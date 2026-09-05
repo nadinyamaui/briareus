@@ -1,0 +1,618 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- interactive-widget: the on-screen keyboard shrinks the layout instead of
+     scrolling the composer out from under it. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <title>Developer</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <!-- Tap-anywhere-to-close backdrop for the two drawers; phone widths only. -->
+    <div id="scrim" class="fixed inset-0 z-30 hidden bg-black/60 lg:hidden"></div>
+
+    <aside
+      id="sidebar"
+      class="drawer drawer-left flex max-w-[300px] shrink-0 flex-col border-r border-line bg-sidebar p-2.5"
+    >
+      <!-- ＋ New session and the three view switches, one strip of equal-height
+       controls. The icons are squares that never stretch and never shrink, and
+       the label is the only thing that gives: below `lg` the drawer is 85vw and
+       everything is thumb-sized, above it the row has 248px to fit in and each
+       button drops a notch so the label still reads on one line. -->
+      <div class="flex items-center gap-1.5">
+        <button
+          id="btn-new"
+          class="h-9 min-w-0 flex-1 cursor-pointer truncate rounded-lg border border-line bg-raise px-2.5 text-left text-[14px] text-ink transition-colors hover:border-accent-dim lg:h-8 lg:px-2 lg:text-xs"
+        >
+          ＋ New session
+        </button>
+        <!-- The main dashboard: every project's spend in one place. Beside ＋ New
+         session rather than in the list below, so it is one click away from a
+         drilled-in project too. -->
+        <button
+          id="btn-home"
+          class="btn-icon hover:border-accent-dim"
+          title="Dashboard: tokens, sessions and cost across every project"
+        >
+          📊
+        </button>
+        <!-- The city: one building per project, one figure per open session.
+         Beside 📊 because it answers the other half of the same question —
+         that one is what the work cost, this one is what is happening now. -->
+        <button
+          id="btn-office"
+          class="btn-icon hover:border-accent-dim"
+          title="Office: every project as a building, every open session as somebody working in it"
+        >
+          🏙
+        </button>
+      </div>
+      <div class="mt-3.5 flex-1 overflow-y-auto">
+        <div id="session-list"></div>
+      </div>
+      <!-- Bulk selection: shown while ☑ Select is on, so several sessions can be
+       closed or deleted in one go. Driven by the selection code in developer.js. -->
+      <div id="bulk-bar" class="hidden flex-col gap-1.5 border-t border-line mt-1.5 px-1.5 pt-2.5 pb-2.5">
+        <div class="flex items-center justify-between gap-2 text-xs text-muted">
+          <span id="bulk-count" class="truncate">0 selected</span>
+          <button
+            id="bulk-all"
+            class="shrink-0 cursor-pointer border-0 bg-transparent p-0 font-[inherit] text-xs text-muted hover:text-ink disabled:cursor-default disabled:text-muted/50"
+          >
+            Select all
+          </button>
+        </div>
+        <div class="flex gap-1.5">
+          <button
+            id="bulk-close"
+            class="btn flex-1 px-2 py-1 text-[12px]"
+            title="Close the selected sessions, releasing their workspace and database"
+          >
+            ⏻ Close
+          </button>
+          <button
+            id="bulk-delete"
+            class="btn btn-danger flex-1 px-2 py-1 text-[12px]"
+            title="Delete the selected conversations and their logs"
+          >
+            🗑 Delete
+          </button>
+        </div>
+        <!-- Every conversation of the project the sidebar is in, ticked or not,
+         kept off the button row above so it cannot be hit reaching for 🗑 Delete. -->
+        <button
+          id="bulk-delete-all"
+          class="cursor-pointer truncate border-0 bg-transparent px-0 py-1.5 text-left font-[inherit] text-[12px] text-muted hover:text-danger disabled:cursor-default disabled:text-muted/50 disabled:hover:text-muted/50 lg:py-0"
+          title="Delete every conversation in this project, whether or not it is ticked"
+        >
+          🗑 Delete all
+        </button>
+      </div>
+
+      <!-- The drawer's footer: 13px links, so they get real padding on a phone. -->
+      <div class="flex items-center justify-between border-t border-line mt-1.5 px-1.5 pt-2.5 pb-0.5">
+        <button
+          id="btn-select"
+          class="shrink-0 cursor-pointer border-0 bg-transparent px-0 py-2 font-[inherit] text-xs text-muted hover:text-ink lg:py-0"
+          title="Pick several sessions to close or delete at once, or ctrl-click a session"
+        >
+          ☑ Select
+        </button>
+        <a href="/settings/projects" class="shrink-0 py-2 text-xs text-muted hover:text-ink lg:py-0"
+          >⚙ Settings</a
+        >
+        <!-- Only when the app has a login configured; developer.js unhides it. -->
+        <button
+          id="btn-signout"
+          class="hidden shrink-0 cursor-pointer border-0 bg-transparent px-0 py-2 font-[inherit] text-xs text-muted hover:text-ink lg:py-0"
+          title="Sign out of this dashboard"
+        >
+          ⎋
+        </button>
+      </div>
+    </aside>
+
+    <main id="main" class="flex min-w-0 flex-1 flex-col">
+      <!-- Phone chrome: the two side panels are drawers there, so this is what
+       opens them. Hidden from `lg` up, where both are columns of the layout. -->
+      <div
+        id="mobile-bar"
+        class="flex shrink-0 items-center gap-2 border-b border-line bg-canvas px-3 py-2 lg:hidden"
+      >
+        <button id="btn-menu" class="btn-icon" aria-label="Sessions" title="Sessions">☰</button>
+        <span class="min-w-0 flex-1 truncate text-sm font-semibold">Briareus</span>
+        <!-- ＋ New session lives in the drawer, which is two taps away from a
+         board or a session on a phone; this is the same action in reach. -->
+        <button id="btn-new-mobile" class="btn-icon" aria-label="New session" title="New session">＋</button>
+        <button
+          id="btn-prpanel"
+          class="btn-icon hidden"
+          aria-label="Pull request panel"
+          title="Pull request, usage and subagents"
+        >
+          ⓘ
+        </button>
+      </div>
+
+      <header
+        id="chat-head"
+        class="hidden flex flex-wrap items-center justify-between gap-2 border-b border-line bg-canvas px-3 py-2.5 lg:flex-nowrap lg:px-[18px]"
+      >
+        <div class="min-w-0 flex-1">
+          <div class="flex min-w-0 items-center gap-1.5">
+            <h1 id="chat-title" class="m-0 truncate text-sm font-semibold"></h1>
+            <button
+              id="btn-edit-title"
+              class="shrink-0 cursor-pointer border-0 bg-transparent px-1 text-xs text-muted hover:text-ink"
+              title="Edit this session's title"
+              aria-label="Edit session title"
+            >
+              ✎
+            </button>
+          </div>
+          <div id="chat-sub" class="truncate text-xs text-muted"></div>
+        </div>
+        <div class="-mx-1 flex shrink-0 gap-2 overflow-x-auto px-1 py-0.5">
+          <button
+            id="btn-link-pr"
+            class="btn hidden"
+            title="Link an existing pull request whose head branch matches this session"
+          >
+            🔗 Link PR
+          </button>
+          <button
+            id="btn-serve"
+            class="btn hidden"
+            title="Serve this session's checkout (php -S against its own database) and open it in a new tab"
+          >
+            ▶ Run
+          </button>
+          <button id="btn-cancel-turn" class="btn hidden" title="Stop the current turn">■ Stop</button>
+          <button
+            id="btn-reopen"
+            class="btn hidden"
+            title="Claim a workspace clone and a database server for this session again and resume the conversation"
+          >
+            ⟳ Reopen
+          </button>
+          <button
+            id="btn-close-session"
+            class="btn hidden"
+            title="Close the session and release its workspace and database"
+          >
+            Close
+          </button>
+          <button
+            id="btn-delete-session"
+            class="btn btn-danger hidden"
+            title="Delete this conversation and its log"
+          >
+            🗑
+          </button>
+        </div>
+      </header>
+
+      <div id="chat-scroll" class="flex-1 scroll-smooth overflow-y-auto">
+        <div id="welcome" class="mx-auto mt-[6vh] max-w-[640px] px-4 text-center lg:mt-[14vh] lg:px-6">
+          <h2 class="mb-1.5 text-[22px] font-semibold lg:text-[26px]">Welcome back</h2>
+          <p class="text-muted">
+            Start a session in a fresh <span class="wl-repo text-accent">project</span> checkout with its own
+            database.<br />
+            Pick a provider and model below, then describe what to build.
+          </p>
+          <div id="provider-warnings" class="mt-[18px] flex flex-col gap-1.5"></div>
+        </div>
+        <div id="messages" class="mx-auto hidden max-w-[860px] px-3 pt-[18px] pb-[30px] lg:px-6"></div>
+      </div>
+
+      <!-- Project dashboard: one project's open pull requests and the errands they
+       are asking for. Shown instead of the chat when a project name in the
+       sidebar is clicked; filled in by renderBoard() in developer.js. -->
+      <div id="project-view" class="hidden flex flex-1 flex-col overflow-hidden">
+        <header
+          class="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-canvas px-3 py-2.5 lg:flex-nowrap lg:gap-3 lg:px-[18px]"
+        >
+          <div class="min-w-0 flex-1">
+            <h1 id="proj-title" class="m-0 truncate text-sm font-semibold"></h1>
+            <div id="proj-sub" class="truncate text-xs text-muted"></div>
+          </div>
+          <div
+            class="flex w-full shrink-0 items-center gap-2 lg:w-auto [&_select]:max-w-[150px] [&_select]:min-w-0 [&_select]:flex-1 [&_select]:cursor-pointer [&_select]:rounded-md [&_select]:border [&_select]:border-line [&_select]:bg-raise [&_select]:px-1.5 [&_select]:py-1 [&_select]:text-[12px] [&_select]:text-ink [&_select:disabled]:cursor-default [&_select:disabled]:text-muted lg:[&_select]:flex-none lg:[&_select]:py-0.5"
+          >
+            <!-- Narrows the list only. Hidden while the board is drilled into one
+             pull request, where there is nothing to filter. -->
+            <select
+              id="proj-author"
+              class="proj-filter"
+              title="Show only one author's pull requests"
+            ></select>
+            <select
+              id="proj-label"
+              class="proj-filter"
+              title="Show only pull requests carrying one label"
+            ></select>
+            <select
+              id="proj-provider"
+              title="The provider every errand started from this board runs on"
+            ></select>
+            <select id="proj-model" title="Model"></select>
+            <button id="proj-refresh" class="btn" title="Read the pull requests from GitHub again">⟳</button>
+          </div>
+        </header>
+        <!-- The view's three panes: this month's spend from the turn ledger, the
+         pull-request board, or the repo's open issues. developer.js keeps which
+         one is open in boardTab and lights the active button; the bar hides
+         while the board is drilled into a single pull request. The pull requests
+         are still what a project name in the sidebar opens onto; the order here
+         reads left to right from the widest view to the narrowest, which is not
+         the same question as which one opens first. -->
+        <div id="proj-tabs" class="flex shrink-0 gap-1 border-b border-line bg-canvas px-3 lg:px-[18px]">
+          <button
+            data-tab="dashboard"
+            class="proj-tab cursor-pointer border-0 border-b-2 border-transparent bg-transparent px-2 py-2 font-[inherit] text-[13px] text-muted hover:text-ink"
+            title="What this project spent this month: sessions, tokens, time and cost"
+          >
+            📊 Dashboard
+          </button>
+          <button
+            data-tab="prs"
+            class="proj-tab cursor-pointer border-0 border-b-2 border-transparent bg-transparent px-2 py-2 font-[inherit] text-[13px] text-muted hover:text-ink"
+            title="This project’s open pull requests and the errands they ask for"
+          >
+            ⇅ Pull requests
+          </button>
+          <button
+            data-tab="issues"
+            class="proj-tab cursor-pointer border-0 border-b-2 border-transparent bg-transparent px-2 py-2 font-[inherit] text-[13px] text-muted hover:text-ink"
+            title="This project’s open issues, and the pull requests already answering them"
+          >
+            ⊙ Issues
+          </button>
+        </div>
+        <div id="proj-list" class="flex-1 overflow-y-auto px-3 py-3.5 lg:px-[18px]"></div>
+      </div>
+
+      <!-- The main dashboard: what every project has spent over the picked
+       window: headline tiles, tokens over time, a row per project and the
+       per-model breakdown. Filled in by renderHome() in developer.js. -->
+      <div id="home-view" class="hidden flex flex-1 flex-col overflow-hidden">
+        <header
+          class="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-canvas px-3 py-2.5 lg:flex-nowrap lg:gap-3 lg:px-[18px]"
+        >
+          <div class="min-w-0 flex-1">
+            <h1 id="home-title" class="m-0 truncate text-sm font-semibold">📊 Dashboard</h1>
+            <div id="home-sub" class="truncate text-xs text-muted"></div>
+          </div>
+          <div
+            class="flex shrink-0 items-center gap-2 [&_select]:cursor-pointer [&_select]:rounded-md [&_select]:border [&_select]:border-line [&_select]:bg-raise [&_select]:px-1.5 [&_select]:py-1 [&_select]:text-[12px] [&_select]:text-ink lg:[&_select]:py-0.5"
+          >
+            <!-- The ids are lib/usage.js's usageWindow() vocabulary; the wording
+             is this page's. Anything else it is handed is read as this month. -->
+            <select id="home-period" title="The window every number on this page is over">
+              <option value="month">This month</option>
+              <option value="prev">Last month</option>
+              <option value="all">All time</option>
+            </select>
+            <button id="home-refresh" class="btn" title="Read the usage ledger again">⟳</button>
+          </div>
+        </header>
+        <div id="home-list" class="flex-1 overflow-y-auto px-3 py-3.5 lg:px-[18px]"></div>
+      </div>
+
+      <!-- 🌊 The office: a three.js resort over the water, one bungalow on
+       stilts per enabled project, a café deck at the end of the boardwalk,
+       villas for the orchestrators, and a character per open session — at
+       its table while it works, at the café while it waits. renderOffice()
+       in developer.js feeds public/island3d.js, which draws into
+       #office-city; the /api/dev/office/events stream keeps it live. -->
+      <div id="office-view" class="hidden flex flex-1 flex-col overflow-hidden">
+        <header
+          class="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-canvas px-3 py-2.5 lg:flex-nowrap lg:gap-3 lg:px-[18px]"
+        >
+          <div class="min-w-0 flex-1">
+            <h1 class="m-0 truncate text-sm font-semibold">🌊 Office</h1>
+            <div id="office-sub" class="truncate text-xs text-muted"></div>
+          </div>
+          <!-- Where to look: the camera swings to the villa, the bungalows or
+           the café, or back out to the whole resort. Then the hour the resort
+           is lit for, said in words, so a reader who opens the office at dusk
+           is told that is why it is purple. -->
+          <div class="flex shrink-0 items-center gap-2">
+            <div class="flex overflow-hidden rounded border border-line text-[11px]">
+              <button
+                type="button"
+                class="office-focus px-2 py-0.5 text-muted hover:bg-raise hover:text-ink"
+                data-focus="island"
+              >
+                Resort
+              </button>
+              <button
+                type="button"
+                class="office-focus border-l border-line px-2 py-0.5 text-muted hover:bg-raise hover:text-ink"
+                data-focus="villa"
+              >
+                ⚓ Villa
+              </button>
+              <button
+                type="button"
+                class="office-focus border-l border-line px-2 py-0.5 text-muted hover:bg-raise hover:text-ink"
+                data-focus="beach"
+              >
+                Bungalows
+              </button>
+              <button
+                type="button"
+                class="office-focus border-l border-line px-2 py-0.5 text-muted hover:bg-raise hover:text-ink"
+                data-focus="cafe"
+              >
+                ☕ Café
+              </button>
+            </div>
+            <button
+              id="office-sound"
+              type="button"
+              class="rounded border border-line bg-raise px-1.5 py-0.5 text-[11px] text-muted hover:text-ink"
+              title="Turn beach ambience on"
+              aria-label="Turn beach ambience on"
+              aria-pressed="false"
+              disabled
+            >
+              🔇
+            </button>
+            <span
+              id="office-phase"
+              class="rounded border border-line bg-raise px-1.5 py-0.5 font-mono text-[10px] tracking-[0.16em] text-muted uppercase"
+            ></span>
+          </div>
+        </header>
+        <!-- The canvas fills #office-city; island3d.js appends it, and the
+         landmark labels, speech bubbles and hover tip that ride on top of it.
+         The hour is the scene's lighting rather than a CSS tint, so nothing
+         here carries it. -->
+        <div class="office-wrap">
+          <div id="office-city" class="office-city"></div>
+          <p id="office-empty" class="office-empty hidden">
+            No projects yet, so there is nothing to build. Add one in
+            <a class="text-accent hover:underline" href="/settings/projects">Settings → Projects</a> and it
+            gets a bungalow on the water here.
+          </p>
+        </div>
+        <!-- The ticker: what the city cannot show, which is what just changed.
+         Fed by the same stream that moves the resort; see officeLog() in
+         developer.js. -->
+        <div class="office-ticker">
+          <div class="office-ticker-head">
+            <span id="office-live" class="text-[11px] text-muted"></span>
+            <b>Activity</b>
+          </div>
+          <div id="office-ticker-body" class="office-ticker-body"></div>
+        </div>
+      </div>
+
+      <div
+        id="composer-wrap"
+        class="px-3 pt-2 pb-[max(0.875rem,env(safe-area-inset-bottom))] lg:px-6 lg:pb-3.5"
+      >
+        <div class="mx-auto max-w-[860px]">
+          <!-- The pickers ride above the box as a row of chips, Claude-desktop style. -->
+          <div
+            id="composer-chips"
+            class="mb-2 flex flex-wrap items-center gap-1 [&_select]:max-w-[130px] [&_select]:cursor-pointer [&_select]:rounded-md [&_select]:border [&_select]:border-line [&_select]:bg-raise [&_select]:px-1.5 [&_select]:py-1 [&_select]:text-[12px] [&_select]:text-ink [&_select:disabled]:cursor-default [&_select:disabled]:text-muted lg:[&_select]:py-0.5"
+          >
+            <select
+              id="sel-workspace"
+              title="Where the session works: a fresh workspace clone of its own, this machine's existing checkout, no checkout at all — an orchestrator chat that starts and supervises worker sessions — or Zeus, a read-only supervisor that turns your brief into a GitHub epic through independent analysts"
+            >
+              <option value="worktree">⌗ Worktree</option>
+              <option value="local">⌂ Local</option>
+              <option value="orchestrator">🧭 Orchestrator</option>
+              <option value="zeus">⚡ Zeus</option>
+            </select>
+            <select id="sel-project" title="Project"></select>
+            <!-- Branch picker: a searchable dropdown, driven by developer.js. -->
+            <div id="branch-picker" class="relative">
+              <button
+                id="branch-btn"
+                type="button"
+                title="Branch the session's workspace works on"
+                class="flex max-w-[150px] cursor-pointer items-center gap-1 rounded-md border border-line bg-raise px-1.5 py-1 text-[12px] text-ink disabled:cursor-default disabled:text-muted lg:py-0.5"
+              >
+                <span id="branch-label" class="truncate">New branch</span>
+                <span class="shrink-0 text-[10px] text-muted">▾</span>
+              </button>
+              <div
+                id="branch-pop"
+                class="absolute left-0 bottom-[calc(100%+5px)] z-40 hidden w-[min(300px,calc(100vw-2rem))] overflow-hidden rounded-lg border border-line bg-raise shadow-2xl shadow-black/50"
+              >
+                <input
+                  id="branch-search"
+                  type="text"
+                  placeholder="Search branches…"
+                  autocomplete="off"
+                  spellcheck="false"
+                  class="w-full border-0 border-b border-line bg-field px-2.5 py-2 text-[16px] text-ink outline-none lg:py-[7px] lg:text-xs"
+                />
+                <div id="branch-list" class="max-h-[260px] overflow-y-auto p-1"></div>
+              </div>
+            </div>
+            <select id="sel-provider" title="Provider"></select>
+            <select id="sel-model" title="Model"></select>
+            <select id="sel-effort" title="Reasoning effort"></select>
+            <!-- Arms the review loop: every push the session settles with gets
+             an automatic code review, whose findings come back to it as a fix
+             turn, round after round until a review finds nothing. On the
+             welcome pane it speaks for the next session; over an open one it
+             arms or disarms that session's loop on the spot. -->
+            <button
+              id="btn-loop"
+              class="btn rounded-md border-accent px-1.5 py-0.5 text-[12px] text-accent"
+              title="Review loop: once the session's work is on an open pull request, every push it settles with is code-reviewed automatically and the findings are implemented back in that session, round after round until a review finds nothing. Can be switched on or off while the session runs"
+            >
+              🔁 Review loop: on
+            </button>
+            <!-- Queued behind the review loop above: when that loop converges
+             cleanly, this writes the test sheet, executes it and stops with the
+             verdict; failed scenarios are left for a human decision. -->
+            <button
+              id="btn-qa-loop"
+              class="btn rounded-md border-accent px-1.5 py-0.5 text-[12px] text-accent"
+              title="QA loop: once the review loop declares no findings, this writes the PR's test sheet, executes it and reports the result. Failed scenarios stop the loop for a human decision."
+            >
+              🎬 QA loop: on
+            </button>
+            <!-- The kickoff library: saved prompts to drop into the message box,
+             the project's own first, then the shared ones. Managed under
+             Saved prompts in /settings. -->
+            <div id="prompt-picker" class="relative">
+              <button
+                id="prompt-btn"
+                type="button"
+                title="Saved prompts: insert one into the message box, or save what is typed there"
+                class="flex cursor-pointer items-center gap-1 rounded-md border border-line bg-raise px-1.5 py-1 text-[12px] text-ink lg:py-0.5"
+              >
+                <span>📋 Prompts</span>
+                <span class="shrink-0 text-[10px] text-muted">▾</span>
+              </button>
+              <div
+                id="prompt-pop"
+                class="absolute left-0 bottom-[calc(100%+5px)] z-40 hidden w-[min(320px,calc(100vw-2rem))] overflow-hidden rounded-lg border border-line bg-raise shadow-2xl shadow-black/50"
+              >
+                <div id="prompt-list" class="max-h-[260px] overflow-y-auto p-1"></div>
+                <button
+                  id="prompt-save"
+                  type="button"
+                  class="block w-full cursor-pointer border-0 border-t border-line bg-transparent px-2.5 py-2 text-left text-[12px] text-accent hover:bg-field disabled:cursor-default disabled:text-muted"
+                >
+                  ＋ Save current text as prompt…
+                </button>
+              </div>
+            </div>
+          </div>
+          <div
+            id="composer"
+            class="rounded-2xl border border-line bg-raise px-3 pt-2.5 pb-2 focus-within:border-line-strong"
+          >
+            <!-- Messages typed during a turn, waiting for it to finish. -->
+            <div id="queued-list" class="mb-1.5 hidden flex-col gap-1"></div>
+            <!-- Files waiting to go with the next message: chips filled in by developer.js. -->
+            <div id="attach-list" class="mb-1.5 hidden flex-wrap gap-1.5"></div>
+            <!-- 16px on a phone: anything smaller and iOS zooms the page in the
+             moment the message box takes focus. -->
+            <textarea
+              id="input"
+              rows="1"
+              placeholder="Describe what to build…"
+              class="max-h-[220px] w-full resize-none border-0 bg-transparent font-[inherit] text-[16px] text-ink outline-none lg:text-[length:inherit]"
+            ></textarea>
+            <div class="mt-1.5 flex items-center justify-between">
+              <button
+                id="btn-attach"
+                title="Attach files, or paste or drop them into the message box"
+                class="h-9 w-9 cursor-pointer rounded-lg border border-line bg-transparent text-[15px] text-muted hover:border-accent-dim hover:text-ink lg:h-[30px] lg:w-8"
+              >
+                📎
+              </button>
+              <button
+                id="btn-send"
+                title="Send (Enter)"
+                class="h-9 w-9 cursor-pointer rounded-lg border-0 bg-accent text-[16px] text-[#1b1b19] hover:bg-accent-dim disabled:cursor-default disabled:bg-field disabled:text-muted lg:h-[30px] lg:w-8"
+              >
+                ↵
+              </button>
+            </div>
+            <input id="file-input" type="file" multiple class="hidden" />
+          </div>
+          <div id="composer-note" class="mt-1.5 min-h-4 text-center text-xs text-muted"></div>
+        </div>
+      </div>
+    </main>
+
+    <!-- PR overview: state, branches, line changes and CI checks, filled in by
+     renderPrPanel() in developer.js once the session has a PR on GitHub. -->
+    <aside
+      id="pr-panel"
+      class="drawer drawer-right hidden flex max-w-[320px] shrink-0 flex-col gap-3 overflow-y-auto border-l border-line bg-sidebar p-3.5 lg:w-[272px]"
+    ></aside>
+
+    <div
+      id="toast"
+      class="fixed bottom-[18px] left-1/2 z-50 hidden -translate-x-1/2 rounded-lg border border-line bg-raise px-3.5 py-2 text-[14px]"
+    ></div>
+
+    <!-- Confirm dialog, filled in and resolved by openConfirm() in developer.js. -->
+    <div
+      id="modal"
+      class="fixed inset-0 z-[60] hidden flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="modal-title"
+    >
+      <div
+        id="modal-backdrop"
+        class="absolute inset-0 animate-backdrop-in bg-black/60 backdrop-blur-sm"
+      ></div>
+      <div
+        id="modal-panel"
+        class="relative w-full max-w-[440px] animate-modal-in rounded-2xl border border-line bg-raise p-5 shadow-2xl shadow-black/50"
+      >
+        <div class="flex gap-3.5">
+          <div
+            id="modal-icon"
+            class="flex size-9 shrink-0 items-center justify-center rounded-full text-base"
+          ></div>
+          <div class="min-w-0 flex-1">
+            <h2 id="modal-title" class="m-0 text-[16px] font-semibold"></h2>
+            <p id="modal-body" class="mt-1.5 mb-0 text-[14px] text-muted"></p>
+          </div>
+        </div>
+        <!-- Controls a question carries, when it does (the epic dialog's
+         runtime pickers); openConfirm fills it and hides it otherwise. -->
+        <div id="modal-form" class="mt-4 hidden"></div>
+        <div class="mt-5 flex justify-end gap-2">
+          <button id="modal-cancel" class="btn px-3 py-1.5 text-[14px]">Cancel</button>
+          <button id="modal-confirm" class="btn px-3 py-1.5 text-[14px]"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- A text question for an action or session metadata edit. Filled in and
+     resolved by openPrompt() in developer.js. -->
+    <div
+      id="ask-modal"
+      class="fixed inset-0 z-[60] hidden flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="ask-title"
+    >
+      <div id="ask-backdrop" class="absolute inset-0 animate-backdrop-in bg-black/60 backdrop-blur-sm"></div>
+      <form
+        id="ask-form"
+        class="relative w-full max-w-[560px] animate-modal-in rounded-2xl border border-line bg-raise p-5 shadow-2xl shadow-black/50"
+      >
+        <h2 id="ask-title" class="m-0 text-[16px] font-semibold"></h2>
+        <p id="ask-body" class="mt-1.5 mb-4 text-[14px] text-muted"></p>
+        <label class="field">
+          <span id="ask-label"></span>
+          <textarea id="ask-input" rows="6" class="resize-y"></textarea>
+        </label>
+        <p class="mt-0.5 mb-0 text-[12px] leading-[1.45] text-muted">Ctrl+Enter confirms · Esc cancels</p>
+        <div class="mt-5 flex justify-end gap-2">
+          <button type="button" id="ask-cancel" class="btn px-3 py-1.5 text-[14px]">Cancel</button>
+          <button type="submit" id="ask-confirm" class="btn btn-primary px-3 py-1.5 text-[14px]"></button>
+        </div>
+      </form>
+    </div>
+
+    <!-- The bare `three` the island's addons import, pointed at the vendored
+     build. developer.js itself is a plain script; only the island is a module. -->
+    <script type="importmap">
+      { "imports": { "three": "/vendor/three/three.module.js" } }
+    </script>
+    <script src="/developer.js"></script>
+  </body>
+</html>

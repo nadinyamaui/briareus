@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Providers · Briareus</title>
+    <meta
+      name="description"
+      content="Registering the agents a session can run on: the three binaries, login vs API token, isolated login directories, model lists and the status panel."
+    />
+    <link rel="stylesheet" href="docs.css" />
+  </head>
+  <body class="min-h-dvh">
+    <article class="doc">
+      <div class="pill mb-4">Configuration</div>
+      <h1 class="mt-0 mb-3 text-[34px] leading-[1.15] font-semibold tracking-[-0.02em]">Providers</h1>
+      <p class="!text-[17px] !text-muted">
+        A provider is one entry in the composer's agent picker: a label, one of three CLI binaries, and
+        whatever that entry needs beyond the binary: its own login, or a custom endpoint with an API key, plus
+        optional model and effort lists. Registered under
+        <strong>Settings → Providers</strong>.
+      </p>
+
+      <h2 id="model">The model</h2>
+      <p>
+        Four binaries are hardcoded: <code>claude</code>, <code>codex</code>, <code>grok</code> and
+        <code>opencode</code>. Everything else is a row in the database. That split is what lets you have
+        several entries on one binary: a subscription login and an API key, two different endpoints, a cheap
+        model for errands and an expensive one for reviews.
+      </p>
+      <p>
+        <strong>Each entry gets a login directory of its own</strong>, derived from its id
+        (<code>~/.claude-provider-&lt;id&gt;</code>, <code>~/.codex-provider-&lt;id&gt;</code>), with the
+        login mirrored into the row. So signing an entry in never disturbs the <code>claude</code> or
+        <code>codex</code> login you use in your own terminal, and two entries on the same binary can be
+        signed into different accounts.
+      </p>
+      <p>
+        <code>opencode</code> has no home variable of its own (it reads the XDG base directories), so its
+        entries get an XDG root instead (<code>~/.opencode-provider-&lt;id&gt;</code>), with all four bases
+        inside it. Nothing is mirrored into the row there: an opencode entry authenticates with its API key,
+        which travels in the environment and never lands on disk.
+      </p>
+
+      <h2 id="binaries">The binaries</h2>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Binary</th>
+              <th>Discovered at</th>
+              <th>Override</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>claude</code></td>
+              <td><code>PATH</code>, the npm global prefix, the native installer's path</td>
+              <td><code>CLAUDE_BIN</code></td>
+            </tr>
+            <tr>
+              <td><code>codex</code></td>
+              <td><code>PATH</code>, <code>~/.npm-global/bin</code>, <code>/usr/local/bin</code></td>
+              <td><code>CODEX_BIN</code></td>
+            </tr>
+            <tr>
+              <td><code>grok</code></td>
+              <td><code>PATH</code>, <code>~/.grok/bin</code></td>
+              <td><code>GROK_BIN</code></td>
+            </tr>
+            <tr>
+              <td><code>opencode</code></td>
+              <td>
+                <code>PATH</code>, <code>~/.opencode/bin</code>, <code>~/.npm-global/bin</code>,
+                <code>/usr/local/bin</code>
+              </td>
+              <td><code>OPENCODE_BIN</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout">
+        <div class="callout-title">A note for WSL</div>
+        <p>
+          WSL inherits the Windows <code>PATH</code>, so <code>which</code> can land on a mounted Windows
+          drive. A hit under <code>/mnt/…</code> is ignored on purpose: that is a host executable, not one
+          this Linux can run. If discovery finds nothing, set the <code>*_BIN</code> override to the Linux
+          path.
+        </p>
+      </div>
+
+      <h2 id="creating">Registering one</h2>
+      <ol class="steps">
+        <li>
+          <h3>Settings → Providers → ＋ New</h3>
+        </li>
+        <li>
+          <h3>Label and binary</h3>
+          <p>
+            The label is what the picker shows, so make it say what matters at a glance (<em>Claude (sub)</em
+            >, <em>Codex API</em>, <em>Z.AI GLM</em>).
+          </p>
+        </li>
+        <li>
+          <h3>Pick a mode, then save</h3>
+          <p>
+            <strong>The Log in button only exists on a saved entry</strong>, because the login is registered
+            against the row: there is nothing to log in until a row exists. Save first, then sign in.
+          </p>
+        </li>
+        <li>
+          <h3>Check the Status section</h3>
+          <p>
+            A saved entry grows a <strong>Status</strong> block at the top of the form: the account and
+            organization, the plan, the auth state, which binary was found and where, the login directory,
+            when it was last checked, and, for an entry whose plan meters itself, its usage bars: the 5-hour
+            and 7-day windows for a claude or codex subscription, the 5-hour and daily quota of a Z.AI coding
+            plan, and one bar for a grok login's credits over the billing period. Every one is best effort: a
+            login idle long enough for its token to expire, or an endpoint that has moved, just shows no bar.
+          </p>
+        </li>
+      </ol>
+
+      <h2 id="fields">The fields</h2>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">Label</div>
+          <p>What the provider picker shows. Also what the review runtime selects list.</p>
+        </div>
+        <div class="f">
+          <div class="f-name">Binary</div>
+          <p>
+            <code>claude (Claude Code)</code>, <code>codex (Codex)</code>, <code>grok (Grok)</code> or
+            <code>opencode</code>. Changing it changes which of the fields below apply.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Mode <span class="f-meta">claude, codex</span></div>
+          <p>
+            <strong>Login</strong>: the CLI's own sign-in, kept in this entry's registered directory.
+            <strong>API token</strong>: an endpoint and a key instead.
+          </p>
+          <p>
+            Two binaries have only one of the two, so the select is hidden for them: a grok entry is always a
+            login, and an opencode entry is always a key.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Log in <span class="f-meta">login mode, saved entries</span></div>
+          <p>Every login happens in your browser, and each binary does it differently:</p>
+          <ul>
+            <li>
+              <strong>claude</strong>: the server hands the page the claude.ai authorization URL, you approve
+              there, and paste the code claude.ai shows back into the field beside the button. Press
+              <span class="kbd">Finish</span> and the server exchanges it for the entry's tokens.
+            </li>
+            <li>
+              <strong>codex</strong>: the server runs <code>codex login</code> hidden; the CLI opens the tab
+              itself and its localhost callback finishes the login. Nothing to paste; the status catches it on
+              its own.
+            </li>
+            <li>
+              <strong>grok</strong>: a device flow, where the CLI prints a confirm URL, the page opens it, and
+              the CLI polls until you approve.
+            </li>
+            <li>
+              <strong>opencode</strong>: nothing to log in to. Its entries authenticate with an API key, so
+              the button is not shown.
+            </li>
+          </ul>
+        </div>
+        <div class="f">
+          <div class="f-name">Base URL <span class="f-meta">token mode</span></div>
+          <p>
+            <strong>On claude</strong>: passed to the CLI as <code>ANTHROPIC_BASE_URL</code>, for a proxy or
+            an Anthropic-compatible endpoint. Leave empty for the Anthropic API.
+          </p>
+          <p>
+            <strong>On codex</strong>: a custom API endpoint driven through the codex CLI (Responses wire
+            format). Sessions run with a server-written <code>CODEX_HOME</code> pointing codex at it, so the
+            machine's own <code>~/.codex</code> login is never touched. This is how a Z.AI / GLM entry is
+            built.
+          </p>
+          <p>
+            <strong>On opencode</strong>: the base URL of the service this entry's models name, for a proxy or
+            a compatible gateway. opencode sets an endpoint per service in its config (<code
+              >provider.anthropic.options.baseURL</code
+            >
+            for an <code>anthropic/…</code> model), and the entry's URL is handed to the CLI that way, as an
+            inline config (<code>OPENCODE_CONFIG_CONTENT</code>) next to the key, so nothing is written to the
+            machine's own opencode config. Include the <code>/v1</code> when the service's own URL carries
+            one. Leave empty for the service's own endpoint.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">API token <span class="f-meta">token mode</span></div>
+          <p>
+            <strong>On claude</strong>: passed as <code>ANTHROPIC_API_KEY</code>, used instead of a login.
+            With a base URL it also goes out as <code>ANTHROPIC_AUTH_TOKEN</code>, so gateways that read
+            <code>Authorization</code> rather than <code>x-api-key</code> see it too.
+          </p>
+          <p><strong>On codex</strong>: it authenticates the base URL above.</p>
+          <p>
+            <strong>On opencode</strong>: the key for the service this entry's models name,
+            <code>anthropic</code> for <code>anthropic/claude-sonnet-4-5</code>, which is how opencode names a
+            model and keys its credentials. It is handed to the CLI as its whole credential store, so no login
+            is needed and the credentials in your own terminal stay untouched.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Test <span class="f-meta">token mode</span></div>
+          <p>
+            Runs the binary against the endpoint and key as entered and reports what came back. An entry that
+            cannot answer here will not answer in a session either.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Models / Efforts <span class="f-meta">one per line</span></div>
+          <p>
+            Override the lists the composer offers for this entry. Leave both empty to take the CLI's own: for
+            codex that means reading its models cache rather than a list baked into this app that would go
+            stale, and for opencode the models.dev catalog it caches, narrowed to the one service this entry's
+            key is for.
+          </p>
+          <p>
+            Useful when an entry only has access to a subset, or when a custom endpoint serves models the CLI
+            has never heard of.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Default model / Default effort</div>
+          <p>What the composer preselects for this entry. Empty means the CLI's own default.</p>
+        </div>
+      </div>
+
+      <h2 id="recipes">Common setups</h2>
+
+      <h3 id="recipe-sub">A subscription Claude entry</h3>
+      <p>
+        Binary <code>claude</code>, mode <strong>Login</strong>, save, then
+        <span class="kbd">Log in</span> and paste the code. Leave the model list empty. The Status block will
+        show the plan and two usage bars: how much of the 5-hour and 7-day windows this account has spent, and
+        when each resets.
+      </p>
+
+      <h3 id="recipe-key">A metered Claude entry beside it</h3>
+      <p>
+        A second entry, same binary, mode <strong>API token</strong>, base URL empty, key pasted in. Now the
+        composer offers both: run everyday sessions on the subscription and let the expensive parallel reviews
+        go through the key, or the reverse.
+      </p>
+
+      <h3 id="recipe-zai">GLM through the codex CLI</h3>
+      <p>
+        Binary <code>codex</code>, mode <strong>API token</strong>, base URL pointed at the Z.AI endpoint and
+        the key beside it, then list the GLM model names under <strong>Models</strong>. Sessions get a
+        <code>CODEX_HOME</code> written for them, so your own <code>~/.codex</code> login is untouched. A
+        coding plan meters the key itself rather than a login, so the Status block reads its quota straight
+        off the endpoint: a bar for the 5-hour window and one for the day, each with when it resets.
+      </p>
+
+      <h3 id="recipe-per-step">Different agents for different work</h3>
+      <p>
+        A project's <a href="projects.html#code-review">Code review</a> section picks the provider, model and
+        effort its reviews open on, and each QA step (test sheet, test run) can name one of its own. A cheap
+        fast entry writing the test sheet while an expensive one does the review is a normal arrangement.
+      </p>
+
+      <h2 id="where-used">Where a provider gets chosen</h2>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Situation</th>
+              <th>Runs on</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>A session you start yourself</td>
+              <td>The composer's provider / model / effort chips, locked once it starts.</td>
+            </tr>
+            <tr>
+              <td>An errand pressed on the pull request board</td>
+              <td>The board header's provider and model selects.</td>
+            </tr>
+            <tr>
+              <td>A ⌕ Code review started from the board</td>
+              <td>The project's <strong>Code review</strong> runtime, unless the composer picked another.</td>
+            </tr>
+            <tr>
+              <td>A QA step (test sheet, test run)</td>
+              <td>That step's own runtime, or, left unset, whatever the session it came from runs on.</td>
+            </tr>
+            <tr>
+              <td>The publish turn after a review</td>
+              <td>
+                Always the review's own provider. It is the review's second breath, in the review's
+                conversation, and only the model that ran the review holds that.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </article>
+    <script src="docs.js"></script>
+  </body>
+</html>

@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Running it for real · Briareus</title>
+    <meta
+      name="description"
+      content="Reaching it from anywhere: the tunnel, the two gates, GitHub webhooks, the workspace pool, database migrations and deploying."
+    />
+    <link rel="stylesheet" href="docs.css" />
+  </head>
+  <body class="min-h-dvh">
+    <article class="doc">
+      <div class="pill mb-4">Operations</div>
+      <h1 class="mt-0 mb-3 text-[34px] leading-[1.15] font-semibold tracking-[-0.02em]">
+        Running it for real
+      </h1>
+      <p class="!text-[17px] !text-muted">
+        Everything that stops being optional the moment this install is reachable by something other than your
+        own laptop: the two authentication gates, the tunnel, the webhooks, and the maintenance the workspace
+        pool and the schema need.
+      </p>
+
+      <h2 id="exposure">Reaching it from anywhere</h2>
+      <p>
+        The server listens on <code>127.0.0.1</code> only. <code>BIND_HOST</code> moves it, and a container is
+        the only install with a reason to. To use the dashboard from a phone, put a tunnel in front of it
+        rather than opening the port; a Cloudflare tunnel (<code>cloudflared</code>) pointed at
+        <code>localhost:4300</code> is what this is set up for. Then set <code>PUBLIC_BASE_URL</code> to the
+        public hostname. That one setting is what the test-run video links point at <em>and</em> what turns
+        the webhooks on.
+      </p>
+
+      <div class="callout danger">
+        <div class="callout-title">Two gates, because this app runs shell commands as you</div>
+        <p>
+          Anything that reaches it can start a session, which means running coding agents on this machine with
+          its git and GitHub credentials. One gate is not enough.
+        </p>
+      </div>
+
+      <h3 id="gate-edge">1. At the edge</h3>
+      <p>
+        A Cloudflare Access application on the hostname, with a policy that allows only your own email. Add a
+        <strong>second</strong> application for <code>&lt;hostname&gt;/webhooks</code> with a
+        <strong>Bypass</strong> policy: GitHub cannot sign into your Access account, and its deliveries
+        authenticate themselves (below).
+      </p>
+
+      <h3 id="gate-app">2. In the app</h3>
+      <pre><code>npm run set-password</code></pre>
+      <p>
+        Writes a username, a scrypt hash of the password and a cookie signing secret into
+        <code>.env</code>; every request then needs the login (see <code>lib/auth.js</code>). Restart for it
+        to take effect.
+      </p>
+      <p>
+        Until both keys are set the boot log says <code>login: OFF</code>. Do not leave it that way while the
+        hostname is reachable.
+      </p>
+
+      <h2 id="webhooks">Webhooks</h2>
+      <p>
+        With a public https hostname, the pull request state an open session mirrors is delivered instead of
+        polled for.
+      </p>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Route</th>
+              <th>Sender</th>
+              <th>Authenticated by</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>POST /webhooks/github</code></td>
+              <td>GitHub</td>
+              <td><code>X-Hub-Signature-256</code>, HMAC-SHA256 over the raw body</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The secret is generated on first boot and kept in the <code>app_settings</code> table, so there is
+        nothing to paste anywhere. The app installs its own repository hook on every project it works on (the
+        <code>repo</code> scope the token already needs covers it), recognising its own by URL so an existing
+        deploy hook is never touched, and re-pointing it if the hostname changes.
+      </p>
+      <p>
+        <strong>Nothing is started by a delivery.</strong> <code>pull_request</code>,
+        <code>pull_request_review</code>, <code>issue_comment</code>, <code>check_suite</code> and
+        <code>check_run</code> refresh the pull request panel of any open session on that branch as the event
+        lands, rather than on the next twenty-second tick.
+      </p>
+      <p>
+        The sync timer remains as the fallback. Nothing about a laptop-only install changes: no public
+        hostname means no hook, and the timer keeps the panels fresh.
+      </p>
+      <p class="!text-[14px] !text-muted">
+        To rotate the secret, delete the <code>webhooks</code> row in <code>app_settings</code>; the hook is
+        rewritten at the next boot.
+      </p>
+
+      <h2 id="workspaces">The workspace pool</h2>
+      <p>
+        <strong>Settings → Workspaces</strong> lists every clone slot: its branch, its HEAD, whether it is
+        dirty, its size, its dependency trees, and which open session holds it. A slot is claimed for as long
+        as the session in it stays open, so the two actions only work on idle ones:
+      </p>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">Reset setup</div>
+          <p>
+            Forgets the install fingerprints in the clone's
+            <code>.git/reviewer-setup.json</code>, so the next session runs every setup command again. The
+            right button after a toolchain change the manifests do not reflect.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Clean</div>
+          <p>
+            Also removes <code>vendor/</code> and <code>node_modules/</code>. Reclaims the disk, and costs the
+            next session a full install.
+          </p>
+        </div>
+      </div>
+      <p>Nothing else is ever deleted, and slots themselves are never removed.</p>
+
+      <h2 id="migrations">Database migrations</h2>
+      <p>
+        The app's own schema lives in <code>migrations/</code>, Laravel-style: one timestamped file per
+        change, each exporting <code>up</code> and <code>down</code>, run once in name order and recorded in
+        the <code>migrations</code> table with the batch that applied it (<a
+          href="https://github.com/sequelize/umzug"
+          >umzug</a
+        >
+        underneath, mysql2 as the only driver).
+      </p>
+      <p>
+        The server applies pending migrations at boot, so a fresh checkout still only needs a running MySQL.
+        The same thing is available from the shell:
+      </p>
+      <pre><code>npm run migrate                   # apply every pending migration
+npm run migrate:rollback          # undo the last batch
+npm run migrate:status            # what has run, what is pending
+npm run make:migration add_x_to_y # write migrations/YYYY_MM_DD_HHMMSS_add_x_to_y.js</code></pre>
+      <p>
+        <code>2026_08_27_000000_baseline.js</code> is the schema as it stood when this started, written
+        idempotently so a database from before then just gets its row in <code>migrations</code>.
+      </p>
+      <div class="callout warn">
+        <div class="callout-title">Never edit a migration that has shipped</div>
+        <p>Add a new one. A file that already ran will not run again.</p>
+      </div>
+
+      <h2 id="deploying">Deploying</h2>
+      <p>
+        Nothing here deploys itself: no poller watches <code>main</code> and nothing restarts the server on
+        its own, so a commit never picks the moment the live checkout changes under whoever is using it. By
+        hand, on purpose:
+      </p>
+      <pre><code>cd /path/to/briareus
+git pull --ff-only
+npm ci                     # only when package-lock.json moved
+npm run build:css          # every pull: the stylesheet is not committed
+sudo systemctl restart briareus.service</code></pre>
+      <p>
+        <code>briareus.service</code> is whatever unit you wrote to run <code>npm start</code>; this
+        repository ships no unit for the app itself, since the checkout path, the user it runs as and the
+        tunnel in front of it are all yours to decide.
+      </p>
+      <p>
+        <code>public/app.css</code> is Tailwind output and is not committed, so the pull carries the source
+        and not the CSS. <code>npm run build:css</code> is what turns one into the other, and
+        <code>node server.js</code> never does it for you; Tailwind is a dev dependency, so the install has to
+        be a plain <code>npm ci</code> rather than <code>--omit=dev</code>. The container deploy has no such
+        step, since the image builds the stylesheet in a stage of its own, and the documentation site has none
+        either: a Pages workflow builds <code>docs/docs.css</code> and publishes the folder.
+      </p>
+      <p>
+        Running the pool's MySQL datadirs in RAM has its own units and script; see
+        <a href="database.html#ram">Keeping them in RAM</a> and
+        <a href="https://github.com/nadinyamaui/briareus/blob/main/deploy/README.md">deploy/README.md</a>.
+      </p>
+
+      <h2 id="health">Health and observability</h2>
+      <ul>
+        <li><code>GET /healthz</code>: a liveness endpoint that also touches the database.</li>
+        <li>
+          <code>GET /api/dev/usage?repo=owner/name</code>: the month's sessions, agent time, tokens and cost,
+          the same numbers the project dashboard shows.
+        </li>
+        <li>
+          <code>GET /api/dev/usage/all?period=month|prev|all</code>: the same ledger across every project,
+          which is what the main 📊 dashboard draws.
+        </li>
+        <li>
+          <strong>Settings → Providers</strong>: each entry's account, plan, auth state, discovered binary
+          and, for a plan that meters itself, its usage bars: 5-hour and 7-day for a claude or codex
+          subscription, 5-hour and daily for a Z.AI coding plan, credits over the billing period for grok.
+        </li>
+        <li>The boot log: which binaries were found, whether the login is on, migrations applied.</li>
+      </ul>
+
+      <h2 id="hardening">A hardening checklist</h2>
+      <ul>
+        <li>
+          <code>npm run set-password</code> has been run, and the boot log no longer says
+          <code>login: OFF</code>.
+        </li>
+        <li>The hostname is behind Cloudflare Access, allowing only your own identity.</li>
+        <li><code>/webhooks</code> has its own Bypass application, and nothing else does.</li>
+        <li><code>BIND_HOST</code> is still <code>127.0.0.1</code> outside a container.</li>
+        <li>The <code>GITHUB_TOKEN</code> is scoped to the repositories this install actually works on.</li>
+        <li>
+          The <code>R2_*</code> keys, if used, are in the process environment rather than <code>.env</code>:
+          that file is readable by every command a session runs.
+        </li>
+        <li>Project <code>.env</code> templates carry development credentials only.</li>
+      </ul>
+      <p>
+        Security problems in Briareus itself go through
+        <a href="https://github.com/nadinyamaui/briareus/blob/main/SECURITY.md">private reporting</a>, never a
+        public issue.
+      </p>
+    </article>
+    <script src="docs.js"></script>
+  </body>
+</html>

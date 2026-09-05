@@ -1,0 +1,339 @@
+name: Release
+
+# Versions are `VX.Y` tags and nothing else. There is no version field to keep
+# in sync: the `main` ruleset requires a signed pull request for every commit
+# and grants no bypass, so a workflow can never push a bump commit back. The
+# tag is therefore the only place a version can live, and `git describe` is how
+# a deployed checkout answers "what is this".
+#
+# Triggered by the push that a merge produces, not by `pull_request: closed`.
+# A `pull_request` run started by a fork, or by Dependabot, is handed a
+# read-only token and could not create the release; a push run always gets the
+# write token, whoever wrote the branch. Creating a tag does not fire this
+# event again, so there is no loop.
+on:
+  push:
+    branches: [main]
+  # A push trigger is not quite enough on its own. GitHub suppresses
+  # push-triggered workflows for a commit whose message carries `[skip ci]` or
+  # one of its siblings, and a squash merge takes its message from the pull
+  # request title, which no required check ever looks at, so such a merge
+  # lands normally and is then silently never tagged. This sweep costs nothing
+  # to have: the job is idempotent per commit, so on any ordinary day it finds
+  # `main` already released and exits before creating anything.
+  schedule:
+    - cron: '17 6 * * *'
+  # And the same job on demand, for repairing that merge the moment it is
+  # noticed rather than waiting for the sweep.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  # Reading the labels off the merged pull request. The push payload has no
+  # idea a pull request was involved.
+  pull-requests: read
+
+jobs:
+  tag:
+    # The dispatch trigger takes whatever ref the maintainer had selected, and
+    # nothing downstream would notice: `github.sha` and the checkout would both
+    # be that branch, and `--target` would cut an official VX.Y release out of
+    # unmerged code. Releases come from `main` or they do not happen.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned by SHA (the comment says which tag): a moved tag on a popular
+      # action is a supply-chain attack on every repo that trusts it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # History back to the previous tag is the input to this commit's
+          # version: a shallow clone fetches neither the tags nor the commits
+          # between them, and every release would be V1.0.
+          fetch-depth: 0
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Not fetched by the checkout, which takes branches and tags only.
+          git fetch --quiet origin '+refs/skipped/*:refs/skipped/*' 2>/dev/null || true
+
+          # Some merges are not worth a version of their own (a typo fix, a
+          # workflow tweak) and a breaking one is worth saying out loud. Both
+          # are said with a label on the pull request, which is the only place
+          # a human's intent for a merge is recorded.
+          #
+          # The `?` is load-bearing. A commit with no originating pull request
+          # (the root of the repository, reachable by the bootstrap walk)
+          # answers with an empty list, and `.[0].labels[]` on that iterates
+          # null and exits non-zero, which under `set -e` would kill the job
+          # before it ever cut a tag. With it suppressed the commit yields no
+          # labels and takes the default, which is the right reading of "there
+          # was no pull request to say otherwise".
+          #
+          # There is deliberately no `|| true` around the call itself: a real
+          # API failure should still stop the job rather than quietly ship a
+          # default bump.
+          level_of() {
+            local labels
+            # A skipped commit never gets a tag, so nothing else would stop the
+            # walk below from asking the API about it again on every push and
+            # every sweep, for the life of the repository. The decision is
+            # recorded once, in a ref namespace of its own so it is invisible
+            # to `git describe` and to the tag matching everywhere else here.
+            if git rev-parse -q --verify "refs/skipped/$1" >/dev/null; then
+              echo skip
+              return 0
+            fi
+            labels=$(gh api "repos/$GITHUB_REPOSITORY/commits/$1/pulls" \
+              --jq '.[0].labels[]?.name')
+            if grep -qx 'release: skip' <<<"$labels"; then
+              echo skip
+            elif grep -qx 'release: major' <<<"$labels"; then
+              echo major
+            else
+              # Minor by default. A breaking change is rare enough to be worth
+              # labelling deliberately, and the inverse default would silently
+              # ship a major every time somebody forgot.
+              echo minor
+            fi
+          }
+
+          # Best-effort: a failure here costs an API call next time, not
+          # correctness, and it must not fail a release.
+          remember_skip() {
+            git push --quiet origin "$1:refs/skipped/$1" 2>/dev/null || true
+          }
+
+          # Every commit this scheme has ever been responsible for, oldest
+          # first: the commit that introduced the workflow and everything on
+          # `main` since. The sweep needs this rather than "commits since the
+          # newest tag", because the gap it exists to repair sits *behind* a
+          # tagged head: an ordinary merge landing on top of a suppressed one
+          # leaves the head tagged, and a range measured from the newest tag is
+          # then empty while the suppressed merge stays untagged forever.
+          managed_commits() {
+            local baseline
+            baseline=$(git log --first-parent --reverse --diff-filter=A \
+              --format=%H -- .github/workflows/release.yml | head -n1)
+            git rev-list --first-parent --reverse "$baseline^..$1" 2>/dev/null \
+              || git rev-list --first-parent --reverse "$1"
+          }
+
+          # Prints the tag to count from (empty if nothing has ever been
+          # tagged) then the first-parent commits from it up to $1, oldest
+          # first. The release path and the sweep must agree on this walk
+          # exactly, or a repaired merge would be numbered differently than it
+          # would have been at merge time.
+          history_to() {
+            local target=$1 base
+            base=$(git describe --tags --match 'V[0-9]*.[0-9]*' --abbrev=0 \
+              --first-parent "$target" 2>/dev/null || true)
+            echo "$base"
+            if [ -n "$base" ]; then
+              git rev-list --first-parent --reverse "$base..$target"
+            else
+              # Nothing has ever been tagged. The baseline is the commit that
+              # introduced this workflow: everything before it was never
+              # released, and counting it would make the first release V1.10
+              # rather than V1.0 and derive a predecessor tag that never
+              # existed.
+              #
+              # Shortcutting this to a literal V1.0 is the other trap: two
+              # merges racing on the first day would both find no tag, both
+              # claim V1.0, and the loser could never recover, because the tag
+              # it collided with sits on a *descendant* and so is invisible to
+              # `git describe` from the older commit. Measuring from a fixed
+              # baseline avoids both: the two merges sit at different
+              # distances from it.
+              managed_commits "$target"
+            fi
+          }
+
+          # Every tag that actually has a release behind it, fetched once. The
+          # walk below visits every managed commit, so asking the API per
+          # commit would rebuild exactly the cost the skip memo exists to
+          # avoid.
+          releases=$(gh release list --limit 1000 --json tagName --jq '.[].tagName')
+          declare -A published=()
+          for tag in $releases; do
+            published[$tag]=1
+          done
+
+          release_commit() {
+            local sha=$1
+            local self_level existing base major minor rest previous
+            local commit level next lines notes
+
+            # Asked of the commit, not of the version about to be computed.
+            # Re-running a workflow that already succeeded checks out the tag
+            # its first attempt created, so computing a version first and then
+            # asking whether *that* exists always answers no, and the re-run
+            # cuts a second release for a commit that already shipped.
+            #
+            # First, before the label lookup: this is a local ref read, and the
+            # sweep below calls it once per commit in history, where an API
+            # call each would be neither cheap nor necessary.
+            existing=$(git tag --list 'V[0-9]*.[0-9]*' --points-at "$sha" | head -n1)
+            if [ -n "$existing" ]; then
+              if [ -v "published[$existing]" ]; then
+                return 0
+              fi
+              # The tag is there but its release is not: made by hand, or the
+              # release deleted and the tag left behind. Publishing for the tag
+              # that exists is the only repair that keeps them agreeing; a
+              # derived new number would leave the old tag orphaned and this
+              # commit carrying two versions.
+              gh release create "$existing" \
+                --title "$existing" \
+                --generate-notes
+              echo "${sha:0:7} had $existing without a release; published it" >> "$GITHUB_STEP_SUMMARY"
+              return 0
+            fi
+
+            self_level=$(level_of "$sha")
+            if [ "$self_level" = skip ]; then
+              remember_skip "$sha"
+              echo "${sha:0:7} is labelled \`release: skip\`" >> "$GITHUB_STEP_SUMMARY"
+              return 0
+            fi
+
+            # The version is a function of where the commit sits in history,
+            # not of whichever tag happens to exist at the moment this run
+            # executes. That is what makes concurrent merges safe without
+            # coordinating: a run for C2 counts C1 ahead of it whether or not
+            # C1 has been tagged yet, so C1 gets V1.1 and C2 gets V1.2 no
+            # matter which run finishes first. Reading the latest tag instead (the
+            # obvious implementation) hands whoever wins the race the
+            # lower number and leaves `git describe` on the newer commit
+            # reporting the older version, which is the one thing these tags
+            # exist to answer.
+            mapfile -t lines < <(history_to "$sha")
+            base=${lines[0]}
+            if [ -n "$base" ]; then
+              rest=${base#V}
+              major=${rest%%.*}
+              minor=${rest#*.}
+            else
+              major=1
+              minor=-1
+            fi
+
+            # The version one step back. Needed for the release notes below,
+            # and only knowable here, mid-walk.
+            previous=""
+            for commit in "${lines[@]:1}"; do
+              if [ "$commit" = "$sha" ]; then
+                level=$self_level
+                if [ "$minor" -ge 0 ]; then
+                  previous="V$major.$minor"
+                fi
+              else
+                level=$(level_of "$commit")
+              fi
+              case "$level" in
+                # A skipped merge takes no number, so a later commit does not
+                # wait on a tag that is never coming.
+                skip) ;;
+                major)
+                  if [ "$minor" -lt 0 ]; then
+                    # Nothing has shipped yet, so there is no compatibility to
+                    # break and no V1.0 to skip past.
+                    minor=0
+                  else
+                    major=$((major + 1))
+                    minor=0
+                  fi
+                  ;;
+                *) minor=$((minor + 1)) ;;
+              esac
+            done
+            next="V$major.$minor"
+
+            # Left alone, `--generate-notes` starts from the newest tag that
+            # exists *at this instant*. A run that gets ahead of the merge
+            # before it would therefore start from an older release and swallow
+            # that merge's commits into its own notes, and they would be listed
+            # again when the earlier release finally appears. Pinning the start
+            # tag explicitly keeps each release's notes to the merge it is for.
+            #
+            # Waiting for it is safe: the predecessor is an already-merged
+            # commit whose own run is in flight, so this is a handful of
+            # seconds, not a lock that can deadlock. A sweep never waits at all,
+            # because it releases predecessors first.
+            notes=(--generate-notes)
+            if [ -n "$previous" ]; then
+              for _ in $(seq 1 20); do
+                if git rev-parse -q --verify "refs/tags/$previous" >/dev/null; then
+                  break
+                fi
+                sleep 15
+                git fetch --tags --force --quiet origin
+              done
+              if git rev-parse -q --verify "refs/tags/$previous" >/dev/null; then
+                notes+=(--notes-start-tag "$previous")
+              else
+                # Degraded notes are worth shipping; a withheld release is not.
+                echo "::warning::$previous never appeared, so $next's notes may repeat it"
+              fi
+            fi
+
+            # `gh release create` creates the tag as well, so the tag and the
+            # release notes can never disagree about which commit shipped.
+            #
+            # A collision should be impossible now that no two commits derive
+            # the same number, so a failure here is a real fault (a revoked
+            # token, a hand-made tag squatting that number) and the job goes
+            # red on the offending merge rather than dropping the release on
+            # the floor.
+            # `gh release create` honours `--target` only when it is the one
+            # creating the tag. If `$next` already exists on another commit
+            # (hand-made, or left behind by a deleted release) the release
+            # would quietly attach to that tag instead, and the `git tag -f`
+            # below would hide the mismatch in this clone while the published
+            # release pointed at the wrong code.
+            git fetch --tags --force --quiet origin
+            squatter=$(git rev-parse -q --verify "refs/tags/$next^{commit}" || true)
+            if [ -n "$squatter" ] && [ "$squatter" != "$sha" ]; then
+              echo "::error::$next already points at ${squatter:0:7}, not ${sha:0:7}"
+              return 1
+            fi
+
+            # Two runs can legitimately reach for the same tag: a merge
+            # backfilling its predecessor, and that predecessor's own run
+            # arriving late. Losing that race is success: the tag exists and
+            # points where this run wanted it. Anything else is a real fault
+            # (a revoked token, a hand-made tag squatting the number) and goes
+            # red on the offending merge rather than dropping the release.
+            if ! gh release create "$next" \
+              --target "$sha" \
+              --title "$next" \
+              "${notes[@]}"; then
+              git fetch --tags --force --quiet origin
+              if [ "$(git rev-parse -q --verify "refs/tags/$next^{commit}" || true)" != "$sha" ]; then
+                echo "::error::could not release ${sha:0:7} as $next"
+                return 1
+              fi
+              echo "${sha:0:7} was released as $next by a concurrent run" >> "$GITHUB_STEP_SUMMARY"
+              return 0
+            fi
+            # The tag exists on the remote now, but this clone has to see it
+            # too or the next commit in this same walk would re-derive the
+            # number just used.
+            git tag -f "$next" "$sha" >/dev/null
+            echo "${base:-first release} -> $next" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          # Every managed commit that is not yet released, oldest first,
+          # for a push as much as for the sweep. Ordinarily that is just the
+          # merge that triggered this run, because everything before it is
+          # already tagged. When it is not, the difference matters twice over:
+          # a merge whose own run was suppressed by a `[skip ci]` directive is
+          # repaired here rather than waiting for the nightly sweep, and
+          # releasing it *first* means the notes for the merge on top of it can
+          # start where they should instead of swallowing it.
+          for commit in $(managed_commits "$SHA"); do
+            release_commit "$commit"
+          done

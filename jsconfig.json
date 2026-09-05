@@ -1,0 +1,23 @@
+{
+  // Type-checking without TypeScript: the code stays plain JS, tsc only reads
+  // it. Opt-in per file: a `// @ts-check` first line puts a file under the
+  // checker; files without it are untouched. `npm run typecheck` runs it, CI
+  // gates on it. The end state is every lib/ file carrying the marker.
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": false,
+    // Not strict: this is plain JS with no annotations, and the win is tsc
+    // catching wrong property names, bad call shapes and impossible branches,
+    // not forcing types onto every parameter.
+    "strict": false,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    // Tracks the one runtime this app is built for: node 24 implements ES2025
+    // in full, so anything below this hides methods the code may legitimately
+    // use and reports them as errors that are not.
+    "target": "es2025",
+    "skipLibCheck": true
+  },
+  "include": ["lib/**/*.js", "server.js", "scripts/**/*.js"]
+}

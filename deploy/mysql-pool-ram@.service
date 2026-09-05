@@ -1,0 +1,24 @@
+# Prepares the RAM datadir one pool instance runs on: mounts the tmpfs and, when
+# it comes up empty (which after a boot it always does) initializes a fresh
+# MySQL datadir into it. mysql-pool@%i requires this, so ordering at boot is
+# systemd's problem rather than a race the instances lose sometimes.
+#
+# Installed to /etc/systemd/system/; see deploy/README.md.
+
+[Unit]
+Description=RAM datadir for MySQL pool instance %i
+Documentation=https://github.com/nadinyamaui/briareus/blob/main/deploy/README.md
+
+[Service]
+Type=oneshot
+# The mount and the fresh datadir both need root; mysqld itself still runs as
+# mysql, and everything this leaves behind is owned by mysql.
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/mysql-pool-ram init %i
+ExecStop=/usr/local/bin/mysql-pool-ram down %i
+# Initializing a datadir is a second or two; a machine still busy booting can
+# take a good deal longer.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

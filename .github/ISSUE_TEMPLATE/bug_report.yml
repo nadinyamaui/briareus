@@ -1,0 +1,66 @@
+name: Bug report
+description: Something behaves differently than the README says it does
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report security problems here; see
+        [SECURITY.md](../blob/main/SECURITY.md) for private reporting.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: >
+        The server's console output around the failure, and the session's own
+        log if a session was involved. Scrub tokens before pasting.
+      render: text
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      placeholder: '24.x, from `node --version`'
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: Ubuntu 24.04, WSL2, ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Which agent was the session running
+      options:
+        - Not provider-specific
+        - Claude Code
+        - Codex
+        - Grok
+        - Z.AI (GLM through codex)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: config
+    attributes:
+      label: Configuration
+      description: Whichever of these apply; they usually decide which code path you were on.
+      options:
+        - label: The login is on (`AUTH_PASSWORD_HASH` and `AUTH_SECRET` are set)
+        - label: A public `PUBLIC_BASE_URL` is set, so webhooks are in play
+        - label: The session claimed a pooled database server
+        - label: The session was in Local mode (⌂), not a worktree

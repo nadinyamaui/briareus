@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Projects · Briareus</title>
+    <meta
+      name="description"
+      content="Creating a project: every field of the project form, from the repository and setup commands, database, code review runtime, checkout .env, prompts and run commands."
+    />
+    <link rel="stylesheet" href="docs.css" />
+  </head>
+  <body class="min-h-dvh">
+    <article class="doc">
+      <div class="pill mb-4">Configuration</div>
+      <h1 class="mt-0 mb-3 text-[34px] leading-[1.15] font-semibold tracking-[-0.02em]">Projects</h1>
+      <p class="!text-[17px] !text-muted">
+        A project is everything the app needs to know to run a session against one repository: which install
+        steps to run, which PHP to run them with, whether a session claims a database server of its own, what
+        to seed the checkout's <code>.env</code> with, and how to serve the app. One row per repository,
+        edited at <code>/settings/projects</code>.
+      </p>
+
+      <h2 id="creating">Creating one</h2>
+      <ol class="steps">
+        <li>
+          <h3>Open the form</h3>
+          <p>
+            <code>/settings/projects</code>, then <strong>＋ New</strong> beside <em>Projects</em> in the
+            sidebar. (<code>/settings</code> redirects here.)
+          </p>
+        </li>
+        <li>
+          <h3>Fill in what you know</h3>
+          <p>
+            Only <strong>Repository</strong> is genuinely required. Everything else has a sane empty
+            behaviour, described field by field below. A project with nothing but a repository name clones it,
+            runs no setup, seeds no <code>.env</code>, claims no database and cannot be
+            <span class="kbd">▶ Run</span>, which is exactly right for a repository you only ever review.
+          </p>
+        </li>
+        <li>
+          <h3>Save</h3>
+          <p>
+            The in-memory copy every session reads from is refreshed on write, so the change applies to the
+            next session immediately. A session already running keeps the configuration it started with.
+          </p>
+        </li>
+      </ol>
+      <p>
+        The <span class="kbd">⧉</span> button in the header clones the open project into a new entry: the fast
+        way to add a second repository that shares a toolchain. <span class="kbd">🗑</span> deletes it.
+      </p>
+
+      <h2 id="project">Project</h2>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">Repository <span class="f-meta">owner/name</span></div>
+          <p>
+            The GitHub repository, spelled exactly as GitHub spells it. Cloned over HTTPS with the machine's
+            own git credentials. The app injects none of its own, so whatever
+            <code>credential.helper</code> points at is what authenticates.
+          </p>
+          <p>
+            This string is the project's identity everywhere else: the workspace slots are named after it
+            (<code>owner__name</code>, <code>owner__name__2</code>, …), and the pull request board, the usage
+            ledger and the memories are all keyed on it. Changing it on a saved project effectively makes a
+            different project.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Label</div>
+          <p>What the project dropdown shows. Cosmetic: leave it empty and the repository name is used.</p>
+        </div>
+        <div class="f">
+          <div class="f-name">Local checkout <span class="f-meta">absolute path</span></div>
+          <p>
+            This machine's own checkout of the repository. A session started in
+            <span class="kbd">⌂ Local</span> mode works directly in it: no clone, no branch juggling, no
+            <code>.env</code> seeding, no setup steps, no pooled database. The tree, whatever branch it has
+            checked out, and its real local database are used as they stand.
+          </p>
+          <p>
+            Leave it empty to keep Local mode off for this project. One local session at a time per checkout.
+            See <a href="sessions.html#local">Local mode</a>.
+          </p>
+        </div>
+        <div class="f" id="self">
+          <div class="f-name">
+            This project is the dashboard itself <span class="f-meta">Orchestrator section</span>
+          </div>
+          <p>
+            Tick it on the repository whose code is running right now, and on no other: a second flag is
+            refused, naming the first. It is what gives every 🧭 orchestrator its
+            <code>fix_tooling</code> tool: a worker on this project, review loop armed, briefed with a flaw
+            the orchestrator found in the tooling running it. The worker runs on this project's worker runtime
+            when one is set, and its pull request is merged by the orchestrator once the loop approves and the
+            checks are green. Redeploying is yours. See <a href="sessions.html#project-view">self-healing</a>.
+          </p>
+        </div>
+      </div>
+
+      <h2 id="setup">Setup</h2>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">Setup commands <span class="f-meta">one per line</span></div>
+          <p>
+            Shell commands run in the checkout, in order, after the branch is prepared and the
+            <code>.env</code> written, before the agent gets your first message. The first failure aborts the
+            session.
+          </p>
+          <pre><code>composer install --no-interaction --prefer-dist
+yarn install
+php artisan migrate:fresh --seed
+yarn build</code></pre>
+          <p>
+            <strong>Installs are fingerprinted.</strong> A dependency install (<code>composer install</code>,
+            <code>yarn</code>/<code>npm</code>/<code>pnpm install</code>) is skipped outright when its
+            manifests are byte-for-byte what they were the last time it succeeded in that slot
+            <em>and</em> what it installs is still on disk. The fingerprints live in the clone's
+            <code>.git/reviewer-setup.json</code>; <strong>Reset setup</strong> under
+            <a href="operations.html#workspaces">Workspaces</a> forgets them.
+          </p>
+          <p>
+            Builds and anything touching the database run every time, which is why migrations and seeding
+            belong here rather than being something the app does for you. They run against whichever server
+            the session claimed.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">PHP bin directory</div>
+          <p>
+            Prepended to <code>PATH</code> for everything this project runs: the setup commands, the run
+            commands and the agent's own shell. This is how two projects on one machine can want different PHP
+            versions.
+          </p>
+          <pre><code>/usr/bin
+~/.phpenv/versions/8.4/bin</code></pre>
+          <p>Leave empty for the machine's own PHP.</p>
+        </div>
+      </div>
+
+      <h2 id="database">Database</h2>
+      <p>
+        Two independent decisions live here: <em>which database name</em> a session uses, and
+        <em>whether it gets a server to itself</em>.
+      </p>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">Database</div>
+          <p>
+            What <code>DB_DATABASE</code> is set to in the session's environment, which beats the checkout's
+            <code>.env</code>. The name must be a plain identifier (<code>A–Z a–z 0–9 _ $</code>), since it
+            goes into DDL, where a placeholder cannot.
+          </p>
+          <p>
+            <strong>With the pool on</strong>, the session claims a server and this database is created on it
+            if it does not exist yet.
+          </p>
+          <p>
+            <strong>With the pool off</strong>, every session gets a database of its own, this name plus the
+            session id, created on the server the <code>.env</code> template points at, and written into the
+            checkout's <code>.env</code>.
+          </p>
+          <p>Leave empty to use the <code>.env</code> template exactly as written.</p>
+        </div>
+        <div class="f">
+          <div class="f-name">Postgres extensions <span class="f-meta">one per line</span></div>
+          <p>
+            Created in the session's database right after it is. A fresh Postgres database carries only what
+            <code>template1</code> does, so a migration declaring a <code>vector</code>
+            column fails without this; the extension itself must already be installed on the server. Ignored
+            on MySQL.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">
+            Give each session a database server of its own <span class="f-meta">checkbox</span>
+          </div>
+          <p>
+            The switch that makes this project's sessions claim from the
+            <a href="database.html">database pool</a>. Ticked, a session takes one server exclusively for as
+            long as it stays open, and its peers queue behind the pool's size.
+          </p>
+          <p>
+            Unticked, the project holds nothing exclusive and its sessions are never capped: they all talk to
+            whatever the <code>.env</code> template points at, each in a database of its own if you named one
+            above.
+          </p>
+          <p>
+            This checkbox also decides whether the project is capped at all, and whether its turns get a time
+            limit: only a session holding a pooled server is in anybody's way, so only those obey
+            <code>DEV_MAX_SESSIONS</code> and <code>DEV_TIMEOUT_MIN</code>.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Restore from .sql <span class="f-meta">pool only</span></div>
+          <p>
+            A dump on this machine, piped into the database every time a server is claimed, right after the
+            database is created, before the setup steps run. Leave empty to skip. Shown only while the
+            checkbox above is ticked.
+          </p>
+        </div>
+      </div>
+
+      <div class="callout">
+        <div class="callout-title">What the session's environment gets</div>
+        <p>
+          The claimed server is injected as <code>DB_HOST</code> / <code>DB_PORT</code> /
+          <code>DB_DATABASE</code> / <code>DB_USERNAME</code> / <code>DB_PASSWORD</code> into every command
+          the session runs, and that beats what the checkout's <code>.env</code> says. Write the template for
+          a developer's machine; the pool overrides it where it matters.
+        </p>
+      </div>
+
+      <h2 id="code-review">Code review</h2>
+      <p>
+        This section is about the errands the app runs on this project's pull requests: who the board is
+        about, what the reviews run on, and what happens after one.
+        <a href="review.html">Code review &amp; QA</a> covers the workflow itself.
+      </p>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">PR author <span class="f-meta">github username</span></div>
+          <p>
+            The filter the pull request board applies, deciding whose pull requests this project's board is
+            about. A login, not a display name.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Provider / Model / Effort</div>
+          <p>
+            What a <span class="kbd">⌕ Code review</span> started from the board opens on, unless the composer
+            picks something else. The three selects are dependent: the model and effort lists are the chosen
+            provider's own.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Publish steps</div>
+          <p>
+            Sent to the agent as its own turn after a code review: this text and nothing else. It is the
+            review's own follow-through, in the review's conversation and on the review's provider, which is
+            why it has no runtime of its own.
+          </p>
+          <pre><code>Publish the review to the PR with gh, then move the labels.</code></pre>
+          <p>Leave empty to run no turn after the review.</p>
+        </div>
+        <div class="f">
+          <div class="f-name">
+            Write a test sheet when the 🎬 QA errand is started <span class="f-meta">checkbox</span>
+          </div>
+          <p>
+            The QA session's first turn derives a manual test sheet from the diff and posts it as one editable
+            comment on the pull request. Ticking it reveals a
+            <strong>Provider / Model / Effort</strong> row for that step alone; a step left unset runs on
+            whatever the session it came from runs on.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">
+            Execute the test sheet and record a video of each scenario <span class="f-meta">checkbox</span>
+          </div>
+          <p>
+            A second turn serves the app against the session's own database, drives every ⬜ scenario with
+            Playwright, records a video of each and writes the results back into the sheet. Same per-step
+            runtime row.
+          </p>
+          <p>
+            Where those videos are linked from depends on whether R2 is configured; see
+            <a href="config.html#r2">Shared video links</a>.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">QA notes</div>
+          <p>
+            Appended to both the test sheet and test run prompts: logins, tenants, URLs, whatever a tester
+            needs that the repository does not say.
+          </p>
+          <pre><code>Login admin@example.test / secret, tenant demo, app lives under /app</code></pre>
+        </div>
+        <div class="f">
+          <div class="f-name">Test sheet closing steps</div>
+          <p>
+            Appended to the end of the 📋 Test sheet prompt: what this project wants done once the sheet is on
+            the pull request. Leave empty to add nothing.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Feedback closing steps</div>
+          <p>
+            Appended to the end of the ⚙ Implement feedback prompt: what this project wants done once the
+            review comments are implemented.
+          </p>
+        </div>
+      </div>
+
+      <h2 id="checkout-env">Checkout .env</h2>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">.env template</div>
+          <p>
+            Written into the clone as <code>.env</code> before the setup steps run, on every session. Leave
+            empty to use whatever the repository ships.
+          </p>
+          <pre><code>APP_ENV=local
+APP_DEBUG=true
+APP_KEY=base64:…
+APP_URL=http://127.0.0.1:8101
+
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=my_app
+DB_USERNAME=root
+DB_PASSWORD=</code></pre>
+          <p>
+            Write it for an ordinary developer machine. When the session claims a pooled server, the
+            <code>DB_*</code> keys are overridden in the environment anyway; the template is the fallback, not
+            the source of truth.
+          </p>
+          <div class="callout warn">
+            <div class="callout-title">This file is readable by everything the session runs</div>
+            <p>
+              Every shell command the agent runs is in the checkout. Put development credentials here, never
+              production ones.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <h2 id="prompts">Prompts</h2>
+      <p>
+        This repository's own wording for any prompt the app sends out. One textarea per template, built from
+        the same catalog the shared editor uses. A field left empty falls back to the shared text under
+        <strong>Prompts</strong> in the sidebar, which in turn falls back to the text this app ships with, so
+        configuring nothing behaves exactly as it always did.
+      </p>
+      <p>
+        Full explanation, including the <code>{{TOKEN}}</code> placeholders:
+        <a href="prompts.html">Prompts &amp; memory</a>.
+      </p>
+
+      <h2 id="run">Run</h2>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">Run commands <span class="f-meta">one per line</span></div>
+          <p>
+            What <span class="kbd">▶ Run</span> executes in the checkout. Chained, so the last one is the
+            server that keeps running; the ones before it are the preparation it needs.
+          </p>
+          <p>
+            Two placeholders: <code>{port}</code> is the session's app port (one per workspace slot: 8101,
+            8102, …), <code>{dir}</code> is the checkout.
+          </p>
+          <pre><code>php -S 127.0.0.1:{port} -t public server.php</code></pre>
+          <pre><code>yarn build
+node server.js --port {port}</code></pre>
+          <p>
+            Leave empty and the ▶ Run button has nothing to do. The QA test run needs these too: it serves the
+            app the same way before driving the scenarios.
+          </p>
+        </div>
+      </div>
+
+      <h2 id="checklist">A working example, end to end</h2>
+      <p>A Laravel project with a pooled database, reviewed by Claude:</p>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Repository</td>
+              <td><code>acme/storefront</code></td>
+            </tr>
+            <tr>
+              <td>Label</td>
+              <td>Storefront</td>
+            </tr>
+            <tr>
+              <td>Local checkout</td>
+              <td><code>/home/you/www/storefront</code></td>
+            </tr>
+            <tr>
+              <td>Setup commands</td>
+              <td>
+                <code>composer install --no-interaction --prefer-dist</code><br />
+                <code>yarn install</code><br />
+                <code>php artisan migrate:fresh --seed</code><br />
+                <code>yarn build</code>
+              </td>
+            </tr>
+            <tr>
+              <td>PHP bin directory</td>
+              <td><code>~/.phpenv/versions/8.4/bin</code></td>
+            </tr>
+            <tr>
+              <td>Database</td>
+              <td><code>storefront</code>, pool ticked</td>
+            </tr>
+            <tr>
+              <td>PR author</td>
+              <td><code>your-github-login</code></td>
+            </tr>
+            <tr>
+              <td>Provider / Model / Effort</td>
+              <td>Claude / opus / high</td>
+            </tr>
+            <tr>
+              <td>Publish steps</td>
+              <td><code>Publish the review to the PR with gh, then move the labels.</code></td>
+            </tr>
+            <tr>
+              <td>.env template</td>
+              <td>the app's local <code>.env</code>, with dev credentials</td>
+            </tr>
+            <tr>
+              <td>Run commands</td>
+              <td><code>php artisan serve --port={port}</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout ok">
+        <div class="callout-title">Rules of thumb</div>
+        <ul>
+          <li>
+            Anything that has to happen on every session goes in <strong>Setup commands</strong>; the app
+            provisions the database and nothing else.
+          </li>
+          <li>
+            Anything that has to happen once per <em>clone</em> is not configurable: dependency installs
+            figure that out themselves from the manifests.
+          </li>
+          <li>
+            If the app cannot be served, leave <strong>Run commands</strong> empty rather than half-filling
+            it: QA's test run depends on it working.
+          </li>
+          <li>
+            Tick the database pool only if sessions genuinely collide; a project with it off is uncapped and
+            cheaper.
+          </li>
+        </ul>
+      </div>
+    </article>
+    <script src="docs.js"></script>
+  </body>
+</html>

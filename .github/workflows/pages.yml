@@ -1,0 +1,63 @@
+name: Pages
+
+# docs/docs.css is Tailwind output and is no longer committed, so the site can
+# no longer be served straight from the `docs/` folder on `main`: something has
+# to run the build first. This is that something.
+#
+# It only publishes once **Settings -> Pages -> Source** is "GitHub Actions".
+# Left on "Deploy from a branch" the site keeps being the raw folder, which now
+# has no stylesheet in it.
+on:
+  push:
+    branches: [main]
+    # The whole site is docs/, and its stylesheet is built from these. A merge
+    # that touches neither leaves the published bytes identical, so it is not
+    # worth a deploy.
+    paths:
+      - 'docs/**'
+      - 'src/docs.css'
+      - 'src/theme.css'
+      - 'package-lock.json'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  # deploy-pages authenticates to the Pages API with an OIDC token rather than
+  # with the job's GITHUB_TOKEN.
+  id-token: write
+
+# Two merges landing together must not deploy over each other, and the newest
+# one wins on its own by being second. Cancelling in flight is deliberately off:
+# a killed deploy leaves the site mid-swap, and the run it would save is a
+# minute long.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      # Pinned by SHA (the comment says which tag): a moved tag on a popular
+      # action is a supply-chain attack on every repo that trusts it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # .nvmrc rather than a literal, so the version lives in one place.
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --no-audit
+      - run: npm run build:docs-css
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          # The folder as it stands after the build: plain HTML, its JS, and the
+          # stylesheet the step above just wrote into it.
+          path: docs
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

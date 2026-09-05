@@ -1,0 +1,124 @@
+# The dashboard, its own MySQL, and, behind the `pool` profile, the extra
+# MySQL instances a session can claim so parallel sessions never share a
+# database.
+#
+#   docker compose up -d --build          the dashboard and its database
+#   docker compose --profile pool up -d   plus two servers for the pool
+#
+# Settings that describe this install are read from the shell (or from the .env
+# next to this file, which docker compose loads on its own); everything the
+# container writes lives in a named volume.
+
+name: reviewer
+
+services:
+  app:
+    build: .
+    environment:
+      # The port inside the container is fixed; HOST_PORT below is what moves.
+      PORT: 4300
+      # Loopback would hide the app from its own published port; see BIND_HOST
+      # in .env.example. Who may reach it is decided by the ports mapping.
+      BIND_HOST: 0.0.0.0
+      # What this install is called from outside: the tunnel hostname when
+      # there is one, since the webhook GitHub delivers to and the video links a
+      # test run leaves on a pull request both start with it.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:4300}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required, the board is empty without it}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-5}
+      CLAUDE_EFFORT: ${CLAUDE_EFFORT:-high}
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_DATABASE:-reviewer}
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD:-reviewer}
+      AUTH_USERNAME: ${AUTH_USERNAME:-admin}
+      # Shared video links through an R2 bucket: optional, and all five keys
+      # or none (see .env.example). Empty is how "not configured" is spelled;
+      # lib/config.js treats an all-blank group as absent.
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_BUCKET: ${R2_BUCKET:-}
+      R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-}
+      # The author on the commits a session makes; git has no answer of its own
+      # in a fresh container.
+      GIT_USER_NAME: ${GIT_USER_NAME:-Briareus}
+      GIT_USER_EMAIL: ${GIT_USER_EMAIL:-sessions@localhost}
+    ports:
+      # Loopback on the host too: the way in from outside is a tunnel pointed at
+      # this port, not the port itself. Publish on 0.0.0.0 only behind a gate.
+      - '127.0.0.1:${HOST_PORT:-4300}:4300'
+    volumes:
+      # .env, and the login `npm run set-password` writes into it.
+      - state:/app/state
+      # The provider CLIs' logins (~/.claude-provider-*, ~/.codex-*, ~/.grok-*,
+      # ~/.opencode-provider-*). Losing these means logging every provider in again.
+      - home:/home/node
+      # The session clones, and the videos a test run drops.
+      - workspaces:/workspaces
+      - videos:/test-videos
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:4300/').then(() => process.exit(0), () => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # The master: session history, projects, providers, prompt templates. Nothing
+  # here is disposable, so it keeps a volume on disk.
+  db:
+    image: mysql:8.4
+    command: ['--character-set-server=utf8mb4', '--collation-server=utf8mb4_unicode_ci']
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-reviewer}
+    volumes:
+      - dbdata:/var/lib/mysql
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-uroot', '-p${DB_PASSWORD:-reviewer}']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  # The pool. Add them at /settings as db-pool-1:3306 and db-pool-2:3306; the
+  # app reaches them by service name over the compose network, so neither needs
+  # a published port. Their datadir is tmpfs, for the same reason the bare-metal
+  # deploy puts it there (deploy/README.md): a session's database is memory and
+  # nothing else, and an instance that comes back empty is repopulated from the
+  # project's dump on first use.
+  db-pool-1:
+    profiles: ['pool']
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-reviewer}
+    tmpfs:
+      - /var/lib/mysql:size=3g
+    restart: unless-stopped
+
+  db-pool-2:
+    profiles: ['pool']
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-reviewer}
+    tmpfs:
+      - /var/lib/mysql:size=3g
+    restart: unless-stopped
+
+volumes:
+  state:
+  home:
+  workspaces:
+  videos:
+  dbdata:

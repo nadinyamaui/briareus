@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Installation · Briareus</title>
+    <meta
+      name="description"
+      content="Requirements, the bare-metal install, the Docker image, and what the first boot expects to find."
+    />
+    <link rel="stylesheet" href="docs.css" />
+  </head>
+  <body class="min-h-dvh">
+    <article class="doc">
+      <div class="pill mb-4">Getting started</div>
+      <h1 class="mt-0 mb-3 text-[34px] leading-[1.15] font-semibold tracking-[-0.02em]">Installation</h1>
+      <p class="!text-[17px] !text-muted">
+        Two ways in. Install it on the machine, where a session can use whatever toolchain that machine
+        already has, or run the Docker image, which carries the runtime, the CLIs and a MySQL and asks only
+        for a GitHub token.
+      </p>
+
+      <h2 id="requirements">Requirements</h2>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">Linux</div>
+          <p>
+            Developed and run on Ubuntu, including under WSL2. Sessions spawn shell commands and resolve
+            binaries through <code>which</code>; a hit on a mounted Windows drive (<code>/mnt/…</code>) is
+            deliberately ignored, because that is a host binary and not one this Linux can run.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Node.js 24 <span class="f-meta">.nvmrc</span></div>
+          <p>
+            The only version supported or tested, and what <code>.nvmrc</code> pins. Also <code>git</code> on
+            <code>PATH</code>.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">MySQL 5.7+ or MariaDB 10.2+</div>
+          <p>
+            For the app's own storage: the projects, the providers, the prompt templates, the session history
+            and the cost ledger. The database and its tables are created on first run; the schema is a set of
+            migrations in <code>migrations/</code>, applied automatically at boot. See
+            <a href="operations.html#migrations">Migrations</a>.
+          </p>
+          <p>
+            This is <em>not</em> the same thing as the <a href="database.html">per-session database pool</a>,
+            which is a separate list of servers you register in the UI.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">At least one agent CLI, authenticated</div>
+          <p>
+            The Claude Code CLI is the default. The CLI a session spawns does
+            <strong>not</strong> share the desktop app's login, so sign it in with
+            <code>claude auth login</code>, or put a <code>claude setup-token</code> result /
+            <code>ANTHROPIC_API_KEY</code> where the provider entry can reach it. The Codex, Grok and opencode
+            CLIs are optional and auto-discovered. See <a href="providers.html">Providers</a>.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">A GitHub token <span class="f-meta">GITHUB_TOKEN</span></div>
+          <p>
+            A classic PAT with <code>repo</code>, or a fine-grained token with
+            <strong>Pull requests: read/write</strong> and <strong>Contents: read</strong>, plus
+            <strong>Issues: read</strong> for the project view's ⊙ Issues tab. Used by the sessions'
+            <code>gh</code> CLI and by the pull request / CI sync in the session header.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">A git credential helper</div>
+          <p>
+            Pushes and fetches authenticate through the machine's own helper:
+            <code>gh auth setup-git</code>, <code>git-credential-libsecret</code>, or whatever
+            <code>credential.helper</code> points at. The app injects no git credentials of its own.
+          </p>
+        </div>
+      </div>
+
+      <h2 id="install">Installing on the machine</h2>
+      <ol class="steps">
+        <li>
+          <h3>Clone and install</h3>
+          <pre><code>git clone https://github.com/nadinyamaui/briareus.git
+cd briareus
+npm install
+npm run build:css</code></pre>
+          <p>
+            The stylesheet is Tailwind output and is not committed, so the build is part of the install: the
+            server serves <code>public/app.css</code> as it stands and never builds it, and a clone that skips
+            this step comes up with every page unstyled. Run it again whenever you pull.
+          </p>
+        </li>
+        <li>
+          <h3>Write the <code>.env</code></h3>
+          <p>
+            Copy the example and fill in the required half. Every setting above the
+            <em>optional</em> line names something about this machine (its database, its port, what it is
+            called from outside, which model to run) so none of them has a default. A missing one stops the
+            boot with its name in the message rather than coming up on a guess.
+          </p>
+          <pre><code>cp .env.example .env</code></pre>
+          <p>
+            The minimum is a <code>GITHUB_TOKEN</code>, the <code>PORT</code>, a
+            <code>PUBLIC_BASE_URL</code> (<code>http://localhost:4300</code> is a valid answer, read as "no
+            public hostname"), the <code>WORKSPACE_DIR</code> / <code>TEST_VIDEOS_DIR</code> paths, the
+            <code>CLAUDE_MODEL</code> / <code>CLAUDE_EFFORT</code> pair, the five <code>DB_*</code> keys and
+            an <code>AUTH_USERNAME</code>. Full list on the <a href="config.html">Environment reference</a>.
+          </p>
+        </li>
+        <li>
+          <h3>Start it</h3>
+          <pre><code>npm start                 # http://localhost:4300</code></pre>
+          <p>
+            <code>--port 4301</code> (or <code>PORT</code> in <code>.env</code>) moves the server; the flag
+            wins over the file, so a test instance can run alongside the real one.
+          </p>
+        </li>
+        <li>
+          <h3>Turn the login on</h3>
+          <p>
+            Optional on a laptop, mandatory the moment anything but <code>localhost</code> can reach it. This
+            writes a username, a scrypt hash of the password and a cookie signing secret into
+            <code>.env</code>; restart for it to take effect.
+          </p>
+          <pre><code>npm run set-password</code></pre>
+        </li>
+        <li>
+          <h3>Configure it</h3>
+          <p>
+            The rest happens in the UI: a <a href="providers.html">provider</a> to run sessions on,
+            <a href="database.html">database servers</a> if your projects want one each, and at least one
+            <a href="projects.html">project</a>. <a href="quickstart.html">Your first session</a> walks
+            through all three in order.
+          </p>
+        </li>
+      </ol>
+
+      <div class="callout">
+        <div class="callout-title">Where the clones go</div>
+        <p>
+          <code>WORKSPACE_DIR</code> defaults to <code>../worktrees</code>, <em>next to</em> the app's
+          checkout, not inside it. That is deliberate: a workspace inside the app's own tree would put the
+          app's source into every session's working directory. Relative paths resolve against the app root;
+          absolute paths are taken as they are.
+        </p>
+      </div>
+
+      <h2 id="docker">In Docker</h2>
+      <p>
+        The image carries node, git, the <code>gh</code> CLI, the four agent CLIs and the
+        <code>mysql</code>/<code>psql</code> clients, and brings up a MySQL of its own beside it. All it needs
+        from you is a <code>GITHUB_TOKEN</code> in the environment, or in the <code>.env</code> next to
+        <code>compose.yaml</code>, which docker compose reads by itself, so an install that already has one is
+        configured.
+      </p>
+      <pre><code>GITHUB_TOKEN=ghp_… docker compose up -d --build
+docker compose exec app npm run set-password
+docker compose restart app</code></pre>
+      <p>The dashboard comes up on <a href="http://localhost:4300">http://localhost:4300</a>.</p>
+
+      <h3 id="docker-settings">The knobs</h3>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Variable</th>
+              <th>What it does</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>GITHUB_TOKEN</code></td>
+              <td>
+                The only required one. Also configures <code>gh</code> as the credential helper inside the
+                container.
+              </td>
+            </tr>
+            <tr>
+              <td><code>HOST_PORT</code></td>
+              <td>Moves the published port. It stays bound to <code>127.0.0.1</code>.</td>
+            </tr>
+            <tr>
+              <td><code>PUBLIC_BASE_URL</code></td>
+              <td>The hostname a tunnel puts in front of it. Turns webhooks and shareable video links on.</td>
+            </tr>
+            <tr>
+              <td><code>DB_PASSWORD</code></td>
+              <td>Used by both the app and the MySQL beside it.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="docker-env">Configuration still arrives as <code>.env</code></h3>
+      <p>
+        <code>lib/config.js</code> reads that file and nothing else, so the entrypoint
+        (<code>docker/entrypoint.sh</code>) writes one from the environment on every boot. It lives on a
+        volume, not in the image, and the keys the environment does not name (the login
+        <code>set-password</code> writes, anything added by hand) are carried across each rewrite. Mounting
+        your own file over <code>/app/.env</code> switches all of that off and uses the file as it is.
+      </p>
+
+      <h3 id="docker-volumes">The volumes are the install</h3>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Volume</th>
+              <th>Holds</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>home</code></td>
+              <td>
+                The provider CLIs' logins, so <code>claude</code>/<code>codex</code>/<code>grok</code> stay
+                signed in across a rebuild, and the isolated homes <code>opencode</code> entries run in.
+              </td>
+            </tr>
+            <tr>
+              <td><code>state</code></td>
+              <td>The <code>.env</code>.</td>
+            </tr>
+            <tr>
+              <td><code>workspaces</code></td>
+              <td>The session clones.</td>
+            </tr>
+            <tr>
+              <td><code>dbdata</code></td>
+              <td>The session history and everything else in the app's own database.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Removing them is what starting over means.</p>
+
+      <h3 id="docker-pool">The database pool in Docker</h3>
+      <p>
+        The extra MySQL servers a session claims are a compose profile of their own, and are not started by
+        default:
+      </p>
+      <pre><code>docker compose --profile pool up -d</code></pre>
+      <p>
+        Then add them at <strong>Settings → Database pool</strong> as <code>db-pool-1:3306</code> and
+        <code>db-pool-2:3306</code>; the app reaches them by service name. Their datadir is tmpfs; see
+        <a href="database.html#ram">Keeping them in RAM</a>.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-title">The image does not carry your project's toolchain</div>
+        <p>
+          It has enough to run a session, but a project's setup steps run whatever is on
+          <code>PATH</code>, so reviewing a PHP repository means adding php and composer to the
+          <code>Dockerfile</code>. One more thing behaves differently in here than on a machine: pushes
+          authenticate through <code>gh</code> as the credential helper, configured by the entrypoint from the
+          same token.
+        </p>
+      </div>
+
+      <h2 id="first-boot">What the first boot does</h2>
+      <ul>
+        <li>Reads <code>.env</code> and refuses to start if a required key is missing, naming it.</li>
+        <li>Connects to the app's MySQL, creating the database and applying pending migrations.</li>
+        <li>
+          Discovers the agent CLIs on <code>PATH</code>, the npm global prefix and the native installer paths.
+        </li>
+        <li>
+          Generates the GitHub webhook secret into the <code>app_settings</code> table if it is not there yet,
+          so there is nothing to paste anywhere.
+        </li>
+        <li>
+          Logs whether the dashboard login is on. <code>login: OFF</code> means anything that reaches the port
+          is trusted.
+        </li>
+      </ul>
+    </article>
+    <script src="docs.js"></script>
+  </body>
+</html>

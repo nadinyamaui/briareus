@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <title>Sign in</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body class="items-center justify-center p-4">
+    <main class="w-full max-w-[340px]">
+      <div class="mb-6 text-center">
+        <h1 class="mb-0 text-[20px] font-semibold tracking-[-.01em]">Briareus</h1>
+      </div>
+
+      <form
+        id="form"
+        class="rounded-2xl border border-line bg-raise p-5 shadow-2xl shadow-black/30"
+        autocomplete="on"
+      >
+        <label class="field">
+          <span>Username</span>
+          <input
+            id="username"
+            type="text"
+            name="username"
+            autocomplete="username"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
+            required
+            autofocus
+          />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input id="password" type="password" name="password" autocomplete="current-password" required />
+        </label>
+        <button id="submit" type="submit" class="btn btn-primary mt-1 w-full py-2 text-[14px] font-medium">
+          Sign in
+        </button>
+        <p id="error" class="m-0 mt-3 hidden text-center text-xs text-danger"></p>
+      </form>
+    </main>
+
+    <script src="/login.js"></script>
+  </body>
+</html>

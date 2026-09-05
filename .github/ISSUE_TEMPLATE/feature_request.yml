@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest something this should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: >
+        The situation, not the solution: what you were doing when you wanted
+        this, and what you do today instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: Optional. If you already know the shape you want, describe it.
+
+  - type: markdown
+    attributes:
+      value: |
+        This app is shaped around one way of working, so a proposal that cuts
+        against that may get a no, and it is better to hear it here than after you have
+        written it. See [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md).

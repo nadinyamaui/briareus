@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Your first session · Briareus</title>
+    <meta
+      name="description"
+      content="From a fresh install to an agent writing code: register a provider, add a database server, create a project, start a session."
+    />
+    <link rel="stylesheet" href="docs.css" />
+  </head>
+  <body class="min-h-dvh">
+    <article class="doc">
+      <div class="pill mb-4">Getting started</div>
+      <h1 class="mt-0 mb-3 text-[34px] leading-[1.15] font-semibold tracking-[-0.02em]">
+        Your first session
+      </h1>
+      <p class="!text-[17px] !text-muted">
+        Four things have to exist before an agent can touch a repository: a provider to run it on, a project
+        describing the repository, optionally a database server for the session to claim, and a session. This
+        page does all four in order, on a small Node repository; the
+        <a href="projects.html">Projects</a> page explains every field it skips past.
+      </p>
+
+      <div class="callout">
+        <div class="callout-title">Before you start</div>
+        <p>
+          The server is running (<a href="install.html">Installation</a>), you can reach
+          <code>http://localhost:4300</code>, and the boot log did not complain about a missing
+          <code>.env</code> key.
+        </p>
+      </div>
+
+      <h2 id="provider">1. Register a provider</h2>
+      <p>
+        A provider is one agent CLI, configured: which binary it runs, how it authenticates, and which models
+        it offers. Go to <strong>Settings → Providers → ＋ New</strong>.
+      </p>
+      <ol class="steps">
+        <li>
+          <h3>Label and binary</h3>
+          <p>
+            Name it whatever the picker should read (<em>Claude</em> is fine) and pick
+            <code>claude (Claude Code)</code> as the binary. The dropdown offers <code>claude</code>,
+            <code>codex</code>, <code>grok</code> and <code>opencode</code>; those four are the only hardcoded
+            part of the system, and every provider entry is built on one of them.
+          </p>
+        </li>
+        <li>
+          <h3>Mode</h3>
+          <p>
+            <strong>Login</strong> uses a subscription sign-in kept in a login directory of this entry's own,
+            so it never disturbs the CLI login you use in your terminal. Press
+            <span class="kbd">Log in</span>, follow the browser flow, paste the code back and press
+            <span class="kbd">Finish</span>. <strong>API token</strong> takes a key instead and, with a
+            <strong>Base URL</strong>, points the binary at a compatible endpoint that is not the vendor's
+            own.
+          </p>
+        </li>
+        <li>
+          <h3>Test it</h3>
+          <p>
+            Press <span class="kbd">Test</span>. It runs the binary for real and reports back: an entry that
+            cannot answer here will not answer in a session either.
+          </p>
+        </li>
+        <li>
+          <h3>Save</h3>
+          <p>
+            Leave <strong>Models</strong> and <strong>Efforts</strong> empty to take the CLI's own lists. The
+            full field reference is on <a href="providers.html">Providers</a>.
+          </p>
+        </li>
+      </ol>
+
+      <h2 id="db">2. Add a database server (optional)</h2>
+      <p>
+        Skip this if your project has no database. Otherwise: a session that claims a server holds it
+        exclusively while it is open, which is what stops two parallel sessions from truncating each other's
+        tables. Go to <strong>Settings → Database pool → ＋ New</strong>.
+      </p>
+      <ul>
+        <li>
+          <strong>Host</strong> / <strong>Port</strong>: <code>127.0.0.1</code> and <code>3307</code>, say,
+          for a second MySQL you run beside your own.
+        </li>
+        <li>
+          <strong>Username</strong> / <strong>Password</strong>: an account that may
+          <code>CREATE DATABASE</code>, because the session's database is created on demand.
+        </li>
+        <li>Press <span class="kbd">Test connection</span>, then Save.</li>
+      </ul>
+      <div class="callout">
+        <div class="callout-title">The pool is the session cap</div>
+        <p>
+          One session holds one server at a time, so as many sessions may be open at once as there are
+          entries. Add one entry per session you want to run in parallel. Details, including how to run
+          several throwaway MySQL instances cheaply, on
+          <a href="database.html">Database pool</a>.
+        </p>
+      </div>
+
+      <h2 id="project">3. Create the project</h2>
+      <p>Go to <strong>Settings → Projects → ＋ New</strong> and fill in four fields.</p>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">Repository</div>
+          <p>
+            <code>owner/name</code>, exactly as GitHub spells it. Cloned over HTTPS with this machine's own
+            git credentials.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Setup commands</div>
+          <p>
+            One shell command per line, run in the fresh checkout before the agent starts. The first failure
+            aborts the session.
+          </p>
+          <pre><code>npm ci
+npm run build</code></pre>
+        </div>
+        <div class="f">
+          <div class="f-name">Database</div>
+          <p>
+            The database name the session points at, e.g. <code>my_app</code>. Tick
+            <strong>Give each session a database server of its own</strong> if you added a pool entry above.
+            Migrations and seeding belong in the setup commands; they run on every session, against the
+            claimed server.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Run commands</div>
+          <p>
+            What <span class="kbd">▶ Run</span> executes. Chained, so the last one is the server that keeps
+            running; <code>{port}</code> is the session's own app port.
+          </p>
+          <pre><code>npm run dev -- --port {port}</code></pre>
+        </div>
+      </div>
+      <p>Press <strong>Save</strong>. The project appears in the composer's picker immediately.</p>
+
+      <h2 id="session">4. Start the session</h2>
+      <ol class="steps">
+        <li>
+          <h3>Open the dashboard</h3>
+          <p>Back to <code>/</code>, and press <strong>New session</strong>.</p>
+        </li>
+        <li>
+          <h3>Set the chips</h3>
+          <p>
+            Above the message box: the workspace mode (<span class="kbd">⌗ Worktree</span>, a clone of its
+            own, or <span class="kbd">⌂ Local</span>), the project, the branch, then the provider, model and
+            effort. They lock once the session starts, so the first turn is where they are decided.
+          </p>
+        </li>
+        <li>
+          <h3>Say what you want</h3>
+          <p>
+            Type the task and send. The session claims a workspace slot and a database server, prepares the
+            checkout (fetch, branch, <code>.env</code>, setup commands) and only then hands your message to
+            the agent. The first run on a fresh clone is the slow one; afterwards the installs are skipped
+            whenever the manifests have not changed.
+          </p>
+        </li>
+        <li>
+          <h3>Watch it work</h3>
+          <p>
+            Output streams live. Tool calls collapse into a run you can open; the turn's footer shows its
+            tokens, its time and, when the CLI reports one, its cost.
+          </p>
+        </li>
+        <li>
+          <h3>Run the app</h3>
+          <p>
+            Press <span class="kbd">▶ Run</span> in the header. The project's run commands are executed in
+            this session's checkout, on this session's port, against this session's database, and the page
+            opens in a new tab.
+          </p>
+        </li>
+        <li>
+          <h3>Close it</h3>
+          <p>
+            <span class="kbd">Close</span> releases the workspace slot and the database server; the
+            conversation stays readable and can be reopened. <span class="kbd">🗑</span> deletes the record and
+            its log; the cost ledger keeps its numbers either way.
+          </p>
+        </li>
+      </ol>
+
+      <h2 id="then">Then what</h2>
+      <div class="my-6 grid gap-3 sm:grid-cols-2">
+        <a class="card no-underline" href="projects.html">
+          <h3>Fill the project in properly</h3>
+          <p>The checkout <code>.env</code>, the PHP version, the review runtime, the per-project prompts.</p>
+        </a>
+        <a class="card no-underline" href="review.html">
+          <h3>Review a pull request</h3>
+          <p>The board, the ⌕ button, the findings panel and the review loop.</p>
+        </a>
+        <a class="card no-underline" href="sessions.html">
+          <h3>Learn the session UI</h3>
+          <p>Chips, branches, local mode, the cost ledger.</p>
+        </a>
+        <a class="card no-underline" href="operations.html">
+          <h3>Reach it from your phone</h3>
+          <p>The tunnel, the two gates, and the webhooks that replace the polling.</p>
+        </a>
+      </div>
+    </article>
+    <script src="docs.js"></script>
+  </body>
+</html>

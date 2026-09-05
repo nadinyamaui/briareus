@@ -1,0 +1,15 @@
+# The build copies the source and installs from the lockfile; everything here
+# is either the host's own answer (its .env, its node_modules built against its
+# libc) or output the image has no use for.
+.git
+.github
+.claude
+node_modules
+coverage
+.env
+*.log
+.idea
+workspace
+Dockerfile
+compose.yaml
+.dockerignore

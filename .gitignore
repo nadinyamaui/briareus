@@ -1,0 +1,25 @@
+node_modules/
+.env
+workspace/
+.idea/
+# Agent worktrees: a checkout of this repo inside itself, node_modules and all.
+.claude/worktrees/
+coverage/
+
+# Tailwind's output, built by whoever deploys rather than carried in a commit:
+# the image builds public/app.css and the Pages workflow builds docs/docs.css.
+# A checkout's copy is whatever its last `npm run build:css` produced, which is
+# a local artefact of local edits and not something to review or merge.
+public/app.css
+docs/docs.css
+
+# Commercial marketplace asset used by licensed local installations only.
+# Its standard license does not permit redistribution of the source model.
+public/assets/overwater_resort_hut.glb
+
+# Where the container entrypoint writes its .env. A volume in compose, but a
+# real directory in any checkout somebody has run the image against.
+state/
+
+# Whatever a run redirected: npm start's output, the pool's error.log.
+*.log

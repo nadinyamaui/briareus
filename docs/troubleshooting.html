@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Troubleshooting · Briareus</title>
+    <meta
+      name="description"
+      content="Boot failures, providers that will not answer, sessions that will not start, setup steps that keep re-running, and pull requests that never attach."
+    />
+    <link rel="stylesheet" href="docs.css" />
+  </head>
+  <body class="min-h-dvh">
+    <article class="doc">
+      <div class="pill mb-4">Operations</div>
+      <h1 class="mt-0 mb-3 text-[34px] leading-[1.15] font-semibold tracking-[-0.02em]">Troubleshooting</h1>
+      <p class="!text-[17px] !text-muted">Symptoms, in the order you are likely to meet them.</p>
+
+      <h2 id="boot">It will not boot</h2>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">A message naming one <code>.env</code> key</div>
+          <p>
+            That key is in the required half and has no default. Fill it in; the
+            <a href="config.html">Environment reference</a> says what each one wants. A key present but empty
+            is a valid answer for <code>DB_PASSWORD</code>; a missing line is not.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">A MySQL connection error</div>
+          <p>
+            The <code>DB_*</code> keys point at the app's own database, not the session pool. Check the server
+            is up and the account may create databases; the schema is created on first run.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Half the R2 keys are set</div>
+          <p>
+            Refused on purpose: a bucket the app can upload to but no public hostname, or the reverse, would
+            be links pointing at videos that never arrive. Set all five or none.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">The port is taken</div>
+          <p>
+            <code>npm start -- --port 4301</code>. The flag beats <code>PORT</code> in the file, so a test
+            instance can run alongside the real one.
+          </p>
+        </div>
+      </div>
+
+      <h2 id="login">The dashboard does not ask for a login</h2>
+      <p>
+        The boot log says <code>login: OFF</code> when either <code>AUTH_PASSWORD_HASH</code> or
+        <code>AUTH_SECRET</code> is missing. Run <code>npm run set-password</code> and
+        <strong>restart</strong>: the keys are read at boot.
+      </p>
+      <p>
+        In Docker: <code>docker compose exec app npm run set-password</code>, then
+        <code>docker compose restart app</code>. The entrypoint rewrites <code>.env</code> on every boot but
+        carries across the keys the environment does not name, so the login survives.
+      </p>
+
+      <h2 id="provider">A provider will not answer</h2>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">Status says the binary was not found</div>
+          <p>
+            Discovery looks at <code>PATH</code>, the npm global prefix and each CLI's installer path. Set
+            <code>CLAUDE_BIN</code>, <code>CODEX_BIN</code>, <code>GROK_BIN</code> or
+            <code>OPENCODE_BIN</code> to the absolute path if it misses.
+          </p>
+          <p>
+            <strong>Under WSL</strong>, a <code>which</code> hit under <code>/mnt/…</code> is ignored on
+            purpose, since that is a Windows executable. If your only install is there, install the CLI inside
+            Linux.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">The Log in button is missing</div>
+          <p>
+            It only exists on a saved entry: the login is registered against the row. Save first, then log in.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Logged in in my terminal, but the entry is not</div>
+          <p>
+            Expected. Each entry has a login directory of its own (<code>~/.claude-provider-&lt;id&gt;</code>,
+            <code>~/.codex-provider-&lt;id&gt;</code>) so it never disturbs the login you use yourself. Sign
+            the entry in from its form.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Test fails on a custom endpoint</div>
+          <p>
+            Check the base URL and key together. On claude the key goes out as
+            <code>ANTHROPIC_API_KEY</code> and, with a base URL, also as <code>ANTHROPIC_AUTH_TOKEN</code>,
+            and a gateway reading only one of the two headers is a common cause. On opencode the URL is set on
+            the service the entry's models name, so a model not named
+            <code>&lt;service&gt;/&lt;model&gt;</code> leaves both the key and the URL with nothing to attach
+            to, and the wire the Test speaks is the service's: Anthropic's for <code>anthropic/…</code>,
+            OpenAI's <code>/chat/completions</code> for the rest.
+          </p>
+        </div>
+      </div>
+
+      <h2 id="session-start">A session will not start</h2>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">It sits waiting for a database server</div>
+          <p>
+            Every enabled pool entry is claimed by an open session. Close one, or add another entry:
+            <strong>the pool is the session cap</strong>. It gives up after
+            <code>DB_POOL_WAIT_TIMEOUT_MIN</code> (default 30).
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">"Too many sessions" with no pool configured</div>
+          <p>
+            With claiming off or no servers registered, <code>DEV_MAX_SESSIONS</code> (default 3) is the
+            fallback cap. Register pool entries and it stops mattering.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Setup aborted on the first command</div>
+          <p>
+            The first failure aborts the session by design. The session log has the command and its output. A
+            missing toolchain is the usual cause; in Docker, remember the image carries node and git but not
+            php, composer or anything else your project needs.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Local mode is not offered</div>
+          <p>
+            The project has no <strong>Local checkout</strong> path set. And only one local session at a time
+            per checkout.
+          </p>
+        </div>
+      </div>
+
+      <h2 id="setup-slow">Setup runs everything every time</h2>
+      <p>
+        Installs are skipped only when their manifests are byte-for-byte unchanged
+        <em>and</em> what they install is still on disk. So a lockfile that changes on every install, or a
+        <code>node_modules</code> something else deletes, defeats it. Builds and database steps run every time
+        by design.
+      </p>
+      <p>
+        The fingerprints live in the clone's <code>.git/reviewer-setup.json</code>;
+        <strong>Reset setup</strong> under Settings → Workspaces clears them deliberately.
+      </p>
+
+      <h2 id="database">The session's database is wrong</h2>
+      <ul>
+        <li>
+          With the pool on, <code>DB_HOST</code>/<code>DB_PORT</code>/<code>DB_DATABASE</code>/
+          <code>DB_USERNAME</code>/<code>DB_PASSWORD</code> are injected into the environment and
+          <strong>beat the checkout's <code>.env</code></strong
+          >. An app that reads its config from somewhere the environment does not reach will not see them.
+        </li>
+        <li>
+          The database name must be a plain identifier (<code>A–Z a–z 0–9 _ $</code>), since it goes into DDL,
+          where a placeholder cannot.
+        </li>
+        <li>
+          Migrations and seeding are the project's <strong>setup commands</strong>. The app creates the
+          database and restores the dump; it runs nothing else.
+        </li>
+        <li>
+          The pool account needs <code>CREATE DATABASE</code>, and write access to everything a restored dump
+          contains.
+        </li>
+      </ul>
+
+      <h2 id="pr">The pull request never attaches</h2>
+      <ul>
+        <li>
+          The match is on the <strong>head ref</strong>: the session's own branch. A local session, or a
+          session on the repository's default branch, is never matched: a branch that is nobody's in
+          particular cannot be claimed.
+        </li>
+        <li>
+          When a branch has several pull requests open (GitHub allows it when their bases differ), only the
+          one targeting the branch the workspace was cut from is taken. Anything still ambiguous is left
+          unattached, with a line in the session naming what it could not tell apart.
+        </li>
+        <li>
+          The lookup on the sync tick has a few minutes' cooldown, so a freshly opened pull request can take a
+          moment. It is also looked up at the end of every turn.
+        </li>
+        <li>Check the <code>GITHUB_TOKEN</code> can actually read that repository.</li>
+      </ul>
+
+      <h2 id="webhooks">Webhooks are not arriving</h2>
+      <ul>
+        <li>
+          <code>PUBLIC_BASE_URL</code> must be a real public https hostname. A <code>localhost</code> or
+          <code>.test</code> value is read as "no public hostname" and the hook is never registered.
+        </li>
+        <li>
+          Cloudflare Access must have a <strong>Bypass</strong> application on
+          <code>&lt;hostname&gt;/webhooks</code>. GitHub cannot sign into your Access account.
+        </li>
+        <li>
+          The app installs the hook itself and recognises its own by URL. Check the repository's webhook
+          deliveries on GitHub for the response it got.
+        </li>
+        <li>
+          To rotate the secret, delete the <code>webhooks</code> row in <code>app_settings</code>; the hook is
+          rewritten at the next boot.
+        </li>
+        <li>
+          None of this is required. Without it the sync timer keeps every panel fresh, just less promptly.
+        </li>
+      </ul>
+
+      <h2 id="loop">The review loop stopped early</h2>
+      <ul>
+        <li><strong>It converged.</strong> A review declared no findings. That is the success case.</li>
+        <li>
+          <strong>The stall gate fired.</strong> A round handed back exactly the findings the round before it
+          did, so the fix session did not move the review. The findings stay on the pull request; your next
+          push picks the loop back up.
+        </li>
+        <li>
+          <strong>The commit gate.</strong> Nothing new was pushed, so no round starts. Chatting never
+          re-triggers a review.
+        </li>
+        <li>
+          <strong>A review failed or was stopped.</strong> The loop pauses until the next push rather than
+          retrying itself in a circle.
+        </li>
+        <li>
+          <strong>There is no pull request yet.</strong> A round needs one; the session looks for it before
+          every round it would otherwise skip.
+        </li>
+      </ul>
+
+      <h2 id="videos">QA videos do not play</h2>
+      <ul>
+        <li>
+          Without R2, videos are served at <code>/videos</code> <strong>behind the dashboard's login</strong>,
+          so a link on a pull request only works for whoever holds that login, while the tunnel is up.
+          Configure the five <a href="config.html#r2">R2 keys</a> for links that work for everybody.
+        </li>
+        <li>
+          Mirroring happens when the recording turn ends, so a link can trail the comment by a few seconds.
+        </li>
+        <li>The test run needs the project's <strong>Run commands</strong> to actually serve the app.</li>
+      </ul>
+
+      <h2 id="restart">After a restart, every session says "interrupted"</h2>
+      <p>
+        Expected. A restart interrupts every running session: the boot marks them so and clears their database
+        claims, because claims live in the process and nowhere else. Reopen a session to claim a clone and a
+        server again and carry on; the conversation is intact.
+      </p>
+
+      <h2 id="ui">The UI looks unstyled after a change</h2>
+      <p>
+        <code>public/app.css</code> is build output and the server never builds it, so the file is whatever
+        your last build left there, or missing entirely in a fresh clone. Any change that adds, removes or
+        renames a Tailwind class under <code>public/</code>, or edits <code>src/app.css</code>, needs
+        <code>npm run build:css</code> again (<code>npm run watch:css</code> while iterating). Nothing to
+        commit: the deploy builds its own copy. The documentation site is the same with
+        <code>npm run build:docs-css</code> and <code>docs/docs.css</code>.
+      </p>
+
+      <h2 id="asking">Still stuck</h2>
+      <p>
+        The session log is the first place to look: it carries the setup commands and their output, which
+        server was claimed, and every line the pull request lookup wrote. After that,
+        <a href="https://github.com/nadinyamaui/briareus/issues">open an issue</a>. Security problems go
+        through
+        <a href="https://github.com/nadinyamaui/briareus/blob/main/SECURITY.md">private reporting</a>
+        instead.
+      </p>
+    </article>
+    <script src="docs.js"></script>
+  </body>
+</html>

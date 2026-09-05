@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "reviewer",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["start"],
+      "port": 4300
+    },
+    {
+      "name": "reviewer-verify",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.js", "--port", "4301"],
+      "port": 4301
+    },
+    {
+      "name": "reviewer-verify-2",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.js", "--port", "4302"],
+      "port": 4302
+    }
+  ]
+}

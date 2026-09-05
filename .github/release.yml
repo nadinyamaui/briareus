@@ -1,0 +1,33 @@
+# Shapes the notes that `gh release create --generate-notes` writes in
+# .github/workflows/release.yml. Without it every merged pull request lands in
+# one undifferentiated list, which is the same information the commit log
+# already has.
+changelog:
+  exclude:
+    labels:
+      - duplicate
+      - invalid
+      - wontfix
+      - 'release: skip'
+  categories:
+    - title: Breaking changes
+      labels:
+        - 'release: major'
+    - title: Features
+      labels:
+        - enhancement
+    - title: Fixes
+      labels:
+        - bug
+        - accessibility
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Dependencies
+      labels:
+        - dependencies
+    # The catch-all has to come last and match everything, or an unlabelled
+    # pull request vanishes from the notes entirely.
+    - title: Other changes
+      labels:
+        - '*'

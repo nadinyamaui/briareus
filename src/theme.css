@@ -1,0 +1,34 @@
+/* The palette and type scale the whole product reads on, imported by both
+   `src/app.css` (the dashboard) and `src/docs.css` (the GitHub Pages site), so
+   the docs cannot drift from the app they document. Tokens only: no utilities,
+   no base rules, nothing that assumes which of the two is building. */
+
+@theme {
+  --color-canvas: #262624;
+  --color-sidebar: #1f1e1d;
+  --color-raise: #30302e;
+  --color-field: #3d3d3a;
+  --color-sunken: #1c1c1a;
+  --color-line: #3e3e3a;
+  --color-line-strong: #5a5850;
+  --color-ink: #e8e6e1;
+  --color-muted: #a29e93;
+  --color-accent: #d97757;
+  --color-accent-dim: #b35c3e;
+  --color-ok: #7fbf7f;
+  --color-warn: #e0af68;
+  --color-danger: #e06c75;
+
+  --font-sans: -apple-system, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', Consolas, monospace;
+
+  /* The whole app reads at a desk, not on a phone: every step of the type
+     scale is one notch above Tailwind's default so body copy lands at 15px
+     and the smallest chrome never drops below 13px. */
+  --text-xs: 0.8125rem; /* 13px */
+  --text-xs--line-height: calc(1.125 / 0.8125);
+  --text-sm: 0.9375rem; /* 15px */
+  --text-sm--line-height: calc(1.375 / 0.9375);
+  --text-base: 1.0625rem; /* 17px */
+  --text-base--line-height: calc(1.625 / 1.0625);
+}

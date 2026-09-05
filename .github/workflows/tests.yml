@@ -1,0 +1,39 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # One version, not a matrix: this app is deployed to a machine we control and
+  # runs nowhere else, so there is no older runtime to stay compatible with and
+  # a second job only doubles the wait for an answer nobody acts on.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned by SHA (the comment says which tag): a moved tag on a popular
+      # action is a supply-chain attack on every repo that trusts it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # .nvmrc rather than a literal, so the version lives in one place and
+          # CI cannot drift from what the machine actually runs.
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --no-audit
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:coverage
+      # Neither stylesheet is committed: the image builds public/app.css and the
+      # Pages workflow builds docs/docs.css. So the thing worth checking here is
+      # that they still build at all, since a syntax error in src/ would
+      # otherwise first be discovered by a deploy that has already started.
+      - name: The stylesheets build
+        run: |
+          npm run build:css
+          npm run build:docs-css

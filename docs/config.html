@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Environment reference · Briareus</title>
+    <meta
+      name="description"
+      content="Every .env key: the required half that describes this machine, the optional half with defaults, and the settings that live in the database instead."
+    />
+    <link rel="stylesheet" href="docs.css" />
+  </head>
+  <body class="min-h-dvh">
+    <article class="doc">
+      <div class="pill mb-4">Configuration</div>
+      <h1 class="mt-0 mb-3 text-[34px] leading-[1.15] font-semibold tracking-[-0.02em]">
+        Environment reference
+      </h1>
+      <p class="!text-[17px] !text-muted">
+        <code>.env</code> in the app root, read by <code>lib/config.js</code> and nothing else. It is split in
+        two halves on purpose: the <strong>required</strong> keys each name something about
+        <em>this machine</em> and have no defaults, and the <strong>optional</strong> keys are behavior that
+        reads the same on every install and do keep theirs.
+      </p>
+      <div class="callout">
+        <div class="callout-title">A missing required key stops the boot</div>
+        <p>
+          By name, in the message. A default for "which database" or "what this install is called from
+          outside" is a guess at somebody else's setup that fails quietly rather than loudly, so there isn't
+          one. Changes need a server restart.
+        </p>
+      </div>
+
+      <h2 id="required">Required</h2>
+
+      <h3 id="github">GitHub</h3>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">GITHUB_TOKEN</div>
+          <p>
+            A classic PAT with <code>repo</code>, or a fine-grained token with
+            <strong>Pull requests: read/write</strong> and <strong>Contents: read</strong>. Used by the
+            sessions' <code>gh</code> CLI, by the branch → pull request / CI sync in the session header, and
+            by the repository webhook the app registers for itself. Adding <strong>Issues: read</strong> turns
+            on the project view's <strong>⊙ Issues</strong> tab; without it everything else works as before
+            and that one tab says what it is missing. A classic <code>repo</code> token already carries the
+            permission.
+          </p>
+        </div>
+      </div>
+
+      <h3 id="server">Server</h3>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">PORT <span class="f-meta">e.g. 4300</span></div>
+          <p>
+            Where the dashboard listens. The <code>--port</code> command-line flag beats it, so a test
+            instance can run alongside the real one.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">PUBLIC_BASE_URL</div>
+          <p>
+            The public origin of this install, e.g.
+            <code>https://reviewer.example.com</code> behind a Cloudflare tunnel. Two things read it: the
+            video links a test run leaves on a pull request, and the GitHub webhook URL the app registers for
+            itself.
+          </p>
+          <p>
+            A <code>localhost</code> or <code>.test</code> hostname is a valid answer: it is treated as no
+            public hostname at all, and everything stays polled.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">WORKSPACE_DIR <span class="f-meta">../worktrees</span></div>
+          <p>
+            Where the session clones are kept. Relative paths resolve against the app root, absolute paths are
+            taken as they are. Keeping it <em>next to</em> this repo rather than inside it is what stops a
+            session from having the app's own tree inside its workspace.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">TEST_VIDEOS_DIR <span class="f-meta">../test-videos</span></div>
+          <p>Where a QA test run drops its scenario videos. Same path rules.</p>
+        </div>
+      </div>
+
+      <h3 id="claude">Claude</h3>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">CLAUDE_MODEL</div>
+          <p>
+            The model this install runs on by default. Not discovered on purpose: model names age out, and one
+            baked into the code would keep being sent months after it was retired.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">CLAUDE_EFFORT</div>
+          <p>The default reasoning effort to run it at.</p>
+        </div>
+      </div>
+
+      <h3 id="db">The app's own database</h3>
+      <p>
+        Session history, the projects, the providers, the prompt templates, the memories and the cost ledger.
+        The database and its tables are created on first run. Not the same thing as the
+        <a href="database.html">per-session pool</a>.
+      </p>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Key</th>
+              <th>Example</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>DB_HOST</code></td>
+              <td><code>127.0.0.1</code></td>
+            </tr>
+            <tr>
+              <td><code>DB_PORT</code></td>
+              <td><code>3306</code></td>
+            </tr>
+            <tr>
+              <td><code>DB_DATABASE</code></td>
+              <td><code>reviewer</code></td>
+            </tr>
+            <tr>
+              <td><code>DB_USERNAME</code></td>
+              <td><code>root</code></td>
+            </tr>
+            <tr>
+              <td><code>DB_PASSWORD</code></td>
+              <td>may be empty, but the key has to be there</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="!text-[14px] !text-muted">
+        "No password" and "you forgot" are not the same answer, which is why an empty value is fine and a
+        missing line is not.
+      </p>
+
+      <h3 id="auth">The dashboard's own login</h3>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">AUTH_USERNAME</div>
+          <p>The username the login asks for.</p>
+        </div>
+        <div class="f">
+          <div class="f-name">
+            AUTH_PASSWORD_HASH / AUTH_SECRET <span class="f-meta">written by a script</span>
+          </div>
+          <p>
+            A scrypt hash of the password and a random secret that signs the session cookie. Written by
+            <code>npm run set-password</code>, never by hand.
+          </p>
+          <p>
+            <strong>With either of them missing the login is off</strong> and anything that reaches the port
+            is trusted: fine on a laptop, not fine behind a public hostname. The boot log says
+            <code>login: OFF</code>.
+          </p>
+        </div>
+      </div>
+
+      <h2 id="optional">Optional</h2>
+
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">BIND_HOST <span class="f-meta">127.0.0.1</span></div>
+          <p>
+            Which interface the server listens on. Loopback only, because the way this install is meant to be
+            reached from outside is a tunnel pointed at it, not an open port. A container is the one place to
+            change it: there the port lives in a namespace of its own and <code>docker compose</code> decides
+            who may reach it.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">AUTH_SESSION_DAYS <span class="f-meta">30</span></div>
+          <p>How long a signed-in browser stays signed in.</p>
+        </div>
+      </div>
+
+      <h3 id="clis">The CLIs</h3>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">CLAUDE_BIN / CODEX_BIN / GROK_BIN / OPENCODE_BIN</div>
+          <p>
+            Auto-discovered; override only if the discovery misses. Which binary each provider entry runs, its
+            isolated login, its custom endpoint and its model list live in the database and are edited at
+            <a href="providers.html">Settings → Providers</a>; only these four binaries are hardcoded.
+          </p>
+        </div>
+      </div>
+
+      <h3 id="pool">Per-session database pool</h3>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">DB_POOL_ENABLED <span class="f-meta">true</span></div>
+          <p>
+            Switches claiming off entirely. The servers themselves are rows in the database, added at
+            <a href="database.html">Settings → Database pool</a>; which projects claim one, and which database
+            name a session uses on it, is per project.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">DB_POOL_WAIT_TIMEOUT_MIN <span class="f-meta">30</span></div>
+          <p>How long a session waits for a server to free up before giving up.</p>
+        </div>
+        <div class="f">
+          <div class="f-name">DB_POOL_POLL_SECONDS <span class="f-meta">10</span></div>
+          <p>How often it re-checks while waiting.</p>
+        </div>
+      </div>
+
+      <h3 id="sessions">Developer sessions</h3>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">DEV_MAX_SESSIONS <span class="f-meta">3</span></div>
+          <p>
+            Only for the projects that claim a pooled database server, and only as the fallback for when the
+            pool cannot answer: claiming off, or no servers configured yet. Otherwise the number of servers is
+            the cap. A project with its database switched off holds nothing exclusive and may open as many
+            sessions as it likes.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">DEV_TIMEOUT_MIN <span class="f-meta">60</span></div>
+          <p>
+            Per <em>turn</em>, not per session, and only for a session that claimed one of the pooled servers,
+            since that claim is what its peers queue behind. A session without one (Local mode, or a project
+            with the pool off) is in nobody's way and its turns run without a time limit.
+          </p>
+        </div>
+      </div>
+
+      <h3 id="review-loop">The review loop (🔁)</h3>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">REVIEW_LOOP_MAX_ROUNDS <span class="f-meta">3</span></div>
+          <p>
+            How many review rounds one armed loop runs before it stops and hands what is left back to you. The
+            last round still reviews and still lists its findings on the pull request; it just does not start
+            another fix session. Without a cap a loop can keep reviewing the code its own fixes introduce:
+            each round genuine, each round smaller, none of them the feature. <code>0</code> removes the cap
+            and leaves only the <a href="review.html#convergence">stall gate</a>.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">REVIEW_LOOP_LOW_UNTIL_ROUND <span class="f-meta">1</span></div>
+          <p>
+            The last round on which a <strong>low</strong> finding is still implemented. From the round after
+            it, lows are recorded on the pull request as optional instead of costing a fix session and another
+            review, since a low found late is nearly always a note on the previous round's fix rather than on
+            the change under review. <code>0</code> never tightens, so every round implements everything it
+            finds.
+          </p>
+        </div>
+      </div>
+
+      <h3 id="r2">Shared video links (Cloudflare R2)</h3>
+      <p>
+        Off by default: the scenario videos then stay on this machine, served at <code>/videos</code>
+        behind the dashboard's login, which means a video link on a pull request only works for whoever holds
+        that login, while the tunnel is up. Set all five keys and every test run composed from then on links
+        its videos from the bucket instead: public, no login, alive when this machine is not.
+      </p>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Key</th>
+              <th>From</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>R2_ENDPOINT</code></td>
+              <td><code>https://&lt;account-id&gt;.r2.cloudflarestorage.com</code></td>
+            </tr>
+            <tr>
+              <td><code>R2_ACCESS_KEY_ID</code></td>
+              <td rowspan="2">
+                An R2 API token with Object Read &amp; Write scoped to this one bucket, nothing wider.
+              </td>
+            </tr>
+            <tr>
+              <td><code>R2_SECRET_ACCESS_KEY</code></td>
+            </tr>
+            <tr>
+              <td><code>R2_BUCKET</code></td>
+              <td>The bucket name.</td>
+            </tr>
+            <tr>
+              <td><code>R2_PUBLIC_BASE_URL</code></td>
+              <td>
+                The bucket's public side: its <code>r2.dev</code> URL, or the custom domain connected to it.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li>
+          Videos still land in <code>TEST_VIDEOS_DIR</code> first; the server mirrors them when the recording
+          turn ends, so a link may trail the PR comment by a few seconds.
+        </li>
+        <li>
+          Access control is the link itself (each run's path carries a random 128-bit token) so the bucket
+          must not be listable, which an R2 public bucket already is not.
+        </li>
+        <li>
+          Half the keys is refused at boot: a bucket the app can upload to but no public hostname (or the
+          reverse) would be links pointing at videos that never arrive.
+        </li>
+      </ul>
+      <div class="callout warn">
+        <div class="callout-title">Prefer the process environment for these five</div>
+        <p>
+          Alone in this file, the <code>R2_*</code> keys may be exported in the server's environment instead
+          of written here. The difference matters: <code>.env</code> is readable by every shell command a
+          session runs, while the environment is stripped of <code>R2_*</code> before it reaches any job
+          child. The Docker setup already does this on its own.
+        </p>
+      </div>
+
+      <h2 id="not-here">Not in the file at all</h2>
+      <p>
+        Projects (repositories, setup steps, PHP version, database, <code>.env</code> template, run commands),
+        providers, the database pool, the prompt templates, the saved prompts and the memories all live in the
+        database and are edited in the UI. So does the GitHub webhook secret, generated on first boot into the
+        <code>app_settings</code> table, so there is nothing to paste anywhere.
+      </p>
+    </article>
+    <script src="docs.js"></script>
+  </body>
+</html>

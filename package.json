@@ -1,0 +1,60 @@
+{
+  "name": "briareus",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Chat sessions with coding agents (claude / codex / grok / opencode), each in its own workspace clone with its own MySQL instance.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nadinyamaui/briareus.git"
+  },
+  "homepage": "https://github.com/nadinyamaui/briareus#readme",
+  "bugs": {
+    "url": "https://github.com/nadinyamaui/briareus/issues"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "set-password": "node scripts/set-password.js",
+    "migrate": "node scripts/migrate.js up",
+    "migrate:rollback": "node scripts/migrate.js rollback",
+    "migrate:status": "node scripts/migrate.js status",
+    "make:migration": "node scripts/migrate.js make",
+    "build:css": "tailwindcss -i src/app.css -o public/app.css --minify",
+    "watch:css": "tailwindcss -i src/app.css -o public/app.css --watch",
+    "build:docs-css": "tailwindcss -i src/docs.css -o docs/docs.css --minify",
+    "watch:docs-css": "tailwindcss -i src/docs.css -o docs/docs.css --watch",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint .",
+    "typecheck": "tsc -p jsconfig.json"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "^2.1.261",
+    "@openai/codex": "^0.154.0-alpha.3",
+    "express": "^5.2.1",
+    "mysql2": "^3.24.3",
+    "opencode-ai": "^1.18.29",
+    "three": "^0.185.1",
+    "umzug": "^3.8.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@tailwindcss/cli": "^4.3.3",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.4.1",
+    "@vitest/coverage-v8": "^4.1.11",
+    "eslint": "^10.9.0",
+    "globals": "^17.11.0",
+    "prettier": "^3.9.6",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}

@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Briareus documentation</title>
+    <meta
+      name="description"
+      content="Briareus runs coding agents against your repositories: every session gets a workspace clone and a database server of its own. Install it, create a project, register database servers."
+    />
+    <link rel="stylesheet" href="docs.css" />
+  </head>
+  <body class="min-h-dvh">
+    <article class="doc">
+      <div class="pill mb-4">Documentation</div>
+      <h1 class="mt-0 mb-3 text-[38px] leading-[1.15] font-semibold tracking-[-0.02em]">
+        Run coding agents against your repositories, in parallel, without them standing on each other.
+      </h1>
+      <p class="!text-[17px] !text-muted">
+        Briareus is a local dashboard for chatting with coding agents: Claude Code, Codex, Grok, opencode, or
+        any provider you register on top of those CLIs. Every session gets a workspace clone of its own and,
+        when its project asks for one, a database server of its own, so two sessions never share a working
+        tree or a schema. You describe what to build; the agent edits, runs the app and its tests, and pushes
+        a branch or opens a pull request when asked.
+      </p>
+
+      <div class="my-8 grid gap-3 sm:grid-cols-2">
+        <a class="card no-underline" href="install.html">
+          <h3>⬇ Install it</h3>
+          <p>
+            Requirements, the bare-metal setup, and the Docker image that already carries the runtime and the
+            CLIs.
+          </p>
+        </a>
+        <a class="card no-underline" href="quickstart.html">
+          <h3>▶ Your first session</h3>
+          <p>
+            End to end: register a provider, add a database server, create a project, start a session, run the
+            app.
+          </p>
+        </a>
+        <a class="card no-underline" href="projects.html">
+          <h3>⚙ Create a project</h3>
+          <p>
+            Every field of the project form: setup commands, the checkout <code>.env</code>, the database, the
+            run commands.
+          </p>
+        </a>
+        <a class="card no-underline" href="database.html">
+          <h3>🗄 Register database servers</h3>
+          <p>The pool a session claims from, why it exists, and how many servers you need.</p>
+        </a>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">⚠ This app runs shell commands as you</div>
+        <p>
+          A session edits files, runs the project's setup and run commands, and pushes to GitHub with the
+          credentials this machine already has, so anything that can reach the port can do all of that. The
+          server listens on <code>127.0.0.1</code> only, and the login is <strong>off</strong> until
+          <code>npm run set-password</code> has been run (the boot log says <code>login: OFF</code> when it
+          is). Before you put a hostname in front of it, read
+          <a href="operations.html">Running it for real</a>.
+        </p>
+      </div>
+
+      <h2 id="what-it-is">What it is</h2>
+      <p>
+        The dashboard is served at <code>/</code>. A <strong>session</strong> is one conversation with one
+        agent, on one branch of one repository. It holds resources for as long as it stays open and hands them
+        back when you close it:
+      </p>
+      <ul>
+        <li>
+          <strong>A workspace clone.</strong> Taken from a pool of slots named
+          <code>&lt;owner&gt;__&lt;repo&gt;</code>, then <code>…__2</code>, <code>…__3</code> as concurrency
+          demands. Slots are never deleted, so <code>vendor/</code>, <code>node_modules/</code> and framework
+          caches survive between sessions and only the first run on a fresh clone pays the full setup cost.
+        </li>
+        <li>
+          <strong>A database server</strong>, if its project asks for one, taken from the servers you register
+          under <a href="database.html">Database pool</a>, claimed exclusively. The project's database is
+          created on it if it does not exist yet.
+        </li>
+        <li>
+          <strong>An app port</strong>, one per pool slot (8101, 8102, …), so
+          <span class="kbd">▶ Run</span> can serve this session's checkout against this session's database
+          while another session serves its own.
+        </li>
+      </ul>
+      <p>
+        Everything else (the conversation, the log, the per-turn cost ledger) lives in MySQL and survives
+        restarts. Nothing is capped or trimmed.
+      </p>
+
+      <h2 id="how-a-session-runs">How a session runs</h2>
+      <ol class="steps">
+        <li>
+          <h3>Claim resources</h3>
+          <p>
+            An idle workspace slot is taken, and a database server with it when the project claims one. A
+            session that already knows its branch prefers the idle slot still on that branch: the one whose
+            dependencies and build output are already the right ones.
+          </p>
+        </li>
+        <li>
+          <h3>Prepare the checkout</h3>
+          <p>
+            The default branch is fetched and checked out onto a session branch (<code>dev-&lt;id&gt;</code>),
+            the project's <code>.env</code> template is written in, and the setup commands run. A dependency
+            install is skipped outright when its manifests are byte-for-byte what they were the last time it
+            succeeded in that slot; builds and anything touching the database run every time.
+          </p>
+        </li>
+        <li>
+          <h3>Chat</h3>
+          <p>
+            Every message spawns one headless provider run that resumes the provider's own session state.
+            Output streams into the page live. The session keeps its clone and its database server between
+            turns.
+          </p>
+        </li>
+        <li>
+          <h3>Run it</h3>
+          <p>
+            <span class="kbd">▶ Run</span> serves the session's checkout with the project's run commands, on
+            the session's own port, against the session's own database.
+          </p>
+        </li>
+        <li>
+          <h3>Watch the pull request</h3>
+          <p>
+            If the session's branch gets a pull request, its state and CI checks are mirrored into the header
+            and the right panel: at the end of every turn, every 20 seconds while a turn runs, and once a
+            minute otherwise. With a public hostname configured, GitHub webhooks deliver it instead of the
+            timer polling for it.
+          </p>
+        </li>
+        <li>
+          <h3>Close</h3>
+          <p>
+            Closing releases the clone slot and the database server; the conversation stays readable. Deleting
+            also removes the record and its log, but not its entry in the cost ledger.
+          </p>
+        </li>
+      </ol>
+
+      <h2 id="where-things-live">Where things are configured</h2>
+      <p>
+        Almost nothing about your repositories lives in a file. The <code>.env</code> describes
+        <em>this machine</em>; everything else is a row in the database, edited in the UI.
+      </p>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Where</th>
+              <th>What</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>.env</code></td>
+              <td>
+                This machine: its port, its own MySQL, the workspace directory, the GitHub token, the
+                dashboard login. <a href="config.html">Reference →</a>
+              </td>
+            </tr>
+            <tr>
+              <td><code>/settings/projects</code></td>
+              <td>
+                One row per repository a session can run against.
+                <a href="projects.html">Guide →</a>
+              </td>
+            </tr>
+            <tr>
+              <td>Settings → Providers</td>
+              <td>
+                The agents a session can run on: binary, login or API token, model list.
+                <a href="providers.html">Guide →</a>
+              </td>
+            </tr>
+            <tr>
+              <td>Settings → Database pool</td>
+              <td>The MySQL servers a session may claim. <a href="database.html">Guide →</a></td>
+            </tr>
+            <tr>
+              <td>Settings → Prompts</td>
+              <td>
+                What this app sends out: the PR body it writes and the errand behind every action.
+                <a href="prompts.html">Guide →</a>
+              </td>
+            </tr>
+            <tr>
+              <td>Settings → Saved prompts</td>
+              <td>
+                A library of reusable kickoff texts for the composer.
+                <a href="prompts.html#saved-prompts">Guide →</a>
+              </td>
+            </tr>
+            <tr>
+              <td>Settings → Memory</td>
+              <td>
+                What the agents keep between sessions on a project.
+                <a href="prompts.html#memory">Guide →</a>
+              </td>
+            </tr>
+            <tr>
+              <td>Settings → Workspaces</td>
+              <td>
+                Every clone slot: branch, HEAD, dirty state, size, who holds it.
+                <a href="operations.html#workspaces">Guide →</a>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="who-starts-what">Nothing on GitHub starts a session</h2>
+      <p>
+        Worth saying plainly, because much of the rest follows from it: no push, no label and no webhook
+        delivery ever opens a session. A code review is always somebody pressing a button, on the pull request
+        board or in a session composer. Webhook deliveries only refresh panels that are already open.
+      </p>
+      <p>
+        The nearest thing to an exception is a loop you armed yourself: a
+        <a href="review.html#review-loop">review loop</a> reviews the session's own pushes round after round
+        until a review finds nothing. Its trigger is still the session's own turn ending, on a loop its user
+        switched on.
+      </p>
+
+      <h2 id="next">Where to go next</h2>
+      <div class="my-6 grid gap-3 sm:grid-cols-2">
+        <a class="card no-underline" href="install.html">
+          <h3>Installation</h3>
+          <p>Node 24, MySQL, a GitHub token and the agent CLIs, or the Docker image.</p>
+        </a>
+        <a class="card no-underline" href="quickstart.html">
+          <h3>Your first session</h3>
+          <p>The shortest path from a fresh install to an agent writing code.</p>
+        </a>
+        <a class="card no-underline" href="review.html">
+          <h3>Code review &amp; QA</h3>
+          <p>The pull request board, the review loop, the test sheet and its videos.</p>
+        </a>
+        <a class="card no-underline" href="troubleshooting.html">
+          <h3>Troubleshooting</h3>
+          <p>Boot failures, stuck sessions, providers that will not answer.</p>
+        </a>
+      </div>
+    </article>
+    <script src="docs.js"></script>
+  </body>
+</html>

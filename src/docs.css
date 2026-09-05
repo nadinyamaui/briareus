@@ -1,0 +1,328 @@
+/* The documentation site (docs/, published with GitHub Pages).
+
+   Built separately from the dashboard's own stylesheet: the two share the
+   palette through src/theme.css but nothing else: the app is a fixed-height
+   flex shell that never scrolls the document, and a docs page is the exact
+   opposite. Build with `npm run build:docs-css` (or `npm run watch:docs-css`);
+   the output at docs/docs.css is committed, because GitHub Pages serves the
+   folder as it stands and runs no build of its own. */
+
+@import 'tailwindcss' source(none);
+@import './theme.css';
+
+@source "../docs";
+/* Same self-feeding problem as public/app.css; see src/app.css. */
+@source not "../docs/docs.css";
+
+@layer base {
+  html {
+    /* Anchored headings sit under the sticky mobile bar rather than behind it. */
+    @apply scroll-pt-20 lg:scroll-pt-8;
+  }
+
+  body {
+    @apply m-0 bg-canvas text-ink font-sans text-sm/relaxed antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-[#3c3b38] rounded-md;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* The JS-injected chrome (nav, page TOC) is hidden until it is filled in, so
+     an empty shell never flashes before the script runs. */
+  [hidden] {
+    display: none !important;
+  }
+}
+
+@layer components {
+  /* ---- Shell ------------------------------------------------------------ */
+
+  /* The sidebar is a column of the page from `lg` up and a drawer over the
+     content below it: same markup, slid out of the way and put back in the
+     flow by width alone. `.open` is what the ☰ button toggles and means
+     nothing at desk width. */
+  .sidebar {
+    @apply fixed inset-y-0 left-0 z-40 w-[85vw] max-w-[320px] -translate-x-full overflow-y-auto
+           border-r border-line bg-sidebar px-3 py-5 shadow-2xl shadow-black/50
+           transition-transform duration-200
+           lg:sticky lg:top-0 lg:z-auto lg:h-dvh lg:w-[264px] lg:max-w-none lg:translate-x-0
+           lg:shadow-none lg:transition-none;
+  }
+  .sidebar.open {
+    @apply translate-x-0;
+  }
+
+  /* ---- Navigation ------------------------------------------------------ */
+
+  .nav-link {
+    @apply block rounded-md px-2.5 py-[5px] text-[14px] text-muted transition-colors
+           hover:bg-raise hover:text-ink;
+  }
+  .nav-link.active {
+    @apply bg-raise font-medium text-ink;
+  }
+  .nav-group {
+    @apply mb-5;
+  }
+  .nav-group > h4 {
+    @apply mb-1 px-2.5 text-[11px] font-semibold uppercase tracking-[.08em] text-muted;
+  }
+
+  /* Right-hand "On this page" rail. */
+  .toc-link {
+    @apply block border-l border-line py-1 pl-3 text-[13px] text-muted transition-colors
+           hover:border-line-strong hover:text-ink;
+  }
+  .toc-link.sub {
+    @apply pl-6;
+  }
+  .toc-link.active {
+    @apply border-accent text-ink;
+  }
+
+  /* ---- Long-form content ----------------------------------------------- */
+
+  /* One class on the article; every tag inside is styled from here, so the
+     pages stay readable as plain HTML with no utility soup in the prose. */
+  .doc {
+    @apply max-w-[46rem];
+  }
+
+  .doc > h2 {
+    @apply mt-12 mb-3 scroll-mt-24 border-t border-line pt-8 text-[26px] font-semibold tracking-[-0.01em]
+           lg:scroll-mt-8;
+  }
+  .doc > h2:first-child {
+    @apply mt-0 border-t-0 pt-0;
+  }
+  .doc > h3 {
+    @apply mt-8 mb-2 scroll-mt-24 text-[19px] font-semibold lg:scroll-mt-8;
+  }
+  .doc > h4 {
+    @apply mt-6 mb-1.5 text-[16px] font-semibold;
+  }
+
+  .doc p {
+    @apply my-3.5 text-[15.5px] leading-[1.7] text-ink/90;
+  }
+  .doc a {
+    @apply text-accent underline decoration-accent/35 underline-offset-2 hover:decoration-accent;
+  }
+  .doc strong {
+    @apply font-semibold text-ink;
+  }
+  .doc em {
+    @apply italic;
+  }
+
+  .doc ul {
+    @apply my-3.5 list-disc space-y-1.5 pl-6 text-[15.5px] leading-[1.7] text-ink/90;
+  }
+  .doc ol {
+    @apply my-3.5 list-decimal space-y-1.5 pl-6 text-[15.5px] leading-[1.7] text-ink/90;
+  }
+  .doc li > ul,
+  .doc li > ol {
+    @apply my-1.5;
+  }
+  .doc li::marker {
+    @apply text-muted;
+  }
+
+  .doc :not(pre) > code {
+    @apply rounded border border-line/70 bg-sunken px-[5px] py-px font-mono text-[0.85em] text-ink;
+  }
+
+  .doc hr {
+    @apply my-10 border-t border-line;
+  }
+
+  .doc blockquote {
+    @apply my-4 border-l-2 border-line-strong pl-4 text-muted italic;
+  }
+
+  /* Tables scroll alone rather than letting the page scroll sideways. */
+  .doc .tbl {
+    @apply my-5 overflow-x-auto rounded-xl border border-line;
+  }
+  .doc table {
+    @apply w-full border-collapse text-[14px];
+  }
+  .doc thead th {
+    @apply border-b border-line bg-raise px-3.5 py-2.5 text-left font-semibold whitespace-nowrap;
+  }
+  .doc tbody td {
+    @apply border-b border-line/60 px-3.5 py-2.5 align-top text-ink/90;
+  }
+  .doc tbody tr:last-child td {
+    @apply border-b-0;
+  }
+  .doc td code,
+  .doc th code {
+    @apply whitespace-nowrap;
+  }
+
+  /* ---- Code blocks ------------------------------------------------------ */
+
+  /* `docs.js` wraps every <pre> in this (plus `group`, which only means
+     something as a literal class) and hangs a copy button in the corner. */
+  .code-block {
+    @apply relative my-5;
+  }
+  .doc pre {
+    @apply overflow-x-auto rounded-xl border border-line bg-sunken px-4 py-3.5
+           font-mono text-[13.5px] leading-[1.65] text-ink;
+  }
+  .doc pre code {
+    @apply bg-transparent p-0 font-mono text-[inherit];
+  }
+  .code-copy {
+    @apply absolute top-2.5 right-2.5 cursor-pointer rounded-md border border-line bg-raise
+           px-2 py-1 text-[11px] text-muted opacity-0 transition
+           hover:border-accent-dim hover:text-ink focus:opacity-100 group-hover:opacity-100;
+  }
+  /* Touch has no hover to reveal it with. */
+  @media (hover: none) {
+    .code-copy {
+      @apply opacity-100;
+    }
+  }
+
+  /* ---- Callouts --------------------------------------------------------- */
+
+  .callout {
+    @apply my-5 rounded-xl border border-line bg-raise/60 px-4 py-3;
+  }
+  /* Written out rather than @apply'd: the `.doc p` / `.doc ul` rules above are
+     a class more specific than `.callout > *`, so a utility here would lose to
+     them and every callout would carry the prose's outer margins. */
+  .callout > :first-child {
+    margin-top: 0 !important;
+  }
+  .callout > :last-child {
+    margin-bottom: 0 !important;
+  }
+  .callout > .callout-title {
+    @apply mb-1 flex items-center gap-2 text-[14px] font-semibold text-ink;
+  }
+  .callout.warn {
+    @apply border-warn/40 bg-warn/[0.07];
+  }
+  .callout.warn > .callout-title {
+    @apply text-warn;
+  }
+  .callout.danger {
+    @apply border-danger/40 bg-danger/[0.07];
+  }
+  .callout.danger > .callout-title {
+    @apply text-danger;
+  }
+  .callout.ok {
+    @apply border-ok/40 bg-ok/[0.07];
+  }
+  .callout.ok > .callout-title {
+    @apply text-ok;
+  }
+
+  /* ---- Field reference -------------------------------------------------- */
+
+  /* One block per setting in a form: the label as it reads in the UI, an
+     optional type/default chip, then the explanation. Used heavily on the
+     Projects, Providers and Database pages. */
+  .fields {
+    @apply my-6 overflow-hidden rounded-xl border border-line;
+  }
+  .fields > .f {
+    @apply border-t border-line px-4 py-4;
+  }
+  .fields > .f:first-child {
+    @apply border-t-0;
+  }
+  .fields > .f > .f-name {
+    @apply flex flex-wrap items-baseline gap-x-2.5 gap-y-1 text-[15px] font-semibold text-ink;
+  }
+  .fields > .f > .f-name > .f-meta {
+    @apply rounded border border-line bg-sunken px-1.5 py-px font-mono text-[11px] font-normal text-muted;
+  }
+  .fields > .f > p {
+    @apply mt-1.5 mb-0 text-[14.5px] leading-[1.65] text-muted;
+  }
+  .fields > .f > p + p {
+    @apply mt-2;
+  }
+  .fields > .f > .code-block {
+    @apply mt-3 mb-0;
+  }
+
+  /* ---- Cards ------------------------------------------------------------ */
+
+  .card {
+    @apply block rounded-xl border border-line bg-raise/50 p-4 transition-colors
+           hover:border-line-strong;
+  }
+  a.card:hover {
+    @apply border-accent-dim;
+  }
+  .card > h3 {
+    @apply m-0 flex items-center gap-2 text-[16px] font-semibold text-ink;
+  }
+  .card > p {
+    @apply mt-1.5 mb-0 text-[14px] leading-[1.6] text-muted;
+  }
+
+  /* ---- Numbered walkthroughs -------------------------------------------- */
+
+  /* A list of steps where each number is a real marker on the left rail, so a
+     step can hold code blocks and screenshots without losing its number.
+     Qualified with `.doc ol` so it outranks the prose list rules above, which
+     would otherwise put decimal markers back on top of the counters. */
+  .doc ol.steps {
+    @apply my-6 list-none space-y-6 border-l border-line py-1 pl-0;
+    counter-reset: step;
+  }
+  .doc ol.steps > li {
+    @apply relative pl-11;
+    counter-increment: step;
+  }
+  .doc ol.steps > li::before {
+    content: counter(step);
+    @apply absolute top-0 -left-[15px] flex size-[30px] items-center justify-center rounded-full
+           border border-line bg-raise font-mono text-[13px] text-accent;
+  }
+  .doc ol.steps > li > h3 {
+    @apply mt-0 mb-1 text-[17px] font-semibold;
+  }
+  .doc ol.steps > li > :last-child {
+    @apply mb-0;
+  }
+
+  /* ---- Misc ------------------------------------------------------------- */
+
+  .kbd {
+    @apply rounded border border-line-strong bg-field px-1.5 py-px font-mono text-[12px] text-ink;
+  }
+
+  .pill {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-line bg-raise
+           px-2.5 py-1 text-[12px] text-muted;
+  }
+
+  /* Prev / next footer links. */
+  .page-nav {
+    @apply flex flex-1 flex-col gap-0.5 rounded-xl border border-line bg-raise/40 p-3.5
+           transition-colors hover:border-accent-dim;
+  }
+  .page-nav > span {
+    @apply text-[12px] text-muted;
+  }
+  .page-nav > strong {
+    @apply text-[15px] font-medium text-ink;
+  }
+}

@@ -1,0 +1,839 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <title>Projects · Settings</title>
+    <!-- Absolute: this page is served from a nested path (/settings/projects). -->
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <!-- Tap-anywhere-to-close backdrop for the entry list drawer; phone widths only. -->
+    <div id="scrim" class="fixed inset-0 z-30 hidden bg-black/60 lg:hidden"></div>
+
+    <aside
+      id="sidebar"
+      class="drawer drawer-left flex max-w-[300px] shrink-0 flex-col border-r border-line bg-sidebar p-2.5"
+    >
+      <div class="px-1.5 pt-1 pb-2.5">
+        <a href="/" class="text-xs text-muted hover:text-ink">← Back to sessions</a>
+      </div>
+      <div class="mt-1 flex-1 overflow-y-auto">
+        <details class="side-sec" open>
+          <summary>
+            <span>Projects</span>
+            <button
+              id="btn-new"
+              title="Add a repository sessions can be started against"
+              class="cursor-pointer rounded border-0 bg-transparent px-1 text-[12px] text-muted hover:text-ink"
+            >
+              ＋ New
+            </button>
+          </summary>
+          <div id="project-list"></div>
+        </details>
+        <details class="side-sec mt-4" open>
+          <summary>
+            <span>Providers</span>
+            <button
+              id="btn-new-provider"
+              title="Add a provider sessions can be started on"
+              class="cursor-pointer rounded border-0 bg-transparent px-1 text-[12px] text-muted hover:text-ink"
+            >
+              ＋ New
+            </button>
+          </summary>
+          <div id="provider-list"></div>
+        </details>
+        <details class="side-sec mt-4" open>
+          <summary>
+            <span
+              >Database pool<span id="d-capacity" class="ml-1.5 text-[11px] font-normal text-muted"></span
+            ></span>
+            <button
+              id="btn-new-db"
+              title="Add a database server sessions can claim"
+              class="cursor-pointer rounded border-0 bg-transparent px-1 text-[12px] text-muted hover:text-ink"
+            >
+              ＋ New
+            </button>
+          </summary>
+          <div id="dbserver-list"></div>
+        </details>
+        <details class="side-sec mt-4" open>
+          <summary>
+            <span>Prompts</span>
+          </summary>
+          <div id="template-list"></div>
+        </details>
+        <details class="side-sec mt-4" open>
+          <summary>
+            <span>Saved prompts</span>
+            <button
+              id="btn-new-saved"
+              title="Add a kickoff prompt the composer can insert"
+              class="cursor-pointer rounded border-0 bg-transparent px-1 text-[12px] text-muted hover:text-ink"
+            >
+              ＋ New
+            </button>
+          </summary>
+          <div id="saved-list"></div>
+        </details>
+        <details class="side-sec mt-4" open>
+          <summary>
+            <span>Memory</span>
+            <button
+              id="btn-new-memory"
+              title="Add something every session on a project should know"
+              class="cursor-pointer rounded border-0 bg-transparent px-1 text-[12px] text-muted hover:text-ink"
+            >
+              ＋ New
+            </button>
+          </summary>
+          <div id="memory-list"></div>
+        </details>
+        <details class="side-sec mt-4" open>
+          <summary>
+            <span>Workspaces</span>
+          </summary>
+          <div id="workspace-list"></div>
+        </details>
+      </div>
+      <div class="flex items-center justify-between border-t border-line px-1.5 pt-2 pb-0.5">
+        <span class="text-xs text-muted">Settings</span>
+        <!-- Only when the app has a login configured; settings.js unhides it. -->
+        <button
+          id="btn-signout"
+          class="hidden shrink-0 cursor-pointer border-0 bg-transparent px-0 py-2 font-[inherit] text-xs text-muted hover:text-ink lg:py-0"
+          title="Sign out of this dashboard"
+        >
+          ⎋ Sign out
+        </button>
+      </div>
+    </aside>
+
+    <main id="main" class="flex min-w-0 flex-1 flex-col">
+      <!-- Phone chrome: the entry list is a drawer there, and this opens it. -->
+      <div
+        id="mobile-bar"
+        class="flex shrink-0 items-center gap-2 border-b border-line bg-canvas px-3 py-2 lg:hidden"
+      >
+        <button
+          id="btn-menu"
+          class="btn-icon"
+          aria-label="Settings sections"
+          title="Projects, providers, database pool"
+        >
+          ☰
+        </button>
+        <span class="min-w-0 flex-1 truncate text-sm font-semibold">Settings</span>
+        <a href="/" class="btn-icon" aria-label="Back to sessions" title="Back to sessions">←</a>
+      </div>
+
+      <header
+        class="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-canvas px-3 py-2.5 lg:flex-nowrap lg:px-[18px]"
+      >
+        <div class="min-w-0 flex-1">
+          <h1 id="form-title" class="m-0 truncate text-sm font-semibold">Projects</h1>
+          <div id="form-sub" class="truncate text-xs text-muted">
+            A project is a repository a session can be started against.
+          </div>
+        </div>
+        <div class="flex shrink-0 gap-2">
+          <button id="btn-save" class="btn btn-primary hidden">Save</button>
+          <button id="btn-clone" class="btn hidden" title="Clone into a new entry">⧉</button>
+          <button id="btn-delete" class="btn btn-danger hidden" title="Delete this project">🗑</button>
+        </div>
+      </header>
+
+      <div class="flex-1 overflow-y-auto">
+        <div id="empty" class="mx-auto mt-[8vh] hidden max-w-[640px] px-4 text-center lg:mt-[14vh] lg:px-6">
+          <h2 class="mb-1.5 text-[26px] font-semibold">No projects yet</h2>
+          <p class="text-muted">
+            A project holds everything a session needs: the setup steps, the PHP version,<br />
+            its database, the .env it runs with, and how to run the app.
+          </p>
+        </div>
+
+        <form
+          id="form"
+          class="mx-auto hidden max-w-[720px] px-4 pt-[18px] pb-[60px] lg:px-6"
+          autocomplete="off"
+        >
+          <details class="fset" open>
+            <summary>Project</summary>
+            <div class="field-row">
+              <label class="field">
+                <span>Repository</span>
+                <input id="f-repo" type="text" placeholder="owner/name" spellcheck="false" />
+                <em>Cloned over HTTPS with the machine's own git credentials.</em>
+              </label>
+              <label class="field">
+                <span>Label</span>
+                <input id="f-label" type="text" placeholder="shown in the project dropdown" />
+              </label>
+            </div>
+            <label class="field">
+              <span>Local checkout</span>
+              <input
+                id="f-localDir"
+                type="text"
+                spellcheck="false"
+                placeholder="/home/you/www/your-checkout"
+              />
+              <em
+                >This machine's own checkout of the repo. A session started in Local mode works directly in
+                it: no clone, no setup steps, no pooled database, and the tree is used exactly as it stands.
+                Leave empty to keep Local mode off for this project.</em
+              >
+            </label>
+          </details>
+
+          <details class="fset" open>
+            <summary>Setup</summary>
+            <label class="field">
+              <span>Setup commands</span>
+              <textarea
+                id="f-setupCommands"
+                rows="6"
+                spellcheck="false"
+                placeholder="composer install --no-interaction --prefer-dist&#10;yarn install"
+              ></textarea>
+              <em
+                >One shell command per line, run in the checkout in order before the session starts. The first
+                failure aborts the session.</em
+              >
+            </label>
+            <label class="field">
+              <span>PHP bin directory</span>
+              <input
+                id="f-phpBinDir"
+                type="text"
+                spellcheck="false"
+                placeholder="/usr/bin (or ~/.phpenv/versions/8.4/bin)"
+              />
+              <em>Prepended to PATH for everything this project runs. Leave empty for the machine's PHP.</em>
+            </label>
+          </details>
+
+          <details class="fset" open>
+            <summary>Database</summary>
+            <label class="field">
+              <span>Database</span>
+              <input id="f-dbPoolDatabase" type="text" spellcheck="false" placeholder="my_app" />
+              <em
+                >What DB_DATABASE is set to in the session's environment. With the pool on, created on the
+                claimed server if it does not exist yet. With the pool off, every session gets a database of
+                its own, this name plus the session id, created on the server the .env template points at, and
+                written into the checkout's <code>.env</code>. Leave empty to use the .env template as-is.
+                Migrations and seeding belong in the setup commands.</em
+              >
+            </label>
+            <label class="field">
+              <span>Postgres extensions</span>
+              <textarea id="f-dbExtensions" rows="2" spellcheck="false" placeholder="vector"></textarea>
+              <em
+                >One extension name per line, created in the session's database right after it is created. A
+                fresh Postgres database carries only what <code>template1</code> does, so migrations that
+                declare a <code>vector</code> column fail without this. The extension itself must already be
+                installed on the server. Ignored on MySQL.</em
+              >
+            </label>
+            <label class="field check">
+              <input id="f-dbPoolEnabled" type="checkbox" />
+              <span>Give each session a database server of its own</span>
+            </label>
+            <div id="db-fields">
+              <label class="field">
+                <span>Restore from .sql</span>
+                <input
+                  id="f-dbRestoreSql"
+                  type="text"
+                  spellcheck="false"
+                  placeholder="/home/you/dumps/my_app.sql"
+                />
+                <em
+                  >A dump on this machine, piped into the database every time a server is claimed, right after
+                  it is created, before the setup steps run. Leave empty to skip. The servers themselves are
+                  added under <strong>Database pool</strong> in the sidebar.</em
+                >
+              </label>
+            </div>
+          </details>
+
+          <details class="fset" open>
+            <summary>Code review</summary>
+            <!-- What the board starts a ⌕ Code review as: whose pull requests
+             it shows, and the provider the review opens on unless the composer
+             picks another. -->
+            <div class="runtime-row">
+              <label class="field">
+                <span>PR author</span>
+                <input id="f-reviewAuthor" type="text" spellcheck="false" placeholder="github-username" />
+              </label>
+            </div>
+            <div class="runtime-row">
+              <label class="field">
+                <span>Provider</span>
+                <select id="f-reviewProviderId"></select>
+              </label>
+              <label class="field">
+                <span>Model</span>
+                <select id="f-reviewModel"></select>
+              </label>
+              <label class="field">
+                <span>Effort</span>
+                <select id="f-reviewEffort"></select>
+              </label>
+            </div>
+            <!-- The publish turn has no runtime of its own: it is the review's own
+             follow-through, in the review's own conversation. -->
+            <label class="field">
+              <span>Publish steps</span>
+              <textarea
+                id="f-reviewPublishInstructions"
+                rows="4"
+                spellcheck="false"
+                placeholder="Publish the review to the PR with gh, then move the labels."
+              ></textarea>
+              <em
+                >Sent to the agent as its own turn after a ⌕ Code review: this text and nothing else. Leave
+                empty to run no turn after the review.</em
+              >
+            </label>
+            <!-- Every step below runs as a turn of its own, and each may run on
+             a provider, model and effort of its own; a step left on "Same as the
+             code review" runs on whatever the session it came from runs on. The
+             three selects per step are filled by writeStepRuntimes(). -->
+            <div class="step">
+              <label class="field check">
+                <input id="f-reviewTestSheet" type="checkbox" />
+                <span>Write a test sheet when the 🎬 QA errand is started</span>
+              </label>
+              <div class="step-fields runtime-row" id="step-testSheet">
+                <label class="field">
+                  <span>Provider</span>
+                  <select id="f-step-testSheet-providerId"></select>
+                </label>
+                <label class="field">
+                  <span>Model</span>
+                  <select id="f-step-testSheet-model"></select>
+                </label>
+                <label class="field">
+                  <span>Effort</span>
+                  <select id="f-step-testSheet-effort"></select>
+                </label>
+              </div>
+            </div>
+            <div class="step">
+              <label class="field check">
+                <input id="f-reviewTestRun" type="checkbox" />
+                <span>Execute the test sheet and record a video of each scenario</span>
+              </label>
+              <div class="step-fields runtime-row" id="step-testRun">
+                <label class="field">
+                  <span>Provider</span>
+                  <select id="f-step-testRun-providerId"></select>
+                </label>
+                <label class="field">
+                  <span>Model</span>
+                  <select id="f-step-testRun-model"></select>
+                </label>
+                <label class="field">
+                  <span>Effort</span>
+                  <select id="f-step-testRun-effort"></select>
+                </label>
+              </div>
+            </div>
+            <label class="field">
+              <span>QA notes</span>
+              <textarea
+                id="f-qaNotes"
+                rows="4"
+                spellcheck="false"
+                placeholder="Login admin@example.test / secret, tenant demo, app lives under /app"
+              ></textarea>
+              <em
+                >Appended to the test sheet and test run prompts: logins, tenants, URLs, whatever a tester
+                needs that the repository does not say.</em
+              >
+            </label>
+            <label class="field">
+              <span>Test sheet closing steps</span>
+              <textarea
+                id="f-testSheetInstructions"
+                rows="4"
+                spellcheck="false"
+                placeholder="Move the PR to `ready-for-qa` and ping the QA lead in #qa."
+              ></textarea>
+              <em
+                >Appended to the end of the 📋 Test sheet prompt: what this project wants done once the sheet
+                is on the pull request. Leave empty to add nothing.</em
+              >
+            </label>
+            <label class="field">
+              <span>Feedback closing steps</span>
+              <textarea
+                id="f-feedbackInstructions"
+                rows="4"
+                spellcheck="false"
+                placeholder="Move the PR to `ready-for-qa` and post the summary in #dev."
+              ></textarea>
+              <em
+                >Appended to the end of the ⚙ Implement feedback prompt: what this project wants done once the
+                review comments are implemented. Leave empty to add nothing.</em
+              >
+            </label>
+          </details>
+
+          <details class="fset" open>
+            <summary>Orchestrator</summary>
+            <!-- What a 🧭 orchestrator's workers run on when it names nothing
+             on spawn. Left on "Same as the orchestrator", a worker runs on the
+             supervisor's own (usually expensive) entry. -->
+            <div class="runtime-row">
+              <label class="field">
+                <span>Worker provider</span>
+                <select id="f-workerProviderId"></select>
+              </label>
+              <label class="field">
+                <span>Model</span>
+                <select id="f-workerModel"></select>
+              </label>
+              <label class="field">
+                <span>Effort</span>
+                <select id="f-workerEffort"></select>
+              </label>
+            </div>
+            <label class="field">
+              <span>Budget (USD)</span>
+              <input id="f-workerBudgetUsd" type="number" min="0" step="0.5" placeholder="no cap" />
+              <em
+                >What one orchestration may spend — the supervisor's turns plus every worker's — before it
+                pauses and waits for you. Only turns whose provider reports a cost count. Leave empty for no
+                cap.</em
+              >
+            </label>
+            <p class="mt-0 mb-1 text-[12px] leading-[1.45] text-muted">
+              The orchestrator's standing instructions for this project live under Prompts below (or globally
+              under Prompts in the sidebar), in the “Orchestrator instructions” template.
+            </p>
+            <!-- Self-healing: the one project that is this dashboard's own
+             repository. An orchestrator on any project that finds a flaw in
+             the tooling running it sends a fix worker here (fix_tooling). -->
+            <label class="field check">
+              <input id="f-isSelf" type="checkbox" />
+              <span>This project is the dashboard itself</span>
+            </label>
+            <p class="mt-0 mb-1 text-[12px] leading-[1.45] text-muted">
+              Tick it on the repository whose code is running right now, and on no other. An orchestrator on
+              any project that finds a flaw in the tooling running it (a briefing, a worker tool, a loop) can
+              then send a fix worker here, review loop armed, and merge its pull request once the loop
+              approves and the checks are green. The running dashboard keeps its code until you redeploy.
+            </p>
+          </details>
+
+          <details class="fset" open>
+            <summary>Checkout .env</summary>
+            <label class="field">
+              <span>.env template</span>
+              <textarea
+                id="f-envTemplate"
+                rows="10"
+                spellcheck="false"
+                placeholder="APP_ENV=local&#10;APP_KEY=…"
+              ></textarea>
+              <em
+                >Written into the checkout as <code>.env</code> before the setup steps run, on every session.
+                Leave empty to use whatever the repository ships.</em
+              >
+            </label>
+          </details>
+
+          <!-- This project's own wording. One textarea per template, built by
+           settings.js from the catalog /api/templates returns; empty means
+           "use the text under Prompts in the sidebar". -->
+          <details class="fset">
+            <summary>Prompts</summary>
+            <p class="mt-0 mb-3.5 text-[12px] leading-[1.45] text-muted">
+              Only for this repository. A field left empty uses the shared text under
+              <strong>Prompts</strong> in the sidebar, which in turn falls back to the one this app ships
+              with.
+            </p>
+            <div id="tpl-project-fields"></div>
+          </details>
+
+          <details class="fset" open>
+            <summary>Run</summary>
+            <label class="field">
+              <span>Run commands</span>
+              <textarea
+                id="f-runCommands"
+                rows="4"
+                spellcheck="false"
+                placeholder="php -S 127.0.0.1:{port} -t public server.php"
+              ></textarea>
+              <em
+                >What ▶ Run executes, in the checkout, one shell command per line, chained, so the last one is
+                the server that keeps running. <code>{port}</code> is the session's app port,
+                <code>{dir}</code> the checkout.</em
+              >
+            </label>
+          </details>
+        </form>
+
+        <!-- One provider in the picker: same page, another entity. -->
+        <form
+          id="form-provider"
+          class="mx-auto hidden max-w-[720px] px-4 pt-[18px] pb-[60px] lg:px-6"
+          autocomplete="off"
+        >
+          <!-- Filled in by loadProviderStatus(); only a saved entry has a status. -->
+          <details class="fset" open id="p-status-sec">
+            <summary>Status</summary>
+            <div id="p-status" class="mb-3.5"></div>
+          </details>
+
+          <details class="fset" open>
+            <summary>Provider</summary>
+            <div class="field-row">
+              <label class="field">
+                <span>Label</span>
+                <input id="p-label" type="text" placeholder="shown in the provider picker" />
+              </label>
+              <label class="field">
+                <span>Binary</span>
+                <select id="p-binary">
+                  <option value="claude">claude (Claude Code)</option>
+                  <option value="codex">codex (Codex)</option>
+                  <option value="grok">grok (Grok)</option>
+                  <option value="opencode">opencode</option>
+                </select>
+              </label>
+            </div>
+            <div class="field-row">
+              <label class="field" id="p-authMode-label">
+                <span>Mode</span>
+                <select id="p-authMode">
+                  <option value="login">Login</option>
+                  <option value="token">API token</option>
+                </select>
+              </label>
+              <div id="p-login-field" class="field">
+                <span>&nbsp;</span>
+                <div class="flex items-center gap-2">
+                  <button type="button" id="p-login-btn" class="btn whitespace-nowrap">Log in</button>
+                  <input
+                    id="p-login-code"
+                    type="text"
+                    spellcheck="false"
+                    autocomplete="off"
+                    placeholder="paste the code from the browser"
+                    class="hidden min-w-0 flex-1"
+                  />
+                  <button type="button" id="p-login-finish" class="btn hidden">Finish</button>
+                </div>
+              </div>
+            </div>
+            <div id="p-endpoint-fields">
+              <label class="field">
+                <span>Base URL</span>
+                <input
+                  id="p-baseUrl"
+                  type="text"
+                  spellcheck="false"
+                  placeholder="empty = the binary's own service"
+                />
+                <em id="p-baseUrl-hint"></em>
+              </label>
+            </div>
+            <div id="p-apiKey-field">
+              <label class="field">
+                <span>API token</span>
+                <input id="p-apiKey" type="password" autocomplete="new-password" spellcheck="false" />
+                <em id="p-apiKey-hint"></em>
+              </label>
+            </div>
+            <div id="p-test-field" class="field">
+              <div class="flex items-center gap-2">
+                <button type="button" id="p-test-btn" class="btn whitespace-nowrap">Test</button>
+                <span id="p-test-result" class="min-w-0 text-xs text-muted"></span>
+              </div>
+            </div>
+          </details>
+
+          <details class="fset" open>
+            <summary>Models</summary>
+            <div class="field-row">
+              <label class="field">
+                <span>Models</span>
+                <textarea
+                  id="p-models"
+                  rows="4"
+                  spellcheck="false"
+                  placeholder="one model per line, empty = the CLI's own list"
+                ></textarea>
+              </label>
+              <label class="field">
+                <span>Efforts</span>
+                <textarea
+                  id="p-efforts"
+                  rows="4"
+                  spellcheck="false"
+                  placeholder="one effort per line, empty = the CLI's own list"
+                ></textarea>
+              </label>
+            </div>
+            <div class="field-row">
+              <label class="field">
+                <span>Default model</span>
+                <input
+                  id="p-defaultModel"
+                  type="text"
+                  spellcheck="false"
+                  placeholder="empty = the CLI's default"
+                />
+              </label>
+              <label class="field">
+                <span>Default effort</span>
+                <input
+                  id="p-defaultEffort"
+                  type="text"
+                  spellcheck="false"
+                  placeholder="empty = the CLI's default"
+                />
+              </label>
+            </div>
+          </details>
+        </form>
+
+        <!-- One database server in the session pool: same page, second entity. -->
+        <form
+          id="form-db"
+          class="mx-auto hidden max-w-[720px] px-4 pt-[18px] pb-[60px] lg:px-6"
+          autocomplete="off"
+        >
+          <details class="fset" open>
+            <summary>Database server</summary>
+            <label class="field check">
+              <input id="d-enabled" type="checkbox" />
+              <span>In the pool: sessions may claim this server</span>
+            </label>
+            <label class="field">
+              <span>Label</span>
+              <input id="d-label" type="text" placeholder="defaults to host:port" />
+            </label>
+            <div class="field-row">
+              <label class="field">
+                <span>Host</span>
+                <input id="d-host" type="text" spellcheck="false" placeholder="127.0.0.1" />
+              </label>
+              <label class="field narrow">
+                <span>Port</span>
+                <input id="d-port" type="number" min="1" max="65535" step="1" placeholder="3306" />
+              </label>
+            </div>
+            <div class="field-row">
+              <label class="field">
+                <span>Username</span>
+                <input id="d-username" type="text" spellcheck="false" placeholder="root" />
+              </label>
+              <label class="field">
+                <span>Password</span>
+                <input
+                  id="d-password"
+                  type="password"
+                  autocomplete="new-password"
+                  spellcheck="false"
+                  placeholder="empty = no password"
+                />
+              </label>
+            </div>
+            <div id="d-test-field" class="field">
+              <div class="flex items-center gap-2">
+                <button type="button" id="d-test-btn" class="btn whitespace-nowrap">Test connection</button>
+                <span id="d-test-result" class="min-w-0 text-xs text-muted"></span>
+              </div>
+            </div>
+            <label class="field">
+              <span></span>
+              <em
+                >One session holds a server at a time, so the pool is the session cap: as many sessions may be
+                open at once as there are entries in it. The session's project decides which database name is
+                used on it (created if missing); its setup commands are where migrations and seeding happen,
+                on every session.</em
+              >
+            </label>
+          </details>
+        </form>
+        <!-- The prompts every project shares: a singleton, same page. The fields
+         are built by settings.js from the catalog the server sends, so the
+         wording of a prompt lives in one place only. -->
+        <form
+          id="form-templates"
+          class="mx-auto hidden max-w-[720px] px-4 pt-[18px] pb-[60px] lg:px-6"
+          autocomplete="off"
+        >
+          <details class="fset" open>
+            <summary>Prompts</summary>
+            <p class="mt-0 mb-3.5 text-[12px] leading-[1.45] text-muted">
+              What this app sends out: the description ✎ PR Body Summary writes, and the errand behind every
+              other action and review step. A field left empty uses the text this app ships with; a project
+              can override any of these for itself under <strong>Prompts</strong> in its own form.
+            </p>
+            <div id="tpl-global-fields"></div>
+          </details>
+        </form>
+        <!-- The kickoff library the composer's Prompts menu offers: plain text
+         with a title, optionally bound to one project. -->
+        <form
+          id="form-saved"
+          class="mx-auto hidden max-w-[720px] px-4 pt-[18px] pb-[60px] lg:px-6"
+          autocomplete="off"
+        >
+          <details class="fset" open>
+            <summary>Saved prompt</summary>
+            <label class="field">
+              <span>Title</span>
+              <input id="s-title" type="text" maxlength="120" placeholder="What the menu calls it" />
+            </label>
+            <div class="field-row">
+              <label class="field">
+                <span>Project</span>
+                <select id="s-repo">
+                  <option value="">All projects</option>
+                </select>
+              </label>
+              <label class="field narrow">
+                <span>Order</span>
+                <input id="s-sortOrder" type="number" step="1" placeholder="0" />
+              </label>
+            </div>
+            <label class="field">
+              <span>Prompt</span>
+              <textarea id="s-body" rows="10" spellcheck="true"></textarea>
+              <em
+                >Inserted into the message box as written, with no {{TOKEN}}s here, unlike the review prompts
+                above. Lower order numbers are listed first; a project's own prompts come before the shared
+                ones.</em
+              >
+            </label>
+          </details>
+        </form>
+
+        <!-- Project memory: what the agents saved through the memory tool (or the
+             operator typed here), briefed into every session on that project. -->
+        <form
+          id="form-memory"
+          class="mx-auto hidden max-w-[720px] px-4 pt-[18px] pb-[60px] lg:px-6"
+          autocomplete="off"
+        >
+          <details class="fset" open>
+            <summary>Memory</summary>
+            <div class="field-row">
+              <label class="field">
+                <span>Project</span>
+                <select id="m-repo"></select>
+              </label>
+              <label class="field narrow">
+                <span>Type</span>
+                <select id="m-type">
+                  <option value="user">user: who the user is</option>
+                  <option value="feedback">feedback: how to work</option>
+                  <option value="project">project: ongoing work, constraints</option>
+                  <option value="reference">reference: URLs, tickets</option>
+                </select>
+              </label>
+            </div>
+            <label class="field">
+              <span>Name</span>
+              <input
+                id="m-name"
+                type="text"
+                maxlength="120"
+                placeholder="kebab-case-slug"
+                spellcheck="false"
+              />
+              <em
+                >One fact per memory. Folded to a slug on save; the same name on the same project is one
+                memory.</em
+              >
+            </label>
+            <label class="field">
+              <span>Description</span>
+              <input
+                id="m-description"
+                type="text"
+                maxlength="255"
+                placeholder="One line, used to judge relevance"
+              />
+            </label>
+            <label class="field">
+              <span>Body</span>
+              <textarea id="m-body" rows="10" spellcheck="true"></textarea>
+              <em
+                >Every session on the project reads this in its briefing. Agents write these themselves with
+                the memory tool as they learn things; edit or delete here whatever turned out wrong.</em
+              >
+            </label>
+          </details>
+        </form>
+
+        <!-- The clone pool: read from disk on open, not an editable entry, so it is
+             a table rather than a form. Rows are built by settings.js. -->
+        <div id="form-workspaces" class="mx-auto hidden max-w-[1100px] px-4 pt-[18px] pb-[60px] lg:px-6">
+          <p class="mt-0 mb-3.5 text-[12px] leading-[1.45] text-muted">
+            Every clone slot in the workspace pool. A slot is claimed for as long as the session in it stays
+            open; the actions only work on idle ones. <strong>Reset setup</strong> forgets which installs
+            already ran, so the next session runs them all again. <strong>Clean</strong> also removes
+            <code>vendor/</code> and <code>node_modules/</code>. Nothing else is ever deleted.
+          </p>
+          <div id="ws-table" class="overflow-x-auto rounded-lg border border-line"></div>
+        </div>
+      </div>
+    </main>
+
+    <div
+      id="toast"
+      class="fixed bottom-[18px] left-1/2 z-50 hidden -translate-x-1/2 rounded-lg border border-line bg-raise px-3.5 py-2 text-[14px]"
+    ></div>
+
+    <!-- Confirm dialog, filled in and resolved by openConfirm() in settings.js. -->
+    <div
+      id="modal"
+      class="fixed inset-0 z-[60] hidden flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="modal-title"
+    >
+      <div
+        id="modal-backdrop"
+        class="absolute inset-0 animate-backdrop-in bg-black/60 backdrop-blur-sm"
+      ></div>
+      <div
+        id="modal-panel"
+        class="relative w-full max-w-[440px] animate-modal-in rounded-2xl border border-line bg-raise p-5 shadow-2xl shadow-black/50"
+      >
+        <div class="flex gap-3.5">
+          <div
+            id="modal-icon"
+            class="flex size-9 shrink-0 items-center justify-center rounded-full text-base"
+          ></div>
+          <div class="min-w-0 flex-1">
+            <h2 id="modal-title" class="m-0 text-[16px] font-semibold"></h2>
+            <p id="modal-body" class="mt-1.5 mb-0 text-[14px] text-muted"></p>
+          </div>
+        </div>
+        <div class="mt-5 flex justify-end gap-2">
+          <button id="modal-cancel" class="btn px-3 py-1.5 text-[14px]">Cancel</button>
+          <button id="modal-confirm" class="btn px-3 py-1.5 text-[14px]"></button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/settings.js"></script>
+  </body>
+</html>

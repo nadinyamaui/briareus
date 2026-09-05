@@ -1,0 +1,4 @@
+# This tree is LF-only. A checkout on a machine with a global
+# core.autocrlf=true would otherwise land as CRLF and make every file look
+# modified, and make linters report line-ending violations on untouched code.
+* text=auto eol=lf

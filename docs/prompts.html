@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Prompts &amp; memory · Briareus</title>
+    <meta
+      name="description"
+      content="The three-step prompt resolution, the {{TOKEN}} placeholders, the saved kickoff library, and the per-project memory the agents keep between sessions."
+    />
+    <link rel="stylesheet" href="docs.css" />
+  </head>
+  <body class="min-h-dvh">
+    <article class="doc">
+      <div class="pill mb-4">Configuration</div>
+      <h1 class="mt-0 mb-3 text-[34px] leading-[1.15] font-semibold tracking-[-0.02em]">
+        Prompts &amp; memory
+      </h1>
+      <p class="!text-[17px] !text-muted">
+        Three separate things share this corner of the settings page: the
+        <strong>prompts</strong> this app sends out on your behalf, the <strong>saved prompts</strong> library
+        the composer inserts from, and the <strong>memory</strong> the agents keep between sessions on a
+        project.
+      </p>
+
+      <h2 id="prompts">Prompts</h2>
+      <p>
+        What this app sends out is a setting, not a string in the source: the pull request description
+        <span class="kbd">✎ PR Body Summary</span> writes, and the errand behind every other action and review
+        step.
+      </p>
+
+      <h3 id="resolution">Three steps, first non-empty wins</h3>
+      <ol>
+        <li><strong>The built-in text</strong> this app ships with.</li>
+        <li><strong>The shared text</strong> under <em>Prompts</em> in the settings sidebar.</li>
+        <li><strong>The project's own</strong>, under <em>Prompts</em> in its form.</li>
+      </ol>
+      <p>
+        The most specific non-empty one wins, so configuring nothing behaves exactly as it always did, and
+        overriding one prompt for one repository leaves every other prompt and every other repository alone.
+      </p>
+
+      <h3 id="tokens">Placeholders</h3>
+      <p>
+        A prompt is plain text with <code>{{TOKEN}}</code> placeholders. The editor lists the ones that
+        particular prompt is composed from underneath the field. A token nobody recognises is left in the text
+        exactly as written, which is how a deploy-link template's own <code>@{{PULL_BRANCH}}</code> survives
+        untouched.
+      </p>
+      <p>Four are common to almost all of them:</p>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Token</th>
+              <th>Is</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>{{REPO}}</code></td>
+              <td><code>owner/name</code> of the repository.</td>
+            </tr>
+            <tr>
+              <td><code>{{PR_REF}}</code></td>
+              <td>
+                "pull request #12", or "the open pull request for branch x" when the number is not known yet.
+              </td>
+            </tr>
+            <tr>
+              <td><code>{{PR_NUMBER}}</code></td>
+              <td>The pull request number, or <code>&lt;number&gt;</code> when it is not known yet.</td>
+            </tr>
+            <tr>
+              <td><code>{{BRANCH}}</code></td>
+              <td>The pull request's own branch, checked out in this workspace.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        <span class="kbd">↧ Load the text it falls back on</span> fills a field with what is being sent today,
+        so editing one line does not mean retyping the whole prompt.
+      </p>
+
+      <h3 id="catalog">The editable prompts</h3>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Prompt</th>
+              <th>What it drives</th>
+              <th>Extra tokens</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>PR body</strong></td>
+              <td>
+                What ✎ PR Body Summary tells the agent to write the description as: the team's own template,
+                deploy links and all. Sent verbatim inside the prompt.
+              </td>
+              <td>—</td>
+            </tr>
+            <tr>
+              <td><strong>Test sheet</strong></td>
+              <td>
+                Derives the manual QA checklist from the diff and posts it as one editable comment. Both the
+                📋 action and the QA session's opening turn.
+              </td>
+              <td>
+                <code>TEST_SHEET_ANCHOR</code>, <code>QA_NOTES</code>, <code>TEST_SHEET_INSTRUCTIONS</code>
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Test run</strong></td>
+              <td>Executes the sheet with Playwright and records a video per scenario.</td>
+              <td>
+                <code>TEST_SHEET_ANCHOR</code>, <code>QA_NOTES</code>, <code>RUN_COMMANDS</code>,
+                <code>VIDEO_DIR</code>, <code>VIDEO_URL</code>
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Implement feedback</strong></td>
+              <td>
+                ⚙ Implement feedback: works from the pull request's own review threads rather than from a
+                findings list.
+              </td>
+              <td>
+                <code>FIX_MARKER</code>, <code>FIXES_ANCHOR</code>, <code>DECLARED_FINDINGS</code>,
+                <code>FEEDBACK_INSTRUCTIONS</code>
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Give feedback</strong></td>
+              <td>
+                ✍ Give feedback: sends what you typed into the dashboard as the whole prompt, verbatim and
+                unframed. Write text here to put instructions around it.
+              </td>
+              <td><code>FIX_MARKER</code>, <code>FEEDBACK</code></td>
+            </tr>
+            <tr>
+              <td><strong>Solve conflicts</strong></td>
+              <td>🔀 Solve conflicts: merges the base branch in, resolves and pushes.</td>
+              <td><code>BASE_BRANCH</code></td>
+            </tr>
+            <tr>
+              <td><strong>Fix failing checks</strong></td>
+              <td>🧪 Fix failing checks: reads the red CI run and fixes what this branch broke.</td>
+              <td><code>FIX_MARKER</code>, <code>BASE_BRANCH</code></td>
+            </tr>
+            <tr>
+              <td><strong>Delete own comments</strong></td>
+              <td>
+                🧹 Delete my comments: removes everything the configured GitHub account left on a pull
+                request.
+              </td>
+              <td><code>AUTHOR</code>, <code>AUTHOR_LC</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="callout-title">Three strings are deliberately not editable</div>
+        <p>
+          The test sheet's anchor, the required-fixes anchor and the <code>[reviewer-fix]</code>
+          commit line (<code>lib/markers.js</code>). They are a contract with pull requests that already
+          exist, and changing one makes every PR written before the change unreadable.
+        </p>
+      </div>
+
+      <h3 id="prompt-tips">Writing one</h3>
+      <ul>
+        <li>
+          Start from <span class="kbd">↧ Load the text it falls back on</span> and edit, rather than writing
+          from scratch. The built-in prompts carry a lot of hard-won detail about how to talk to
+          <code>gh</code>.
+        </li>
+        <li>
+          Prefer the project's own field over the shared one when the instruction is about
+          <em>that</em> repository (its labels, its deploy links, its review conventions).
+        </li>
+        <li>
+          Prefer the shared field for house style that applies everywhere, and leave the project fields empty
+          so a new repository inherits it.
+        </li>
+        <li>
+          For "do this too, at the end", the project form already has purpose-built fields:
+          <strong>Publish steps</strong>, <strong>Test sheet closing steps</strong>,
+          <strong>Feedback closing steps</strong>, which append to the shipped prompt rather than replacing
+          it. Reach for those before overriding a whole template.
+        </li>
+      </ul>
+
+      <h2 id="saved-prompts">Saved prompts</h2>
+      <p>
+        A different, simpler thing: a library of reusable <em>kickoff</em> texts for the composer. No
+        <code>{{TOKEN}}</code>s: they are inserted into the message box exactly as written.
+      </p>
+      <ul>
+        <li>
+          The <span class="kbd">📋 Prompts</span> menu next to the composer's chips lists them, the current
+          project's own first, then the ones offered on every project, and a click drops the text into the
+          message box.
+        </li>
+        <li><em>Save current text as prompt…</em> in the same menu adds whatever is typed there.</li>
+        <li>
+          Edit, re-scope to a project or delete them under <strong>Saved prompts</strong> in the settings
+          sidebar. Lower <strong>Order</strong> numbers are listed first.
+        </li>
+      </ul>
+
+      <h2 id="memory">Memory</h2>
+      <p>
+        What the agents keep between sessions on a project: the dashboard's stand-in for Claude Code's own
+        memory directory, which the headless runs it spawns never see (every session is a fresh clone with a
+        fresh config dir).
+      </p>
+      <p>
+        Memories live in the database, one row per fact, scoped to the repository: a kebab-case name, a type,
+        a one-line description and a body. Every turn's briefing carries the project's memories: newest first,
+        whole until a size budget, then by headline alone.
+      </p>
+
+      <h3 id="memory-fields">The fields</h3>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">Project</div>
+          <p>Which repository's sessions read it. A memory belongs to exactly one project.</p>
+        </div>
+        <div class="f">
+          <div class="f-name">Type</div>
+          <p>
+            <code>user</code>: who the user is. <code>feedback</code>: how to work. <code>project</code>:
+            ongoing work and constraints. <code>reference</code>: URLs and tickets.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Name</div>
+          <p>
+            One fact per memory. Folded to a slug on save; the same name on the same project is one memory, so
+            re-saving updates rather than duplicating.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Description</div>
+          <p>One line, used to judge relevance when the briefing has to choose what to include whole.</p>
+        </div>
+        <div class="f">
+          <div class="f-name">Body</div>
+          <p>The fact itself. Every session on the project reads this in its briefing.</p>
+        </div>
+      </div>
+
+      <h3 id="memory-agents">How the agents write them</h3>
+      <p>Every turn can add to the project's memory, and each binary is given the ability differently:</p>
+      <ul>
+        <li>
+          <strong>Claude and Codex</strong> get <code>memory_save</code>, <code>memory_list</code>,
+          <code>memory_read</code> and <code>memory_delete</code> as tools, from a tiny MCP server
+          (<code>lib/memory-mcp.js</code>) mounted per turn.
+        </li>
+        <li>
+          <strong>Grok and opencode</strong>, which take no MCP server headless, are told the same thing over
+          HTTP: <code>$REVIEWER_MEMORY_URL/api/agent/memories</code> with
+          <code>$REVIEWER_MEMORY_TOKEN</code> as a bearer token, both in the turn's environment. The token is
+          the session's own, minted per process, never stored, and it only reaches that session's project.
+        </li>
+      </ul>
+      <p>
+        Read, correct or prune what was remembered under <strong>Memory</strong> in the settings sidebar.
+        Editing what an agent got wrong is the point of the panel existing.
+      </p>
+
+      <div class="callout ok">
+        <div class="callout-title">What is worth remembering</div>
+        <p>
+          Things the repository does not say and a fresh clone cannot discover: which of two similar test
+          suites is the one that matters, that a service is stubbed locally, a decision the team made and its
+          reason. Not code structure or git history: the agent can read those.
+        </p>
+      </div>
+    </article>
+    <script src="docs.js"></script>
+  </body>
+</html>

@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sessions · Briareus</title>
+    <meta
+      name="description"
+      content="The composer's chips, branches, worktree vs local mode, running the app, the pull request panel and the cost ledger."
+    />
+    <link rel="stylesheet" href="docs.css" />
+  </head>
+  <body class="min-h-dvh">
+    <article class="doc">
+      <div class="pill mb-4">Working</div>
+      <h1 class="mt-0 mb-3 text-[34px] leading-[1.15] font-semibold tracking-[-0.02em]">Sessions</h1>
+      <p class="!text-[17px] !text-muted">
+        A session is one conversation with one agent, on one branch of one repository, holding a workspace
+        clone and, when its project asks for one, a database server, for as long as it stays open.
+      </p>
+
+      <h2 id="composer">Starting one</h2>
+      <p>
+        <strong>＋ New session</strong> in the sidebar opens the welcome pane. Above the message box is a row
+        of chips; they are the whole configuration of the session, and they lock once it starts.
+      </p>
+      <p>
+        On a phone the sidebar is a drawer behind ☰, so the top bar carries its own
+        <strong>＋</strong> beside it: the same action, without opening the drawer first from a board or an
+        open session. It is hidden on wide screens, where the sidebar is a column and its button is always on
+        show.
+      </p>
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">⌗ Worktree / ⌂ Local / 🧭 Orchestrator / ⚡ Zeus</div>
+          <p>
+            Where the session works: a fresh workspace clone of its own, this machine's existing checkout, no
+            checkout at all (a supervisor that starts worker sessions), or a read-only clone from which Zeus
+            turns a brief into a GitHub epic. See <a href="#local">Local mode</a> and
+            <a href="#zeus">Zeus mode</a>.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Project</div>
+          <p>Which repository, and with it every setting on <a href="projects.html">the project</a>.</p>
+        </div>
+        <div class="f">
+          <div class="f-name">Branch <span class="f-meta">worktree only</span></div>
+          <p>
+            A searchable dropdown of the repository's branches. Left on <em>New branch</em>, the session cuts
+            <code>dev-&lt;id&gt;</code> from the default branch. Pick an existing one to continue somebody's
+            work; the session will find the open pull request for it by itself.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Provider / Model / Effort</div>
+          <p>
+            Which <a href="providers.html">provider entry</a> runs the turns, and on what. The model and
+            effort lists are that provider's own.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">🔁 Review loop</div>
+          <p>
+            Arms the <a href="review.html#review-loop">review loop</a> on this session. On the welcome pane it
+            speaks for the next session; over an open session it arms or disarms that session's loop on the
+            spot.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">🎬 QA loop</div>
+          <p>
+            Queues a <a href="review.html#qa-loop">QA run</a> behind an armed review loop. It starts when that
+            loop converges by declaring no findings.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">📋 Prompts</div>
+          <p>
+            The <a href="prompts.html#saved-prompts">saved prompt</a> library: insert one into the message
+            box, or save what is typed there.
+          </p>
+        </div>
+      </div>
+      <p>Files can be attached with the 📎 button, or pasted or dropped straight into the message box.</p>
+
+      <h2 id="preparing">What happens before the agent sees your message</h2>
+      <ol>
+        <li>An idle workspace slot is claimed, preferring one already on the branch you picked.</li>
+        <li>A database server is claimed, if the project asks for one.</li>
+        <li>The default branch is fetched; the session branch is checked out.</li>
+        <li>The project's <code>.env</code> template is written into the checkout.</li>
+        <li>
+          The setup commands run, in order. Dependency installs are skipped when their manifests are unchanged
+          since the last success in that slot; builds and database steps always run.
+        </li>
+        <li>Only then is your message handed to the agent.</li>
+      </ol>
+      <p>
+        The first run against a fresh clone is the slow one. After that,
+        <code>vendor/</code> and <code>node_modules/</code> survive in the slot and the installs are skipped
+        outright.
+      </p>
+
+      <h2 id="turns">Turns</h2>
+      <p>
+        Every message spawns one headless provider run that resumes the provider's own session state. Output
+        streams into the page live over SSE; runs of tool calls collapse into an openable block; the turn's
+        footer shows its tokens, its agent time and, when the CLI reports one, its cost.
+      </p>
+      <p>
+        <span class="kbd">■ Stop</span> in the header kills the running turn. The session keeps its clone and
+        its database server between turns and while idle.
+      </p>
+      <p>
+        The status dot beside a session in the sidebar says what it is doing: running, preparing or queued
+        (pulsing), idle (green), <em>waiting</em> (idle but the agent left a question standing, so it is your
+        move), interrupted, or failed. Beside the provider is a second box with the branch the session works
+        on; clicking it opens that branch's pull request and its runs instead of the conversation.
+      </p>
+
+      <h2 id="run">▶ Run</h2>
+      <p>
+        Serves the session's checkout with the project's
+        <a href="projects.html#run">run commands</a>, on an app port of its own (one per workspace slot, 8101,
+        8102, …) against the session's own database, and opens it in a new tab. Two sessions can be served at
+        once without either noticing the other.
+      </p>
+
+      <h2 id="pr-panel">The pull request panel</h2>
+      <p>
+        If the session's branch gets a pull request, its state and CI checks are mirrored into the header and
+        the right-hand panel. Synced at the end of every turn, every 20 seconds while a turn is running, and
+        once a minute otherwise, and the panel redraws from a pushed session record, so it never waits for a
+        poll. With a
+        <a href="operations.html#webhooks">public hostname</a>, GitHub delivers the events instead.
+      </p>
+      <p>
+        <strong>A session finds its own pull request.</strong> Being handed a branch that already has one is
+        the normal way to continue somebody's work, and an agent typically reports back "pushed to
+        <code>dev-x</code> (PR #51)": a number, never a URL. So a session on a branch of its own asks GitHub
+        which pull request is open from exactly that branch: when its workspace is prepared, before any review
+        round it would otherwise skip for want of one, and on the sync tick while it has none (that last one
+        on a few minutes' cooldown, since a session can work for an hour before opening anything, and the
+        token is shared with the board and the webhooks).
+      </p>
+      <p>
+        Nothing is guessed. The match is on the head ref, never on a local session or the repository's default
+        branch. When a branch has several pull requests open at once (GitHub allows that when their bases
+        differ) only the one targeting the branch the workspace was cut from is taken; anything still
+        ambiguous is left unattached, with a line in the session saying which pull requests it could not tell
+        apart.
+      </p>
+      <p>
+        A pull request found this way is a weaker claim than one you handed the session, in one place: merging
+        it does not close the session. An errand pointed at a pull request still ends the moment it merges,
+        but a session opened to keep iterating on a branch is told and left alone rather than stopped mid-work
+        by a teammate's merge.
+      </p>
+      <p>
+        <strong><span class="kbd">🔗 Link PR</span> repairs a missed association.</strong> Enter a pull
+        request number, <code>#number</code>, or its full GitHub URL. The dashboard reads the pull request
+        before linking it and refuses one from another repository or head branch. The
+        <strong>✎</strong> beside the session heading edits the conversation title without sending a message
+        to the agent.
+      </p>
+
+      <h2 id="closing">Closing, reopening, deleting</h2>
+      <ul>
+        <li>
+          <strong>Close</strong> releases the workspace clone and the database server. The conversation stays
+          readable.
+        </li>
+        <li>
+          <strong>Reopen</strong> claims a clone and a database server again and resumes the conversation.
+        </li>
+        <li>
+          <strong>🗑 Delete</strong> also trashes the record and its log. The cost ledger keeps its numbers:
+          deleting a session removes its transcript, not its statistics.
+        </li>
+        <li>
+          The sidebar's multi-select mode closes or deletes several at once; ctrl-clicking a session does the
+          same thing.
+        </li>
+      </ul>
+      <p>
+        <strong>A merge ends every errand on a pull request.</strong> As soon as any session mirroring it sees
+        <code>merged</code>, every open session working on that pull request (review, errand, QA) is closed:
+        its turn is killed and its resources go back to the pool.
+      </p>
+
+      <h2 id="local">Local mode</h2>
+      <p>
+        The workspace chip switches a session from <span class="kbd">⌗ Worktree</span> to
+        <span class="kbd">⌂ Local</span>: the agent works directly in the project's existing checkout on this
+        machine: the path configured as <em>Local checkout</em> in the project's settings.
+      </p>
+      <p>
+        Nothing is prepared. No clone, no branch juggling, no <code>.env</code> seeding, no setup steps, no
+        pooled database. The tree, whatever branch it has checked out, and its real local database are used as
+        they stand. One local session at a time per checkout; the branch picker and ⌕ Code review only apply
+        to worktree sessions.
+      </p>
+
+      <h2 id="zeus">Zeus mode</h2>
+      <p>
+        Selecting <span class="kbd">⚡ Zeus</span> opens the model picker immediately. Choose three models to
+        perform the same complete task independently; the session model in the composer is ZEUS, the
+        summarizer. New Zeus sessions require all three choices. Resuming an older session without complete
+        choices also opens the picker before sending the next message.
+      </p>
+      <p>
+        Every model receives exactly the same complete prompt, investigates a read-only repository clone and
+        returns a complete epic. The server refuses different proposal prompts within the same user brief,
+        including after a restart. Models do not receive specialist assignments or see each other's outputs.
+        In the sidebar they appear as Model 1, Model 2 and Model 3.
+      </p>
+      <p>
+        ZEUS reads all three outputs in full and combines them into one epic, preserving useful unique
+        findings, removing duplicates and checking contradictions against repository evidence. Assumptions and
+        unresolved decisions stay explicit. There is no separate validator: ZEUS consolidates the result and
+        publishes the parent issue with linked implementation sub-issues. The document follows the
+        <em>Zeus epic</em> template under <a href="prompts.html">Prompts</a>, overridable per project.
+      </p>
+      <div class="callout warn">
+        <div class="callout-title">It is your working tree</div>
+        <p>
+          Uncommitted work in that checkout is in the agent's reach, and nothing rolls it back when the
+          session closes. Local mode is for the times you want exactly that; otherwise use a worktree session.
+        </p>
+      </div>
+
+      <h2 id="project-view">The project view</h2>
+      <p>Clicking a project name in the sidebar opens its own view instead of a chat, with three tabs:</p>
+      <ul>
+        <li>
+          <strong>📊 Dashboard</strong>: what this project spent this calendar month, in sessions, agent time,
+          tokens and priced cost.
+        </li>
+        <li>
+          <strong>⇅ Pull requests</strong>: the board, holding this project's open pull requests and the
+          errands they are asking for, filtered by author and label, with the provider and model every errand
+          started from here runs on. See <a href="review.html">Code review &amp; QA</a>.
+        </li>
+        <li>
+          <strong>⊙ Issues</strong>: this repository's open issues, each with who reported it, who holds it,
+          its labels and the open pull requests that say they close it (a pull request in another repository
+          is drawn as <code>owner/repo#n</code> so it cannot be read as this one's). Every row carries
+          <strong>▶ Start</strong>: it opens a session on the project that reads the issue with
+          <code>gh</code>, implements it on a branch of its own and opens a pull request closing it, with the
+          review loop armed. That session appears in the sidebar badged <em>New branch</em>, and the board
+          stays where it is, so several issues can be started in a row. The issues ride on the board's own
+          query, so opening the tab costs no extra GitHub request, and the walk is bounded at four pages of
+          the most-recently-updated issues: the tab says so when it was cut short. The token needs
+          <strong>Issues: read</strong> for any of it; without that the board still works and the tab prints
+          what it is missing.
+        </li>
+        <li>
+          <strong>Epics</strong> are GitHub's own sub-issues, read off the parent/child link rather than an
+          <code>epic</code> label or an <code>[Epic]</code> title. A sub-issue is drawn nested under its
+          parent, in number order, and an epic carries how much of itself is finished (<em>3/8 done</em>) and
+          a fold to put its children away. That count is GitHub's, over every sub-issue: the closed ones and
+          any in another repository or past the four-page walk are in it, which is why it is often larger than
+          the rows nested underneath. A sub-issue whose epic is not on the list — closed, in another
+          repository, or hidden by the pickers — stays where it is and links to it instead.
+          <strong>▶ Start</strong> on an epic asks first — and asks what to run it on: an account, model and
+          effort for the orchestrator, and another set for the workers it will start (the project's worker
+          runtime from Settings when one is set, the orchestrator's own picks otherwise). It then opens a 🧭
+          orchestrator rather than a coding session: it lists the open sub-issues itself and takes them one at
+          a time, a worker each with the review loop armed, merging each pull request (squash) once the loop
+          approves it and its checks are green before the next worker starts. Each review round's findings
+          come to the orchestrator first, to <a href="review.html#triage">triage</a> against the sub-issue and
+          the epic; only what it keeps is implemented. A loop that stalls hands it the leftover findings to
+          judge the same way: the ones that apply go back to the worker, the rest it waives on the pull
+          request.
+        </li>
+        <li>
+          <strong>Self-healing.</strong> The dashboard is software too, and an orchestrator can be failed by
+          it: a worker tool that errors or misleads, a briefing that sent a worker the wrong way, a loop that
+          misbehaves. When the dashboard's own repository is set up as a project and flagged as
+          <em>the dashboard itself</em> (<a href="projects.html#self">Projects</a>), every orchestrator gets a
+          <code>fix_tooling</code> tool beside <code>spawn_worker</code>: it starts a worker on that project,
+          review loop armed, with the orchestrator's report as its brief. The fix is a worker in every other
+          respect: it counts among the open workers and against the budget, it opens a pull request, and the
+          orchestrator merges it (squash) once the loop approves and the checks are green, then says so. The
+          running dashboard keeps its current code until you redeploy it. In the sidebar the worker is drawn
+          under its orchestrator badged <em>🩹 tooling</em>, and again at the top of the dashboard project's
+          own list, where its branch lives. With no project flagged, the briefing asks the orchestrator to
+          report such flaws to you in a line instead.
+        </li>
+      </ul>
+      <p>
+        Each tab keeps its own filter picks, so narrowing the issues to a label does not throw away the author
+        the pull requests were narrowed to. Switching projects drops both, since a name that means something
+        on one repository means nothing on the next.
+      </p>
+
+      <h2 id="cost">What a session costs</h2>
+      <p>
+        Every finished turn is written to a project-owned <code>turn_usage</code> ledger: agent time, tokens
+        in and out, and the provider's own cost figure when its CLI reports one: claude and opencode do, codex
+        does not, and the ledger stores no number nobody charged.
+      </p>
+      <p>
+        The ledger is independent of the session record, so deleting a session removes its transcript but
+        keeps its statistics. The session header shows that session's tokens and cost as a chip, each turn's
+        footer shows its own, and the project dashboard shows the month so far. The same numbers are available
+        as JSON:
+      </p>
+      <p>
+        A session's chip and its <strong>Context usage</strong> panel count everything it ordered, not only
+        its own turns: an orchestrator's numbers cover every worker it spawned, and a task's cover the review
+        sessions, fix sessions and QA run its loops started, while those are open and after they close (an
+        auto-closed review pays its spend into the session it reviewed for as it is deleted). The panel says
+        how many other sessions are in the total. The sub-agents a turn forks inside the CLI were always in
+        that turn's own figures. The ledger stays per turn and per activity, so the dashboard still tells
+        review spend from orchestration spend.
+      </p>
+      <pre><code>GET /api/dev/usage?repo=owner/name</code></pre>
+
+      <h3 id="main-dashboard">The main dashboard</h3>
+      <p>
+        The 📊 button beside <strong>＋ New session</strong> opens the same ledger with no project filter:
+        headline tiles, tokens over time, a row per project and a breakdown per model. Its picker chooses the
+        window every number on the page is over: <strong>This month</strong>, <strong>Last month</strong> or
+        <strong>All time</strong>. A month is charted a bar per calendar day, all time a bar per month, both
+        cut on this machine's own clock. Projects you have since switched off are still listed: one disabled
+        mid-month spent what it spent, and leaving it out would stop the rows adding up to the totals.
+      </p>
+      <p>
+        A cost total wears a <code>+</code> when some of the turns behind it could not be priced at all, so an
+        unpriced turn cannot be read as a free one, and a <code>~</code> when some of them were priced by the
+        dashboard rather than by their own CLI: their tokens at the model's published list price, from the
+        <a href="https://models.dev">models.dev</a> catalog the app fetches once a day and caches. The Cost
+        tile and every cost tooltip say how many turns of the total that was. An estimate is arithmetic over
+        tokens, never an invoice: the ledger itself still stores only what the providers reported. Same
+        numbers as JSON:
+      </p>
+      <pre><code>GET /api/dev/usage/all?period=month|prev|all</code></pre>
+
+      <h2 id="storage">Where the history lives</h2>
+      <p>
+        Session history and logs live in MySQL (<code>jobs</code> / <code>job_events</code>) and nowhere else,
+        so they survive restarts and nothing is capped or trimmed. Writes are batched and retried while the
+        database is unreachable, and flushed on shutdown. The only files the app writes are the scratch prompt
+        files each turn hands to the CLI, kept in the OS temp directory and deleted when the turn ends.
+      </p>
+    </article>
+    <script src="docs.js"></script>
+  </body>
+</html>

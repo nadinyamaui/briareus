@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Code review &amp; QA · Briareus</title>
+    <meta
+      name="description"
+      content="The pull request board and its errands, the ⌕ code review, the findings panel, the review loop, the stall gate and the QA test sheet."
+    />
+    <link rel="stylesheet" href="docs.css" />
+  </head>
+  <body class="min-h-dvh">
+    <article class="doc">
+      <div class="pill mb-4">Working</div>
+      <h1 class="mt-0 mb-3 text-[34px] leading-[1.15] font-semibold tracking-[-0.02em]">
+        Code review &amp; QA
+      </h1>
+      <p class="!text-[17px] !text-muted">
+        Reviews, fixes and manual QA, all driven from a project's pull request board. Configured in the
+        <a href="projects.html#code-review">Code review</a> section of the project form.
+      </p>
+
+      <div class="callout">
+        <div class="callout-title">Every review is somebody pressing a button</div>
+        <p>
+          Nothing on GitHub starts a session by itself: no push, no label and no webhook delivery ever opens
+          one. The only automatic rounds are inside a
+          <a href="#review-loop">review loop</a> you armed, and even there the trigger is the session's own
+          turn ending.
+        </p>
+      </div>
+
+      <h2 id="board">The pull request board</h2>
+      <p>
+        Click a project in the sidebar and open the <strong>⇅ Pull requests</strong> tab. It lists the
+        project's open pull requests and the errands each is asking for, filtered by author and label; the
+        header's provider and model selects decide what every errand started from here runs on.
+        <span class="kbd">⟳</span> re-reads GitHub.
+      </p>
+      <p>
+        A project's <strong>PR author</strong> setting is the default filter, deciding whose pull requests
+        this board is about.
+      </p>
+      <p>
+        The <strong>⊙ Issues</strong> tab beside it lists the repository's open issues and the pull requests
+        already answering them, on the same query the board makes. Its one errand is <strong>▶ Start</strong>,
+        which puts a session on the issue with the review loop armed; on an epic it opens a 🧭 orchestrator
+        that works the sub-issues one at a time and merges each once its loop approves it. See
+        <a href="sessions.html#project-view">The project view</a>.
+      </p>
+
+      <h3 id="errands">The errands</h3>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Button</th>
+              <th>Does</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>⌕ Code review</td>
+              <td>Reviews the branch and publishes what it found on the pull request.</td>
+            </tr>
+            <tr>
+              <td>✎ PR Body Summary</td>
+              <td>
+                Writes the pull request description, in the shape the
+                <a href="prompts.html">PR body prompt</a> asks for.
+              </td>
+            </tr>
+            <tr>
+              <td>📋 Test sheet</td>
+              <td>Derives the manual QA checklist from the diff and posts it as one editable comment.</td>
+            </tr>
+            <tr>
+              <td>🎬 Run test sheet</td>
+              <td>
+                Starts the <a href="#qa">QA session</a>: write the sheet, execute it, record the evidence.
+              </td>
+            </tr>
+            <tr>
+              <td>🛠 Implement feedback</td>
+              <td>Works from the pull request's own review threads and pushes the fixes.</td>
+            </tr>
+            <tr>
+              <td>✍ Give feedback</td>
+              <td>Sends what you type into the dashboard to the agent as the whole prompt.</td>
+            </tr>
+            <tr>
+              <td>🔀 Solve conflicts</td>
+              <td>Merges the base branch in, resolves and pushes.</td>
+            </tr>
+            <tr>
+              <td>🧪 Fix failing checks</td>
+              <td>Reads the red CI run and fixes what this branch broke.</td>
+            </tr>
+            <tr>
+              <td>🧹 Delete my comments</td>
+              <td>Removes everything the configured GitHub account left on the pull request.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Every one of these is a prompt you can rewrite, shared or per project; see
+        <a href="prompts.html">Prompts</a>.
+      </p>
+
+      <h2 id="review">What a code review does</h2>
+      <ol class="steps">
+        <li>
+          <h3>It says it started</h3>
+          <p>
+            As soon as the clone is claimed, before the minutes the checkout takes, the session comments on
+            the pull request: which agent is reviewing which branch, and that the findings land there when it
+            is done. One anchored comment per PR (<code>&lt;!-- reviewer:review-started --&gt;</code>), so a
+            project reviewing every push edits the notice already there instead of stacking one per push. Best
+            effort: no token, no PR number or a GitHub that will not answer leaves a line in the session's log
+            and the review runs anyway.
+          </p>
+        </li>
+        <li>
+          <h3>It reviews</h3>
+          <p>
+            On the project's review runtime (provider, model and effort) unless the composer picked another.
+          </p>
+        </li>
+        <li>
+          <h3>It publishes</h3>
+          <p>
+            The summary comment ends with a machine-readable findings block. Then the project's
+            <strong>Publish steps</strong> run as one more turn in the same conversation, on the same
+            provider: label moves, issue updates, whatever the team's workflow asks for.
+          </p>
+        </li>
+        <li>
+          <h3>It closes itself</h3>
+          <p>
+            A review session started from a board row hands its workspace clone and its database server
+            straight back, and its record goes with them, rather than leaving one dead conversation per review
+            in the sidebar. What it found is on the pull request, which is where it gets read and answered.
+          </p>
+          <p>
+            The exception is a review that stopped to ask something: it stays open until somebody answers it.
+          </p>
+        </li>
+      </ol>
+      <p>
+        Each fix commit ends with a <code>[reviewer-fix]</code> line, so the dashboard can tell a push it made
+        from one a human made.
+      </p>
+
+      <h2 id="findings">The findings panel</h2>
+      <p>
+        The findings themselves live on the pull request. GitHub is the source of truth, and the app only
+        parses the block the review left there. What the app owns is <em>your verdict</em> on each one, stored
+        per finding and mirrored back onto the pull request as one anchored
+        <strong>Required fixes</strong> checklist comment.
+      </p>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Verdict</th>
+              <th>Means</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>fix</strong></td>
+              <td>Goes on the Required fixes checklist. A fix session implements it and ticks it.</td>
+            </tr>
+            <tr>
+              <td><strong>optional</strong></td>
+              <td>Acknowledged, not required. Left off the checklist and never sent back to be fixed.</td>
+            </tr>
+            <tr>
+              <td><strong>dismissed</strong></td>
+              <td>Rejected. Same: off the checklist, never re-sent.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Findings are keyed by a hash of their title: the one thing the block, the stored verdict and the
+        checklist comment all carry. So a verdict survives the next review re-declaring the same finding:
+        <strong>your decision stands, however often a later review raises it again.</strong>
+      </p>
+
+      <h2 id="review-loop">The review loop</h2>
+      <p>
+        The composer's <span class="kbd">🔁</span> chip arms a review loop, and
+        <span class="kbd">🛠 Implement feedback</span>, started from the board, arms the same loop so the fixes
+        it pushes get reviewed. A review, a QA run, any other board errand or a local session is never a loop.
+      </p>
+      <p>An armed session works its task as usual. Then, round after round:</p>
+      <ol>
+        <li>It settles idle with new commits on its open pull request.</li>
+        <li>
+          The app starts a review session for it: the same auto-closing kind the board starts, on the review
+          runtime the project configures.
+        </li>
+        <li>
+          When that review closes, whatever findings it declared are handed to a <strong>fix session</strong>
+          of its own: the same auto-closing implement-feedback errand the board starts, on the session's
+          branch and provider.
+        </li>
+        <li>That fix session pushes and closes, which triggers the next review.</li>
+      </ol>
+      <p>
+        <strong>The session is the durable half.</strong> It is the loop's anchor: it keeps its clone, its
+        database server and its conversation, and you can keep chatting in it undisturbed while the reviews
+        and the fix sessions come and go around it.
+      </p>
+      <p>
+        Each round's findings are listed on the <strong>Required fixes</strong> checklist before the fix
+        session starts, exactly as if you had decided them by hand in the findings panel: handing them over to
+        be implemented <em>is</em> that decision. The fix session then ticks the ones it actually fixed,
+        replies on the threads it addressed and resolves them, so the pull request and the panel both show
+        what is solved and what is still open. A finding you had already dismissed or marked optional is left
+        off that list.
+      </p>
+
+      <p id="triage">
+        <strong>A worker's loop is triaged by its orchestrator first.</strong> When the worker files under a
+        🧭 orchestrator, each round's findings reach the orchestrator as an update, each with the loop's own
+        advice on it (what the rules below would have parked, and why), and nothing is implemented until it
+        rules on every one with <code>triage_findings</code>: <em>fix</em> goes to the fix session,
+        <em>dismissed</em> is recorded like a verdict given by hand in the findings panel and said on the pull
+        request with the reason, so no later round offers it again, and <em>optional</em> keeps it on the pull
+        request without spending a round. The orchestrator has the task's whole context, which the review did
+        not. The loop holds until it rules (the worker shows <em>awaiting triage</em>); a loop whose
+        orchestrator was closed meanwhile runs the round the way a loop with no orchestrator does.
+      </p>
+
+      <h3 id="convergence">When it stops</h3>
+      <p>
+        It runs until it converges: it stops on its own when a review declares no findings, and the 🔁 chip
+        stops it whenever you decide the rounds are no longer paying for themselves.
+      </p>
+      <p>
+        Three gates keep it from reviewing the code its own fixes introduced, which is the runaway the stall
+        gate below cannot see: every round finds something genuine and something new, so the loop neither runs
+        dry nor repeats itself.
+      </p>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Gate</th>
+              <th>Does</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>REVIEW_LOOP_MAX_ROUNDS</code><br /><span class="f-meta">3</span></td>
+              <td>
+                How many rounds one armed loop runs. The last one still reviews and still lists what it found;
+                it just does not start the fix session that would open the next round. <code>0</code> removes
+                the cap.
+              </td>
+            </tr>
+            <tr>
+              <td><code>REVIEW_LOOP_LOW_UNTIL_ROUND</code><br /><span class="f-meta">1</span></td>
+              <td>
+                The last round on which a <strong>low</strong> finding is still implemented. After it, a low
+                is recorded instead of costing a fix session and another review: a low found late is nearly
+                always a note on the previous round's fix rather than on the change under review.
+                <code>0</code> never tightens.
+              </td>
+            </tr>
+            <tr>
+              <td>Off-diff findings</td>
+              <td>
+                A finding naming a file the pull request does not change is parked. A review reading the whole
+                repository occasionally reports something real about code the branch never touched. It fails
+                open when the diff cannot be listed: withholding a real finding is the worse half of that
+                trade.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        A finding held back by either of the last two is recorded as <strong>optional</strong>: it stays in
+        the findings panel and in the review's own comment on the pull request, stays off the required-fixes
+        checklist, and is not offered again next round. A verdict you gave by hand wins over all of it: a
+        dismissed finding never comes back, and one you marked <em>fix</em> is kept however low it is or
+        wherever it points.
+      </p>
+      <p>
+        Then there is the <strong>stall gate</strong>. A round that hands back exactly the findings the round
+        before it did means the fix session between them did not move the review, and implementing them again
+        would push another commit, open the commit gate and start the same round over, so the loop stops there
+        and says so instead of ping-ponging on a session nobody is watching. What it found stays on the pull
+        request, and the next push you make yourself picks the loop back up.
+      </p>
+      <p>
+        Between rounds a <strong>commit gate</strong> keeps a session with nothing new pushed from being
+        reviewed again, so chatting never re-triggers a review, and a failed or stopped review pauses the loop
+        until the next push instead of retrying itself in a circle.
+      </p>
+
+      <h3 id="arming">Arming mid-session</h3>
+      <p>
+        The 🔁 chip stays live over an open session and turns its loop on or off there and then, which is
+        usually when you know you want it: the task turned out bigger than it looked, or the pull request is
+        up and there is no reason to press ⌕ by hand every push. Arming mid-session reviews what is already
+        pushed rather than waiting for the next push.
+      </p>
+      <p>
+        Turning it off stops any further rounds; a review already running still finishes and publishes on the
+        pull request, it just reports nothing back. Re-arming starts the round count over, except that a
+        review still running from the arm you turned off is adopted as the new loop's first round, rather than
+        a second review of the same pull request being started alongside it.
+      </p>
+
+      <h2 id="qa">QA, once the code is approved</h2>
+      <p>
+        QA is not part of the review, and it is not started by a label either: the board shows a
+        <span class="kbd">🎬 QA</span> button on an approved pull request and somebody presses it. It runs in
+        a <strong>session of its own</strong>: a review session would otherwise have to sit on its clone and
+        its database server for however long the sign-off took.
+      </p>
+      <ul>
+        <li>
+          With <strong>Write a test sheet</strong> on, that session's first turn derives the manual test sheet
+          from the diff and posts it as one editable comment.
+        </li>
+        <li>
+          With <strong>Execute the test sheet</strong> on, a second turn serves the app against the session's
+          own database, drives every ⬜ scenario with Playwright, records a video of each and writes the
+          results back into the sheet.
+        </li>
+      </ul>
+      <p>
+        Nothing follows the run: the ❌ rows are there to be read, and
+        <span class="kbd">⚙ Implement feedback</span> is the errand that acts on them.
+      </p>
+      <p>
+        The test run needs the project's <a href="projects.html#run">run commands</a> to work: it serves the
+        app the same way ▶ Run does. Where the videos are linked from depends on whether
+        <a href="config.html#r2">R2</a> is configured; without it they are served at
+        <code>/videos</code> behind the dashboard's login.
+      </p>
+
+      <h2 id="qa-loop">The QA loop</h2>
+      <p>
+        The composer's <span class="kbd">🎬</span> chip queues a QA loop behind an armed review loop. It is
+        one run, not another series of rounds: when the review loop converges by declaring no findings, the
+        app starts the same kind of auto-closing QA session the board's 🎬 button starts.
+      </p>
+      <ul>
+        <li>That session's first turn writes the test sheet.</li>
+        <li>As soon as that turn settles, its second turn executes the sheet and records the evidence.</li>
+        <li>If every executed scenario passes, the QA loop stops.</li>
+        <li>
+          Failed scenarios are reported back to the task session as QA feedback, and the loop stops there too,
+          since acting on that feedback stays a human decision for now.
+        </li>
+      </ul>
+      <p>Turning the review loop off also cancels the QA run waiting behind it.</p>
+
+      <h2 id="merged">Merged pull requests</h2>
+      <p>
+        A merge ends every errand on a pull request. As soon as any session mirroring it sees
+        <code>merged</code>, every open session working on that pull request (review, errand, QA) is closed:
+        its turn is killed and its clone and database server go back to the pool. The conversations stay
+        readable, as they do after any close.
+      </p>
+      <p>
+        The one session that survives a merge is one that
+        <a href="sessions.html#pr-panel">found its own pull request</a> rather than being handed it: it is
+        told, and left alone rather than stopped mid-work by a teammate's merge.
+      </p>
+
+      <h2 id="setup">Setting a project up for review</h2>
+      <ol>
+        <li>Fill in <strong>PR author</strong> so the board shows the right pull requests.</li>
+        <li>
+          Pick the review <strong>Provider / Model / Effort</strong>. Reviews are the one place where spending
+          on a stronger model usually pays.
+        </li>
+        <li>
+          Write <strong>Publish steps</strong>: at minimum, publishing the review to the pull request with
+          <code>gh</code>. Leave it empty and nothing happens after the review.
+        </li>
+        <li>
+          For QA: tick the two step checkboxes, fill in <strong>QA notes</strong> with the logins and URLs a
+          tester needs, and make sure <strong>Run commands</strong> actually serve the app.
+        </li>
+        <li>
+          Optionally give the test sheet and feedback errands <strong>closing steps</strong>: label moves, a
+          ping in chat.
+        </li>
+      </ol>
+    </article>
+    <script src="docs.js"></script>
+  </body>
+</html>

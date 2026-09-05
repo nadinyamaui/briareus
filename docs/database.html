@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Database pool · Briareus</title>
+    <meta
+      name="description"
+      content="Registering the MySQL servers a session can claim: why the pool exists, how a claim works, how many entries you need, and how to run several throwaway instances in RAM."
+    />
+    <link rel="stylesheet" href="docs.css" />
+  </head>
+  <body class="min-h-dvh">
+    <article class="doc">
+      <div class="pill mb-4">Configuration</div>
+      <h1 class="mt-0 mb-3 text-[34px] leading-[1.15] font-semibold tracking-[-0.02em]">Database pool</h1>
+      <p class="!text-[17px] !text-muted">
+        The list of MySQL servers a session can take for itself. Each entry is one server (host, port,
+        username, password) and one session holds one server at a time, exclusively, for as long as it stays
+        open. Registered under <strong>Settings → Database pool</strong>.
+      </p>
+
+      <h2 id="why">Why it exists</h2>
+      <p>
+        Parallel sessions used to share one database, so a test that truncated a table or a migration that
+        rebuilt the schema broke whatever else was running at the time. Giving each session a server of its
+        own is the blunt fix, and it is blunt on purpose: nothing about a project's test suite has to be
+        changed for it to work.
+      </p>
+
+      <div class="callout warn">
+        <div class="callout-title">Two different databases, do not confuse them</div>
+        <p>
+          The <code>DB_*</code> keys in <code>.env</code> point at <strong>the app's own database</strong>:
+          the projects, the providers, the prompts, the session history, the cost ledger. The pool on this
+          page is <strong>the sessions' databases</strong>, and has nothing to do with those keys. On a
+          single-machine install they are usually different servers, or at least different ports.
+        </p>
+      </div>
+
+      <h2 id="adding">Adding a server</h2>
+      <ol class="steps">
+        <li>
+          <h3>Settings → Database pool → ＋ New</h3>
+        </li>
+        <li>
+          <h3>Point it at the server</h3>
+          <p>Host, port, username, password. Press <span class="kbd">Test connection</span>.</p>
+        </li>
+        <li>
+          <h3>Save</h3>
+          <p>
+            The capacity counter beside the sidebar heading goes up by one. That number is the ceiling on how
+            many sessions of pool-claiming projects can be open at once.
+          </p>
+        </li>
+      </ol>
+
+      <div class="fields">
+        <div class="f">
+          <div class="f-name">
+            In the pool: sessions may claim this server <span class="f-meta">checkbox</span>
+          </div>
+          <p>
+            Untick to take a server out of rotation without deleting it: for maintenance, or while you work
+            out whether it is the one misbehaving. A session already holding it keeps it until it closes.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Label</div>
+          <p>What the sidebar and the session log call it. Defaults to <code>host:port</code>.</p>
+        </div>
+        <div class="f">
+          <div class="f-name">Host / Port</div>
+          <p>
+            Where the server is, from the app's point of view. In Docker that is the compose service name:
+            <code>db-pool-1</code>, port <code>3306</code>. Host and port together must be unique across the
+            pool: two entries for the same server would hand two sessions the same database, which is exactly
+            what the pool exists to prevent.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Username / Password</div>
+          <p>
+            An account that may <code>CREATE DATABASE</code> (the session's database is created on demand)
+            and, if a project restores a dump,, may write everything in it. The password may be empty.
+          </p>
+        </div>
+        <div class="f">
+          <div class="f-name">Test connection</div>
+          <p>
+            Connects with what is in the form right now, saved or not. Do this before saving: a bad entry in
+            the pool fails at the least convenient moment, which is a session that has already spent two
+            minutes cloning.
+          </p>
+        </div>
+      </div>
+
+      <h2 id="claiming">What happens on a claim</h2>
+      <ol>
+        <li>
+          The session picks an idle enabled entry. If none is free, it waits, up to
+          <code>DB_POOL_WAIT_TIMEOUT_MIN</code> (default 30), checking every
+          <code>DB_POOL_POLL_SECONDS</code> (default 10).
+        </li>
+        <li>
+          The project's <strong>Database</strong> name is created on that server if it is not there yet. Any
+          <strong>Postgres extensions</strong> the project lists are created in it.
+        </li>
+        <li>
+          If the project names a <strong>Restore from .sql</strong> dump, it is piped in, before the setup
+          steps run.
+        </li>
+        <li>
+          The server is injected into the session's environment as <code>DB_HOST</code>, <code>DB_PORT</code>,
+          <code>DB_DATABASE</code>, <code>DB_USERNAME</code> and <code>DB_PASSWORD</code>, beating whatever
+          the checkout's <code>.env</code> says. The project's setup commands (migrations, seeding) then run
+          against it.
+        </li>
+        <li>A line is written into the session log saying which server was claimed.</li>
+        <li>The claim is released when the session closes, fails or is deleted.</li>
+      </ol>
+      <p>
+        Claims live in the server process and nowhere else. Sessions are the only claimants, and a restart
+        interrupts every session (the boot marks them interrupted and clears their claims) so there is nothing
+        on disk to reconcile.
+      </p>
+
+      <h2 id="how-many">How many entries do I need?</h2>
+      <p>
+        As many as the number of sessions you want open at once <em>on projects that claim a server</em>. That
+        is the whole rule. A project with the pool switched off holds nothing exclusive and is never capped,
+        so a repository with no database costs nothing here.
+      </p>
+      <p>
+        When the pool cannot answer the question (claiming switched off with
+        <code>DB_POOL_ENABLED=false</code>, or no servers registered yet) <code>DEV_MAX_SESSIONS</code>
+        (default 3) is the fallback cap. Once there are entries, the pool's size is the cap and that setting
+        stops mattering.
+      </p>
+
+      <h2 id="running">Running the servers</h2>
+      <p>
+        Briareus does not start MySQL for you; it connects to servers that are already running. Three ordinary
+        ways to have several:
+      </p>
+
+      <h3 id="running-docker">Docker compose</h3>
+      <p>The repository's own compose file ships a <code>pool</code> profile:</p>
+      <pre><code>docker compose --profile pool up -d</code></pre>
+      <p>Then add <code>db-pool-1:3306</code> and <code>db-pool-2:3306</code> as entries.</p>
+
+      <h3 id="running-systemd">A templated systemd unit</h3>
+      <p>
+        On a machine with MySQL installed, a <code>mysql-pool@&lt;port&gt;</code> template gives you one
+        instance per port (3307, 3308, 3309 and up) each with its own datadir. Add one pool entry per port.
+      </p>
+
+      <h3 id="ram">Keeping them in RAM</h3>
+      <p>
+        A pool server is disposable by design: the app creates the session's database and restores the
+        project's dump before the session runs, so an instance that comes up empty is repopulated on first
+        use. That makes tmpfs the natural datadir: a reboot leaves none of it behind, and the next session
+        gets a server that has never held anybody's data.
+      </p>
+      <p>
+        <code>scripts/mysql-pool-ram.sh</code> and the units in <code>deploy/</code> do this for eight
+        instances (3307–3314). The install, the memory sizing and the reset commands are in
+        <a href="https://github.com/nadinyamaui/briareus/blob/main/deploy/README.md">deploy/README.md</a>.
+      </p>
+      <div class="callout danger">
+        <div class="callout-title">The master on 3306 stays on disk</div>
+        <p>
+          It holds Briareus's own database (session history, projects, providers, prompt templates) and none
+          of that is meant to be disposable. Only the pool instances go to RAM.
+        </p>
+      </div>
+      <p class="!text-muted !text-[14px]">
+        Rough sizing: an empty instance is around 190 MB and a restored project dump adds a few hundred more,
+        which puts eight of them near 4 GB. The script's <code>RAM_SIZE</code> (3G) and
+        <code>BUFFER_POOL</code> (512M) are per-instance ceilings, not reservations, but they are ceilings
+        eight times over, so size the pool against the RAM you actually have.
+      </p>
+
+      <h2 id="project-side">The project half</h2>
+      <p>
+        Registering a server does nothing on its own. A project has to ask for one: tick
+        <strong>Give each session a database server of its own</strong> and name the
+        <strong>Database</strong> in <a href="projects.html#database">the project form</a>.
+      </p>
+      <p>
+        Migrations and seeding stay the project's business, in its setup commands. They run on every session,
+        against whichever server was claimed. The app creates the database and restores the dump; everything
+        past that is yours.
+      </p>
+
+      <h2 id="tuning">Related settings</h2>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th><code>.env</code> key</th>
+              <th>Default</th>
+              <th>What it does</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>DB_POOL_ENABLED</code></td>
+              <td><code>true</code></td>
+              <td>
+                Switches claiming off entirely. With it off, no project claims a server whatever its own
+                checkbox says.
+              </td>
+            </tr>
+            <tr>
+              <td><code>DB_POOL_WAIT_TIMEOUT_MIN</code></td>
+              <td><code>30</code></td>
+              <td>How long a session waits for a server to free up before giving up.</td>
+            </tr>
+            <tr>
+              <td><code>DB_POOL_POLL_SECONDS</code></td>
+              <td><code>10</code></td>
+              <td>How often it re-checks while waiting.</td>
+            </tr>
+            <tr>
+              <td><code>DEV_MAX_SESSIONS</code></td>
+              <td><code>3</code></td>
+              <td>The session cap used only when the pool cannot answer for it.</td>
+            </tr>
+            <tr>
+              <td><code>DEV_TIMEOUT_MIN</code></td>
+              <td><code>60</code></td>
+              <td>
+                Per-turn time limit, and only for a session holding a pooled server, since that claim is what
+                its peers queue behind. A session without one runs without a limit.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </article>
+    <script src="docs.js"></script>
+  </body>
+</html>

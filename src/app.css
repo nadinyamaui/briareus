@@ -1,0 +1,531 @@
+/* Developer mode: a Claude-desktop-style dark chat, built with Tailwind.
+   Build with `npm run build:css` (or `npm run watch:css` while editing);
+   the output at public/app.css is committed so `node server.js` needs no build. */
+
+@import 'tailwindcss' source(none);
+/* The palette and type scale: `bg-raise`, `text-muted`, `border-line`,
+   `text-accent`… all fall out of these. Shared with the documentation site so
+   the two cannot drift apart; see src/theme.css. */
+@import './theme.css';
+
+@source "../public";
+/* The build output lives in the directory being scanned, so without this it
+   feeds on itself: every build reads the classes the last one emitted and
+   re-emits them, and the file only settles after several rounds. */
+@source not "../public/app.css";
+
+@theme {
+  --animate-modal-in: modal-in 0.16s ease-out;
+  --animate-backdrop-in: backdrop-in 0.16s ease-out;
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 🏝 The office's ticker is the one piece of the office CSS still animates:
+   the island itself moves in three.js (public/island3d.js). */
+@keyframes ticker-line-in {
+  from {
+    opacity: 0;
+    transform: translateX(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+@keyframes ticker-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+@layer base {
+  /* Only `body` carries the type size: setting it on `html` too made every
+     rem-based size resolve against a shrunken root, so `text-sm` compounded
+     down to ~12px and the whole app read a size smaller than it looked.
+     Height is dynamic-viewport rather than 100%: on a phone the address bar
+     comes and goes, and `h-full` against it left the composer sitting under
+     the browser chrome. */
+  html,
+  body {
+    @apply h-dvh m-0 bg-canvas text-ink font-sans;
+  }
+
+  body {
+    @apply flex overflow-hidden text-sm/relaxed;
+  }
+
+  /* Elements the JS shows and hides carry both `flex` and `hidden`; hiding has
+     to win regardless of how the two display utilities happen to be ordered. */
+  .hidden {
+    display: none !important;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-[#3c3b38] rounded-md;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* Off-canvas panels. The two side panels are columns of the desktop layout
+     and drawers over the content on a phone: same markup, slid out of the way
+     below `lg` and put back in the flow above it. `.open` is what the ☰ / ⓘ
+     buttons toggle, and it means nothing at desktop width. */
+  .drawer {
+    @apply fixed inset-y-0 z-40 w-[85vw] shadow-2xl shadow-black/50 transition-transform duration-200
+           lg:relative lg:z-auto lg:w-[268px] lg:shadow-none lg:transition-none;
+  }
+  /* The desktop reset rides on these two rather than on `.drawer`: same
+     specificity, and the side rule is the later one, so a reset written up
+     there would lose the cascade and leave the panel shifted out of its own
+     column at every width. */
+  .drawer-left {
+    @apply left-0 -translate-x-full lg:translate-x-0;
+  }
+  .drawer-right {
+    @apply right-0 translate-x-full lg:translate-x-0;
+  }
+  .drawer.open {
+    @apply translate-x-0;
+  }
+
+  /* Buttons: the only chrome repeated often enough to earn a class. Taller on
+     a phone, where 24px of button is a miss as often as a hit. */
+  .btn {
+    @apply cursor-pointer rounded-[7px] border border-line bg-raise px-2.5 py-1.5
+           text-xs text-ink transition-colors hover:border-accent-dim
+           disabled:cursor-default disabled:text-muted disabled:hover:border-line
+           lg:py-[5px];
+  }
+  /* The mobile bar's own controls: ☰ and ⓘ, sized for a thumb. The sidebar's
+     view switches share the class, and there the row has 248px to hold ＋ New
+     session as well, so above `lg` — where the pointer is a mouse and 32px is
+     an easy target — the square drops a notch and gives the label the room. */
+  .btn-icon {
+    @apply flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-lg
+           border border-line bg-raise text-[15px] text-ink transition-colors
+           lg:size-8 lg:text-[13px];
+  }
+  .btn-danger {
+    @apply hover:border-danger hover:text-danger;
+  }
+  .btn-primary {
+    @apply border-accent bg-accent text-[#1b1b19] hover:border-accent-dim hover:bg-accent-dim;
+  }
+
+  /* The chip row above the message box wraps to three lines on a phone, which
+     is fine while composing a new session (that is where the pickers are used)
+     but pure loss once a session is open and every chip is locked to what it
+     runs on. Locked, it becomes one scrollable line and gives the conversation
+     its ~60px back. (Only safe when locked: the branch popover is absolutely
+     positioned inside this row, and a scroll container would clip it.) */
+  @media (width < 64rem) {
+    #composer-chips:has(select:disabled) {
+      @apply flex-nowrap overflow-x-auto;
+    }
+  }
+
+  /* Status dot in the session list; the modifier comes from session.status. */
+  .dot {
+    @apply size-[7px] shrink-0 rounded-full bg-[#6b6862];
+  }
+  .dot.running,
+  .dot.preparing,
+  .dot.queued {
+    @apply animate-pulse bg-accent;
+  }
+  .dot.idle {
+    @apply bg-ok;
+  }
+  /* Idle, but the agent left a question standing: it is the reader's move. */
+  .dot.waiting {
+    @apply animate-pulse bg-warn;
+  }
+  .dot.failed {
+    @apply bg-danger;
+  }
+  .dot.interrupted {
+    @apply bg-warn;
+  }
+
+  /* Rendered markdown: md() emits bare tags, so style them here. */
+  .prose-chat {
+    @apply my-2.5 break-words;
+  }
+  .prose-chat p {
+    @apply my-1.5;
+  }
+  .prose-chat h2,
+  .prose-chat h3,
+  .prose-chat h4 {
+    @apply mt-3 mb-1 text-[17px] font-semibold;
+  }
+  .prose-chat ul {
+    @apply my-1 list-disc pl-[22px];
+  }
+  .prose-chat ol {
+    @apply my-1 list-decimal pl-[22px];
+  }
+  .prose-chat li {
+    @apply my-[3px];
+  }
+  .prose-chat li > ul,
+  .prose-chat li > ol {
+    @apply my-0;
+  }
+  .prose-chat pre {
+    @apply overflow-x-auto rounded-lg border border-line bg-sunken p-2.5
+           font-mono text-xs;
+  }
+  .prose-chat code {
+    @apply rounded bg-sunken px-1.5 py-px font-mono text-xs;
+  }
+  .prose-chat a {
+    @apply text-accent hover:underline;
+  }
+  .prose-chat em {
+    @apply italic;
+  }
+  .prose-chat del {
+    @apply text-muted line-through;
+  }
+  .prose-chat hr {
+    @apply my-3 border-t border-line;
+  }
+  .prose-chat blockquote {
+    @apply my-1.5 border-l-2 border-line pl-2.5 text-muted;
+  }
+  /* Tables are the one block that can outgrow the column, so scroll it alone
+     rather than letting the chat scroll sideways. */
+  .prose-chat .tbl {
+    @apply my-2 overflow-x-auto;
+  }
+  .prose-chat table {
+    @apply w-full border-collapse text-[14px];
+  }
+  .prose-chat th,
+  .prose-chat td {
+    @apply border border-line px-2 py-1 text-left align-top;
+  }
+  .prose-chat th {
+    @apply bg-raise font-semibold;
+  }
+  .prose-chat td code,
+  .prose-chat th code {
+    @apply whitespace-nowrap;
+  }
+
+  /* Log-ish event rows, appended one by one from the event stream. */
+  .ev-log {
+    @apply my-px break-words font-mono text-[12px] text-muted;
+  }
+
+  /* A run of tool calls, collapsed by default. */
+  .ev-steps {
+    @apply my-2 open:border-l-2 open:border-line open:pl-2.5;
+  }
+  .ev-steps > summary {
+    @apply hover:text-ink;
+  }
+
+  /* Collapsible sidebar sections on the settings page: the header row is the
+     <summary>, with the ＋ New button riding along inside it. */
+  .side-sec > summary {
+    @apply flex cursor-pointer select-none items-center justify-between gap-1
+           px-1.5 pt-0.5 pb-1.5 text-[12px] tracking-wide text-muted;
+  }
+  .side-sec > summary::-webkit-details-marker {
+    display: none;
+  }
+  .side-sec > summary::before {
+    content: '▸';
+    @apply mr-0.5 text-[10px];
+  }
+  .side-sec[open] > summary::before {
+    content: '▾';
+  }
+  .side-sec > summary > span {
+    @apply flex-1;
+  }
+
+  /* Settings form: one <label class="field"> per setting, grouped in
+     <section class="fset">. Repeated ~20 times, so it earns classes. */
+  .fset {
+    @apply border-t border-line pt-4 pb-1;
+  }
+  .fset:first-child {
+    @apply border-t-0 pt-1.5;
+  }
+  .fset > summary {
+    @apply mb-3 cursor-pointer select-none text-xs font-semibold uppercase tracking-[.06em] text-muted hover:text-ink;
+  }
+  .fset:not([open]) > summary {
+    @apply mb-1;
+  }
+
+  .field {
+    @apply mb-3.5 flex min-w-0 flex-1 flex-col gap-[5px];
+  }
+  .field > span {
+    @apply text-[14px];
+  }
+  .field em {
+    @apply text-[12px] not-italic leading-[1.45] text-muted;
+  }
+  .field code {
+    @apply rounded bg-sunken px-1 font-mono text-[11px];
+  }
+
+  /* 16px on a phone and 14px from `lg` up: anything under 16px makes iOS zoom
+     the page in on focus and leave it there, which on a form this long is the
+     difference between usable and not. */
+  .field input[type='text'],
+  .field input[type='number'],
+  .field input[type='password'],
+  .field select,
+  .field textarea {
+    @apply w-full rounded-lg border border-line bg-field px-[9px] py-2
+           font-[inherit] text-[16px] text-ink focus:border-accent-dim focus:outline-none
+           lg:py-[7px] lg:text-[14px];
+  }
+  .field textarea {
+    @apply min-h-16 resize-y font-mono text-[16px] leading-normal lg:text-xs;
+  }
+
+  /* Two fields side by side at desk width, stacked on a phone. */
+  .field-row {
+    @apply flex flex-col items-stretch gap-0 lg:flex-row lg:items-start lg:gap-3.5;
+  }
+  .field.narrow {
+    @apply lg:flex-none lg:basis-[190px];
+  }
+
+  /* The review runtime rows (the review's own and one per step) share a
+     single three-column grid, so Provider / Model / Effort line up down the
+     whole section. One column on a phone, where three would be unreadable. */
+  .runtime-row {
+    @apply grid grid-cols-1 items-start gap-3.5 lg:grid-cols-3;
+  }
+
+  .field.check {
+    @apply flex-row items-center gap-2;
+  }
+  .field.check input {
+    @apply size-[15px] accent-accent;
+  }
+  .field.check span {
+    @apply text-[14px];
+  }
+
+  /* A project with no instance of its own has nothing to provision. */
+  #db-fields.off {
+    @apply hidden;
+  }
+
+  /* Who and what the auto review runs as, only while it is switched on. */
+  #auto-review-fields.off {
+    @apply hidden;
+  }
+
+  /* What one review step runs on: shown only while that step is switched on.
+     A step and its runtime read as one block: tight under the checkbox, with
+     a clear gap before the next step. With the runtime hidden the checkbox
+     spaces like any other. */
+  .step > .field:has(+ .step-fields:not(.off)) {
+    @apply mb-2;
+  }
+  .step-fields {
+    @apply mb-5;
+  }
+  .step-fields > .field {
+    @apply mb-0;
+  }
+  .step-fields.off {
+    @apply hidden;
+  }
+
+  /* Provider fields that only apply to some binaries / auth modes. */
+  #p-status-sec.off,
+  #p-authMode-label.off,
+  #p-endpoint-fields.off,
+  #p-apiKey-field.off,
+  #p-test-field.off,
+  #p-login-field.off {
+    @apply hidden;
+  }
+  /* With the Status section hidden (a new, unsaved entry), the Provider
+     section is the visual first child again. */
+  #p-status-sec.off + .fset {
+    @apply border-t-0 pt-1.5;
+  }
+
+  /* ---- 🏝 the office ----------------------------------------------------
+     The island is a three.js canvas (public/island3d.js) — the sand, thatch
+     and daylight all live there, as materials and lights, so nothing here
+     has a colour that is not a theme token. What CSS still owns is the
+     furniture around the canvas: the panel it fills, the landmark labels,
+     the bubble over every character saying what it is doing, and the tip a
+     hovered one gets. Those are text, and text stays in the DOM where it is
+     crisp. */
+  .office-wrap {
+    @apply relative flex flex-1 items-center justify-center overflow-hidden bg-canvas;
+  }
+  .office-city {
+    @apply absolute inset-0 overflow-hidden;
+  }
+  .office-canvas {
+    @apply block touch-none select-none;
+  }
+  /* The DOM over the canvas. Deaf to the pointer so the canvas gets every
+     drag and hover. */
+  .office-overlay {
+    @apply pointer-events-none absolute inset-0 overflow-hidden;
+  }
+  /* A landmark label, floating over its building. Anchored at the bottom
+     centre so it hangs where island3d.js projected the roof to. */
+  .office-plate {
+    @apply pointer-events-auto absolute max-w-[170px] -translate-x-1/2 -translate-y-full cursor-pointer rounded
+           border border-line-strong bg-sidebar/90 px-2 py-1 text-center text-[11px] leading-tight;
+    box-shadow: 0 2px 6px rgb(0 0 0 / 0.6);
+  }
+  .office-plate:hover {
+    @apply border-accent;
+  }
+  .office-plate b {
+    @apply block truncate font-semibold text-white;
+  }
+  /* The count under the name, set like the nameplate on a desk. */
+  .office-plate i {
+    @apply block font-mono text-[10px] tracking-[0.14em] text-muted not-italic uppercase;
+  }
+  .office-plate-park {
+    @apply pointer-events-none cursor-default border-transparent bg-transparent font-mono text-[10px]
+           tracking-[0.2em] text-white/80 uppercase;
+    box-shadow: none;
+    text-shadow: 0 1px 2px rgb(0 0 0 / 0.5);
+  }
+  /* The hovered character's name, as a speech bubble: what the reference
+     office says everything with. The tail is a border triangle. */
+  .office-tip {
+    @apply absolute max-w-[240px] -translate-x-1/2 -translate-y-[calc(100%+8px)] truncate rounded border
+           border-line-strong bg-sidebar px-1.5 py-0.5 font-mono text-[11px] text-ink;
+    box-shadow: 0 2px 6px rgb(0 0 0 / 0.6);
+  }
+  .office-tip::after {
+    content: '';
+    @apply absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent;
+    border-top-color: var(--color-line-strong);
+  }
+  /* What a character is doing, over its head: the tool a running turn is
+     on, the question a waiting one asked, the last thing an idle one said.
+     Tinted by mood the way the sidebar's dot is, so the beach reads from
+     across the room. */
+  .office-bubble {
+    @apply absolute max-w-[200px] -translate-x-1/2 -translate-y-[calc(100%+6px)] truncate rounded-md border
+           border-line-strong bg-sidebar/90 px-1.5 py-0.5 text-[10.5px] leading-snug text-ink;
+    box-shadow: 0 2px 6px rgb(0 0 0 / 0.5);
+  }
+  .office-bubble::after {
+    content: '';
+    @apply absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent;
+    border-top-color: var(--color-line-strong);
+  }
+  .office-bubble.busy {
+    @apply border-accent/70;
+  }
+  .office-bubble.wait {
+    @apply border-warn/80 text-warn;
+  }
+  .office-bubble.lit {
+    @apply text-muted;
+  }
+  .office-empty {
+    @apply relative z-10 max-w-[380px] text-center text-xs text-muted;
+  }
+
+  /* ---- the ticker ----------------------------------------------------
+     A terminal strip under the island, straight out of the reference office:
+     the status changes coming off the stream, as they happen. The island says
+     what is true now and cannot say what just changed — a session that
+     finished a turn while you were watching its table simply gets up and
+     walks to the café. This is where that lands. */
+  .office-ticker {
+    @apply flex h-[86px] shrink-0 flex-col overflow-hidden border-t border-line bg-[#0a0c08];
+  }
+  .office-ticker-head {
+    @apply flex shrink-0 items-center gap-1.5 border-b border-[#1a2a1a] bg-[#0d100d] px-3 py-1;
+  }
+  .office-ticker-head b {
+    @apply font-mono text-[10px] font-normal tracking-[0.18em] text-[#3a5a3a] uppercase;
+  }
+  .office-ticker-body {
+    @apply flex flex-1 flex-col gap-px overflow-y-auto px-3 py-1 font-mono text-[11px] leading-[1.45];
+    scrollbar-width: none;
+  }
+  .office-ticker-body::-webkit-scrollbar {
+    display: none;
+  }
+  /* `shrink-0` on both: the body is a flex column, and without it a strip that
+     has filled up squashes its lines into each other instead of scrolling. */
+  .office-ticker-line {
+    @apply shrink-0 truncate text-[#3fb950];
+    text-shadow: 0 0 6px rgb(60 200 80 / 0.3);
+    animation: ticker-line-in 0.15s ease-out;
+  }
+  /* Something started: the only lines worth catching from across the room. */
+  .office-ticker-line.bright {
+    @apply text-[#7ee787];
+    text-shadow: 0 0 8px rgb(120 230 130 / 0.5);
+  }
+  /* Something ended, or the stream talking about itself. */
+  .office-ticker-line.dim {
+    @apply text-[#2a5a30];
+    text-shadow: none;
+  }
+  .office-ticker-line.bad {
+    @apply text-danger;
+    text-shadow: none;
+  }
+  .office-ticker-cursor {
+    @apply shrink-0 font-mono text-[11px] leading-[1.45] text-[#3fb950];
+    animation: ticker-blink 1s step-end infinite;
+  }
+}
+
+/* The ticker's crawl and blink stop for a reader who has asked their system
+   for less motion. The island itself is three.js and keeps moving: it is a
+   picture of live work, and a still one would be a picture of nothing. */
+@media (prefers-reduced-motion: reduce) {
+  .office-ticker * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
