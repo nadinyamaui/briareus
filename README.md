@@ -210,6 +210,10 @@ the evidence. If every executed scenario passes, the QA loop stops. Failed
 scenarios are reported back to the task session as QA feedback, and the loop
 stops there too, since acting on that feedback stays a human decision for now.
 Turning the review loop off also cancels the QA run waiting behind it.
+If the QA provider fails or its session is interrupted, the run is shown as
+failed/interrupted and **not running**, never as queued. For an orchestrated
+worker, `send_to_worker` with a follow-up retries QA after that worker turn
+settles; no QA result is approved until a replacement run reaches a verdict.
 
 Arming is not only a decision for the composer: the same 🔁 chip stays live
 over an open session and turns its loop on or off there and then, which is
