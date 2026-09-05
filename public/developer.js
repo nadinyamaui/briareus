@@ -1481,7 +1481,26 @@
                       : ''
         }`,
       );
-    if (s.qaLoop) bits.push(`🎬 QA ${s.qaLoop.done ? 'done' : s.qaLoop.running ? 'running' : 'queued'}`);
+    if (s.qaLoop) {
+      const qa = s.qaLoop;
+      bits.push(
+        `🎬 QA ${
+          qa.running
+            ? 'running'
+            : qa.pendingVerdict
+              ? 'reading verdict'
+              : qa.verdictError
+                ? 'verdict unavailable — check the test sheet'
+                : qa.failure
+                  ? `${qa.failure.kind || 'failed'} — not running; send a follow-up turn to retry`
+                  : qa.done
+                    ? 'done'
+                    : s.reviewLoop?.done
+                      ? 'retry pending — send a follow-up turn'
+                      : 'queued'
+        }`,
+      );
+    }
     if (s.branch) bits.push(s.branch);
     if (s.dbPort) bits.push(`mysql ${s.dbHost ? `${s.dbHost}:` : ':'}${s.dbPort}`);
     if (usageChip(s)) bits.push(usageChip(s));

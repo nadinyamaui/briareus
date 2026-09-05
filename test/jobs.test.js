@@ -131,6 +131,7 @@ import { implementFeedbackPrompt } from '../lib/prtasks.js';
 import { githubGraphql, githubRest } from '../lib/github.js';
 import { resolveRuntime, getProviderForJob, captureProviderAuth } from '../lib/providerstore.js';
 import {
+  bus,
   initJobs,
   closeDevSession,
   deleteJobById,
@@ -262,6 +263,14 @@ describe('restart reconciliation for loop jobs', () => {
       reason: 'Server restarted while the job was active',
     });
     expect(qaParent.qaLoop).toMatchObject({ running: false, done: false });
+    expect(qaParent.qaLoop.failure).toMatchObject({
+      kind: 'interrupted',
+      reason: 'Server restarted while the job was active',
+    });
+    expect(workerSummary(qaParent).qaLoop.failure).toEqual({
+      kind: 'interrupted',
+      reason: 'Server restarted while the job was active',
+    });
   });
 });
 
@@ -596,6 +605,9 @@ describe('spawnWorkerSession', () => {
       row('w-a2', { parentId: 'orch-a', day: 3 }),
       row('zeus-a', { orchestrator: true, zeus: true }),
       row('zeus-resume', { orchestrator: true, zeus: true }),
+      row('zeus-resume-codex', { orchestrator: true, zeus: true }),
+      row('zeus-resume-grok', { orchestrator: true, zeus: true }),
+      row('zeus-resume-opencode', { orchestrator: true, zeus: true }),
       // Started from the composer's dialog with a pick for two roles; its own
       // effort is the provider's default, so an analyst on 'low' proves the
       // role's pick was used, and one on 'high' that the fallback was.
@@ -653,8 +665,9 @@ describe('spawnWorkerSession', () => {
   it.each(['codex', 'grok', 'opencode'])(
     '%s receives updated Zeus choices on immediate and queued resumed turns',
     async (binary) => {
-      const job = getJob('zeus-resume');
-      dropQueuedMessage(job.id, 0);
+      // One session per provider keeps a fire-and-forget turn from another
+      // case from publishing a same-id status transition into this case.
+      const job = getJob(`zeus-resume-${binary}`);
       job.status = 'idle';
       job.chats = { 1: { sessionId: binary === 'opencode' ? 'ses_resume' : 'resume-id', started: true } };
       const provider = { ...state.provider, binary };
@@ -698,8 +711,21 @@ describe('spawnWorkerSession', () => {
           expect(prompt).not.toContain('# Fusion');
           expect(prompt).toContain('ZEUS itself consolidates both complete outputs');
         }
+        // The child close resolves runDevTurn first; the queue-drain
+        // continuation publishes idle on the job bus afterwards. Listen
+        // before closing instead of racing that continuation with a
+        // wall-clock poll, which is unreliable on a loaded CI runner.
+        const settled = new Promise((resolve) => {
+          const onJob = (session) => {
+            if (session.id !== job.id || session.status !== 'idle') return;
+            bus.off('job', onJob);
+            resolve();
+          };
+          bus.on('job', onJob);
+        });
         children[1].emit('close', 0);
-        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        await settled;
+        expect(job.status).toBe('idle');
       } finally {
         bin.mockRestore();
         spawn.mockReset();
@@ -2693,6 +2719,18 @@ describe('the QA loop: reporting a finished QA run', () => {
       qaRow('qa-run-5', 'qa-par-5', true),
       parentRow('qa-par-6', 'qa-run-6'),
       qaRow('qa-run-6', 'qa-par-6', true),
+      {
+        ...parentRow('qa-par-7', 'qa-run-7'),
+        qaLoop: {
+          running: false,
+          sessionId: 'qa-run-7',
+          done: false,
+          failure: { kind: 'failed', reason: 'Claude HQ exited with code 1' },
+        },
+      },
+      qaRow('qa-run-7', 'qa-par-7', false),
+      { ...parentRow('qa-par-8', 'qa-run-8'), parentId: 'qa-orch' },
+      qaRow('qa-run-8', 'qa-par-8', false),
     ];
     await initJobs();
     for (const id of [
@@ -2709,6 +2747,10 @@ describe('the QA loop: reporting a finished QA run', () => {
       'qa-run-3',
       'qa-par-4',
       'qa-run-4',
+      'qa-par-7',
+      'qa-run-7',
+      'qa-par-8',
+      'qa-run-8',
     ]) {
       getJob(id).status = 'idle';
     }
@@ -2742,8 +2784,36 @@ describe('the QA loop: reporting a finished QA run', () => {
     await new Promise((r) => setTimeout(r, 0));
     const parent = getJob('qa-par-3');
     expect(parent.qaLoop).toMatchObject({ running: false, done: false });
+    expect(parent.qaLoop.failure).toMatchObject({
+      kind: 'interrupted',
+      reason: 'the QA session was stopped before it finished',
+    });
     expect(infoTexts(parent).join('\n')).toMatch(/stopped before it finished/);
     expect(latestTestFailures).not.toHaveBeenCalledWith('acme/qa-loop', 88);
+  });
+
+  it('does not overwrite a provider failure when the failed QA session is subsequently closed', async () => {
+    await closeDevSession('qa-run-7');
+    await new Promise((r) => setTimeout(r, 0));
+    const parent = getJob('qa-par-7');
+
+    expect(parent.qaLoop).toMatchObject({
+      running: false,
+      done: false,
+      failure: { kind: 'failed', reason: 'Claude HQ exited with code 1' },
+    });
+    expect(infoTexts(parent).join('\n')).not.toMatch(/stopped before it finished/);
+  });
+
+  it('wakes the orchestrator when QA is interrupted and names the retry action', async () => {
+    await closeDevSession('qa-run-8');
+    await new Promise((r) => setTimeout(r, 0));
+    const notice = getJob('qa-orch').pendingWorkerNotices.find((n) => n.workerId === 'qa-par-8');
+
+    expect(notice.kind).toBe('loop');
+    expect(notice.text).toMatch(/QA was interrupted before it finished/);
+    expect(notice.text).toMatch(/No QA is running and nothing was approved/);
+    expect(notice.text).toMatch(/use send_to_worker/);
   });
 
   it('a QA run staled by a later push closes without recording its verdict', async () => {
