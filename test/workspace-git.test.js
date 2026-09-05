@@ -185,6 +185,41 @@ describe('empty loose object recovery', () => {
     }
   });
 
+  it('can repair a broken remote ref exposed after empty objects are quarantined', async () => {
+    const dir = repo();
+    try {
+      const hash = '4cff9a22527ca9725cf5b923776c432fba0ad820';
+      const empty = path.join(dir, '.git', 'objects', hash.slice(0, 2), hash.slice(2));
+      fs.mkdirSync(path.dirname(empty), { recursive: true });
+      fs.writeFileSync(empty, '');
+      const ref = 'refs/remotes/origin/interrupted-worker';
+      const loose = path.join(dir, '.git', ...ref.split('/'));
+      fs.mkdirSync(path.dirname(loose), { recursive: true });
+      fs.writeFileSync(loose, '');
+      let fetches = 0;
+      const repaired = [];
+
+      await fetchWithWorkspaceRecovery({
+        dir,
+        fetchRefs: async () => {
+          fetches++;
+          if (fs.existsSync(empty)) {
+            throw new Error(`error: object file .git/objects/${hash.slice(0, 2)}/${hash.slice(2)} is empty`);
+          }
+          if (fs.existsSync(loose)) throw new Error(`fatal: bad object ${ref}`);
+        },
+        onRepair: (refs) => repaired.push(...refs),
+      });
+
+      expect(fetches).toBe(3);
+      expect(repaired).toEqual([ref]);
+      expect(fs.existsSync(empty)).toBe(false);
+      expect(fs.existsSync(loose)).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('does not scan or retry for an unrelated fetch failure', async () => {
     const dir = repo();
     try {
