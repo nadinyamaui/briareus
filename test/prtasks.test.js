@@ -186,6 +186,8 @@ describe('implementFeedbackPrompt', () => {
     });
     expect(prompt).toContain('- **HIGH**: Injection (`lib/db.js:42`)');
     expect(prompt).toContain('- **MEDIUM**: No severity given');
+    expect(prompt).toContain('Decide which open findings require a fix');
+    expect(prompt).toContain('candidates to assess, not an instruction to implement');
   });
 
   it('a triaged round is a decided list, with the orchestrator’s note behind it', () => {
