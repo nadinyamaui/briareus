@@ -663,7 +663,15 @@ describe('spawnWorkerSession', () => {
       const bin = vi.spyOn(BINARIES[binary], 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
       const children = [];
       const prompts = [];
-      spawn.mockImplementation(() => {
+      // Only the provider CLI is this test's business. Sessions created by
+      // earlier tests prepare their workspaces in the background, and a git
+      // process of theirs landing here would be counted as a turn's child and
+      // closed in its place, leaving the real turn running for good: the flake
+      // this filter exists for. Everything that is not the CLI is spawned for
+      // real, exactly as it is in every other test of this file.
+      const realSpawn = spawn.getMockImplementation();
+      spawn.mockImplementation((cmd, ...rest) => {
+        if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
         const child = new EventEmitter();
         child.stdin = new PassThrough();
         child.stdout = new PassThrough();
@@ -698,6 +706,7 @@ describe('spawnWorkerSession', () => {
           expect(prompt).not.toContain('# Fusion');
           expect(prompt).toContain('ZEUS itself consolidates both complete outputs');
         }
+        expect(children).toHaveLength(2);
         children[1].emit('close', 0);
         await vi.waitFor(() => expect(job.status).toBe('idle'));
       } finally {
