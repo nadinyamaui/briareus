@@ -125,7 +125,6 @@ import {
   latestReviewFindings,
   latestTestFailures,
   queueFindingsForFix,
-  sortFindingsForFix,
   recordTriage,
 } from '../lib/findings.js';
 import { implementFeedbackPrompt } from '../lib/prtasks.js';
@@ -1857,50 +1856,26 @@ describe('the review loop: what a closing loop review reports back', () => {
     expect(notice.text).toMatch(/ready to merge/);
   });
 
-  it('a worker’s round is held for its orchestrator to triage, neither fixed nor stalled', async () => {
-    latestReviewFindings.mockResolvedValueOnce([
-      { key: 'k1', severity: 'high', title: 'A thing' },
-      { key: 'k2', severity: 'low', title: 'A nit', file: 'lib/x.js', line: 4 },
-    ]);
-    sortFindingsForFix.mockResolvedValueOnce({
-      kept: [{ key: 'k1', severity: 'high', title: 'A thing' }],
-      parked: [{ key: 'k2', severity: 'low', title: 'A nit', file: 'lib/x.js', line: 4, reason: 'severity' }],
-    });
+  it('a worker’s review goes directly to the fix step without orchestrator triage', async () => {
+    const findings = [{ key: 'new-key', severity: 'high', title: 'A new issue' }];
+    latestReviewFindings.mockResolvedValueOnce(findings);
+    queueFindingsForFix.mockResolvedValueOnce({ kept: findings, parked: [] });
     const recorded = recordTriage.mock.calls.length;
-    const queued = queueFindingsForFix.mock.calls.length;
     await closeDevSession('rev-13');
     await new Promise((r) => setTimeout(r, 0));
     const parent = getJob('par-13');
-    // Round two hands back what round one did, which stalls a loop running
-    // on its own; under an orchestrator the stall gate runs on what the
-    // triage keeps, so nothing is decided until it rules.
-    expect(parent.reviewLoop.stalled).toBeFalsy();
-    expect(parent.reviewLoop.fixing).toBeFalsy();
-    expect(parent.reviewLoop.triage).toMatchObject({ prNumber: 77, round: 2 });
-    // The automatic split rides along as advice, verdicts left open.
-    expect(parent.reviewLoop.triage.findings).toEqual([
-      { key: 'k1', severity: 'high', title: 'A thing', parked: null },
-      { key: 'k2', severity: 'low', title: 'A nit', file: 'lib/x.js', line: 4, parked: 'severity' },
-    ]);
-    expect(sortFindingsForFix).toHaveBeenLastCalledWith('acme/loop', 77, expect.any(Array), {
+    expect(parent.reviewLoop.triage).toBeFalsy();
+    expect(parent.reviewLoop.lastFindings).toBe('new-key');
+    expect(queueFindingsForFix).toHaveBeenLastCalledWith('acme/loop', 77, findings, {
       severityFloor: 'medium',
     });
     expect(recordTriage.mock.calls.length).toBe(recorded);
-    expect(queueFindingsForFix.mock.calls.length).toBe(queued);
-    const orch = getJob('loop-orch');
-    const notice = orch.pendingWorkerNotices.find((n) => n.workerId === 'par-13');
-    expect(notice.kind).toBe('triage');
-    expect(notice.text).toMatch(
-      /^Worker par-13 \(Fix the filter\): review round 2 of PR #77 left 2 finding\(s\) for you to triage/,
-    );
-    expect(notice.text).toContain('- [k1] HIGH: A thing');
-    expect(notice.text).toContain(
-      '- [k2] LOW: A nit (lib/x.js:4) — the loop would have parked it: below the floor',
-    );
-    expect(notice.text).toMatch(/triage_findings/);
+    expect(
+      getJob('loop-orch').pendingWorkerNotices.some((n) => n.workerId === 'par-13' && n.kind === 'triage'),
+    ).toBe(false);
   });
 
-  it('the round cap stands ahead of the triage: the last round stalls and hands the findings over', async () => {
+  it('the round cap still stops a worker’s loop without orchestrator triage', async () => {
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k9', severity: 'high', title: 'Yet another' }]);
     await closeDevSession('rev-14');
     await new Promise((r) => setTimeout(r, 0));
@@ -1912,7 +1887,7 @@ describe('the review loop: what a closing loop review reports back', () => {
     expect(notice.text).toMatch(/^Worker par-14 \(Add the import\): the review loop stalled on PR #77/);
     expect(notice.text).toMatch(/REVIEW_LOOP_MAX_ROUNDS=3/);
     expect(notice.text).toMatch(/1 finding\(s\) listed on the pull request: Yet another\./);
-    expect(notice.text).toMatch(/yours to waive/);
+    expect(notice.text).toMatch(/do not waive findings or restart the loop automatically/);
   });
 });
 
@@ -2461,7 +2436,8 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
     expect(notice.text).toMatch(/stalled on PR #79.*same findings as the round before it/);
   });
 
-  it('a round whose orchestrator is gone is implemented the way a lone loop runs it', async () => {
+  it('a persisted held round resumes directly even with a live orchestrator', async () => {
+    getJob('tri-5').parentId = 'tri-orch';
     const before = queueFindingsForFix.mock.calls.length;
     await closeDevSession('tri-5-fix'); // the worker's next settle
     await new Promise((r) => setTimeout(r, 0));
@@ -2472,7 +2448,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       severityFloor: 'medium',
     });
     const text = infoTexts(worker).join('\n');
-    expect(text).toMatch(/orchestrator that was to triage round 2's findings is gone/);
+    expect(text).toMatch(/round 2's previously held findings now go directly to the fix session/);
     expect(text).toMatch(/could not start the fix session/);
   });
 
