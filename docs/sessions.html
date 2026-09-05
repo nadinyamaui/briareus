@@ -204,20 +204,20 @@
 
       <h2 id="zeus">Zeus mode</h2>
       <p>
-        Selecting <span class="kbd">⚡ Zeus</span> opens the model picker immediately. Choose three models to
+        Selecting <span class="kbd">⚡ Zeus</span> opens the model picker immediately. Choose two models to
         perform the same complete task independently; the session model in the composer is ZEUS, the
-        summarizer. New Zeus sessions require all three choices. Resuming an older session without complete
-        choices also opens the picker before sending the next message.
+        summarizer. New Zeus sessions require both choices. Resuming an older session without complete choices
+        also opens the picker before sending the next message.
       </p>
       <p>
-        Every model receives exactly the same complete prompt, investigates a read-only repository clone and
-        returns a complete epic. The server refuses different proposal prompts within the same user brief,
+        Both models receive exactly the same complete prompt, investigate a read-only repository clone and
+        return a complete epic. The server refuses different proposal prompts within the same user brief,
         including after a restart. Models do not receive specialist assignments or see each other's outputs.
-        In the sidebar they appear as Model 1, Model 2 and Model 3.
+        In the sidebar they appear as Model 1 and Model 2.
       </p>
       <p>
-        ZEUS reads all three outputs in full and combines them into one epic, preserving useful unique
-        findings, removing duplicates and checking contradictions against repository evidence. Assumptions and
+        ZEUS reads both outputs in full and combines them into one epic, preserving useful unique findings,
+        removing duplicates and checking contradictions against repository evidence. Assumptions and
         unresolved decisions stay explicit. There is no separate validator: ZEUS consolidates the result and
         publishes the parent issue with linked implementation sub-issues. The document follows the
         <em>Zeus epic</em> template under <a href="prompts.html">Prompts</a>, overridable per project.
