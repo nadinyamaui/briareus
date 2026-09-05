@@ -2581,7 +2581,9 @@
     }
   }
 
-  // Keep stored/API role identifiers compatible with existing sessions.
+  // Keep stored/API role identifiers compatible with existing sessions: qa and
+  // validator are only reachable from sessions started before the fusion
+  // dropped to two proposals, and still have to read as themselves.
   function zeusAnalystLabel(role) {
     return (
       { product: 'Model 1', architecture: 'Model 2', qa: 'Model 3', validator: 'Validator' }[role] ||
@@ -2593,11 +2595,12 @@
   // The dialog a ⚡ Zeus start opens: a runtime per analyst role. Defaults to
   // the project's worker runtime when Settings names one, and to the
   // composer's own picks otherwise, which is what a spawn falls back to anyway.
-  // Resolves to the three picks, or null when the dialog was dismissed.
+  // Resolves to the two picks, or null when the dialog was dismissed. Both rows
+  // read the same on purpose: the slots are indistinguishable, and the only
+  // reason they are named is that the runtime is stored under a role.
   const ZEUS_ROLES = [
-    ['product', 'Model 1', 'Independently proposes the complete epic from the shared prompt.'],
+    ['product', 'Model 1', 'Receives the brief and proposes the complete epic on its own.'],
     ['architecture', 'Model 2', 'Receives exactly the same prompt and proposes the complete epic.'],
-    ['qa', 'Model 3', 'Receives exactly the same prompt and proposes the complete epic.'],
   ];
 
   async function pickZeusRoles(session) {
@@ -2608,7 +2611,7 @@
         : { providerId: selProvider.value, model: selModel.value, effort: selEffort.value };
     const answered = openConfirm({
       title: 'Choose the fusion models',
-      body: `All three models receive the same complete task. ZEUS combines their outputs into one epic using the session model (${session?.model || selModel.value}). Choose the summarizer in the session model selector.`,
+      body: `Both models receive the same complete task, independently. ZEUS then merges their two outputs into one epic, on the session model (${session?.model || selModel.value}) — change the summarizer in the composer's model selector.`,
       confirmLabel: session ? 'Continue Zeus' : 'Use these models',
       icon: '⚡',
       form: ZEUS_ROLES.map(([role, label, hint]) => runtimePickerHtml(`zeus-${role}`, label, hint)).join(''),

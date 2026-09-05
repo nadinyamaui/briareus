@@ -459,7 +459,7 @@ describe('createDevSession: the validation gauntlet', () => {
         /only chats and manages workers/,
       );
     }
-    const zeusRoles = { product: { providerId: 1 }, architecture: { providerId: 1 }, qa: { providerId: 1 } };
+    const zeusRoles = { product: { providerId: 1 }, architecture: { providerId: 1 } };
     const zeus = createDevSession({ ...base, zeus: true, zeusRoles });
     expect(zeus.orchestrator).toBe(true);
     expect(zeus.zeus).toBe(true);
@@ -493,17 +493,28 @@ describe('createDevSession: the validation gauntlet', () => {
       zeusRoles: {
         product: { providerId: 1, model: 'claude-fable-5-1', effort: 'low' },
         architecture: { providerId: 1, model: 'gone-model', effort: 'extreme' },
-        qa: { providerId: 1, model: 'claude-fable-5-1', effort: 'low' },
       },
     });
     expect(picked.zeusRoles).toEqual({
       product: { providerId: 1, model: 'claude-fable-5-1', effort: 'low' },
       architecture: { providerId: 1, model: 'claude-fable-5-1', effort: 'high' },
-      qa: { providerId: 1, model: 'claude-fable-5-1', effort: 'low' },
     });
-    for (const zeusRoles of [undefined, {}, { product: { providerId: 1 } }]) {
+    // A session started before the fusion dropped to two proposals still reads
+    // back its third pick; it is simply no longer asked for.
+    expect(
+      createDevSession({
+        ...base,
+        zeus: true,
+        zeusRoles: {
+          product: { providerId: 1 },
+          architecture: { providerId: 1 },
+          qa: { providerId: 1, model: 'claude-fable-5-1', effort: 'low' },
+        },
+      }).zeusRoles.qa,
+    ).toEqual({ providerId: 1, model: 'claude-fable-5-1', effort: 'low' });
+    for (const zeusRoles of [undefined, {}, { product: { providerId: 1 } }, { qa: { providerId: 1 } }]) {
       expect(() => createDevSession({ ...base, zeus: true, zeusRoles })).toThrow(
-        /Choose a model for all three/,
+        /Choose a model for both proposal slots/,
       );
     }
   });
@@ -610,8 +621,8 @@ describe('spawnWorkerSession', () => {
     const job = getJob('zeus-resume');
     job.status = 'running';
     const pick = { providerId: 1, model: 'claude-fable-5-1', effort: 'low' };
-    const roles = { product: pick, architecture: pick, qa: pick };
-    expect(() => sendDevMessage(job.id, 'Brief', [], { product: pick })).toThrow(/all three proposal slots/);
+    const roles = { product: pick, architecture: pick };
+    expect(() => sendDevMessage(job.id, 'Brief', [], { product: pick })).toThrow(/both proposal slots/);
     expect(job.zeusRoles).toBeUndefined();
     expect(() => sendDevMessage('orch-a', 'Brief', [], roles)).toThrow(/Only a Zeus/);
     const session = sendDevMessage(job.id, 'Same complete brief', [], roles);
@@ -667,7 +678,7 @@ describe('spawnWorkerSession', () => {
       });
       try {
         const pick = { providerId: 1, model: 'claude-fable-5-1', effort: 'low' };
-        const roles = { product: pick, architecture: pick, qa: pick };
+        const roles = { product: pick, architecture: pick };
         sendDevMessage(job.id, 'Immediate brief', [], roles);
         expect(prompts).toHaveLength(1);
         const queued = sendDevMessage(job.id, 'Queued brief', [], roles);
@@ -679,13 +690,13 @@ describe('spawnWorkerSession', () => {
           expect(prompt).toContain(index === 0 ? 'Immediate brief' : 'Queued brief');
           expect(prompt).toContain('supersede any earlier missing or partial picks');
           expect(prompt).toContain('Omit provider_id and model');
-          expect(prompt).toContain('same complete proposal prompt to all three');
+          expect(prompt).toContain('same complete proposal prompt to both');
           for (const role of Object.keys(roles)) {
             expect(prompt).toContain(`- ${role}: Claude entry (provider_id 1), claude-fable-5-1, effort low`);
           }
           // Resumed providers do not receive the full initial system briefing.
           expect(prompt).not.toContain('# Fusion');
-          expect(prompt).toContain('ZEUS itself consolidates all three complete outputs');
+          expect(prompt).toContain('ZEUS itself consolidates both complete outputs');
         }
         children[1].emit('close', 0);
         await vi.waitFor(() => expect(job.status).toBe('idle'));

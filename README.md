@@ -317,15 +317,15 @@ brief, it hands back a GitHub epic. It is a 🧭 orchestrator in its machinery
 read-only shallow clone of the default branch to investigate and verify against,
 and every worker it starts is a read-only **analyst** that reports instead of
 pushing (the spawn refuses loops and branches for them). Selecting **⚡ Zeus**
-opens the model picker immediately: choose three models for the same task.
+opens the model picker immediately: choose two models for the same task.
 The session model selected in the composer is ZEUS, the summarizer.
-New Zeus sessions require all three choices; resuming an older session without
+New Zeus sessions require both choices; resuming an older session without
 complete choices opens the picker before sending the next message.
 
-Every model receives the same complete prompt, independently investigates the
-repository and produces a complete epic. The server refuses a different proposal
-prompt within the same user brief, including after a restart. ZEUS combines all
-three outputs into one document, preserving useful unique findings, checking
+Both models receive the same complete prompt, independently investigate the
+repository and produce a complete epic. The server refuses a different proposal
+prompt within the same user brief, including after a restart. ZEUS combines the
+two outputs into one document, preserving useful unique findings, checking
 contradictions against evidence and keeping unresolved decisions explicit.
 There are no specialist assignments or separate validator. ZEUS publishes the
 combined epic as a parent issue with linked sub-issues for implementation.
