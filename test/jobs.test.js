@@ -605,6 +605,9 @@ describe('spawnWorkerSession', () => {
       row('w-a2', { parentId: 'orch-a', day: 3 }),
       row('zeus-a', { orchestrator: true, zeus: true }),
       row('zeus-resume', { orchestrator: true, zeus: true }),
+      row('zeus-resume-codex', { orchestrator: true, zeus: true }),
+      row('zeus-resume-grok', { orchestrator: true, zeus: true }),
+      row('zeus-resume-opencode', { orchestrator: true, zeus: true }),
       // Started from the composer's dialog with a pick for two roles; its own
       // effort is the provider's default, so an analyst on 'low' proves the
       // role's pick was used, and one on 'high' that the fallback was.
@@ -662,8 +665,9 @@ describe('spawnWorkerSession', () => {
   it.each(['codex', 'grok', 'opencode'])(
     '%s receives updated Zeus choices on immediate and queued resumed turns',
     async (binary) => {
-      const job = getJob('zeus-resume');
-      dropQueuedMessage(job.id, 0);
+      // One session per provider keeps a fire-and-forget turn from another
+      // case from publishing a same-id status transition into this case.
+      const job = getJob(`zeus-resume-${binary}`);
       job.status = 'idle';
       job.chats = { 1: { sessionId: binary === 'opencode' ? 'ses_resume' : 'resume-id', started: true } };
       const provider = { ...state.provider, binary };
