@@ -131,6 +131,7 @@ import { implementFeedbackPrompt } from '../lib/prtasks.js';
 import { githubGraphql, githubRest } from '../lib/github.js';
 import { resolveRuntime, getProviderForJob, captureProviderAuth } from '../lib/providerstore.js';
 import {
+  bus,
   initJobs,
   closeDevSession,
   deleteJobById,
@@ -706,8 +707,21 @@ describe('spawnWorkerSession', () => {
           expect(prompt).not.toContain('# Fusion');
           expect(prompt).toContain('ZEUS itself consolidates both complete outputs');
         }
+        // The child close resolves runDevTurn first; the queue-drain
+        // continuation publishes idle on the job bus afterwards. Listen
+        // before closing instead of racing that continuation with a
+        // wall-clock poll, which is unreliable on a loaded CI runner.
+        const settled = new Promise((resolve) => {
+          const onJob = (session) => {
+            if (session.id !== job.id || session.status !== 'idle') return;
+            bus.off('job', onJob);
+            resolve();
+          };
+          bus.on('job', onJob);
+        });
         children[1].emit('close', 0);
-        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        await settled;
+        expect(job.status).toBe('idle');
       } finally {
         bin.mockRestore();
         spawn.mockReset();
