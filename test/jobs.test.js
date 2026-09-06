@@ -4075,6 +4075,21 @@ describe('the review loop: what a round runs on, and re-running one that could n
       reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
     },
     {
+      // The orchestrator of the restarted worker below: it stands on a
+      // question of its own, so what the loop tells it stays in its buffer
+      // where the test can read it instead of being spent on a turn.
+      id: 'rt-orch',
+      kind: 'devchat',
+      // Not closed when the records are restored: the round is failed there,
+      // and a closed session is owed nothing (queueWorkerNotice).
+      status: 'interrupted',
+      repo: 'acme/rt-rev',
+      providerId: 1,
+      turns: 1,
+      orchestrator: true,
+      awaitingAnswer: true,
+    },
+    {
       // A round that was riding on the project's reviewer when the process
       // died: reconcileRestartedLoopJobs fails the round, which is not the
       // reviewer failing at anything.
@@ -4082,6 +4097,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
       kind: 'devchat',
       status: 'interrupted',
       repo: 'acme/rt-rev',
+      parentId: 'rt-orch',
+      title: 'Add the export',
       providerId: 1,
       provider: 'Claude entry',
       branch: 'task/rt',
@@ -4200,6 +4217,28 @@ describe('the review loop: what a round runs on, and re-running one that could n
       reviewLoop: { rounds: 1, lastSha: 'sha-rt', reviewerFailed: true },
     },
     {
+      // A loop a partial retry left with the project's reviewer of the day
+      // frozen into its review override: nobody named that provider, the
+      // fill-in did (retryLoopRound).
+      id: 'rt-repointed',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 99,
+      provider: 'Session provider',
+      model: 'session-model',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 69,
+      prStatus: { number: 69, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        reviewRuntime: { providerId: 2, model: 'claude-fable-5-1', effort: 'low' },
+        reviewRuntimeFromProject: true,
+      },
+    },
+    {
       // A project whose reviewer row was deleted in Settings since.
       id: 'rt-gone',
       kind: 'devchat',
@@ -4299,9 +4338,16 @@ describe('the review loop: what a round runs on, and re-running one that could n
     // its CLI is not installed here, which createDevSession only finds out
     // when it tries. The round must not die on that.
     const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue(null);
+    // With a QA loop queued behind this one, the way out this notice points at
+    // costs it: turning the 🔁 chip off drops the QA loop too (setReviewLoop).
+    job.qaLoop = { running: false, done: false };
     try {
       await retryLoopRound('rt-uninstalled');
+      expect(infoTexts(job).join('\n')).toMatch(
+        /turn the 🔁 chip off and on to ask the project again, and arm the 🎬 chip again/,
+      );
     } finally {
+      job.qaLoop = null;
       bin.mockRestore();
     }
 
@@ -4471,6 +4517,41 @@ describe('the review loop: what a round runs on, and re-running one that could n
       /could not start the code review: Project reviewer: this provider is inactive/,
     );
     expect(infoTexts(job).join('\n')).not.toMatch(/Claude entry: this provider is inactive/);
+  });
+
+  it('a partial retry’s frozen reviewer follows the project when Settings repoints it', async () => {
+    const job = getJob('rt-repointed');
+    // The override names provider 2 because that is what ⌕ Code review said
+    // when the retry filled the provider in; the operator has since repointed
+    // the setting at another one, which is what the give-up messages ask for.
+    state.projects = state.projects.map((p) =>
+      p.repo === 'acme/rt-rev' ? { ...p, reviewProviderId: 3, reviewModel: null, reviewEffort: null } : p,
+    );
+    state.group = [];
+
+    await retryLoopRound('rt-repointed');
+
+    // So the round rides the reviewer the project names now. Left frozen, it
+    // would review on a row nothing names, with the give-up and the
+    // start-refusal fallback both switched off for being an override.
+    expect(infoTexts(job).join('\n')).toMatch(
+      /could not start the code review: Uninstalled reviewer: this provider is inactive/,
+    );
+    expect(infoTexts(job).join('\n')).not.toMatch(/Project reviewer/);
+  });
+
+  it('a round nothing but a restart ended is not a provider to move off', async () => {
+    // reconcileRestartedLoopJobs failed rt-restarted's round while the records
+    // were restored. The orchestrator is the one party that acts on this, and
+    // what it is told to do — retry_review on another provider_id — moves the
+    // loop's reviews, its fix sessions and its QA run off the project's
+    // reviewer for good, so it must not be told that for a round the provider
+    // never turned away.
+    const notice = getJob('rt-orch').pendingWorkerNotices.find((n) => n.workerId === 'rt-restarted');
+    expect(notice.kind).toBe('loop');
+    expect(notice.text).toMatch(/interrupted rather than turned away by the provider/);
+    expect(notice.text).toMatch(/naming no provider_id or model/);
+    expect(notice.text).not.toMatch(/This is the provider failing/);
   });
 
   it('a retry’s override outranks the project’s reviewer', async () => {

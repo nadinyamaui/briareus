@@ -299,7 +299,10 @@
               <td>A round of a 🔁 review loop</td>
               <td>
                 The project's <strong>Code review</strong> runtime as well, or, left unset, the session the
-                loop belongs to. A retry onto another provider keeps the loop there.
+                loop belongs to. A retry onto another provider keeps the loop there. A reviewer that cannot
+                run a round — its CLI missing here, its accounts spent — is given up for the rest of that
+                loop: every later round moves onto the session's own provider, and it takes a repair in
+                Settings plus the <span class="kbd">🔁</span> chip off and on to ask the project again.
               </td>
             </tr>
             <tr>
