@@ -4076,9 +4076,9 @@ describe('the review loop: what a round runs on, and re-running one that could n
     },
     {
       // A round that was riding on the project's reviewer when the process
-      // died: reconcileRestartedLoopJobs reports that failure the same way a
-      // review whose provider exits non-zero does.
-      id: 'rt-reviewer-died',
+      // died: reconcileRestartedLoopJobs fails the round, which is not the
+      // reviewer failing at anything.
+      id: 'rt-restarted',
       kind: 'devchat',
       status: 'interrupted',
       repo: 'acme/rt-rev',
@@ -4091,18 +4091,39 @@ describe('the review loop: what a round runs on, and re-running one that could n
         rounds: 1,
         lastSha: 'sha-rt',
         reviewing: true,
-        reviewSessionId: 'rt-reviewer-review',
+        reviewSessionId: 'rt-restarted-review',
         reviewerRound: true,
       },
     },
     {
-      id: 'rt-reviewer-review',
+      id: 'rt-restarted-review',
       kind: 'devchat',
       status: 'closed',
       repo: 'acme/rt-rev',
       providerId: 2,
       branch: 'task/rt',
-      loopParentId: 'rt-reviewer-died',
+      loopParentId: 'rt-restarted',
+    },
+    {
+      // A loop a partial retry moved onto the project's own reviewer without
+      // the caller ever naming it: an override that is the reviewer, on the
+      // project whose reviewer runs a CLI this machine does not have.
+      id: 'rt-override-reviewer',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-cli',
+      providerId: 1,
+      provider: 'Claude entry',
+      model: 'claude-fable-5-1',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 65,
+      prStatus: { number: 65, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        runtime: { providerId: 3, model: 'claude-fable-5-1', effort: 'high' },
+      },
     },
     {
       // A project whose reviewer row was deleted in Settings since.
@@ -4215,25 +4236,76 @@ describe('the review loop: what a round runs on, and re-running one that could n
     closeDevSession(job.reviewLoop.reviewSessionId);
   });
 
-  it('a round that died on the project’s reviewer gives that reviewer up', async () => {
-    const job = getJob('rt-reviewer-died');
-    // The failure was reported while the records were restored, before any of
-    // this ran: a reviewer whose accounts are spent starts a session and dies
-    // on its first turn, which is that reviewer failing, not the session's.
-    expect(job.reviewLoop).toMatchObject({ reviewerFailed: true, reviewerRound: false });
-    expect(infoTexts(job).join('\n')).toMatch(
-      /The reviewer this project was set up with is what failed, so the rounds after this one run on Claude entry instead/,
-    );
+  it('a round a server restart interrupted keeps the project’s reviewer', async () => {
+    const job = getJob('rt-restarted');
+    // The round was reported failed while the records were restored, before
+    // any of this ran. A restart is this process dying, not the reviewer the
+    // round was riding: only a failure that came out of the provider is
+    // evidence about it, so the reviewer is not given up here.
+    expect(job.reviewLoop.reviewerFailed).toBeFalsy();
+    expect(job.reviewLoop.reviewerRound).toBe(false);
+    expect(infoTexts(job).join('\n')).not.toMatch(/The reviewer this project was set up with is what failed/);
 
     state.group = [];
-    await retryLoopRound('rt-reviewer-died');
+    await retryLoopRound('rt-restarted');
 
-    // acme/rt-rev still names a reviewer in Settings; this loop no longer asks
-    // for it, and the next round is the session's own provider.
+    // So the retried round is still the project's reviewer, not the session's.
     expect(infoTexts(job).join('\n')).toMatch(
-      /could not start the code review: Claude entry: this provider is inactive/,
+      /could not start the code review: Project reviewer: this provider is inactive/,
     );
-    expect(infoTexts(job).join('\n')).not.toMatch(/Project reviewer/);
+  });
+
+  it('an override that is the project’s reviewer falls back and is given up like one', async () => {
+    const job = getJob('rt-override-reviewer');
+    // A retry that named only a model had its provider filled in from the
+    // reviewer, so this loop rides the project's reviewer through an override
+    // nobody chose. It must still be treated as the project's: the reviewer's
+    // CLI is not on this machine, and the round has to fall back rather than
+    // fail for good.
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue(null);
+    try {
+      await retryLoopRound('rt-override-reviewer');
+
+      expect(infoTexts(job).join('\n')).toMatch(
+        /the reviewer this project was set up with cannot run \(Uninstalled reviewer: the Codex CLI was not found on this machine\), so this round and the ones after it run on Claude entry instead/,
+      );
+      expect(infoTexts(job).join('\n')).toMatch(/started code review round 2 of PR #65/);
+      expect(job.reviewLoop).toMatchObject({ reviewerFailed: true, reviewerRound: false });
+      expect(getJob(job.reviewLoop.reviewSessionId).providerId).toBe(1);
+      closeDevSession(job.reviewLoop.reviewSessionId);
+
+      // And the override does not bring that reviewer back on the next round:
+      // it names the provider this loop has just given up, so it is dropped
+      // with the setting it was filled in from.
+      state.group = [];
+      job.reviewLoop.reviewing = false;
+      await retryLoopRound('rt-override-reviewer');
+      expect(infoTexts(job).join('\n')).toMatch(
+        /could not start the code review: Claude entry: this provider is inactive/,
+      );
+      expect(infoTexts(job).join('\n')).not.toMatch(/Unknown provider: 3/);
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
+  it('refuses a retry whose model the provider it names does not run', async () => {
+    // resolveRuntime swaps a model the provider does not run for that
+    // provider's default, which would leave the retry running on the very
+    // model it was moved off. The mock above answers whatever it is given, so
+    // the swap is staged here.
+    const real = resolveRuntime.getMockImplementation();
+    resolveRuntime.mockImplementation((runtime) => {
+      const out = real(runtime);
+      return out && out.model === 'not-a-model' ? { ...out, model: 'claude-fable-5-1' } : out;
+    });
+    try {
+      await expect(retryLoopRound('rt-model-only', { model: 'not-a-model' })).rejects.toThrow(
+        /does not run not-a-model \(it runs claude-fable-5-1\)/,
+      );
+    } finally {
+      resolveRuntime.mockImplementation(real);
+    }
   });
 
   it('a retry that names only a model keeps the loop on the project’s reviewer', async () => {
