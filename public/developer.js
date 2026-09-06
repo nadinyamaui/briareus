@@ -4047,27 +4047,52 @@
   // re-sorted by size, so the swatch on a row is always that row's slice. It
   // matters for the activity table, which the server ranks by cost: the ring
   // shows the token share of the four rows a reader is already looking at.
-  function shareSlices(rows, labelOf) {
+  //
+  // One pass hands back both the slices and the colour of every row, so the
+  // ring and the marks beside the table can never be drawn on different rules.
+  // Only a row that spent tokens takes a colour — a row sitting at zero has no
+  // slice to point at — and a card with too few slices to draw a ring hands
+  // back no colours at all, since a hue with nothing beside it to decode it is
+  // noise in a product where hue means which one.
+  function shareSeries(rows, labelOf) {
     const total = rows.reduce((n, r) => n + r.totalTokens, 0);
-    if (!total) return { total: 0, slices: [] };
-    const head = rows.slice(0, SERIES_SLOTS).filter((r) => r.totalTokens > 0);
-    const tail = rows.slice(SERIES_SLOTS).filter((r) => r.totalTokens > 0);
-    const slices = head.map((r, i) => ({
-      label: labelOf(r),
-      color: seriesColor(i),
-      tokens: r.totalTokens,
-      turns: r.turns,
-      cost: fmtCost(r),
-    }));
-    if (tail.length)
+    const plain = { total, slices: [], colors: rows.map(() => '') };
+    if (!total) return plain;
+    const spent = [];
+    rows.forEach((r, i) => {
+      if (r.totalTokens > 0) spent.push(i);
+    });
+    const colors = rows.map(() => '');
+    const slices = spent.slice(0, SERIES_SLOTS).map((at, i) => {
+      colors[at] = seriesColor(i);
+      return {
+        label: labelOf(rows[at]),
+        color: colors[at],
+        tokens: rows[at].totalTokens,
+        turns: rows[at].turns,
+        cost: fmtCost(rows[at]),
+      };
+    });
+    // Every row the table paints with the tail colour is a row Other counts,
+    // and nothing else is, so the (n) in the label is what a reader can see.
+    const tail = spent.slice(SERIES_SLOTS);
+    if (tail.length) {
+      tail.forEach((at) => {
+        colors[at] = seriesColor(SERIES_SLOTS);
+      });
       slices.push({
         label: `Other (${tail.length})`,
         color: seriesColor(SERIES_SLOTS),
-        tokens: tail.reduce((n, r) => n + r.totalTokens, 0),
-        turns: tail.reduce((n, r) => n + r.turns, 0),
+        tokens: tail.reduce((n, at) => n + rows[at].totalTokens, 0),
+        turns: tail.reduce((n, at) => n + rows[at].turns, 0),
         cost: null,
       });
-    return { total, slices };
+    }
+    // Under three slices there is no shape to read: one is a circle, and two
+    // is a single ratio that the row bars and the numbers beside them already
+    // say plainly. A ring drawn for those is decoration, so it is not drawn —
+    // and with it goes the palette on the rows.
+    return slices.length < 3 ? plain : { total, slices, colors };
   }
 
   // The ring itself: one stroked arc per slice on a shared circle, which keeps
@@ -4079,12 +4104,8 @@
   const RING_C = 2 * Math.PI * RING_R;
   const RING_GAP = 2;
 
-  function donut(rows, labelOf, { hint = '' } = {}) {
-    const { total, slices } = shareSlices(rows, labelOf);
-    // Under three slices there is no shape to read: one is a circle, and two is
-    // a single ratio that the row bars and the numbers beside them already
-    // say plainly. A ring drawn for those is decoration.
-    if (slices.length < 3) return '';
+  function donut({ total, slices }, { hint = '' } = {}) {
+    if (!slices.length) return '';
     let at = 0;
     const arcs = slices
       .map((s) => {
@@ -4113,24 +4134,23 @@
   // One breakdown: its heading, its ring, and its table side by side — the ring
   // for the shape of the split, the table for the numbers, and on a narrow
   // window the ring above rather than squeezed beside.
-  function breakdownCard(heading, rows, labelOf, table) {
+  function breakdownCard(heading, series, table) {
     return `<div class="mt-3 rounded-xl border border-line bg-raise px-3.5 py-3">
         <div class="text-[12px] tracking-wide text-muted">${heading}</div>
         <div class="mt-1.5 flex flex-col items-center gap-4 lg:flex-row lg:items-start lg:gap-5">
-          ${donut(rows, labelOf, { hint: SHARE_HINT })}
+          ${donut(series, { hint: SHARE_HINT })}
           <div class="w-full min-w-0 overflow-x-auto">${table}</div>
         </div>
       </div>`;
   }
 
   const SHARE_HINT =
-    'Each slice is one row’s share of the tokens in this window. The first four rows of the table get a colour of their own and everything under them is summed into Other, so the ring follows the table’s own ranking and the swatch beside a row is always that row’s slice. Hover a slice for its share, turns and cost.';
+    'Each slice is one row’s share of the tokens in this window. The first four rows that spent anything get a colour of their own and every other row that spent is summed into Other, so the ring follows the table’s own ranking and the swatch beside a row is always that row’s slice. A row at zero has no slice and carries no swatch. Hover a slice for its share, turns and cost.';
 
-  // The swatch that ties a table row to its slice. Rows past the fourth all
-  // wear the tail's colour, which is exactly what the ring shows.
-  function swatch(i, rows) {
-    if (!rows || rows.length < 3) return '';
-    const color = seriesColor(Math.min(i, SERIES_SLOTS));
+  // The swatch that ties a table row to its slice: the colour shareSeries gave
+  // that row, and nothing at all where it gave none.
+  function swatch(color) {
+    if (!color) return '';
     return `<span class="mr-2 inline-block h-2 w-2 shrink-0 rounded-[2px] align-middle" style="background:${color}"></span>`;
   }
 
@@ -4266,6 +4286,7 @@
   function modelTable(u, { filterable = false } = {}) {
     const models = u.models || [];
     if (!models.length) return '';
+    const series = shareSeries(models, modelLabel);
     const rows = models
       .map((m, i) => {
         const on = filterable && homeFilter.model === m.key;
@@ -4276,7 +4297,7 @@
             }"`
           : '';
         return `<tr class="border-t border-line${cls}"${attrs}>
-          <td class="max-w-[220px] truncate py-1.5 pr-3 text-ink" title="${esc(m.model || '')}">${swatch(i, models)}<span class="font-mono text-[12px]">${esc(m.model || 'unknown')}</span></td>
+          <td class="max-w-[220px] truncate py-1.5 pr-3 text-ink" title="${esc(m.model || '')}">${swatch(series.colors[i])}<span class="font-mono text-[12px]">${esc(m.model || 'unknown')}</span></td>
           <td class="py-1.5 pr-3 text-muted">${esc(m.provider || '—')}</td>
           <td class="py-1.5 pr-3 text-right">${m.sessions}</td>
           <td class="py-1.5 pr-3 text-right">${m.turns}</td>
@@ -4293,8 +4314,7 @@
           filterable ? ' Click a row to narrow the whole page to that model.' : ''
         }`,
       ),
-      models,
-      modelLabel,
+      series,
       `<table class="w-full border-collapse text-[13px]">
           <thead><tr class="text-[11px] tracking-wide text-muted">
             <th class="py-1 pr-3 text-left font-normal">${hinted('Model', 'The model id the provider’s CLI reported for the turn.')}</th>
@@ -4317,13 +4337,14 @@
     const providers = u.providers || [];
     if (!providers.length) return '';
     const label = (p) => p.provider || 'unknown';
+    const series = shareSeries(providers, label);
     const rows = providers
       .map((p, i) => {
         const name = p.provider
           ? esc(p.provider)
           : '<span class="text-muted" title="No provider was recorded on these turns">unknown</span>';
         return `<tr class="border-t border-line">
-          <td class="max-w-[200px] truncate py-1.5 pr-3 text-ink">${swatch(i, providers)}<span class="font-mono text-[12px]">${name}</span></td>
+          <td class="max-w-[200px] truncate py-1.5 pr-3 text-ink">${swatch(series.colors[i])}<span class="font-mono text-[12px]">${name}</span></td>
           <td class="py-1.5 pr-3 text-right">${p.sessions}</td>
           <td class="py-1.5 pr-3 text-right">${p.turns}</td>
           <td class="py-1.5 pr-3 text-right" title="${p.inputTokens.toLocaleString()} in · ${p.outputTokens.toLocaleString()} out">${fmtTokens(p.inputTokens)} / ${fmtTokens(p.outputTokens)}</td>
@@ -4337,8 +4358,7 @@
         'By provider',
         'What each CLI cost, over every model it was asked for. This is the row to read against a subscription or an invoice; the accounts of one provider are summed together, since they bill as one.',
       ),
-      providers,
-      label,
+      series,
       `<table class="w-full border-collapse text-[13px]">
           <thead><tr class="text-[11px] tracking-wide text-muted">
             <th class="py-1 pr-3 text-left font-normal">${hinted('Provider', 'The CLI the turns ran on: claude, codex, grok, opencode. Which account of it ran them is not distinguished here.')}</th>
@@ -4416,6 +4436,7 @@
     const activities = u.activities || [];
     if (!activities.length) return '';
     const label = (a) => (a.activity ? ACTIVITY_LABELS[a.activity] || a.activity : 'Unattributed');
+    const series = shareSeries(activities, label);
     const rows = activities
       .map((a, i) => {
         // The label alone is a guess at best ("Worker" started by whom?), so
@@ -4429,7 +4450,7 @@
               'Turns recorded before the ledger tracked what kind of work they were. Nothing new lands here.',
             );
         return `<tr class="border-t border-line">
-          <td class="max-w-[220px] truncate py-1.5 pr-3 text-ink">${swatch(i, activities)}${name}</td>
+          <td class="max-w-[220px] truncate py-1.5 pr-3 text-ink">${swatch(series.colors[i])}${name}</td>
           <td class="py-1.5 pr-3 text-right">${a.sessions}</td>
           <td class="py-1.5 pr-3 text-right">${a.turns}</td>
           <td class="py-1.5 pr-3 text-right" title="${a.inputTokens.toLocaleString()} in · ${a.outputTokens.toLocaleString()} out">${fmtTokens(a.inputTokens)} / ${fmtTokens(a.outputTokens)}</td>
@@ -4443,8 +4464,7 @@
         'By activity',
         'Where the money went, by the kind of work it bought. A session is filed under one activity when it starts and every turn it ever runs counts there, so a review’s fixes and a worker’s reviews land in their own rows rather than in the one that started them. Ranked by cost; the ring beside it is share of tokens.',
       ),
-      activities,
-      label,
+      series,
       `<table class="w-full border-collapse text-[13px]">
           <thead><tr class="text-[11px] tracking-wide text-muted">
             <th class="py-1 pr-3 text-left font-normal">${hinted('Activity', 'What kind of work the turns paid for. Hover a row to see what starts that kind of session.')}</th>
@@ -4828,13 +4848,16 @@
     return new Date(y, m - 1, 1).toLocaleDateString([], { month: 'long', year: 'numeric' });
   }
 
-  // One row per project, biggest token spender first. The bar is a share of the
-  // busiest project: magnitude, so one hue, and the number beside it is what
-  // is actually being read; the bar only says how the projects rank at a glance.
+  // One row per project, biggest token spender first. The bar's length is a
+  // share of the busiest project, and the number beside it is what is actually
+  // being read; the bar only says how the projects rank at a glance. Its hue is
+  // the row's slice on the ring, or the one accent hue wherever shareSeries
+  // draws no ring.
   function projectTable(u) {
     const rows = u.projects || [];
     if (!rows.length) return '';
     const max = Math.max(1, ...rows.map((p) => p.totalTokens));
+    const series = shareSeries(rows, (p) => p.label);
     const body = rows
       .map((p, i) => {
         const width = Math.round((p.totalTokens / max) * 100);
@@ -4853,8 +4876,9 @@
         // This row's bar wears its slice's colour rather than the one accent
         // hue, which is what ties it to the ring beside the table. It stands in
         // for the swatch the other tables carry: two colour marks on one row
-        // would be saying the same thing twice.
-        const bar = rows.length > 2 ? seriesColor(Math.min(i, SERIES_SLOTS)) : 'var(--color-accent)';
+        // would be saying the same thing twice. No slice, no palette: back to
+        // the accent, which says magnitude and nothing about identity.
+        const bar = series.colors[i] || 'var(--color-accent)';
         return `<tr class="cursor-pointer border-t border-line hover:bg-sunken/60${cls}"${attrs}>
           <td class="max-w-[200px] truncate py-1.5 pr-3">${name}</td>
           <td class="py-1.5 pr-3 text-right">${p.sessions}</td>
@@ -4878,8 +4902,7 @@
         'By project',
         'Every configured project, plus any repository with spend that no project claims any more. A project that ran nothing is listed at zero, so the rows always add up to the totals above. Click a row to narrow the whole page to that project.',
       ),
-      rows,
-      (p) => p.label,
+      series,
       `<table class="w-full border-collapse text-[13px]">
           <thead><tr class="text-[11px] tracking-wide text-muted">
             <th class="py-1 pr-3 text-left font-normal">${hinted('Project', 'The project in Settings the turns were spent on. A project renamed since keeps one row; one deleted from Settings keeps its history under the repository it named, greyed out and marked (removed).')}</th>
@@ -4904,7 +4927,15 @@
     const known = options.some((o) => o.key === value);
     const rows = options.map((o) => ({ key: o.key, label: o.label }));
     if (value && !known) rows.push({ key: value, label: homeFilterLabels[which] || value });
-    $(id).innerHTML = [{ key: '', label: all }, ...rows]
+    // The pane redraws itself on a 60-second refresh tick, and replacing the
+    // <option> nodes under a dropdown the reader has open closes it with
+    // nothing on screen saying why. Between two ticks the options are almost
+    // always the same, so the rewrite only happens when they are not.
+    const el = $(id);
+    const sig = JSON.stringify([all, value, rows]);
+    if (el.dataset.pickerSig === sig && el.value === value) return;
+    el.dataset.pickerSig = sig;
+    el.innerHTML = [{ key: '', label: all }, ...rows]
       .map(
         (o) => `<option value="${esc(o.key)}"${o.key === value ? ' selected' : ''}>${esc(o.label)}</option>`,
       )
