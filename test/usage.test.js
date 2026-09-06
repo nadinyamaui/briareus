@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 
-const db = vi.hoisted(() => ({ rows: [], all: [], saved: [] }));
+const db = vi.hoisted(() => ({ rows: [], all: [], jobs: [], calibration: [], saved: [] }));
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({}) }));
 // The catalog behind the estimates has a test file of its own; here the rows
@@ -12,6 +12,8 @@ vi.mock('../lib/db.js', () => ({
   }),
   loadTurnUsage: vi.fn(async () => db.rows),
   loadAllTurnUsage: vi.fn(async () => db.all),
+  loadJobTurnUsage: vi.fn(async () => db.jobs),
+  loadTurnUsageCalibration: vi.fn(async () => db.calibration),
 }));
 
 const {
@@ -30,8 +32,10 @@ const {
   jobUsageEstimates,
   estimateEventCosts,
   recordTurnUsage,
+  resetUsageCalibration,
 } = await import('../lib/usage.js');
-const { loadTurnUsage, loadAllTurnUsage } = await import('../lib/db.js');
+const { loadTurnUsage, loadAllTurnUsage, loadJobTurnUsage, loadTurnUsageCalibration, saveTurnUsage } =
+  await import('../lib/db.js');
 const { estimateCosts } = await import('../lib/prices.js');
 
 describe('turnUsageRecord', () => {
@@ -554,20 +558,46 @@ describe('recordTurnUsage', () => {
       costUsd: 0.1,
     });
   });
+
+  it('stops waiting for a stalled write after one second', async () => {
+    vi.useFakeTimers();
+    try {
+      saveTurnUsage.mockImplementationOnce(() => new Promise(() => {}));
+      const pending = recordTurnUsage(
+        { id: 'slow', projectId: 7, repo: 'o/r' },
+        { inputTokens: 1, outputTokens: 2, costUsd: null },
+        { binary: 'codex' },
+        'm',
+      );
+      let settled = false;
+      pending.then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await pending;
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('session cost estimates', () => {
-  it('calibrates over the whole ledger before grouping the requested sessions', async () => {
-    db.all = [
+  it('caches a compact lifetime calibration while loading only requested sessions', async () => {
+    resetUsageCalibration();
+    db.jobs = [
       { jobId: 'a', costUsd: 2, inputTokens: 10, at: 1 },
       { jobId: 'a', costUsd: 0.5, costEstimated: true, inputTokens: 20, at: 2 },
       { jobId: 'a', costUsd: null, inputTokens: 30, at: 3 },
       { jobId: 'b', costUsd: 1, costEstimated: true, inputTokens: 40, at: 4 },
-      { jobId: 'calibration-only', costUsd: 3, inputTokens: 1_000_000, at: 5 },
     ];
+    db.calibration = [{ provider: 'claude', model: 'm', costUsd: 3, inputTokens: 1_000_000 }];
     const estimates = await jobUsageEstimates(['a', 'b'], 123);
-    expect(loadAllTurnUsage).toHaveBeenCalledWith();
-    expect(estimateCosts).toHaveBeenCalledWith(db.all, 123);
+    expect(loadJobTurnUsage).toHaveBeenCalledWith(['a', 'b']);
+    expect(loadTurnUsageCalibration).toHaveBeenCalledTimes(1);
+    expect(estimateCosts).toHaveBeenCalledWith(db.jobs, 123, db.calibration);
     expect(estimates.get('a')).toMatchObject({
       estimatedCostUsd: 0.5,
       estimatedTurns: 1,
@@ -575,7 +605,17 @@ describe('session cost estimates', () => {
     });
     expect(estimates.get('a').rows).toHaveLength(3);
     expect(estimates.get('b')).toMatchObject({ estimatedCostUsd: 1, estimatedTurns: 1, unpricedTurns: 0 });
-    expect(estimates.has('calibration-only')).toBe(false);
+    await jobUsageEstimates(['a'], 124);
+    expect(loadTurnUsageCalibration).toHaveBeenCalledTimes(1);
+  });
+
+  it('does no ledger work when there are no restored sessions', async () => {
+    resetUsageCalibration();
+    loadJobTurnUsage.mockClear();
+    loadTurnUsageCalibration.mockClear();
+    expect(await jobUsageEstimates([])).toEqual(new Map());
+    expect(loadJobTurnUsage).not.toHaveBeenCalled();
+    expect(loadTurnUsageCalibration).not.toHaveBeenCalled();
   });
 
   it('puts the nearest estimated ledger row on an unpriced transcript footer', () => {

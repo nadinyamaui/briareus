@@ -117,6 +117,15 @@ describe('withEstimates', () => {
     const rows = [{ provider: 'codex', model: 'gpt-5.6-sol', inputTokens: 100, costUsd: null }];
     expect(withEstimates(rows, {})[0].costUsd).toBeNull();
   });
+  it('can calibrate requested rows from a separate lifetime aggregate', () => {
+    const rows = [
+      { provider: 'codex', model: 'gpt-5.6-sol', inputTokens: 10e6, outputTokens: 1e6, costUsd: null },
+    ];
+    const calibration = [
+      { provider: 'codex', model: 'gpt-5.6-sol', inputTokens: 10e6, outputTokens: 1e6, costUsd: 32.6 },
+    ];
+    expect(withEstimates(rows, CATALOG, calibration)[0].costUsd).toBeCloseTo(32.6, 6);
+  });
 });
 
 describe('loadCatalog', () => {
