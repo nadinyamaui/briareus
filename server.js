@@ -875,12 +875,13 @@ app.delete('/api/providers/:id', async (req, res) => {
 // Auth + usage for one provider row, exactly as a session would run it:
 // claude entries answer from the cached `claude auth status` probe (plus the
 // account's subscription usage), everything else is probed on demand.
-async function providerAuthUsage(p, cfg) {
+async function providerAuthUsage(p, cfg, fresh = false) {
   let auth = null;
   let usage = null;
   // Every meter goes through lib/balancer.js's cache: the same numbers the
   // session balancer reads, so page loads keep it warm.
-  const zaiKeyUsage = () => (p.apiKey && zaiHost(p.baseUrl) ? providerUsage(p) : null);
+  const readUsage = () => providerUsage(p, fresh ? { ttlMs: 0 } : {});
+  const zaiKeyUsage = () => (p.apiKey && zaiHost(p.baseUrl) ? readUsage() : null);
   if (p.binary === 'claude') {
     if (p.apiKey) {
       // Verified with a live call to the endpoint (Anthropic's or the custom
@@ -893,6 +894,17 @@ async function providerAuthUsage(p, cfg) {
       });
       usage = await zaiKeyUsage();
     } else {
+      if (fresh && cfg.claudeBin) {
+        const dir = claudeHomeDir(p);
+        await new Promise((resolve) =>
+          probeClaudeCli(cfg, dir, (state) => {
+            const previous = claudeAuthByDir.get(dir);
+            if (!previous || Date.parse(state.checkedAt) >= Date.parse(previous.checkedAt))
+              claudeAuthByDir.set(dir, state);
+            resolve(null);
+          }),
+        );
+      }
       const state = claudeAuthByDir.get(claudeHomeDir(p));
       if (state && state.loggedIn != null) {
         auth = {
@@ -901,17 +913,17 @@ async function providerAuthUsage(p, cfg) {
           checkedAt: state.checkedAt,
           ...providerAuthAccount('claude', p),
         };
-        if (state.loggedIn) usage = await providerUsage(p);
+        if (state.loggedIn) usage = await readUsage();
       }
     }
   } else {
     auth = await probeProviderAuth(p, cfg);
     if (p.binary === 'codex' && !p.baseUrl && !p.apiKey && auth?.loggedIn) {
-      usage = await providerUsage(p);
+      usage = await readUsage();
     } else if (p.binary === 'grok' && auth?.loggedIn) {
       // The login dir is the account here: grok's billing is read with the
       // token `grok login` left in it, exactly as probeProviderAuth found it.
-      usage = await providerUsage(p);
+      usage = await readUsage();
     } else {
       usage = await zaiKeyUsage();
     }
@@ -932,7 +944,8 @@ app.get('/api/providers/:id/status', async (req, res) => {
   if (!p) return res.status(404).json({ error: 'Provider not found' });
   const cfg = getConfig();
   const found = getBinary(p.binary).bin(cfg);
-  const { auth, usage } = await providerAuthUsage(p, cfg);
+  const { auth, usage } = await providerAuthUsage(p, cfg, req.query.fresh === '1');
+  res.set('Cache-Control', 'no-store');
   res.json({
     status: {
       available: !!found,
@@ -1202,7 +1215,7 @@ app.get('/api/dev/providers', async (req, res) => {
       const found = binary.bin(cfg);
       const accounts = await Promise.all(
         group.members.map(async (m) => {
-          const { auth, usage } = await providerAuthUsage(m, cfg);
+          const { auth, usage } = await providerAuthUsage(m, cfg, req.query.fresh === '1');
           return { id: m.id, label: m.label, auth, usage };
         }),
       );
@@ -1237,7 +1250,7 @@ app.get('/api/dev/providers', async (req, res) => {
       };
     }),
   );
-  res.json({ providers });
+  res.set('Cache-Control', 'no-store').json({ providers });
 });
 
 // The branches of one project, for the composer's branch picker: the default

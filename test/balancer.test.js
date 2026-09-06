@@ -239,6 +239,15 @@ describe('rememberProviderAuth', () => {
 });
 
 describe('providerUsage', () => {
+  it('a manual refresh retries a cached failure and updates the balancer immediately', async () => {
+    expect(await providerUsage(row(1))).toBeNull();
+    state.usage['/claude-1'] = windows(100);
+    expect(await providerUsage(row(1))).toBeNull();
+    expect(await providerUsage(row(1), { ttlMs: 0 })).toEqual(windows(100));
+    expect(cachedProviderUsage(row(1))).toEqual(windows(100));
+    expect(providers.claudeUsage).toHaveBeenCalledTimes(2);
+  });
+
   it('caches a read, including a failed one, for the TTL', async () => {
     state.usage['/claude-1'] = windows(1);
     expect(await providerUsage(row(1))).toEqual(windows(1));
@@ -254,6 +263,18 @@ describe('providerUsage', () => {
 });
 
 describe('providerUsage in flight', () => {
+  it('shares an in-flight manual refresh even when callers bypass the TTL', async () => {
+    await providerUsage(row(1));
+    let release;
+    providers.claudeUsage.mockImplementationOnce(() => new Promise((r) => (release = r)));
+    const first = providerUsage(row(1), { ttlMs: 0 });
+    const second = providerUsage(row(1), { ttlMs: 0 });
+    expect(providers.claudeUsage).toHaveBeenCalledTimes(2);
+    release(windows(80));
+    expect(await Promise.all([first, second])).toEqual([windows(80), windows(80)]);
+    expect(cachedProviderUsage(row(1))).toEqual(windows(80));
+  });
+
   it('collapses concurrent reads of one account into a single request', async () => {
     state.usage['/claude-1'] = windows(7);
     const reads = await Promise.all([providerUsage(row(1)), providerUsage(row(1)), providerUsage(row(1))]);
