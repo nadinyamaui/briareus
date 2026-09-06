@@ -1179,7 +1179,16 @@ app.get('/api/dev/usage', async (req, res) => {
 // switched off mid-month still spent what it spent, and leaving it out would
 // make the per-project rows fail to add up to the headline totals.
 app.get('/api/dev/usage/all', async (req, res) => {
-  res.json(await overallUsage(listProjects(), String(req.query.period || 'month')));
+  // `project` and `model` are lib/usage.js's own filter keys, handed back
+  // verbatim from the options the last payload carried. A key nothing matches
+  // narrows the page to an empty window rather than being dropped, which is
+  // what makes "this model never ran here" readable instead of invisible.
+  res.json(
+    await overallUsage(listProjects(), String(req.query.period || 'month'), Date.now(), {
+      project: req.query.project ? String(req.query.project) : null,
+      model: req.query.model ? String(req.query.model) : null,
+    }),
+  );
 });
 
 // One pull request on its own, in the detail the right-hand panel draws: state,
@@ -1449,6 +1458,17 @@ app.get('/api/dev/office/events', (req, res) => {
   });
 });
 
+// What the browser is allowed to file a session's spend under. Everything
+// else names its activity server-side: a board errand passes its own action id
+// and the rest is derived from what the session is (lib/jobs.js). This list is
+// for the kinds of work only the browser knows about, because the derivation
+// cannot see them: ▶ Start on an issue is an ordinary coding session in every
+// respect except what it was started for, and folding its spend into plain
+// chat is what makes "what did working issues cost?" unanswerable. An activity
+// not on the list is dropped rather than rejected: a stale tab must not fail
+// to start a session over a label.
+const COMPOSER_ACTIVITIES = new Set(['issue']);
+
 app.post('/api/dev/sessions', (req, res) => {
   // prNumber is the project dashboard's: a review started from a pull request
   // row already knows which one it is, so the review prompt and the session's
@@ -1467,6 +1487,9 @@ app.post('/api/dev/sessions', (req, res) => {
   // code (lib/jobs.js, zeusSystemPrompt); `zeusRoles` is what each analyst
   // role (product, architecture, qa, validator) runs on, when the composer's
   // dialog picked them.
+  // `activity` is what the start files its spend under in the usage ledger,
+  // for the starts the server cannot tell apart from a plain chat; see
+  // COMPOSER_ACTIVITIES above.
   const {
     provider,
     model,
@@ -1485,6 +1508,7 @@ app.post('/api/dev/sessions', (req, res) => {
     prNumber,
     reviewLoop,
     qaLoop,
+    activity,
   } = req.body || {};
   try {
     const number = Number.isInteger(Number(prNumber)) && Number(prNumber) > 0 ? Number(prNumber) : undefined;
@@ -1507,6 +1531,7 @@ app.post('/api/dev/sessions', (req, res) => {
         prNumber: number,
         reviewLoop: reviewLoop === true,
         qaLoop: qaLoop === true,
+        activity: COMPOSER_ACTIVITIES.has(activity) ? activity : undefined,
       }),
     });
   } catch (e) {

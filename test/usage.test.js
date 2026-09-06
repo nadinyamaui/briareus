@@ -23,7 +23,12 @@ const {
   localMonth,
   monthlyUsage,
   projectBreakdown,
+  projectFilterKey,
+  modelFilterKey,
+  filterUsageRows,
+  usageFilterOptions,
   modelUsage,
+  providerUsage,
   activityUsage,
   projectUsage,
   overallUsage,
@@ -218,6 +223,25 @@ describe('modelUsage', () => {
   });
 });
 
+describe('providerUsage', () => {
+  it('groups a provider’s whole spend together, whatever models it ran', () => {
+    const rows = [
+      { provider: 'claude', model: 'opus', jobId: 'a', inputTokens: 10, outputTokens: 0, costUsd: 1 },
+      { provider: 'claude', model: 'sonnet', jobId: 'b', inputTokens: 20, outputTokens: 0, costUsd: 2 },
+      { provider: 'codex', model: 'gpt-5', jobId: 'c', inputTokens: 5, outputTokens: 0, costUsd: null },
+    ];
+    const out = providerUsage(rows);
+    expect(out.map((p) => p.provider)).toEqual(['claude', 'codex']);
+    expect(out[0]).toMatchObject({ sessions: 2, turns: 2, totalTokens: 30, costUsd: 3 });
+    expect(out[1]).toMatchObject({ turns: 1, totalTokens: 5, costUsd: null, unpricedTurns: 1 });
+  });
+
+  it('keeps rows with no provider recorded under null', () => {
+    const out = providerUsage([{ provider: null, jobId: 'a', inputTokens: 1, outputTokens: 0 }]);
+    expect(out[0].provider).toBeNull();
+  });
+});
+
 describe('activityUsage', () => {
   it('groups by the kind of work, biggest spend first', () => {
     const rows = [
@@ -272,7 +296,7 @@ describe('projectUsage', () => {
       costUsd: null,
     });
   });
-  it('carries the dashboard breakdowns: one bucket per day, the model and activity groups', async () => {
+  it('carries the dashboard breakdowns: one bucket per day, the model, provider and activity groups', async () => {
     const now = new Date(2026, 2, 15).getTime();
     db.rows = [
       {
@@ -290,6 +314,7 @@ describe('projectUsage', () => {
     expect(u.today).toBe('2026-03-15'); // the server's calendar, for the chart's future check
     expect(u.daily[14]).toMatchObject({ turns: 1, totalTokens: 10 });
     expect(u.models).toEqual([expect.objectContaining({ provider: 'claude', model: 'opus', turns: 1 })]);
+    expect(u.providers).toEqual([expect.objectContaining({ provider: 'claude', turns: 1, totalTokens: 10 })]);
     expect(u.activities).toEqual([expect.objectContaining({ activity: 'qa', turns: 1 })]);
   });
 });
@@ -448,6 +473,102 @@ describe('projectBreakdown', () => {
   });
 });
 
+describe('filterUsageRows', () => {
+  const projects = [
+    { id: 1, repo: 'o/one', label: 'One' },
+    { id: 2, repo: 'o/two', label: 'Two' },
+  ];
+  const rows = [
+    { projectId: 1, repo: 'o/one', jobId: 'a', provider: 'claude', model: 'opus', inputTokens: 10 },
+    { projectId: 2, repo: 'o/two', jobId: 'b', provider: 'claude', model: 'opus', inputTokens: 20 },
+    { projectId: 2, repo: 'o/two', jobId: 'c', provider: 'codex', model: 'gpt-5', inputTokens: 40 },
+    { projectId: 9, repo: 'o/gone', jobId: 'd', provider: 'claude', model: 'opus', inputTokens: 80 },
+  ];
+
+  it('hands back the same rows when nothing is picked', () => {
+    expect(filterUsageRows(rows, projects, {})).toBe(rows);
+  });
+
+  it('narrows to one project by the key its table row carries', () => {
+    const out = filterUsageRows(rows, projects, { project: projectFilterKey(projects[1], 'o/two') });
+    expect(out.map((r) => r.jobId)).toEqual(['b', 'c']);
+  });
+
+  it('claims a project’s turns by repository the way the breakdown does', () => {
+    // Written before project_id existed, and under a name since changed: both
+    // belong to project 1, so a filter on project 1 has to keep both.
+    const legacy = [
+      { projectId: null, repo: 'O/ONE', jobId: 'x', inputTokens: 1 },
+      { projectId: 1, repo: 'o/old-name', jobId: 'y', inputTokens: 1 },
+    ];
+    const out = filterUsageRows(legacy, projects, { project: projectFilterKey(projects[0], 'o/one') });
+    expect(out.map((r) => r.jobId)).toEqual(['x', 'y']);
+  });
+
+  it('keeps a deleted project’s turns under the repository they name', () => {
+    const out = filterUsageRows(rows, projects, { project: projectFilterKey(null, 'o/gone') });
+    expect(out.map((r) => r.jobId)).toEqual(['d']);
+  });
+
+  it('narrows to one model, provider and all', () => {
+    expect(
+      filterUsageRows(rows, projects, { model: modelFilterKey('claude', 'opus') }).map((r) => r.jobId),
+    ).toEqual(['a', 'b', 'd']);
+    expect(
+      filterUsageRows(rows, projects, { model: modelFilterKey('codex', 'gpt-5') }).map((r) => r.jobId),
+    ).toEqual(['c']);
+  });
+
+  it('keeps the same model id apart when two providers sell it', () => {
+    const both = [
+      { provider: 'claude', model: 'opus', jobId: 'a' },
+      { provider: 'opencode', model: 'opus', jobId: 'b' },
+    ];
+    expect(
+      filterUsageRows(both, [], { model: modelFilterKey('opencode', 'opus') }).map((r) => r.jobId),
+    ).toEqual(['b']);
+  });
+
+  it('intersects the two picks', () => {
+    const out = filterUsageRows(rows, projects, {
+      project: projectFilterKey(projects[1], 'o/two'),
+      model: modelFilterKey('claude', 'opus'),
+    });
+    expect(out.map((r) => r.jobId)).toEqual(['b']);
+  });
+
+  it('narrows to nothing when the pick matches nothing', () => {
+    expect(filterUsageRows(rows, projects, { model: modelFilterKey('grok', 'grok-4') })).toEqual([]);
+  });
+});
+
+describe('usageFilterOptions', () => {
+  const projects = [
+    { id: 1, repo: 'o/one', label: 'One' },
+    { id: 2, repo: 'o/two', label: 'Two' },
+  ];
+
+  it('offers every project and model of the window, ordered by spend', () => {
+    const rows = [
+      { projectId: 1, repo: 'o/one', jobId: 'a', provider: 'claude', model: 'opus', inputTokens: 10 },
+      { projectId: 9, repo: 'o/gone', jobId: 'b', provider: 'codex', model: 'gpt-5', inputTokens: 80 },
+    ];
+    const { projects: p, models } = usageFilterOptions(rows, projects);
+    expect(p.map((o) => [o.label, o.gone])).toEqual([
+      ['o/gone', true],
+      ['One', false],
+      // Listed at zero: a project can only be picked out of a list it is on.
+      ['Two', false],
+    ]);
+    expect(models.map((o) => [o.model, o.provider])).toEqual([
+      ['gpt-5', 'codex'],
+      ['opus', 'claude'],
+    ]);
+    expect(p[0].key).toBe(projectFilterKey(null, 'o/gone'));
+    expect(models[0].key).toBe(modelFilterKey('codex', 'gpt-5'));
+  });
+});
+
 describe('overallUsage', () => {
   const projects = [{ id: 1, repo: 'o/one', label: 'One' }];
 
@@ -499,7 +620,125 @@ describe('overallUsage', () => {
     expect(u.buckets[14]).toMatchObject({ turns: 2, totalTokens: 12 });
     expect(u.projects.map((p) => p.label)).toEqual(['One', 'o/gone']);
     expect(u.models.map((m) => m.model)).toEqual(['opus', 'gpt-5']);
+    expect(u.providers.map((p) => p.provider)).toEqual(['claude', 'codex']);
     expect(u.activities.map((a) => a.activity)).toEqual(['implement-feedback', 'chat']);
+  });
+
+  it('narrows every number to the picked project, and keeps the pickers whole', async () => {
+    const now = new Date(2026, 2, 15).getTime();
+    const both = [
+      { id: 1, repo: 'o/one', label: 'One' },
+      { id: 2, repo: 'o/two', label: 'Two' },
+    ];
+    db.all = [
+      {
+        projectId: 1,
+        repo: 'o/one',
+        jobId: 'a',
+        provider: 'claude',
+        model: 'opus',
+        inputTokens: 10,
+        outputTokens: 0,
+        costUsd: 1,
+        at: now,
+      },
+      {
+        projectId: 2,
+        repo: 'o/two',
+        jobId: 'b',
+        provider: 'codex',
+        model: 'gpt-5',
+        inputTokens: 90,
+        outputTokens: 0,
+        costUsd: 9,
+        at: now,
+      },
+    ];
+    const u = await overallUsage(both, 'month', now, { project: projectFilterKey(both[0], 'o/one') });
+    expect(u).toMatchObject({ turns: 1, sessions: 1, totalTokens: 10, costUsd: 1 });
+    expect(u.filter).toEqual({ project: 'p:1', model: null });
+    // The by-project table is the pick alone: the quiet projects answer
+    // "which ran nothing?", which is not the question a pick asked.
+    expect(u.projects.map((p) => p.label)).toEqual(['One']);
+    expect(u.models.map((m) => m.model)).toEqual(['opus']);
+    expect(u.buckets[14]).toMatchObject({ turns: 1, totalTokens: 10 });
+    // …but both projects and both models stay on the pickers, or narrowing to
+    // one would be a one-way door.
+    expect(u.options.projects.map((o) => o.label)).toEqual(['Two', 'One']);
+    expect(u.options.models.map((o) => o.model)).toEqual(['gpt-5', 'opus']);
+  });
+
+  it('narrows to one model across every project', async () => {
+    const now = new Date(2026, 2, 15).getTime();
+    const both = [
+      { id: 1, repo: 'o/one', label: 'One' },
+      { id: 2, repo: 'o/two', label: 'Two' },
+    ];
+    db.all = [
+      {
+        projectId: 1,
+        repo: 'o/one',
+        jobId: 'a',
+        provider: 'claude',
+        model: 'opus',
+        inputTokens: 10,
+        outputTokens: 0,
+        costUsd: 1,
+        at: now,
+      },
+      {
+        projectId: 2,
+        repo: 'o/two',
+        jobId: 'b',
+        provider: 'claude',
+        model: 'opus',
+        inputTokens: 20,
+        outputTokens: 0,
+        costUsd: 2,
+        at: now,
+      },
+      {
+        projectId: 2,
+        repo: 'o/two',
+        jobId: 'c',
+        provider: 'codex',
+        model: 'gpt-5',
+        inputTokens: 90,
+        outputTokens: 0,
+        costUsd: 9,
+        at: now,
+      },
+    ];
+    const u = await overallUsage(both, 'month', now, { model: modelFilterKey('claude', 'opus') });
+    expect(u).toMatchObject({ turns: 2, totalTokens: 30, costUsd: 3 });
+    // The per-project totals of that one model: what the pick is for.
+    expect(u.projects.map((p) => [p.label, p.totalTokens])).toEqual([
+      ['Two', 20],
+      ['One', 10],
+    ]);
+    expect(u.filter).toEqual({ project: null, model: 'claude|opus' });
+  });
+
+  it('reports an empty window rather than ignoring a pick nothing matches', async () => {
+    const now = new Date(2026, 2, 15).getTime();
+    db.all = [
+      {
+        projectId: 1,
+        repo: 'o/one',
+        jobId: 'a',
+        provider: 'claude',
+        model: 'opus',
+        inputTokens: 10,
+        outputTokens: 0,
+        at: now,
+      },
+    ];
+    const u = await overallUsage([{ id: 1, repo: 'o/one', label: 'One' }], 'month', now, {
+      model: modelFilterKey('grok', 'grok-4'),
+    });
+    expect(u).toMatchObject({ turns: 0, totalTokens: 0, costUsd: null });
+    expect(u.models).toEqual([]);
+    expect(u.options.models.map((o) => o.model)).toEqual(['opus']);
   });
 
   it('asks for the whole ledger and buckets it by month for all time', async () => {
