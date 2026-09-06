@@ -4316,6 +4316,27 @@ describe('the review loop: what a round runs on, and re-running one that could n
       reviewLoop: { rounds: 1, lastSha: 'sha-rt', reviewerFailed: true },
     },
     {
+      // A loop a retry has already moved once, onto a provider of another
+      // family: what the next retry has to not carry forward. The project
+      // names no reviewer, so nothing but the two overrides is in play.
+      id: 'rt-again',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt',
+      providerId: 1,
+      provider: 'Claude entry',
+      model: 'session-model',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 74,
+      prStatus: { number: 74, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        runtime: { providerId: 3, model: 'codex-model', effort: 'low' },
+      },
+    },
+    {
       // A project whose reviewer row was deleted in Settings since.
       id: 'rt-gone',
       kind: 'devchat',
@@ -4720,6 +4741,26 @@ describe('the review loop: what a round runs on, and re-running one that could n
     });
     expect(infoTexts(job).join('\n')).toMatch(/retrying the review on claude-fable-5-1/);
     expect(infoTexts(job).join('\n')).not.toMatch(/retrying the review on session-model/);
+  });
+
+  it('a second retry onto another provider restores the session’s own model', async () => {
+    const job = getJob('rt-again');
+    state.group = [];
+
+    // The first retry moved this loop onto provider 3, which runs models of
+    // another family; this one names the session's own row again, the call the
+    // failure notice invites once that provider runs dry too. Filled in from
+    // the override it replaces, the model would be the other family's — which
+    // provider 1 does not run, so resolveRuntime would swap it for provider
+    // 1's default, and the fix sessions and the QA run would open for the rest
+    // of the loop on a model neither the session nor the caller ever named.
+    await retryLoopRound('rt-again', { providerId: 1 });
+
+    expect(job.reviewLoop.runtime).toEqual({
+      providerId: 1,
+      model: 'session-model',
+      effort: 'high',
+    });
   });
 
   it('a round nothing but a restart ended is not a provider to move off', async () => {

@@ -302,7 +302,9 @@
                 loop belongs to. A retry onto another provider keeps the loop there. A reviewer that cannot
                 run a round — its CLI missing here, its accounts spent — is given up for the rest of that
                 loop: every later round moves onto the session's own provider, and it takes a repair in
-                Settings plus the <span class="kbd">🔁</span> chip off and on to ask the project again.
+                Settings plus either the <span class="kbd">🔁</span> chip off and on, which rebuilds the loop
+                and drops a queued QA run with it, or a <code>retry_review</code> naming the repaired row,
+                which keeps both, to ask the project again.
               </td>
             </tr>
             <tr>

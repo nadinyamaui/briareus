@@ -236,7 +236,10 @@ yarn build</code></pre>
             provider's own. Left empty, a round follows the session it reviews for, as does a round whose
             reviewer proved unable to run: a loop that has been turned away by it once gives it up and reviews
             on the session's own provider until the reviewer is repaired here and the
-            <span class="kbd">🔁</span> chip is turned off and on again.
+            <span class="kbd">🔁</span> chip is turned off and on again — which re-arms the loop from scratch
+            and drops any QA run queued behind it. An orchestrator asks the project again without losing
+            either: a <code>retry_review</code> naming the repaired row puts the reviews back on it, round
+            count and all.
           </p>
         </div>
         <div class="f">
