@@ -162,6 +162,23 @@ describe('loadCatalog', () => {
     expect(await loadCatalog(1000 + day + 1)).toEqual(CATALOG);
   });
 
+  it('bounds a stalled catalog refresh', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url, { signal }) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('aborted')));
+          }),
+      ),
+    );
+    const pending = loadCatalog(1000);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(await pending).toEqual({});
+    vi.useRealTimers();
+  });
+
   it('falls back to the catalog the opencode CLI caches, then to nothing', async () => {
     vi.stubGlobal(
       'fetch',

@@ -1541,8 +1541,26 @@ app.get('/api/dev/sessions/:id/events', (req, res) => {
   const send = (event) => res.write(`id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`);
   const since = Number(req.headers['last-event-id'] ?? req.query.since ?? 0);
   for (const e of jobEventsSince(job, since)) send(e);
+  let sendQueue = Promise.resolve();
   const onEvent = (jobId, event) => {
-    if (jobId === job.id) send(event);
+    if (jobId !== job.id) return;
+    // Keep numbered events in order while a just-completed result is matched
+    // to the ledger row that now carries its catalog estimate.
+    sendQueue = sendQueue
+      .then(async () => {
+        if (event.kind !== 'result' || event.costUsd != null) {
+          send(event);
+          return;
+        }
+        try {
+          const estimates = await jobUsageEstimates([job.id]);
+          send(estimateEventCosts([event], estimates.get(job.id)?.rows)[0]);
+        } catch (e) {
+          console.error(`live session cost unavailable for ${job.id}: ${e.message}`);
+          send(event);
+        }
+      })
+      .catch(() => {});
   };
   bus.on('event', onEvent);
   // The session record itself, pushed on every change the server makes to it:
