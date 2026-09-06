@@ -577,7 +577,14 @@ describe('session cost estimates', () => {
 
   it('puts the nearest estimated ledger row on an unpriced transcript footer', () => {
     const events = [
-      { seq: 1, t: new Date(1000).toISOString(), kind: 'result', costUsd: null },
+      {
+        seq: 1,
+        t: new Date(1000).toISOString(),
+        kind: 'result',
+        costUsd: null,
+        inputTokens: 100,
+        outputTokens: 20,
+      },
       { seq: 2, t: new Date(3000).toISOString(), kind: 'result', costUsd: 2 },
     ];
     const rows = [
@@ -589,5 +596,26 @@ describe('session cost estimates', () => {
       events[1],
     ]);
     expect(events[0].costUsd).toBeNull();
+  });
+
+  it('does not use a later turn ledger row for a ledger-less failure', () => {
+    const events = [
+      { seq: 1, t: new Date(1000).toISOString(), kind: 'result', isError: true, costUsd: null },
+      {
+        seq: 2,
+        t: new Date(3000).toISOString(),
+        kind: 'result',
+        isError: false,
+        costUsd: null,
+        inputTokens: 100,
+        outputTokens: 20,
+      },
+    ];
+    const rows = [{ at: 3005, costUsd: 0.25, costEstimated: true }];
+
+    expect(estimateEventCosts(events, rows)).toEqual([
+      events[0],
+      { ...events[1], costUsd: 0.25, costEstimated: true },
+    ]);
   });
 });
