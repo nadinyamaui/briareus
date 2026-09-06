@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 
-const db = vi.hoisted(() => ({ rows: [], all: [], saved: [] }));
+const db = vi.hoisted(() => ({ rows: [], all: [], jobs: [], saved: [] }));
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({}) }));
 // The catalog behind the estimates has a test file of its own; here the rows
@@ -12,6 +12,7 @@ vi.mock('../lib/db.js', () => ({
   }),
   loadTurnUsage: vi.fn(async () => db.rows),
   loadAllTurnUsage: vi.fn(async () => db.all),
+  loadJobTurnUsage: vi.fn(async () => db.jobs),
 }));
 
 const {
@@ -27,9 +28,11 @@ const {
   activityUsage,
   projectUsage,
   overallUsage,
+  jobUsageEstimates,
+  estimateEventCosts,
   recordTurnUsage,
 } = await import('../lib/usage.js');
-const { loadTurnUsage, loadAllTurnUsage } = await import('../lib/db.js');
+const { loadTurnUsage, loadAllTurnUsage, loadJobTurnUsage } = await import('../lib/db.js');
 
 describe('turnUsageRecord', () => {
   const job = { id: 'j1', projectId: 7, repo: 'o/r' };
@@ -550,5 +553,41 @@ describe('recordTurnUsage', () => {
       model: 'm',
       costUsd: 0.1,
     });
+  });
+});
+
+describe('session cost estimates', () => {
+  it('groups estimated and still-unpriced turns by session without changing reported costs', async () => {
+    db.jobs = [
+      { jobId: 'a', costUsd: 2, inputTokens: 10, at: 1 },
+      { jobId: 'a', costUsd: 0.5, costEstimated: true, inputTokens: 20, at: 2 },
+      { jobId: 'a', costUsd: null, inputTokens: 30, at: 3 },
+      { jobId: 'b', costUsd: 1, costEstimated: true, inputTokens: 40, at: 4 },
+    ];
+    const estimates = await jobUsageEstimates(['a', 'b']);
+    expect(loadJobTurnUsage).toHaveBeenCalledWith(['a', 'b']);
+    expect(estimates.get('a')).toMatchObject({
+      estimatedCostUsd: 0.5,
+      estimatedTurns: 1,
+      unpricedTurns: 1,
+    });
+    expect(estimates.get('a').rows).toHaveLength(3);
+    expect(estimates.get('b')).toMatchObject({ estimatedCostUsd: 1, estimatedTurns: 1, unpricedTurns: 0 });
+  });
+
+  it('puts the nearest estimated ledger row on an unpriced transcript footer', () => {
+    const events = [
+      { seq: 1, t: new Date(1000).toISOString(), kind: 'result', costUsd: null },
+      { seq: 2, t: new Date(3000).toISOString(), kind: 'result', costUsd: 2 },
+    ];
+    const rows = [
+      { at: 1005, costUsd: 0.25, costEstimated: true },
+      { at: 3005, costUsd: 2 },
+    ];
+    expect(estimateEventCosts(events, rows)).toEqual([
+      { ...events[0], costUsd: 0.25, costEstimated: true },
+      events[1],
+    ]);
+    expect(events[0].costUsd).toBeNull();
   });
 });

@@ -1299,6 +1299,22 @@ describe('the worker budget', () => {
     expect(workerSummary(getJob('bud-w1')).costUsd).toBe(3.5);
   });
 
+  it('adds read-side estimates to a session tree while keeping the stored figures raw', () => {
+    const estimates = new Map([
+      ['bud-orch', { estimatedCostUsd: 0.25, estimatedTurns: 1, unpricedTurns: 0 }],
+      ['bud-w1', { estimatedCostUsd: 0.5, estimatedTurns: 1, unpricedTurns: 0 }],
+      ['bud-qa', { estimatedCostUsd: 0.1, estimatedTurns: 1, unpricedTurns: 1 }],
+    ]);
+    const projected = publicJob(getJob('bud-orch'), estimates);
+    expect(projected.costUsd).toBe(5);
+    expect(projected.usage).toMatchObject({
+      costUsd: 9.35,
+      estimatedCostUsd: 0.85,
+      estimatedTurns: 3,
+      unpricedTurns: 1,
+    });
+  });
+
   it('spawn refuses once the orchestration spent its budget', () => {
     state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '', workerBudgetUsd: 6 }];
     expect(() => spawnWorkerSession(getJob('bud-orch'), { title: 'x', prompt: 'x' })).toThrow(

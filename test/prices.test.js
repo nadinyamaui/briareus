@@ -40,6 +40,11 @@ describe('priceFor', () => {
       cacheRead: 0.5,
     });
     expect(priceFor(CATALOG, 'codex', 'gpt-5.6-sol')).toEqual({ input: 4, output: 20, cacheRead: 0.4 });
+    expect(priceFor(CATALOG, 'codex', 'gpt-5.6-sol (872k)')).toEqual({
+      input: 4,
+      output: 20,
+      cacheRead: 0.4,
+    });
     expect(priceFor(CATALOG, 'grok', 'grok-4.6')).toEqual({ input: 2, output: 6, cacheRead: 0.5 });
   });
   it('reads an opencode model reference as the service it names', () => {
