@@ -1590,15 +1590,27 @@
     return s.usage || s;
   }
 
-  // "12.4k tok · $0.83": what the session has consumed so far. Tokens are
-  // input + output over every turn; the cost is only there when the provider
-  // priced its turns, so a codex session shows tokens alone.
+  function preserveEstimatedUsage(next, previous) {
+    const oldUsage = previous?.usage;
+    if (!oldUsage || !('estimatedTurns' in oldUsage) || 'estimatedTurns' in (next.usage || {})) return next;
+    const raw = next.usage.costUsd;
+    const estimated = oldUsage.estimatedCostUsd;
+    next.usage.costUsd = raw == null && estimated == null ? null : (raw || 0) + (estimated || 0);
+    next.usage.estimatedCostUsd = estimated;
+    next.usage.estimatedTurns = oldUsage.estimatedTurns || 0;
+    next.usage.unpricedTurns = oldUsage.unpricedTurns || 0;
+    return next;
+  }
+
+  // "12.4k tok · ~$0.83": what the session has consumed so far. Codex does
+  // not report a price, so its catalog-priced total carries the same estimate
+  // marker and partial-total suffix as the usage dashboards.
   function usageChip(s) {
     const u = sessionUsage(s);
     const tokens = (u.inputTokens || 0) + (u.outputTokens || 0);
     const bits = [];
     if (tokens) bits.push(`${fmtTokens(tokens)} tok`);
-    if (u.costUsd != null) bits.push(`$${u.costUsd.toFixed(2)}`);
+    if (u.costUsd != null) bits.push(fmtCost(u));
     return bits.join(' · ');
   }
 
@@ -1708,7 +1720,7 @@
     if (u.inputTokens != null) rows.push(row('Input tokens', fmtTokens(u.inputTokens)));
     if (u.outputTokens != null) rows.push(row('Output tokens', fmtTokens(u.outputTokens)));
     if (u.durationMs != null) rows.push(row('Agent time', fmtDur(u.durationMs)));
-    if (u.costUsd != null) rows.push(row('Cost', `$${u.costUsd.toFixed(2)}`));
+    if (u.costUsd != null) rows.push(row('Cost', fmtCost(u)));
     // Say when those numbers are more than this conversation's own: an
     // orchestrator's cover its workers, a task's the reviews its loop ran.
     if (u.sessions)
@@ -2279,8 +2291,11 @@
         const s = JSON.parse(m.data);
         if (s.id !== current) return;
         const i = sessions.findIndex((x) => x.id === s.id);
+        // Live record pushes are synchronous and therefore carry only what
+        // the CLI reported. Keep the latest read-side estimate until the next
+        // sessions poll recalculates it, including any turn just completed.
         if (i === -1) sessions.unshift(s);
-        else sessions[i] = s;
+        else sessions[i] = preserveEstimatedUsage(s, sessions[i]);
         renderSidebar();
         updateHead();
       } catch {
@@ -2378,7 +2393,7 @@
           (e.isError ? 'text-danger' : 'text-muted');
         const bits = [];
         if (e.isError) bits.push('turn failed');
-        if (e.costUsd != null) bits.push(`$${e.costUsd.toFixed(4)}`);
+        if (e.costUsd != null) bits.push(`${e.costEstimated ? '~' : ''}$${e.costUsd.toFixed(4)}`);
         if (e.durationMs != null) bits.push(`${Math.round(e.durationMs / 1000)}s`);
         if (e.numTurns != null) bits.push(`${e.numTurns} turns`);
         if (e.inputTokens != null || e.outputTokens != null)
@@ -2839,7 +2854,7 @@
         body: JSON.stringify({ title }),
       });
       const i = sessions.findIndex((x) => x.id === session.id);
-      if (i !== -1) sessions[i] = session;
+      if (i !== -1) sessions[i] = preserveEstimatedUsage(session, sessions[i]);
       renderSidebar();
       updateHead();
       toast('Session title updated');
@@ -2868,7 +2883,7 @@
         body: JSON.stringify({ pr }),
       });
       const i = sessions.findIndex((x) => x.id === session.id);
-      if (i !== -1) sessions[i] = session;
+      if (i !== -1) sessions[i] = preserveEstimatedUsage(session, sessions[i]);
       renderSidebar();
       updateHead();
       toast(`Linked PR #${session.prStatus.number}`);
@@ -3907,7 +3922,7 @@
   function runRow(s) {
     const bits = [s.provider, sessionState(s), timeAgo(s.createdAt)];
     const cost = sessionUsage(s).costUsd;
-    if (cost != null) bits.push(`$${cost.toFixed(2)}`);
+    if (cost != null) bits.push(fmtCost(sessionUsage(s)));
     return `<div class="run-row mb-1.5 flex cursor-pointer items-center gap-2 rounded-xl border border-line bg-raise px-3 py-2 hover:border-accent-dim" data-id="${s.id}"
          title="Open this conversation">
         <span class="dot ${esc(sessionState(s))}"></span>

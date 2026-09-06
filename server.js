@@ -116,7 +116,7 @@ import { projectPulls, pullOverview } from './lib/prboard.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload } from './lib/uploads.js';
-import { projectUsage, overallUsage } from './lib/usage.js';
+import { projectUsage, overallUsage, jobUsageEstimates, estimateEventCosts } from './lib/usage.js';
 import {
   requireAuth,
   authEnabled,
@@ -1383,8 +1383,21 @@ app.post('/api/dev/actions', async (req, res) => {
   }
 });
 
-app.get('/api/dev/sessions', (req, res) => {
-  res.json({ sessions: listDevSessions() });
+async function currentJobUsageEstimates() {
+  const plain = listDevSessions();
+  try {
+    return await jobUsageEstimates(plain.map((session) => session.id));
+  } catch (e) {
+    // Usage is an enhancement to the in-memory session list, not a reason to
+    // make every conversation disappear when its ledger cannot be read.
+    console.error(`session costs unavailable: ${e.message}`);
+    return null;
+  }
+}
+
+app.get('/api/dev/sessions', async (req, res) => {
+  const estimates = await currentJobUsageEstimates();
+  res.json({ sessions: listDevSessions(estimates) });
 });
 
 // ---- the office ----
@@ -1520,7 +1533,12 @@ app.get('/api/dev/sessions/:id', async (req, res) => {
   const since = Number(req.query.since || 0);
   // A session from before the last restart has its log in the database, not in
   // memory; jobEventsFor reads back whichever applies.
-  res.json({ session: publicJob(job), events: await jobEventsFor(job, since) });
+  const estimates = await currentJobUsageEstimates();
+  const events = await jobEventsFor(job, since);
+  res.json({
+    session: publicJob(job, estimates),
+    events: estimateEventCosts(events, estimates?.get(job.id)?.rows),
+  });
 });
 
 app.get('/api/dev/sessions/:id/events', (req, res) => {
@@ -1536,8 +1554,26 @@ app.get('/api/dev/sessions/:id/events', (req, res) => {
   const send = (event) => res.write(`id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`);
   const since = Number(req.headers['last-event-id'] ?? req.query.since ?? 0);
   for (const e of jobEventsSince(job, since)) send(e);
+  let sendQueue = Promise.resolve();
   const onEvent = (jobId, event) => {
-    if (jobId === job.id) send(event);
+    if (jobId !== job.id) return;
+    // Keep numbered events in order while a just-completed result is matched
+    // to the ledger row that now carries its catalog estimate.
+    sendQueue = sendQueue
+      .then(async () => {
+        if (event.kind !== 'result' || event.costUsd != null) {
+          send(event);
+          return;
+        }
+        try {
+          const estimates = await jobUsageEstimates([job.id]);
+          send(estimateEventCosts([event], estimates.get(job.id)?.rows)[0]);
+        } catch (e) {
+          console.error(`live session cost unavailable for ${job.id}: ${e.message}`);
+          send(event);
+        }
+      })
+      .catch(() => {});
   };
   bus.on('event', onEvent);
   // The session record itself, pushed on every change the server makes to it:

@@ -291,9 +291,9 @@ The dashboard puts a figure on the turns their CLI never priced: their tokens at
 the model's published list price, from the [models.dev](https://models.dev)
 catalog (fetched once a day and cached; an install with no reach keeps whatever
 copy it has, or shows those turns as unpriced). Those costs read `~$12.34`, and
-the tile and every tooltip say how many turns of the total were estimated. They
-are arithmetic over tokens, not an invoice: what the ledger stores is still only
-what the providers themselves reported.
+the session header, turn footer, tiles and tooltips keep that estimate visible.
+They are arithmetic over tokens, not an invoice: what the ledger stores is still
+only what the providers themselves reported.
 
 ### Merged pull requests
 

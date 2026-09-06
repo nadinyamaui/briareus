@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 
-const db = vi.hoisted(() => ({ rows: [], all: [], saved: [] }));
+const db = vi.hoisted(() => ({ rows: [], all: [], jobs: [], calibration: [], saved: [] }));
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({}) }));
 // The catalog behind the estimates has a test file of its own; here the rows
@@ -12,6 +12,8 @@ vi.mock('../lib/db.js', () => ({
   }),
   loadTurnUsage: vi.fn(async () => db.rows),
   loadAllTurnUsage: vi.fn(async () => db.all),
+  loadJobTurnUsage: vi.fn(async () => db.jobs),
+  loadTurnUsageCalibration: vi.fn(async () => db.calibration),
 }));
 
 const {
@@ -27,9 +29,14 @@ const {
   activityUsage,
   projectUsage,
   overallUsage,
+  jobUsageEstimates,
+  estimateEventCosts,
   recordTurnUsage,
+  resetUsageCalibration,
 } = await import('../lib/usage.js');
-const { loadTurnUsage, loadAllTurnUsage } = await import('../lib/db.js');
+const { loadTurnUsage, loadAllTurnUsage, loadJobTurnUsage, loadTurnUsageCalibration, saveTurnUsage } =
+  await import('../lib/db.js');
+const { estimateCosts } = await import('../lib/prices.js');
 
 describe('turnUsageRecord', () => {
   const job = { id: 'j1', projectId: 7, repo: 'o/r' };
@@ -550,5 +557,153 @@ describe('recordTurnUsage', () => {
       model: 'm',
       costUsd: 0.1,
     });
+  });
+
+  it('stops waiting for a stalled write after one second', async () => {
+    vi.useFakeTimers();
+    try {
+      saveTurnUsage.mockImplementationOnce(() => new Promise(() => {}));
+      const pending = recordTurnUsage(
+        { id: 'slow', projectId: 7, repo: 'o/r' },
+        { inputTokens: 1, outputTokens: 2, costUsd: null },
+        { binary: 'codex' },
+        'm',
+      );
+      let settled = false;
+      pending.then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await pending;
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('session cost estimates', () => {
+  it('caches a compact lifetime calibration while loading only requested sessions', async () => {
+    resetUsageCalibration();
+    db.jobs = [
+      { jobId: 'a', costUsd: 2, inputTokens: 10, at: 1 },
+      { jobId: 'a', costUsd: 0.5, costEstimated: true, inputTokens: 20, at: 2 },
+      { jobId: 'a', costUsd: null, inputTokens: 30, at: 3 },
+      { jobId: 'b', costUsd: 1, costEstimated: true, inputTokens: 40, at: 4 },
+    ];
+    db.calibration = [{ provider: 'claude', model: 'm', costUsd: 3, inputTokens: 1_000_000 }];
+    const estimates = await jobUsageEstimates(['a', 'b'], 123);
+    expect(loadJobTurnUsage).toHaveBeenCalledWith(['a', 'b']);
+    expect(loadTurnUsageCalibration).toHaveBeenCalledTimes(1);
+    expect(estimateCosts).toHaveBeenCalledWith(db.jobs, 123, db.calibration);
+    expect(estimates.get('a')).toMatchObject({
+      estimatedCostUsd: 0.5,
+      estimatedTurns: 1,
+      unpricedTurns: 1,
+    });
+    expect(estimates.get('a').rows).toHaveLength(3);
+    expect(estimates.get('b')).toMatchObject({ estimatedCostUsd: 1, estimatedTurns: 1, unpricedTurns: 0 });
+    await jobUsageEstimates(['a'], 124);
+    expect(loadTurnUsageCalibration).toHaveBeenCalledTimes(1);
+  });
+
+  it('does no ledger work when there are no restored sessions', async () => {
+    resetUsageCalibration();
+    loadJobTurnUsage.mockClear();
+    loadTurnUsageCalibration.mockClear();
+    expect(await jobUsageEstimates([])).toEqual(new Map());
+    expect(loadJobTurnUsage).not.toHaveBeenCalled();
+    expect(loadTurnUsageCalibration).not.toHaveBeenCalled();
+  });
+
+  it('does not double-count a priced write already visible to an overlapping calibration load', async () => {
+    resetUsageCalibration();
+    loadJobTurnUsage.mockClear();
+    loadTurnUsageCalibration.mockClear();
+    saveTurnUsage.mockClear();
+    db.jobs = [{ jobId: 'a', costUsd: null, inputTokens: 30, at: 3 }];
+    const committed = [{ provider: 'claude', model: 'm', costUsd: 0.25, inputTokens: 25 }];
+    db.calibration = committed;
+    let finishLoad;
+    loadTurnUsageCalibration.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishLoad = resolve;
+        }),
+    );
+    let finishSave;
+    saveTurnUsage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishSave = resolve;
+        }),
+    );
+
+    const initialProjection = jobUsageEstimates(['a'], 123);
+    await vi.waitFor(() => expect(loadTurnUsageCalibration).toHaveBeenCalledTimes(1));
+    const write = recordTurnUsage(
+      { id: 'a', projectId: 7, repo: 'o/r' },
+      { inputTokens: 25, outputTokens: 5, costUsd: 0.25 },
+      { binary: 'claude' },
+      'm',
+    );
+    await vi.waitFor(() => expect(saveTurnUsage).toHaveBeenCalledTimes(1));
+
+    // MySQL has committed the insert and lets the aggregate see it before the
+    // insert promise's completion callback runs.
+    finishLoad(committed);
+    await initialProjection;
+    finishSave();
+    await write;
+
+    await jobUsageEstimates(['a'], 124);
+    expect(loadTurnUsageCalibration).toHaveBeenCalledTimes(2);
+    expect(estimateCosts).toHaveBeenLastCalledWith(db.jobs, 124, committed);
+  });
+
+  it('puts the nearest estimated ledger row on an unpriced transcript footer', () => {
+    const events = [
+      {
+        seq: 1,
+        t: new Date(1000).toISOString(),
+        kind: 'result',
+        costUsd: null,
+        inputTokens: 100,
+        outputTokens: 20,
+      },
+      { seq: 2, t: new Date(3000).toISOString(), kind: 'result', costUsd: 2 },
+    ];
+    const rows = [
+      { at: 1005, costUsd: 0.25, costEstimated: true },
+      { at: 3005, costUsd: 2 },
+    ];
+    expect(estimateEventCosts(events, rows)).toEqual([
+      { ...events[0], costUsd: 0.25, costEstimated: true },
+      events[1],
+    ]);
+    expect(events[0].costUsd).toBeNull();
+  });
+
+  it('does not use a later turn ledger row for a ledger-less failure', () => {
+    const events = [
+      { seq: 1, t: new Date(1000).toISOString(), kind: 'result', isError: true, costUsd: null },
+      {
+        seq: 2,
+        t: new Date(3000).toISOString(),
+        kind: 'result',
+        isError: false,
+        costUsd: null,
+        inputTokens: 100,
+        outputTokens: 20,
+      },
+    ];
+    const rows = [{ at: 3005, costUsd: 0.25, costEstimated: true }];
+
+    expect(estimateEventCosts(events, rows)).toEqual([
+      events[0],
+      { ...events[1], costUsd: 0.25, costEstimated: true },
+    ]);
   });
 });

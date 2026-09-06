@@ -125,6 +125,7 @@ vi.mock('../lib/uploads.js', () => ({
 }));
 
 vi.mock('../lib/usage.js', () => ({
+  jobUsageEstimates: vi.fn(async () => new Map()),
   recordTurnUsage: vi.fn(),
 }));
 
@@ -137,6 +138,7 @@ import {
   recordTriage,
 } from '../lib/findings.js';
 import { implementFeedbackPrompt } from '../lib/prtasks.js';
+import { jobUsageEstimates } from '../lib/usage.js';
 import { githubGraphql, githubRest } from '../lib/github.js';
 import { resolveRuntime, getProviderForJob, captureProviderAuth } from '../lib/providerstore.js';
 import { stepRuntime } from '../lib/projects.js';
@@ -1308,6 +1310,22 @@ describe('the worker budget', () => {
     expect(workerSummary(getJob('bud-w1')).costUsd).toBe(3.5);
   });
 
+  it('adds read-side estimates to a session tree while keeping the stored figures raw', () => {
+    const estimates = new Map([
+      ['bud-orch', { estimatedCostUsd: 0.25, estimatedTurns: 1, unpricedTurns: 0 }],
+      ['bud-w1', { estimatedCostUsd: 0.5, estimatedTurns: 1, unpricedTurns: 0 }],
+      ['bud-qa', { estimatedCostUsd: 0.1, estimatedTurns: 1, unpricedTurns: 1 }],
+    ]);
+    const projected = publicJob(getJob('bud-orch'), estimates);
+    expect(projected.costUsd).toBe(5);
+    expect(projected.usage).toMatchObject({
+      costUsd: 9.35,
+      estimatedCostUsd: 0.85,
+      estimatedTurns: 3,
+      unpricedTurns: 1,
+    });
+  });
+
   it('spawn refuses once the orchestration spent its budget', () => {
     state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '', workerBudgetUsd: 6 }];
     expect(() => spawnWorkerSession(getJob('bud-orch'), { title: 'x', prompt: 'x' })).toThrow(
@@ -1501,6 +1519,8 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
       row('cost-rev-5', { autoClose: true, loopParentId: 'cost-par-5', costUsd: 0.5 }),
       row('cost-par-6', { costUsd: 1 }),
       row('cost-fix-6', { autoClose: true, loopFixParentId: 'cost-par-6', costUsd: 0.5 }),
+      row('cost-par-7', { costUsd: 1 }),
+      row('cost-rev-7', { autoClose: true, loopParentId: 'cost-par-7', costUsd: null }),
     ];
     await initJobs();
     for (const j of state.stored) getJob(j.id).status = 'idle';
@@ -1558,6 +1578,34 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
     await closeDevSession('cost-fix-6');
     expect(getJob('cost-fix-6')).toBeNull();
     expect(sessionUsage(getJob('cost-par-6')).costUsd).toBe(1.5);
+  });
+
+  it("keeps a deleted child's estimated and unpriced turns on its parent", async () => {
+    jobUsageEstimates.mockResolvedValueOnce(
+      new Map([['cost-rev-7', { estimatedCostUsd: 0.25, estimatedTurns: 1, unpricedTurns: 2, rows: [] }]]),
+    );
+    await closeDevSession('cost-rev-7');
+    const parent = getJob('cost-par-7');
+    expect(parent).toMatchObject({
+      absorbedEstimatedCostUsd: 0.25,
+      absorbedEstimatedTurns: 1,
+      absorbedUnpricedTurns: 2,
+    });
+    expect(publicJob(parent, new Map()).usage).toMatchObject({
+      costUsd: 1.25,
+      estimatedCostUsd: 0.25,
+      estimatedTurns: 1,
+      unpricedTurns: 2,
+    });
+    expect(deleteJob).toHaveBeenCalledWith(
+      'cost-rev-7',
+      expect.objectContaining({
+        intoJobId: 'cost-par-7',
+        estimatedCostUsd: 0.25,
+        estimatedTurns: 1,
+        unpricedTurns: 2,
+      }),
+    );
   });
 
   it("a session that reported nothing leaves the parent's number alone", async () => {

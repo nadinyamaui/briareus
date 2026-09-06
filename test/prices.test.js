@@ -40,6 +40,11 @@ describe('priceFor', () => {
       cacheRead: 0.5,
     });
     expect(priceFor(CATALOG, 'codex', 'gpt-5.6-sol')).toEqual({ input: 4, output: 20, cacheRead: 0.4 });
+    expect(priceFor(CATALOG, 'codex', 'gpt-5.6-sol (872k)')).toEqual({
+      input: 4,
+      output: 20,
+      cacheRead: 0.4,
+    });
     expect(priceFor(CATALOG, 'grok', 'grok-4.6')).toEqual({ input: 2, output: 6, cacheRead: 0.5 });
   });
   it('reads an opencode model reference as the service it names', () => {
@@ -112,6 +117,15 @@ describe('withEstimates', () => {
     const rows = [{ provider: 'codex', model: 'gpt-5.6-sol', inputTokens: 100, costUsd: null }];
     expect(withEstimates(rows, {})[0].costUsd).toBeNull();
   });
+  it('can calibrate requested rows from a separate lifetime aggregate', () => {
+    const rows = [
+      { provider: 'codex', model: 'gpt-5.6-sol', inputTokens: 10e6, outputTokens: 1e6, costUsd: null },
+    ];
+    const calibration = [
+      { provider: 'codex', model: 'gpt-5.6-sol', inputTokens: 10e6, outputTokens: 1e6, costUsd: 32.6 },
+    ];
+    expect(withEstimates(rows, CATALOG, calibration)[0].costUsd).toBeCloseTo(32.6, 6);
+  });
 });
 
 describe('loadCatalog', () => {
@@ -155,6 +169,23 @@ describe('loadCatalog', () => {
     );
     const day = 24 * 60 * 60 * 1000;
     expect(await loadCatalog(1000 + day + 1)).toEqual(CATALOG);
+  });
+
+  it('bounds a stalled catalog refresh', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url, { signal }) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('aborted')));
+          }),
+      ),
+    );
+    const pending = loadCatalog(1000);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(await pending).toEqual({});
+    vi.useRealTimers();
   });
 
   it('falls back to the catalog the opencode CLI caches, then to nothing', async () => {
