@@ -11,6 +11,7 @@ import {
   parserFor,
   parseContextReport,
   contextWindowFor,
+  claudeUsage,
   grokUsage,
   zaiUsage,
   canResume,
@@ -880,6 +881,58 @@ describe('the grok parser', () => {
     parser.feed({ type: 'content_block_start', index: 2, content_block: { type: 'text' } });
     parser.feed({ type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: 'tail' } });
     expect(parser.flush()).toEqual([{ kind: 'text', text: 'tail' }]);
+  });
+});
+
+describe('claudeUsage', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function stub(status, body = {}) {
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: 'access-token' } }),
+    );
+    const fetch = vi.fn(async () => ({ ok: status === 200, status, json: async () => body }));
+    vi.stubGlobal('fetch', fetch);
+    return fetch;
+  }
+
+  it('reports a refused usage check without inventing quota usage', async () => {
+    stub(429);
+    expect(await claudeUsage('/tmp/claude-home')).toEqual({
+      windows: [],
+      error: 'Claude rate limited the usage check. Please try again later.',
+    });
+  });
+
+  it('reports HTTP failures without exposing the upstream response body', async () => {
+    stub(401, { error: { message: 'private upstream details' } });
+    expect(await claudeUsage('/tmp/claude-home')).toEqual({
+      windows: [],
+      error: 'Claude usage check failed (HTTP 401).',
+    });
+  });
+
+  it('reads both quota windows from the requested account', async () => {
+    const fetch = stub(200, {
+      five_hour: { utilization: 100, resets_at: '2026-09-06T15:00:00Z' },
+      seven_day: { utilization: 35 },
+    });
+    expect(await claudeUsage('/tmp/claude-home')).toEqual({
+      windows: [
+        { label: 'Session (5h window)', short: '5h', usedPct: 100, resetsAt: '2026-09-06T15:00:00Z' },
+        { label: 'Week (7-day window)', short: 'wk', usedPct: 35, resetsAt: null },
+      ],
+    });
+    expect(fs.readFileSync).toHaveBeenCalledWith('/tmp/claude-home/.credentials.json', 'utf8');
+    expect(fetch).toHaveBeenCalledWith(
+      'https://api.anthropic.com/api/oauth/usage',
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer access-token', 'anthropic-beta': 'oauth-2025-04-20' },
+      }),
+    );
   });
 });
 

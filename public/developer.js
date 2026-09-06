@@ -444,8 +444,13 @@
     }
   }
 
-  async function loadProviders() {
-    const data = await api('/api/dev/providers');
+  let providersSeq = 0;
+  async function loadProviders(fresh = false) {
+    const seq = ++providersSeq;
+    const data = await api(`/api/dev/providers${fresh ? '?fresh=1' : ''}`);
+    if (seq !== providersSeq) return;
+    // Preserve the user's choices, including changes made while the request ran.
+    const selected = { provider: selProvider.value, model: selModel.value, effort: selEffort.value };
     providers = data.providers;
     selProvider.innerHTML = providers
       .map((p) => {
@@ -470,8 +475,13 @@
       })
       .join('');
     const firstAvailable = providers.find((p) => p.available);
-    if (firstAvailable) selProvider.value = firstAvailable.id;
+    const previous = providers.find((p) => String(p.id) === selected.provider && p.available);
+    if (previous || firstAvailable) selProvider.value = (previous || firstAvailable).id;
     fillModelControls();
+    if (previous) {
+      if (previous.models.includes(selected.model)) selModel.value = selected.model;
+      if (previous.efforts.includes(selected.effort)) selEffort.value = selected.effort;
+    }
     // The auth probes can resolve long after a session was opened, and the chips
     // must keep showing that session's data, not snap back to the defaults.
     const open = currentSession();
@@ -482,13 +492,27 @@
     const warnings = providers
       .filter((p) => p.available)
       .flatMap((p) => (p.accounts && p.accounts.length ? p.accounts : [p]))
-      .filter((a) => a.auth && a.auth.loggedIn === false)
+      .filter((a) => a.auth?.loggedIn === false || a.usage?.error)
       .map(
         (a) =>
-          `<div class="rounded-lg border border-warn px-2.5 py-1.5 text-left text-xs text-warn">⚠ ${esc(a.label)}: ${esc(a.auth.detail || 'not logged in')}</div>`,
+          `<div class="rounded-lg border border-warn px-2.5 py-1.5 text-left text-xs text-warn">⚠ ${esc(a.label)}: ${esc(a.auth?.loggedIn === false ? a.auth.detail || 'not logged in' : a.usage.error)}</div>`,
       );
     $('provider-warnings').innerHTML = warnings.join('');
   }
+
+  $('btn-check-usage').addEventListener('click', async () => {
+    const button = $('btn-check-usage');
+    button.disabled = true;
+    button.textContent = 'Checking…';
+    try {
+      await loadProviders(true);
+    } catch (e) {
+      toast(`Usage check: ${e.message}`, true);
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Check usage';
+    }
+  });
 
   selProvider.addEventListener('change', fillModelControls);
   selProject.addEventListener('change', () => {

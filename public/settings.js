@@ -422,20 +422,32 @@
   // The Status section: the entry's connection at a glance. Account, plan,
   // subscription usage, binary. Only a saved row has one to show.
   let statusSeq = 0;
-  async function loadProviderStatus(row) {
+  async function loadProviderStatus(row, fresh = false) {
+    const seq = ++statusSeq;
     const sec = $('p-status-sec');
     sec.classList.toggle('off', !row || !row.id);
+    const button = $('p-check-usage');
+    button.disabled = !!row?.id;
+    button.textContent = fresh ? 'Checking usage…' : 'Check usage';
     if (!row || !row.id) return;
-    const seq = ++statusSeq;
     $('p-status').innerHTML = '<div class="text-[13px] text-muted">Checking the connection…</div>';
     try {
-      const { status } = await api(`/api/providers/${row.id}/status`);
+      const { status } = await api(`/api/providers/${row.id}/status${fresh ? '?fresh=1' : ''}`);
       if (seq === statusSeq) $('p-status').innerHTML = renderProviderStatus(status);
     } catch (e) {
       if (seq === statusSeq)
         $('p-status').innerHTML = `<div class="text-[13px] text-danger">${esc(e.message)}</div>`;
+    } finally {
+      if (seq === statusSeq) {
+        button.disabled = false;
+        button.textContent = 'Check usage';
+      }
     }
   }
+
+  $('p-check-usage').addEventListener('click', () => {
+    if (currentType === 'provider' && current && !isNew) loadProviderStatus(current, true);
+  });
 
   function fmtReset(iso) {
     const d = new Date(iso);
@@ -494,7 +506,7 @@
         ${row('Login dir', s.loginDir, true)}
         ${row('Checked', a.checkedAt ? fmtReset(a.checkedAt) : '')}
       </div>
-      ${bars}`;
+      ${bars || `<div class="mt-2.5 text-[13px] text-muted">${esc(s.usage?.error || 'Usage unavailable: this account’s meter could not be read or is not supported.')}</div>`}`;
   }
 
   // The database fields only mean anything when the project claims a server, so

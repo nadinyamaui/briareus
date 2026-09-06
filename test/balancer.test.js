@@ -171,9 +171,37 @@ describe('pickLeastUsedProvider', () => {
     expect(pickLeastUsedProvider(row(1), { usageOf: (p) => usage[p.id] }).id).toBe(1);
   });
 
-  it('puts accounts whose usage is unknown after every known one', () => {
+  it('puts accounts whose usage is unknown after known accounts with quota left', () => {
     const usage = { 1: null, 2: windows(95, 95), 3: undefined };
     expect(pickLeastUsedProvider(row(1), { usageOf: (p) => usage[p.id] }).id).toBe(2);
+  });
+
+  it.each([
+    ['five-hour', windows(100, 10)],
+    ['weekly', windows(10, 100)],
+  ])('prefers unknown usage to an exhausted %s limit', (_window, exhausted) => {
+    const usage = { 1: exhausted, 2: null, 3: undefined };
+    expect(pickLeastUsedProvider(row(1), { usageOf: (p) => usage[p.id] }).id).toBe(2);
+    // Even a busy account with known headroom is better than either fallback.
+    usage[3] = windows(99, 99);
+    expect(pickLeastUsedProvider(row(1), { usageOf: (p) => usage[p.id] }).id).toBe(3);
+  });
+
+  it('keeps logged-out accounts last even when the logged-in accounts are exhausted', () => {
+    const usage = { 1: windows(100), 2: null, 3: windows(0) };
+    rememberProviderAuth(1, true);
+    rememberProviderAuth(2, false);
+    rememberProviderAuth(3, false);
+    expect(pickLeastUsedProvider(row(1), { usageOf: (p) => usage[p.id] }).id).toBe(1);
+  });
+
+  it('still breaks ties by open sessions when every account is exhausted', () => {
+    expect(
+      pickLeastUsedProvider(row(1), {
+        usageOf: () => windows(100),
+        openSessions: (p) => (p.id === 2 ? 0 : 1),
+      }).id,
+    ).toBe(2);
   });
 
   it('reads the cache by default and refreshes stale members in the background', async () => {
@@ -211,6 +239,15 @@ describe('rememberProviderAuth', () => {
 });
 
 describe('providerUsage', () => {
+  it('a manual refresh retries a cached failure and updates the balancer immediately', async () => {
+    expect(await providerUsage(row(1))).toBeNull();
+    state.usage['/claude-1'] = windows(100);
+    expect(await providerUsage(row(1))).toBeNull();
+    expect(await providerUsage(row(1), { ttlMs: 0 })).toEqual(windows(100));
+    expect(cachedProviderUsage(row(1))).toEqual(windows(100));
+    expect(providers.claudeUsage).toHaveBeenCalledTimes(2);
+  });
+
   it('caches a read, including a failed one, for the TTL', async () => {
     state.usage['/claude-1'] = windows(1);
     expect(await providerUsage(row(1))).toEqual(windows(1));
@@ -226,6 +263,18 @@ describe('providerUsage', () => {
 });
 
 describe('providerUsage in flight', () => {
+  it('shares an in-flight manual refresh even when callers bypass the TTL', async () => {
+    await providerUsage(row(1));
+    let release;
+    providers.claudeUsage.mockImplementationOnce(() => new Promise((r) => (release = r)));
+    const first = providerUsage(row(1), { ttlMs: 0 });
+    const second = providerUsage(row(1), { ttlMs: 0 });
+    expect(providers.claudeUsage).toHaveBeenCalledTimes(2);
+    release(windows(80));
+    expect(await Promise.all([first, second])).toEqual([windows(80), windows(80)]);
+    expect(cachedProviderUsage(row(1))).toEqual(windows(80));
+  });
+
   it('collapses concurrent reads of one account into a single request', async () => {
     state.usage['/claude-1'] = windows(7);
     const reads = await Promise.all([providerUsage(row(1)), providerUsage(row(1)), providerUsage(row(1))]);
