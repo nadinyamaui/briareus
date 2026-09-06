@@ -245,6 +245,22 @@ describe('the worker tools', () => {
               id: 'w3',
               reviewLoop: { rounds: 1, reviewing: false, awaitingResult: true, done: false },
             }),
+            worker({
+              id: 'w4',
+              reviewLoop: { rounds: 1, done: true },
+              qaLoop: {
+                running: false,
+                done: false,
+                failure: { kind: 'failed', reason: 'Claude HQ exited with code 1' },
+              },
+            }),
+            // Old records did not persist a failure reason. Once review has
+            // converged, this cannot truthfully be "queued behind" review.
+            worker({
+              id: 'w5',
+              reviewLoop: { rounds: 1, done: true },
+              qaLoop: { running: false, done: false },
+            }),
           ],
         },
       }),
@@ -259,6 +275,14 @@ describe('the worker tools', () => {
     expect(lines[1]).toContain('review loop round 3: converged');
     expect(lines[1]).toContain('QA failed: 2 scenario(s)');
     expect(lines[2]).toContain("review loop round 1: reading the round's result off the pull request");
+    expect(lines[3]).toContain(
+      'QA failed (Claude HQ exited with code 1); not running — send_to_worker starts a retry when the worker settles',
+    );
+    expect(lines[3]).not.toContain('QA queued');
+    expect(lines[4]).toContain(
+      'QA retry pending after an incomplete run; not running — send_to_worker starts a retry when the worker settles',
+    );
+    expect(lines[4]).not.toContain('QA queued');
   });
 
   it('list_workers tells a round that could not run from a loop that converged', async () => {

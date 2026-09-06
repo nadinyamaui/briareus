@@ -363,6 +363,12 @@
         </li>
       </ul>
       <p>Turning the review loop off also cancels the QA run waiting behind it.</p>
+      <p>
+        If the QA provider fails or its session is interrupted, status shows it as failed/interrupted and
+        <strong>not running</strong>, not queued. For an orchestrated worker, send it a follow-up with
+        <code>send_to_worker</code>; QA retries after that worker turn settles, and nothing is approved until
+        the replacement run reaches a verdict.
+      </p>
 
       <h2 id="merged">Merged pull requests</h2>
       <p>

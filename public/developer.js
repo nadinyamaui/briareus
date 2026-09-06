@@ -205,6 +205,12 @@
   // moment this returns, so the caller wires it up and reads it after the
   // answer (the next question replaces it).
   let modalResolve = null;
+  // The keystroke that opens a dialog must not also answer it. A caller reached
+  // from a keydown handler (Enter in the composer starting a Zeus session) opens
+  // this synchronously, so the same event goes on bubbling to the document
+  // listener below and would confirm the question before it is even painted.
+  // Arming one task later puts the dialog's own keys out of that event's reach.
+  let modalArmed = false;
   function openConfirm({ title, body, confirmLabel = 'Confirm', danger = false, icon = '?', form = '' }) {
     closeConfirm(false); // a second question supersedes an unanswered one
     const modal = $('modal');
@@ -233,6 +239,10 @@
 
     modal.classList.remove('hidden');
     btnOk.focus();
+    modalArmed = false;
+    setTimeout(() => {
+      modalArmed = true;
+    }, 0);
     return new Promise((resolve) => {
       modalResolve = resolve;
     });
@@ -251,7 +261,7 @@
   $('modal-cancel').addEventListener('click', () => closeConfirm(false));
   $('modal-backdrop').addEventListener('click', () => closeConfirm(false));
   document.addEventListener('keydown', (e) => {
-    if (!modalResolve) return;
+    if (!modalResolve || !modalArmed) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       closeConfirm(false);
@@ -1471,7 +1481,26 @@
                       : ''
         }`,
       );
-    if (s.qaLoop) bits.push(`🎬 QA ${s.qaLoop.done ? 'done' : s.qaLoop.running ? 'running' : 'queued'}`);
+    if (s.qaLoop) {
+      const qa = s.qaLoop;
+      bits.push(
+        `🎬 QA ${
+          qa.running
+            ? 'running'
+            : qa.pendingVerdict
+              ? 'reading verdict'
+              : qa.verdictError
+                ? 'verdict unavailable — check the test sheet'
+                : qa.failure
+                  ? `${qa.failure.kind || 'failed'} — not running; send a follow-up turn to retry`
+                  : qa.done
+                    ? 'done'
+                    : s.reviewLoop?.done
+                      ? 'retry pending — send a follow-up turn'
+                      : 'queued'
+        }`,
+      );
+    }
     if (s.branch) bits.push(s.branch);
     if (s.dbPort) bits.push(`mysql ${s.dbHost ? `${s.dbHost}:` : ':'}${s.dbPort}`);
     if (usageChip(s)) bits.push(usageChip(s));
@@ -2637,6 +2666,9 @@
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      // send() can open a dialog before it suspends, and this key is answered
+      // here: let it no further, or it reaches the confirm modal's own handler.
+      e.stopPropagation();
       send();
     }
   });
