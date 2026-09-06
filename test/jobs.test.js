@@ -4299,6 +4299,23 @@ describe('the review loop: what a round runs on, and re-running one that could n
       reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
     },
     {
+      // The same project again, with a reviewer this loop gave up and an
+      // operator who has since repaired it: what a retry naming it outright
+      // has to leave the reviews reading.
+      id: 'rt-back',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 1,
+      provider: 'Claude entry',
+      model: 'session-model',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 73,
+      prStatus: { number: 73, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: { rounds: 1, lastSha: 'sha-rt', reviewerFailed: true },
+    },
+    {
       // A project whose reviewer row was deleted in Settings since.
       id: 'rt-gone',
       kind: 'devchat',
@@ -4487,6 +4504,13 @@ describe('the review loop: what a round runs on, and re-running one that could n
 
       expect(job.reviewLoop.reviewerFailed).toBe(true);
       expect(job.reviewLoop.runtime).toBeNull();
+      // Dropping it is a move somebody made being undone: the fix sessions and
+      // the QA run go back to the session's own provider, which may be the
+      // account that retry escaped, so the give-up says so rather than sending
+      // them back in silence.
+      expect(infoTexts(job).join('\n')).toMatch(
+        /The retry that had moved this loop onto Uninstalled reviewer goes with it, so its fix sessions and its QA run are back on Claude entry/,
+      );
       expect(infoTexts(job).join('\n')).toMatch(/started code review round 2 of PR #68/);
       expect(getJob(job.reviewLoop.reviewSessionId).providerId).toBe(1);
       closeDevSession(job.reviewLoop.reviewSessionId);
@@ -4668,6 +4692,34 @@ describe('the review loop: what a round runs on, and re-running one that could n
       model: 'session-model',
       effort: 'high',
     });
+  });
+
+  it('a retry back onto the reviewer keeps the reviews on the project’s model', async () => {
+    const job = getJob('rt-back');
+    state.group = [];
+
+    // Naming the reviewer this loop gave up says it is repaired, so the rounds
+    // ride it again. What the call left out is the setting's answer for those
+    // rounds, not the session's: filled in from the work this retry moves, the
+    // reviews would run on the model that wrote the code (session-model /
+    // high) and outrank ⌕ Code review for the rest of the loop.
+    await retryLoopRound('rt-back', { providerId: 2 });
+
+    expect(job.reviewLoop.reviewerFailed).toBe(false);
+    expect(job.reviewLoop.reviewRuntime).toEqual({
+      providerId: 2,
+      model: 'claude-fable-5-1',
+      effort: 'low',
+    });
+    // The fix sessions and the QA run this retry moves keep the session's own
+    // model and effort, as they always have.
+    expect(job.reviewLoop.runtime).toEqual({
+      providerId: 2,
+      model: 'session-model',
+      effort: 'high',
+    });
+    expect(infoTexts(job).join('\n')).toMatch(/retrying the review on claude-fable-5-1/);
+    expect(infoTexts(job).join('\n')).not.toMatch(/retrying the review on session-model/);
   });
 
   it('a round nothing but a restart ended is not a provider to move off', async () => {
