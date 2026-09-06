@@ -618,6 +618,51 @@ describe('session cost estimates', () => {
     expect(loadTurnUsageCalibration).not.toHaveBeenCalled();
   });
 
+  it('does not double-count a priced write already visible to an overlapping calibration load', async () => {
+    resetUsageCalibration();
+    loadJobTurnUsage.mockClear();
+    loadTurnUsageCalibration.mockClear();
+    saveTurnUsage.mockClear();
+    db.jobs = [{ jobId: 'a', costUsd: null, inputTokens: 30, at: 3 }];
+    const committed = [{ provider: 'claude', model: 'm', costUsd: 0.25, inputTokens: 25 }];
+    db.calibration = committed;
+    let finishLoad;
+    loadTurnUsageCalibration.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishLoad = resolve;
+        }),
+    );
+    let finishSave;
+    saveTurnUsage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishSave = resolve;
+        }),
+    );
+
+    const initialProjection = jobUsageEstimates(['a'], 123);
+    await vi.waitFor(() => expect(loadTurnUsageCalibration).toHaveBeenCalledTimes(1));
+    const write = recordTurnUsage(
+      { id: 'a', projectId: 7, repo: 'o/r' },
+      { inputTokens: 25, outputTokens: 5, costUsd: 0.25 },
+      { binary: 'claude' },
+      'm',
+    );
+    await vi.waitFor(() => expect(saveTurnUsage).toHaveBeenCalledTimes(1));
+
+    // MySQL has committed the insert and lets the aggregate see it before the
+    // insert promise's completion callback runs.
+    finishLoad(committed);
+    await initialProjection;
+    finishSave();
+    await write;
+
+    await jobUsageEstimates(['a'], 124);
+    expect(loadTurnUsageCalibration).toHaveBeenCalledTimes(2);
+    expect(estimateCosts).toHaveBeenLastCalledWith(db.jobs, 124, committed);
+  });
+
   it('puts the nearest estimated ledger row on an unpriced transcript footer', () => {
     const events = [
       {

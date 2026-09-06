@@ -1566,6 +1566,18 @@
     return s.usage || s;
   }
 
+  function preserveEstimatedUsage(next, previous) {
+    const oldUsage = previous?.usage;
+    if (!oldUsage || !('estimatedTurns' in oldUsage) || 'estimatedTurns' in (next.usage || {})) return next;
+    const raw = next.usage.costUsd;
+    const estimated = oldUsage.estimatedCostUsd;
+    next.usage.costUsd = raw == null && estimated == null ? null : (raw || 0) + (estimated || 0);
+    next.usage.estimatedCostUsd = estimated;
+    next.usage.estimatedTurns = oldUsage.estimatedTurns || 0;
+    next.usage.unpricedTurns = oldUsage.unpricedTurns || 0;
+    return next;
+  }
+
   // "12.4k tok · ~$0.83": what the session has consumed so far. Codex does
   // not report a price, so its catalog-priced total carries the same estimate
   // marker and partial-total suffix as the usage dashboards.
@@ -2258,17 +2270,8 @@
         // Live record pushes are synchronous and therefore carry only what
         // the CLI reported. Keep the latest read-side estimate until the next
         // sessions poll recalculates it, including any turn just completed.
-        const oldUsage = i === -1 ? null : sessions[i].usage;
-        if (oldUsage && 'estimatedTurns' in oldUsage && !('estimatedTurns' in (s.usage || {}))) {
-          const raw = s.usage.costUsd;
-          const estimated = oldUsage.estimatedCostUsd;
-          s.usage.costUsd = raw == null && estimated == null ? null : (raw || 0) + (estimated || 0);
-          s.usage.estimatedCostUsd = oldUsage.estimatedCostUsd;
-          s.usage.estimatedTurns = oldUsage.estimatedTurns || 0;
-          s.usage.unpricedTurns = oldUsage.unpricedTurns || 0;
-        }
         if (i === -1) sessions.unshift(s);
-        else sessions[i] = s;
+        else sessions[i] = preserveEstimatedUsage(s, sessions[i]);
         renderSidebar();
         updateHead();
       } catch {
@@ -2827,7 +2830,7 @@
         body: JSON.stringify({ title }),
       });
       const i = sessions.findIndex((x) => x.id === session.id);
-      if (i !== -1) sessions[i] = session;
+      if (i !== -1) sessions[i] = preserveEstimatedUsage(session, sessions[i]);
       renderSidebar();
       updateHead();
       toast('Session title updated');
@@ -2856,7 +2859,7 @@
         body: JSON.stringify({ pr }),
       });
       const i = sessions.findIndex((x) => x.id === session.id);
-      if (i !== -1) sessions[i] = session;
+      if (i !== -1) sessions[i] = preserveEstimatedUsage(session, sessions[i]);
       renderSidebar();
       updateHead();
       toast(`Linked PR #${session.prStatus.number}`);
