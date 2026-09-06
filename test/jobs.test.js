@@ -4239,6 +4239,66 @@ describe('the review loop: what a round runs on, and re-running one that could n
       },
     },
     {
+      // The same shape, kept apart so a second partial retry can be run over
+      // it: what the loop looks like when the notice for the round the first
+      // retry re-ran invites another one.
+      id: 'rt-refrozen',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 99,
+      provider: 'Session provider',
+      model: 'session-model',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 70,
+      prStatus: { number: 70, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        reviewRuntime: { providerId: 2, model: 'claude-fable-5-1', effort: 'low' },
+        reviewRuntimeFromProject: true,
+      },
+    },
+    {
+      // And the same again, for the line the retry pushes: the override here
+      // is the one loopReviewChoice passes over once Settings is repointed.
+      id: 'rt-passed-over',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 99,
+      provider: 'Session provider',
+      model: 'session-model',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 71,
+      prStatus: { number: 71, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        reviewRuntime: { providerId: 2, model: 'claude-fable-5-1', effort: 'low' },
+        reviewRuntimeFromProject: true,
+      },
+    },
+    {
+      // On the project with a reviewer of its own, and a session runtime
+      // nothing like it: what a retry that names a provider has to keep for
+      // the fix sessions and the QA run it takes with it.
+      id: 'rt-moved',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 1,
+      provider: 'Claude entry',
+      model: 'session-model',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 72,
+      prStatus: { number: 72, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
+    },
+    {
       // A project whose reviewer row was deleted in Settings since.
       id: 'rt-gone',
       kind: 'devchat',
@@ -4538,6 +4598,76 @@ describe('the review loop: what a round runs on, and re-running one that could n
       /could not start the code review: Uninstalled reviewer: this provider is inactive/,
     );
     expect(infoTexts(job).join('\n')).not.toMatch(/Project reviewer/);
+  });
+
+  it('a second partial retry keeps the frozen reviewer following the project', async () => {
+    const job = getJob('rt-refrozen');
+    state.group = [];
+
+    // The round the first retry re-ran failed again, and its notice invites
+    // another partial retry. Still nobody has named a provider — the fill-in
+    // read it off ⌕ Code review both times — so the row stays marked as the
+    // setting's answer rather than being unmarked by the retry that re-reads it.
+    await retryLoopRound('rt-refrozen', { effort: 'high' });
+
+    expect(job.reviewLoop.reviewRuntime).toEqual({
+      providerId: 2,
+      model: 'claude-fable-5-1',
+      effort: 'high',
+    });
+    expect(job.reviewLoop.reviewRuntimeFromProject).toBe(true);
+
+    // So repointing the setting still moves the reviews with it, one retry
+    // later. Unmarked, the round would ride provider 2 as an override for
+    // good, with the give-up and the start-refusal fallback both switched off.
+    state.projects = state.projects.map((p) =>
+      p.repo === 'acme/rt-rev' ? { ...p, reviewProviderId: 3 } : p,
+    );
+    const said = infoTexts(job).length;
+    await retryLoopRound('rt-refrozen');
+
+    expect(infoTexts(job).slice(said).join('\n')).toMatch(
+      /could not start the code review: Uninstalled reviewer: this provider is inactive/,
+    );
+    // (the round before it is named in the retry line as the one that failed,
+    // so only the attempt itself says which provider this round asked for)
+    expect(infoTexts(job).slice(said).join('\n')).not.toMatch(
+      /could not start the code review: Project reviewer/,
+    );
+  });
+
+  it('the retry line names the model the round opens on, not the pin passed over', async () => {
+    const job = getJob('rt-passed-over');
+    // The review override froze provider 2 in from the setting, and Settings
+    // names another reviewer now, so loopReviewChoice passes that override
+    // over. This line is the operator's only word on the runtime.
+    state.projects = state.projects.map((p) =>
+      p.repo === 'acme/rt-rev' ? { ...p, reviewProviderId: 3, reviewModel: 'codex-model' } : p,
+    );
+    state.group = [];
+
+    await retryLoopRound('rt-passed-over');
+
+    expect(infoTexts(job).join('\n')).toMatch(/retrying the review on codex-model/);
+    expect(infoTexts(job).join('\n')).not.toMatch(/retrying the review on claude-fable-5-1/);
+  });
+
+  it('a retry that names a provider keeps the session’s model on the work it moves', async () => {
+    const job = getJob('rt-moved');
+    state.group = [];
+
+    // A provider named outright moves the whole loop, so what it settles is
+    // what the fix sessions and the QA run open on (loopSessionRuntime).
+    // Filling its gaps in from the reviews would put them on the reviewer's
+    // model and effort — claude-fable-5-1 / low here — which the caller never
+    // named and which is nobody's answer for code-writing turns.
+    await retryLoopRound('rt-moved', { providerId: 2 });
+
+    expect(job.reviewLoop.runtime).toEqual({
+      providerId: 2,
+      model: 'session-model',
+      effort: 'high',
+    });
   });
 
   it('a round nothing but a restart ended is not a provider to move off', async () => {
