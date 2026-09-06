@@ -16,6 +16,8 @@ const state = vi.hoisted(() => ({
   // the interchangeable-accounts tests set either.
   otherProviders: [],
   group: null,
+  // Appended to every group key: what a rewritten model cache does to it.
+  catalog: '',
   projects: [],
   claimsServer: false,
   capacity: 3,
@@ -72,7 +74,7 @@ vi.mock('../lib/dbpool.js', () => ({
 vi.mock('../lib/providerstore.js', () => ({
   getProvider: (id) => [state.provider, ...state.otherProviders].find((p) => p.id === Number(id)) || null,
   providerGroup: (p) => state.group || [p],
-  providerGroupKey: (p) => `${p.binary}|${p.baseUrl || ''}`,
+  providerGroupKey: (p) => `${p.binary}|${p.baseUrl || ''}${state.catalog}`,
   providerGroups: () => [{ key: 'claude|', label: state.provider.label, members: [state.provider] }],
   getProviderForJob: vi.fn(),
   providerModels: () => ['claude-fable-5-1'],
@@ -383,22 +385,40 @@ describe('stepProvider', () => {
     const job = { id: 'step-pin', providerId: 1 };
 
     expect(stepProvider(job, a).id).toBe(7);
-    expect(job.stepProviders).toEqual({ 'codex|': 7 });
+    expect(job.stepProviders).toEqual({ 7: 7 });
     // The next turn re-picks nothing: the step's conversation lives on the
     // member the first one chose, whatever the group order says now.
     state.group = [b, a];
     expect(stepProvider(job, a).id).toBe(7);
-    expect(stepProvider(job, b).id).toBe(7);
   });
 
-  it('re-picks when the member it settled on is gone', () => {
+  it('keeps the pin when the group key moves under it', () => {
+    // The key carries the members' catalogs, and the CLI rewrites those on its
+    // own; a pin filed under the old key would re-balance the step onto an
+    // account that holds none of its conversation.
     const [a, b] = [member(7), member(8)];
-    state.otherProviders = [b];
+    state.otherProviders = [a, b];
+    state.group = [b, a];
+    getProviderForJob.mockReturnValue(state.provider);
+    const job = { id: 'step-catalog', providerId: 1 };
+
+    expect(stepProvider(job, a).id).toBe(8);
+    state.catalog = '|new-model';
+    expect(stepProvider(job, a).id).toBe(8);
+    expect(job.stepProviders).toEqual({ 7: 8 });
+  });
+
+  it('re-picks when the member it settled on is gone or no longer interchangeable', () => {
+    const [a, b, c] = [member(7), member(8), { ...member(9), baseUrl: 'https://elsewhere' }];
+    state.otherProviders = [b, c];
     state.group = [b];
     getProviderForJob.mockReturnValue(state.provider);
-    const job = { id: 'step-gone', providerId: 1, stepProviders: { 'codex|': a.id } };
+    const gone = { id: 'step-gone', providerId: 1, stepProviders: { 8: a.id } };
+    expect(stepProvider(gone, b).id).toBe(8);
 
-    expect(stepProvider(job, b).id).toBe(8);
+    // Pinned to a row that has since been pointed at another endpoint.
+    const moved = { id: 'step-moved', providerId: 1, stepProviders: { 8: c.id } };
+    expect(stepProvider(moved, b).id).toBe(8);
   });
 });
 

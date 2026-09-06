@@ -27,6 +27,7 @@ import {
   rememberProviderAuth,
   cachedProviderAuth,
   zaiHost,
+  AUTH_TTL_MS,
 } from '../lib/balancer.js';
 
 const windows = (...pcts) => ({ windows: pcts.map((usedPct, i) => ({ usedPct, short: i ? 'wk' : '5h' })) });
@@ -95,6 +96,19 @@ describe('pickLeastUsedProvider', () => {
     expect(pickLeastUsedProvider(row(1), { usageOf: (p) => usage[p.id] }).id).toBe(1);
   });
 
+  it('stops trusting a probe older than the auth TTL', () => {
+    // Nothing re-affirmed the logged-out reading for longer than the probes
+    // run apart, so it is stale, and stale reads as unknown rather than as
+    // still logged out: the account may well have been logged back in.
+    const usage = { 1: windows(0), 2: windows(50), 3: windows(90) };
+    rememberProviderAuth(1, false, Date.now() - AUTH_TTL_MS - 1);
+    expect(cachedProviderAuth(1)).toBe(null);
+    expect(pickLeastUsedProvider(row(1), { usageOf: (p) => usage[p.id] }).id).toBe(1);
+    rememberProviderAuth(1, false, Date.now() - AUTH_TTL_MS + 1000);
+    expect(cachedProviderAuth(1)).toBe(false);
+    expect(pickLeastUsedProvider(row(1), { usageOf: (p) => usage[p.id] }).id).toBe(2);
+  });
+
   it('treats an account nobody has probed as usable', () => {
     expect(cachedProviderAuth(1)).toBe(null);
     const usage = { 1: windows(0), 2: windows(50), 3: windows(90) };
@@ -148,6 +162,43 @@ describe('providerUsage in flight', () => {
     expect(cachedProviderUsage(row(1))).toBe(undefined);
     await inFlight;
     expect(cachedProviderUsage(row(1))).toEqual(windows(90));
+  });
+
+  it('keeps serving the last reading while a refresh is in flight', async () => {
+    state.usage['/claude-1'] = windows(90);
+    await providerUsage(row(1));
+    state.usage['/claude-1'] = windows(10);
+    const refresh = providerUsage(row(1), { ttlMs: 0 });
+    // The pick that triggered this refresh reads one statement later; it must
+    // see the minute-old number, not a blank.
+    expect(cachedProviderUsage(row(1))).toEqual(windows(90));
+    await refresh;
+    expect(cachedProviderUsage(row(1))).toEqual(windows(10));
+  });
+
+  it('lets the pick rank on the last readings across a stale refresh', async () => {
+    state.usage['/claude-1'] = windows(50);
+    state.usage['/claude-2'] = windows(5);
+    await Promise.all(state.rows.map((r) => providerUsage(r)));
+    expect(pickLeastUsedProvider(row(1)).id).toBe(2);
+    // Every entry is now stale; the pick refreshes all three and must still
+    // answer from what it knew, not fall through to picker order.
+    for (const r of state.rows) providerUsage(r, { ttlMs: 0 }).catch(() => {});
+    expect(pickLeastUsedProvider(row(1)).id).toBe(2);
+  });
+
+  it('does not write back a reading the account was told to forget mid-read', async () => {
+    let release;
+    providers.claudeUsage.mockImplementationOnce(() => new Promise((r) => (release = r)));
+    const read = providerUsage(row(3));
+    // The login finished while the (logged-out) read was in flight.
+    forgetProviderUsage(3);
+    release(null);
+    expect(await read).toBe(null);
+    expect(cachedProviderUsage(row(3))).toBe(undefined);
+    // The next caller reads afresh rather than getting the dropped null.
+    state.usage['/claude-3'] = windows(2);
+    expect(await providerUsage(row(3))).toEqual(windows(2));
   });
 });
 

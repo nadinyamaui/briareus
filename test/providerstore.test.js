@@ -625,6 +625,22 @@ describe('interchangeable accounts', () => {
     expect(providerGroup(getProvider(4)).map((p) => p.id)).toEqual([4]);
   });
 
+  it('settles the key when the rows load, not on every read', async () => {
+    await seed([
+      row({ id: 1, binary: 'codex', sortOrder: 1 }),
+      row({ id: 2, binary: 'codex', sortOrder: 2 }),
+    ]);
+    expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([1, 2]);
+    // What the codex CLI rewriting a member's model cache mid-session amounts
+    // to: the catalog the row resolves to changes under a key already handed
+    // out. The group holds until the rows are reloaded by a write.
+    getProvider(2).models = ['gpt-b'];
+    expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([1, 2]);
+    await updateProvider(2, { models: ['gpt-b'] });
+    expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([1]);
+    expect(providerGroup(getProvider(2)).map((p) => p.id)).toEqual([2]);
+  });
+
   it('groups rows that only differ in which model they default to', async () => {
     await seed([
       row({ id: 1, binary: 'claude', sortOrder: 1 }),

@@ -268,8 +268,15 @@ function probeClaudeCli(cfg, configDir, apply) {
   }
 }
 
-// One probe per claude entry. Run at boot (once the providers are loaded)
-// and again after every provider edit.
+// One probe per claude entry. Run at boot (once the providers are loaded),
+// after every provider edit, and on a timer: a login made from a terminal (or
+// a token one of the account's own sessions refreshed) changes nothing the
+// server can see, and the balancer ranks an account it remembers as logged out
+// behind one at its limit, so the memory has to be renewed to stay honest.
+// The timer is inside the balancer's AUTH_TTL_MS, so a probe is always fresh
+// enough to count.
+const CLAUDE_AUTH_RECHECK_MS = 5 * 60_000;
+
 function checkClaudeAuth() {
   const cfg = getConfig();
   const checkedAt = new Date().toISOString();
@@ -283,7 +290,7 @@ function checkClaudeAuth() {
     // opens the composer already knows not to start on a logged-out account.
     const record = (a) => {
       claudeAuthByDir.set(dir, a);
-      rememberProviderAuth(p.id, a.loggedIn);
+      rememberProviderAuth(p.id, a.loggedIn, Date.parse(a.checkedAt));
     };
     if (!cfg.claudeBin) {
       record({ checkedAt, loggedIn: false, authMethod: 'cli not found' });
@@ -880,8 +887,11 @@ async function providerAuthUsage(p, cfg) {
     }
   }
   // Only a probe that answered: a row whose claude login state has not been
-  // read yet must not erase what the boot probe already established.
-  if (auth) rememberProviderAuth(p.id, auth.loggedIn);
+  // read yet must not erase what the boot probe already established. A claude
+  // row's answer is the timer's probe read back, so it keeps that probe's
+  // time rather than passing for a fresh one.
+  if (auth)
+    rememberProviderAuth(p.id, auth.loggedIn, auth.checkedAt ? Date.parse(auth.checkedAt) : undefined);
   return { auth, usage };
 }
 
@@ -1666,6 +1676,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   // Providers come from the database, so the login probes can only run once
   // the rows are loaded.
   checkClaudeAuth();
+  setInterval(checkClaudeAuth, CLAUDE_AUTH_RECHECK_MS).unref();
   await initJobs();
   // Every project gets (or keeps) a hook pointing at this install's public
   // hostname, so an open session's pull request panel keeps up with the reviews,
