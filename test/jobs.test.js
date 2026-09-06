@@ -4126,6 +4126,28 @@ describe('the review loop: what a round runs on, and re-running one that could n
       },
     },
     {
+      // The same project, reached the other way: a retry that named that
+      // reviewer outright, so the loop-wide override the fix sessions and the
+      // QA run read (loopSessionRuntime) points at a CLI this machine has not
+      // got either.
+      id: 'rt-pinned',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-cli',
+      providerId: 1,
+      provider: 'Claude entry',
+      model: 'claude-fable-5-1',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 68,
+      prStatus: { number: 68, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        runtime: { providerId: 3, model: 'claude-fable-5-1', effort: 'high' },
+      },
+    },
+    {
       // The same shape, on a project whose reviewer is fine: what a retry that
       // named only a model leaves behind, with a finished review of its own to
       // close so the fix session it hands the findings to can be watched.
@@ -4342,6 +4364,36 @@ describe('the review loop: what a round runs on, and re-running one that could n
         /could not start the code review: Claude entry: this provider is inactive/,
       );
       expect(infoTexts(job).join('\n')).not.toMatch(/Unknown provider: 3/);
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
+  it('giving the reviewer up drops the retry that pinned the whole loop to it', async () => {
+    const job = getJob('rt-pinned');
+    // A retry named this provider outright, so it is the loop-wide override:
+    // what loopSessionRuntime hands to every fix session and to the QA run.
+    // The review falls back off it here, and leaving the fix sessions on it
+    // would publish findings that nothing could ever implement.
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue(null);
+    try {
+      await retryLoopRound('rt-pinned');
+
+      expect(job.reviewLoop.reviewerFailed).toBe(true);
+      expect(job.reviewLoop.runtime).toBeNull();
+      expect(infoTexts(job).join('\n')).toMatch(/started code review round 2 of PR #68/);
+      expect(getJob(job.reviewLoop.reviewSessionId).providerId).toBe(1);
+      closeDevSession(job.reviewLoop.reviewSessionId);
+
+      // And nothing brings that provider back on the next round.
+      const said = infoTexts(job).length;
+      state.group = [];
+      job.reviewLoop.reviewing = false;
+      await retryLoopRound('rt-pinned');
+      expect(infoTexts(job).slice(said).join('\n')).toMatch(
+        /could not start the code review: Claude entry: this provider is inactive/,
+      );
+      expect(infoTexts(job).slice(said).join('\n')).not.toMatch(/Uninstalled reviewer/);
     } finally {
       bin.mockRestore();
     }
