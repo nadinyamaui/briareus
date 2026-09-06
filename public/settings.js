@@ -106,6 +106,7 @@
       fields: {
         label: 'text',
         binary: 'text',
+        active: 'bool',
         baseUrl: 'text',
         apiKey: 'text',
         models: 'list',
@@ -1036,9 +1037,10 @@
         .map(
           (p) => `
       <div class="${ROW}${selected('provider', p) ? ' bg-raise' : ''}" data-type="provider" data-id="${p.id}">
-        <div class="flex items-center gap-[7px] truncate text-[14px]"><span class="dot idle"></span>${esc(p.label)}</div>
+        <div class="flex items-center gap-[7px] truncate text-[14px]"><span class="dot ${p.active ? 'idle' : ''}"></span>${esc(p.label)}</div>
         <div class="flex items-center gap-2 text-[12px] text-muted">
           <span class="${BADGE}">${esc(p.binary)}</span>
+          ${p.active ? '' : `<span class="${BADGE}">inactive</span>`}
           ${p.hasLogin ? `<span class="${BADGE}">own login</span>` : ''}
           ${p.baseUrl ? `<span class="${BADGE}">custom endpoint</span>` : ''}
         </div>

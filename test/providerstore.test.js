@@ -153,6 +153,14 @@ describe('the cache', () => {
     expect(getProvider('4').id).toBe(4);
     expect(getProvider(9)).toBeNull();
   });
+
+  it('keeps an inactive row editable and resumable', async () => {
+    await seed([row({ id: 4, active: false })]);
+
+    expect(listProviders().map((p) => p.id)).toEqual([4]);
+    expect(getProvider(4).active).toBe(false);
+    expect(getProviderForJob({ providerId: 4 }).id).toBe(4);
+  });
 });
 
 describe('adopting a login at boot', () => {
@@ -460,6 +468,12 @@ describe('resolveRuntime', () => {
     expect(resolveRuntime({ providerId: 99, model: 'opus' }, cfg)).toBeNull();
   });
 
+  it('answers null when the provider row is inactive', async () => {
+    await seed([row({ id: 1, binary: 'claude', active: false })]);
+
+    expect(resolveRuntime({ providerId: 1, model: 'opus' }, cfg)).toBeNull();
+  });
+
   it('answers null when there is no runtime at all', () => {
     expect(resolveRuntime(null, cfg)).toBeNull();
   });
@@ -471,7 +485,14 @@ describe('creating a provider', () => {
   it('fills the defaults for everything not given', async () => {
     const saved = await createProvider({ binary: 'claude' });
 
-    expect(saved).toMatchObject({ binary: 'claude', baseUrl: '', apiKey: '', models: [], efforts: [] });
+    expect(saved).toMatchObject({
+      binary: 'claude',
+      active: true,
+      baseUrl: '',
+      apiKey: '',
+      models: [],
+      efforts: [],
+    });
   });
 
   it('labels an unlabelled entry with its binary label', async () => {
@@ -559,6 +580,10 @@ describe('creating a provider', () => {
     });
   });
 
+  it('takes the active flag as given', async () => {
+    expect((await createProvider({ binary: 'claude', active: false })).active).toBe(false);
+  });
+
   it('appends to the end of the order when no position is given', async () => {
     await seed([row({ id: 1, sortOrder: 4 })]);
 
@@ -589,6 +614,13 @@ describe('updating a provider', () => {
 
   it('validates the edit against the same rules as a create', async () => {
     await expect(updateProvider(1, { binary: 'gemini' })).rejects.toThrow(/is not one of the binaries/);
+  });
+
+  it('turns the active flag off without losing the row', async () => {
+    const saved = await updateProvider(1, { active: false });
+
+    expect(saved).toMatchObject({ id: 1, active: false, label: 'one' });
+    expect(listProviders()).toHaveLength(1);
   });
 });
 
@@ -623,6 +655,17 @@ describe('interchangeable accounts', () => {
     expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([1, 2]);
     expect(providerGroup(getProvider(3)).map((p) => p.id)).toEqual([3]);
     expect(providerGroup(getProvider(4)).map((p) => p.id)).toEqual([4]);
+  });
+
+  it('leaves inactive rows out of the pickers and the balancer', async () => {
+    await seed([
+      row({ id: 1, binary: 'claude', label: 'Off', active: false, sortOrder: 1 }),
+      row({ id: 2, binary: 'claude', label: 'On', sortOrder: 2 }),
+    ]);
+
+    expect(providerGroups().map((g) => g.members.map((p) => p.id))).toEqual([[2]]);
+    expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([2]);
+    expect(providerGroup(getProvider(2)).map((p) => p.id)).toEqual([2]);
   });
 
   it('settles the key when the rows load, not on every read', async () => {

@@ -11,7 +11,7 @@ import { BINARIES } from '../lib/providers.js';
 // creates anything. The success path (spawning a session) stays untested on
 // purpose; it is the integration surface.
 const state = vi.hoisted(() => ({
-  provider: { id: 1, label: 'Claude entry', binary: 'claude' },
+  provider: { id: 1, label: 'Claude entry', binary: 'claude', active: true },
   // The rows beside the session's own, and the group the balancer sees: only
   // the interchangeable-accounts tests set either.
   otherProviders: [],
@@ -177,6 +177,7 @@ import {
 } from '../lib/jobs.js';
 
 beforeEach(() => {
+  state.provider = { id: 1, label: 'Claude entry', binary: 'claude', active: true };
   state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '' }];
   state.claimsServer = false;
   state.capacity = 3;
@@ -451,6 +452,13 @@ describe('createDevSession: the validation gauntlet', () => {
 
   it('refuses a provider nobody configured', () => {
     expect(() => createDevSession({ ...base, provider: 99 })).toThrow(/Unknown provider: 99/);
+  });
+
+  it('refuses a provider whose whole group is inactive', () => {
+    state.provider = { ...state.provider, active: false };
+    state.group = [];
+
+    expect(() => createDevSession(base)).toThrow(/Claude entry: this provider is inactive/);
   });
 
   it('refuses when no projects exist, and an unknown repo', () => {
