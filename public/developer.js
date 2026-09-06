@@ -3894,6 +3894,12 @@
           orchestrator: epic || undefined,
           workerRuntime: workerRuntime || undefined,
           reviewLoop: epic ? undefined : true,
+          // What this session's spend is filed under on the dashboards. Only
+          // the plain issue needs saying: an epic's session is an orchestrator
+          // and already files as one, and counting it as issue work instead
+          // would empty the category that answers "what do the supervisors
+          // cost?".
+          activity: epic ? undefined : 'issue',
         }),
       });
       sessions.unshift(session);
@@ -4032,9 +4038,178 @@
     return u.costUsd == null ? 'no turn reported a price' : 'as the providers priced it';
   }
 
-  function statTile(label, value, sub) {
+  // ---------- share donuts ----------
+  //
+  // The tables answer "how much"; a donut answers "how much of the whole",
+  // which is the one question a column of numbers is genuinely bad at. It is
+  // read beside its own table and nowhere else, so the table is its legend:
+  // every row carries the swatch of its slice, which is what keeps identity
+  // off colour alone.
+  //
+  // Four slices and a tail, never more. Past four hues the slices stop being
+  // tellable apart under colour blindness, and a part-to-whole read that needs
+  // seven colours was a table all along — which is the thing sitting next to
+  // it. See src/theme.css for the colours and what they were validated against.
+  const SERIES_SLOTS = 4;
+  const seriesColor = (i) =>
+    i < SERIES_SLOTS ? `var(--color-series-${i + 1})` : 'var(--color-series-other)';
+
+  // Tokens, not cost, for the same reason the bar chart plots tokens: every
+  // turn carries them, while a window run on a CLI that prices nothing would
+  // draw an empty ring.
+  //
+  // The slices keep the order of the table they sit beside rather than being
+  // re-sorted by size, so the swatch on a row is always that row's slice. It
+  // matters for the activity table, which the server ranks by cost: the ring
+  // shows the token share of the four rows a reader is already looking at.
+  //
+  // One pass hands back both the slices and the colour of every row, so the
+  // ring and the marks beside the table can never be drawn on different rules.
+  // Only a row that spent tokens takes a colour — a row sitting at zero has no
+  // slice to point at — and a card with too few slices to draw a ring hands
+  // back no colours at all, since a hue with nothing beside it to decode it is
+  // noise in a product where hue means which one.
+  function shareSeries(rows, labelOf) {
+    const total = rows.reduce((n, r) => n + r.totalTokens, 0);
+    const plain = { total, slices: [], colors: rows.map(() => '') };
+    if (!total) return plain;
+    const spent = [];
+    rows.forEach((r, i) => {
+      if (r.totalTokens > 0) spent.push(i);
+    });
+    const colors = rows.map(() => '');
+    const slices = spent.slice(0, SERIES_SLOTS).map((at, i) => {
+      colors[at] = seriesColor(i);
+      return {
+        label: labelOf(rows[at]),
+        color: colors[at],
+        tokens: rows[at].totalTokens,
+        turns: rows[at].turns,
+        cost: fmtCost(rows[at]),
+      };
+    });
+    // Every row the table paints with the tail colour is a row Other counts,
+    // and nothing else is, so the (n) in the label is what a reader can see.
+    const tail = spent.slice(SERIES_SLOTS);
+    if (tail.length) {
+      tail.forEach((at) => {
+        colors[at] = seriesColor(SERIES_SLOTS);
+      });
+      slices.push({
+        label: `Other (${tail.length})`,
+        color: seriesColor(SERIES_SLOTS),
+        tokens: tail.reduce((n, at) => n + rows[at].totalTokens, 0),
+        turns: tail.reduce((n, at) => n + rows[at].turns, 0),
+        cost: null,
+      });
+    }
+    // Under three slices there is no shape to read: one is a circle, and two
+    // is a single ratio that the row bars and the numbers beside them already
+    // say plainly. A ring drawn for those is decoration, so it is not drawn —
+    // and with it goes the palette on the rows.
+    return slices.length < 3 ? plain : { total, slices, colors };
+  }
+
+  // The ring itself: one stroked arc per slice on a shared circle, which keeps
+  // every segment one element the pointer can find and the browser can title.
+  // The 2-unit gap between arcs is the surface showing through rather than a
+  // border drawn around them, so two slices of near-equal size still read as
+  // two.
+  const RING_R = 40;
+  const RING_C = 2 * Math.PI * RING_R;
+  const RING_GAP = 2;
+
+  function donut({ total, slices }, { hint = '' } = {}) {
+    if (!slices.length) return '';
+    let at = 0;
+    const arcs = slices
+      .map((s) => {
+        const share = s.tokens / total;
+        const len = Math.max(0, share * RING_C - RING_GAP);
+        const offset = -at * RING_C;
+        at += share;
+        const tip = `${s.label}: ${Math.round(share * 100)}% · ${fmtTokens(s.tokens)} tok · ${s.turns} turn${
+          s.turns === 1 ? '' : 's'
+        }${s.cost ? ` · ${s.cost}` : ''}`;
+        return `<circle cx="50" cy="50" r="${RING_R}" fill="none" stroke="${s.color}" stroke-width="13"
+            stroke-dasharray="${len.toFixed(2)} ${(RING_C - len).toFixed(2)}" stroke-dashoffset="${offset.toFixed(2)}"
+            class="transition-opacity hover:opacity-80"><title>${esc(tip)}</title></circle>`;
+      })
+      .join('');
+    return `<div class="flex shrink-0 flex-col items-center gap-1.5">
+        <svg viewBox="0 0 100 100" class="h-[132px] w-[132px] -rotate-90" role="img" aria-label="Share of tokens">
+          ${arcs}
+        </svg>
+        <div class="text-[11px] text-muted">${
+          hint ? hinted('share of tokens', hint) : 'share of tokens'
+        }</div>
+      </div>`;
+  }
+
+  // One breakdown: its heading, its ring, and its table side by side — the ring
+  // for the shape of the split, the table for the numbers, and on a narrow
+  // window the ring above rather than squeezed beside.
+  function breakdownCard(heading, series, table) {
+    return `<div class="mt-3 rounded-xl border border-line bg-raise px-3.5 py-3">
+        <div class="text-[12px] tracking-wide text-muted">${heading}</div>
+        <div class="mt-1.5 flex flex-col items-center gap-4 lg:flex-row lg:items-start lg:gap-5">
+          ${donut(series, { hint: SHARE_HINT })}
+          <div class="w-full min-w-0 overflow-x-auto">${table}</div>
+        </div>
+      </div>`;
+  }
+
+  const SHARE_HINT =
+    'Each slice is one row’s share of the tokens in this window. The first four rows that spent anything get a colour of their own and every other row that spent is summed into Other, so the ring follows the table’s own ranking and the swatch beside a row is always that row’s slice. A row at zero has no slice and carries no swatch. Hover a slice for its share, turns and cost.';
+
+  // The swatch that ties a table row to its slice: the colour shareSeries gave
+  // that row, and nothing at all where it gave none.
+  function swatch(color) {
+    if (!color) return '';
+    return `<span class="mr-2 inline-block h-2 w-2 shrink-0 rounded-[2px] align-middle" style="background:${color}"></span>`;
+  }
+
+  // A label with an explanation behind it. Every number on this pane is a
+  // count of something the app did, and which thing is rarely guessable from
+  // a two-word column head — "sessions" and "turns" are the app's vocabulary,
+  // not anyone's prior. The dotted underline is the only thing on screen
+  // saying an explanation exists, so it goes on every one of them, and the
+  // text is passed through as markup: some of these labels carry an icon or a
+  // nested span already.
+  function hinted(html, hint) {
+    return `<span class="cursor-help underline decoration-dotted decoration-muted/50 underline-offset-[3px]" title="${esc(hint)}">${html}</span>`;
+  }
+
+  // What the columns of the three breakdown tables mean. Written once and
+  // shared: the same column is the same measure in all of them, and three
+  // wordings of it would read as three measures.
+  const COLUMN_HINTS = {
+    sessions:
+      'How many separate sessions spent anything here. A session counts once however many turns it ran, and it keeps counting after it is closed or deleted: the ledger is written beside the conversation, not inside it.',
+    turns:
+      'One turn is one prompt and the whole agent run that answered it — every model call, tool call and retry inside it.',
+    tokens:
+      'Input and output tokens as the provider reported them. Input is summed over every model call the turn made, so the context re-sent on each call is counted again; most of it is cache reads, billed at a fraction of fresh input.',
+    total:
+      'Input plus output. The bar is this row’s share of the busiest row, so the ranking reads at a glance.',
+    time: 'Wall-clock time the agent spent working, summed over its turns. Sessions that ran at the same time each count their own, so this can add up to more time than actually passed.',
+    cost: 'What the turns cost. “~” means some of them were priced from published list prices because their CLI reports no cost of its own; “+” means some carry no price at all and are missing from the total. Hover a figure for the exact split.',
+  };
+
+  // The four headline tiles, said once for both dashboards: the project's own
+  // 📊 pane and the main one draw the same four over different windows.
+  const TILE_HINTS = {
+    cost: 'What the window cost, over the turns that carry a price. Turns their CLI never priced are filled in from published list prices where the catalog knows the model, and left out of the total where it does not — the line under the figure says which happened.',
+    tokens:
+      'Input plus output over every turn in the window. Input counts the context re-sent on each model call, so it dwarfs output and is mostly cache reads.',
+    sessions:
+      'How many sessions spent anything in this window, and how many turns they ran between them. Closed and deleted conversations still count: the ledger outlives them.',
+    time: 'Wall-clock time the agents spent working, summed over every turn. Sessions that ran side by side each count their own, so this is agent time, not elapsed time.',
+  };
+
+  function statTile(label, value, sub, hint = '') {
     return `<div class="rounded-xl border border-line bg-raise px-3.5 py-3">
-        <div class="text-[12px] tracking-wide text-muted">${label}</div>
+        <div class="text-[12px] tracking-wide text-muted">${hint ? hinted(label, hint) : label}</div>
         <div class="mt-1 text-[22px] font-semibold text-ink">${value}</div>
         <div class="mt-0.5 min-h-4 text-[12px] text-muted">${sub || ''}</div>
       </div>`;
@@ -4060,7 +4235,7 @@
   // whole history) and decides how a key reads and how dense the axis is. One
   // hue throughout: the columns encode magnitude, not identity, so a second
   // colour would only claim a distinction the data does not have.
-  function bucketChart(buckets, { unit = 'day', today = '', title = 'Tokens per day' } = {}) {
+  function bucketChart(buckets, { unit = 'day', today = '', title = 'Tokens per day', hint = '' } = {}) {
     const max = Math.max(0, ...buckets.map((b) => b.totalTokens));
     if (!buckets.length || !max) return '';
     // "Has not happened yet" is the server's calendar, the one the buckets are
@@ -4097,21 +4272,47 @@
       })
       .join('');
     return `<div class="mt-3 rounded-xl border border-line bg-raise px-3.5 py-3">
-        <div class="text-[12px] tracking-wide text-muted">${esc(title)}</div>
+        <div class="text-[12px] tracking-wide text-muted">${hint ? hinted(esc(title), hint) : esc(title)}</div>
         <div class="mt-2.5 flex h-28 items-end gap-[2px]">${cols}</div>
         <div class="mt-1 flex gap-[2px] text-[11px] text-muted">${labels}</div>
       </div>`;
   }
 
-  const dailyChart = (u) => bucketChart(u.daily || [], { unit: 'day', today: u.today });
+  // Tokens rather than cost, which is worth saying: a month run entirely on a
+  // CLI that prices nothing would chart as an empty month.
+  const CHART_HINT =
+    'Tokens spent per bucket, not cost: every turn carries tokens, while a run on a CLI that prices nothing would chart as empty. Hover a column for its turns and what they cost. Buckets still ahead on the server’s calendar are left off.';
 
-  function modelTable(u) {
+  const dailyChart = (u) => bucketChart(u.daily || [], { unit: 'day', today: u.today, hint: CHART_HINT });
+
+  // A model as one line: the model id is what anyone reads it by, the provider
+  // behind it only matters when two of them sell the same id, which the ledger
+  // already keeps apart (lib/usage.js, modelFilterKey).
+  function modelLabel(m) {
+    // Parenthesized rather than joined with the middle dot the subtitle and
+    // the pickers already separate their own parts with, which would read as
+    // one more part rather than as the provider behind the model.
+    return m.provider ? `${m.model || 'unknown'} (${m.provider})` : m.model || 'unknown';
+  }
+
+  // `filterable` is the main dashboard's: only there is there a picker for a
+  // click on a row to move. A project's own 📊 Dashboard draws the same table
+  // over one project's turns and has nothing to narrow.
+  function modelTable(u, { filterable = false } = {}) {
     const models = u.models || [];
     if (!models.length) return '';
+    const series = shareSeries(models, modelLabel);
     const rows = models
-      .map((m) => {
-        return `<tr class="border-t border-line">
-          <td class="max-w-[220px] truncate py-1.5 pr-3 font-mono text-[12px] text-ink" title="${esc(m.model || '')}">${esc(m.model || 'unknown')}</td>
+      .map((m, i) => {
+        const on = filterable && homeFilter.model === m.key;
+        const cls = filterable ? ` cursor-pointer hover:bg-sunken/60${on ? ' bg-sunken' : ''}` : '';
+        const attrs = filterable
+          ? ` data-filter="model" data-key="${esc(m.key)}" data-label="${esc(modelLabel(m))}" title="${
+              on ? 'Show every model again' : `Show only ${esc(modelLabel(m))}`
+            }"`
+          : '';
+        return `<tr class="border-t border-line${cls}"${attrs}>
+          <td class="max-w-[220px] truncate py-1.5 pr-3 text-ink" title="${esc(m.model || '')}">${swatch(series.colors[i])}<span class="font-mono text-[12px]">${esc(m.model || 'unknown')}</span></td>
           <td class="py-1.5 pr-3 text-muted">${esc(m.provider || '—')}</td>
           <td class="py-1.5 pr-3 text-right">${m.sessions}</td>
           <td class="py-1.5 pr-3 text-right">${m.turns}</td>
@@ -4121,21 +4322,70 @@
         </tr>`;
       })
       .join('');
-    return `<div class="mt-3 overflow-x-auto rounded-xl border border-line bg-raise px-3.5 py-3">
-        <div class="text-[12px] tracking-wide text-muted">By model</div>
-        <table class="mt-1.5 w-full border-collapse text-[13px]">
+    return breakdownCard(
+      hinted(
+        'By model',
+        `What each model was actually used for and what it cost. A session records the model it ran a turn on, so switching model mid-conversation splits that session across two rows.${
+          filterable ? ' Click a row to narrow the whole page to that model.' : ''
+        }`,
+      ),
+      series,
+      `<table class="w-full border-collapse text-[13px]">
           <thead><tr class="text-[11px] tracking-wide text-muted">
-            <th class="py-1 pr-3 text-left font-normal">Model</th>
-            <th class="py-1 pr-3 text-left font-normal">Provider</th>
-            <th class="py-1 pr-3 text-right font-normal">Sessions</th>
-            <th class="py-1 pr-3 text-right font-normal">Turns</th>
-            <th class="py-1 pr-3 text-right font-normal">Tokens in / out</th>
-            <th class="py-1 pr-3 text-right font-normal">Time</th>
-            <th class="py-1 text-right font-normal">Cost</th>
+            <th class="py-1 pr-3 text-left font-normal">${hinted('Model', 'The model id the provider’s CLI reported for the turn.')}</th>
+            <th class="py-1 pr-3 text-left font-normal">${hinted('Provider', 'Which CLI ran it. The same model id can be sold by more than one, and the two are counted apart.')}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Sessions', COLUMN_HINTS.sessions)}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Turns', COLUMN_HINTS.turns)}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Tokens in / out', COLUMN_HINTS.tokens)}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Time', COLUMN_HINTS.time)}</th>
+            <th class="py-1 text-right font-normal">${hinted('Cost', COLUMN_HINTS.cost)}</th>
           </tr></thead>
           <tbody>${rows}</tbody>
-        </table>
-      </div>`;
+        </table>`,
+    );
+  }
+
+  // Every provider that ran a turn, biggest first. Coarser than the model
+  // table on purpose: a provider is an account with a bill attached, and its
+  // spend is spread over however many models it was asked for.
+  function providerTable(u) {
+    const providers = u.providers || [];
+    if (!providers.length) return '';
+    const label = (p) => p.provider || 'unknown';
+    const series = shareSeries(providers, label);
+    const rows = providers
+      .map((p, i) => {
+        const name = p.provider
+          ? esc(p.provider)
+          : '<span class="text-muted" title="No provider was recorded on these turns">unknown</span>';
+        return `<tr class="border-t border-line">
+          <td class="max-w-[200px] truncate py-1.5 pr-3 text-ink">${swatch(series.colors[i])}<span class="font-mono text-[12px]">${name}</span></td>
+          <td class="py-1.5 pr-3 text-right">${p.sessions}</td>
+          <td class="py-1.5 pr-3 text-right">${p.turns}</td>
+          <td class="py-1.5 pr-3 text-right" title="${p.inputTokens.toLocaleString()} in · ${p.outputTokens.toLocaleString()} out">${fmtTokens(p.inputTokens)} / ${fmtTokens(p.outputTokens)}</td>
+          <td class="py-1.5 pr-3 text-right">${p.durationMs ? fmtDur(p.durationMs) : '—'}</td>
+          <td class="py-1.5 text-right" title="${esc(costNote(p))}">${fmtCost(p) || '—'}</td>
+        </tr>`;
+      })
+      .join('');
+    return breakdownCard(
+      hinted(
+        'By provider',
+        'What each CLI cost, over every model it was asked for. This is the row to read against a subscription or an invoice; the accounts of one provider are summed together, since they bill as one.',
+      ),
+      series,
+      `<table class="w-full border-collapse text-[13px]">
+          <thead><tr class="text-[11px] tracking-wide text-muted">
+            <th class="py-1 pr-3 text-left font-normal">${hinted('Provider', 'The CLI the turns ran on: claude, codex, grok, opencode. Which account of it ran them is not distinguished here.')}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Sessions', COLUMN_HINTS.sessions)}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Turns', COLUMN_HINTS.turns)}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Tokens in / out', COLUMN_HINTS.tokens)}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Time', COLUMN_HINTS.time)}</th>
+            <th class="py-1 text-right font-normal">${hinted('Cost', COLUMN_HINTS.cost)}</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`,
+    );
   }
 
   // What each ledger activity id is called on screen. The action ids wear the
@@ -4146,6 +4396,7 @@
   const ACTIVITY_LABELS = {
     chat: '💬 Chat',
     'code-review': '⌕ Code review',
+    issue: '▶ Issue',
     qa: '🔍 QA',
     orchestrator: '🧭 Orchestrator',
     worker: '👷 Worker',
@@ -4161,19 +4412,60 @@
     'delete-self-comments': '🧹 Delete my comments',
   };
 
+  // …and what each one actually is. Half of these are started by an agent
+  // rather than by a person, so this row is the only place their spend is ever
+  // seen, and a name like "Worker" or "Chat" says nothing about which sessions
+  // are in it. Each hint says what starts that kind of session and, where two
+  // rows are easily confused, which of them the spend lands in.
+  const ACTIVITY_HINTS = {
+    chat: 'Sessions you started yourself from ＋ New session with no mode on them: ordinary coding and conversation. Everything the app or an agent starts has a row of its own, so this is hand-driven work only.',
+    issue:
+      'Sessions started with ▶ Start on an issue in the ⊙ Issues tab. An epic starts an orchestrator instead, and counts under 🧭 Orchestrator.',
+    'code-review':
+      'Reviews: the 🔍 chip on the composer, the board’s review errand, and every round the review loop runs on its own. A review’s publishing turn is review spend too.',
+    qa: 'The 🎬 QA errand and the QA loop: a session that writes the test sheet for a pull request and then executes it.',
+    orchestrator:
+      'What supervising costs, not what the code costs: an epic’s 🧭 orchestrator reading the issues, triaging findings and merging. The work it hands out is under 👷 Worker.',
+    worker:
+      'Sessions an orchestrator started rather than you (spawn_worker, fix_tooling) — one per sub-issue, each on its own branch. Their reviews and fixes count under ⌕ Code review and 🛠 Implement feedback.',
+    zeus: 'The ⚡ composer mode: a supervisor briefed to turn a brief into a GitHub epic through read-only analysts instead of landing code itself.',
+    analyst:
+      'The read-only sessions ⚡ Zeus spawns to study a brief (product, architecture, QA, validator). They change nothing; they read and report.',
+    'pr-body-summary': 'The ✎ errand that rewrites a pull request’s description from its own diff.',
+    'test-sheet': 'The 📋 errand that writes a manual test sheet for a pull request.',
+    'test-run': 'The 🎬 errand that executes a test sheet against a running copy of the app.',
+    'solve-conflicts':
+      'The 🔀 errand that merges the base branch into a pull request and resolves the conflicts.',
+    'fix-checks': 'The 🧪 errand that reads a pull request’s failing checks and pushes a fix.',
+    'implement-feedback':
+      'Fixing what a review found: the board’s 🛠 errand and the fix sessions the review loop starts on its own. They are the same errand, so they share the row.',
+    'custom-feedback':
+      'The ✍ errand that sends a pull request whatever you typed, as an instruction to act on.',
+    'delete-self-comments': 'The 🧹 errand that removes this dashboard’s own comments from a pull request.',
+  };
+
   // Where the money went, by the kind of work it bought: biggest spender
   // first, the server's ordering. A null activity is a turn written before the
   // ledger recorded one, said plainly rather than guessed at.
   function activityTable(u) {
     const activities = u.activities || [];
     if (!activities.length) return '';
+    const label = (a) => (a.activity ? ACTIVITY_LABELS[a.activity] || a.activity : 'Unattributed');
+    const series = shareSeries(activities, label);
     const rows = activities
-      .map((a) => {
+      .map((a, i) => {
+        // The label alone is a guess at best ("Worker" started by whom?), so
+        // every row carries the sentence that says which sessions are in it.
         const name = a.activity
-          ? esc(ACTIVITY_LABELS[a.activity] || a.activity)
-          : `<span class="text-muted" title="Turns recorded before the ledger tracked what kind of work they were">Unattributed</span>`;
+          ? ACTIVITY_HINTS[a.activity]
+            ? hinted(esc(ACTIVITY_LABELS[a.activity] || a.activity), ACTIVITY_HINTS[a.activity])
+            : esc(ACTIVITY_LABELS[a.activity] || a.activity)
+          : hinted(
+              '<span class="text-muted">Unattributed</span>',
+              'Turns recorded before the ledger tracked what kind of work they were. Nothing new lands here.',
+            );
         return `<tr class="border-t border-line">
-          <td class="max-w-[220px] truncate py-1.5 pr-3 text-ink">${name}</td>
+          <td class="max-w-[220px] truncate py-1.5 pr-3 text-ink">${swatch(series.colors[i])}${name}</td>
           <td class="py-1.5 pr-3 text-right">${a.sessions}</td>
           <td class="py-1.5 pr-3 text-right">${a.turns}</td>
           <td class="py-1.5 pr-3 text-right" title="${a.inputTokens.toLocaleString()} in · ${a.outputTokens.toLocaleString()} out">${fmtTokens(a.inputTokens)} / ${fmtTokens(a.outputTokens)}</td>
@@ -4182,20 +4474,24 @@
         </tr>`;
       })
       .join('');
-    return `<div class="mt-3 overflow-x-auto rounded-xl border border-line bg-raise px-3.5 py-3">
-        <div class="text-[12px] tracking-wide text-muted">By activity</div>
-        <table class="mt-1.5 w-full border-collapse text-[13px]">
+    return breakdownCard(
+      hinted(
+        'By activity',
+        'Where the money went, by the kind of work it bought. A session is filed under one activity when it starts and every turn it ever runs counts there, so a review’s fixes and a worker’s reviews land in their own rows rather than in the one that started them. Ranked by cost; the ring beside it is share of tokens.',
+      ),
+      series,
+      `<table class="w-full border-collapse text-[13px]">
           <thead><tr class="text-[11px] tracking-wide text-muted">
-            <th class="py-1 pr-3 text-left font-normal">Activity</th>
-            <th class="py-1 pr-3 text-right font-normal">Sessions</th>
-            <th class="py-1 pr-3 text-right font-normal">Turns</th>
-            <th class="py-1 pr-3 text-right font-normal">Tokens in / out</th>
-            <th class="py-1 pr-3 text-right font-normal">Time</th>
-            <th class="py-1 text-right font-normal">Cost</th>
+            <th class="py-1 pr-3 text-left font-normal">${hinted('Activity', 'What kind of work the turns paid for. Hover a row to see what starts that kind of session.')}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Sessions', COLUMN_HINTS.sessions)}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Turns', COLUMN_HINTS.turns)}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Tokens in / out', COLUMN_HINTS.tokens)}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Time', COLUMN_HINTS.time)}</th>
+            <th class="py-1 text-right font-normal">${hinted('Cost', COLUMN_HINTS.cost)}</th>
           </tr></thead>
           <tbody>${rows}</tbody>
-        </table>
-      </div>`;
+        </table>`,
+    );
   }
 
   function renderDashboard() {
@@ -4220,18 +4516,30 @@
       return;
     }
     const tiles = [
-      statTile('Cost', fmtCost(u) || '—', costNote(u)),
+      statTile('Cost', fmtCost(u) || '—', costNote(u), TILE_HINTS.cost),
       statTile(
         'Tokens',
         fmtTokens(u.totalTokens),
         `${fmtTokens(u.inputTokens)} in · ${fmtTokens(u.outputTokens)} out`,
+        TILE_HINTS.tokens,
       ),
-      statTile('Sessions', String(u.sessions), `${u.turns} turn${u.turns === 1 ? '' : 's'}`),
-      statTile('Agent time', u.durationMs ? fmtDur(u.durationMs) : '—', 'summed over every turn'),
+      statTile(
+        'Sessions',
+        String(u.sessions),
+        `${u.turns} turn${u.turns === 1 ? '' : 's'}`,
+        TILE_HINTS.sessions,
+      ),
+      statTile(
+        'Agent time',
+        u.durationMs ? fmtDur(u.durationMs) : '—',
+        'summed over every turn',
+        TILE_HINTS.time,
+      ),
     ].join('');
     list.innerHTML = `<div class="grid grid-cols-2 gap-2 lg:grid-cols-4">${tiles}</div>
       ${dailyChart(u)}
       ${activityTable(u)}
+      ${providerTable(u)}
       ${modelTable(u)}`;
   }
 
@@ -4492,25 +4800,56 @@
   const HOME_PERIOD_KEY = 'dev.usagePeriod';
   let homeOpen = false;
   let homePeriod = localStorage.getItem(HOME_PERIOD_KEY) || 'month';
-  let homeUsage = { period: null, data: null };
+  // One project, one model, or neither: lib/usage.js's filter keys, straight
+  // off the tables below. Deliberately not remembered across reloads the way
+  // the window is: the window is a preference, a filter is the question being
+  // asked right now, and a sticky one is how a small number gets read as the
+  // whole month's spend.
+  let homeFilter = { project: null, model: null };
+  // What the pickers offer and what the current picks are called, both from
+  // the last payload that landed: the options are the whole window's, so
+  // narrowing to one project never empties the list you would widen back with.
+  let homeOptions = { projects: [], models: [] };
+  let homeFilterLabels = { project: '', model: '' };
+  let homeUsage = { key: null, data: null };
   let homeError = null;
   let homeSeq = 0;
   let homeTimer = null;
   let homeTicks = 0;
 
+  // What the pane on screen is drawn from: the window and both filters, so a
+  // payload that answered an older pick is never mistaken for this one's.
+  const homeKey = () => [homePeriod, homeFilter.project || '', homeFilter.model || ''].join('\n');
+
   async function loadHomeUsage() {
     const seq = ++homeSeq;
-    const period = homePeriod;
+    const key = homeKey();
+    const query = new URLSearchParams({ period: homePeriod });
+    if (homeFilter.project) query.set('project', homeFilter.project);
+    if (homeFilter.model) query.set('model', homeFilter.model);
     try {
-      const data = await api(`/api/dev/usage/all?period=${encodeURIComponent(period)}`);
+      const data = await api(`/api/dev/usage/all?${query}`);
       if (seq !== homeSeq) return; // a newer pick is already on its way
-      homeUsage = { period, data };
+      homeUsage = { key, data };
+      homeOptions = data.options || { projects: [], models: [] };
       homeError = null;
     } catch (e) {
       if (seq !== homeSeq) return;
       homeError = e.message;
     }
     if (homeOpen) renderHome();
+  }
+
+  // Set a filter and reload under it. The same value twice clears it, which is
+  // what makes the table rows toggles: click a project to see only it, click
+  // it again to come back out.
+  function setHomeFilter(which, value, label = '') {
+    const next = homeFilter[which] === value ? null : value || null;
+    if (homeFilter[which] === next) return;
+    homeFilter = { ...homeFilter, [which]: next };
+    homeFilterLabels = { ...homeFilterLabels, [which]: next ? label : '' };
+    renderHome(); // straight to the loader: the pane must not read as the old pick's
+    loadHomeUsage();
   }
 
   // What the window is called. The month comes off the payload as a "YYYY-MM"
@@ -4524,22 +4863,38 @@
     return new Date(y, m - 1, 1).toLocaleDateString([], { month: 'long', year: 'numeric' });
   }
 
-  // One row per project, biggest token spender first. The bar is a share of the
-  // busiest project: magnitude, so one hue, and the number beside it is what
-  // is actually being read; the bar only says how the projects rank at a glance.
+  // One row per project, biggest token spender first. The bar's length is a
+  // share of the busiest project, and the number beside it is what is actually
+  // being read; the bar only says how the projects rank at a glance. Its hue is
+  // the row's slice on the ring, or the one accent hue wherever shareSeries
+  // draws no ring.
   function projectTable(u) {
     const rows = u.projects || [];
     if (!rows.length) return '';
     const max = Math.max(1, ...rows.map((p) => p.totalTokens));
+    const series = shareSeries(rows, (p) => p.label);
     const body = rows
-      .map((p) => {
+      .map((p, i) => {
         const width = Math.round((p.totalTokens / max) * 100);
         // A project no longer in Settings still has to add up into the totals
         // above, so it keeps its row and says why it is greyed out.
         const name = p.gone
           ? `<span class="text-muted" title="No project in Settings owns ${esc(p.repo || 'these turns')} any more, and its history is still counted here">${esc(p.label)} <span class="text-[11px]">(removed)</span></span>`
           : `<span class="text-ink" title="${esc(p.repo || '')}">${esc(p.label)}</span>`;
-        return `<tr class="border-t border-line${p.turns ? '' : ' text-muted'}">
+        // The row is the filter: clicking it narrows the page to this project,
+        // clicking it again comes back out (setHomeFilter).
+        const on = homeFilter.project === p.key;
+        const cls = `${p.turns ? '' : ' text-muted'}${on ? ' bg-sunken' : ''}`;
+        const attrs = ` data-filter="project" data-key="${esc(p.key)}" data-label="${esc(p.label)}" title="${
+          on ? 'Show every project again' : `Show only ${esc(p.label)}`
+        }"`;
+        // This row's bar wears its slice's colour rather than the one accent
+        // hue, which is what ties it to the ring beside the table. It stands in
+        // for the swatch the other tables carry: two colour marks on one row
+        // would be saying the same thing twice. No slice, no palette: back to
+        // the accent, which says magnitude and nothing about identity.
+        const bar = series.colors[i] || 'var(--color-accent)';
+        return `<tr class="cursor-pointer border-t border-line hover:bg-sunken/60${cls}"${attrs}>
           <td class="max-w-[200px] truncate py-1.5 pr-3">${name}</td>
           <td class="py-1.5 pr-3 text-right">${p.sessions}</td>
           <td class="py-1.5 pr-3 text-right">${p.turns}</td>
@@ -4547,7 +4902,7 @@
           <td class="w-[26%] py-1.5 pr-3">
             <div class="flex items-center gap-2">
               <div class="h-1.5 min-w-0 flex-1 rounded-full bg-sunken">
-                <div class="h-full rounded-full bg-accent/75" style="width:${width}%"></div>
+                <div class="h-full rounded-full" style="width:${width}%;background:${bar}"></div>
               </div>
               <span class="shrink-0 tabular-nums">${fmtTokens(p.totalTokens)}</span>
             </div>
@@ -4557,26 +4912,84 @@
         </tr>`;
       })
       .join('');
-    return `<div class="mt-3 overflow-x-auto rounded-xl border border-line bg-raise px-3.5 py-3">
-        <div class="text-[12px] tracking-wide text-muted">By project</div>
-        <table class="mt-1.5 w-full border-collapse text-[13px]">
+    return breakdownCard(
+      hinted(
+        'By project',
+        'Every configured project, plus any repository with spend that no project claims any more. A project that ran nothing is listed at zero, so the rows always add up to the totals above. Click a row to narrow the whole page to that project.',
+      ),
+      series,
+      `<table class="w-full border-collapse text-[13px]">
           <thead><tr class="text-[11px] tracking-wide text-muted">
-            <th class="py-1 pr-3 text-left font-normal">Project</th>
-            <th class="py-1 pr-3 text-right font-normal">Sessions</th>
-            <th class="py-1 pr-3 text-right font-normal">Turns</th>
-            <th class="py-1 pr-3 text-right font-normal">Tokens in / out</th>
-            <th class="py-1 pr-3 text-left font-normal">Total tokens</th>
-            <th class="py-1 pr-3 text-right font-normal">Time</th>
-            <th class="py-1 text-right font-normal">Cost</th>
+            <th class="py-1 pr-3 text-left font-normal">${hinted('Project', 'The project in Settings the turns were spent on. A project renamed since keeps one row; one deleted from Settings keeps its history under the repository it named, greyed out and marked (removed).')}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Sessions', COLUMN_HINTS.sessions)}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Turns', COLUMN_HINTS.turns)}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Tokens in / out', COLUMN_HINTS.tokens)}</th>
+            <th class="py-1 pr-3 text-left font-normal">${hinted('Total tokens', COLUMN_HINTS.total)}</th>
+            <th class="py-1 pr-3 text-right font-normal">${hinted('Time', COLUMN_HINTS.time)}</th>
+            <th class="py-1 text-right font-normal">${hinted('Cost', COLUMN_HINTS.cost)}</th>
           </tr></thead>
           <tbody>${body}</tbody>
-        </table>
-      </div>`;
+        </table>`,
+    );
+  }
+
+  // One picker's options, from the window's own contents. The selected key is
+  // kept even when this window never saw it — a model retired last month, a
+  // project with nothing in it — under the label it was picked by, so the
+  // select never goes blank under a filter the page is visibly drawing.
+  function fillHomePicker(id, which, all, options) {
+    const value = homeFilter[which] || '';
+    const known = options.some((o) => o.key === value);
+    const rows = options.map((o) => ({ key: o.key, label: o.label }));
+    if (value && !known) rows.push({ key: value, label: homeFilterLabels[which] || value });
+    // The pane redraws itself on a 60-second refresh tick, and replacing the
+    // <option> nodes under a dropdown the reader has open closes it with
+    // nothing on screen saying why. Between two ticks the options are almost
+    // always the same, so the rewrite only happens when they are not.
+    const el = $(id);
+    const sig = JSON.stringify([all, value, rows]);
+    if (el.dataset.pickerSig === sig && el.value === value) return;
+    el.dataset.pickerSig = sig;
+    el.innerHTML = [{ key: '', label: all }, ...rows]
+      .map(
+        (o) => `<option value="${esc(o.key)}"${o.key === value ? ' selected' : ''}>${esc(o.label)}</option>`,
+      )
+      .join('');
+  }
+
+  // What a pick is called in the subtitle: whatever the payload calls it now,
+  // falling back to the label it was picked by. The payload is preferred so a
+  // project renamed in Settings since the click reads as its new name.
+  function filterLabel(which, u) {
+    const key = homeFilter[which];
+    const from =
+      which === 'project'
+        ? (u.projects || []).find((p) => p.key === key)
+        : (u.models || []).find((m) => m.key === key);
+    if (!from) return homeFilterLabels[which] || key;
+    return which === 'project' ? from.label : modelLabel(from);
   }
 
   function renderHome() {
-    const u = homeUsage.period === homePeriod ? homeUsage.data : null;
+    const u = homeUsage.key === homeKey() ? homeUsage.data : null;
     $('home-period').value = homePeriod;
+    // The pickers are filled from the last payload that landed, not only from
+    // the one on screen: a reload under a new pick must not empty them.
+    fillHomePicker(
+      'home-project',
+      'project',
+      'All projects',
+      (homeOptions.projects || []).map((o) => ({
+        key: o.key,
+        label: o.gone ? `${o.label} (removed)` : o.label,
+      })),
+    );
+    fillHomePicker(
+      'home-model',
+      'model',
+      'All models',
+      (homeOptions.models || []).map((o) => ({ key: o.key, label: modelLabel(o) })),
+    );
     const list = $('home-list');
     if (homeError && !u) {
       $('home-sub').textContent = '';
@@ -4593,39 +5006,63 @@
     // The count is of projects that actually spent something, not of the rows
     // below: every configured project has a row, including the quiet ones.
     const active = (u.projects || []).filter((p) => p.turns).length;
+    // A filter is said in the subtitle as well as shown in its picker: these
+    // totals are a slice, and the one line every screenshot of this pane
+    // carries has to say which slice.
+    const picked = [
+      homeFilter.project ? filterLabel('project', u) : '',
+      homeFilter.model ? filterLabel('model', u) : '',
+    ].filter(Boolean);
     $('home-sub').textContent = [
       over,
-      `${active} project${active === 1 ? '' : 's'} with usage`,
+      ...picked.map((what) => `only ${what}`),
+      picked.length ? '' : `${active} project${active === 1 ? '' : 's'} with usage`,
       `${u.turns} turn${u.turns === 1 ? '' : 's'}`,
-    ].join(' · ');
+    ]
+      .filter(Boolean)
+      .join(' · ');
     // An empty window still lists the projects, at zero. The tiles and the
     // chart are dropped (a row of dashes over an empty plot says nothing the
     // sentence does not) but "which projects ran nothing?" is the one question
     // left worth answering here, and it is the one projectBreakdown keeps those
     // rows for.
     if (!u.turns) {
-      list.innerHTML = `<div class="my-8 text-center text-sm text-muted">No usage recorded in ${esc(over)}.</div>${projectTable(u)}`;
+      const what = picked.length ? ` for ${esc(picked.join(' and '))}` : '';
+      list.innerHTML = `<div class="my-8 text-center text-sm text-muted">No usage recorded in ${esc(over)}${what}.</div>${projectTable(u)}`;
       return;
     }
     const tiles = [
-      statTile('Cost', fmtCost(u) || '—', costNote(u)),
+      statTile('Cost', fmtCost(u) || '—', costNote(u), TILE_HINTS.cost),
       statTile(
         'Tokens',
         fmtTokens(u.totalTokens),
         `${fmtTokens(u.inputTokens)} in · ${fmtTokens(u.outputTokens)} out`,
+        TILE_HINTS.tokens,
       ),
-      statTile('Sessions', String(u.sessions), `${u.turns} turn${u.turns === 1 ? '' : 's'}`),
-      statTile('Agent time', u.durationMs ? fmtDur(u.durationMs) : '—', 'summed over every turn'),
+      statTile(
+        'Sessions',
+        String(u.sessions),
+        `${u.turns} turn${u.turns === 1 ? '' : 's'}`,
+        TILE_HINTS.sessions,
+      ),
+      statTile(
+        'Agent time',
+        u.durationMs ? fmtDur(u.durationMs) : '—',
+        'summed over every turn',
+        TILE_HINTS.time,
+      ),
     ].join('');
     list.innerHTML = `<div class="grid grid-cols-2 gap-2 lg:grid-cols-4">${tiles}</div>
       ${bucketChart(u.buckets || [], {
         unit: u.unit,
         today: u.today,
         title: u.unit === 'month' ? 'Tokens per month' : 'Tokens per day',
+        hint: CHART_HINT,
       })}
       ${projectTable(u)}
       ${activityTable(u)}
-      ${modelTable(u)}`;
+      ${providerTable(u)}
+      ${modelTable(u, { filterable: true })}`;
   }
 
   $('home-period').addEventListener('change', (e) => {
@@ -4635,8 +5072,23 @@
     loadHomeUsage();
   });
 
+  $('home-project').addEventListener('change', (e) =>
+    setHomeFilter('project', e.target.value, e.target.selectedOptions[0].textContent),
+  );
+
+  $('home-model').addEventListener('change', (e) =>
+    setHomeFilter('model', e.target.value, e.target.selectedOptions[0].textContent),
+  );
+
+  // The by-project and by-model tables are pickers too; see setHomeFilter.
+  $('home-list').addEventListener('click', (e) => {
+    const row = e.target.closest('[data-filter]');
+    if (!row) return;
+    setHomeFilter(row.dataset.filter, row.dataset.key, row.dataset.label);
+  });
+
   $('home-refresh').addEventListener('click', () => {
-    homeUsage = { period: null, data: null };
+    homeUsage = { key: null, data: null };
     homeError = null;
     renderHome();
     loadHomeUsage();

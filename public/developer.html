@@ -298,6 +298,15 @@
               <option value="prev">Last month</option>
               <option value="all">All time</option>
             </select>
+            <!-- The two filters. Their options are lib/usage.js's own keys,
+             filled in from the payload the page is drawn from, so the list is
+             always what this window actually holds. -->
+            <select id="home-project" title="Narrow every number on this page to one project">
+              <option value="">All projects</option>
+            </select>
+            <select id="home-model" title="Narrow every number on this page to one model">
+              <option value="">All models</option>
+            </select>
             <button id="home-refresh" class="btn" title="Read the usage ledger again">⟳</button>
           </div>
         </header>
