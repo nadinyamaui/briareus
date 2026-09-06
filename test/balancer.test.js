@@ -41,10 +41,58 @@ beforeEach(() => {
 });
 
 describe('providerLoad', () => {
-  it('is the fullest window: the one that stops the account first', () => {
-    expect(providerLoad(windows(12, 70))).toBe(70);
+  it('is how spent the window a turn actually runs into is', () => {
     expect(providerLoad(windows(80, 5))).toBe(80);
+    // A week at 70% is not a session window at 70%: there are hours of work
+    // left before it is the limit this account runs into.
+    expect(providerLoad(windows(12, 70))).toBe(40);
+    expect(providerLoad(windows(12, 40))).toBe(12);
   });
+
+  it('lets a nearly spent week outrank a busy session window', () => {
+    // 15 points of a 5-hour window against 4 points of a week: the week is
+    // the account that will be unusable for days, so it reads as the fuller.
+    expect(providerLoad(windows(85, 30))).toBe(85);
+    expect(providerLoad(windows(85, 96))).toBe(92);
+    expect(providerLoad(windows(20, 100))).toBe(100);
+  });
+
+  it('takes a lone window at face value, whatever period it bills', () => {
+    // grok meters one billing month, so that bar is the account's load; there
+    // is no shorter window for it to be discounted against.
+    expect(providerLoad({ windows: [{ usedPct: 60, short: 'mo' }] })).toBe(60);
+    expect(providerLoad({ windows: [{ usedPct: 60, short: 'plan' }] })).toBe(60);
+    // A window whose period the meter would not name is not ranked below one
+    // that has a period either.
+    expect(
+      providerLoad({
+        windows: [
+          { usedPct: 30, short: '5h' },
+          { usedPct: 60, short: 'plan' },
+        ],
+      }),
+    ).toBe(60);
+  });
+
+  it('reads the Z.AI plan windows the same way', () => {
+    expect(
+      providerLoad({
+        windows: [
+          { usedPct: 40, short: '5h' },
+          { usedPct: 70, short: '1d' },
+        ],
+      }),
+    ).toBe(40);
+    expect(
+      providerLoad({
+        windows: [
+          { usedPct: 40, short: '5h' },
+          { usedPct: 95, short: '1d' },
+        ],
+      }),
+    ).toBe(90);
+  });
+
   it('is unknown without a readable window', () => {
     expect(providerLoad(null)).toBe(null);
     expect(providerLoad({ windows: [] })).toBe(null);
@@ -59,10 +107,18 @@ describe('pickLeastUsedProvider', () => {
   });
 
   it('picks the sibling with the most headroom, whichever member was named', () => {
-    const usage = { 1: windows(10, 60), 2: windows(30, 20), 3: windows(90, 10) };
+    const usage = { 1: windows(60, 10), 2: windows(20, 10), 3: windows(90, 10) };
     const usageOf = (p) => usage[p.id];
     expect(pickLeastUsedProvider(row(1), { usageOf }).id).toBe(2);
     expect(pickLeastUsedProvider(row(3), { usageOf }).id).toBe(2);
+  });
+
+  it('prefers the free session window to the emptier week', () => {
+    // Account 1 has 15 points of a 5-hour window left, which one long review
+    // turn spends; account 2 has its whole session window and days before its
+    // week is what it runs into, so it is where the session goes.
+    const usage = { 1: windows(85, 30), 2: windows(20, 90), 3: windows(95, 95) };
+    expect(pickLeastUsedProvider(row(1), { usageOf: (p) => usage[p.id] }).id).toBe(2);
   });
 
   it('spreads a burst over accounts whose loads are only a few points apart', () => {
@@ -128,6 +184,29 @@ describe('pickLeastUsedProvider', () => {
     await vi.waitFor(() => expect(providers.claudeUsage).toHaveBeenCalledTimes(3));
     await Promise.resolve();
     expect(pickLeastUsedProvider(row(1)).id).toBe(2);
+  });
+});
+
+describe('rememberProviderAuth', () => {
+  it('keeps the newest probe when an older one is written back after it', () => {
+    // /api/dev/providers reads the claude state, awaits the usage, and only
+    // then writes: the timer's probe can land in between, and the revoked
+    // login it found must not be undone by the page's older reading.
+    const now = Date.now();
+    rememberProviderAuth(1, false, now);
+    rememberProviderAuth(1, true, now - 60_000);
+    expect(cachedProviderAuth(1)).toBe(false);
+    // A probe of its own, made since, is what replaces it.
+    rememberProviderAuth(1, true, now + 1);
+    expect(cachedProviderAuth(1)).toBe(true);
+  });
+
+  it('takes a probe with no time of its own as made now', () => {
+    rememberProviderAuth(2, false, Date.now() - 1000);
+    rememberProviderAuth(2, true);
+    expect(cachedProviderAuth(2)).toBe(true);
+    rememberProviderAuth(2, null, NaN);
+    expect(cachedProviderAuth(2)).toBe(null);
   });
 });
 

@@ -268,14 +268,15 @@ function probeClaudeCli(cfg, configDir, apply) {
   }
 }
 
-// One probe per claude entry. Run at boot (once the providers are loaded),
-// after every provider edit, and on a timer: a login made from a terminal (or
-// a token one of the account's own sessions refreshed) changes nothing the
-// server can see, and the balancer ranks an account it remembers as logged out
-// behind one at its limit, so the memory has to be renewed to stay honest.
-// The timer is inside the balancer's AUTH_TTL_MS, so a probe is always fresh
-// enough to count.
-const CLAUDE_AUTH_RECHECK_MS = 5 * 60_000;
+// One probe per claude entry, and the same for the other login-backed
+// binaries below. Run at boot (once the providers are loaded), after every
+// provider edit, and on a timer: a login made from a terminal (or a token one
+// of the account's own sessions refreshed) changes nothing the server can see,
+// and the balancer ranks an account it remembers as logged out behind one at
+// its limit, so the memory has to be renewed to stay honest. The timer is
+// inside the balancer's AUTH_TTL_MS, so a probe is always fresh enough to
+// count.
+const AUTH_RECHECK_MS = 5 * 60_000;
 
 function checkClaudeAuth() {
   const cfg = getConfig();
@@ -298,6 +299,35 @@ function checkClaudeAuth() {
       probeClaudeCli(cfg, dir, record);
     }
   }
+}
+
+// The other binaries that log in per entry. Their probe is a look for the
+// login file the CLI wrote (probeProviderAuth, codex and grok), so putting
+// them on the same timer costs a stat call per row, and leaving them off it
+// costs correctness: nothing else refreshes their login state, so the
+// balancer's memory of a logged-out codex or grok account expires ten minutes
+// after the last page load and the row ranks as if it were fine again. Rows
+// with a key or a custom endpoint are left out — theirs is a live call to the
+// endpoint, which belongs on a page's request rather than on a timer.
+function checkLoginAuth() {
+  const cfg = getConfig();
+  for (const p of listProviders().filter(
+    (r) => (r.binary === 'codex' || r.binary === 'grok') && !r.baseUrl && !r.apiKey,
+  )) {
+    probeProviderAuth(p, cfg)
+      .then((a) => a && rememberProviderAuth(p.id, a.loggedIn))
+      .catch(() => {
+        /* a best-effort probe never fails a request or the boot */
+      });
+  }
+}
+
+// Every login-backed row's auth state, refreshed together: what the settings
+// page shows for a claude entry, and what the balancer ranks on for all of
+// them.
+function checkProviderAuth() {
+  checkClaudeAuth();
+  checkLoginAuth();
 }
 
 // The developer chat is the whole app now. Both pages route in the browser, so
@@ -811,7 +841,7 @@ app.get('/api/providers', (req, res) => {
 app.post('/api/providers', async (req, res) => {
   try {
     const provider = await createProvider(req.body || {});
-    checkClaudeAuth();
+    checkProviderAuth();
     res.status(201).json({ provider: publicProvider(provider) });
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
@@ -824,7 +854,7 @@ app.put('/api/providers/:id', async (req, res) => {
     // An edited endpoint or key meters a different account: what was read for
     // the old one must not be served to the balancer for the rest of the TTL.
     forgetProviderUsage(provider.id);
-    checkClaudeAuth();
+    checkProviderAuth();
     res.json({ provider: publicProvider(provider) });
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
@@ -957,7 +987,7 @@ function watchLogin(providerId) {
         // A fresh login makes the cached "logged out, no quota" reading wrong
         // rather than stale: the account is pickable again right now.
         forgetProviderUsage(providerId);
-        checkClaudeAuth();
+        checkProviderAuth();
       }
     } catch {
       /* mid-write credentials file: keep watching */
@@ -1080,7 +1110,7 @@ app.post('/api/providers/:id/login/finish', async (req, res) => {
     claudeLogins.delete(provider.id);
     const updated = await captureProviderAuth(provider);
     forgetProviderUsage(provider.id);
-    checkClaudeAuth();
+    checkProviderAuth();
     res.json({ provider: publicProvider(updated) });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -1675,8 +1705,8 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   }
   // Providers come from the database, so the login probes can only run once
   // the rows are loaded.
-  checkClaudeAuth();
-  setInterval(checkClaudeAuth, CLAUDE_AUTH_RECHECK_MS).unref();
+  checkProviderAuth();
+  setInterval(checkProviderAuth, AUTH_RECHECK_MS).unref();
   await initJobs();
   // Every project gets (or keeps) a hook pointing at this install's public
   // hostname, so an open session's pull request panel keeps up with the reviews,
