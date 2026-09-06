@@ -281,7 +281,7 @@ const AUTH_RECHECK_MS = 5 * 60_000;
 function checkClaudeAuth() {
   const cfg = getConfig();
   const checkedAt = new Date().toISOString();
-  for (const p of listProviders().filter((r) => r.binary === 'claude' && !r.apiKey)) {
+  for (const p of listProviders().filter((r) => r.active && r.binary === 'claude' && !r.apiKey)) {
     // Materialize the entry's dir from the database, and adopt whatever fresh
     // login was made in it since the last look, then probe what a session
     // would actually run with.
@@ -312,7 +312,7 @@ function checkClaudeAuth() {
 function checkLoginAuth() {
   const cfg = getConfig();
   for (const p of listProviders().filter(
-    (r) => (r.binary === 'codex' || r.binary === 'grok') && !r.baseUrl && !r.apiKey,
+    (r) => r.active && (r.binary === 'codex' || r.binary === 'grok') && !r.baseUrl && !r.apiKey,
   )) {
     probeProviderAuth(p, cfg)
       .then((a) => a && rememberProviderAuth(p.id, a.loggedIn))
@@ -1699,13 +1699,13 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initProviders();
     // Warm the balancer's quota cache so the first session started after boot
     // already lands on the account with the most headroom.
-    for (const p of listProviders()) providerUsage(p).catch(() => {});
+    for (const p of listProviders().filter((r) => r.active)) providerUsage(p).catch(() => {});
     // Each login-backed Codex row has an isolated CODEX_HOME. Refresh those
     // catalogs before jobs and the composer resolve their available models;
     // a logged-out account or a network failure leaves its last cache usable.
     await Promise.all(
       listProviders()
-        .filter((p) => p.binary === 'codex' && !p.baseUrl && !p.apiKey)
+        .filter((p) => p.active && p.binary === 'codex' && !p.baseUrl && !p.apiKey)
         .map((p) =>
           refreshCodexModelCache(p, cfg)
             .then((models) => console.log(`Refreshed ${models.length} Codex models for "${p.label}"`))

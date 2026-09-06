@@ -102,4 +102,23 @@ describe('migrator', () => {
     expect(migrationFileName('Add notes to projects', at)).toBe('2026_08_27_090503_add_notes_to_projects.js');
     expect(() => migrationFileName('!!!')).toThrow(/needs a name/);
   });
+
+  it('guards the provider active column against work that is already done', async () => {
+    const base = fakePool();
+    const pool = {
+      ...base,
+      async query(sql, params = []) {
+        if (/information_schema\.COLUMNS/.test(sql)) return [[{ present: 1 }]];
+        return base.query(sql, params);
+      },
+    };
+    const migration = await import('../migrations/2026_09_06_000000_add_active_to_providers.js');
+
+    await migration.up({ context: pool });
+    expect(base.queries).toEqual([]);
+
+    const absent = fakePool();
+    await migration.down({ context: absent });
+    expect(absent.queries.some((q) => /ALTER TABLE `providers`/.test(q))).toBe(false);
+  });
 });

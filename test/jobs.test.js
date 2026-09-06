@@ -11,7 +11,7 @@ import { BINARIES } from '../lib/providers.js';
 // creates anything. The success path (spawning a session) stays untested on
 // purpose; it is the integration surface.
 const state = vi.hoisted(() => ({
-  provider: { id: 1, label: 'Claude entry', binary: 'claude' },
+  provider: { id: 1, label: 'Claude entry', binary: 'claude', active: true },
   // The rows beside the session's own, and the group the balancer sees: only
   // the interchangeable-accounts tests set either.
   otherProviders: [],
@@ -139,6 +139,7 @@ import {
 import { implementFeedbackPrompt } from '../lib/prtasks.js';
 import { githubGraphql, githubRest } from '../lib/github.js';
 import { resolveRuntime, getProviderForJob, captureProviderAuth } from '../lib/providerstore.js';
+import { stepRuntime } from '../lib/projects.js';
 import {
   bus,
   initJobs,
@@ -177,6 +178,7 @@ import {
 } from '../lib/jobs.js';
 
 beforeEach(() => {
+  state.provider = { id: 1, label: 'Claude entry', binary: 'claude', active: true };
   state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '' }];
   state.claimsServer = false;
   state.capacity = 3;
@@ -451,6 +453,13 @@ describe('createDevSession: the validation gauntlet', () => {
 
   it('refuses a provider nobody configured', () => {
     expect(() => createDevSession({ ...base, provider: 99 })).toThrow(/Unknown provider: 99/);
+  });
+
+  it('refuses a provider whose whole group is inactive', () => {
+    state.provider = { ...state.provider, active: false };
+    state.group = [];
+
+    expect(() => createDevSession(base)).toThrow(/Claude entry: this provider is inactive/);
   });
 
   it('refuses when no projects exist, and an unknown repo', () => {
@@ -3035,6 +3044,52 @@ describe('the QA loop: arming and disarming', () => {
 
   it('cannot be armed without the review loop', () => {
     expect(() => setQaLoop('qa-arm-1', true)).toThrow(/turn the review loop on first/);
+  });
+});
+
+describe('the QA loop: the runtime its sheet starts on', () => {
+  beforeAll(async () => {
+    state.stored = [
+      {
+        id: 'qa-inactive-sheet',
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/qa-inactive',
+        providerId: 99,
+        model: 'claude-fable-5-1',
+        effort: 'high',
+        turns: 1,
+        branch: 'task/qa',
+        startedOnPr: 91,
+        prStatus: { number: 91, state: 'open' },
+        reviewLoop: { rounds: 1, done: true, reviewing: false },
+      },
+    ];
+    await initJobs();
+    getJob('qa-inactive-sheet').status = 'idle';
+  });
+
+  it('falls back to the session when the configured sheet provider is inactive', async () => {
+    state.projects = [
+      {
+        repo: 'acme/qa-inactive',
+        label: 'QA',
+        localDir: '',
+        stepRuntimes: {
+          testSheet: { providerId: 2, model: 'claude-fable-5-1', effort: 'high' },
+        },
+      },
+    ];
+    state.otherProviders = [{ id: 2, label: 'Sheet provider', binary: 'claude', active: false }];
+    stepRuntime.mockImplementationOnce((project, step) => project.stepRuntimes?.[step] || null);
+
+    setQaLoop('qa-inactive-sheet', true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const parent = getJob('qa-inactive-sheet');
+    expect(parent.qaLoop.running).toBe(false);
+    expect(parent.qaLoop.failure.reason).toMatch(/Unknown provider: 99/);
+    expect(parent.qaLoop.failure.reason).not.toMatch(/this provider is inactive/);
   });
 });
 

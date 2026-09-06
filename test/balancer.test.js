@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const state = vi.hoisted(() => ({ rows: [], usage: {} }));
 
 vi.mock('../lib/providerstore.js', () => ({
-  providerGroup: (p) => state.rows.filter((r) => r.binary === p.binary && !r.apiKey),
+  providerGroup: (p) => state.rows.filter((r) => r.active && r.binary === p.binary && !r.apiKey),
 }));
 
 vi.mock('../lib/providers.js', () => ({
@@ -31,7 +31,15 @@ import {
 } from '../lib/balancer.js';
 
 const windows = (...pcts) => ({ windows: pcts.map((usedPct, i) => ({ usedPct, short: i ? 'wk' : '5h' })) });
-const row = (id, over = {}) => ({ id, binary: 'claude', baseUrl: '', apiKey: '', sortOrder: id, ...over });
+const row = (id, over = {}) => ({
+  id,
+  binary: 'claude',
+  active: true,
+  baseUrl: '',
+  apiKey: '',
+  sortOrder: id,
+  ...over,
+});
 
 beforeEach(() => {
   state.rows = [row(1), row(2), row(3)];
@@ -104,6 +112,18 @@ describe('pickLeastUsedProvider', () => {
   it('answers the row itself when it has no siblings', () => {
     state.rows = [row(1)];
     expect(pickLeastUsedProvider(row(1))).toEqual(row(1));
+  });
+
+  it('answers the active sibling when the named row is inactive', () => {
+    state.rows = [row(2)];
+
+    expect(pickLeastUsedProvider(row(1, { active: false })).id).toBe(2);
+  });
+
+  it('refuses a group with no active rows', () => {
+    state.rows = [];
+
+    expect(() => pickLeastUsedProvider(row(1, { active: false }))).toThrow(/this provider is inactive/);
   });
 
   it('picks the sibling with the most headroom, whichever member was named', () => {

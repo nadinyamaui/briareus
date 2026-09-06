@@ -106,6 +106,7 @@
       fields: {
         label: 'text',
         binary: 'text',
+        active: 'bool',
         baseUrl: 'text',
         apiKey: 'text',
         models: 'list',
@@ -526,7 +527,18 @@
     sel.innerHTML = ['<option value="">Pick a provider</option>']
       .concat(devProviders.map((p) => `<option value="${p.id}">${esc(p.label)}</option>`))
       .join('');
-    sel.value = selectedId ? String(devProviderGroupId(selectedId)) : '';
+    if (selectedId) selectedId = devProviderGroupId(selectedId);
+    sel.value = selectedId ? String(selectedId) : '';
+    // A configured entry the live picker no longer carries (an inactive row,
+    // a deleted one, or a failed providers request) stays selected instead of
+    // collapsing to the empty choice, which a save would then silently store.
+    if (selectedId && sel.value !== String(selectedId)) {
+      sel.insertAdjacentHTML(
+        'beforeend',
+        `<option value="${Number(selectedId)}">Provider #${Number(selectedId)} (unavailable)</option>`,
+      );
+      sel.value = String(selectedId);
+    }
   }
 
   // Each /api/dev/providers entry stands for a group of interchangeable
@@ -632,7 +644,17 @@
     sel.innerHTML = ['<option value="">Same as the code review</option>']
       .concat(devProviders.map((p) => `<option value="${p.id}">${esc(p.label)}</option>`))
       .join('');
-    sel.value = selectedId ? String(devProviderGroupId(selectedId)) : '';
+    if (selectedId) selectedId = devProviderGroupId(selectedId);
+    sel.value = selectedId ? String(selectedId) : '';
+    // As above: an unavailable configured entry stays selected so an unrelated
+    // save cannot erase the step's runtime.
+    if (selectedId && sel.value !== String(selectedId)) {
+      sel.insertAdjacentHTML(
+        'beforeend',
+        `<option value="${Number(selectedId)}">Provider #${Number(selectedId)} (unavailable)</option>`,
+      );
+      sel.value = String(selectedId);
+    }
   }
 
   // The model and effort lists belong to the step's own provider, so they are
@@ -1036,9 +1058,10 @@
         .map(
           (p) => `
       <div class="${ROW}${selected('provider', p) ? ' bg-raise' : ''}" data-type="provider" data-id="${p.id}">
-        <div class="flex items-center gap-[7px] truncate text-[14px]"><span class="dot idle"></span>${esc(p.label)}</div>
+        <div class="flex items-center gap-[7px] truncate text-[14px]"><span class="dot ${p.active ? 'idle' : ''}"></span>${esc(p.label)}</div>
         <div class="flex items-center gap-2 text-[12px] text-muted">
           <span class="${BADGE}">${esc(p.binary)}</span>
+          ${p.active ? '' : `<span class="${BADGE}">inactive</span>`}
           ${p.hasLogin ? `<span class="${BADGE}">own login</span>` : ''}
           ${p.baseUrl ? `<span class="${BADGE}">custom endpoint</span>` : ''}
         </div>
