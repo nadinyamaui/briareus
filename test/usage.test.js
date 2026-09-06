@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 
-const db = vi.hoisted(() => ({ rows: [], all: [], jobs: [], saved: [] }));
+const db = vi.hoisted(() => ({ rows: [], all: [], saved: [] }));
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({}) }));
 // The catalog behind the estimates has a test file of its own; here the rows
@@ -12,7 +12,6 @@ vi.mock('../lib/db.js', () => ({
   }),
   loadTurnUsage: vi.fn(async () => db.rows),
   loadAllTurnUsage: vi.fn(async () => db.all),
-  loadJobTurnUsage: vi.fn(async () => db.jobs),
 }));
 
 const {
@@ -32,7 +31,8 @@ const {
   estimateEventCosts,
   recordTurnUsage,
 } = await import('../lib/usage.js');
-const { loadTurnUsage, loadAllTurnUsage, loadJobTurnUsage } = await import('../lib/db.js');
+const { loadTurnUsage, loadAllTurnUsage } = await import('../lib/db.js');
+const { estimateCosts } = await import('../lib/prices.js');
 
 describe('turnUsageRecord', () => {
   const job = { id: 'j1', projectId: 7, repo: 'o/r' };
@@ -557,15 +557,17 @@ describe('recordTurnUsage', () => {
 });
 
 describe('session cost estimates', () => {
-  it('groups estimated and still-unpriced turns by session without changing reported costs', async () => {
-    db.jobs = [
+  it('calibrates over the whole ledger before grouping the requested sessions', async () => {
+    db.all = [
       { jobId: 'a', costUsd: 2, inputTokens: 10, at: 1 },
       { jobId: 'a', costUsd: 0.5, costEstimated: true, inputTokens: 20, at: 2 },
       { jobId: 'a', costUsd: null, inputTokens: 30, at: 3 },
       { jobId: 'b', costUsd: 1, costEstimated: true, inputTokens: 40, at: 4 },
+      { jobId: 'calibration-only', costUsd: 3, inputTokens: 1_000_000, at: 5 },
     ];
-    const estimates = await jobUsageEstimates(['a', 'b']);
-    expect(loadJobTurnUsage).toHaveBeenCalledWith(['a', 'b']);
+    const estimates = await jobUsageEstimates(['a', 'b'], 123);
+    expect(loadAllTurnUsage).toHaveBeenCalledWith();
+    expect(estimateCosts).toHaveBeenCalledWith(db.all, 123);
     expect(estimates.get('a')).toMatchObject({
       estimatedCostUsd: 0.5,
       estimatedTurns: 1,
@@ -573,6 +575,7 @@ describe('session cost estimates', () => {
     });
     expect(estimates.get('a').rows).toHaveLength(3);
     expect(estimates.get('b')).toMatchObject({ estimatedCostUsd: 1, estimatedTurns: 1, unpricedTurns: 0 });
+    expect(estimates.has('calibration-only')).toBe(false);
   });
 
   it('puts the nearest estimated ledger row on an unpriced transcript footer', () => {
