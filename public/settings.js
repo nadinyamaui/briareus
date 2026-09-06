@@ -514,7 +514,19 @@
     sel.innerHTML = ['<option value="">Pick a provider</option>']
       .concat(devProviders.map((p) => `<option value="${p.id}">${esc(p.label)}</option>`))
       .join('');
-    sel.value = selectedId ? String(selectedId) : '';
+    sel.value = selectedId ? String(devProviderGroupId(selectedId)) : '';
+  }
+
+  // Each /api/dev/providers entry stands for a group of interchangeable
+  // accounts and carries the first one's id; a saved setting may name any
+  // member (it was picked before the accounts were grouped, or the group's
+  // first row changed), and means the entry that member belongs to.
+  function devProviderGroupId(id) {
+    const key = String(id);
+    const group = devProviders.find(
+      (p) => String(p.id) === key || (p.accounts || []).some((a) => String(a.id) === key),
+    );
+    return group ? group.id : id;
   }
 
   function fillReviewModels(selectedModel) {
@@ -549,6 +561,7 @@
     sel.innerHTML = ['<option value="">Same as the orchestrator</option>']
       .concat(devProviders.map((p) => `<option value="${p.id}">${esc(p.label)}</option>`))
       .join('');
+    if (selectedId) selectedId = devProviderGroupId(selectedId);
     sel.value = selectedId ? String(selectedId) : '';
     // A configured entry the provider list no longer carries (deleted row, or
     // the providers request failed) stays visible instead of collapsing to
@@ -607,7 +620,7 @@
     sel.innerHTML = ['<option value="">Same as the code review</option>']
       .concat(devProviders.map((p) => `<option value="${p.id}">${esc(p.label)}</option>`))
       .join('');
-    sel.value = selectedId ? String(selectedId) : '';
+    sel.value = selectedId ? String(devProviderGroupId(selectedId)) : '';
   }
 
   // The model and effort lists belong to the step's own provider, so they are

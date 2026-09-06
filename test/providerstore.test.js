@@ -17,6 +17,10 @@ const state = vi.hoisted(() => ({
   ensureThrows: null,
 }));
 
+// The grouping resolves each row's catalog, which goes through the config the
+// binaries read; nothing in this module looks at a key of it.
+vi.mock('../lib/config.js', () => ({ getConfig: () => ({}) }));
+
 vi.mock('../lib/db.js', () => ({
   loadProviderRows: async () => {
     if (state.loadError) throw state.loadError;
@@ -82,6 +86,9 @@ const {
   providerDefaultModel,
   providerDefaultEffort,
   resolveRuntime,
+  providerGroupKey,
+  providerGroup,
+  providerGroups,
   createProvider,
   updateProvider,
   removeProvider,
@@ -592,5 +599,80 @@ describe('removing a provider', () => {
     expect(await removeProvider(1)).toBe(true);
     expect(state.deleted).toEqual([1]);
     expect(listProviders()).toEqual([]);
+  });
+});
+
+describe('interchangeable accounts', () => {
+  it('groups logins to the same service, in picker order', async () => {
+    await seed([
+      row({ id: 1, binary: 'claude', label: 'Claude work', sortOrder: 2 }),
+      row({ id: 2, binary: 'claude', label: 'Claude home', sortOrder: 1 }),
+      row({ id: 3, binary: 'codex', label: 'Codex' }),
+    ]);
+    expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([2, 1]);
+    expect(providerGroup(getProvider(3)).map((p) => p.id)).toEqual([3]);
+  });
+
+  it('keeps rows whose catalogs differ apart, so a pick can run what the picker offered', async () => {
+    await seed([
+      row({ id: 1, binary: 'codex', sortOrder: 1 }),
+      row({ id: 2, binary: 'codex', sortOrder: 2 }),
+      row({ id: 3, binary: 'codex', models: ['gpt-b'], sortOrder: 3 }),
+      row({ id: 4, binary: 'codex', efforts: ['max'], sortOrder: 4 }),
+    ]);
+    expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([1, 2]);
+    expect(providerGroup(getProvider(3)).map((p) => p.id)).toEqual([3]);
+    expect(providerGroup(getProvider(4)).map((p) => p.id)).toEqual([4]);
+  });
+
+  it('settles the key when the rows load, not on every read', async () => {
+    await seed([
+      row({ id: 1, binary: 'codex', sortOrder: 1 }),
+      row({ id: 2, binary: 'codex', sortOrder: 2 }),
+    ]);
+    expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([1, 2]);
+    // What the codex CLI rewriting a member's model cache mid-session amounts
+    // to: the catalog the row resolves to changes under a key already handed
+    // out. The group holds until the rows are reloaded by a write.
+    getProvider(2).models = ['gpt-b'];
+    expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([1, 2]);
+    await updateProvider(2, { models: ['gpt-b'] });
+    expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([1]);
+    expect(providerGroup(getProvider(2)).map((p) => p.id)).toEqual([2]);
+  });
+
+  it('groups rows that only differ in which model they default to', async () => {
+    await seed([
+      row({ id: 1, binary: 'claude', sortOrder: 1 }),
+      row({ id: 2, binary: 'claude', defaultModel: 'sonnet', sortOrder: 2 }),
+    ]);
+    expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([1, 2]);
+  });
+
+  it('keeps a custom endpoint and an api key apart from the plain logins', async () => {
+    await seed([
+      row({ id: 1, binary: 'claude' }),
+      row({ id: 2, binary: 'claude', baseUrl: 'https://api.z.ai/v1' }),
+      row({ id: 3, binary: 'claude', baseUrl: 'https://api.z.ai/v1' }),
+      row({ id: 4, binary: 'claude', baseUrl: 'https://api.z.ai/v1', apiKey: 'k' }),
+    ]);
+    expect(providerGroupKey(getProvider(1))).not.toBe(providerGroupKey(getProvider(2)));
+    expect(providerGroup(getProvider(2)).map((p) => p.id)).toEqual([2, 3]);
+    expect(providerGroup(getProvider(4)).map((p) => p.id)).toEqual([4]);
+  });
+
+  it('names a group of logins after the service and a lone row after itself', async () => {
+    await seed([
+      row({ id: 1, binary: 'claude', label: 'Claude 1', sortOrder: 1 }),
+      row({ id: 2, binary: 'claude', label: 'Claude 2', sortOrder: 2 }),
+      row({ id: 3, binary: 'codex', label: 'My codex', sortOrder: 3 }),
+      row({ id: 4, binary: 'codex', label: 'Z.AI a', baseUrl: 'https://api.z.ai/v1', sortOrder: 4 }),
+      row({ id: 5, binary: 'codex', label: 'Z.AI b', baseUrl: 'https://api.z.ai/v1', sortOrder: 5 }),
+    ]);
+    expect(providerGroups().map((g) => [g.label, g.members.map((m) => m.id)])).toEqual([
+      ['claude label', [1, 2]],
+      ['My codex', [3]],
+      ['Z.AI a', [4, 5]],
+    ]);
   });
 });

@@ -379,8 +379,14 @@
 
   // Provider ids are database row ids (numbers), but <select> values are
   // strings, so compare loosely.
+  // An entry is a group of interchangeable accounts (see /api/dev/providers);
+  // a session or a saved runtime may name any member, and means the group.
   function providerById(id) {
-    return providers.find((p) => String(p.id) === String(id)) || null;
+    const key = String(id);
+    return (
+      providers.find((p) => String(p.id) === key || (p.accounts || []).some((a) => String(a.id) === key)) ||
+      null
+    );
   }
 
   // A session started before its project was renamed (or deleted) still has
@@ -443,9 +449,22 @@
     providers = data.providers;
     selProvider.innerHTML = providers
       .map((p) => {
-        const account = p.auth?.name || p.auth?.email || '';
-        const used = (p.usage?.windows || []).map((w) => `${w.usedPct}%${w.short}`);
-        const info = [account, ...used].filter(Boolean).join(' ');
+        const accounts = p.accounts || [];
+        let info;
+        if (accounts.length > 1) {
+          // Several accounts behind one entry: the server starts the session
+          // on the least loaded, so show each one's fullest window.
+          info = accounts
+            .map((a) => {
+              const pcts = (a.usage?.windows || []).map((w) => w.usedPct).filter((n) => Number.isFinite(n));
+              return pcts.length ? `${Math.max(...pcts)}%` : '?';
+            })
+            .join(' · ');
+        } else {
+          const account = p.auth?.name || p.auth?.email || '';
+          const used = (p.usage?.windows || []).map((w) => `${w.usedPct}%${w.short}`);
+          info = [account, ...used].filter(Boolean).join(' ');
+        }
         const suffix = !p.available ? ' (not installed)' : info ? ` (${info})` : '';
         return `<option value="${p.id}"${p.available ? '' : ' disabled'}>${esc(p.label)}${esc(suffix)}</option>`;
       })
@@ -458,11 +477,15 @@
     const open = currentSession();
     if (open) reflectSession(open);
 
+    // One warning per account, not per entry: a group is fine as long as one
+    // login works, but the logged-out member still deserves a line.
     const warnings = providers
-      .filter((p) => p.available && p.auth && p.auth.loggedIn === false)
+      .filter((p) => p.available)
+      .flatMap((p) => (p.accounts && p.accounts.length ? p.accounts : [p]))
+      .filter((a) => a.auth && a.auth.loggedIn === false)
       .map(
-        (p) =>
-          `<div class="rounded-lg border border-warn px-2.5 py-1.5 text-left text-xs text-warn">⚠ ${esc(p.label)}: ${esc(p.auth.detail || 'not logged in')}</div>`,
+        (a) =>
+          `<div class="rounded-lg border border-warn px-2.5 py-1.5 text-left text-xs text-warn">⚠ ${esc(a.label)}: ${esc(a.auth.detail || 'not logged in')}</div>`,
       );
     $('provider-warnings').innerHTML = warnings.join('');
   }

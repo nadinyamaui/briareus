@@ -44,16 +44,12 @@ import {
   getBinary,
   probeProviderAuth,
   providerAuthAccount,
-  claudeUsage,
   claudeHomeDir,
   ensureClaudeHome,
   codexHomeDir,
   ensureCodexHome,
-  codexUsage,
-  zaiUsage,
   grokHomeDir,
   ensureGrokHome,
-  grokUsage,
   opencodeHomeDir,
   refreshCodexModelCache,
   claudeLoginStart,
@@ -75,7 +71,9 @@ import {
   providerEfforts,
   providerDefaultModel,
   providerDefaultEffort,
+  providerGroups,
 } from './lib/providerstore.js';
+import { providerUsage, zaiHost, rememberProviderAuth, forgetProviderUsage } from './lib/balancer.js';
 import {
   initProjects,
   listProjects,
@@ -270,8 +268,16 @@ function probeClaudeCli(cfg, configDir, apply) {
   }
 }
 
-// One probe per claude entry. Run at boot (once the providers are loaded)
-// and again after every provider edit.
+// One probe per claude entry, and the same for the other login-backed
+// binaries below. Run at boot (once the providers are loaded), after every
+// provider edit, and on a timer: a login made from a terminal (or a token one
+// of the account's own sessions refreshed) changes nothing the server can see,
+// and the balancer ranks an account it remembers as logged out behind one at
+// its limit, so the memory has to be renewed to stay honest. The timer is
+// inside the balancer's AUTH_TTL_MS, so a probe is always fresh enough to
+// count.
+const AUTH_RECHECK_MS = 5 * 60_000;
+
 function checkClaudeAuth() {
   const cfg = getConfig();
   const checkedAt = new Date().toISOString();
@@ -281,38 +287,47 @@ function checkClaudeAuth() {
     // would actually run with.
     const dir = ensureClaudeHome(p);
     captureProviderAuth(p).catch(() => {});
+    // The balancer hears the result too, so a session started before anyone
+    // opens the composer already knows not to start on a logged-out account.
+    const record = (a) => {
+      claudeAuthByDir.set(dir, a);
+      rememberProviderAuth(p.id, a.loggedIn, Date.parse(a.checkedAt));
+    };
     if (!cfg.claudeBin) {
-      claudeAuthByDir.set(dir, { checkedAt, loggedIn: false, authMethod: 'cli not found' });
+      record({ checkedAt, loggedIn: false, authMethod: 'cli not found' });
     } else {
-      probeClaudeCli(cfg, dir, (a) => claudeAuthByDir.set(dir, a));
+      probeClaudeCli(cfg, dir, record);
     }
   }
 }
 
-// Subscription usage per account (claude, codex and grok logins each have a
-// usage endpoint, as does a Z.AI coding-plan key), cached so page loads don't
-// hit it more than once a minute.
-const usageCache = new Map(); // `binary:account` -> { at, value }
-async function providerUsageCached(binaryId, account, read) {
-  const key = `${binaryId}:${account || ''}`;
-  const hit = usageCache.get(key);
-  if (hit && Date.now() - hit.at < 60_000) return hit.value;
-  const value = await read();
-  usageCache.set(key, { at: Date.now(), value });
-  return value;
+// The other binaries that log in per entry. Their probe is a look for the
+// login file the CLI wrote (probeProviderAuth, codex and grok), so putting
+// them on the same timer costs a stat call per row, and leaving them off it
+// costs correctness: nothing else refreshes their login state, so the
+// balancer's memory of a logged-out codex or grok account expires ten minutes
+// after the last page load and the row ranks as if it were fine again. Rows
+// with a key or a custom endpoint are left out — theirs is a live call to the
+// endpoint, which belongs on a page's request rather than on a timer.
+function checkLoginAuth() {
+  const cfg = getConfig();
+  for (const p of listProviders().filter(
+    (r) => (r.binary === 'codex' || r.binary === 'grok') && !r.baseUrl && !r.apiKey,
+  )) {
+    probeProviderAuth(p, cfg)
+      .then((a) => a && rememberProviderAuth(p.id, a.loggedIn))
+      .catch(() => {
+        /* a best-effort probe never fails a request or the boot */
+      });
+  }
 }
 
-// Z.AI publishes the plan's quota on the same host the sessions run against,
-// so the endpoint's URL is what says whether there is anything to read, not
-// the binary, which is codex for the Responses wire and claude for the
-// Anthropic-shaped one.
-function zaiHost(baseUrl) {
-  try {
-    const host = new URL(baseUrl).hostname;
-    return host === 'api.z.ai' || host.endsWith('.bigmodel.cn');
-  } catch {
-    return false;
-  }
+// Every login-backed row's auth state, refreshed together: what the settings
+// page shows for a claude entry, and what the balancer ranks on for all of
+// them.
+function checkProviderAuth() {
+  checkClaudeAuth();
+  checkLoginAuth();
 }
 
 // The developer chat is the whole app now. Both pages route in the browser, so
@@ -826,7 +841,7 @@ app.get('/api/providers', (req, res) => {
 app.post('/api/providers', async (req, res) => {
   try {
     const provider = await createProvider(req.body || {});
-    checkClaudeAuth();
+    checkProviderAuth();
     res.status(201).json({ provider: publicProvider(provider) });
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
@@ -836,7 +851,10 @@ app.post('/api/providers', async (req, res) => {
 app.put('/api/providers/:id', async (req, res) => {
   try {
     const provider = await updateProvider(Number(req.params.id), req.body || {});
-    checkClaudeAuth();
+    // An edited endpoint or key meters a different account: what was read for
+    // the old one must not be served to the balancer for the rest of the TTL.
+    forgetProviderUsage(provider.id);
+    checkProviderAuth();
     res.json({ provider: publicProvider(provider) });
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
@@ -847,6 +865,7 @@ app.delete('/api/providers/:id', async (req, res) => {
   try {
     const removed = await removeProvider(Number(req.params.id));
     if (!removed) return res.status(404).json({ error: 'Provider not found' });
+    forgetProviderUsage(Number(req.params.id));
     res.json({ ok: true });
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
@@ -859,10 +878,9 @@ app.delete('/api/providers/:id', async (req, res) => {
 async function providerAuthUsage(p, cfg) {
   let auth = null;
   let usage = null;
-  const zaiKeyUsage = () =>
-    p.apiKey && zaiHost(p.baseUrl)
-      ? providerUsageCached('zai', p.apiKey, () => zaiUsage(p.baseUrl, p.apiKey))
-      : null;
+  // Every meter goes through lib/balancer.js's cache: the same numbers the
+  // session balancer reads, so page loads keep it warm.
+  const zaiKeyUsage = () => (p.apiKey && zaiHost(p.baseUrl) ? providerUsage(p) : null);
   if (p.binary === 'claude') {
     if (p.apiKey) {
       // Verified with a live call to the endpoint (Anthropic's or the custom
@@ -883,26 +901,27 @@ async function providerAuthUsage(p, cfg) {
           checkedAt: state.checkedAt,
           ...providerAuthAccount('claude', p),
         };
-        if (state.loggedIn) {
-          const dir = claudeHomeDir(p);
-          usage = await providerUsageCached('claude', dir, () => claudeUsage(dir));
-        }
+        if (state.loggedIn) usage = await providerUsage(p);
       }
     }
   } else {
     auth = await probeProviderAuth(p, cfg);
     if (p.binary === 'codex' && !p.baseUrl && !p.apiKey && auth?.loggedIn) {
-      const dir = codexHomeDir(p);
-      usage = await providerUsageCached('codex', dir, () => codexUsage(dir));
+      usage = await providerUsage(p);
     } else if (p.binary === 'grok' && auth?.loggedIn) {
       // The login dir is the account here: grok's billing is read with the
       // token `grok login` left in it, exactly as probeProviderAuth found it.
-      const dir = grokHomeDir(p);
-      usage = await providerUsageCached('grok', dir, () => grokUsage(dir));
+      usage = await providerUsage(p);
     } else {
       usage = await zaiKeyUsage();
     }
   }
+  // Only a probe that answered: a row whose claude login state has not been
+  // read yet must not erase what the boot probe already established. A claude
+  // row's answer is the timer's probe read back, so it keeps that probe's
+  // time rather than passing for a fresh one.
+  if (auth)
+    rememberProviderAuth(p.id, auth.loggedIn, auth.checkedAt ? Date.parse(auth.checkedAt) : undefined);
   return { auth, usage };
 }
 
@@ -965,7 +984,10 @@ function watchLogin(providerId) {
       if (JSON.stringify(updated.authData) !== JSON.stringify(row.authData)) {
         clearInterval(timer);
         loginWatchers.delete(providerId);
-        checkClaudeAuth();
+        // A fresh login makes the cached "logged out, no quota" reading wrong
+        // rather than stale: the account is pickable again right now.
+        forgetProviderUsage(providerId);
+        checkProviderAuth();
       }
     } catch {
       /* mid-write credentials file: keep watching */
@@ -1048,7 +1070,10 @@ app.post('/api/providers/:id/login', async (req, res) => {
     }
     // The login command exits straight away when the dir already holds a login.
     const updated = await captureProviderAuth(provider).catch(() => provider);
-    if (updated.authData) return res.json({ ok: true });
+    if (updated.authData) {
+      forgetProviderUsage(provider.id);
+      return res.json({ ok: true });
+    }
     return res.status(500).json({
       error: `${provider.binary} login produced no login URL: ${output.trim().slice(0, 300) || '(no output)'}`,
     });
@@ -1084,7 +1109,8 @@ app.post('/api/providers/:id/login/finish', async (req, res) => {
     await claudeLoginFinish(provider, String((req.body || {}).code || ''), verifier);
     claudeLogins.delete(provider.id);
     const updated = await captureProviderAuth(provider);
-    checkClaudeAuth();
+    forgetProviderUsage(provider.id);
+    checkProviderAuth();
     res.json({ provider: publicProvider(updated) });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -1162,17 +1188,42 @@ app.get('/api/dev/pull', async (req, res) => {
 
 // Which providers a session can be started on, with what models, and whether
 // each is logged in, so a dead provider fails in the banner instead of on the
-// first message.
+// first message. Interchangeable accounts (see providerGroups) come back as
+// one entry: its id is the first member's, and naming it starts the session on
+// whichever member has the most headroom (lib/balancer.js). `accounts` lists
+// the members behind it, with each one's login and quota, so the picker can
+// show where the group stands and warn about one login without hiding the rest.
 app.get('/api/dev/providers', async (req, res) => {
   const cfg = getConfig();
   const providers = await Promise.all(
-    listProviders().map(async (p) => {
+    providerGroups().map(async (group) => {
+      const p = group.members[0];
       const binary = getBinary(p.binary);
       const found = binary.bin(cfg);
-      const { auth, usage } = await providerAuthUsage(p, cfg);
+      const accounts = await Promise.all(
+        group.members.map(async (m) => {
+          const { auth, usage } = await providerAuthUsage(m, cfg);
+          return { id: m.id, label: m.label, auth, usage };
+        }),
+      );
+      // One login out of several keeps the group usable; the group is only
+      // down when every member is.
+      const known = accounts.filter((a) => a.auth && a.auth.loggedIn != null);
+      const auth =
+        accounts.length === 1
+          ? accounts[0].auth
+          : known.length
+            ? {
+                loggedIn: known.some((a) => a.auth.loggedIn),
+                detail: known
+                  .map((a) => `${a.label}: ${a.auth.detail || (a.auth.loggedIn ? 'ok' : 'not logged in')}`)
+                  .join('; '),
+                checkedAt: known[0].auth.checkedAt || null,
+              }
+            : null;
       return {
         id: p.id,
-        label: p.label,
+        label: group.label,
         binary: p.binary,
         available: !!found,
         binSource: found ? found.source : null,
@@ -1181,7 +1232,8 @@ app.get('/api/dev/providers', async (req, res) => {
         efforts: providerEfforts(p),
         defaultEffort: providerDefaultEffort(p, cfg),
         auth,
-        usage,
+        usage: accounts.length === 1 ? accounts[0].usage : null,
+        accounts,
       };
     }),
   );
@@ -1632,6 +1684,9 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initSavedPrompts();
     await initMemories();
     await initProviders();
+    // Warm the balancer's quota cache so the first session started after boot
+    // already lands on the account with the most headroom.
+    for (const p of listProviders()) providerUsage(p).catch(() => {});
     // Each login-backed Codex row has an isolated CODEX_HOME. Refresh those
     // catalogs before jobs and the composer resolve their available models;
     // a logged-out account or a network failure leaves its last cache usable.
@@ -1650,7 +1705,8 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   }
   // Providers come from the database, so the login probes can only run once
   // the rows are loaded.
-  checkClaudeAuth();
+  checkProviderAuth();
+  setInterval(checkProviderAuth, AUTH_RECHECK_MS).unref();
   await initJobs();
   // Every project gets (or keeps) a hook pointing at this install's public
   // hostname, so an open session's pull request panel keeps up with the reviews,
