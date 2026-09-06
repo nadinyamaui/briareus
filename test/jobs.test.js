@@ -67,6 +67,7 @@ vi.mock('../lib/dbpool.js', () => ({
 
 vi.mock('../lib/providerstore.js', () => ({
   getProvider: (id) => (id === state.provider.id ? state.provider : null),
+  providerGroup: (p) => [p],
   getProviderForJob: vi.fn(),
   providerModels: () => ['claude-fable-5-1'],
   providerEfforts: () => ['low', 'high'],

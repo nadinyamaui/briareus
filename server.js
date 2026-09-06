@@ -44,16 +44,12 @@ import {
   getBinary,
   probeProviderAuth,
   providerAuthAccount,
-  claudeUsage,
   claudeHomeDir,
   ensureClaudeHome,
   codexHomeDir,
   ensureCodexHome,
-  codexUsage,
-  zaiUsage,
   grokHomeDir,
   ensureGrokHome,
-  grokUsage,
   opencodeHomeDir,
   refreshCodexModelCache,
   claudeLoginStart,
@@ -75,7 +71,9 @@ import {
   providerEfforts,
   providerDefaultModel,
   providerDefaultEffort,
+  providerGroups,
 } from './lib/providerstore.js';
+import { providerUsage, zaiHost } from './lib/balancer.js';
 import {
   initProjects,
   listProjects,
@@ -286,32 +284,6 @@ function checkClaudeAuth() {
     } else {
       probeClaudeCli(cfg, dir, (a) => claudeAuthByDir.set(dir, a));
     }
-  }
-}
-
-// Subscription usage per account (claude, codex and grok logins each have a
-// usage endpoint, as does a Z.AI coding-plan key), cached so page loads don't
-// hit it more than once a minute.
-const usageCache = new Map(); // `binary:account` -> { at, value }
-async function providerUsageCached(binaryId, account, read) {
-  const key = `${binaryId}:${account || ''}`;
-  const hit = usageCache.get(key);
-  if (hit && Date.now() - hit.at < 60_000) return hit.value;
-  const value = await read();
-  usageCache.set(key, { at: Date.now(), value });
-  return value;
-}
-
-// Z.AI publishes the plan's quota on the same host the sessions run against,
-// so the endpoint's URL is what says whether there is anything to read, not
-// the binary, which is codex for the Responses wire and claude for the
-// Anthropic-shaped one.
-function zaiHost(baseUrl) {
-  try {
-    const host = new URL(baseUrl).hostname;
-    return host === 'api.z.ai' || host.endsWith('.bigmodel.cn');
-  } catch {
-    return false;
   }
 }
 
@@ -859,10 +831,9 @@ app.delete('/api/providers/:id', async (req, res) => {
 async function providerAuthUsage(p, cfg) {
   let auth = null;
   let usage = null;
-  const zaiKeyUsage = () =>
-    p.apiKey && zaiHost(p.baseUrl)
-      ? providerUsageCached('zai', p.apiKey, () => zaiUsage(p.baseUrl, p.apiKey))
-      : null;
+  // Every meter goes through lib/balancer.js's cache: the same numbers the
+  // session balancer reads, so page loads keep it warm.
+  const zaiKeyUsage = () => (p.apiKey && zaiHost(p.baseUrl) ? providerUsage(p) : null);
   if (p.binary === 'claude') {
     if (p.apiKey) {
       // Verified with a live call to the endpoint (Anthropic's or the custom
@@ -883,22 +854,17 @@ async function providerAuthUsage(p, cfg) {
           checkedAt: state.checkedAt,
           ...providerAuthAccount('claude', p),
         };
-        if (state.loggedIn) {
-          const dir = claudeHomeDir(p);
-          usage = await providerUsageCached('claude', dir, () => claudeUsage(dir));
-        }
+        if (state.loggedIn) usage = await providerUsage(p);
       }
     }
   } else {
     auth = await probeProviderAuth(p, cfg);
     if (p.binary === 'codex' && !p.baseUrl && !p.apiKey && auth?.loggedIn) {
-      const dir = codexHomeDir(p);
-      usage = await providerUsageCached('codex', dir, () => codexUsage(dir));
+      usage = await providerUsage(p);
     } else if (p.binary === 'grok' && auth?.loggedIn) {
       // The login dir is the account here: grok's billing is read with the
       // token `grok login` left in it, exactly as probeProviderAuth found it.
-      const dir = grokHomeDir(p);
-      usage = await providerUsageCached('grok', dir, () => grokUsage(dir));
+      usage = await providerUsage(p);
     } else {
       usage = await zaiKeyUsage();
     }
@@ -1162,17 +1128,42 @@ app.get('/api/dev/pull', async (req, res) => {
 
 // Which providers a session can be started on, with what models, and whether
 // each is logged in, so a dead provider fails in the banner instead of on the
-// first message.
+// first message. Interchangeable accounts (see providerGroups) come back as
+// one entry: its id is the first member's, and naming it starts the session on
+// whichever member has the most headroom (lib/balancer.js). `accounts` lists
+// the members behind it, with each one's login and quota, so the picker can
+// show where the group stands and warn about one login without hiding the rest.
 app.get('/api/dev/providers', async (req, res) => {
   const cfg = getConfig();
   const providers = await Promise.all(
-    listProviders().map(async (p) => {
+    providerGroups().map(async (group) => {
+      const p = group.members[0];
       const binary = getBinary(p.binary);
       const found = binary.bin(cfg);
-      const { auth, usage } = await providerAuthUsage(p, cfg);
+      const accounts = await Promise.all(
+        group.members.map(async (m) => {
+          const { auth, usage } = await providerAuthUsage(m, cfg);
+          return { id: m.id, label: m.label, auth, usage };
+        }),
+      );
+      // One login out of several keeps the group usable; the group is only
+      // down when every member is.
+      const known = accounts.filter((a) => a.auth && a.auth.loggedIn != null);
+      const auth =
+        accounts.length === 1
+          ? accounts[0].auth
+          : known.length
+            ? {
+                loggedIn: known.some((a) => a.auth.loggedIn),
+                detail: known
+                  .map((a) => `${a.label}: ${a.auth.detail || (a.auth.loggedIn ? 'ok' : 'not logged in')}`)
+                  .join('; '),
+                checkedAt: known[0].auth.checkedAt || null,
+              }
+            : null;
       return {
         id: p.id,
-        label: p.label,
+        label: group.label,
         binary: p.binary,
         available: !!found,
         binSource: found ? found.source : null,
@@ -1181,7 +1172,8 @@ app.get('/api/dev/providers', async (req, res) => {
         efforts: providerEfforts(p),
         defaultEffort: providerDefaultEffort(p, cfg),
         auth,
-        usage,
+        usage: accounts.length === 1 ? accounts[0].usage : null,
+        accounts,
       };
     }),
   );
@@ -1632,6 +1624,9 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initSavedPrompts();
     await initMemories();
     await initProviders();
+    // Warm the balancer's quota cache so the first session started after boot
+    // already lands on the account with the most headroom.
+    for (const p of listProviders()) providerUsage(p).catch(() => {});
     // Each login-backed Codex row has an isolated CODEX_HOME. Refresh those
     // catalogs before jobs and the composer resolve their available models;
     // a logged-out account or a network failure leaves its last cache usable.
