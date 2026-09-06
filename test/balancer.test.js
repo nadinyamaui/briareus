@@ -23,6 +23,9 @@ import {
   providerUsage,
   readProviderUsage,
   forgetProviderUsage,
+  cachedProviderUsage,
+  rememberProviderAuth,
+  cachedProviderAuth,
   zaiHost,
 } from '../lib/balancer.js';
 
@@ -61,11 +64,41 @@ describe('pickLeastUsedProvider', () => {
     expect(pickLeastUsedProvider(row(3), { usageOf }).id).toBe(2);
   });
 
+  it('spreads a burst over accounts whose loads are only a few points apart', () => {
+    // The meters are a minute old at worst, so 12% against 13% says nothing
+    // about where the next four sessions should go; the open count does.
+    const usage = { 1: windows(12), 2: windows(13), 3: windows(40) };
+    const open = { 1: 2, 2: 0, 3: 0 };
+    const picked = pickLeastUsedProvider(row(1), {
+      usageOf: (p) => usage[p.id],
+      openSessions: (p) => open[p.id],
+    });
+    expect(picked.id).toBe(2);
+  });
+
   it('breaks a tie on the sessions already open, then on picker order', () => {
     const usageOf = () => windows(40, 40);
     const open = { 1: 2, 2: 0, 3: 2 };
     expect(pickLeastUsedProvider(row(1), { usageOf, openSessions: (p) => open[p.id] }).id).toBe(2);
     expect(pickLeastUsedProvider(row(3), { usageOf, openSessions: () => 1 }).id).toBe(1);
+  });
+
+  it('leaves an account the auth probe found logged out for last', () => {
+    // The empty account is the one with the most headroom and no sessions on
+    // it, and still the wrong pick: a session there dies on its first turn.
+    const usage = { 1: windows(0), 2: windows(50), 3: windows(90) };
+    rememberProviderAuth(1, false);
+    rememberProviderAuth(2, true);
+    expect(pickLeastUsedProvider(row(1), { usageOf: (p) => usage[p.id] }).id).toBe(2);
+    // Logged back in, it is the obvious pick again.
+    rememberProviderAuth(1, true);
+    expect(pickLeastUsedProvider(row(1), { usageOf: (p) => usage[p.id] }).id).toBe(1);
+  });
+
+  it('treats an account nobody has probed as usable', () => {
+    expect(cachedProviderAuth(1)).toBe(null);
+    const usage = { 1: windows(0), 2: windows(50), 3: windows(90) };
+    expect(pickLeastUsedProvider(row(1), { usageOf: (p) => usage[p.id] }).id).toBe(1);
   });
 
   it('puts accounts whose usage is unknown after every known one', () => {
@@ -96,6 +129,25 @@ describe('providerUsage', () => {
     expect(await providerUsage(row(2))).toBe(null);
     expect(await providerUsage(row(2))).toBe(null);
     expect(providers.claudeUsage).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('providerUsage in flight', () => {
+  it('collapses concurrent reads of one account into a single request', async () => {
+    state.usage['/claude-1'] = windows(7);
+    const reads = await Promise.all([providerUsage(row(1)), providerUsage(row(1)), providerUsage(row(1))]);
+    expect(reads).toEqual([windows(7), windows(7), windows(7)]);
+    expect(providers.claudeUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not hand the unresolved read to the synchronous pick', async () => {
+    state.usage['/claude-1'] = windows(90);
+    const inFlight = providerUsage(row(1));
+    // Mid-read the entry holds a promise, which providerLoad could not read:
+    // the pick must see it as not read yet.
+    expect(cachedProviderUsage(row(1))).toBe(undefined);
+    await inFlight;
+    expect(cachedProviderUsage(row(1))).toEqual(windows(90));
   });
 });
 

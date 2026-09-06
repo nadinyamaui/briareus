@@ -17,6 +17,10 @@ const state = vi.hoisted(() => ({
   ensureThrows: null,
 }));
 
+// The grouping resolves each row's catalog, which goes through the config the
+// binaries read; nothing in this module looks at a key of it.
+vi.mock('../lib/config.js', () => ({ getConfig: () => ({}) }));
+
 vi.mock('../lib/db.js', () => ({
   loadProviderRows: async () => {
     if (state.loadError) throw state.loadError;
@@ -607,6 +611,26 @@ describe('interchangeable accounts', () => {
     ]);
     expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([2, 1]);
     expect(providerGroup(getProvider(3)).map((p) => p.id)).toEqual([3]);
+  });
+
+  it('keeps rows whose catalogs differ apart, so a pick can run what the picker offered', async () => {
+    await seed([
+      row({ id: 1, binary: 'codex', sortOrder: 1 }),
+      row({ id: 2, binary: 'codex', sortOrder: 2 }),
+      row({ id: 3, binary: 'codex', models: ['gpt-b'], sortOrder: 3 }),
+      row({ id: 4, binary: 'codex', efforts: ['max'], sortOrder: 4 }),
+    ]);
+    expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([1, 2]);
+    expect(providerGroup(getProvider(3)).map((p) => p.id)).toEqual([3]);
+    expect(providerGroup(getProvider(4)).map((p) => p.id)).toEqual([4]);
+  });
+
+  it('groups rows that only differ in which model they default to', async () => {
+    await seed([
+      row({ id: 1, binary: 'claude', sortOrder: 1 }),
+      row({ id: 2, binary: 'claude', defaultModel: 'sonnet', sortOrder: 2 }),
+    ]);
+    expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([1, 2]);
   });
 
   it('keeps a custom endpoint and an api key apart from the plain logins', async () => {

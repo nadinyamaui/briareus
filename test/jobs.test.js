@@ -12,6 +12,10 @@ import { BINARIES } from '../lib/providers.js';
 // purpose; it is the integration surface.
 const state = vi.hoisted(() => ({
   provider: { id: 1, label: 'Claude entry', binary: 'claude' },
+  // The rows beside the session's own, and the group the balancer sees: only
+  // the interchangeable-accounts tests set either.
+  otherProviders: [],
+  group: null,
   projects: [],
   claimsServer: false,
   capacity: 3,
@@ -66,8 +70,10 @@ vi.mock('../lib/dbpool.js', () => ({
 }));
 
 vi.mock('../lib/providerstore.js', () => ({
-  getProvider: (id) => (id === state.provider.id ? state.provider : null),
-  providerGroup: (p) => [p],
+  getProvider: (id) => [state.provider, ...state.otherProviders].find((p) => p.id === Number(id)) || null,
+  providerGroup: (p) => state.group || [p],
+  providerGroupKey: (p) => `${p.binary}|${p.baseUrl || ''}`,
+  providerGroups: () => [{ key: 'claude|', label: state.provider.label, members: [state.provider] }],
   getProviderForJob: vi.fn(),
   providerModels: () => ['claude-fable-5-1'],
   providerEfforts: () => ['low', 'high'],
@@ -140,6 +146,7 @@ import {
   publicJob,
   getJob,
   createDevSession,
+  stepProvider,
   devSessionSlots,
   dropQueuedMessage,
   cancelDevTurn,
@@ -171,6 +178,8 @@ beforeEach(() => {
   state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '' }];
   state.claimsServer = false;
   state.capacity = 3;
+  state.otherProviders = [];
+  state.group = null;
 });
 
 describe('jobEventsSince', () => {
@@ -347,6 +356,49 @@ describe('publicJob', () => {
     for (const secret of ['events', 'seq', 'proc', 'timeout', 'turnCanceled', 'serveProc']) {
       expect(projected).not.toHaveProperty(secret);
     }
+  });
+});
+
+describe('stepProvider', () => {
+  const member = (id) => ({ id, label: `Codex ${id}`, binary: 'codex' });
+
+  it("keeps a step on the session's own account when it names the session's group", () => {
+    // Same group, so the step continues the session's conversation instead of
+    // opening a second one on a sibling login.
+    const sibling = { id: 2, label: 'Claude spare', binary: 'claude' };
+    state.otherProviders = [sibling];
+    state.group = [state.provider, sibling];
+    getProviderForJob.mockReturnValue(state.provider);
+    const job = { id: 'step-own', providerId: 1 };
+
+    expect(stepProvider(job, sibling).id).toBe(1);
+    expect(job.stepProviders).toBeUndefined();
+  });
+
+  it('balances a step onto one member of its group and stays there', () => {
+    const [a, b] = [member(7), member(8)];
+    state.otherProviders = [a, b];
+    state.group = [a, b];
+    getProviderForJob.mockReturnValue(state.provider);
+    const job = { id: 'step-pin', providerId: 1 };
+
+    expect(stepProvider(job, a).id).toBe(7);
+    expect(job.stepProviders).toEqual({ 'codex|': 7 });
+    // The next turn re-picks nothing: the step's conversation lives on the
+    // member the first one chose, whatever the group order says now.
+    state.group = [b, a];
+    expect(stepProvider(job, a).id).toBe(7);
+    expect(stepProvider(job, b).id).toBe(7);
+  });
+
+  it('re-picks when the member it settled on is gone', () => {
+    const [a, b] = [member(7), member(8)];
+    state.otherProviders = [b];
+    state.group = [b];
+    getProviderForJob.mockReturnValue(state.provider);
+    const job = { id: 'step-gone', providerId: 1, stepProviders: { 'codex|': a.id } };
+
+    expect(stepProvider(job, b).id).toBe(8);
   });
 });
 

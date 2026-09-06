@@ -73,7 +73,7 @@ import {
   providerDefaultEffort,
   providerGroups,
 } from './lib/providerstore.js';
-import { providerUsage, zaiHost } from './lib/balancer.js';
+import { providerUsage, zaiHost, rememberProviderAuth, forgetProviderUsage } from './lib/balancer.js';
 import {
   initProjects,
   listProjects,
@@ -279,10 +279,16 @@ function checkClaudeAuth() {
     // would actually run with.
     const dir = ensureClaudeHome(p);
     captureProviderAuth(p).catch(() => {});
+    // The balancer hears the result too, so a session started before anyone
+    // opens the composer already knows not to start on a logged-out account.
+    const record = (a) => {
+      claudeAuthByDir.set(dir, a);
+      rememberProviderAuth(p.id, a.loggedIn);
+    };
     if (!cfg.claudeBin) {
-      claudeAuthByDir.set(dir, { checkedAt, loggedIn: false, authMethod: 'cli not found' });
+      record({ checkedAt, loggedIn: false, authMethod: 'cli not found' });
     } else {
-      probeClaudeCli(cfg, dir, (a) => claudeAuthByDir.set(dir, a));
+      probeClaudeCli(cfg, dir, record);
     }
   }
 }
@@ -808,6 +814,9 @@ app.post('/api/providers', async (req, res) => {
 app.put('/api/providers/:id', async (req, res) => {
   try {
     const provider = await updateProvider(Number(req.params.id), req.body || {});
+    // An edited endpoint or key meters a different account: what was read for
+    // the old one must not be served to the balancer for the rest of the TTL.
+    forgetProviderUsage(provider.id);
     checkClaudeAuth();
     res.json({ provider: publicProvider(provider) });
   } catch (e) {
@@ -819,6 +828,7 @@ app.delete('/api/providers/:id', async (req, res) => {
   try {
     const removed = await removeProvider(Number(req.params.id));
     if (!removed) return res.status(404).json({ error: 'Provider not found' });
+    forgetProviderUsage(Number(req.params.id));
     res.json({ ok: true });
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
@@ -869,6 +879,9 @@ async function providerAuthUsage(p, cfg) {
       usage = await zaiKeyUsage();
     }
   }
+  // Only a probe that answered: a row whose claude login state has not been
+  // read yet must not erase what the boot probe already established.
+  if (auth) rememberProviderAuth(p.id, auth.loggedIn);
   return { auth, usage };
 }
 
@@ -931,6 +944,9 @@ function watchLogin(providerId) {
       if (JSON.stringify(updated.authData) !== JSON.stringify(row.authData)) {
         clearInterval(timer);
         loginWatchers.delete(providerId);
+        // A fresh login makes the cached "logged out, no quota" reading wrong
+        // rather than stale: the account is pickable again right now.
+        forgetProviderUsage(providerId);
         checkClaudeAuth();
       }
     } catch {
@@ -1014,7 +1030,10 @@ app.post('/api/providers/:id/login', async (req, res) => {
     }
     // The login command exits straight away when the dir already holds a login.
     const updated = await captureProviderAuth(provider).catch(() => provider);
-    if (updated.authData) return res.json({ ok: true });
+    if (updated.authData) {
+      forgetProviderUsage(provider.id);
+      return res.json({ ok: true });
+    }
     return res.status(500).json({
       error: `${provider.binary} login produced no login URL: ${output.trim().slice(0, 300) || '(no output)'}`,
     });
@@ -1050,6 +1069,7 @@ app.post('/api/providers/:id/login/finish', async (req, res) => {
     await claudeLoginFinish(provider, String((req.body || {}).code || ''), verifier);
     claudeLogins.delete(provider.id);
     const updated = await captureProviderAuth(provider);
+    forgetProviderUsage(provider.id);
     checkClaudeAuth();
     res.json({ provider: publicProvider(updated) });
   } catch (e) {
