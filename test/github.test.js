@@ -398,6 +398,29 @@ describe('upsertPrComment', () => {
   });
 });
 
+describe('addPullRequestLabel', () => {
+  it('adds one label without replacing the pull request labels', async () => {
+    const { addPullRequestLabel } = await freshGithub();
+    const fetchMock = stubFetch(reply({ body: [{ name: 'code-approved' }] }));
+
+    await addPullRequestLabel(cfg, 'o/r', 3, 'code-approved');
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.github.com/repos/o/r/issues/3/labels');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({ labels: ['code-approved'] });
+  });
+
+  it('reports a label GitHub refuses', async () => {
+    const { addPullRequestLabel } = await freshGithub();
+    stubFetch(reply({ status: 422 }));
+
+    await expect(addPullRequestLabel(cfg, 'o/r', 3, 'code-approved')).rejects.toThrow(
+      /answered 422 adding code-approved to o\/r#3/,
+    );
+  });
+});
+
 describe('listRepoBranches', () => {
   // The branch cache is keyed by repo, so every test uses its own name.
   let n = 0;
