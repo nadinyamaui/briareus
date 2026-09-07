@@ -500,20 +500,6 @@
     $('provider-warnings').innerHTML = warnings.join('');
   }
 
-  $('btn-check-usage').addEventListener('click', async () => {
-    const button = $('btn-check-usage');
-    button.disabled = true;
-    button.textContent = 'Checking…';
-    try {
-      await loadProviders(true);
-    } catch (e) {
-      toast(`Usage check: ${e.message}`, true);
-    } finally {
-      button.disabled = false;
-      button.textContent = 'Check usage';
-    }
-  });
-
   selProvider.addEventListener('change', fillModelControls);
   selProject.addEventListener('change', () => {
     document.querySelector('.wl-repo').textContent = projectLabel(selProject.value);
