@@ -51,6 +51,20 @@
         >
           🏙
         </button>
+        <!-- The review queue: every review round waiting for a verdict, across
+         every project. Nothing a review found is fixed until it is marked
+         here, so the badge is the count of rounds standing still. -->
+        <button
+          id="btn-findings"
+          class="btn-icon relative hover:border-accent-dim"
+          title="Findings: the review rounds waiting for you to decide what gets fixed"
+        >
+          ⚑
+          <span
+            id="findings-count"
+            class="absolute -right-1.5 -top-1.5 hidden min-w-4 rounded-full bg-accent px-1 text-center text-[10px] font-semibold leading-4 text-[#1b1b19]"
+          ></span>
+        </button>
       </div>
       <div class="mt-3.5 flex-1 overflow-y-auto">
         <div id="session-list"></div>
@@ -311,6 +325,22 @@
           </div>
         </header>
         <div id="home-list" class="flex-1 overflow-y-auto px-3 py-3.5 lg:px-[18px]"></div>
+      </div>
+
+      <!-- ⚑ Findings: the review rounds on hold, one card per round, each
+       finding with its verdict buttons, and a Send per card that releases the
+       round: what is marked fix goes to a fix session, the rest is recorded on
+       the pull request. Filled in by renderFindingsView() in developer.js. -->
+      <div id="findings-view" class="hidden flex flex-1 flex-col overflow-hidden">
+        <header
+          class="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-canvas px-3 py-2.5 lg:flex-nowrap lg:gap-3 lg:px-[18px]"
+        >
+          <div class="min-w-0 flex-1">
+            <h1 class="m-0 truncate text-sm font-semibold">⚑ Findings</h1>
+            <div id="findings-sub" class="truncate text-xs text-muted"></div>
+          </div>
+        </header>
+        <div id="findings-list" class="flex-1 overflow-y-auto px-3 py-3.5 lg:px-[18px]"></div>
       </div>
 
       <!-- 🌊 The office: a three.js resort over the water, one bungalow on

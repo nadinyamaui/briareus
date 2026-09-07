@@ -341,6 +341,7 @@ const settingsPage = pageHandler(PUBLIC, 'settings.html');
 app.get('/', devPage);
 app.get('/dashboard', devPage);
 app.get('/office', devPage);
+app.get('/findings', devPage);
 app.get('/sessions/:id', devPage);
 app.get('/projects/:owner/:name', devPage);
 app.get('/projects/:owner/:name/dashboard', devPage);
@@ -1668,6 +1669,19 @@ app.post('/api/dev/sessions/:id/loop', (req, res) => {
   try {
     const { on } = req.body || {};
     res.json({ session: setReviewLoop(req.params.id, on === true) });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ⚑ Findings: the verdicts on the review round a session's loop is holding
+// (lib/jobs.js, holdForTriage). What is marked fix starts the fix session, the
+// rest is recorded on the pull request; an unmarked finding is left optional
+// rather than refused, since "not now" is the verdict leaving it blank means.
+app.post('/api/dev/sessions/:id/triage', async (req, res) => {
+  try {
+    const { verdicts, note } = req.body || {};
+    res.json(await triageLoopFindings(req.params.id, { verdicts, note, by: 'The user' }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

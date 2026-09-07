@@ -481,7 +481,7 @@ describe('the worker tools', () => {
     ],
   };
 
-  it('list_workers says a round is waiting for the orchestrator’s triage', async () => {
+  it('list_workers says a round is waiting for the user’s triage', async () => {
     stubFetch(
       reply({
         body: {
@@ -495,7 +495,9 @@ describe('the worker tools', () => {
 
     const [res] = await s.send(callTool('list_workers', {}));
 
-    expect(res.result.content[0].text).toContain('review loop round 2: 2 finding(s) awaiting your triage');
+    expect(res.result.content[0].text).toContain(
+      "review loop round 2: 2 finding(s) awaiting the user's triage",
+    );
   });
 
   it('read_worker lists the held findings by key, with the loop’s advice', async () => {
@@ -512,7 +514,9 @@ describe('the worker tools', () => {
     const [res] = await s.send(callTool('read_worker', { id: 'w1' }));
 
     const text = res.result.content[0].text;
-    expect(text).toContain('Review round 2 of PR #7 is waiting for your triage_findings verdicts:');
+    expect(text).toContain(
+      "Review round 2 of PR #7 is on hold, waiting for the user's verdicts in the dashboard's ⚑ Findings screen",
+    );
     expect(text).toContain('- [abc123] HIGH: Race in the cache (lib/c.js:9)');
     expect(text).toContain('- [def456] LOW: Nit — the loop would have parked it: below the floor');
   });

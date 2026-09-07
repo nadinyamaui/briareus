@@ -121,34 +121,32 @@ a review session for it (the same auto-closing kind the board starts, on the
 session's own provider, model and effort — a loop's sessions run where the
 session they work for runs, so a worker moved onto another provider takes its
 reviews with it), and when that review closes, whatever
-findings it declared are handed to a **fix session** of their own (the same
-auto-closing implement-feedback errand the board starts, on the session's
-branch and provider), whose pushes, once it closes, trigger the next review.
+findings it declared wait on the **⚑ Findings** screen (the flag beside 📊 in
+the sidebar header, one card per round across every project) until you mark
+each one _fix_, _optional_ or _dismissed_ and send the round. What you marked
+fix is handed to a **fix session** of its own (the same auto-closing
+implement-feedback errand the board starts, on the session's branch and
+provider), whose pushes, once it closes, trigger the next review.
 The session itself is the durable half: it is the loop's anchor, it keeps its
 clone, its database server and its conversation, and you can keep chatting in
 it undisturbed while the reviews and the fix sessions come and go around it.
 
-Each round's findings are listed on the pull request's **Required fixes**
-checklist before the fix session starts, exactly as if you had decided them
-by hand in the findings panel: handing them over to be implemented is that
-decision. The fix session then ticks the ones it actually fixed, replies on the
-threads it addressed and resolves them, so the pull request and the panel both
-show what is solved and what is still open. A finding you had already
-dismissed or marked optional is left off that list and is not sent back to be
-fixed: your verdict on it stands, however often a later review re-declares it.
-
-A worker's loop is different in one respect: **its orchestrator triages every
-round first.** The findings reach the orchestrator as an update, each with the
-loop's own advice on it (what the rules below would have parked, and why), and
-nothing is implemented until it rules on every one with `triage_findings`:
-_fix_ goes to the fix session, _dismissed_ is recorded like a verdict given by
+Nothing a review found is fixed until you say so. Each card on ⚑ Findings
+shows the round's findings with the loop's own advice on each (what the rules
+below would have parked, and why); mark what the fix session should implement
+and press **Send**. Anything left unmarked stays on the pull request as
+_optional_. Sending records every verdict: what you marked fix goes on the
+pull request's **Required fixes** checklist and to the fix session, which
+ticks the ones it actually fixed, replies on the threads it addressed and
+resolves them; _dismissed_ and _optional_ are recorded like verdicts given by
 hand in the findings panel and said on the pull request with the reason, so
-no later round offers it again, and _optional_ keeps it on the pull request
-without spending a round. The orchestrator has the task's whole context, which
-the review did not; a finding it knows to be beside the point costs nothing
-when it never reaches a fix session. The loop holds until it rules (the
-worker shows _awaiting triage_), and a loop whose orchestrator was closed
-meanwhile runs the round the way a loop with no orchestrator does.
+no later round offers them again. A round with nothing marked fix converges
+the loop. The loop holds until you send (the session shows _findings waiting
+in ⚑ Findings_), across restarts too.
+
+A worker's loop stops there just the same: its orchestrator is told the round
+is waiting for you and that the task is not done, and it does not rule on the
+round itself unless you ask it to (`triage_findings` is there for that).
 
 A round that could not run at all — its provider exited non-zero or was out of
 quota, a dashboard restart interrupted its review or fix session, or its
