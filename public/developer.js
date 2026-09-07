@@ -5522,17 +5522,27 @@
     $('btn-findings').classList.toggle('text-accent', findingsOpen);
   }
 
-  function roundKey(sessionId) {
-    const round = heldRounds().find((r) => r.session.id === sessionId);
-    return `${sessionId}\n${round ? round.held.round : ''}`;
+  // Drafts and notes are keyed by session and round (see pruneFindingsDrafts);
+  // the round comes from the card in hand rather than from a fresh walk of
+  // every session, which a card drawing several drafts per finding would
+  // otherwise repeat for each of them.
+  function roundKey(sessionId, round) {
+    return `${sessionId}\n${round}`;
   }
 
-  function draftOf(sessionId, key) {
-    return findingsDraft.get(`${roundKey(sessionId)}\n${key}`) || { decision: null, reason: '' };
+  // The round a click or a keystroke lands on, or null once it left the
+  // screen between the poll and the event: nothing is drafted for a round
+  // that is gone.
+  function roundOf(sessionId) {
+    return heldRounds().find((r) => r.session.id === sessionId) || null;
   }
 
-  function setDraft(sessionId, key, draft) {
-    findingsDraft.set(`${roundKey(sessionId)}\n${key}`, draft);
+  function draftOf(rk, key) {
+    return findingsDraft.get(`${rk}\n${key}`) || { decision: null, reason: '' };
+  }
+
+  function setDraft(rk, key, draft) {
+    findingsDraft.set(`${rk}\n${key}`, draft);
   }
 
   // Drafts and notes for a round no longer on the screen: sent from another
@@ -5562,7 +5572,11 @@
     // The poll redraws only when the queue itself changed: a redraw under a
     // pointer mid-click, or under a reason half-typed, is worse than a list a
     // few seconds stale, and the verdict buttons redraw on their own click.
+    // And not at all while a reason or a note is being typed, whichever card
+    // changed: the list is drawn whole, and replacing it takes the caret with
+    // it. The next poll after the field is left catches up.
     if (!force && signature === findingsDrawn) return;
+    if (!force && $('findings-list').contains(document.activeElement)) return;
     findingsDrawn = signature;
     pruneFindingsDrafts(rounds);
     $('findings-sub').textContent = rounds.length
@@ -5600,10 +5614,11 @@
   }
 
   function roundCard({ session: s, held }) {
+    const rk = roundKey(s.id, held.round);
     const prUrl =
       s.prStatus && s.prStatus.url ? s.prStatus.url : `https://github.com/${s.repo}/pull/${held.prNumber}`;
     const decBtn = (f, dec, label) => {
-      const on = draftOf(s.id, f.key).decision === dec;
+      const on = draftOf(rk, f.key).decision === dec;
       const activeCls = dec === 'fix' ? 'border-danger text-danger' : 'border-accent text-accent';
       return `<button type="button" class="finding-verdict cursor-pointer rounded border bg-transparent px-1.5 py-px text-[11px] ${on ? activeCls : 'border-line text-muted hover:text-ink'}"
         data-session="${esc(s.id)}" data-key="${esc(f.key)}" data-dec="${dec}">${label}</button>`;
@@ -5612,7 +5627,7 @@
       .map((f) => {
         const [sevLabel, sevCls] = SEV_CHIP[f.severity] || SEV_CHIP.medium;
         const loc = f.file ? `${f.file}${f.line ? `:${f.line}` : ''}` : '';
-        const draft = draftOf(s.id, f.key);
+        const draft = draftOf(rk, f.key);
         const advice = f.parked
           ? `<div class="text-[11px] text-muted">The loop would have parked it: ${esc(PARK_HINTS[f.parked] || f.parked)}.</div>`
           : '';
@@ -5632,7 +5647,7 @@
         </div>`;
       })
       .join('');
-    const fixes = held.findings.filter((f) => draftOf(s.id, f.key).decision === 'fix').length;
+    const fixes = held.findings.filter((f) => draftOf(rk, f.key).decision === 'fix').length;
     const sending = findingsSending.has(s.id);
     const error = findingsErrors.get(s.id);
     const heldFor = held.heldAt ? `held since ${fmtWhen(held.heldAt)}` : '';
@@ -5651,7 +5666,7 @@
       </div>
       <div class="mt-2 flex flex-col gap-2">${rows}</div>
       <div class="mt-2.5 flex flex-col gap-1.5 border-t border-line pt-2.5">
-        <input class="finding-note w-full rounded border border-line bg-field px-1.5 py-1 text-[12px] text-ink placeholder:text-muted" data-session="${esc(s.id)}" placeholder="A note for the fix session (optional)" value="${esc(findingsNotes.get(roundKey(s.id)) || '')}">
+        <input class="finding-note w-full rounded border border-line bg-field px-1.5 py-1 text-[12px] text-ink placeholder:text-muted" data-session="${esc(s.id)}" placeholder="A note for the fix session (optional)" value="${esc(findingsNotes.get(rk) || '')}">
         <div class="flex flex-wrap items-center gap-2">
           <button type="button" class="btn finding-send btn-primary" data-session="${esc(s.id)}"${sending ? ' disabled' : ''}>${
             sending ? 'Sending…' : fixes ? `Send ${fixes} to be fixed` : 'Nothing to fix · close the round'
@@ -5666,8 +5681,11 @@
     const verdict = e.target.closest('.finding-verdict');
     if (verdict) {
       const { session, key, dec } = verdict.dataset;
-      const draft = draftOf(session, key);
-      setDraft(session, key, {
+      const round = roundOf(session);
+      if (!round) return;
+      const rk = roundKey(session, round.held.round);
+      const draft = draftOf(rk, key);
+      setDraft(rk, key, {
         decision: draft.decision === dec ? null : dec, // the same button twice clears the pick
         reason: draft.reason,
       });
@@ -5676,12 +5694,13 @@
     }
     const all = e.target.closest('.finding-all');
     if (all) {
-      const round = heldRounds().find((r) => r.session.id === all.dataset.session);
+      const round = roundOf(all.dataset.session);
       if (!round) return;
+      const rk = roundKey(all.dataset.session, round.held.round);
       for (const f of round.held.findings) {
-        setDraft(all.dataset.session, f.key, {
+        setDraft(rk, f.key, {
           decision: all.dataset.dec || null,
-          reason: draftOf(all.dataset.session, f.key).reason,
+          reason: draftOf(rk, f.key).reason,
         });
       }
       renderFindingsView({ force: true });
@@ -5707,11 +5726,17 @@
     const reason = e.target.closest('.finding-reason');
     if (reason) {
       const { session, key } = reason.dataset;
-      setDraft(session, key, { ...draftOf(session, key), reason: reason.value });
+      const round = roundOf(session);
+      if (!round) return;
+      const rk = roundKey(session, round.held.round);
+      setDraft(rk, key, { ...draftOf(rk, key), reason: reason.value });
       return;
     }
     const note = e.target.closest('.finding-note');
-    if (note) findingsNotes.set(roundKey(note.dataset.session), note.value);
+    if (note) {
+      const round = roundOf(note.dataset.session);
+      if (round) findingsNotes.set(roundKey(note.dataset.session, round.held.round), note.value);
+    }
   });
 
   // Release one round: every finding gets its verdict (unmarked ones
@@ -5720,11 +5745,11 @@
   // on the next poll, once the session's record no longer holds it, and the
   // answer says whether a fix session actually followed.
   async function sendRound(sessionId) {
-    const round = heldRounds().find((r) => r.session.id === sessionId);
+    const round = roundOf(sessionId);
     if (!round || findingsSending.has(sessionId)) return;
-    const key = roundKey(sessionId);
+    const key = roundKey(sessionId, round.held.round);
     const verdicts = round.held.findings.map((f) => {
-      const draft = draftOf(sessionId, f.key);
+      const draft = draftOf(key, f.key);
       return { key: f.key, decision: draft.decision || 'optional', reason: draft.reason || undefined };
     });
     findingsSending.add(sessionId);

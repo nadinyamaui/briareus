@@ -199,9 +199,24 @@ describe('implementFeedbackPrompt', () => {
     });
     expect(prompt).toContain('Implement these and only these');
     expect(prompt).not.toContain('starting point');
+    expect(prompt).toContain('as the orchestrator triaged them');
+    expect(prompt).toContain('do not reassess this list');
     expect(prompt).toContain('- **HIGH**: Injection\n\nThe orchestrator adds: Keep the public signature.');
     // An untriaged round says nothing about an orchestrator.
     expect(implementFeedbackPrompt({ ...base, findings: [{ title: 'x' }] })).not.toContain('orchestrator');
+  });
+
+  it('a round the user sent from ⚑ Findings is the user’s decision, not the orchestrator’s', () => {
+    const prompt = implementFeedbackPrompt({
+      ...base,
+      findings: [{ severity: 'high', title: 'Injection' }],
+      triaged: true,
+      note: 'Keep the public signature.',
+      by: 'The user',
+    });
+    expect(prompt).toContain('as the user triaged them');
+    expect(prompt).toContain('- **HIGH**: Injection\n\nThe user adds: Keep the public signature.');
+    expect(prompt).not.toContain('orchestrator');
   });
 
   it('collapses cleanly when the pull request declared none', () => {
