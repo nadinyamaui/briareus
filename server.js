@@ -29,6 +29,7 @@ import {
   linkPrToSession,
   dropQueuedMessage,
   startDevServe,
+  startPullRequestPreview,
   flushJobs,
   spawnWorkerSession,
   workerSessionsFor,
@@ -1389,6 +1390,62 @@ app.post('/api/dev/actions', async (req, res) => {
         activity: action.id,
       }),
     });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ▶ Run on a pull-request card: verify the PR and its current head branch on
+// GitHub, then prepare a clean session workspace and serve it without sending
+// an agent turn. The returned session remains available in the sidebar so the
+// user can inspect it, chat in it, or close it to release its resources.
+app.post('/api/dev/pulls/:number/serve', async (req, res) => {
+  const { repo, provider, model, effort } = req.body || {};
+  const project = getProject(repo || '');
+  if (!project) return res.status(400).json({ error: `Unknown project: ${repo || ''}` });
+  const number = Number(req.params.number);
+  if (!Number.isInteger(number) || number < 1) {
+    return res.status(400).json({ error: 'The PR number must be a whole number' });
+  }
+  if (!project.runCommands.length) {
+    return res
+      .status(400)
+      .json({ error: `No run command is configured for ${project.repo}; add one in Settings` });
+  }
+  const cfg = getConfig();
+  if (!cfg.githubToken) {
+    return res
+      .status(400)
+      .json({ error: 'No GITHUB_TOKEN is configured, so the pull request cannot be looked up' });
+  }
+  try {
+    const lookup = await githubRest(cfg, 'GET', `/repos/${project.repo}/pulls/${number}`);
+    if (lookup.status === 404) {
+      return res.status(404).json({ error: `${project.repo} has no pull request #${number}` });
+    }
+    if (!lookup.ok) {
+      return res
+        .status(502)
+        .json({ error: `GitHub answered ${lookup.status} reading pull request #${number}` });
+    }
+    const pr = await lookup.json();
+    const branch = pr.head && pr.head.ref;
+    if (!branch) {
+      return res
+        .status(502)
+        .json({ error: `Pull request #${number} has no head branch; its fork may be gone` });
+    }
+    res.status(201).json(
+      await startPullRequestPreview({
+        provider,
+        model,
+        effort,
+        repo: project.repo,
+        branch,
+        prNumber: number,
+        title: pr.title || '',
+      }),
+    );
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

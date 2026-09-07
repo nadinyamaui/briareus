@@ -2991,6 +2991,12 @@
   // The errands a row offers, in the order they are shown.
   const PR_ACTIONS = [
     {
+      id: 'run',
+      icon: '▶',
+      label: 'Run',
+      why: 'Prepare this pull request in a clean workspace and open the app in a new tab',
+    },
+    {
       id: 'review',
       icon: '⌕',
       label: 'Code review',
@@ -4397,6 +4403,7 @@
   // being folded into "other".
   const ACTIVITY_LABELS = {
     chat: '💬 Chat',
+    preview: '▶ Run',
     'code-review': '⌕ Code review',
     issue: '▶ Issue',
     qa: '🔍 QA',
@@ -4421,6 +4428,8 @@
   // rows are easily confused, which of them the spend lands in.
   const ACTIVITY_HINTS = {
     chat: 'Sessions you started yourself from ＋ New session with no mode on them: ordinary coding and conversation. Everything the app or an agent starts has a row of its own, so this is hand-driven work only.',
+    preview:
+      'A pull request workspace created with ▶ Run. Preparing and serving it spends no model tokens; this row appears only if you later chat in that preview session.',
     issue:
       'Sessions started with ▶ Start on an issue in the ⊙ Issues tab. An epic starts an orchestrator instead, and counts under 🧭 Orchestrator.',
     'code-review':
@@ -4661,9 +4670,10 @@
     });
   }
 
-  // Start one of the row's errands. Code review and QA are sessions of their
-  // own kind on the pull request's branch; the rest are ⚡ Actions the server
-  // has the prompt for. Either way
+  // Start one of the row's errands. ▶ Run prepares and serves a clean checkout
+  // without an agent turn. Code review and QA are sessions of their own kind
+  // on the pull request's branch; the rest are ⚡ Actions the server has the
+  // prompt for. Either way
   // the board stays where it is: the run appears under its pull request, so
   // firing off a second errand is another click rather than a trip back out of
   // a conversation nobody asked to read yet.
@@ -4711,6 +4721,38 @@
     if (!provider) return toast('No provider is installed to run this on', true);
     const prNumber = Number(btn.dataset.pr);
     const act = btn.dataset.act;
+
+    // Open synchronously while the click still owns popup permission. Preparing
+    // a fresh clone and database can take minutes; the blank tab is pointed at
+    // the app only after the server confirms it is listening.
+    if (act === 'run') {
+      const w = window.open('about:blank', '_blank');
+      boardBusy = `${board.repo}#${prNumber}:${act}`;
+      renderBoard();
+      try {
+        const model = $('proj-model').value || provider.defaultModel;
+        const effort = boardEffort(provider);
+        const { session, url } = await api(`/api/dev/pulls/${prNumber}/serve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: provider.id, model, effort, repo: board.repo }),
+        });
+        const previous = sessions.findIndex((s) => s.id === session.id);
+        if (previous === -1) sessions.unshift(session);
+        else sessions[previous] = preserveEstimatedUsage(session, sessions[previous]);
+        loadSessions();
+        if (w) w.location = url;
+        else window.open(url, '_blank');
+        toast(`Running #${prNumber}; its workspace is under the pull request`);
+      } catch (err) {
+        if (w) w.close();
+        toast(err.message, true);
+      } finally {
+        boardBusy = null;
+        renderBoard();
+      }
+      return;
+    }
 
     // An action that asks something (✍ Give feedback) asks it here, before the
     // row goes busy: the answer is the errand, so backing out of the question
