@@ -125,6 +125,7 @@ vi.mock('../lib/findings.js', () => ({
   sortFindingsForFix: vi.fn(async (repo, prNumber, findings) => ({ kept: findings, parked: [] })),
   recordTriage: vi.fn(async () => ({ error: null })),
   findingKey: vi.fn((title) => `key:${title}`),
+  findingUrl: vi.fn((repo, prNumber, file, line) => `url:${repo}#${prNumber}:${file || ''}:${line || ''}`),
   PARK_REASONS: { severity: 'below the floor', 'out-of-diff': 'outside the diff' },
 }));
 
@@ -2001,7 +2002,16 @@ describe('the review loop: what a closing loop review reports back', () => {
     expect(parent.reviewLoop.triage).toEqual({
       prNumber: 77,
       round: 1,
-      findings: [{ key: 'k1', severity: 'high', title: 'A thing', parked: null, parkedWhy: null }],
+      findings: [
+        {
+          key: 'k1',
+          severity: 'high',
+          title: 'A thing',
+          url: 'url:acme/loop#77::',
+          parked: null,
+          parkedWhy: null,
+        },
+      ],
       heldAt: expect.any(String),
       sha: parent.reviewLoop.lastSha,
       stale: false,
@@ -2031,7 +2041,14 @@ describe('the review loop: what a closing loop review reports back', () => {
     const text = infoTexts(parent).join('\n');
     expect(text).toMatch(/could not read this pull request's finding verdicts/);
     expect(parent.reviewLoop.triage.findings).toEqual([
-      { key: 'k1', severity: 'high', title: 'A thing', parked: null, parkedWhy: null },
+      {
+        key: 'k1',
+        severity: 'high',
+        title: 'A thing',
+        url: 'url:acme/loop#77::',
+        parked: null,
+        parkedWhy: null,
+      },
     ]); // the round is not dropped
   });
 
@@ -2156,7 +2173,12 @@ describe('the review loop: what a closing loop review reports back', () => {
     // The advice ships with its wording, so the screen reads the same
     // sentence the orchestrator does without a copy of the table.
     expect(parent.reviewLoop.triage.findings).toEqual([
-      { ...found[0], parked: 'severity', parkedWhy: 'below the floor' },
+      {
+        ...found[0],
+        url: expect.stringContaining('url:acme/loop#77'),
+        parked: 'severity',
+        parkedWhy: 'below the floor',
+      },
     ]);
     expect(workerSummary(parent).reviewLoop.triage.findings[0].parked).toBe('below the floor');
   });

@@ -43,6 +43,7 @@ vi.mock('../lib/db.js', () => ({
 
 import {
   findingKey,
+  findingUrl,
   getFindings,
   latestReviewFindings,
   latestTestFailures,
@@ -81,6 +82,29 @@ describe('findingKey', () => {
 
   it('differs for different titles', () => {
     expect(findingKey('a')).not.toBe(findingKey('b'));
+  });
+});
+
+describe('findingUrl', () => {
+  it('anchors the pull request diff on the file and its line', () => {
+    expect(findingUrl('owner/repo', 7, 'app/Models/User.php', 42)).toBe(
+      'https://github.com/owner/repo/pull/7/files#diff-37a2d7d879a7de3f7d73b2975cd22be9f41ec10c334a0dda9ad1e869332e4ecb' +
+        'R42',
+    );
+  });
+
+  it('reads a ./-prefixed path as the same file the diff names', () => {
+    expect(findingUrl('owner/repo', 7, './app/Models/User.php', 42)).toBe(
+      findingUrl('owner/repo', 7, 'app/Models/User.php', 42),
+    );
+  });
+
+  it('drops the line anchor when the finding gives no line', () => {
+    expect(findingUrl('owner/repo', 7, 'a.js', null)).not.toMatch(/R/);
+  });
+
+  it('falls back to the diff itself when the finding names no file', () => {
+    expect(findingUrl('owner/repo', 7, null, null)).toBe('https://github.com/owner/repo/pull/7/files');
   });
 });
 
@@ -164,7 +188,12 @@ describe('getFindings', () => {
     const { findings, fixesUrl } = await getFindings(repo, 5, { fresh: true });
     expect(fixesUrl).toBe('https://x/9');
     expect(findings).toHaveLength(2);
-    expect(findings[0]).toMatchObject({ title: 'Finding A', decision: 'fix', fixed: true });
+    expect(findings[0]).toMatchObject({
+      title: 'Finding A',
+      decision: 'fix',
+      fixed: true,
+      url: findingUrl(repo, 5, null, null),
+    });
     expect(findings[1]).toMatchObject({ title: 'Finding B', decision: null, fixed: false });
   });
 
