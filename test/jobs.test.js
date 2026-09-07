@@ -58,6 +58,7 @@ vi.mock('../lib/github.js', () => ({
   githubRest: vi.fn(),
   githubGraphql: vi.fn(),
   upsertPrComment: vi.fn(),
+  addPullRequestLabel: vi.fn(async () => []),
 }));
 
 vi.mock('../lib/dbpool.js', () => ({
@@ -149,7 +150,7 @@ import {
 } from '../lib/findings.js';
 import { implementFeedbackPrompt } from '../lib/prtasks.js';
 import { jobUsageEstimates } from '../lib/usage.js';
-import { githubGraphql, githubRest } from '../lib/github.js';
+import { addPullRequestLabel, githubGraphql, githubRest } from '../lib/github.js';
 import { resolveRuntime, getProviderForJob, captureProviderAuth } from '../lib/providerstore.js';
 import { stepRuntime } from '../lib/projects.js';
 import {
@@ -508,6 +509,15 @@ describe('createDevSession: the validation gauntlet', () => {
 
   it('a chat session with nothing to say does not start', () => {
     expect(() => createDevSession({ ...base, prompt: '   ' })).toThrow(/first message cannot be empty/);
+  });
+
+  it('a pull request preview needs a branch and cannot be combined with an agent workflow', () => {
+    expect(() => createDevSession({ ...base, prompt: '', preview: true })).toThrow(
+      /preview needs the branch to run/,
+    );
+    expect(() => createDevSession({ ...base, preview: true, review: true, branch: 'feature' })).toThrow(
+      /preview only prepares and serves its worktree/,
+    );
   });
 
   it('local mode needs a configured checkout that is actually a git tree', () => {
@@ -1501,6 +1511,7 @@ describe('standalone code-review findings', () => {
     state.stored = [
       queuedReview('stand-dismiss', [finding('k1', 'Remove the race')]),
       queuedReview('stand-fix-fails', [finding('k2', 'Validate the input')]),
+      queuedReview('stand-label-fails', [finding('k4', 'Keep the type')]),
       { ...queuedReview('stand-close', [finding('k3', 'Keep the guard')]), status: 'closed' },
     ];
     await initJobs();
@@ -1547,7 +1558,13 @@ describe('standalone code-review findings', () => {
       verdicts: [{ key: 'k1', decision: 'dismissed', reason: 'Not part of this change' }],
     });
 
-    expect(result).toMatchObject({ fixing: false, dismissed: true, session: null });
+    expect(result).toMatchObject({ fixing: false, dismissed: true, approved: true, session: null });
+    expect(addPullRequestLabel).toHaveBeenLastCalledWith(
+      expect.objectContaining({ githubToken: 'tok' }),
+      'acme/standalone',
+      31,
+      'code-approved',
+    );
     expect(recordTriage).toHaveBeenCalledWith(
       'acme/standalone',
       31,
@@ -1555,6 +1572,19 @@ describe('standalone code-review findings', () => {
       { by: 'the user' },
     );
     expect(getJob('stand-dismiss')).toBeNull();
+  });
+
+  it('keeps the queue card when GitHub refuses the approval label', async () => {
+    addPullRequestLabel.mockRejectedValueOnce(
+      new Error('GitHub answered 422 adding code-approved to acme/standalone#31'),
+    );
+
+    await expect(
+      triageStandaloneReviewFindings('stand-label-fails', {
+        verdicts: [{ key: 'k4', decision: 'optional' }],
+      }),
+    ).rejects.toThrow(/answered 422 adding code-approved/);
+    expect(getJob('stand-label-fails').reviewTriage).toMatchObject({ prNumber: 31 });
   });
 
   it('keeps the queue card when the selected implementation session cannot start', async () => {
@@ -2746,6 +2776,8 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
         ...workerRow('tri-12', 'tri-orch', { lastSha: null, triage: { ...held(), sha: null, stale: false } }),
         prStatus: { number: 79, state: 'open', headSha: 'def' },
       },
+      // Its approval label write fails, so its round must remain retryable.
+      workerRow('tri-13', 'tri-orch'),
       // Closed with its round still on the screen.
       workerRow('tri-9', 'tri-orch'),
       // Merged under the hold, before the sync dropped the round.
@@ -2773,6 +2805,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       'tri-10',
       'tri-11',
       'tri-12',
+      'tri-13',
       'tri-free',
     ]) {
       getJob(id).status = 'idle';
@@ -2872,7 +2905,13 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       ],
     });
     const worker = getJob('tri-2');
-    expect(result).toEqual({ fixing: false, converged: true });
+    expect(result).toEqual({ fixing: false, converged: true, approved: true });
+    expect(addPullRequestLabel).toHaveBeenLastCalledWith(
+      expect.objectContaining({ githubToken: 'tok' }),
+      'acme/triage',
+      79,
+      'code-approved',
+    );
     expect(worker.reviewLoop.done).toBe(true);
     expect(worker.reviewLoop.triage).toBeNull();
     expect(infoTexts(worker).join('\n')).toMatch(
@@ -2927,13 +2966,14 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
     const first = triageLoopFindings('tri-6', { verdicts });
     await expect(triageLoopFindings('tri-6', { verdicts })).rejects.toThrow(/already being sent/);
     expect(recordTriage.mock.calls.length).toBe(before + 1); // one record, one triage comment
-    await expect(first).resolves.toEqual({ fixing: false, converged: true });
+    await expect(first).resolves.toEqual({ fixing: false, converged: true, approved: true });
     // Released once the first is through: a third call finds no round, not a send in flight.
     await expect(triageLoopFindings('tri-6', { verdicts })).rejects.toThrow(/no review round waiting/);
   });
 
   it('nothing to fix on a round the branch moved past reviews the new commits instead of converging', async () => {
     const worker = getJob('tri-7');
+    const labelsBefore = addPullRequestLabel.mock.calls.length;
     const result = await triageLoopFindings('tri-7', {
       verdicts: [
         { key: 'k1', decision: 'dismissed', reason: 'fixed by hand' },
@@ -2947,6 +2987,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
     expect(result).toEqual({ fixing: false, converged: false, reviewing: false, deferred: false });
     expect(worker.reviewLoop.triage).toBeNull();
     expect(worker.reviewLoop.done).toBeFalsy();
+    expect(addPullRequestLabel.mock.calls.length).toBe(labelsBefore);
     const text = infoTexts(worker).join('\n');
     expect(text).toMatch(/branch moved while it was held, so the new commits are reviewed/);
     expect(text).toMatch(/could not start the code review/);
@@ -2982,9 +3023,26 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
         { key: 'k2', decision: 'optional' },
       ],
     });
-    expect(result).toEqual({ fixing: false, converged: true });
+    expect(result).toEqual({ fixing: false, converged: true, approved: true });
     expect(worker.reviewLoop.done).toBe(true);
     expect(infoTexts(worker).join('\n')).not.toMatch(/branch moved/);
+  });
+
+  it('keeps the round open when GitHub refuses the approval label', async () => {
+    addPullRequestLabel.mockRejectedValueOnce(
+      new Error('GitHub answered 422 adding code-approved to acme/triage#79'),
+    );
+
+    await expect(
+      triageLoopFindings('tri-13', {
+        verdicts: [
+          { key: 'k1', decision: 'optional' },
+          { key: 'k2', decision: 'dismissed' },
+        ],
+      }),
+    ).rejects.toThrow(/answered 422 adding code-approved/);
+    expect(getJob('tri-13').reviewLoop.triage).toEqual(held());
+    expect(getJob('tri-13').reviewLoop.done).toBeFalsy();
   });
 
   it('a push landing under a held round marks the card stale at the next settle', async () => {

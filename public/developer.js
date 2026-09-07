@@ -500,20 +500,6 @@
     $('provider-warnings').innerHTML = warnings.join('');
   }
 
-  $('btn-check-usage').addEventListener('click', async () => {
-    const button = $('btn-check-usage');
-    button.disabled = true;
-    button.textContent = 'Checking…';
-    try {
-      await loadProviders(true);
-    } catch (e) {
-      toast(`Usage check: ${e.message}`, true);
-    } finally {
-      button.disabled = false;
-      button.textContent = 'Check usage';
-    }
-  });
-
   selProvider.addEventListener('change', fillModelControls);
   selProject.addEventListener('change', () => {
     document.querySelector('.wl-repo').textContent = projectLabel(selProject.value);
@@ -2991,6 +2977,12 @@
   // The errands a row offers, in the order they are shown.
   const PR_ACTIONS = [
     {
+      id: 'run',
+      icon: '▶',
+      label: 'Run',
+      why: 'Prepare this pull request in a clean workspace and open the app in a new tab',
+    },
+    {
       id: 'review',
       icon: '⌕',
       label: 'Code review',
@@ -4397,6 +4389,7 @@
   // being folded into "other".
   const ACTIVITY_LABELS = {
     chat: '💬 Chat',
+    preview: '▶ Run',
     'code-review': '⌕ Code review',
     issue: '▶ Issue',
     qa: '🔍 QA',
@@ -4421,6 +4414,8 @@
   // rows are easily confused, which of them the spend lands in.
   const ACTIVITY_HINTS = {
     chat: 'Sessions you started yourself from ＋ New session with no mode on them: ordinary coding and conversation. Everything the app or an agent starts has a row of its own, so this is hand-driven work only.',
+    preview:
+      'A pull request workspace created with ▶ Run. Preparing and serving it spends no model tokens; this row appears only if you later chat in that preview session.',
     issue:
       'Sessions started with ▶ Start on an issue in the ⊙ Issues tab. An epic starts an orchestrator instead, and counts under 🧭 Orchestrator.',
     'code-review':
@@ -4661,9 +4656,10 @@
     });
   }
 
-  // Start one of the row's errands. Code review and QA are sessions of their
-  // own kind on the pull request's branch; the rest are ⚡ Actions the server
-  // has the prompt for. Either way
+  // Start one of the row's errands. ▶ Run prepares and serves a clean checkout
+  // without an agent turn. Code review and QA are sessions of their own kind
+  // on the pull request's branch; the rest are ⚡ Actions the server has the
+  // prompt for. Either way
   // the board stays where it is: the run appears under its pull request, so
   // firing off a second errand is another click rather than a trip back out of
   // a conversation nobody asked to read yet.
@@ -4711,6 +4707,38 @@
     if (!provider) return toast('No provider is installed to run this on', true);
     const prNumber = Number(btn.dataset.pr);
     const act = btn.dataset.act;
+
+    // Open synchronously while the click still owns popup permission. Preparing
+    // a fresh clone and database can take minutes; the blank tab is pointed at
+    // the app only after the server confirms it is listening.
+    if (act === 'run') {
+      const w = window.open('about:blank', '_blank');
+      boardBusy = `${board.repo}#${prNumber}:${act}`;
+      renderBoard();
+      try {
+        const model = $('proj-model').value || provider.defaultModel;
+        const effort = boardEffort(provider);
+        const { session, url } = await api(`/api/dev/pulls/${prNumber}/serve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: provider.id, model, effort, repo: board.repo }),
+        });
+        const previous = sessions.findIndex((s) => s.id === session.id);
+        if (previous === -1) sessions.unshift(session);
+        else sessions[previous] = preserveEstimatedUsage(session, sessions[previous]);
+        loadSessions();
+        if (w) w.location = url;
+        else window.open(url, '_blank');
+        toast(`Running #${prNumber}; its workspace is under the pull request`);
+      } catch (err) {
+        if (w) w.close();
+        toast(err.message, true);
+      } finally {
+        boardBusy = null;
+        renderBoard();
+      }
+      return;
+    }
 
     // An action that asks something (✍ Give feedback) asks it here, before the
     // row goes busy: the answer is the errand, so backing out of the question
@@ -5674,20 +5702,22 @@
   // session, a pull request no longer open, a spawn that failed), and a card
   // that just vanishes reads as a fix session under way. Stays until dismissed
   // or the screen is closed.
-  function outcomeLine(sessionId, { title, fixing, converged, reviewing, deferred, error }) {
+  function outcomeLine(sessionId, { title, fixing, converged, approved, reviewing, deferred, error }) {
     const text = error
       ? `Not sent: ${error}`
-      : fixing
-        ? 'Verdicts recorded; a fix session is running.'
-        : converged
-          ? 'Verdicts recorded; nothing was left to fix, so the loop converged.'
-          : reviewing
-            ? 'Verdicts recorded; nothing was left to fix, but the branch had moved, so the new commits are being reviewed.'
-            : deferred
-              ? 'Verdicts recorded; nothing was left to fix, but the branch had moved. The new commits are reviewed once the session settles idle.'
-              : 'Verdicts recorded, but no fix session started. The session’s log says why.';
+      : converged
+        ? 'Verdicts recorded; nothing was left to fix, so code-approved was added and the loop converged.'
+        : approved
+          ? 'Verdicts recorded; nothing was left to fix, so code-approved was added.'
+          : fixing
+            ? 'Verdicts recorded; a fix session is running.'
+            : reviewing
+              ? 'Verdicts recorded; nothing was left to fix, but the branch had moved, so the new commits are being reviewed.'
+              : deferred
+                ? 'Verdicts recorded; nothing was left to fix, but the branch had moved. The new commits are reviewed once the session settles idle.'
+                : 'Verdicts recorded, but no fix session started. The session’s log says why.';
     return `<div class="mb-3 flex flex-wrap items-baseline gap-x-2 rounded-lg border border-line bg-raise px-3 py-2 text-[12px] ${
-      fixing || converged || reviewing || deferred ? 'text-muted' : 'text-danger'
+      fixing || converged || approved || reviewing || deferred ? 'text-muted' : 'text-danger'
     }">
       <button type="button" class="finding-session cursor-pointer border-0 bg-transparent p-0 font-semibold text-ink hover:text-accent hover:underline" data-session="${esc(sessionId)}">${esc(title || '(untitled)')}</button>
       <span>${esc(text)}</span>
@@ -5759,8 +5789,8 @@
                   ? `Start session for ${fixes} selected`
                   : `Send ${fixes} to be fixed`
                 : standalone
-                  ? 'Delete / close findings'
-                  : 'Nothing to fix · close the round'
+                  ? 'Nothing to fix · approve'
+                  : 'Nothing to fix · approve and close'
           }</button>
           ${error ? `<span class="text-[12px] text-danger">${esc(error)}</span>` : ''}
         </div>
@@ -5860,12 +5890,13 @@
       });
       for (const f of round.held.findings) findingsDraft.delete(`${key}\n${f.key}`);
       findingsNotes.delete(key);
-      if (!(outcome && outcome.dismissed)) {
+      if (!(outcome && outcome.dismissed) || (outcome && outcome.approved)) {
         const outcomeSession = outcome && outcome.session;
         findingsOutcomes.set(outcomeSession ? outcomeSession.id : sessionId, {
           title: outcomeSession ? outcomeSession.title : round.session.title,
           fixing: !!(outcome && outcome.fixing),
           converged: !!(outcome && outcome.converged),
+          approved: !!(outcome && outcome.approved),
           reviewing: !!(outcome && outcome.reviewing),
           deferred: !!(outcome && outcome.deferred),
         });
