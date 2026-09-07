@@ -5499,12 +5499,6 @@
   const findingsOutcomes = new Map(); // sessionId -> what the last send came back with
   const findingsSending = new Set();
   let findingsDrawn = null; // the signature of the last list drawn
-  // The loop's park reasons (lib/findings.js, PARK_REASONS) as the session
-  // record spells them, said the way the orchestrator hears them.
-  const PARK_HINTS = {
-    severity: 'below this round’s severity floor',
-    'out-of-diff': 'on a file this pull request does not change',
-  };
 
   function heldRounds() {
     return sessions
@@ -5537,6 +5531,33 @@
     return heldRounds().find((r) => r.session.id === sessionId) || null;
   }
 
+  // The same, from the card the event happened on: the card carries the round
+  // it was drawn for, and the round the poll now holds for that session must
+  // be the very same one. A card can be a round behind the poll (the redraw
+  // waits while a reason is being typed on it) or outlive its round (sent
+  // from another tab, ruled on by an orchestrator, dropped with its pull
+  // request), and a verdict or a Send on it would then land on a round the
+  // user never read. So the event is dropped, the list redrawn to what is
+  // held now, and a Send says what happened; nothing is recorded.
+  function roundOnCard(el, { send = false } = {}) {
+    const card = el.closest('[data-round]');
+    if (!card) return null;
+    const sessionId = card.dataset.session;
+    const round = roundOf(sessionId);
+    const drawn = Number(card.dataset.round);
+    if (round && round.held.round === drawn) return round;
+    if (send) {
+      findingsOutcomes.set(sessionId, {
+        title: card.dataset.title,
+        error: round
+          ? `Round ${drawn} left the screen before it was sent; nothing was recorded. Round ${round.held.round} is what waits now.`
+          : `Round ${drawn} left the screen before it was sent; nothing was recorded.`,
+      });
+    }
+    renderFindingsView({ force: true });
+    return null;
+  }
+
   function draftOf(rk, key) {
     return findingsDraft.get(`${rk}\n${key}`) || { decision: null, reason: '' };
   }
@@ -5548,7 +5569,7 @@
   // Drafts and notes for a round no longer on the screen: sent from another
   // tab, ruled on by an orchestrator, dropped with its session or pull request.
   function pruneFindingsDrafts(rounds) {
-    const live = new Set(rounds.map(({ session, held }) => `${session.id}\n${held.round}`));
+    const live = new Set(rounds.map(({ session, held }) => roundKey(session.id, held.round)));
     for (const k of findingsDraft.keys()) {
       if (!live.has(k.slice(0, k.lastIndexOf('\n')))) findingsDraft.delete(k);
     }
@@ -5574,9 +5595,12 @@
     // few seconds stale, and the verdict buttons redraw on their own click.
     // And not at all while a reason or a note is being typed, whichever card
     // changed: the list is drawn whole, and replacing it takes the caret with
-    // it. The next poll after the field is left catches up.
+    // it. The next poll after the field is left catches up. A button that has
+    // the focus is no reason to wait: nothing typed is lost with it, and a
+    // card left a round behind would take a verdict on the wrong round.
     if (!force && signature === findingsDrawn) return;
-    if (!force && $('findings-list').contains(document.activeElement)) return;
+    const active = document.activeElement;
+    if (!force && active && active.matches('input, textarea') && $('findings-list').contains(active)) return;
     findingsDrawn = signature;
     pruneFindingsDrafts(rounds);
     $('findings-sub').textContent = rounds.length
@@ -5598,14 +5622,20 @@
   // session, a pull request no longer open, a spawn that failed), and a card
   // that just vanishes reads as a fix session under way. Stays until dismissed
   // or the screen is closed.
-  function outcomeLine(sessionId, { title, fixing, converged }) {
-    const text = fixing
-      ? 'Verdicts recorded; a fix session is running.'
-      : converged
-        ? 'Verdicts recorded; nothing was left to fix, so the loop converged.'
-        : 'Verdicts recorded, but no fix session started. The session’s log says why.';
+  function outcomeLine(sessionId, { title, fixing, converged, reviewing, deferred, error }) {
+    const text = error
+      ? `Not sent: ${error}`
+      : fixing
+        ? 'Verdicts recorded; a fix session is running.'
+        : converged
+          ? 'Verdicts recorded; nothing was left to fix, so the loop converged.'
+          : reviewing
+            ? 'Verdicts recorded; nothing was left to fix, but the branch had moved, so the new commits are being reviewed.'
+            : deferred
+              ? 'Verdicts recorded; nothing was left to fix, but the branch had moved. The new commits are reviewed once the session settles idle.'
+              : 'Verdicts recorded, but no fix session started. The session’s log says why.';
     return `<div class="mb-3 flex flex-wrap items-baseline gap-x-2 rounded-lg border border-line bg-raise px-3 py-2 text-[12px] ${
-      fixing || converged ? 'text-muted' : 'text-danger'
+      fixing || converged || reviewing || deferred ? 'text-muted' : 'text-danger'
     }">
       <button type="button" class="finding-session cursor-pointer border-0 bg-transparent p-0 font-semibold text-ink hover:text-accent hover:underline" data-session="${esc(sessionId)}">${esc(title || '(untitled)')}</button>
       <span>${esc(text)}</span>
@@ -5629,7 +5659,7 @@
         const loc = f.file ? `${f.file}${f.line ? `:${f.line}` : ''}` : '';
         const draft = draftOf(rk, f.key);
         const advice = f.parked
-          ? `<div class="text-[11px] text-muted">The loop would have parked it: ${esc(PARK_HINTS[f.parked] || f.parked)}.</div>`
+          ? `<div class="text-[11px] text-muted">The loop would have parked it: ${esc(f.parkedWhy || f.parked)}.</div>`
           : '';
         const reason =
           draft.decision === 'dismissed' || draft.decision === 'optional'
@@ -5654,7 +5684,7 @@
     const stale = held.stale
       ? `<div class="mt-1 text-[12px] text-danger">The branch moved after this round was reviewed: some of these may already be fixed. Sending with nothing to fix reviews the new commits instead of closing the loop.</div>`
       : '';
-    return `<section class="mb-3 rounded-lg border border-line bg-raise px-3 py-2.5" data-round="${esc(s.id)}">
+    return `<section class="mb-3 rounded-lg border border-line bg-raise px-3 py-2.5" data-session="${esc(s.id)}" data-round="${held.round}" data-title="${esc(s.title || '(untitled)')}">
       <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <button type="button" class="finding-session cursor-pointer border-0 bg-transparent p-0 text-left text-sm font-semibold text-ink hover:text-accent hover:underline" data-session="${esc(s.id)}">${esc(s.title || '(untitled)')}</button>
         <span class="text-[12px] text-muted">${esc(s.repo)} · <a class="hover:text-ink hover:underline" href="${esc(prUrl)}" target="_blank" rel="noopener">PR #${held.prNumber} ↗</a> · round ${held.round}${heldFor ? ` · ${esc(heldFor)}` : ''}</span>
@@ -5681,7 +5711,7 @@
     const verdict = e.target.closest('.finding-verdict');
     if (verdict) {
       const { session, key, dec } = verdict.dataset;
-      const round = roundOf(session);
+      const round = roundOnCard(verdict);
       if (!round) return;
       const rk = roundKey(session, round.held.round);
       const draft = draftOf(rk, key);
@@ -5694,7 +5724,7 @@
     }
     const all = e.target.closest('.finding-all');
     if (all) {
-      const round = roundOf(all.dataset.session);
+      const round = roundOnCard(all);
       if (!round) return;
       const rk = roundKey(all.dataset.session, round.held.round);
       for (const f of round.held.findings) {
@@ -5719,14 +5749,17 @@
       return;
     }
     const send = e.target.closest('.finding-send');
-    if (send) await sendRound(send.dataset.session);
+    if (send) {
+      const round = roundOnCard(send, { send: true });
+      if (round) await sendRound(round);
+    }
   });
 
   $('findings-list').addEventListener('input', (e) => {
     const reason = e.target.closest('.finding-reason');
     if (reason) {
       const { session, key } = reason.dataset;
-      const round = roundOf(session);
+      const round = roundOnCard(reason);
       if (!round) return;
       const rk = roundKey(session, round.held.round);
       setDraft(rk, key, { ...draftOf(rk, key), reason: reason.value });
@@ -5734,7 +5767,7 @@
     }
     const note = e.target.closest('.finding-note');
     if (note) {
-      const round = roundOf(note.dataset.session);
+      const round = roundOnCard(note);
       if (round) findingsNotes.set(roundKey(note.dataset.session, round.held.round), note.value);
     }
   });
@@ -5743,10 +5776,13 @@
   // optional, which the loop never offers again), the server records them and
   // starts the fix session with what was marked fix. The round leaves the list
   // on the next poll, once the session's record no longer holds it, and the
-  // answer says whether a fix session actually followed.
-  async function sendRound(sessionId) {
-    const round = roundOf(sessionId);
-    if (!round || findingsSending.has(sessionId)) return;
+  // answer says whether a fix session actually followed. A send that fails
+  // because the round is no longer held (sent from another tab, ruled on by
+  // an orchestrator, the loop turned off) has no card left to carry its
+  // error, so it is said on the outcome line instead of pruned with the card.
+  async function sendRound(round) {
+    const sessionId = round.session.id;
+    if (findingsSending.has(sessionId)) return;
     const key = roundKey(sessionId, round.held.round);
     const verdicts = round.held.findings.map((f) => {
       const draft = draftOf(key, f.key);
@@ -5767,6 +5803,8 @@
         title: round.session.title,
         fixing: !!(outcome && outcome.fixing),
         converged: !!(outcome && outcome.converged),
+        reviewing: !!(outcome && outcome.reviewing),
+        deferred: !!(outcome && outcome.deferred),
       });
     } catch (err) {
       findingsErrors.set(sessionId, err.message);
@@ -5774,6 +5812,12 @@
       findingsSending.delete(sessionId);
     }
     await loadSessions();
+    const error = findingsErrors.get(sessionId);
+    const still = roundOf(sessionId);
+    if (error && (!still || still.held.round !== round.held.round)) {
+      findingsErrors.delete(sessionId);
+      findingsOutcomes.set(sessionId, { title: round.session.title, error });
+    }
     renderFindingsView({ force: true });
   }
 

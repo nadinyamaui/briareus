@@ -212,7 +212,7 @@ describe('implementFeedbackPrompt', () => {
       findings: [{ severity: 'high', title: 'Injection' }],
       triaged: true,
       note: 'Keep the public signature.',
-      by: 'The user',
+      by: 'the user',
     });
     expect(prompt).toContain('as the user triaged them');
     expect(prompt).toContain('- **HIGH**: Injection\n\nThe user adds: Keep the public signature.');

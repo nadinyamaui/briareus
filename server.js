@@ -1682,7 +1682,7 @@ app.post('/api/dev/sessions/:id/loop', (req, res) => {
 app.post('/api/dev/sessions/:id/triage', async (req, res) => {
   try {
     const { verdicts, note } = req.body || {};
-    res.json(await triageLoopFindings(req.params.id, { verdicts, note, by: 'The user' }));
+    res.json(await triageLoopFindings(req.params.id, { verdicts, note, by: 'the user' }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
