@@ -204,9 +204,10 @@
           runtime the project configures.
         </li>
         <li>
-          When that review closes, whatever findings it declared are handed to a <strong>fix session</strong>
-          of its own: the same auto-closing implement-feedback errand the board starts, on the session's
-          branch and provider.
+          When that review closes, whatever findings it declared wait on the
+          <strong>⚑ Findings</strong> screen (below) until you rule on them. What you mark fix goes to a
+          <strong>fix session</strong> of its own: the same auto-closing implement-feedback errand the board
+          starts, on the session's branch and provider.
         </li>
         <li>That fix session pushes and closes, which triggers the next review.</li>
       </ol>
@@ -215,25 +216,25 @@
         database server and its conversation, and you can keep chatting in it undisturbed while the reviews
         and the fix sessions come and go around it.
       </p>
-      <p>
-        Each round's findings are listed on the <strong>Required fixes</strong> checklist before the fix
-        session starts, exactly as if you had decided them by hand in the findings panel: handing them over to
-        be implemented <em>is</em> that decision. The fix session then ticks the ones it actually fixed,
-        replies on the threads it addressed and resolves them, so the pull request and the panel both show
-        what is solved and what is still open. A finding you had already dismissed or marked optional is left
-        off that list.
-      </p>
-
       <p id="triage">
-        <strong>A worker's loop is triaged by its orchestrator first.</strong> When the worker files under a
-        🧭 orchestrator, each round's findings reach the orchestrator as an update, each with the loop's own
-        advice on it (what the rules below would have parked, and why), and nothing is implemented until it
-        rules on every one with <code>triage_findings</code>: <em>fix</em> goes to the fix session,
-        <em>dismissed</em> is recorded like a verdict given by hand in the findings panel and said on the pull
-        request with the reason, so no later round offers it again, and <em>optional</em> keeps it on the pull
-        request without spending a round. The orchestrator has the task's whole context, which the review did
-        not. The loop holds until it rules (the worker shows <em>awaiting triage</em>); a loop whose
-        orchestrator was closed meanwhile runs the round the way a loop with no orchestrator does.
+        <strong>Nothing a review found is fixed until you say so.</strong> Each round waits on the
+        <strong>⚑ Findings</strong> screen (the flag beside 📊 in the sidebar header; the badge counts the
+        rounds on hold), one card per round across every project, each finding with the loop's own advice on
+        it (what the rules below would have parked, and why). Mark each one <em>Fix</em>, <em>Optional</em> or
+        <em>Dismiss</em> (with a reason, recorded on the pull request) and press <strong>Send</strong>;
+        anything left unmarked stays on the pull request as optional. Sending records every verdict the way
+        the findings panel does: what you marked fix goes on the <strong>Required fixes</strong> checklist and
+        to the fix session, which ticks the ones it actually fixed, replies on the threads it addressed and
+        resolves them; a dismissed or optional finding is not offered again by a later round. A round with
+        nothing marked fix converges the loop. The loop holds until you send (the session shows
+        <em>findings waiting in ⚑ Findings</em>), across restarts too.
+      </p>
+      <p>
+        A worker's loop stops there just the same: its 🧭 orchestrator is told the round is waiting for you
+        and that the task is not done, and it does not rule on the round itself unless you ask it to (<code
+          >triage_findings</code
+        >
+        is there for that).
       </p>
 
       <h3 id="convergence">When it stops</h3>

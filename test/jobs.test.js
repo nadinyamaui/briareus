@@ -143,7 +143,7 @@ import { dropSessionDatabase } from '../lib/dbpool.js';
 import {
   latestReviewFindings,
   latestTestFailures,
-  queueFindingsForFix,
+  sortFindingsForFix,
   recordTriage,
 } from '../lib/findings.js';
 import { implementFeedbackPrompt } from '../lib/prtasks.js';
@@ -1737,6 +1737,13 @@ describe('the review loop: what a closing loop review reports back', () => {
       // A third: its read fails the same way, and then its session is closed.
       parentRow('par-17', 'rev-17'),
       reviewRow('rev-17', 'par-17', true),
+      // On its last allowed round, with a round that leaves only what the
+      // loop's own rules would park: the cap has nothing to stand ahead of.
+      parentRow('par-18', 'rev-18', { rounds: 3, lastFindings: 'k0' }),
+      reviewRow('rev-18', 'par-18', true),
+      // Its loop is turned off while the round's verdicts are being read.
+      parentRow('par-19', 'rev-19'),
+      reviewRow('rev-19', 'par-19', true),
       // Two workers of an orchestrator: their loops' verdicts are its to act
       // on. It stands on a question of its own, so the updates are held in
       // its buffer where the tests can read them instead of being spent on
@@ -1766,7 +1773,8 @@ describe('the review loop: what a closing loop review reports back', () => {
         createdAt: '2026-08-25T12:31:00.000Z',
       },
       reviewRow('rev-13', 'par-13', true),
-      // A third on its last allowed round: the cap stands ahead of the triage.
+      // A third on its last allowed round: the cap stands where the fix
+      // session would start, once the round is sent.
       {
         ...parentRow('par-14', 'rev-14', { rounds: 3, lastFindings: 'k0' }),
         parentId: 'loop-orch',
@@ -1812,6 +1820,10 @@ describe('the review loop: what a closing loop review reports back', () => {
       'rev-16',
       'par-17',
       'rev-17',
+      'par-18',
+      'rev-18',
+      'par-19',
+      'rev-19',
     ]) {
       getJob(id).status = 'idle';
     }
@@ -1860,80 +1872,105 @@ describe('the review loop: what a closing loop review reports back', () => {
     });
   });
 
-  it('findings go to a fix session even while the session stands on a question', async () => {
+  it('a round is held for triage even while the session stands on a question', async () => {
     const parent = getJob('par-3');
     parent.awaitingAnswer = true;
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
     await closeDevSession('rev-3');
     await new Promise((r) => setTimeout(r, 0));
-    // The fix runs in a session of its own, so nothing is held back and no
-    // turn is fired at the question card.
+    // Nothing is fixed until somebody rules on the round: no fix session, and
+    // no turn fired at the question card.
     expect(parent.reviewLoop.pendingFix).toBeFalsy();
+    expect(parent.reviewLoop.fixing).toBeFalsy();
+    expect(parent.reviewLoop.triage).toMatchObject({ prNumber: 77, round: 1 });
     expect(parent.awaitingAnswer).toBe(true); // the question card is still the user's to answer
     expect(parent.status).toBe('idle'); // no turn was started behind it
-    expect(infoTexts(parent).join('\n')).toMatch(/could not start the fix session/);
+    expect(infoTexts(parent).join('\n')).toMatch(/waiting in ⚑ Findings for you to decide/);
   });
 
-  it("lists the round's findings as required fixes so the fix session can mark them solved", async () => {
+  it("holds the round's findings with the loop's own advice on each", async () => {
+    const parent = getJob('par-4');
     const found = [{ key: 'k1', severity: 'high', title: 'A thing' }];
     latestReviewFindings.mockResolvedValueOnce(found);
     await closeDevSession('rev-4');
     await new Promise((r) => setTimeout(r, 0));
     // Round one takes everything a review found; the floor only tightens later.
-    expect(queueFindingsForFix).toHaveBeenCalledWith('acme/loop', 77, found, { severityFloor: 'low' });
+    expect(sortFindingsForFix).toHaveBeenCalledWith('acme/loop', 77, found, { severityFloor: 'low' });
+    expect(parent.reviewLoop.triage).toEqual({
+      prNumber: 77,
+      round: 1,
+      findings: [{ key: 'k1', severity: 'high', title: 'A thing', parked: null, parkedWhy: null }],
+      heldAt: expect.any(String),
+      sha: parent.reviewLoop.lastSha,
+      stale: false,
+    });
+    // Held, not decided: nothing is recorded until the verdicts come in.
+    expect(recordTriage).not.toHaveBeenCalledWith('acme/loop', 77, expect.anything(), expect.anything());
   });
 
-  it('sends nothing back when every finding was already dismissed by hand', async () => {
+  it('holds nothing when every finding was already dismissed by hand', async () => {
     const parent = getJob('par-5');
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
-    queueFindingsForFix.mockResolvedValueOnce({ kept: [], parked: [], error: null });
+    sortFindingsForFix.mockResolvedValueOnce({ kept: [], parked: [] });
     await closeDevSession('rev-5');
     await new Promise((r) => setTimeout(r, 0));
     expect(parent.status).toBe('idle');
+    expect(parent.reviewLoop.triage).toBeFalsy();
+    expect(parent.reviewLoop.done).toBe(true);
     expect(infoTexts(parent).join('\n')).toMatch(/none of them for this loop to implement/);
   });
 
-  it('implements the whole round when even the stored verdicts cannot be read', async () => {
+  it('holds the whole round when even the stored verdicts cannot be read', async () => {
     const parent = getJob('par-6');
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
-    queueFindingsForFix.mockRejectedValueOnce(new Error('database is away'));
+    sortFindingsForFix.mockRejectedValueOnce(new Error('database is away'));
     await closeDevSession('rev-6');
     await new Promise((r) => setTimeout(r, 0));
     const text = infoTexts(parent).join('\n');
     expect(text).toMatch(/could not read this pull request's finding verdicts/);
-    expect(text).toMatch(/could not start the fix session/); // the round is not dropped
+    expect(parent.reviewLoop.triage.findings).toEqual([
+      { key: 'k1', severity: 'high', title: 'A thing', parked: null, parkedWhy: null },
+    ]); // the round is not dropped
   });
 
-  it('starts no fix session for a pull request that closed during the checklist write', async () => {
+  it('holds nothing for a pull request that closed while the verdicts were read', async () => {
     const parent = getJob('par-7');
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
-    queueFindingsForFix.mockImplementationOnce(async (repo, prNumber, findings) => {
-      parent.prStatus = { number: 77, state: 'closed' }; // merged while the write was out
-      return { kept: findings, parked: [], error: null };
+    sortFindingsForFix.mockImplementationOnce(async (repo, prNumber, findings) => {
+      parent.prStatus = { number: 77, state: 'closed' }; // merged while the read was out
+      return { kept: findings, parked: [] };
     });
     await closeDevSession('rev-7');
     await new Promise((r) => setTimeout(r, 0));
     expect(parent.status).toBe('idle');
     expect(parent.reviewLoop.fixing).toBeFalsy();
-    expect(infoTexts(parent).join('\n')).not.toMatch(/fix session/);
+    expect(parent.reviewLoop.triage).toBeFalsy();
+    expect(infoTexts(parent).join('\n')).not.toMatch(/⚑ Findings/);
   });
 
-  it('stops the loop when a round repeats the findings of the round before it', async () => {
+  it('stops the loop when a sent round repeats the findings of the round before it', async () => {
     const parent = getJob('par-8');
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
     await closeDevSession('rev-8');
     await new Promise((r) => setTimeout(r, 0));
+    // The stall gate runs on what is sent to be fixed, not on what was found:
+    // a round held on the screen has cost nothing yet.
+    expect(parent.reviewLoop.stalled).toBeFalsy();
+    expect(parent.reviewLoop.triage).toMatchObject({ round: 2 });
+    await triageLoopFindings('par-8', { verdicts: [{ key: 'k1', decision: 'fix' }] });
     expect(parent.reviewLoop.stalled).toBe(true);
     expect(parent.reviewLoop.fixing).toBeFalsy(); // no fix session to push another commit with
     expect(parent.status).toBe('idle');
     expect(infoTexts(parent).join('\n')).toMatch(/same 1 finding\(s\) as the round before it/);
   });
 
-  it('a round that found something new goes to a fix session and becomes the next comparison', async () => {
+  it('a sent round that found something new goes to a fix session and becomes the next comparison', async () => {
     const parent = getJob('par-9');
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k2', severity: 'high', title: 'Another' }]);
     await closeDevSession('rev-9');
     await new Promise((r) => setTimeout(r, 0));
+    expect(parent.reviewLoop.lastFindings).toBe('k1'); // untouched while the round is on hold
+    await triageLoopFindings('par-9', { verdicts: [{ key: 'k2', decision: 'fix' }] });
     expect(parent.reviewLoop.stalled).toBeFalsy(); // restored rows carry no flag until one is set
     expect(parent.reviewLoop.lastFindings).toBe('k2');
     expect(infoTexts(parent).join('\n')).toMatch(/could not start the fix session/); // the spawn was attempted
@@ -1947,28 +1984,79 @@ describe('the review loop: what a closing loop review reports back', () => {
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k9', severity: 'high', title: 'Yet another' }]);
     await closeDevSession('rev-10');
     await new Promise((r) => setTimeout(r, 0));
+    // The final round is held and ruled on like any other: what it found is
+    // recorded on the pull request through the verdicts, and the cap stands
+    // where the fix session would start.
+    expect(parent.reviewLoop.stalled).toBeFalsy();
+    expect(parent.reviewLoop.triage).toMatchObject({ round: 3 });
+    expect(infoTexts(parent).join('\n')).not.toMatch(/REVIEW_LOOP_MAX_ROUNDS/);
+    const result = await triageLoopFindings('par-10', { verdicts: [{ key: 'k9', decision: 'fix' }] });
+    expect(result).toEqual({ fixing: false, converged: false });
     expect(parent.reviewLoop.stalled).toBe(true);
     expect(parent.reviewLoop.fixing).toBeFalsy(); // no fix session, so no round 4
-    expect(infoTexts(parent).join('\n')).toMatch(/REVIEW_LOOP_MAX_ROUNDS=3/);
+    expect(parent.reviewLoop.lastFindings).toBe('k0'); // never reached the stall gate's comparison
+    expect(infoTexts(parent).join('\n')).toMatch(
+      /REVIEW_LOOP_MAX_ROUNDS=3\), so the 1 finding\(s\) marked fix are listed on PR #77 rather than implemented/,
+    );
   });
 
-  it('stops asking for lows once the loop is past its first round', async () => {
+  it('holds a final round whose findings the loop would all have parked, instead of stalling', async () => {
+    const parent = getJob('par-18');
+    const found = [{ key: 'k1', severity: 'low', title: 'A nit' }];
+    latestReviewFindings.mockResolvedValueOnce(found);
+    sortFindingsForFix.mockResolvedValueOnce({ kept: [], parked: [{ ...found[0], reason: 'severity' }] });
+    await closeDevSession('rev-18');
+    await new Promise((r) => setTimeout(r, 0));
+    // The cap counts what the loop itself would have fixed, and that is
+    // nothing here: the round reaches the screen, where a nothing-to-fix
+    // send converges the loop the way a round that fixed nothing always did.
+    expect(parent.reviewLoop.stalled).toBeFalsy();
+    expect(parent.reviewLoop.triage).toMatchObject({
+      round: 3,
+      findings: [{ ...found[0], parked: 'severity' }],
+    });
+    expect(infoTexts(parent).join('\n')).not.toMatch(/REVIEW_LOOP_MAX_ROUNDS/);
+    await triageLoopFindings('par-18', { verdicts: [{ key: 'k1', decision: 'optional', reason: 'later' }] });
+    expect(parent.reviewLoop.done).toBe(true);
+    expect(parent.reviewLoop.stalled).toBeFalsy();
+  });
+
+  it('holds nothing for a loop turned off while the verdicts were read', async () => {
+    const parent = getJob('par-19');
+    latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
+    sortFindingsForFix.mockImplementationOnce(async (repo, prNumber, findings) => {
+      setReviewLoop('par-19', false); // 🔁 off, mid-read
+      return { kept: findings, parked: [] };
+    });
+    await closeDevSession('rev-19');
+    await new Promise((r) => setTimeout(r, 0));
+    // The hold would have landed on the detached loop object: announced in
+    // the log and to nobody's screen.
+    expect(parent.reviewLoop).toBeNull();
+    expect(infoTexts(parent).join('\n')).not.toMatch(/⚑ Findings/);
+  });
+
+  it('marks lows as advice to park once the loop is past its first round', async () => {
     const parent = getJob('par-11');
     const found = [{ key: 'k1', severity: 'low', title: 'A nit' }];
     latestReviewFindings.mockResolvedValueOnce(found);
-    queueFindingsForFix.mockResolvedValueOnce({
+    sortFindingsForFix.mockResolvedValueOnce({
       kept: [],
       parked: [{ ...found[0], reason: 'severity' }],
-      error: null,
     });
     await closeDevSession('rev-11');
     await new Promise((r) => setTimeout(r, 0));
-    expect(queueFindingsForFix).toHaveBeenCalledWith('acme/loop', 77, found, {
+    expect(sortFindingsForFix).toHaveBeenCalledWith('acme/loop', 77, found, {
       severityFloor: 'medium',
     });
-    // Recorded on the pull request and said out loud, but not implemented.
+    // Still the person's call: the split goes along as advice, not a verdict.
     expect(parent.reviewLoop.fixing).toBeFalsy();
-    expect(infoTexts(parent).join('\n')).toMatch(/A nit \(below the floor\)/);
+    // The advice ships with its wording, so the screen reads the same
+    // sentence the orchestrator does without a copy of the table.
+    expect(parent.reviewLoop.triage.findings).toEqual([
+      { ...found[0], parked: 'severity', parkedWhy: 'below the floor' },
+    ]);
+    expect(workerSummary(parent).reviewLoop.triage.findings[0].parked).toBe('below the floor');
   });
 
   // The failure the loop used to swallow: the review had finished and
@@ -2041,38 +2129,44 @@ describe('the review loop: what a closing loop review reports back', () => {
     expect(notice.text).toMatch(/ready to merge/);
   });
 
-  it('a worker’s review goes directly to the fix step without orchestrator triage', async () => {
+  it('a worker’s round is held for the user too, and its orchestrator is told to wait', async () => {
     const findings = [{ key: 'new-key', severity: 'high', title: 'A new issue' }];
     latestReviewFindings.mockResolvedValueOnce(findings);
-    queueFindingsForFix.mockResolvedValueOnce({ kept: findings, parked: [] });
     const recorded = recordTriage.mock.calls.length;
     await closeDevSession('rev-13');
     await new Promise((r) => setTimeout(r, 0));
     const parent = getJob('par-13');
-    expect(parent.reviewLoop.triage).toBeFalsy();
-    expect(parent.reviewLoop.lastFindings).toBe('new-key');
-    expect(queueFindingsForFix).toHaveBeenLastCalledWith('acme/loop', 77, findings, {
-      severityFloor: 'medium',
-    });
+    expect(parent.reviewLoop.triage).toMatchObject({ prNumber: 77, round: 2 });
+    expect(parent.reviewLoop.lastFindings).toBe('k1'); // nothing was sent to be fixed
     expect(recordTriage.mock.calls.length).toBe(recorded);
-    expect(
-      getJob('loop-orch').pendingWorkerNotices.some((n) => n.workerId === 'par-13' && n.kind === 'triage'),
-    ).toBe(false);
+    const notice = getJob('loop-orch').pendingWorkerNotices.find((n) => n.workerId === 'par-13');
+    expect(notice.kind).toBe('triage');
+    expect(notice.text).toMatch(
+      /^Worker par-13 \(Fix the filter\): review round 2 of PR #77 left 1 finding\(s\)/,
+    );
+    expect(notice.text).toMatch(/waiting for the user to decide in the dashboard's ⚑ Findings screen/);
+    expect(notice.text).toMatch(/do not triage the round yourself/);
   });
 
-  it('the round cap still stops a worker’s loop without orchestrator triage', async () => {
+  it('the round cap stalls a sent final round, and the orchestrator hears it', async () => {
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k9', severity: 'high', title: 'Yet another' }]);
     await closeDevSession('rev-14');
     await new Promise((r) => setTimeout(r, 0));
     const parent = getJob('par-14');
+    expect(parent.reviewLoop.stalled).toBeFalsy();
+    expect(parent.reviewLoop.triage).toMatchObject({ round: 3 }); // held, not stalled
+    await triageLoopFindings('par-14', { verdicts: [{ key: 'k9', decision: 'fix' }] });
     expect(parent.reviewLoop.stalled).toBe(true);
-    expect(parent.reviewLoop.triage).toBeFalsy(); // restored rows carry no field until one is set
+    expect(parent.reviewLoop.triage).toBeNull();
     const orch = getJob('loop-orch');
-    const notice = orch.pendingWorkerNotices.find((n) => n.workerId === 'par-14');
+    // After the hold notice: the round waited on the screen first.
+    const notice = orch.pendingWorkerNotices.find((n) => n.workerId === 'par-14' && n.kind === 'loop');
     expect(notice.text).toMatch(/^Worker par-14 \(Add the import\): the review loop stalled on PR #77/);
     expect(notice.text).toMatch(/REVIEW_LOOP_MAX_ROUNDS=3/);
     expect(notice.text).toMatch(/1 finding\(s\) listed on the pull request: Yet another\./);
-    expect(notice.text).toMatch(/do not waive findings or restart the loop automatically/);
+    expect(notice.text).toMatch(
+      /Findings are the user's to rule on; do not waive them or restart the loop on your own/,
+    );
   });
 });
 
@@ -2493,6 +2587,45 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
         loopFixParentId: 'tri-5',
         loopFixDone: true,
       },
+      // Two sends of the same round racing each other.
+      workerRow('tri-6', 'tri-orch'),
+      // Held at abc, and the branch has moved on to def since.
+      {
+        ...workerRow('tri-7', 'tri-orch', { triage: { ...held(), sha: 'abc', stale: false } }),
+        prStatus: { number: 79, state: 'open', headSha: 'def' },
+      },
+      {
+        ...workerRow('tri-8', 'tri-orch', {
+          fixing: true,
+          fixSessionId: 'tri-8-fix',
+          triage: { ...held(), sha: 'abc', stale: false },
+        }),
+        prStatus: { number: 79, state: 'open', headSha: 'def' },
+      },
+      {
+        id: 'tri-8-fix',
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/triage',
+        turns: 1,
+        loopFixParentId: 'tri-8',
+        loopFixDone: true,
+      },
+      // Held at abc with the branch at def, on a worker a restart left
+      // interrupted: the review the send owes cannot start until it settles.
+      {
+        ...workerRow('tri-11', 'tri-orch', { triage: { ...held(), sha: 'abc', stale: false } }),
+        prStatus: { number: 79, state: 'open', headSha: 'def' },
+      },
+      // Held with no sha recorded, and the branch at def: nothing to compare.
+      {
+        ...workerRow('tri-12', 'tri-orch', { lastSha: null, triage: { ...held(), sha: null, stale: false } }),
+        prStatus: { number: 79, state: 'open', headSha: 'def' },
+      },
+      // Closed with its round still on the screen.
+      workerRow('tri-9', 'tri-orch'),
+      // Merged under the hold, before the sync dropped the round.
+      { ...workerRow('tri-10', 'tri-orch'), prStatus: { number: 79, state: 'merged' } },
       // A free orchestrator with a triage update for a worker no longer holding one.
       orchRow('tri-free', {
         awaitingAnswer: false,
@@ -2500,9 +2633,27 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       }),
     ];
     await initJobs();
-    for (const id of ['tri-orch', 'tri-1', 'tri-2', 'tri-3', 'tri-4', 'tri-5', 'tri-5-fix', 'tri-free']) {
+    for (const id of [
+      'tri-orch',
+      'tri-1',
+      'tri-2',
+      'tri-3',
+      'tri-4',
+      'tri-5',
+      'tri-5-fix',
+      'tri-6',
+      'tri-7',
+      'tri-8',
+      'tri-8-fix',
+      'tri-9',
+      'tri-10',
+      'tri-11',
+      'tri-12',
+      'tri-free',
+    ]) {
       getJob(id).status = 'idle';
     }
+    getJob('tri-11').status = 'interrupted';
   });
 
   const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
@@ -2567,7 +2718,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
           reason: 'the memo is keyed on purpose',
         },
       ],
-      { round: 2 },
+      { round: 2, by: 'the orchestrator' },
     );
     // What was kept is the next round's comparison, and is what the fix
     // session is briefed with, as a decided list plus the note.
@@ -2578,6 +2729,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
         findings: [{ key: 'k1', severity: 'high', title: 'A thing' }],
         triaged: true,
         note: 'Keep the public signature.',
+        by: 'the orchestrator',
       }),
     );
     const text = infoTexts(worker).join('\n');
@@ -2599,10 +2751,14 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
     expect(result).toEqual({ fixing: false, converged: true });
     expect(worker.reviewLoop.done).toBe(true);
     expect(worker.reviewLoop.triage).toBeNull();
-    expect(infoTexts(worker).join('\n')).toMatch(/leaves nothing to implement after triage/);
+    expect(infoTexts(worker).join('\n')).toMatch(
+      /round 2 left nothing to implement after the orchestrator's triage\. The loop is done unless something new is pushed/,
+    );
     const notice = getJob('tri-orch').pendingWorkerNotices.find((n) => n.workerId === 'tri-2');
     expect(notice.kind).toBe('loop');
-    expect(notice.text).toMatch(/converged on PR #79: round 2 left nothing to implement after your triage/);
+    expect(notice.text).toMatch(
+      /converged on PR #79: round 2 left nothing to implement after the orchestrator's triage/,
+    );
   });
 
   it('the stall gate runs on what the triage kept', async () => {
@@ -2621,20 +2777,135 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
     expect(notice.text).toMatch(/stalled on PR #79.*same findings as the round before it/);
   });
 
-  it('a persisted held round resumes directly even with a live orchestrator', async () => {
-    getJob('tri-5').parentId = 'tri-orch';
-    const before = queueFindingsForFix.mock.calls.length;
+  it('a persisted held round stays on hold across a restart and a settle', async () => {
+    const before = sortFindingsForFix.mock.calls.length;
     await closeDevSession('tri-5-fix'); // the worker's next settle
     await new Promise((r) => setTimeout(r, 0));
     const worker = getJob('tri-5');
-    expect(worker.reviewLoop.triage).toBeNull();
-    expect(queueFindingsForFix.mock.calls.length).toBe(before + 1);
-    expect(queueFindingsForFix).toHaveBeenLastCalledWith('acme/triage', 79, held().findings, {
-      severityFloor: 'medium',
+    // The decision it waits for is a person's; nothing here makes it, and
+    // nothing re-sorts or re-reviews a round already on the screen.
+    expect(worker.reviewLoop.triage).toEqual(held());
+    expect(worker.reviewLoop.fixing).toBe(false);
+    expect(worker.reviewLoop.reviewing).toBeFalsy();
+    expect(sortFindingsForFix.mock.calls.length).toBe(before);
+    expect(infoTexts(worker).join('\n')).not.toMatch(/could not start the fix session|started a fix session/);
+  });
+
+  it('a second send of a round already being sent is refused before anything is written', async () => {
+    const before = recordTriage.mock.calls.length;
+    recordTriage.mockImplementationOnce(
+      () => new Promise((resolve) => setTimeout(() => resolve({ error: null }), 30)),
+    );
+    const verdicts = [
+      { key: 'k1', decision: 'optional' },
+      { key: 'k2', decision: 'optional' },
+    ];
+    const first = triageLoopFindings('tri-6', { verdicts });
+    await expect(triageLoopFindings('tri-6', { verdicts })).rejects.toThrow(/already being sent/);
+    expect(recordTriage.mock.calls.length).toBe(before + 1); // one record, one triage comment
+    await expect(first).resolves.toEqual({ fixing: false, converged: true });
+    // Released once the first is through: a third call finds no round, not a send in flight.
+    await expect(triageLoopFindings('tri-6', { verdicts })).rejects.toThrow(/no review round waiting/);
+  });
+
+  it('nothing to fix on a round the branch moved past reviews the new commits instead of converging', async () => {
+    const worker = getJob('tri-7');
+    const result = await triageLoopFindings('tri-7', {
+      verdicts: [
+        { key: 'k1', decision: 'dismissed', reason: 'fixed by hand' },
+        { key: 'k2', decision: 'optional' },
+      ],
     });
+    // Not the failure shape: the round is closed and a review was attempted
+    // on the new head. It failed to spawn here (the repo being unknown, which
+    // is the trace it leaves), so `reviewing` is false; and the session is
+    // idle, so nothing was deferred either, and the log says why instead.
+    expect(result).toEqual({ fixing: false, converged: false, reviewing: false, deferred: false });
+    expect(worker.reviewLoop.triage).toBeNull();
+    expect(worker.reviewLoop.done).toBeFalsy();
     const text = infoTexts(worker).join('\n');
-    expect(text).toMatch(/round 2's previously held findings now go directly to the fix session/);
-    expect(text).toMatch(/could not start the fix session/);
+    expect(text).toMatch(/branch moved while it was held, so the new commits are reviewed/);
+    expect(text).toMatch(/could not start the code review/);
+    expect(text).not.toMatch(/waits for this session to settle idle/);
+    const notice = (getJob('tri-orch').pendingWorkerNotices || []).find(
+      (n) => n.workerId === 'tri-7' && /converged/.test(n.text),
+    );
+    expect(notice).toBeUndefined();
+  });
+
+  it('a review the stale send owes but cannot start yet is said to be deferred, not failed', async () => {
+    const worker = getJob('tri-11');
+    const result = await triageLoopFindings('tri-11', {
+      verdicts: [
+        { key: 'k1', decision: 'dismissed', reason: 'fixed by hand' },
+        { key: 'k2', decision: 'optional' },
+      ],
+    });
+    expect(result).toEqual({ fixing: false, converged: false, reviewing: false, deferred: true });
+    expect(worker.reviewLoop.triage).toBeNull();
+    expect(worker.reviewLoop.done).toBeFalsy();
+    expect(worker.reviewLoop.rounds).toBe(2); // no round was attempted on an interrupted session
+    const text = infoTexts(worker).join('\n');
+    expect(text).toMatch(/waits for this session to settle idle \(it is interrupted\)/);
+    expect(text).not.toMatch(/could not start the code review/);
+  });
+
+  it('a hold that recorded no sha counts as not moved: it converges rather than re-reviewing', async () => {
+    const worker = getJob('tri-12');
+    const result = await triageLoopFindings('tri-12', {
+      verdicts: [
+        { key: 'k1', decision: 'optional' },
+        { key: 'k2', decision: 'optional' },
+      ],
+    });
+    expect(result).toEqual({ fixing: false, converged: true });
+    expect(worker.reviewLoop.done).toBe(true);
+    expect(infoTexts(worker).join('\n')).not.toMatch(/branch moved/);
+  });
+
+  it('a push landing under a held round marks the card stale at the next settle', async () => {
+    await closeDevSession('tri-8-fix'); // the worker's next settle
+    await new Promise((r) => setTimeout(r, 0));
+    const worker = getJob('tri-8');
+    expect(worker.reviewLoop.triage).toMatchObject({ round: 2, sha: 'abc', stale: true });
+    expect(worker.reviewLoop.reviewing).toBeFalsy(); // one round on the screen at a time
+    expect(infoTexts(worker).join('\n')).toMatch(/branch moved after round 2 was reviewed/);
+    expect(workerSummary(worker).reviewLoop.triage.stale).toBe(true);
+  });
+
+  it('closing the worker drops the round it was holding', async () => {
+    const worker = getJob('tri-9');
+    await closeDevSession('tri-9');
+    expect(worker.reviewLoop.triage).toBeNull();
+    expect(infoTexts(worker).join('\n')).toMatch(/round waiting in ⚑ Findings is dropped with this close/);
+    await expect(triageLoopFindings('tri-9', { verdicts: [{ key: 'k1', decision: 'fix' }] })).rejects.toThrow(
+      /no review round waiting/,
+    );
+  });
+
+  it('a round whose pull request is no longer open is refused before anything is written', async () => {
+    const before = recordTriage.mock.calls.length;
+    const worker = getJob('tri-10');
+    await expect(
+      triageLoopFindings('tri-10', {
+        verdicts: [
+          { key: 'k1', decision: 'fix' },
+          { key: 'k2', decision: 'fix' },
+        ],
+      }),
+    ).rejects.toThrow(/PR #79 is merged; its round is no longer waiting/);
+    expect(recordTriage.mock.calls.length).toBe(before); // no verdicts, no triage comment on a merged PR
+    expect(worker.reviewLoop.triage).toEqual(held()); // the sync drops it, not this
+    worker.status = 'closed';
+    await expect(
+      triageLoopFindings('tri-10', {
+        verdicts: [
+          { key: 'k1', decision: 'fix' },
+          { key: 'k2', decision: 'fix' },
+        ],
+      }),
+    ).rejects.toThrow(/This session is closed/);
+    expect(recordTriage.mock.calls.length).toBe(before);
   });
 
   it('a triage update for a round no longer on hold is dropped at delivery', () => {
@@ -2651,6 +2922,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
     expect(holding.reviewLoop.triage).toEqual({
       prNumber: 79,
       round: 2,
+      stale: false,
       findings: [
         { key: 'k1', severity: 'high', title: 'A thing', file: null, line: null, parked: null },
         { key: 'k2', severity: 'low', title: 'A nit', file: 'lib/x.js', line: 4, parked: 'below the floor' },
@@ -2741,7 +3013,10 @@ describe('the review loop: arming and disarming a session already underway', () 
       row('arm-7', { local: true }),
       row('arm-closed'),
       // A session whose loop review is still running, and that review.
-      row('arm-8', { reviewLoop: { rounds: 2, reviewing: true, reviewSessionId: 'arm-8-rev' } }),
+      row('arm-8', {
+        reviewLoop: { rounds: 2, reviewing: true, reviewSessionId: 'arm-8-rev' },
+        prStatus: { number: 8, state: 'open', headSha: 'head8' },
+      }),
       row('arm-8-rev', { loopParentId: 'arm-8' }),
     ];
     await initJobs();
@@ -2791,6 +3066,9 @@ describe('the review loop: arming and disarming a session already underway', () 
     // Counted as the round it is, and pointed at again, so its close reports
     // back here and no second review of the same pull request starts.
     expect(session.reviewLoop).toMatchObject({ rounds: 1, reviewing: true, reviewSessionId: 'arm-8-rev' });
+    // And the head it is reading, so the round it holds can be told stale
+    // and a nothing-to-fix send converges instead of reviewing it again.
+    expect(getJob('arm-8').reviewLoop.lastSha).toBe('head8');
     expect(infoTexts(getJob('arm-8')).join('\n')).toMatch(/already running is its first round/);
     await new Promise((r) => setTimeout(r, 0));
     expect(getJob('arm-8').reviewLoop.reviewSessionId).toBe('arm-8-rev');
@@ -3678,7 +3956,18 @@ describe('a merge closing the sessions on a pull request', () => {
   });
 
   beforeAll(async () => {
-    state.stored = [row('handed-1', false), row('branch-1', true)];
+    state.stored = [
+      row('handed-1', false),
+      {
+        ...row('branch-1', true),
+        // A round on the ⚑ Findings screen when the merge lands.
+        reviewLoop: {
+          rounds: 1,
+          lastSha: 'sha89',
+          triage: { prNumber: 90, round: 1, findings: [{ key: 'k1', severity: 'high', title: 'A thing' }] },
+        },
+      },
+    ];
     await initJobs();
     for (const id of ['handed-1', 'branch-1']) getJob(id).status = 'idle';
     githubRest.mockImplementation(async (_cfg, _method, url) => {
@@ -3714,6 +4003,81 @@ describe('a merge closing the sessions on a pull request', () => {
         .map((e) => e.text)
         .join('\n'),
     ).toMatch(/stays open: its pull request was found from its branch/);
+  });
+
+  it('drops the round that was held for the merged pull request', async () => {
+    await vi.waitFor(() => expect(getJob('branch-1').prStatus.state).toBe('merged'));
+    const job = getJob('branch-1');
+    expect(job.reviewLoop.triage).toBeNull();
+    expect(
+      job.events
+        .filter((e) => e.kind === 'info')
+        .map((e) => e.text)
+        .join('\n'),
+    ).toMatch(/PR #90 is merged, so the round waiting in ⚑ Findings is dropped/);
+  });
+});
+
+describe('a push by hand landing under a held round', () => {
+  // Its own repo and PR number, so the sync here matches nothing the other
+  // describes restored.
+  beforeAll(async () => {
+    state.stored = [
+      {
+        id: 'hand-1',
+        kind: 'devchat',
+        status: 'closed', // flipped to idle after the restore, like the rows above
+        repo: 'acme/hand',
+        turns: 1,
+        branch: 'dev-hand',
+        workDir: '/tmp/nowhere/acme-hand', // no clone there: the fetch fails, the probe falls back to the mirror
+        prAttachedByBranch: true,
+        prStatus: { number: 91, state: 'open', headSha: 'sha91', syncedAt: '2026-08-25T13:00:00.000Z' },
+        reviewLoop: {
+          rounds: 1,
+          lastSha: 'sha91',
+          triage: {
+            prNumber: 91,
+            round: 1,
+            findings: [{ key: 'k1', severity: 'high', title: 'A thing' }],
+            sha: 'sha91',
+            stale: false,
+          },
+        },
+      },
+    ];
+    await initJobs();
+    getJob('hand-1').status = 'idle';
+    spawn.mockClear();
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url === '/repos/acme/hand/pulls/91') {
+        return {
+          ok: true,
+          json: async () => ({
+            number: 91,
+            html_url: 'https://github.com/acme/hand/pull/91',
+            state: 'open',
+            merged_at: null,
+            head: { ref: 'dev-hand', sha: 'sha92' },
+            base: { ref: 'main' },
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    syncSessionsOn('acme/hand', null, 91);
+  });
+
+  it('fetches the branch into the clone before deciding whether the round is stale', async () => {
+    await vi.waitFor(() => expect(getJob('hand-1').reviewLoop.triage.stale).toBe(true));
+    // The stale check reads the clone's remote-tracking ref, which a push made
+    // anywhere else never moves: the sync fetches first, or the card would
+    // stay fresh over commits no round has read.
+    const fetch = spawn.mock.calls.find(
+      ([cmd, args]) => cmd === 'git' && args.join(' ') === '-C /tmp/nowhere/acme-hand fetch origin dev-hand',
+    );
+    expect(fetch).toBeTruthy();
+    expect(getJob('hand-1').reviewLoop.triage).toMatchObject({ sha: 'sha91', stale: true });
   });
 });
 
@@ -4597,9 +4961,10 @@ describe('the review loop: what a round runs on, and re-running one that could n
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
 
     await closeDevSession('rt-fix-review');
-    for (let i = 0; i < 400 && !/fix session/.test(infoTexts(job).join('\n')); i++) {
+    for (let i = 0; i < 400 && !job.reviewLoop.triage; i++) {
       await new Promise((r) => setTimeout(r, 10));
     }
+    await triageLoopFindings('rt-fix', { verdicts: [{ key: 'k1', decision: 'fix' }] });
 
     // The loop rides the project's reviewer (provider 2) for its reviews, and
     // the fix session that implements what one found is still the session's

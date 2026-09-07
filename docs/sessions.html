@@ -269,10 +269,10 @@
           orchestrator rather than a coding session: it lists the open sub-issues itself and takes them one at
           a time, a worker each with the review loop armed, merging each pull request (squash) once the loop
           approves it and its checks are green before the next worker starts. Each review round's findings
-          come to the orchestrator first, to <a href="review.html#triage">triage</a> against the sub-issue and
-          the epic; only what it keeps is implemented. A loop that stalls hands it the leftover findings to
-          judge the same way: the ones that apply go back to the worker, the rest it waives on the pull
-          request.
+          wait for you on the <a href="review.html#triage">⚑ Findings</a> screen; only what you mark fix is
+          implemented, and the orchestrator is told to wait meanwhile. A loop that stalls hands it the
+          leftover findings to judge the same way: the ones that apply go back to the worker, the rest it
+          waives on the pull request.
         </li>
         <li>
           <strong>Self-healing.</strong> The dashboard is software too, and an orchestrator can be failed by
