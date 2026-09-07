@@ -35,6 +35,7 @@ const {
   updateProject,
   removeProject,
   stepRuntime,
+  reviewerRuntime,
   render,
   selfProject,
   REVIEW_STEPS,
@@ -467,6 +468,24 @@ describe('reading one step runtime back', () => {
   it('answers null for a project with no overrides and for no project', () => {
     expect(stepRuntime({}, 'testSheet')).toBeNull();
     expect(stepRuntime(null, 'testSheet')).toBeNull();
+  });
+});
+
+describe('reading the project reviewer runtime back', () => {
+  it('answers what ⌕ Code review was configured to run on', () => {
+    const p = { reviewProviderId: 3, reviewModel: 'opus', reviewEffort: 'high' };
+
+    expect(reviewerRuntime(p)).toEqual({ providerId: 3, model: 'opus', effort: 'high' });
+  });
+
+  it('fills the model and effort in as blank when the project omits them', () => {
+    expect(reviewerRuntime({ reviewProviderId: 3 })).toEqual({ providerId: 3, model: '', effort: '' });
+  });
+
+  it('answers null for a project that named no reviewer, and for no project', () => {
+    expect(reviewerRuntime({ reviewProviderId: null, reviewModel: 'opus' })).toBeNull();
+    expect(reviewerRuntime({})).toBeNull();
+    expect(reviewerRuntime(null)).toBeNull();
   });
 });
 

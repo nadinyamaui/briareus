@@ -296,6 +296,18 @@
               <td>The project's <strong>Code review</strong> runtime, unless the composer picked another.</td>
             </tr>
             <tr>
+              <td>A round of a 🔁 review loop</td>
+              <td>
+                The project's <strong>Code review</strong> runtime as well, or, left unset, the session the
+                loop belongs to. A retry onto another provider keeps the loop there. A reviewer that cannot
+                run a round — its CLI missing here, its accounts spent — is given up for the rest of that
+                loop: every later round moves onto the session's own provider, and it takes a repair in
+                Settings plus either the <span class="kbd">🔁</span> chip off and on, which rebuilds the loop
+                and drops a queued QA run with it, or a <code>retry_review</code> naming the repaired row,
+                which keeps both, to ask the project again.
+              </td>
+            </tr>
+            <tr>
               <td>A QA step (test sheet, test run)</td>
               <td>That step's own runtime, or, left unset, whatever the session it came from runs on.</td>
             </tr>

@@ -82,13 +82,14 @@ vi.mock('../lib/providerstore.js', () => ({
   providerDefaultModel: () => 'claude-fable-5-1',
   providerDefaultEffort: () => 'high',
   captureProviderAuth: vi.fn(),
-  // The real one resolves a runtime against the provider rows; here the one
-  // row there is answers as stored, and any other id is a deleted row.
-  resolveRuntime: vi.fn((runtime) =>
-    runtime && runtime.providerId === state.provider.id
-      ? { provider: state.provider, model: runtime.model, effort: runtime.effort }
-      : null,
-  ),
+  // The real one resolves a runtime against the provider rows; here any row on
+  // the list answers as stored, and an id on none of them is a deleted row.
+  resolveRuntime: vi.fn((runtime) => {
+    const row = [state.provider, ...state.otherProviders].find(
+      (p) => runtime && p.id === Number(runtime.providerId),
+    );
+    return row && row.active ? { provider: row, model: runtime.model, effort: runtime.effort } : null;
+  }),
 }));
 
 vi.mock('../lib/projects.js', () => ({
@@ -97,6 +98,14 @@ vi.mock('../lib/projects.js', () => ({
   selfProject: () => state.projects.find((p) => p.isSelf) || null,
   render: vi.fn((s) => s),
   stepRuntime: vi.fn(() => null),
+  reviewerRuntime: (project) =>
+    project && project.reviewProviderId
+      ? {
+          providerId: project.reviewProviderId,
+          model: project.reviewModel || '',
+          effort: project.reviewEffort || '',
+        }
+      : null,
 }));
 
 vi.mock('../lib/prtasks.js', () => ({
@@ -3931,9 +3940,10 @@ describe('syncSessionsOn', () => {
   });
 });
 
-// A loop's own sessions — its reviews, its fix sessions, its QA run — are the
-// worker's work continued, so they run where the worker runs. The rounds here
-// all fail to start on purpose (an unknown provider row, a repo no project
+// A loop's reviews run on the reviewer the project was set up with; its fix
+// sessions and its QA run are the worker's work continued, so those run where
+// the worker runs. The rounds here all fail to start on purpose (an unknown
+// provider row, a provider family with no member left, a repo no project
 // claims): what the attempt asked for is what these tests read, out of the
 // info line the loop leaves behind, and no session is ever spawned.
 describe('the review loop: what a round runs on, and re-running one that could not', () => {
@@ -3997,6 +4007,349 @@ describe('the review loop: what a round runs on, and re-running one that could n
         failure: { round: 1, reason: 'Server restarted while the job was active', at: '2026-09-05' },
       },
     },
+    {
+      // On the project that configured a reviewer of its own, and on a
+      // provider row that is nothing like it.
+      id: 'rt-project',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 99,
+      model: 'claude-fable-5-1',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 59,
+      prStatus: { number: 59, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
+    },
+    {
+      // The same project, and a retry that has already moved this loop
+      // somewhere else: two answers to "what reviews this", one of which wins.
+      id: 'rt-both',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 99,
+      model: 'claude-fable-5-1',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 60,
+      prStatus: { number: 60, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        runtime: { providerId: 1, model: 'claude-fable-5-1', effort: 'high' },
+      },
+    },
+    {
+      // The same project, retried with nothing but a model: what the failure
+      // notice invites when an account is out of quota.
+      id: 'rt-model-only',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 99,
+      provider: 'Session provider',
+      model: 'session-model',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 62,
+      prStatus: { number: 62, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
+    },
+    {
+      // A project whose reviewer resolves and cannot run: its CLI is not on
+      // this machine. The session's own provider is one that can, so the round
+      // has somewhere to fall back to.
+      id: 'rt-uninstalled',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-cli',
+      providerId: 1,
+      provider: 'Claude entry',
+      model: 'claude-fable-5-1',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 63,
+      prStatus: { number: 63, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
+    },
+    {
+      // The orchestrator of the restarted worker below: it stands on a
+      // question of its own, so what the loop tells it stays in its buffer
+      // where the test can read it instead of being spent on a turn.
+      id: 'rt-orch',
+      kind: 'devchat',
+      // Not closed when the records are restored: the round is failed there,
+      // and a closed session is owed nothing (queueWorkerNotice).
+      status: 'interrupted',
+      repo: 'acme/rt-rev',
+      providerId: 1,
+      turns: 1,
+      orchestrator: true,
+      awaitingAnswer: true,
+    },
+    {
+      // A round that was riding on the project's reviewer when the process
+      // died: reconcileRestartedLoopJobs fails the round, which is not the
+      // reviewer failing at anything.
+      id: 'rt-restarted',
+      kind: 'devchat',
+      status: 'interrupted',
+      repo: 'acme/rt-rev',
+      parentId: 'rt-orch',
+      title: 'Add the export',
+      providerId: 1,
+      provider: 'Claude entry',
+      branch: 'task/rt',
+      startedOnPr: 64,
+      prStatus: { number: 64, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        reviewing: true,
+        reviewSessionId: 'rt-restarted-review',
+        reviewerRound: true,
+      },
+    },
+    {
+      id: 'rt-restarted-review',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 2,
+      branch: 'task/rt',
+      loopParentId: 'rt-restarted',
+    },
+    {
+      // A loop a partial retry moved onto the project's own reviewer without
+      // the caller ever naming it: a review override that is the reviewer, on
+      // the project whose reviewer runs a CLI this machine does not have.
+      id: 'rt-override-reviewer',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-cli',
+      providerId: 1,
+      provider: 'Claude entry',
+      model: 'claude-fable-5-1',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 65,
+      prStatus: { number: 65, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        reviewRuntime: { providerId: 3, model: 'claude-fable-5-1', effort: 'high' },
+      },
+    },
+    {
+      // The same project, reached the other way: a retry that named that
+      // reviewer outright, so the loop-wide override the fix sessions and the
+      // QA run read (loopSessionRuntime) points at a CLI this machine has not
+      // got either.
+      id: 'rt-pinned',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-cli',
+      providerId: 1,
+      provider: 'Claude entry',
+      model: 'claude-fable-5-1',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 68,
+      prStatus: { number: 68, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        runtime: { providerId: 3, model: 'claude-fable-5-1', effort: 'high' },
+      },
+    },
+    {
+      // The same shape, on a project whose reviewer is fine: what a retry that
+      // named only a model leaves behind, with a finished review of its own to
+      // close so the fix session it hands the findings to can be watched.
+      id: 'rt-fix',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      // Deleted since, so every spawn attempt names it and fails: the attempt
+      // is what says which runtime the fix session was given.
+      providerId: 99,
+      provider: 'Session provider',
+      model: 'session-model',
+      effort: 'high',
+      turns: 1,
+      branch: 'task/rt',
+      startedOnPr: 66,
+      prStatus: { number: 66, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        reviewing: true,
+        reviewSessionId: 'rt-fix-review',
+        lastSha: 'sha-rt',
+        reviewRuntime: { providerId: 2, model: 'claude-fable-5-1', effort: 'low' },
+      },
+    },
+    {
+      id: 'rt-fix-review',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      turns: 1,
+      createdAt: '2026-08-25T13:00:00.000Z',
+      loopParentId: 'rt-fix',
+      loopReviewDone: true,
+    },
+    {
+      // A loop that gave the project's reviewer up, whose operator has since
+      // repaired it and says so by naming it in a retry.
+      id: 'rt-repaired',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 1,
+      provider: 'Claude entry',
+      model: 'claude-fable-5-1',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 67,
+      prStatus: { number: 67, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: { rounds: 1, lastSha: 'sha-rt', reviewerFailed: true },
+    },
+    {
+      // A loop a partial retry left with the project's reviewer of the day
+      // frozen into its review override: nobody named that provider, the
+      // fill-in did (retryLoopRound).
+      id: 'rt-repointed',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 99,
+      provider: 'Session provider',
+      model: 'session-model',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 69,
+      prStatus: { number: 69, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        reviewRuntime: { providerId: 2, model: 'claude-fable-5-1', effort: 'low' },
+        reviewRuntimeFromProject: true,
+      },
+    },
+    {
+      // The same shape, kept apart so a second partial retry can be run over
+      // it: what the loop looks like when the notice for the round the first
+      // retry re-ran invites another one.
+      id: 'rt-refrozen',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 99,
+      provider: 'Session provider',
+      model: 'session-model',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 70,
+      prStatus: { number: 70, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        reviewRuntime: { providerId: 2, model: 'claude-fable-5-1', effort: 'low' },
+        reviewRuntimeFromProject: true,
+      },
+    },
+    {
+      // And the same again, for the line the retry pushes: the override here
+      // is the one loopReviewChoice passes over once Settings is repointed.
+      id: 'rt-passed-over',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 99,
+      provider: 'Session provider',
+      model: 'session-model',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 71,
+      prStatus: { number: 71, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        reviewRuntime: { providerId: 2, model: 'claude-fable-5-1', effort: 'low' },
+        reviewRuntimeFromProject: true,
+      },
+    },
+    {
+      // On the project with a reviewer of its own, and a session runtime
+      // nothing like it: what a retry that names a provider has to keep for
+      // the fix sessions and the QA run it takes with it.
+      id: 'rt-moved',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 1,
+      provider: 'Claude entry',
+      model: 'session-model',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 72,
+      prStatus: { number: 72, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
+    },
+    {
+      // The same project again, with a reviewer this loop gave up and an
+      // operator who has since repaired it: what a retry naming it outright
+      // has to leave the reviews reading.
+      id: 'rt-back',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-rev',
+      providerId: 1,
+      provider: 'Claude entry',
+      model: 'session-model',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 73,
+      prStatus: { number: 73, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: { rounds: 1, lastSha: 'sha-rt', reviewerFailed: true },
+    },
+    {
+      // A loop a retry has already moved once, onto a provider of another
+      // family: what the next retry has to not carry forward. The project
+      // names no reviewer, so nothing but the two overrides is in play.
+      id: 'rt-again',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt',
+      providerId: 1,
+      provider: 'Claude entry',
+      model: 'session-model',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 74,
+      prStatus: { number: 74, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: {
+        rounds: 1,
+        lastSha: 'sha-rt',
+        runtime: { providerId: 3, model: 'codex-model', effort: 'low' },
+      },
+    },
+    {
+      // A project whose reviewer row was deleted in Settings since.
+      id: 'rt-gone',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/rt-gone',
+      providerId: 99,
+      model: 'claude-fable-5-1',
+      effort: 'high',
+      branch: 'task/rt',
+      startedOnPr: 61,
+      prStatus: { number: 61, state: 'open', headSha: 'sha-rt' },
+      reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
+    },
   ];
 
   beforeAll(async () => {
@@ -4006,27 +4359,437 @@ describe('the review loop: what a round runs on, and re-running one that could n
   });
 
   beforeEach(() => {
-    // The project configures a board reviewer of its own: what ⌕ Code review
-    // opens on, and deliberately not what this session's loop follows.
     state.projects = [
+      // No reviewer of their own: a round on these follows the session.
       { repo: 'acme/shop', label: 'Shop', localDir: '' },
-      { repo: 'acme/rt', label: 'RT', localDir: '', reviewProviderId: 1, reviewModel: 'claude-fable-5-1' },
+      { repo: 'acme/rt', label: 'RT', localDir: '' },
+      // What ⌕ Code review was set up to run on, and so what a round runs on.
+      {
+        repo: 'acme/rt-rev',
+        label: 'RT reviewer',
+        localDir: '',
+        reviewProviderId: 2,
+        reviewModel: 'claude-fable-5-1',
+        reviewEffort: 'low',
+      },
+      // The same setting, naming a provider row that has been deleted since.
+      { repo: 'acme/rt-gone', label: 'RT gone', localDir: '', reviewProviderId: 97 },
+      // And one naming a row that is there, active, and runs a CLI this
+      // machine does not have.
+      { repo: 'acme/rt-cli', label: 'RT cli', localDir: '', reviewProviderId: 3 },
+    ];
+    state.otherProviders = [
+      { id: 2, label: 'Project reviewer', binary: 'claude', active: true },
+      { id: 3, label: 'Uninstalled reviewer', binary: 'codex', active: true },
     ];
   });
 
   const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
 
-  it('a round runs on the session it reviews for, not on the project’s board reviewer', async () => {
+  it('a round runs on the project’s reviewer, not on the session it reviews for', async () => {
+    const job = getJob('rt-project');
+    // Nothing spawns here either: the reviewer resolves, and the round stops
+    // one step later, on a provider family with no member left to run it.
+    state.group = [];
+
+    const outcome = await retryLoopRound('rt-project');
+
+    // The attempt named the project's reviewer by label. Had it followed the
+    // session it reviews for, the line would carry provider 99 instead.
+    expect(infoTexts(job).join('\n')).toMatch(
+      /could not start the code review: Project reviewer: this provider is inactive/,
+    );
+    expect(infoTexts(job).join('\n')).not.toMatch(/Unknown provider: 99/);
+    expect(outcome).toEqual({ started: false, round: 1 });
+  });
+
+  it('falls back to the session when the project configured no reviewer', async () => {
     const job = getJob('rt-own');
 
     const outcome = await retryLoopRound('rt-own');
 
-    // The attempt named provider 99, the session's own: had it read the
-    // project's reviewer it would have asked for provider 1.
+    // acme/rt names no reviewer, so the round is the session's own provider 99.
     expect(infoTexts(job).join('\n')).toMatch(/could not start the code review: Unknown provider: 99/);
     // The round that could not start gives its number back, as every failed
     // start does, so the next one is still round 2.
     expect(outcome).toEqual({ started: false, round: 1 });
+  });
+
+  it('falls back to the session when the project’s reviewer row is gone, and says so once', async () => {
+    const job = getJob('rt-gone');
+
+    await retryLoopRound('rt-gone');
+
+    expect(infoTexts(job).join('\n')).toMatch(/the reviewer this project was set up with is gone/);
+    expect(infoTexts(job).join('\n')).toMatch(/could not start the code review: Unknown provider: 99/);
+
+    // The row stays deleted, so every later round takes the same fallback. The
+    // notice is a standing condition, said once like the loop's others, not a
+    // line per push for the life of the session.
+    await retryLoopRound('rt-gone');
+    expect(infoTexts(job).filter((t) => /is gone, so the review runs on/.test(t))).toHaveLength(1);
+  });
+
+  it('falls back to the session when the project’s reviewer cannot run at all', async () => {
+    const job = getJob('rt-uninstalled');
+    // Resolving says nothing about being able to start: this row is active and
+    // its CLI is not installed here, which createDevSession only finds out
+    // when it tries. The round must not die on that.
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue(null);
+    // With a QA loop queued behind this one, the way out this notice points at
+    // costs it: turning the 🔁 chip off drops the QA loop too (setReviewLoop).
+    job.qaLoop = { running: false, done: false };
+    try {
+      await retryLoopRound('rt-uninstalled');
+      expect(infoTexts(job).join('\n')).toMatch(
+        /turn the 🔁 chip off and on to ask the project again, and arm the 🎬 chip again/,
+      );
+    } finally {
+      job.qaLoop = null;
+      bin.mockRestore();
+    }
+
+    expect(infoTexts(job).join('\n')).toMatch(
+      /the reviewer this project was set up with cannot run \(Uninstalled reviewer: the Codex CLI was not found on this machine\), so this round and the ones after it run on Claude entry instead/,
+    );
+    // The round happened, on the session's own provider, and the reviewer is
+    // given up rather than retried into the same wall on every later round.
+    expect(infoTexts(job).join('\n')).toMatch(/started code review round 2 of PR #63/);
+    expect(job.reviewLoop).toMatchObject({ reviewing: true, reviewerFailed: true, reviewerRound: false });
+    expect(getJob(job.reviewLoop.reviewSessionId).providerId).toBe(1);
+    closeDevSession(job.reviewLoop.reviewSessionId);
+  });
+
+  it('a round a server restart interrupted keeps the project’s reviewer', async () => {
+    const job = getJob('rt-restarted');
+    // The round was reported failed while the records were restored, before
+    // any of this ran. A restart is this process dying, not the reviewer the
+    // round was riding: only a failure that came out of the provider is
+    // evidence about it, so the reviewer is not given up here.
+    expect(job.reviewLoop.reviewerFailed).toBeFalsy();
+    expect(job.reviewLoop.reviewerRound).toBe(false);
+    expect(infoTexts(job).join('\n')).not.toMatch(/The reviewer this project was set up with is what failed/);
+
+    state.group = [];
+    await retryLoopRound('rt-restarted');
+
+    // So the retried round is still the project's reviewer, not the session's.
+    expect(infoTexts(job).join('\n')).toMatch(
+      /could not start the code review: Project reviewer: this provider is inactive/,
+    );
+  });
+
+  it('an override that is the project’s reviewer falls back and is given up like one', async () => {
+    const job = getJob('rt-override-reviewer');
+    // A retry that named only a model had its provider filled in from the
+    // reviewer, so this loop rides the project's reviewer through an override
+    // nobody chose. It must still be treated as the project's: the reviewer's
+    // CLI is not on this machine, and the round has to fall back rather than
+    // fail for good.
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue(null);
+    try {
+      await retryLoopRound('rt-override-reviewer');
+
+      expect(infoTexts(job).join('\n')).toMatch(
+        /the reviewer this project was set up with cannot run \(Uninstalled reviewer: the Codex CLI was not found on this machine\), so this round and the ones after it run on Claude entry instead/,
+      );
+      expect(infoTexts(job).join('\n')).toMatch(/started code review round 2 of PR #65/);
+      expect(job.reviewLoop).toMatchObject({ reviewerFailed: true, reviewerRound: false });
+      expect(getJob(job.reviewLoop.reviewSessionId).providerId).toBe(1);
+      closeDevSession(job.reviewLoop.reviewSessionId);
+
+      // And the override does not bring that reviewer back on the next round:
+      // it names the provider this loop has just given up, so it is dropped
+      // with the setting it was filled in from.
+      state.group = [];
+      job.reviewLoop.reviewing = false;
+      await retryLoopRound('rt-override-reviewer');
+      expect(infoTexts(job).join('\n')).toMatch(
+        /could not start the code review: Claude entry: this provider is inactive/,
+      );
+      expect(infoTexts(job).join('\n')).not.toMatch(/Unknown provider: 3/);
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
+  it('giving the reviewer up drops the retry that pinned the whole loop to it', async () => {
+    const job = getJob('rt-pinned');
+    // A retry named this provider outright, so it is the loop-wide override:
+    // what loopSessionRuntime hands to every fix session and to the QA run.
+    // The review falls back off it here, and leaving the fix sessions on it
+    // would publish findings that nothing could ever implement.
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue(null);
+    try {
+      await retryLoopRound('rt-pinned');
+
+      expect(job.reviewLoop.reviewerFailed).toBe(true);
+      expect(job.reviewLoop.runtime).toBeNull();
+      // Dropping it is a move somebody made being undone: the fix sessions and
+      // the QA run go back to the session's own provider, which may be the
+      // account that retry escaped, so the give-up says so rather than sending
+      // them back in silence.
+      expect(infoTexts(job).join('\n')).toMatch(
+        /The retry that had moved this loop onto Uninstalled reviewer goes with it, so its fix sessions and its QA run are back on Claude entry/,
+      );
+      expect(infoTexts(job).join('\n')).toMatch(/started code review round 2 of PR #68/);
+      expect(getJob(job.reviewLoop.reviewSessionId).providerId).toBe(1);
+      closeDevSession(job.reviewLoop.reviewSessionId);
+
+      // And nothing brings that provider back on the next round.
+      const said = infoTexts(job).length;
+      state.group = [];
+      job.reviewLoop.reviewing = false;
+      await retryLoopRound('rt-pinned');
+      expect(infoTexts(job).slice(said).join('\n')).toMatch(
+        /could not start the code review: Claude entry: this provider is inactive/,
+      );
+      expect(infoTexts(job).slice(said).join('\n')).not.toMatch(/Uninstalled reviewer/);
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
+  it('refuses a retry whose model the provider it names does not run', async () => {
+    // resolveRuntime swaps a model the provider does not run for that
+    // provider's default, which would leave the retry running on the very
+    // model it was moved off. The mock above answers whatever it is given, so
+    // the swap is staged here.
+    const real = resolveRuntime.getMockImplementation();
+    resolveRuntime.mockImplementation((runtime) => {
+      const out = real(runtime);
+      return out && out.model === 'not-a-model' ? { ...out, model: 'claude-fable-5-1' } : out;
+    });
+    try {
+      await expect(retryLoopRound('rt-model-only', { model: 'not-a-model' })).rejects.toThrow(
+        /does not run not-a-model \(it runs claude-fable-5-1\)/,
+      );
+    } finally {
+      resolveRuntime.mockImplementation(real);
+    }
+  });
+
+  it('a retry that names only a model keeps the loop on the project’s reviewer', async () => {
+    const job = getJob('rt-model-only');
+    state.group = [];
+
+    await retryLoopRound('rt-model-only', { model: 'claude-fable-5-1' });
+
+    // Filled in from what the reviews already run on: the model asked for
+    // belongs to the reviewer, so defaulting the provider to the session's
+    // would have dropped it and pinned every later round to provider 99.
+    expect(job.reviewLoop.reviewRuntime).toEqual({
+      providerId: 2,
+      model: 'claude-fable-5-1',
+      effort: 'low',
+    });
+    // The reviews only: the retry named a model for the round it re-runs and
+    // nothing for the work, so the loop-wide override the fix sessions and the
+    // QA run read (loopSessionRuntime) is left alone.
+    expect(job.reviewLoop.runtime).toBeFalsy();
+    expect(infoTexts(job).join('\n')).toMatch(
+      /could not start the code review: Project reviewer: this provider is inactive/,
+    );
+  });
+
+  it('a retry that names only a model leaves the fix session on the session’s own provider', async () => {
+    const job = getJob('rt-fix');
+    latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
+
+    await closeDevSession('rt-fix-review');
+    for (let i = 0; i < 400 && !/fix session/.test(infoTexts(job).join('\n')); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    // The loop rides the project's reviewer (provider 2) for its reviews, and
+    // the fix session that implements what one found is still the session's
+    // own work: it is attempted on provider 99, not on the reviewer.
+    expect(infoTexts(job).join('\n')).toMatch(/could not start the fix session: Unknown provider: 99/);
+    expect(infoTexts(job).join('\n')).not.toMatch(/Project reviewer/);
+  });
+
+  it('a retry naming the reviewer this loop gave up puts the round back on it', async () => {
+    const job = getJob('rt-repaired');
+    state.group = [];
+
+    // reviewerFailed is this loop's record that the reviewer could not review
+    // anything. An operator naming it outright is saying it is repaired — the
+    // account rolled over, the CLI is installed — so the round rides it again.
+    await retryLoopRound('rt-repaired', { providerId: 2 });
+
+    expect(job.reviewLoop.reviewerFailed).toBe(false);
+    expect(infoTexts(job).join('\n')).toMatch(
+      /could not start the code review: Project reviewer: this provider is inactive/,
+    );
+    expect(infoTexts(job).join('\n')).not.toMatch(/Claude entry: this provider is inactive/);
+  });
+
+  it('a partial retry’s frozen reviewer follows the project when Settings repoints it', async () => {
+    const job = getJob('rt-repointed');
+    // The override names provider 2 because that is what ⌕ Code review said
+    // when the retry filled the provider in; the operator has since repointed
+    // the setting at another one, which is what the give-up messages ask for.
+    state.projects = state.projects.map((p) =>
+      p.repo === 'acme/rt-rev' ? { ...p, reviewProviderId: 3, reviewModel: null, reviewEffort: null } : p,
+    );
+    state.group = [];
+
+    await retryLoopRound('rt-repointed');
+
+    // So the round rides the reviewer the project names now. Left frozen, it
+    // would review on a row nothing names, with the give-up and the
+    // start-refusal fallback both switched off for being an override.
+    expect(infoTexts(job).join('\n')).toMatch(
+      /could not start the code review: Uninstalled reviewer: this provider is inactive/,
+    );
+    expect(infoTexts(job).join('\n')).not.toMatch(/Project reviewer/);
+  });
+
+  it('a second partial retry keeps the frozen reviewer following the project', async () => {
+    const job = getJob('rt-refrozen');
+    state.group = [];
+
+    // The round the first retry re-ran failed again, and its notice invites
+    // another partial retry. Still nobody has named a provider — the fill-in
+    // read it off ⌕ Code review both times — so the row stays marked as the
+    // setting's answer rather than being unmarked by the retry that re-reads it.
+    await retryLoopRound('rt-refrozen', { effort: 'high' });
+
+    expect(job.reviewLoop.reviewRuntime).toEqual({
+      providerId: 2,
+      model: 'claude-fable-5-1',
+      effort: 'high',
+    });
+    expect(job.reviewLoop.reviewRuntimeFromProject).toBe(true);
+
+    // So repointing the setting still moves the reviews with it, one retry
+    // later. Unmarked, the round would ride provider 2 as an override for
+    // good, with the give-up and the start-refusal fallback both switched off.
+    state.projects = state.projects.map((p) =>
+      p.repo === 'acme/rt-rev' ? { ...p, reviewProviderId: 3 } : p,
+    );
+    const said = infoTexts(job).length;
+    await retryLoopRound('rt-refrozen');
+
+    expect(infoTexts(job).slice(said).join('\n')).toMatch(
+      /could not start the code review: Uninstalled reviewer: this provider is inactive/,
+    );
+    // (the round before it is named in the retry line as the one that failed,
+    // so only the attempt itself says which provider this round asked for)
+    expect(infoTexts(job).slice(said).join('\n')).not.toMatch(
+      /could not start the code review: Project reviewer/,
+    );
+  });
+
+  it('the retry line names the model the round opens on, not the pin passed over', async () => {
+    const job = getJob('rt-passed-over');
+    // The review override froze provider 2 in from the setting, and Settings
+    // names another reviewer now, so loopReviewChoice passes that override
+    // over. This line is the operator's only word on the runtime.
+    state.projects = state.projects.map((p) =>
+      p.repo === 'acme/rt-rev' ? { ...p, reviewProviderId: 3, reviewModel: 'codex-model' } : p,
+    );
+    state.group = [];
+
+    await retryLoopRound('rt-passed-over');
+
+    expect(infoTexts(job).join('\n')).toMatch(/retrying the review on codex-model/);
+    expect(infoTexts(job).join('\n')).not.toMatch(/retrying the review on claude-fable-5-1/);
+  });
+
+  it('a retry that names a provider keeps the session’s model on the work it moves', async () => {
+    const job = getJob('rt-moved');
+    state.group = [];
+
+    // A provider named outright moves the whole loop, so what it settles is
+    // what the fix sessions and the QA run open on (loopSessionRuntime).
+    // Filling its gaps in from the reviews would put them on the reviewer's
+    // model and effort — claude-fable-5-1 / low here — which the caller never
+    // named and which is nobody's answer for code-writing turns.
+    await retryLoopRound('rt-moved', { providerId: 2 });
+
+    expect(job.reviewLoop.runtime).toEqual({
+      providerId: 2,
+      model: 'session-model',
+      effort: 'high',
+    });
+  });
+
+  it('a retry back onto the reviewer keeps the reviews on the project’s model', async () => {
+    const job = getJob('rt-back');
+    state.group = [];
+
+    // Naming the reviewer this loop gave up says it is repaired, so the rounds
+    // ride it again. What the call left out is the setting's answer for those
+    // rounds, not the session's: filled in from the work this retry moves, the
+    // reviews would run on the model that wrote the code (session-model /
+    // high) and outrank ⌕ Code review for the rest of the loop.
+    await retryLoopRound('rt-back', { providerId: 2 });
+
+    expect(job.reviewLoop.reviewerFailed).toBe(false);
+    expect(job.reviewLoop.reviewRuntime).toEqual({
+      providerId: 2,
+      model: 'claude-fable-5-1',
+      effort: 'low',
+    });
+    // The fix sessions and the QA run this retry moves keep the session's own
+    // model and effort, as they always have.
+    expect(job.reviewLoop.runtime).toEqual({
+      providerId: 2,
+      model: 'session-model',
+      effort: 'high',
+    });
+    expect(infoTexts(job).join('\n')).toMatch(/retrying the review on claude-fable-5-1/);
+    expect(infoTexts(job).join('\n')).not.toMatch(/retrying the review on session-model/);
+  });
+
+  it('a second retry onto another provider restores the session’s own model', async () => {
+    const job = getJob('rt-again');
+    state.group = [];
+
+    // The first retry moved this loop onto provider 3, which runs models of
+    // another family; this one names the session's own row again, the call the
+    // failure notice invites once that provider runs dry too. Filled in from
+    // the override it replaces, the model would be the other family's — which
+    // provider 1 does not run, so resolveRuntime would swap it for provider
+    // 1's default, and the fix sessions and the QA run would open for the rest
+    // of the loop on a model neither the session nor the caller ever named.
+    await retryLoopRound('rt-again', { providerId: 1 });
+
+    expect(job.reviewLoop.runtime).toEqual({
+      providerId: 1,
+      model: 'session-model',
+      effort: 'high',
+    });
+  });
+
+  it('a round nothing but a restart ended is not a provider to move off', async () => {
+    // reconcileRestartedLoopJobs failed rt-restarted's round while the records
+    // were restored. The orchestrator is the one party that acts on this, and
+    // what it is told to do — retry_review on another provider_id — moves the
+    // loop's reviews, its fix sessions and its QA run off the project's
+    // reviewer for good, so it must not be told that for a round the provider
+    // never turned away.
+    const notice = getJob('rt-orch').pendingWorkerNotices.find((n) => n.workerId === 'rt-restarted');
+    expect(notice.kind).toBe('loop');
+    expect(notice.text).toMatch(/interrupted rather than turned away by the provider/);
+    expect(notice.text).toMatch(/naming no provider_id or model/);
+    expect(notice.text).not.toMatch(/This is the provider failing/);
+  });
+
+  it('a retry’s override outranks the project’s reviewer', async () => {
+    const job = getJob('rt-both');
+    state.group = [];
+
+    await retryLoopRound('rt-both');
+
+    // Provider 1 is what the retry moved this loop onto, and it is what moved
+    // it off a provider that failed it: the project's reviewer does not undo
+    // that on the next round.
+    expect(infoTexts(job).join('\n')).toMatch(
+      /could not start the code review: Claude entry: this provider is inactive/,
+    );
+    expect(infoTexts(job).join('\n')).not.toMatch(/Project reviewer/);
   });
 
   it('a retry moves the loop onto the runtime it names, and keeps it for later rounds', async () => {
