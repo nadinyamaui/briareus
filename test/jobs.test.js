@@ -1889,6 +1889,8 @@ describe('the review loop: what a closing loop review reports back', () => {
       round: 1,
       findings: [{ key: 'k1', severity: 'high', title: 'A thing', parked: null }],
       heldAt: expect.any(String),
+      sha: parent.reviewLoop.lastSha,
+      stale: false,
     });
     // Held, not decided: nothing is recorded until the verdicts come in.
     expect(recordTriage).not.toHaveBeenCalledWith('acme/loop', 77, expect.anything(), expect.anything());
@@ -2095,7 +2097,9 @@ describe('the review loop: what a closing loop review reports back', () => {
     expect(notice.text).toMatch(/^Worker par-14 \(Add the import\): the review loop stalled on PR #77/);
     expect(notice.text).toMatch(/REVIEW_LOOP_MAX_ROUNDS=3/);
     expect(notice.text).toMatch(/1 finding\(s\) listed on the pull request: Yet another\./);
-    expect(notice.text).toMatch(/do not waive findings or restart the loop automatically/);
+    expect(notice.text).toMatch(
+      /Findings are the user's to rule on; do not waive them or restart the loop on your own/,
+    );
   });
 });
 
@@ -2516,6 +2520,32 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
         loopFixParentId: 'tri-5',
         loopFixDone: true,
       },
+      // Two sends of the same round racing each other.
+      workerRow('tri-6', 'tri-orch'),
+      // Held at abc, and the branch has moved on to def since.
+      {
+        ...workerRow('tri-7', 'tri-orch', { triage: { ...held(), sha: 'abc', stale: false } }),
+        prStatus: { number: 79, state: 'open', headSha: 'def' },
+      },
+      {
+        ...workerRow('tri-8', 'tri-orch', {
+          fixing: true,
+          fixSessionId: 'tri-8-fix',
+          triage: { ...held(), sha: 'abc', stale: false },
+        }),
+        prStatus: { number: 79, state: 'open', headSha: 'def' },
+      },
+      {
+        id: 'tri-8-fix',
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/triage',
+        turns: 1,
+        loopFixParentId: 'tri-8',
+        loopFixDone: true,
+      },
+      // Closed with its round still on the screen.
+      workerRow('tri-9', 'tri-orch'),
       // A free orchestrator with a triage update for a worker no longer holding one.
       orchRow('tri-free', {
         awaitingAnswer: false,
@@ -2523,7 +2553,21 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       }),
     ];
     await initJobs();
-    for (const id of ['tri-orch', 'tri-1', 'tri-2', 'tri-3', 'tri-4', 'tri-5', 'tri-5-fix', 'tri-free']) {
+    for (const id of [
+      'tri-orch',
+      'tri-1',
+      'tri-2',
+      'tri-3',
+      'tri-4',
+      'tri-5',
+      'tri-5-fix',
+      'tri-6',
+      'tri-7',
+      'tri-8',
+      'tri-8-fix',
+      'tri-9',
+      'tri-free',
+    ]) {
       getJob(id).status = 'idle';
     }
   });
@@ -2658,6 +2702,65 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
     expect(infoTexts(worker).join('\n')).not.toMatch(/could not start the fix session|started a fix session/);
   });
 
+  it('a second send of a round already being sent is refused before anything is written', async () => {
+    const before = recordTriage.mock.calls.length;
+    recordTriage.mockImplementationOnce(
+      () => new Promise((resolve) => setTimeout(() => resolve({ error: null }), 30)),
+    );
+    const verdicts = [
+      { key: 'k1', decision: 'optional' },
+      { key: 'k2', decision: 'optional' },
+    ];
+    const first = triageLoopFindings('tri-6', { verdicts });
+    await expect(triageLoopFindings('tri-6', { verdicts })).rejects.toThrow(/already being sent/);
+    expect(recordTriage.mock.calls.length).toBe(before + 1); // one record, one triage comment
+    await expect(first).resolves.toEqual({ fixing: false, converged: true });
+    // Released once the first is through: a third call finds no round, not a send in flight.
+    await expect(triageLoopFindings('tri-6', { verdicts })).rejects.toThrow(/no review round waiting/);
+  });
+
+  it('nothing to fix on a round the branch moved past reviews the new commits instead of converging', async () => {
+    const worker = getJob('tri-7');
+    const result = await triageLoopFindings('tri-7', {
+      verdicts: [
+        { key: 'k1', decision: 'dismissed', reason: 'fixed by hand' },
+        { key: 'k2', decision: 'optional' },
+      ],
+    });
+    expect(result).toEqual({ fixing: false, converged: false });
+    expect(worker.reviewLoop.triage).toBeNull();
+    expect(worker.reviewLoop.done).toBeFalsy();
+    const text = infoTexts(worker).join('\n');
+    expect(text).toMatch(/branch moved while it was held, so the new commits are reviewed/);
+    // The commit gate ran on the new head: a round was attempted on it (and
+    // failed to spawn here, the repo being unknown, which is the trace it leaves).
+    expect(text).toMatch(/could not start the code review/);
+    const notice = (getJob('tri-orch').pendingWorkerNotices || []).find(
+      (n) => n.workerId === 'tri-7' && /converged/.test(n.text),
+    );
+    expect(notice).toBeUndefined();
+  });
+
+  it('a push landing under a held round marks the card stale at the next settle', async () => {
+    await closeDevSession('tri-8-fix'); // the worker's next settle
+    await new Promise((r) => setTimeout(r, 0));
+    const worker = getJob('tri-8');
+    expect(worker.reviewLoop.triage).toMatchObject({ round: 2, sha: 'abc', stale: true });
+    expect(worker.reviewLoop.reviewing).toBeFalsy(); // one round on the screen at a time
+    expect(infoTexts(worker).join('\n')).toMatch(/branch moved after round 2 was reviewed/);
+    expect(workerSummary(worker).reviewLoop.triage.stale).toBe(true);
+  });
+
+  it('closing the worker drops the round it was holding', async () => {
+    const worker = getJob('tri-9');
+    await closeDevSession('tri-9');
+    expect(worker.reviewLoop.triage).toBeNull();
+    expect(infoTexts(worker).join('\n')).toMatch(/round waiting in ⚑ Findings is dropped with this close/);
+    await expect(triageLoopFindings('tri-9', { verdicts: [{ key: 'k1', decision: 'fix' }] })).rejects.toThrow(
+      /no review round waiting/,
+    );
+  });
+
   it('a triage update for a round no longer on hold is dropped at delivery', () => {
     const orch = getJob('tri-free');
     deliverWorkerNotices(orch);
@@ -2672,6 +2775,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
     expect(holding.reviewLoop.triage).toEqual({
       prNumber: 79,
       round: 2,
+      stale: false,
       findings: [
         { key: 'k1', severity: 'high', title: 'A thing', file: null, line: null, parked: null },
         { key: 'k2', severity: 'low', title: 'A nit', file: 'lib/x.js', line: 4, parked: 'below the floor' },
@@ -3699,7 +3803,18 @@ describe('a merge closing the sessions on a pull request', () => {
   });
 
   beforeAll(async () => {
-    state.stored = [row('handed-1', false), row('branch-1', true)];
+    state.stored = [
+      row('handed-1', false),
+      {
+        ...row('branch-1', true),
+        // A round on the ⚑ Findings screen when the merge lands.
+        reviewLoop: {
+          rounds: 1,
+          lastSha: 'sha89',
+          triage: { prNumber: 90, round: 1, findings: [{ key: 'k1', severity: 'high', title: 'A thing' }] },
+        },
+      },
+    ];
     await initJobs();
     for (const id of ['handed-1', 'branch-1']) getJob(id).status = 'idle';
     githubRest.mockImplementation(async (_cfg, _method, url) => {
@@ -3735,6 +3850,18 @@ describe('a merge closing the sessions on a pull request', () => {
         .map((e) => e.text)
         .join('\n'),
     ).toMatch(/stays open: its pull request was found from its branch/);
+  });
+
+  it('drops the round that was held for the merged pull request', async () => {
+    await vi.waitFor(() => expect(getJob('branch-1').prStatus.state).toBe('merged'));
+    const job = getJob('branch-1');
+    expect(job.reviewLoop.triage).toBeNull();
+    expect(
+      job.events
+        .filter((e) => e.kind === 'info')
+        .map((e) => e.text)
+        .join('\n'),
+    ).toMatch(/PR #90 is merged, so the round waiting in ⚑ Findings is dropped/);
   });
 });
 

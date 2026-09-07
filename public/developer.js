@@ -5486,12 +5486,17 @@
   // so the same 7-second tick that moves the sidebar moves this list.
 
   let findingsOpen = false;
-  // Verdicts and reasons picked but not yet sent, by session and finding key,
+  // Verdicts and reasons picked but not yet sent, by round and finding key,
   // and the note per round. Kept outside the DOM so the poll's redraws never
-  // lose a pick or a half-typed reason.
-  const findingsDraft = new Map(); // `${sessionId}\n${key}` -> { decision, reason }
-  const findingsNotes = new Map(); // sessionId -> note
+  // lose a pick or a half-typed reason. Keyed by the round as well as the
+  // session because finding keys are title hashes: a later round re-declaring
+  // a title must not come up with the pick made on the earlier one, and a
+  // round released elsewhere (another tab, an orchestrator, the loop turned
+  // off) takes its drafts with it when its card goes.
+  const findingsDraft = new Map(); // `${roundKey}\n${key}` -> { decision, reason }
+  const findingsNotes = new Map(); // roundKey -> note
   const findingsErrors = new Map(); // sessionId -> the last send's error
+  const findingsOutcomes = new Map(); // sessionId -> what the last send came back with
   const findingsSending = new Set();
   let findingsDrawn = null; // the signature of the last list drawn
   // The loop's park reasons (lib/findings.js, PARK_REASONS) as the session
@@ -5517,13 +5522,37 @@
     $('btn-findings').classList.toggle('text-accent', findingsOpen);
   }
 
+  function roundKey(sessionId) {
+    const round = heldRounds().find((r) => r.session.id === sessionId);
+    return `${sessionId}\n${round ? round.held.round : ''}`;
+  }
+
   function draftOf(sessionId, key) {
-    return findingsDraft.get(`${sessionId}\n${key}`) || { decision: null, reason: '' };
+    return findingsDraft.get(`${roundKey(sessionId)}\n${key}`) || { decision: null, reason: '' };
+  }
+
+  function setDraft(sessionId, key, draft) {
+    findingsDraft.set(`${roundKey(sessionId)}\n${key}`, draft);
+  }
+
+  // Drafts and notes for a round no longer on the screen: sent from another
+  // tab, ruled on by an orchestrator, dropped with its session or pull request.
+  function pruneFindingsDrafts(rounds) {
+    const live = new Set(rounds.map(({ session, held }) => `${session.id}\n${held.round}`));
+    for (const k of findingsDraft.keys()) {
+      if (!live.has(k.slice(0, k.lastIndexOf('\n')))) findingsDraft.delete(k);
+    }
+    for (const k of findingsNotes.keys()) if (!live.has(k)) findingsNotes.delete(k);
+    const sessionsLive = new Set(rounds.map(({ session }) => session.id));
+    for (const k of findingsErrors.keys()) if (!sessionsLive.has(k)) findingsErrors.delete(k);
   }
 
   function findingsSignature(rounds) {
     return rounds
-      .map(({ session, held }) => `${session.id}:${held.round}:${held.findings.map((f) => f.key).join(',')}`)
+      .map(
+        ({ session, held }) =>
+          `${session.id}:${held.round}:${held.stale ? 'stale' : ''}:${held.findings.map((f) => f.key).join(',')}`,
+      )
       .join('|');
   }
 
@@ -5535,16 +5564,39 @@
     // few seconds stale, and the verdict buttons redraw on their own click.
     if (!force && signature === findingsDrawn) return;
     findingsDrawn = signature;
+    pruneFindingsDrafts(rounds);
     $('findings-sub').textContent = rounds.length
       ? `${rounds.length} round${rounds.length === 1 ? '' : 's'} waiting for a decision`
       : 'nothing is waiting';
     const list = $('findings-list');
+    const outcomes = [...findingsOutcomes.entries()].map(([id, o]) => outcomeLine(id, o)).join('');
     if (!rounds.length) {
       list.innerHTML =
+        outcomes +
         '<div class="my-8 text-center text-sm text-muted">No review round is waiting. A session with 🔁 on stops here after every review, with what it found.</div>';
       return;
     }
-    list.innerHTML = rounds.map(roundCard).join('');
+    list.innerHTML = outcomes + rounds.map(roundCard).join('');
+  }
+
+  // What a send came back with, once its card is gone: the server records the
+  // verdicts whether or not a fix session follows (a stalled loop, a retired
+  // session, a pull request no longer open, a spawn that failed), and a card
+  // that just vanishes reads as a fix session under way. Stays until dismissed
+  // or the screen is closed.
+  function outcomeLine(sessionId, { title, fixing, converged }) {
+    const text = fixing
+      ? 'Verdicts recorded; a fix session is running.'
+      : converged
+        ? 'Verdicts recorded; nothing was left to fix, so the loop converged.'
+        : 'Verdicts recorded, but no fix session started. The session’s log says why.';
+    return `<div class="mb-3 flex flex-wrap items-baseline gap-x-2 rounded-lg border border-line bg-raise px-3 py-2 text-[12px] ${
+      fixing || converged ? 'text-muted' : 'text-danger'
+    }">
+      <button type="button" class="finding-session cursor-pointer border-0 bg-transparent p-0 font-semibold text-ink hover:text-accent hover:underline" data-session="${esc(sessionId)}">${esc(title || '(untitled)')}</button>
+      <span>${esc(text)}</span>
+      <button type="button" class="finding-outcome-close ml-auto cursor-pointer border-0 bg-transparent p-0 text-muted hover:text-ink" data-session="${esc(sessionId)}" title="Dismiss">×</button>
+    </div>`;
   }
 
   function roundCard({ session: s, held }) {
@@ -5584,18 +5636,22 @@
     const sending = findingsSending.has(s.id);
     const error = findingsErrors.get(s.id);
     const heldFor = held.heldAt ? `held since ${fmtWhen(held.heldAt)}` : '';
+    const stale = held.stale
+      ? `<div class="mt-1 text-[12px] text-danger">The branch moved after this round was reviewed: some of these may already be fixed. Sending with nothing to fix reviews the new commits instead of closing the loop.</div>`
+      : '';
     return `<section class="mb-3 rounded-lg border border-line bg-raise px-3 py-2.5" data-round="${esc(s.id)}">
       <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <button type="button" class="finding-session cursor-pointer border-0 bg-transparent p-0 text-left text-sm font-semibold text-ink hover:text-accent hover:underline" data-session="${esc(s.id)}">${esc(s.title || '(untitled)')}</button>
         <span class="text-[12px] text-muted">${esc(s.repo)} · <a class="hover:text-ink hover:underline" href="${esc(prUrl)}" target="_blank" rel="noopener">PR #${held.prNumber} ↗</a> · round ${held.round}${heldFor ? ` · ${esc(heldFor)}` : ''}</span>
       </div>
-      <div class="mt-1 text-[12px] text-muted">${held.findings.length} finding${held.findings.length === 1 ? '' : 's'}. Mark what the fix session should implement; anything left unmarked stays on the pull request as optional.
+      ${stale}
+      <div class="mt-1 text-[12px] text-muted">${held.findings.length} finding${held.findings.length === 1 ? '' : 's'}. Mark what the fix session should implement; anything left unmarked is recorded as optional and not offered to the loop again.
         <button type="button" class="finding-all cursor-pointer border-0 bg-transparent p-0 text-[12px] text-accent hover:underline" data-session="${esc(s.id)}" data-dec="fix">Fix all</button> ·
         <button type="button" class="finding-all cursor-pointer border-0 bg-transparent p-0 text-[12px] text-accent hover:underline" data-session="${esc(s.id)}" data-dec="">Clear</button>
       </div>
       <div class="mt-2 flex flex-col gap-2">${rows}</div>
       <div class="mt-2.5 flex flex-col gap-1.5 border-t border-line pt-2.5">
-        <input class="finding-note w-full rounded border border-line bg-field px-1.5 py-1 text-[12px] text-ink placeholder:text-muted" data-session="${esc(s.id)}" placeholder="A note for the fix session (optional)" value="${esc(findingsNotes.get(s.id) || '')}">
+        <input class="finding-note w-full rounded border border-line bg-field px-1.5 py-1 text-[12px] text-ink placeholder:text-muted" data-session="${esc(s.id)}" placeholder="A note for the fix session (optional)" value="${esc(findingsNotes.get(roundKey(s.id)) || '')}">
         <div class="flex flex-wrap items-center gap-2">
           <button type="button" class="btn finding-send btn-primary" data-session="${esc(s.id)}"${sending ? ' disabled' : ''}>${
             sending ? 'Sending…' : fixes ? `Send ${fixes} to be fixed` : 'Nothing to fix · close the round'
@@ -5611,7 +5667,7 @@
     if (verdict) {
       const { session, key, dec } = verdict.dataset;
       const draft = draftOf(session, key);
-      findingsDraft.set(`${session}\n${key}`, {
+      setDraft(session, key, {
         decision: draft.decision === dec ? null : dec, // the same button twice clears the pick
         reason: draft.reason,
       });
@@ -5623,7 +5679,7 @@
       const round = heldRounds().find((r) => r.session.id === all.dataset.session);
       if (!round) return;
       for (const f of round.held.findings) {
-        findingsDraft.set(`${all.dataset.session}\n${f.key}`, {
+        setDraft(all.dataset.session, f.key, {
           decision: all.dataset.dec || null,
           reason: draftOf(all.dataset.session, f.key).reason,
         });
@@ -5633,7 +5689,14 @@
     }
     const open = e.target.closest('.finding-session');
     if (open) {
+      findingsOutcomes.delete(open.dataset.session);
       openSession(open.dataset.session);
+      return;
+    }
+    const dismiss = e.target.closest('.finding-outcome-close');
+    if (dismiss) {
+      findingsOutcomes.delete(dismiss.dataset.session);
+      renderFindingsView({ force: true });
       return;
     }
     const send = e.target.closest('.finding-send');
@@ -5644,20 +5707,22 @@
     const reason = e.target.closest('.finding-reason');
     if (reason) {
       const { session, key } = reason.dataset;
-      findingsDraft.set(`${session}\n${key}`, { ...draftOf(session, key), reason: reason.value });
+      setDraft(session, key, { ...draftOf(session, key), reason: reason.value });
       return;
     }
     const note = e.target.closest('.finding-note');
-    if (note) findingsNotes.set(note.dataset.session, note.value);
+    if (note) findingsNotes.set(roundKey(note.dataset.session), note.value);
   });
 
   // Release one round: every finding gets its verdict (unmarked ones
-  // optional), the server records them and starts the fix session with what
-  // was marked fix. The round leaves the list on the next poll, once the
-  // session's record no longer holds it.
+  // optional, which the loop never offers again), the server records them and
+  // starts the fix session with what was marked fix. The round leaves the list
+  // on the next poll, once the session's record no longer holds it, and the
+  // answer says whether a fix session actually followed.
   async function sendRound(sessionId) {
     const round = heldRounds().find((r) => r.session.id === sessionId);
     if (!round || findingsSending.has(sessionId)) return;
+    const key = roundKey(sessionId);
     const verdicts = round.held.findings.map((f) => {
       const draft = draftOf(sessionId, f.key);
       return { key: f.key, decision: draft.decision || 'optional', reason: draft.reason || undefined };
@@ -5666,13 +5731,18 @@
     findingsErrors.delete(sessionId);
     renderFindingsView({ force: true });
     try {
-      await api(`/api/dev/sessions/${encodeURIComponent(sessionId)}/triage`, {
+      const outcome = await api(`/api/dev/sessions/${encodeURIComponent(sessionId)}/triage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ verdicts, note: findingsNotes.get(sessionId) || '' }),
+        body: JSON.stringify({ verdicts, note: findingsNotes.get(key) || '' }),
       });
-      for (const f of round.held.findings) findingsDraft.delete(`${sessionId}\n${f.key}`);
-      findingsNotes.delete(sessionId);
+      for (const f of round.held.findings) findingsDraft.delete(`${key}\n${f.key}`);
+      findingsNotes.delete(key);
+      findingsOutcomes.set(sessionId, {
+        title: round.session.title,
+        fixing: !!(outcome && outcome.fixing),
+        converged: !!(outcome && outcome.converged),
+      });
     } catch (err) {
       findingsErrors.set(sessionId, err.message);
     } finally {
@@ -5685,6 +5755,7 @@
   function closeFindingsView() {
     if (!findingsOpen) return;
     findingsOpen = false;
+    findingsOutcomes.clear();
     paintFindingsBadge();
     $('findings-view').classList.add('hidden');
     $('chat-scroll').classList.remove('hidden');

@@ -1676,8 +1676,9 @@ app.post('/api/dev/sessions/:id/loop', (req, res) => {
 
 // ⚑ Findings: the verdicts on the review round a session's loop is holding
 // (lib/jobs.js, holdForTriage). What is marked fix starts the fix session, the
-// rest is recorded on the pull request; an unmarked finding is left optional
-// rather than refused, since "not now" is the verdict leaving it blank means.
+// rest is recorded on the pull request. The screen sends an unmarked finding
+// as optional, which is recorded like any other verdict: the loop never offers
+// it again, and the card says so.
 app.post('/api/dev/sessions/:id/triage', async (req, res) => {
   try {
     const { verdicts, note } = req.body || {};
