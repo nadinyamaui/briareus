@@ -5674,20 +5674,22 @@
   // session, a pull request no longer open, a spawn that failed), and a card
   // that just vanishes reads as a fix session under way. Stays until dismissed
   // or the screen is closed.
-  function outcomeLine(sessionId, { title, fixing, converged, reviewing, deferred, error }) {
+  function outcomeLine(sessionId, { title, fixing, converged, approved, reviewing, deferred, error }) {
     const text = error
       ? `Not sent: ${error}`
-      : fixing
-        ? 'Verdicts recorded; a fix session is running.'
-        : converged
-          ? 'Verdicts recorded; nothing was left to fix, so the loop converged.'
-          : reviewing
-            ? 'Verdicts recorded; nothing was left to fix, but the branch had moved, so the new commits are being reviewed.'
-            : deferred
-              ? 'Verdicts recorded; nothing was left to fix, but the branch had moved. The new commits are reviewed once the session settles idle.'
-              : 'Verdicts recorded, but no fix session started. The session’s log says why.';
+      : converged
+        ? 'Verdicts recorded; nothing was left to fix, so code-approved was added and the loop converged.'
+        : approved
+          ? 'Verdicts recorded; nothing was left to fix, so code-approved was added.'
+          : fixing
+            ? 'Verdicts recorded; a fix session is running.'
+            : reviewing
+              ? 'Verdicts recorded; nothing was left to fix, but the branch had moved, so the new commits are being reviewed.'
+              : deferred
+                ? 'Verdicts recorded; nothing was left to fix, but the branch had moved. The new commits are reviewed once the session settles idle.'
+                : 'Verdicts recorded, but no fix session started. The session’s log says why.';
     return `<div class="mb-3 flex flex-wrap items-baseline gap-x-2 rounded-lg border border-line bg-raise px-3 py-2 text-[12px] ${
-      fixing || converged || reviewing || deferred ? 'text-muted' : 'text-danger'
+      fixing || converged || approved || reviewing || deferred ? 'text-muted' : 'text-danger'
     }">
       <button type="button" class="finding-session cursor-pointer border-0 bg-transparent p-0 font-semibold text-ink hover:text-accent hover:underline" data-session="${esc(sessionId)}">${esc(title || '(untitled)')}</button>
       <span>${esc(text)}</span>
@@ -5759,8 +5761,8 @@
                   ? `Start session for ${fixes} selected`
                   : `Send ${fixes} to be fixed`
                 : standalone
-                  ? 'Delete / close findings'
-                  : 'Nothing to fix · close the round'
+                  ? 'Nothing to fix · approve'
+                  : 'Nothing to fix · approve and close'
           }</button>
           ${error ? `<span class="text-[12px] text-danger">${esc(error)}</span>` : ''}
         </div>
@@ -5860,12 +5862,13 @@
       });
       for (const f of round.held.findings) findingsDraft.delete(`${key}\n${f.key}`);
       findingsNotes.delete(key);
-      if (!(outcome && outcome.dismissed)) {
+      if (!(outcome && outcome.dismissed) || (outcome && outcome.approved)) {
         const outcomeSession = outcome && outcome.session;
         findingsOutcomes.set(outcomeSession ? outcomeSession.id : sessionId, {
           title: outcomeSession ? outcomeSession.title : round.session.title,
           fixing: !!(outcome && outcome.fixing),
           converged: !!(outcome && outcome.converged),
+          approved: !!(outcome && outcome.approved),
           reviewing: !!(outcome && outcome.reviewing),
           deferred: !!(outcome && outcome.deferred),
         });

@@ -141,7 +141,9 @@ ticks the ones it actually fixed, replies on the threads it addressed and
 resolves them; _dismissed_ and _optional_ are recorded like verdicts given by
 hand in the findings panel and said on the pull request with the reason, so
 no later round offers them again. A round with nothing marked fix converges
-the loop. The loop holds until you send (the session shows _findings waiting
+the loop and adds the pull request's `code-approved` label. A standalone
+review sent with nothing marked fix adds the same label as it closes its
+findings card. The loop holds until you send (the session shows _findings waiting
 in ⚑ Findings_), across restarts too.
 
 A worker's loop stops there just the same: its orchestrator is told the round
