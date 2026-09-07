@@ -181,6 +181,8 @@ import {
   sessionUsage,
   childSessionsOf,
   triageLoopFindings,
+  holdStandaloneReviewFindings,
+  triageStandaloneReviewFindings,
   retryLoopRound,
   workspaceStartBranch,
   workspaceBranchPlan,
@@ -1462,6 +1464,106 @@ describe('closeDevSession on an unattended session', () => {
       expect.objectContaining({ id: 'hand-1' }),
       expect.any(Function),
     );
+  });
+});
+
+describe('standalone code-review findings', () => {
+  const finding = (key, title) => ({ key, severity: 'high', title, file: 'lib/x.js', line: 7 });
+  const queuedReview = (id, findings) => ({
+    id,
+    kind: 'devchat',
+    status: 'closed',
+    repo: 'acme/standalone',
+    providerId: 1,
+    provider: 'Claude entry',
+    model: 'claude-fable-5-1',
+    effort: 'high',
+    turns: 1,
+    title: 'Code review: #31 task/review',
+    createdAt: '2026-09-07T10:00:00.000Z',
+    reviewBranch: 'task/review',
+    startBranch: 'task/review',
+    startedOnPr: 31,
+    autoClose: true,
+    prStatus: { number: 31, state: 'open' },
+    reviewTriage: {
+      prNumber: 31,
+      round: 1,
+      branch: 'task/review',
+      standalone: true,
+      heldAt: '2026-09-07T10:05:00.000Z',
+      findings,
+    },
+  });
+
+  beforeAll(async () => {
+    state.stored = [
+      queuedReview('stand-dismiss', [finding('k1', 'Remove the race')]),
+      queuedReview('stand-fix-fails', [finding('k2', 'Validate the input')]),
+      { ...queuedReview('stand-close', [finding('k3', 'Keep the guard')]), status: 'closed' },
+    ];
+    await initJobs();
+    getJob('stand-close').status = 'idle';
+  });
+
+  it('holds only the findings declared by this standalone review', async () => {
+    const found = [finding('fresh', 'Fresh finding')];
+    latestReviewFindings.mockResolvedValueOnce(found);
+    sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
+    const job = {
+      id: 'stand-new',
+      kind: 'devchat',
+      status: 'idle',
+      repo: 'acme/standalone',
+      reviewBranch: 'task/new',
+      startedOnPr: 32,
+      createdAt: '2026-09-07T11:00:00.000Z',
+      events: [],
+      seq: 0,
+    };
+
+    expect(await holdStandaloneReviewFindings(job)).toBe(true);
+    expect(latestReviewFindings).toHaveBeenCalledWith('acme/standalone', 32, {
+      since: '2026-09-07T11:00:00.000Z',
+    });
+    expect(job.reviewTriage).toMatchObject({
+      prNumber: 32,
+      branch: 'task/new',
+      standalone: true,
+      findings: [{ key: 'fresh', title: 'Fresh finding', parked: null }],
+    });
+  });
+
+  it('keeps an auto-closed review record while its findings are in the queue', async () => {
+    await closeDevSession('stand-close');
+    expect(getJob('stand-close')).toMatchObject({ status: 'closed', reviewTriage: { prNumber: 31 } });
+    expect(deleteJob).not.toHaveBeenCalledWith('stand-close', null);
+  });
+
+  it('records dismissals and deletes the queue holder when nothing is selected', async () => {
+    recordTriage.mockResolvedValueOnce({ error: null });
+    const result = await triageStandaloneReviewFindings('stand-dismiss', {
+      verdicts: [{ key: 'k1', decision: 'dismissed', reason: 'Not part of this change' }],
+    });
+
+    expect(result).toMatchObject({ fixing: false, dismissed: true, session: null });
+    expect(recordTriage).toHaveBeenCalledWith(
+      'acme/standalone',
+      31,
+      [expect.objectContaining({ key: 'k1', decision: 'dismissed' })],
+      { by: 'the user' },
+    );
+    expect(getJob('stand-dismiss')).toBeNull();
+  });
+
+  it('keeps the queue card when the selected implementation session cannot start', async () => {
+    recordTriage.mockResolvedValueOnce({ error: null });
+    await expect(
+      triageStandaloneReviewFindings('stand-fix-fails', {
+        verdicts: [{ key: 'k2', decision: 'fix' }],
+      }),
+    ).rejects.toThrow(/Unknown project: acme\/standalone/);
+    expect(getJob('stand-fix-fails').reviewTriage).toMatchObject({ prNumber: 31 });
   });
 });
 

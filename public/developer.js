@@ -5476,14 +5476,13 @@
 
   // ---------- ⚑ findings: the review queue ----------
   //
-  // Every review round the loops are holding, across every project, on one
-  // screen. A round arrives here with each finding the review declared and
-  // the loop's own advice on it (what its rules would have parked, and why);
-  // nothing is fixed until somebody marks it so and sends the round. Sending
-  // records every verdict (an unmarked finding is left optional: real, not
-  // now) and starts the fix session with what was marked fix. The rounds are
-  // read off the sessions poll: a held round is part of its session's record,
-  // so the same 7-second tick that moves the sidebar moves this list.
+  // Every review result waiting for a decision, across every project, on one
+  // screen: both rounds held by a review loop and standalone reviews started
+  // from the pull-request board. Nothing is fixed until somebody marks it so
+  // and sends the result. Sending records every verdict (an unmarked finding
+  // is left optional: real, not now) and starts an Implement feedback session
+  // with what was marked fix. Results are read off the sessions poll, so the
+  // same 7-second tick that moves the sidebar moves this list.
 
   let findingsOpen = false;
   // Verdicts and reasons picked but not yet sent, by round and finding key,
@@ -5502,8 +5501,11 @@
 
   function heldRounds() {
     return sessions
-      .filter((s) => s.reviewLoop && s.reviewLoop.triage)
-      .map((s) => ({ session: s, held: s.reviewLoop.triage }))
+      .filter((s) => (s.reviewLoop && s.reviewLoop.triage) || s.reviewTriage)
+      .map((s) => ({
+        session: s,
+        held: (s.reviewLoop && s.reviewLoop.triage) || s.reviewTriage,
+      }))
       .sort((a, b) => String(a.held.heldAt || '').localeCompare(String(b.held.heldAt || '')));
   }
 
@@ -5604,14 +5606,14 @@
     findingsDrawn = signature;
     pruneFindingsDrafts(rounds);
     $('findings-sub').textContent = rounds.length
-      ? `${rounds.length} round${rounds.length === 1 ? '' : 's'} waiting for a decision`
+      ? `${rounds.length} review${rounds.length === 1 ? '' : 's'} waiting for a decision`
       : 'nothing is waiting';
     const list = $('findings-list');
     const outcomes = [...findingsOutcomes.entries()].map(([id, o]) => outcomeLine(id, o)).join('');
     if (!rounds.length) {
       list.innerHTML =
         outcomes +
-        '<div class="my-8 text-center text-sm text-muted">No review round is waiting. A session with 🔁 on stops here after every review, with what it found.</div>';
+        '<div class="my-8 text-center text-sm text-muted">No review is waiting. Findings arrive here from ⌕ Code review and from every review-loop round.</div>';
       return;
     }
     list.innerHTML = outcomes + rounds.map(roundCard).join('');
@@ -5653,6 +5655,7 @@
       return `<button type="button" class="finding-verdict cursor-pointer rounded border bg-transparent px-1.5 py-px text-[11px] ${on ? activeCls : 'border-line text-muted hover:text-ink'}"
         data-session="${esc(s.id)}" data-key="${esc(f.key)}" data-dec="${dec}">${label}</button>`;
     };
+    const standalone = !!held.standalone;
     const rows = held.findings
       .map((f) => {
         const [sevLabel, sevCls] = SEV_CHIP[f.severity] || SEV_CHIP.medium;
@@ -5672,7 +5675,7 @@
           </div>
           ${loc ? `<div class="truncate font-mono text-[11px] text-muted">${esc(loc)}</div>` : ''}
           ${advice}
-          <div class="flex flex-wrap items-center gap-1">${decBtn(f, 'fix', 'Fix')}${decBtn(f, 'optional', 'Optional')}${decBtn(f, 'dismissed', 'Dismiss')}</div>
+          <div class="flex flex-wrap items-center gap-1">${decBtn(f, 'fix', 'Fix')}${decBtn(f, 'optional', 'Optional')}${decBtn(f, 'dismissed', standalone ? 'Delete' : 'Dismiss')}</div>
           ${reason}
         </div>`;
       })
@@ -5687,10 +5690,10 @@
     return `<section class="mb-3 rounded-lg border border-line bg-raise px-3 py-2.5" data-session="${esc(s.id)}" data-round="${held.round}" data-title="${esc(s.title || '(untitled)')}">
       <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <button type="button" class="finding-session cursor-pointer border-0 bg-transparent p-0 text-left text-sm font-semibold text-ink hover:text-accent hover:underline" data-session="${esc(s.id)}">${esc(s.title || '(untitled)')}</button>
-        <span class="text-[12px] text-muted">${esc(s.repo)} · <a class="hover:text-ink hover:underline" href="${esc(prUrl)}" target="_blank" rel="noopener">PR #${held.prNumber} ↗</a> · round ${held.round}${heldFor ? ` · ${esc(heldFor)}` : ''}</span>
+        <span class="text-[12px] text-muted">${esc(s.repo)} · <a class="hover:text-ink hover:underline" href="${esc(prUrl)}" target="_blank" rel="noopener">PR #${held.prNumber} ↗</a> · ${standalone ? 'standalone review' : `round ${held.round}`}${heldFor ? ` · ${esc(heldFor)}` : ''}</span>
       </div>
       ${stale}
-      <div class="mt-1 text-[12px] text-muted">${held.findings.length} finding${held.findings.length === 1 ? '' : 's'}. Mark what the fix session should implement; anything left unmarked is recorded as optional and not offered to the loop again.
+      <div class="mt-1 text-[12px] text-muted">${held.findings.length} finding${held.findings.length === 1 ? '' : 's'}. Mark what the implementation session should fix; anything left unmarked is recorded as optional and removed from this queue.
         <button type="button" class="finding-all cursor-pointer border-0 bg-transparent p-0 text-[12px] text-accent hover:underline" data-session="${esc(s.id)}" data-dec="fix">Fix all</button> ·
         <button type="button" class="finding-all cursor-pointer border-0 bg-transparent p-0 text-[12px] text-accent hover:underline" data-session="${esc(s.id)}" data-dec="">Clear</button>
       </div>
@@ -5699,7 +5702,15 @@
         <input class="finding-note w-full rounded border border-line bg-field px-1.5 py-1 text-[12px] text-ink placeholder:text-muted" data-session="${esc(s.id)}" placeholder="A note for the fix session (optional)" value="${esc(findingsNotes.get(rk) || '')}">
         <div class="flex flex-wrap items-center gap-2">
           <button type="button" class="btn finding-send btn-primary" data-session="${esc(s.id)}"${sending ? ' disabled' : ''}>${
-            sending ? 'Sending…' : fixes ? `Send ${fixes} to be fixed` : 'Nothing to fix · close the round'
+            sending
+              ? 'Sending…'
+              : fixes
+                ? standalone
+                  ? `Start session for ${fixes} selected`
+                  : `Send ${fixes} to be fixed`
+                : standalone
+                  ? 'Delete / close findings'
+                  : 'Nothing to fix · close the round'
           }</button>
           ${error ? `<span class="text-[12px] text-danger">${esc(error)}</span>` : ''}
         </div>
@@ -5799,13 +5810,16 @@
       });
       for (const f of round.held.findings) findingsDraft.delete(`${key}\n${f.key}`);
       findingsNotes.delete(key);
-      findingsOutcomes.set(sessionId, {
-        title: round.session.title,
-        fixing: !!(outcome && outcome.fixing),
-        converged: !!(outcome && outcome.converged),
-        reviewing: !!(outcome && outcome.reviewing),
-        deferred: !!(outcome && outcome.deferred),
-      });
+      if (!(outcome && outcome.dismissed)) {
+        const outcomeSession = outcome && outcome.session;
+        findingsOutcomes.set(outcomeSession ? outcomeSession.id : sessionId, {
+          title: outcomeSession ? outcomeSession.title : round.session.title,
+          fixing: !!(outcome && outcome.fixing),
+          converged: !!(outcome && outcome.converged),
+          reviewing: !!(outcome && outcome.reviewing),
+          deferred: !!(outcome && outcome.deferred),
+        });
+      }
     } catch (err) {
       findingsErrors.set(sessionId, err.message);
     } finally {

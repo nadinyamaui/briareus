@@ -51,13 +51,13 @@
         >
           🏙
         </button>
-        <!-- The review queue: every review round waiting for a verdict, across
-         every project. Nothing a review found is fixed until it is marked
-         here, so the badge is the count of rounds standing still. -->
+        <!-- The review queue: standalone reviews and review-loop rounds
+         waiting for a verdict, across every project. Nothing a review found
+         is fixed until it is marked here, so the badge is the count waiting. -->
         <button
           id="btn-findings"
           class="btn-icon relative hover:border-accent-dim"
-          title="Findings: the review rounds waiting for you to decide what gets fixed"
+          title="Findings: reviews waiting for you to decide what gets fixed"
         >
           ⚑
           <span
@@ -327,10 +327,10 @@
         <div id="home-list" class="flex-1 overflow-y-auto px-3 py-3.5 lg:px-[18px]"></div>
       </div>
 
-      <!-- ⚑ Findings: the review rounds on hold, one card per round, each
-       finding with its verdict buttons, and a Send per card that releases the
-       round: what is marked fix goes to a fix session, the rest is recorded on
-       the pull request. Filled in by renderFindingsView() in developer.js. -->
+      <!-- ⚑ Findings: standalone reviews and review-loop rounds on hold,
+       one card per result, each finding with its verdict buttons, and a Send
+       per card: what is marked fix goes to an implementation session, the rest
+       is recorded on the pull request. Filled by developer.js. -->
       <div id="findings-view" class="hidden flex flex-1 flex-col overflow-hidden">
         <header
           class="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-canvas px-3 py-2.5 lg:flex-nowrap lg:gap-3 lg:px-[18px]"

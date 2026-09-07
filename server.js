@@ -37,6 +37,7 @@ import {
   assertWorkerBudget,
   orchestratorBudgetStatus,
   triageLoopFindings,
+  triageReviewFindings,
   retryLoopRound,
   DEV_OPEN,
 } from './lib/jobs.js';
@@ -1674,15 +1675,14 @@ app.post('/api/dev/sessions/:id/loop', (req, res) => {
   }
 });
 
-// ⚑ Findings: the verdicts on the review round a session's loop is holding
-// (lib/jobs.js, holdForTriage). What is marked fix starts the fix session, the
-// rest is recorded on the pull request. The screen sends an unmarked finding
-// as optional, which is recorded like any other verdict: the loop never offers
-// it again, and the card says so.
+// ⚑ Findings: verdicts on either a review-loop round or a standalone review
+// started from the pull-request board. What is marked fix starts an Implement
+// feedback session; the rest is recorded on the pull request. The screen sends
+// an unmarked finding as optional, so it is not offered again.
 app.post('/api/dev/sessions/:id/triage', async (req, res) => {
   try {
     const { verdicts, note } = req.body || {};
-    res.json(await triageLoopFindings(req.params.id, { verdicts, note, by: 'the user' }));
+    res.json(await triageReviewFindings(req.params.id, { verdicts, note, by: 'the user' }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
