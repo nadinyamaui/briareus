@@ -1821,7 +1821,7 @@
         return `<div class="flex flex-col gap-1">
           <div class="flex items-center gap-1.5">
             <span class="shrink-0 rounded-[4px] border px-1 text-[10px] font-semibold ${sevCls}">${sevLabel}</span>
-            <span class="truncate text-[12px]" title="${esc(loc ? `${f.title} · ${loc}` : f.title)}">${esc(f.title)}</span>
+            <a class="truncate text-[12px] text-ink hover:text-accent hover:underline" href="${esc(f.url || `https://github.com/${s.repo}/pull/${pr.number}/files`)}" target="_blank" rel="noopener" title="${esc(loc ? `${f.title} · ${loc}` : f.title)}">${esc(f.title)}</a>
             ${fixed}
           </div>
           <div class="flex gap-1">${decBtn(f, 'fix', 'Fix')}${decBtn(f, 'optional', 'Optional')}${decBtn(f, 'dismissed', 'Dismiss')}</div>
@@ -5584,9 +5584,56 @@
     return rounds
       .map(
         ({ session, held }) =>
-          `${session.id}:${held.round}:${held.stale ? 'stale' : ''}:${held.findings.map((f) => f.key).join(',')}`,
+          `${session.id}:${session.repo}#${held.prNumber}:${held.round}:${held.stale ? 'stale' : ''}:${held.findings.map((f) => f.key).join(',')}`,
       )
       .join('|');
+  }
+
+  // The pull request a round is about, as a link: its session's own PR link
+  // when that is the same pull request, and built from the number otherwise
+  // (a session that moved on to another PR still holds this round).
+  function heldPrUrl(s, held) {
+    const pr = s.prStatus;
+    return pr && pr.url && pr.number === held.prNumber
+      ? pr.url
+      : `https://github.com/${s.repo}/pull/${held.prNumber}`;
+  }
+
+  // Rounds by the pull request they were left on. Two reviews of one pull
+  // request (a loop round and a hand-started review, or two hand-started
+  // ones) are one piece of code to judge, and reading them as unrelated
+  // cards means opening the same diff twice; each pull request gets one
+  // heading and its reviews under it. Groups keep the queue's oldest-first
+  // order, taken from the oldest round in each.
+  function findingsGroups(rounds) {
+    const groups = new Map();
+    for (const round of rounds) {
+      const key = `${round.session.repo.toLowerCase()}#${round.held.prNumber}`;
+      const group = groups.get(key);
+      if (group) group.rounds.push(round);
+      else {
+        groups.set(key, {
+          repo: round.session.repo,
+          prNumber: round.held.prNumber,
+          prUrl: heldPrUrl(round.session, round.held),
+          rounds: [round],
+        });
+      }
+    }
+    return [...groups.values()];
+  }
+
+  function prGroupCard({ repo, prNumber, prUrl, rounds }) {
+    const findings = rounds.reduce((n, { held }) => n + held.findings.length, 0);
+    return `<section class="mb-4">
+      <div class="mb-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <a class="text-sm font-semibold text-ink hover:text-accent hover:underline" href="${esc(prUrl)}" target="_blank" rel="noopener">${esc(repo)} · PR #${prNumber} ↗</a>
+        <span class="text-[12px] text-muted">${findings} finding${findings === 1 ? '' : 's'}${
+          rounds.length > 1 ? ` across ${rounds.length} reviews` : ''
+        }</span>
+      </div>
+      ${rounds.map(roundCard).join('')}
+    </section>`;
   }
 
   function renderFindingsView({ force = false } = {}) {
@@ -5605,9 +5652,12 @@
     if (!force && active && active.matches('input, textarea') && $('findings-list').contains(active)) return;
     findingsDrawn = signature;
     pruneFindingsDrafts(rounds);
-    $('findings-sub').textContent = rounds.length
-      ? `${rounds.length} review${rounds.length === 1 ? '' : 's'} waiting for a decision`
-      : 'nothing is waiting';
+    const groups = findingsGroups(rounds);
+    $('findings-sub').textContent = !rounds.length
+      ? 'nothing is waiting'
+      : groups.length === rounds.length
+        ? `${rounds.length} review${rounds.length === 1 ? '' : 's'} waiting for a decision`
+        : `${rounds.length} reviews on ${groups.length} pull request${groups.length === 1 ? '' : 's'} waiting for a decision`;
     const list = $('findings-list');
     const outcomes = [...findingsOutcomes.entries()].map(([id, o]) => outcomeLine(id, o)).join('');
     if (!rounds.length) {
@@ -5616,7 +5666,7 @@
         '<div class="my-8 text-center text-sm text-muted">No review is waiting. Findings arrive here from ⌕ Code review and from every review-loop round.</div>';
       return;
     }
-    list.innerHTML = outcomes + rounds.map(roundCard).join('');
+    list.innerHTML = outcomes + groups.map(prGroupCard).join('');
   }
 
   // What a send came back with, once its card is gone: the server records the
@@ -5647,8 +5697,6 @@
 
   function roundCard({ session: s, held }) {
     const rk = roundKey(s.id, held.round);
-    const prUrl =
-      s.prStatus && s.prStatus.url ? s.prStatus.url : `https://github.com/${s.repo}/pull/${held.prNumber}`;
     const decBtn = (f, dec, label) => {
       const on = draftOf(rk, f.key).decision === dec;
       const activeCls = dec === 'fix' ? 'border-danger text-danger' : 'border-accent text-accent';
@@ -5669,11 +5717,13 @@
             ? `<input class="finding-reason w-full rounded border border-line bg-field px-1.5 py-0.5 text-[11px] text-ink placeholder:text-muted" data-session="${esc(s.id)}" data-key="${esc(f.key)}" placeholder="Why (recorded on the pull request)" value="${esc(draft.reason)}">`
             : '';
         return `<div class="flex flex-col gap-1 border-t border-line pt-2">
-          <div class="flex items-center gap-1.5">
-            <span class="shrink-0 rounded-[4px] border px-1 text-[10px] font-semibold ${sevCls}">${sevLabel}</span>
-            <span class="min-w-0 text-[13px]">${esc(f.title)}</span>
-          </div>
-          ${loc ? `<div class="truncate font-mono text-[11px] text-muted">${esc(loc)}</div>` : ''}
+          <a class="group flex flex-col gap-1 no-underline" href="${esc(f.url || `${heldPrUrl(s, held)}/files`)}" target="_blank" rel="noopener" title="Read this finding on the pull request">
+            <div class="flex items-center gap-1.5">
+              <span class="shrink-0 rounded-[4px] border px-1 text-[10px] font-semibold ${sevCls}">${sevLabel}</span>
+              <span class="min-w-0 text-[13px] text-ink group-hover:text-accent group-hover:underline">${esc(f.title)}</span>
+            </div>
+            ${loc ? `<div class="truncate font-mono text-[11px] text-muted group-hover:text-ink">${esc(loc)} ↗</div>` : ''}
+          </a>
           ${advice}
           <div class="flex flex-wrap items-center gap-1">${decBtn(f, 'fix', 'Fix')}${decBtn(f, 'optional', 'Optional')}${decBtn(f, 'dismissed', standalone ? 'Delete' : 'Dismiss')}</div>
           ${reason}
@@ -5690,7 +5740,7 @@
     return `<section class="mb-3 rounded-lg border border-line bg-raise px-3 py-2.5" data-session="${esc(s.id)}" data-round="${held.round}" data-title="${esc(s.title || '(untitled)')}">
       <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <button type="button" class="finding-session cursor-pointer border-0 bg-transparent p-0 text-left text-sm font-semibold text-ink hover:text-accent hover:underline" data-session="${esc(s.id)}">${esc(s.title || '(untitled)')}</button>
-        <span class="text-[12px] text-muted">${esc(s.repo)} · <a class="hover:text-ink hover:underline" href="${esc(prUrl)}" target="_blank" rel="noopener">PR #${held.prNumber} ↗</a> · ${standalone ? 'standalone review' : `round ${held.round}`}${heldFor ? ` · ${esc(heldFor)}` : ''}</span>
+        <span class="text-[12px] text-muted">${standalone ? 'standalone review' : `round ${held.round}`}${heldFor ? ` · ${esc(heldFor)}` : ''}</span>
       </div>
       ${stale}
       <div class="mt-1 text-[12px] text-muted">${held.findings.length} finding${held.findings.length === 1 ? '' : 's'}. Mark what the implementation session should fix; anything left unmarked is recorded as optional and removed from this queue.
