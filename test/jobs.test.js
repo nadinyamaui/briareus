@@ -511,6 +511,15 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(() => createDevSession({ ...base, prompt: '   ' })).toThrow(/first message cannot be empty/);
   });
 
+  it('a pull request preview needs a branch and cannot be combined with an agent workflow', () => {
+    expect(() => createDevSession({ ...base, prompt: '', preview: true })).toThrow(
+      /preview needs the branch to run/,
+    );
+    expect(() => createDevSession({ ...base, preview: true, review: true, branch: 'feature' })).toThrow(
+      /preview only prepares and serves its worktree/,
+    );
+  });
+
   it('local mode needs a configured checkout that is actually a git tree', () => {
     expect(() => createDevSession({ ...base, local: true })).toThrow(/no local checkout configured/);
     state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '/tmp/definitely-not-a-checkout' }];
