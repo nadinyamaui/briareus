@@ -39,6 +39,7 @@ import {
   orchestratorBudgetStatus,
   triageLoopFindings,
   triageReviewFindings,
+  saveReviewFindingsDrafts,
   retryLoopRound,
   DEV_OPEN,
 } from './lib/jobs.js';
@@ -1740,6 +1741,18 @@ app.post('/api/dev/sessions/:id/triage', async (req, res) => {
   try {
     const { verdicts, note } = req.body || {};
     res.json(await triageReviewFindings(req.params.id, { verdicts, note, by: 'the user' }));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ⚑ Findings, Save comments: the verdicts picked and the reasons and note
+// typed so far, kept on the held round and posted on the pull request as one
+// comment. Nothing is ruled; the round goes on waiting for Complete.
+app.post('/api/dev/sessions/:id/triage/save', async (req, res) => {
+  try {
+    const { verdicts, note } = req.body || {};
+    res.json(await saveReviewFindingsDrafts(req.params.id, { verdicts, note, by: 'the user' }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

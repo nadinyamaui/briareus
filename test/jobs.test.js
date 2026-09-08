@@ -125,6 +125,7 @@ vi.mock('../lib/findings.js', () => ({
   })),
   sortFindingsForFix: vi.fn(async (repo, prNumber, findings) => ({ kept: findings, parked: [] })),
   recordTriage: vi.fn(async () => ({ error: null })),
+  postTriageNotes: vi.fn(async () => 'https://github.com/acme/standalone/pull/31#issuecomment-9'),
   findingKey: vi.fn((title) => `key:${title}`),
   findingUrl: vi.fn((repo, prNumber, file, line) => `url:${repo}#${prNumber}:${file || ''}:${line || ''}`),
   PARK_REASONS: { severity: 'below the floor', 'out-of-diff': 'outside the diff' },
@@ -147,6 +148,7 @@ import {
   latestTestFailures,
   sortFindingsForFix,
   recordTriage,
+  postTriageNotes,
 } from '../lib/findings.js';
 import { implementFeedbackPrompt } from '../lib/prtasks.js';
 import { jobUsageEstimates } from '../lib/usage.js';
@@ -185,6 +187,7 @@ import {
   triageLoopFindings,
   holdStandaloneReviewFindings,
   triageStandaloneReviewFindings,
+  saveReviewFindingsDrafts,
   retryLoopRound,
   workspaceStartBranch,
   workspaceBranchPlan,
@@ -1552,11 +1555,75 @@ describe('standalone code-review findings', () => {
     expect(deleteJob).not.toHaveBeenCalledWith('stand-close', null);
   });
 
+  it('Save comments keeps the drafts on the card and says them on the pull request, ruling nothing', async () => {
+    postTriageNotes.mockClear();
+    const result = await saveReviewFindingsDrafts('stand-dismiss', {
+      verdicts: [{ key: 'k1', decision: '', reason: '  Looks intentional, checking with the author  ' }],
+      note: 'Ship after the hotfix',
+    });
+    expect(result).toMatchObject({
+      url: 'https://github.com/acme/standalone/pull/31#issuecomment-9',
+      warning: null,
+      drafts: {
+        verdicts: { k1: { decision: null, reason: 'Looks intentional, checking with the author' } },
+        note: 'Ship after the hotfix',
+      },
+    });
+    const held = getJob('stand-dismiss').reviewTriage;
+    expect(held).toMatchObject({ prNumber: 31, drafts: { note: 'Ship after the hotfix' } });
+    expect(held.drafts.savedAt).toEqual(expect.any(String));
+    expect(postTriageNotes).toHaveBeenCalledWith(
+      'acme/standalone',
+      31,
+      'stand-dismiss',
+      [
+        expect.objectContaining({
+          key: 'k1',
+          decision: null,
+          reason: 'Looks intentional, checking with the author',
+        }),
+      ],
+      { note: 'Ship after the hotfix', round: 1, standalone: true, by: 'the user' },
+    );
+    expect(recordTriage).not.toHaveBeenCalledWith(
+      'acme/standalone',
+      31,
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('Save comments refuses a finding that is not on the card and a verdict that is not one', async () => {
+    await expect(
+      saveReviewFindingsDrafts('stand-dismiss', { verdicts: [{ key: 'nope', reason: 'x' }] }),
+    ).rejects.toThrow(/No finding nope is waiting/);
+    await expect(
+      saveReviewFindingsDrafts('stand-dismiss', { verdicts: [{ key: 'k1', decision: 'maybe' }] }),
+    ).rejects.toThrow(/"maybe" is not a verdict/);
+    await expect(saveReviewFindingsDrafts('stand-nope', {})).rejects.toThrow(/Session not found/);
+  });
+
+  it('Save comments keeps the drafts and warns when the pull request refuses the comment', async () => {
+    postTriageNotes.mockRejectedValueOnce(new Error('GitHub answered 403 writing the triage notes comment'));
+    const result = await saveReviewFindingsDrafts('stand-dismiss', {
+      verdicts: [{ key: 'k1', decision: 'dismiss', reason: 'Generated code' }],
+    });
+    expect(result.warning).toMatch(/Saved here, but not on PR #31: GitHub answered 403/);
+    expect(getJob('stand-dismiss').reviewTriage.drafts.verdicts).toEqual({
+      k1: { decision: 'dismissed', reason: 'Generated code' },
+    });
+  });
+
   it('records dismissals and deletes the queue holder when nothing is selected', async () => {
     recordTriage.mockResolvedValueOnce({ error: null });
+    postTriageNotes.mockClear();
     const result = await triageStandaloneReviewFindings('stand-dismiss', {
       verdicts: [{ key: 'k1', decision: 'dismissed', reason: 'Not part of this change' }],
+      note: 'Ship after the hotfix',
     });
+    // Completing takes the "so far" notes comment off: the verdicts are on
+    // the Review triage comment now, note included.
+    expect(postTriageNotes).toHaveBeenCalledWith('acme/standalone', 31, 'stand-dismiss', [], {});
 
     expect(result).toMatchObject({ fixing: false, dismissed: true, approved: true, session: null });
     expect(addPullRequestLabel).toHaveBeenLastCalledWith(
@@ -1569,7 +1636,7 @@ describe('standalone code-review findings', () => {
       'acme/standalone',
       31,
       [expect.objectContaining({ key: 'k1', decision: 'dismissed' })],
-      { by: 'the user' },
+      { by: 'the user', note: 'Ship after the hotfix' },
     );
     expect(getJob('stand-dismiss')).toBeNull();
   });
@@ -2875,7 +2942,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
           reason: 'the memo is keyed on purpose',
         },
       ],
-      { round: 2, by: 'the orchestrator' },
+      { round: 2, by: 'the orchestrator', note: 'Keep the public signature.' },
     );
     // What was kept is the next round's comparison, and is what the fix
     // session is briefed with, as a decided list plus the note.

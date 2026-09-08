@@ -51,6 +51,7 @@ import {
   queueFindingsForFix,
   sortFindingsForFix,
   recordTriage,
+  postTriageNotes,
   DECISIONS,
 } from '../lib/findings.js';
 
@@ -407,6 +408,15 @@ describe('recordTriage: the orchestrator’s verdicts on a round', () => {
     expect(gh.writes.filter((w) => w.method === 'POST')).toHaveLength(1); // the checklist alone
   });
 
+  it('says the round’s note on the pull request even when every finding was kept', async () => {
+    gh.comments = [findingsComment([{ title: 'Needs fixing', severity: 'high' }])];
+    await recordTriage(repo, 5, [{ ...round[0], decision: 'fix' }], { note: 'Mind the migration order' });
+    const posts = gh.writes.filter((w) => w.method === 'POST');
+    expect(posts).toHaveLength(2);
+    expect(posts[1].body.body).toContain('sent every one of them to be fixed');
+    expect(posts[1].body.body).toContain('**Note:** Mind the migration order');
+  });
+
   it('a comment GitHub refused is reported, not thrown, and the verdicts still hold', async () => {
     gh.comments = [findingsComment([{ title: 'Also this', severity: 'low' }])];
     gh.fail = 'POST';
@@ -548,5 +558,76 @@ describe('decideFinding', () => {
     await decideFinding(repo, 5, key, null);
     const del = gh.writes.find((w) => w.method === 'DELETE');
     expect(del.url).toBe(`/repos/${repo}/issues/comments/77`);
+  });
+});
+
+describe('postTriageNotes: the comments saved on a held round before it is completed', () => {
+  const findings = [
+    {
+      key: 'a1',
+      severity: 'high',
+      title: 'Needs fixing',
+      file: 'lib/x.js',
+      line: 3,
+      decision: 'fix',
+      reason: 'Do it first',
+    },
+    { key: 'a2', severity: 'low', title: 'Also this', decision: null, reason: '' },
+    {
+      key: 'a3',
+      severity: 'medium',
+      title: 'Elsewhere',
+      file: 'lib/o.js',
+      decision: 'dismissed',
+      reason: 'Not in scope',
+    },
+  ];
+
+  it('posts one comment with the reasons typed so far and the note', async () => {
+    await postTriageNotes(repo, 5, 'sess-1', findings, { note: 'Merge after #4', round: 2 });
+    const posts = gh.writes.filter((w) => w.method === 'POST');
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe(`/repos/${repo}/issues/5/comments`);
+    const body = posts[0].body.body;
+    expect(body).toContain('<!-- reviewer:triage-notes sess-1 -->');
+    expect(body).toContain('## Review triage notes (round 2)');
+    expect(body).toContain('- **HIGH**: Needs fixing (`lib/x.js:3`) — to fix: Do it first');
+    expect(body).toContain('- **MEDIUM**: Elsewhere (`lib/o.js`) — dismissed: Not in scope');
+    expect(body).not.toContain('Also this'); // nothing was typed on it
+    expect(body).toContain('**Note:** Merge after #4');
+  });
+
+  it('rewrites its own comment on the next save instead of stacking another', async () => {
+    gh.comments = [
+      { id: 40, body: 'unrelated' },
+      { id: 41, html_url: 'https://gh/c/41', body: '<!-- reviewer:triage-notes sess-1 -->\nold' },
+      { id: 42, body: '<!-- reviewer:triage-notes other -->\nsomeone else’s round' },
+    ];
+    const url = await postTriageNotes(repo, 5, 'sess-1', findings, { standalone: true });
+    expect(url).toBe('https://gh/c/41');
+    expect(gh.writes).toEqual([
+      expect.objectContaining({ method: 'PATCH', url: `/repos/${repo}/issues/comments/41` }),
+    ]);
+    expect(gh.writes[0].body.body).toContain('## Review triage notes\n');
+    expect(gh.writes[0].body.body).toContain("reading this review's findings");
+  });
+
+  it('removes the comment when a save leaves nothing to say, and posts none when there never was', async () => {
+    gh.comments = [{ id: 41, body: '<!-- reviewer:triage-notes sess-1 -->\nold' }];
+    expect(await postTriageNotes(repo, 5, 'sess-1', [{ ...findings[1] }], { note: '  ' })).toBeNull();
+    expect(gh.writes).toEqual([
+      expect.objectContaining({ method: 'DELETE', url: `/repos/${repo}/issues/comments/41` }),
+    ]);
+    gh.writes = [];
+    gh.comments = [];
+    expect(await postTriageNotes(repo, 5, 'sess-1', [], {})).toBeNull();
+    expect(gh.writes).toEqual([]);
+  });
+
+  it('throws when GitHub refuses the write, for the caller to report', async () => {
+    gh.fail = 'POST';
+    await expect(postTriageNotes(repo, 5, 'sess-1', findings, {})).rejects.toThrow(
+      /GitHub answered 500 writing the triage notes comment/,
+    );
   });
 });
