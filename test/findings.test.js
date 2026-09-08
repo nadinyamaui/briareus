@@ -7,7 +7,18 @@ import { TEST_SHEET_ANCHOR, FIXES_ANCHOR } from '../lib/markers.js';
 // to survive GitHub saying no.
 // `files` is the PR's changed paths, or null for a GitHub that will not say,
 // which is the case the out-of-diff rule has to fail open on.
-const gh = vi.hoisted(() => ({ comments: [], writes: [], token: 'tok', fail: '', files: null }));
+// `reviewComments` are the inline ones on the diff, a different endpoint from
+// the PR's issue comments and the only place a finding can be deleted from.
+const gh = vi.hoisted(() => ({
+  comments: [],
+  reviewComments: [],
+  writes: [],
+  token: 'tok',
+  fail: '',
+  files: null,
+  // What a write comes back with, for the calls that read their answer.
+  created: {},
+}));
 const db = vi.hoisted(() => ({ decisions: new Map() }));
 
 vi.mock('../lib/config.js', () => ({
@@ -16,6 +27,10 @@ vi.mock('../lib/config.js', () => ({
 
 vi.mock('../lib/github.js', () => ({
   githubRest: vi.fn(async (cfg, method, url, body) => {
+    if (method === 'GET' && /\/pulls\/\d+\/comments\?/.test(url)) {
+      const page = Number(new URL(url, 'https://x').searchParams.get('page'));
+      return { ok: true, status: 200, json: async () => (page === 1 ? gh.reviewComments : []) };
+    }
     if (method === 'GET' && /\/comments\?/.test(url)) {
       return { ok: true, status: 200, json: async () => gh.comments };
     }
@@ -30,7 +45,7 @@ vi.mock('../lib/github.js', () => ({
     }
     gh.writes.push({ method, url, body });
     if (gh.fail === method) return { ok: false, status: 500, json: async () => ({}) };
-    return { ok: true, status: method === 'POST' ? 201 : 200, json: async () => ({}) };
+    return { ok: true, status: method === 'POST' ? 201 : 200, json: async () => gh.created };
   }),
 }));
 
@@ -52,6 +67,8 @@ import {
   sortFindingsForFix,
   recordTriage,
   postTriageNotes,
+  deleteFindingFromReview,
+  replyOnFindingThread,
   DECISIONS,
 } from '../lib/findings.js';
 
@@ -61,10 +78,12 @@ let repo;
 beforeEach(() => {
   repo = `owner/repo-${n++}`;
   gh.comments = [];
+  gh.reviewComments = [];
   gh.writes = [];
   gh.token = 'tok';
   gh.fail = '';
   gh.files = null;
+  gh.created = {};
   db.decisions = new Map();
 });
 
@@ -603,13 +622,13 @@ describe('postTriageNotes: the comments saved on a held round before it is compl
       { id: 41, html_url: 'https://gh/c/41', body: '<!-- reviewer:triage-notes sess-1 -->\nold' },
       { id: 42, body: '<!-- reviewer:triage-notes other -->\nsomeone else’s round' },
     ];
-    const url = await postTriageNotes(repo, 5, 'sess-1', findings, { standalone: true });
+    const url = await postTriageNotes(repo, 5, 'sess-1', findings, {});
     expect(url).toBe('https://gh/c/41');
     expect(gh.writes).toEqual([
       expect.objectContaining({ method: 'PATCH', url: `/repos/${repo}/issues/comments/41` }),
     ]);
     expect(gh.writes[0].body.body).toContain('## Review triage notes\n');
-    expect(gh.writes[0].body.body).toContain("reading this review's findings");
+    expect(gh.writes[0].body.body).toContain("reading this round's findings");
   });
 
   it('removes the comment when a save leaves nothing to say, and posts none when there never was', async () => {
@@ -628,6 +647,165 @@ describe('postTriageNotes: the comments saved on a held round before it is compl
     gh.fail = 'POST';
     await expect(postTriageNotes(repo, 5, 'sess-1', findings, {})).rejects.toThrow(
       /GitHub answered 500 writing the triage notes comment/,
+    );
+  });
+});
+
+describe('deleteFindingFromReview', () => {
+  const entries = [
+    { severity: 'high', title: 'Race in the retry loop', file: 'lib/x.js', line: 12 },
+    { severity: 'low', title: 'Duplicated helper', file: 'public/y.js', line: 40 },
+  ];
+  const race = {
+    key: findingKey('Race in the retry loop'),
+    title: 'Race in the retry loop',
+    file: 'lib/x.js',
+    line: 12,
+  };
+  const inline = (extra = {}) => ({
+    id: 101,
+    path: 'lib/x.js',
+    line: 12,
+    body: '**HIGH**: Race in the retry loop\n\nIt can spin forever.',
+    html_url: 'https://gh/r/101',
+    created_at: '2026-09-08T10:00:00Z',
+    ...extra,
+  });
+
+  it('deletes the finding’s own comment and stops the review declaring it', async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [inline(), { id: 102, path: 'public/y.js', line: 40, body: 'Duplicated helper' }];
+
+    const out = await deleteFindingFromReview(repo, 5, race);
+
+    expect(out).toEqual({ commentDeleted: true, undeclared: true, warning: null });
+    expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/101` });
+    expect(gh.writes[1]).toMatchObject({ method: 'PATCH', url: `/repos/${repo}/issues/comments/7` });
+    const rewritten = gh.writes[1].body.body;
+    expect(rewritten).toContain('Duplicated helper'); // the other finding stands
+    expect(rewritten).not.toContain('Race in the retry loop');
+    expect(rewritten).toContain('Review summary'); // the prose the review wrote is not touched
+    expect(gh.writes).toHaveLength(2);
+  });
+
+  it('finds the comment by its title when the line it was written against has moved', async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [inline({ line: null, original_line: 99 })];
+
+    const out = await deleteFindingFromReview(repo, 5, race);
+
+    expect(out.commentDeleted).toBe(true);
+    expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/101` });
+  });
+
+  it('undeclares a finding the review only listed in its summary, deleting nothing', async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [];
+
+    const out = await deleteFindingFromReview(repo, 5, race);
+
+    expect(out).toEqual({ commentDeleted: false, undeclared: true, warning: null });
+    expect(gh.writes.map((w) => w.method)).toEqual(['PATCH']);
+  });
+
+  it('never touches a comment posted before the review began', async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [inline({ created_at: '2026-09-01T10:00:00Z' })];
+
+    const out = await deleteFindingFromReview(repo, 5, race, { since: '2026-09-08T09:00:00Z' });
+
+    expect(out.commentDeleted).toBe(false);
+    expect(gh.writes.map((w) => w.method)).toEqual(['PATCH']);
+  });
+
+  it('never touches a reply on a thread', async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [inline({ id: 103, in_reply_to_id: 101 })];
+
+    expect((await deleteFindingFromReview(repo, 5, race)).commentDeleted).toBe(false);
+    expect(gh.writes.map((w) => w.method)).toEqual(['PATCH']);
+  });
+
+  it('warns when the block cannot be rewritten: the comment is already gone', async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [inline()];
+    gh.fail = 'PATCH';
+
+    const out = await deleteFindingFromReview(repo, 5, race);
+
+    expect(out.commentDeleted).toBe(true);
+    expect(out.undeclared).toBe(false);
+    expect(out.warning).toMatch(/answered 500 rewriting the review's findings block/);
+  });
+
+  it('fails without touching the block when the comment cannot be deleted', async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [inline()];
+    gh.fail = 'DELETE';
+
+    await expect(deleteFindingFromReview(repo, 5, race)).rejects.toThrow(
+      /answered 500 deleting the finding's review comment/,
+    );
+    expect(gh.writes.map((w) => w.method)).toEqual(['DELETE']);
+  });
+});
+
+describe('replyOnFindingThread', () => {
+  const race = {
+    key: findingKey('Race in the retry loop'),
+    title: 'Race in the retry loop',
+    file: 'lib/x.js',
+    line: 12,
+  };
+  const inline = (extra = {}) => ({
+    id: 101,
+    path: 'lib/x.js',
+    line: 12,
+    body: '**HIGH**: Race in the retry loop',
+    html_url: 'https://gh/r/101',
+    created_at: '2026-09-08T10:00:00Z',
+    ...extra,
+  });
+
+  it("replies under the finding's own comment, with the pull request in the path", async () => {
+    gh.reviewComments = [inline()];
+    gh.created = { html_url: 'https://gh/r/101#reply' };
+
+    const out = await replyOnFindingThread(repo, 5, race, '  Fine for me, this is a one-time command  ');
+
+    expect(out).toEqual({ url: 'https://gh/r/101#reply' });
+    expect(gh.writes).toEqual([
+      {
+        method: 'POST',
+        url: `/repos/${repo}/pulls/5/comments/101/replies`,
+        body: { body: 'Fine for me, this is a one-time command' },
+      },
+    ]);
+  });
+
+  it('falls back to the thread itself when the reply comes back without a url', async () => {
+    gh.reviewComments = [inline()];
+
+    expect(await replyOnFindingThread(repo, 5, race, 'Noted')).toEqual({ url: 'https://gh/r/101' });
+  });
+
+  it('writes nothing for an empty reply, or a finding with no thread of its own', async () => {
+    gh.reviewComments = [inline()];
+    await expect(replyOnFindingThread(repo, 5, race, '   ')).rejects.toThrow(/Write something/);
+
+    gh.reviewComments = [];
+    await expect(replyOnFindingThread(repo, 5, race, 'Noted')).rejects.toThrow(
+      /no comment of its own on PR #5/,
+    );
+    expect(gh.writes).toEqual([]);
+  });
+
+  it('says what GitHub refused', async () => {
+    gh.reviewComments = [inline()];
+    gh.fail = 'POST';
+
+    await expect(replyOnFindingThread(repo, 5, race, 'Noted')).rejects.toThrow(
+      /answered 500 replying on the finding's thread/,
     );
   });
 });
