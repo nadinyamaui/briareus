@@ -59,6 +59,7 @@ vi.mock('../lib/github.js', () => ({
   githubGraphql: vi.fn(),
   upsertPrComment: vi.fn(),
   addPullRequestLabel: vi.fn(async () => []),
+  removePullRequestLabel: vi.fn(async () => []),
 }));
 
 vi.mock('../lib/dbpool.js', () => ({
@@ -152,7 +153,7 @@ import {
 } from '../lib/findings.js';
 import { implementFeedbackPrompt } from '../lib/prtasks.js';
 import { jobUsageEstimates } from '../lib/usage.js';
-import { addPullRequestLabel, githubGraphql, githubRest } from '../lib/github.js';
+import { addPullRequestLabel, removePullRequestLabel, githubGraphql, githubRest } from '../lib/github.js';
 import { resolveRuntime, getProviderForJob, captureProviderAuth } from '../lib/providerstore.js';
 import { stepRuntime } from '../lib/projects.js';
 import {
@@ -1632,6 +1633,12 @@ describe('standalone code-review findings', () => {
       31,
       'code-approved',
     );
+    expect(removePullRequestLabel).toHaveBeenLastCalledWith(
+      expect.objectContaining({ githubToken: 'tok' }),
+      'acme/standalone',
+      31,
+      'feedback-given',
+    );
     expect(recordTriage).toHaveBeenCalledWith(
       'acme/standalone',
       31,
@@ -2979,6 +2986,12 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       79,
       'code-approved',
     );
+    expect(removePullRequestLabel).toHaveBeenLastCalledWith(
+      expect.objectContaining({ githubToken: 'tok' }),
+      'acme/triage',
+      79,
+      'feedback-given',
+    );
     expect(worker.reviewLoop.done).toBe(true);
     expect(worker.reviewLoop.triage).toBeNull();
     expect(infoTexts(worker).join('\n')).toMatch(
@@ -3108,6 +3121,23 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
         ],
       }),
     ).rejects.toThrow(/answered 422 adding code-approved/);
+    expect(getJob('tri-13').reviewLoop.triage).toEqual(held());
+    expect(getJob('tri-13').reviewLoop.done).toBeFalsy();
+  });
+
+  it('keeps the round open when GitHub refuses to remove feedback-given', async () => {
+    removePullRequestLabel.mockRejectedValueOnce(
+      new Error('GitHub answered 500 removing feedback-given from acme/triage#79'),
+    );
+
+    await expect(
+      triageLoopFindings('tri-13', {
+        verdicts: [
+          { key: 'k1', decision: 'optional' },
+          { key: 'k2', decision: 'dismissed' },
+        ],
+      }),
+    ).rejects.toThrow(/answered 500 removing feedback-given/);
     expect(getJob('tri-13').reviewLoop.triage).toEqual(held());
     expect(getJob('tri-13').reviewLoop.done).toBeFalsy();
   });
