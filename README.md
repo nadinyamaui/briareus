@@ -370,15 +370,15 @@ written idempotently so a database from before then just gets its row in
 - MySQL 5.7+ / MariaDB 10.2+ for session history (created on first run).
   The schema is a set of migrations in `migrations/`, applied automatically
   at boot and by `npm run migrate`; see [Database migrations](#database-migrations)
-- The Claude Code CLI, authenticated. The spawned CLI does **not** share the
-  desktop app's login (`claude auth login`, or `claude setup-token` /
-  `ANTHROPIC_API_KEY` in `.env`)
+- The Claude Code CLI, with a provider login or API token configured in
+  **Settings**. Each provider entry has an isolated login, so spawned sessions
+  do not share the desktop app's login
 - Optionally the Codex, Grok and opencode CLIs (auto-discovered; `CODEX_BIN` /
-  `GROK_BIN` / `OPENCODE_BIN` to override). A `ZAI_API_KEY` in `.env` adds a
-  Z.AI entry that runs GLM models through the codex CLI (own `CODEX_HOME`, so
-  the codex login is untouched). An opencode entry authenticates with an API
-  key and nothing else, since there is no login flow to drive: it names its model
-  the way opencode does (`<service>/<model>`, say
+  `GROK_BIN` / `OPENCODE_BIN` to override). A Z.AI entry is configured in
+  **Settings** with the codex binary, its endpoint and API key; it runs GLM
+  models in its own `CODEX_HOME`, so the codex login is untouched. An opencode
+  entry authenticates with an API key and nothing else, since there is no login
+  flow to drive: it names its model the way opencode does (`<service>/<model>`, say
   `anthropic/claude-sonnet-4-5`), the key is filed under that service (and so
   is an optional base URL, for a proxy or a compatible gateway), and it runs
   with the XDG directories pointed at `~/.opencode-provider-<id>` so the
