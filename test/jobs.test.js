@@ -126,6 +126,8 @@ vi.mock('../lib/findings.js', () => ({
   })),
   sortFindingsForFix: vi.fn(async (repo, prNumber, findings) => ({ kept: findings, parked: [] })),
   recordTriage: vi.fn(async () => ({ error: null })),
+  deleteFindingFromReview: vi.fn(async () => ({ commentDeleted: true, undeclared: true, warning: null })),
+  replyOnFindingThread: vi.fn(async () => ({ url: 'https://gh/r/101#reply' })),
   postTriageNotes: vi.fn(async () => 'https://github.com/acme/standalone/pull/31#issuecomment-9'),
   findingKey: vi.fn((title) => `key:${title}`),
   findingUrl: vi.fn((repo, prNumber, file, line) => `url:${repo}#${prNumber}:${file || ''}:${line || ''}`),
@@ -150,6 +152,8 @@ import {
   sortFindingsForFix,
   recordTriage,
   postTriageNotes,
+  deleteFindingFromReview,
+  replyOnFindingThread,
 } from '../lib/findings.js';
 import { implementFeedbackPrompt } from '../lib/prtasks.js';
 import { jobUsageEstimates } from '../lib/usage.js';
@@ -187,7 +191,9 @@ import {
   childSessionsOf,
   triageLoopFindings,
   holdStandaloneReviewFindings,
-  triageStandaloneReviewFindings,
+  completeStandaloneReview,
+  deleteReviewFinding,
+  replyToReviewFinding,
   saveReviewFindingsDrafts,
   retryLoopRound,
   workspaceStartBranch,
@@ -1513,10 +1519,13 @@ describe('standalone code-review findings', () => {
 
   beforeAll(async () => {
     state.stored = [
-      queuedReview('stand-dismiss', [finding('k1', 'Remove the race')]),
-      queuedReview('stand-fix-fails', [finding('k2', 'Validate the input')]),
-      queuedReview('stand-label-fails', [finding('k4', 'Keep the type')]),
+      queuedReview('stand-complete', [finding('k1', 'Remove the race')]),
+      queuedReview('stand-notes', [finding('k2', 'Validate the input')]),
+      queuedReview('stand-delete', [finding('k5', 'Guard the id list'), finding('k6', 'Log the skips')]),
       { ...queuedReview('stand-close', [finding('k3', 'Keep the guard')]), status: 'closed' },
+      // A review whose card is already gone: completed from another tab, or
+      // dropped with a pull request that stopped being open.
+      { ...queuedReview('stand-none', []), reviewTriage: null },
     ];
     await initJobs();
     getJob('stand-close').status = 'idle';
@@ -1556,119 +1565,100 @@ describe('standalone code-review findings', () => {
     expect(deleteJob).not.toHaveBeenCalledWith('stand-close', null);
   });
 
-  it('Save comments keeps the drafts on the card and says them on the pull request, ruling nothing', async () => {
-    postTriageNotes.mockClear();
-    const result = await saveReviewFindingsDrafts('stand-dismiss', {
-      verdicts: [{ key: 'k1', decision: '', reason: '  Looks intentional, checking with the author  ' }],
-      note: 'Ship after the hotfix',
-    });
-    expect(result).toMatchObject({
-      url: 'https://github.com/acme/standalone/pull/31#issuecomment-9',
-      warning: null,
-      drafts: {
-        verdicts: { k1: { decision: null, reason: 'Looks intentional, checking with the author' } },
-        note: 'Ship after the hotfix',
-      },
-    });
-    const held = getJob('stand-dismiss').reviewTriage;
-    expect(held).toMatchObject({ prNumber: 31, drafts: { note: 'Ship after the hotfix' } });
-    expect(held.drafts.savedAt).toEqual(expect.any(String));
-    expect(postTriageNotes).toHaveBeenCalledWith(
-      'acme/standalone',
-      31,
-      'stand-dismiss',
-      [
-        expect.objectContaining({
-          key: 'k1',
-          decision: null,
-          reason: 'Looks intentional, checking with the author',
-        }),
-      ],
-      { note: 'Ship after the hotfix', round: 1, standalone: true, by: 'the user' },
-    );
-    expect(recordTriage).not.toHaveBeenCalledWith(
-      'acme/standalone',
-      31,
-      expect.anything(),
-      expect.anything(),
-    );
-  });
-
-  it('Save comments refuses a finding that is not on the card and a verdict that is not one', async () => {
+  it('has nothing to save: a code review is not triaged here', async () => {
     await expect(
-      saveReviewFindingsDrafts('stand-dismiss', { verdicts: [{ key: 'nope', reason: 'x' }] }),
-    ).rejects.toThrow(/No finding nope is waiting/);
-    await expect(
-      saveReviewFindingsDrafts('stand-dismiss', { verdicts: [{ key: 'k1', decision: 'maybe' }] }),
-    ).rejects.toThrow(/"maybe" is not a verdict/);
+      saveReviewFindingsDrafts('stand-complete', { verdicts: [{ key: 'k1', decision: 'fix' }] }),
+    ).rejects.toThrow(/no findings waiting for triage/);
     await expect(saveReviewFindingsDrafts('stand-nope', {})).rejects.toThrow(/Session not found/);
   });
 
-  it('Save comments keeps the drafts and warns when the pull request refuses the comment', async () => {
-    postTriageNotes.mockRejectedValueOnce(new Error('GitHub answered 403 writing the triage notes comment'));
-    const result = await saveReviewFindingsDrafts('stand-dismiss', {
-      verdicts: [{ key: 'k1', decision: 'dismiss', reason: 'Generated code' }],
-    });
-    expect(result.warning).toMatch(/Saved here, but not on PR #31: GitHub answered 403/);
-    expect(getJob('stand-dismiss').reviewTriage.drafts.verdicts).toEqual({
-      k1: { decision: 'dismissed', reason: 'Generated code' },
-    });
+  it("replies on one finding's thread and keeps it on the card", async () => {
+    replyOnFindingThread.mockClear();
+
+    const out = await replyToReviewFinding('stand-delete', 'k5', '  Fine for me  ');
+
+    expect(out).toEqual({ replied: 'k5', url: 'https://gh/r/101#reply' });
+    expect(replyOnFindingThread).toHaveBeenCalledWith(
+      'acme/standalone',
+      31,
+      expect.objectContaining({ key: 'k5' }),
+      '  Fine for me  ', // trimmed where it is written, so nothing is lost here
+      { since: '2026-09-07T10:00:00.000Z' },
+    );
+    expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k5', 'k6']);
   });
 
-  it('records dismissals and deletes the queue holder when nothing is selected', async () => {
-    recordTriage.mockResolvedValueOnce({ error: null });
+  it('refuses a reply on a finding, or a session, that is not there', async () => {
+    await expect(replyToReviewFinding('stand-delete', 'nope', 'hi')).rejects.toThrow(
+      /no longer on this review/,
+    );
+    await expect(replyToReviewFinding('stand-none', 'k5', 'hi')).rejects.toThrow(/no findings waiting/);
+    await expect(replyToReviewFinding('stand-nope', 'k5', 'hi')).rejects.toThrow(/Session not found/);
+  });
+
+  it('deletes one finding from the review itself and leaves the rest on the card', async () => {
+    deleteFindingFromReview.mockClear();
+
+    const out = await deleteReviewFinding('stand-delete', 'k5');
+
+    expect(out).toMatchObject({ deleted: 'k5', remaining: 1, commentDeleted: true, undeclared: true });
+    expect(deleteFindingFromReview).toHaveBeenCalledWith(
+      'acme/standalone',
+      31,
+      expect.objectContaining({ key: 'k5', title: 'Guard the id list' }),
+      { since: '2026-09-07T10:00:00.000Z' },
+    );
+    expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
+  });
+
+  it('keeps the finding on the card when GitHub refuses to delete its comment', async () => {
+    deleteFindingFromReview.mockRejectedValueOnce(
+      new Error("GitHub answered 403 deleting the finding's review comment"),
+    );
+
+    await expect(deleteReviewFinding('stand-delete', 'k6')).rejects.toThrow(/answered 403/);
+    expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
+  });
+
+  it('refuses a finding that is not on the card, and a session with no card', async () => {
+    await expect(deleteReviewFinding('stand-delete', 'nope')).rejects.toThrow(/no longer on this review/);
+    await expect(deleteReviewFinding('stand-none', 'k5')).rejects.toThrow(/no findings waiting/);
+    await expect(deleteReviewFinding('stand-nope', 'k5')).rejects.toThrow(/Session not found/);
+  });
+
+  it('completes the review without ruling on anything, and deletes the queue holder', async () => {
+    recordTriage.mockClear();
     postTriageNotes.mockClear();
-    const result = await triageStandaloneReviewFindings('stand-dismiss', {
-      verdicts: [{ key: 'k1', decision: 'dismissed', reason: 'Not part of this change' }],
-      note: 'Ship after the hotfix',
-    });
-    // Completing takes the "so far" notes comment off: the verdicts are on
-    // the Review triage comment now, note included.
-    expect(postTriageNotes).toHaveBeenCalledWith('acme/standalone', 31, 'stand-dismiss', [], {});
+    addPullRequestLabel.mockClear();
 
-    expect(result).toMatchObject({ fixing: false, dismissed: true, approved: true, session: null });
-    expect(addPullRequestLabel).toHaveBeenLastCalledWith(
-      expect.objectContaining({ githubToken: 'tok' }),
-      'acme/standalone',
-      31,
-      'code-approved',
-    );
-    expect(removePullRequestLabel).toHaveBeenLastCalledWith(
-      expect.objectContaining({ githubToken: 'tok' }),
-      'acme/standalone',
-      31,
-      'feedback-given',
-    );
-    expect(recordTriage).toHaveBeenCalledWith(
-      'acme/standalone',
-      31,
-      [expect.objectContaining({ key: 'k1', decision: 'dismissed' })],
-      { by: 'the user', note: 'Ship after the hotfix' },
-    );
-    expect(getJob('stand-dismiss')).toBeNull();
+    const result = await completeStandaloneReview('stand-complete');
+
+    expect(result).toEqual({ completed: true, prNumber: 31, findings: 1 });
+    // What it found is the pull request author's to answer: no verdicts on the
+    // record, no comment, no approval label, and no fix session.
+    expect(recordTriage).not.toHaveBeenCalled();
+    expect(postTriageNotes).not.toHaveBeenCalled();
+    expect(addPullRequestLabel).not.toHaveBeenCalled();
+    expect(getJob('stand-complete')).toBeNull();
   });
 
-  it('keeps the queue card when GitHub refuses the approval label', async () => {
-    addPullRequestLabel.mockRejectedValueOnce(
-      new Error('GitHub answered 422 adding code-approved to acme/standalone#31'),
-    );
+  it('takes off the notes comment a round held before Complete was the only control left', async () => {
+    postTriageNotes.mockClear();
+    getJob('stand-notes').reviewTriage.drafts = {
+      verdicts: {},
+      note: 'from an older save',
+      savedAt: '2026-09-07T10:10:00.000Z',
+    };
 
-    await expect(
-      triageStandaloneReviewFindings('stand-label-fails', {
-        verdicts: [{ key: 'k4', decision: 'optional' }],
-      }),
-    ).rejects.toThrow(/answered 422 adding code-approved/);
-    expect(getJob('stand-label-fails').reviewTriage).toMatchObject({ prNumber: 31 });
+    await completeStandaloneReview('stand-notes');
+
+    expect(postTriageNotes).toHaveBeenCalledWith('acme/standalone', 31, 'stand-notes', [], {});
+    expect(getJob('stand-notes')).toBeNull();
   });
 
-  it('keeps the queue card when the selected implementation session cannot start', async () => {
-    recordTriage.mockResolvedValueOnce({ error: null });
-    await expect(
-      triageStandaloneReviewFindings('stand-fix-fails', {
-        verdicts: [{ key: 'k2', decision: 'fix' }],
-      }),
-    ).rejects.toThrow(/Unknown project: acme\/standalone/);
-    expect(getJob('stand-fix-fails').reviewTriage).toMatchObject({ prNumber: 31 });
+  it('refuses a review whose card is already gone', async () => {
+    await expect(completeStandaloneReview('stand-none')).rejects.toThrow(/no findings waiting/);
+    await expect(completeStandaloneReview('stand-nope')).rejects.toThrow(/Session not found/);
   });
 });
 
@@ -2856,6 +2846,10 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       workerRow('tri-9', 'tri-orch'),
       // Merged under the hold, before the sync dropped the round.
       { ...workerRow('tri-10', 'tri-orch'), prStatus: { number: 79, state: 'merged' } },
+      // Save comments is written and read back on these two: one live, one
+      // left closed so the guard on a retired session is exercised.
+      workerRow('tri-save', 'tri-orch'),
+      workerRow('tri-save-closed', 'tri-orch'),
       // A free orchestrator with a triage update for a worker no longer holding one.
       orchRow('tri-free', {
         awaitingAnswer: false,
@@ -2880,6 +2874,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       'tri-11',
       'tri-12',
       'tri-13',
+      'tri-save',
       'tri-free',
     ]) {
       getJob(id).status = 'idle';
@@ -2894,6 +2889,66 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       /no review round waiting/,
     );
     await expect(triageLoopFindings('nobody', { verdicts: [] })).rejects.toThrow(/Session not found/);
+  });
+
+  it('Save comments keeps the drafts on the round and says them on the pull request, ruling nothing', async () => {
+    postTriageNotes.mockClear();
+    const recorded = recordTriage.mock.calls.length;
+
+    const result = await saveReviewFindingsDrafts('tri-save', {
+      verdicts: [{ key: 'k1', decision: '', reason: '  Looks intentional, checking with the author  ' }],
+      note: 'Ship after the hotfix',
+    });
+
+    expect(result).toMatchObject({
+      warning: null,
+      drafts: {
+        verdicts: { k1: { decision: null, reason: 'Looks intentional, checking with the author' } },
+        note: 'Ship after the hotfix',
+      },
+    });
+    const held = getJob('tri-save').reviewLoop.triage;
+    expect(held.drafts.savedAt).toEqual(expect.any(String));
+    expect(postTriageNotes).toHaveBeenCalledWith(
+      'acme/triage',
+      79,
+      'tri-save',
+      [
+        expect.objectContaining({
+          key: 'k1',
+          decision: null,
+          reason: 'Looks intentional, checking with the author',
+        }),
+        expect.objectContaining({ key: 'k2', decision: null, reason: '' }),
+      ],
+      { note: 'Ship after the hotfix', round: 2, by: 'the user' },
+    );
+    expect(recordTriage.mock.calls.length).toBe(recorded); // nothing ruled
+  });
+
+  it('Save comments keeps the drafts and warns when the pull request refuses the comment', async () => {
+    postTriageNotes.mockRejectedValueOnce(new Error('GitHub answered 403 writing the triage notes comment'));
+
+    const result = await saveReviewFindingsDrafts('tri-save', {
+      verdicts: [{ key: 'k1', decision: 'dismiss', reason: 'Generated code' }],
+    });
+
+    expect(result.warning).toMatch(/Saved here, but not on PR #79: GitHub answered 403/);
+    expect(getJob('tri-save').reviewLoop.triage.drafts.verdicts).toEqual({
+      k1: { decision: 'dismissed', reason: 'Generated code' },
+    });
+  });
+
+  it('Save comments refuses a finding that is not on the round, a verdict that is not one, and a closed session', async () => {
+    await expect(
+      saveReviewFindingsDrafts('tri-save', { verdicts: [{ key: 'nope', reason: 'x' }] }),
+    ).rejects.toThrow(/No finding nope is waiting/);
+    await expect(
+      saveReviewFindingsDrafts('tri-save', { verdicts: [{ key: 'k1', decision: 'maybe' }] }),
+    ).rejects.toThrow(/"maybe" is not a verdict/);
+    await expect(saveReviewFindingsDrafts('tri-save-closed', {})).rejects.toThrow(/session is closed/);
+    await expect(saveReviewFindingsDrafts('tri-4', {})).rejects.toThrow(/no findings waiting for triage/);
+    await expect(saveReviewFindingsDrafts('nobody', {})).rejects.toThrow(/Session not found/);
   });
 
   it('wants a verdict on every finding, by key, in one of the three words', async () => {
