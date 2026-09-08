@@ -146,6 +146,31 @@
       cloneReset: { label: '', port: null },
       cloneFocus: 'd-port',
     },
+    ssh: {
+      listEl: () => $('ssh-list'),
+      formEl: () => $('form-ssh'),
+      api: '/api/ssh/servers',
+      body: 'servers',
+      single: 'server',
+      prefix: 'ssh-',
+      fields: {
+        label: 'text',
+        repo: 'text',
+        host: 'text',
+        port: 'number',
+        username: 'text',
+        identityFile: 'text',
+        permissionMode: 'text',
+        enabled: 'bool',
+      },
+      title: (s) => s.label,
+      sub: (s) => `${s.username}@${s.host}:${s.port} · ${s.repo}`,
+      name: (s) => s.label,
+      newTitle: 'New SSH server',
+      deleteBody: 'Sessions lose access through the SSH tool and pending approvals are cancelled.',
+      cloneReset: { label: '' },
+      cloneFocus: 'ssh-label',
+    },
     // The prompts every project shares: one row, always id 1. Its fields are
     // not a fixed list (they are built from the catalog the server sends), so
     // `fields` is empty and readForm/writeForm handle it in their own branch,
@@ -217,6 +242,7 @@
     project: [],
     provider: [],
     server: [],
+    ssh: [],
     templates: [],
     saved: [],
     memory: [],
@@ -232,6 +258,7 @@
     project: null,
     provider: null,
     server: null,
+    ssh: null,
     templates: null,
     saved: { title: '', body: '', repo: '', sortOrder: null },
     memory: { repo: '', type: 'project', name: '', description: '', body: '' },
@@ -1082,6 +1109,16 @@
         )
         .join('') ||
       '<div class="px-2 py-1 text-[12px] text-muted">No servers yet. Add one so sessions can claim a database of their own.</div>';
+    $('ssh-list').innerHTML =
+      items.ssh
+        .map(
+          (s) => `
+      <div class="${ROW}${selected('ssh', s) ? ' bg-raise' : ''}" data-type="ssh" data-id="${s.id}">
+        <div class="truncate text-[14px]">${esc(s.label)}${s.enabled ? '' : ' · disabled'}</div>
+        <div class="text-[12px] text-muted">${esc(s.repo)} · ${s.permissionMode === 'ask' ? 'Ask for all commands' : 'Don’t ask anything'}</div>
+      </div>`,
+        )
+        .join('') || '<div class="px-2 py-1 text-[12px] text-muted">No SSH servers registered.</div>';
     $('template-list').innerHTML = items.templates
       .map((t) => {
         const n = Object.keys(t.values || {}).length;
@@ -1302,6 +1339,7 @@
     project: 'projects',
     provider: 'providers',
     server: 'servers',
+    ssh: 'ssh',
     templates: 'prompts',
     saved: 'saved-prompts',
     memory: 'memory',
@@ -1387,7 +1425,14 @@
     renderList();
     syncPath();
     $(
-      { project: 'f-repo', provider: 'p-label', server: 'd-host', saved: 's-title', memory: 'm-name' }[type],
+      {
+        project: 'f-repo',
+        provider: 'p-label',
+        server: 'd-host',
+        ssh: 'ssh-host',
+        saved: 's-title',
+        memory: 'm-name',
+      }[type],
     ).focus();
   }
 
@@ -1479,6 +1524,10 @@
     e.preventDefault();
     startNew('provider');
   });
+  $('btn-new-ssh').addEventListener('click', (e) => {
+    e.preventDefault();
+    startNew('ssh');
+  });
   $('btn-new-db').addEventListener('click', (e) => {
     e.preventDefault();
     startNew('server');
@@ -1535,7 +1584,7 @@
   });
 
   async function load() {
-    const [proj, prov, db, dev, tpl, saved, mem] = await Promise.all([
+    const [proj, prov, db, dev, tpl, saved, mem, ssh] = await Promise.all([
       api('/api/projects'),
       api('/api/providers'),
       api('/api/dbservers'),
@@ -1545,7 +1594,16 @@
       api('/api/templates').catch(() => ({ templates: [], defaults: null, catalog: [] })),
       api('/api/dev/prompts').catch(() => ({ prompts: [] })),
       api('/api/memories').catch(() => ({ memories: [] })),
+      api('/api/ssh/servers'),
     ]);
+    items.ssh = ssh.servers;
+    defaults.ssh = { ...ssh.defaults, repo: proj.projects[0]?.repo || '' };
+    const sshRepo = $('ssh-repo');
+    const keepSshRepo = sshRepo.value;
+    sshRepo.innerHTML = proj.projects
+      .map((p) => `<option value="${esc(p.repo)}">${esc(p.label || p.repo)}</option>`)
+      .join('');
+    sshRepo.value = keepSshRepo;
     items.saved = saved.prompts;
     items.memory = mem.memories;
     // A memory always belongs to a project, so this select has no "all" row

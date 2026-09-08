@@ -1,5 +1,7 @@
 // @ts-check
 import express from 'express';
+import { createSshService } from './lib/ssh.js';
+import { sshRoutes } from './lib/ssh-routes.js';
 import fs from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
@@ -354,7 +356,7 @@ app.get('/projects/:owner/:name/issues', devPage);
 app.get('/projects/:owner/:name/branches/*branch', devPage);
 
 app.get('/settings', (req, res) => res.redirect('/settings/projects'));
-for (const section of ['projects', 'providers', 'servers', 'saved-prompts', 'memory']) {
+for (const section of ['projects', 'providers', 'servers', 'ssh', 'saved-prompts', 'memory']) {
   app.get(`/settings/${section}`, settingsPage);
   app.get(`/settings/${section}/:id`, settingsPage);
 }
@@ -511,6 +513,9 @@ function agentSession(req, res) {
   }
   return job;
 }
+
+const sshService = createSshService({ getJob });
+app.use(sshRoutes({ service: sshService, agentSession, getProject }));
 
 app.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
@@ -1840,6 +1845,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initTemplates();
     await initProjects();
     await initDbServers();
+    await sshService.init();
     await initSavedPrompts();
     await initMemories();
     await initProviders();
