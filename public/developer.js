@@ -5525,6 +5525,14 @@
   const findingsErrors = new Map(); // sessionId -> the last send's error
   const findingsOutcomes = new Map(); // sessionId -> what the last send came back with
   const findingsSending = new Set();
+  // Rounds whose saved drafts (Save comments, kept on the round by the
+  // server) have been read into the maps above: once, when the card is first
+  // drawn here, so what is typed afterwards is never overwritten by the poll.
+  const findingsSeeded = new Set(); // roundKey
+  // What Save comments last said per session: saved (with the comment's url),
+  // saving, or why the pull request refused. Cleared by the next edit.
+  const findingsSaved = new Map(); // sessionId -> { at, url, warning, error }
+  const findingsSaving = new Set();
   let findingsDrawn = null; // the signature of the last list drawn
 
   function heldRounds() {
@@ -5604,8 +5612,32 @@
       if (!live.has(k.slice(0, k.lastIndexOf('\n')))) findingsDraft.delete(k);
     }
     for (const k of findingsNotes.keys()) if (!live.has(k)) findingsNotes.delete(k);
+    for (const k of findingsSeeded) if (!live.has(k)) findingsSeeded.delete(k);
     const sessionsLive = new Set(rounds.map(({ session }) => session.id));
     for (const k of findingsErrors.keys()) if (!sessionsLive.has(k)) findingsErrors.delete(k);
+    for (const k of findingsSaved.keys()) if (!sessionsLive.has(k)) findingsSaved.delete(k);
+  }
+
+  // The drafts a round was saved with (Save comments) become this tab's
+  // drafts the first time the round is drawn here: a reload, or another tab,
+  // comes back to the verdicts and comments as they were saved. Only once per
+  // round: after that the maps are the truth, and a poll must not put back
+  // what the user has since changed.
+  function seedFindingsDrafts(rounds) {
+    for (const { session, held } of rounds) {
+      const rk = roundKey(session.id, held.round);
+      if (findingsSeeded.has(rk)) continue;
+      findingsSeeded.add(rk);
+      const saved = held.drafts;
+      if (!saved) continue;
+      for (const f of held.findings) {
+        const d = saved.verdicts && saved.verdicts[f.key];
+        if (d && !findingsDraft.has(`${rk}\n${f.key}`)) {
+          setDraft(rk, f.key, { decision: d.decision || null, reason: d.reason || '' });
+        }
+      }
+      if (saved.note && !findingsNotes.has(rk)) findingsNotes.set(rk, saved.note);
+    }
   }
 
   function findingsSignature(rounds) {
@@ -5680,6 +5712,7 @@
     if (!force && active && active.matches('input, textarea') && $('findings-list').contains(active)) return;
     findingsDrawn = signature;
     pruneFindingsDrafts(rounds);
+    seedFindingsDrafts(rounds);
     const groups = findingsGroups(rounds);
     $('findings-sub').textContent = !rounds.length
       ? 'nothing is waiting'
@@ -5742,10 +5775,14 @@
         const advice = f.parked
           ? `<div class="text-[11px] text-muted">The loop would have parked it: ${esc(f.parkedWhy || f.parked)}.</div>`
           : '';
-        const reason =
-          draft.decision === 'dismissed' || draft.decision === 'optional'
-            ? `<input class="finding-reason w-full rounded border border-line bg-field px-1.5 py-0.5 text-[11px] text-ink placeholder:text-muted" data-session="${esc(s.id)}" data-key="${esc(f.key)}" placeholder="Why (recorded on the pull request)" value="${esc(draft.reason)}">`
-            : '';
+        // A comment on every finding, whatever the verdict (or none yet):
+        // Save comments puts it on the pull request, and Complete records it
+        // beside the verdict.
+        const reason = `<input class="finding-reason w-full rounded border border-line bg-field px-1.5 py-0.5 text-[11px] text-ink placeholder:text-muted" data-session="${esc(s.id)}" data-key="${esc(f.key)}" placeholder="${
+          draft.decision === 'fix' || !draft.decision
+            ? 'Comment (saved to the pull request)'
+            : 'Why (recorded on the pull request)'
+        }" value="${esc(draft.reason)}">`;
         return `<div class="flex flex-col gap-1 border-t border-line pt-2">
           <a class="group flex flex-col gap-1 no-underline" href="${esc(f.url || `${heldPrUrl(s, held)}/files`)}" target="_blank" rel="noopener" title="Read this finding on the pull request">
             <div class="flex items-center gap-1.5">
@@ -5761,8 +5798,24 @@
       })
       .join('');
     const fixes = held.findings.filter((f) => draftOf(rk, f.key).decision === 'fix').length;
+    const unruled = held.findings.filter((f) => !draftOf(rk, f.key).decision).length;
     const sending = findingsSending.has(s.id);
+    const saving = findingsSaving.has(s.id);
     const error = findingsErrors.get(s.id);
+    const saved = findingsSaved.get(s.id);
+    const savedLine = saved
+      ? saved.error
+        ? `<span class="finding-saved text-[12px] text-danger">Not saved: ${esc(saved.error)}</span>`
+        : saved.warning
+          ? `<span class="finding-saved text-[12px] text-danger">${esc(saved.warning)}</span>`
+          : `<span class="finding-saved text-[12px] text-muted">Saved${
+              saved.url
+                ? ` · <a class="text-muted hover:text-ink hover:underline" href="${esc(saved.url)}" target="_blank" rel="noopener">comment on the pull request ↗</a>`
+                : ''
+            }</span>`
+      : held.drafts && held.drafts.savedAt
+        ? `<span class="text-[12px] text-muted">Comments saved ${esc(fmtWhen(held.drafts.savedAt))}</span>`
+        : '';
     const heldFor = held.heldAt ? `held since ${fmtWhen(held.heldAt)}` : '';
     const stale = held.stale
       ? `<div class="mt-1 text-[12px] text-danger">The branch moved after this round was reviewed: some of these may already be fixed. Sending with nothing to fix reviews the new commits instead of closing the loop.</div>`
@@ -5773,26 +5826,34 @@
         <span class="text-[12px] text-muted">${standalone ? 'standalone review' : `round ${held.round}`}${heldFor ? ` · ${esc(heldFor)}` : ''}</span>
       </div>
       ${stale}
-      <div class="mt-1 text-[12px] text-muted">${held.findings.length} finding${held.findings.length === 1 ? '' : 's'}. Mark what the implementation session should fix; anything left unmarked is recorded as optional and removed from this queue.
+      <div class="mt-1 text-[12px] text-muted">${held.findings.length} finding${held.findings.length === 1 ? '' : 's'}. Give each one a verdict and a comment if you have one; Save comments keeps them here and on the pull request, and Complete appears once every finding is marked.
         <button type="button" class="finding-all cursor-pointer border-0 bg-transparent p-0 text-[12px] text-accent hover:underline" data-session="${esc(s.id)}" data-dec="fix">Fix all</button> ·
         <button type="button" class="finding-all cursor-pointer border-0 bg-transparent p-0 text-[12px] text-accent hover:underline" data-session="${esc(s.id)}" data-dec="">Clear</button>
       </div>
       <div class="mt-2 flex flex-col gap-2">${rows}</div>
       <div class="mt-2.5 flex flex-col gap-1.5 border-t border-line pt-2.5">
-        <input class="finding-note w-full rounded border border-line bg-field px-1.5 py-1 text-[12px] text-ink placeholder:text-muted" data-session="${esc(s.id)}" placeholder="A note for the fix session (optional)" value="${esc(findingsNotes.get(rk) || '')}">
+        <input class="finding-note w-full rounded border border-line bg-field px-1.5 py-1 text-[12px] text-ink placeholder:text-muted" data-session="${esc(s.id)}" placeholder="A note for the pull request and the fix session (optional)" value="${esc(findingsNotes.get(rk) || '')}">
         <div class="flex flex-wrap items-center gap-2">
-          <button type="button" class="btn finding-send btn-primary" data-session="${esc(s.id)}"${sending ? ' disabled' : ''}>${
-            sending
-              ? 'Sending…'
-              : fixes
-                ? standalone
-                  ? `Start session for ${fixes} selected`
-                  : `Send ${fixes} to be fixed`
-                : standalone
-                  ? 'Nothing to fix · approve'
-                  : 'Nothing to fix · approve and close'
+          <button type="button" class="btn finding-save" data-session="${esc(s.id)}"${saving || sending ? ' disabled' : ''} title="Keep the verdicts and comments typed so far, here and as a comment on the pull request, without completing the review">${
+            saving ? 'Saving…' : 'Save comments'
           }</button>
+          ${
+            unruled
+              ? `<span class="text-[12px] text-muted">${unruled} finding${unruled === 1 ? '' : 's'} still unmarked; Complete appears once every finding has a verdict.</span>`
+              : `<button type="button" class="btn finding-send btn-primary" data-session="${esc(s.id)}"${sending || saving ? ' disabled' : ''} title="Record every verdict and comment on the pull request${fixes ? ' and start the fix session' : ' and approve it'}">${
+                  sending
+                    ? 'Completing…'
+                    : fixes
+                      ? standalone
+                        ? `Complete · start session for ${fixes} to fix`
+                        : `Complete · send ${fixes} to be fixed`
+                      : standalone
+                        ? 'Complete · nothing to fix, approve'
+                        : 'Complete · nothing to fix, approve and close'
+                }</button>`
+          }
           ${error ? `<span class="text-[12px] text-danger">${esc(error)}</span>` : ''}
+          ${savedLine}
         </div>
       </div>
     </section>`;
@@ -5810,6 +5871,7 @@
         decision: draft.decision === dec ? null : dec, // the same button twice clears the pick
         reason: draft.reason,
       });
+      findingsSaved.delete(session);
       renderFindingsView({ force: true });
       return;
     }
@@ -5824,6 +5886,7 @@
           reason: draftOf(rk, f.key).reason,
         });
       }
+      findingsSaved.delete(all.dataset.session);
       renderFindingsView({ force: true });
       return;
     }
@@ -5837,6 +5900,12 @@
     if (dismiss) {
       findingsOutcomes.delete(dismiss.dataset.session);
       renderFindingsView({ force: true });
+      return;
+    }
+    const saveBtn = e.target.closest('.finding-save');
+    if (saveBtn) {
+      const round = roundOnCard(saveBtn, { send: true });
+      if (round) await saveRound(round);
       return;
     }
     const send = e.target.closest('.finding-send');
@@ -5854,14 +5923,57 @@
       if (!round) return;
       const rk = roundKey(session, round.held.round);
       setDraft(rk, key, { ...draftOf(rk, key), reason: reason.value });
+      clearSavedLine(session);
       return;
     }
     const note = e.target.closest('.finding-note');
     if (note) {
       const round = roundOnCard(note);
-      if (round) findingsNotes.set(roundKey(note.dataset.session, round.held.round), note.value);
+      if (!round) return;
+      findingsNotes.set(roundKey(note.dataset.session, round.held.round), note.value);
+      clearSavedLine(note.dataset.session);
     }
   });
+
+  // An edit after a save: the "Saved" line no longer describes what is on
+  // the screen, so it goes, in place rather than by a redraw, which would
+  // take the caret with it.
+  function clearSavedLine(sessionId) {
+    if (!findingsSaved.delete(sessionId)) return;
+    const card = $('findings-list').querySelector(`[data-round][data-session="${CSS.escape(sessionId)}"]`);
+    const line = card && card.querySelector('.finding-saved');
+    if (line) line.remove();
+  }
+
+  // Save comments: the verdicts picked and the comments typed so far go to
+  // the server, which keeps them on the round (a reload or another tab comes
+  // back to them) and writes them on the pull request as one comment that
+  // every save rewrites. Nothing is ruled and the round stays on the screen.
+  async function saveRound(round) {
+    const sessionId = round.session.id;
+    if (findingsSaving.has(sessionId) || findingsSending.has(sessionId)) return;
+    const key = roundKey(sessionId, round.held.round);
+    const verdicts = round.held.findings.map((f) => {
+      const draft = draftOf(key, f.key);
+      return { key: f.key, decision: draft.decision || null, reason: draft.reason || '' };
+    });
+    findingsSaving.add(sessionId);
+    findingsSaved.delete(sessionId);
+    renderFindingsView({ force: true });
+    try {
+      const res = await api(`/api/dev/sessions/${encodeURIComponent(sessionId)}/triage/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ verdicts, note: findingsNotes.get(key) || '' }),
+      });
+      findingsSaved.set(sessionId, { at: Date.now(), url: res && res.url, warning: res && res.warning });
+    } catch (err) {
+      findingsSaved.set(sessionId, { at: Date.now(), error: err.message });
+    } finally {
+      findingsSaving.delete(sessionId);
+    }
+    renderFindingsView({ force: true });
+  }
 
   // Release one round: every finding gets its verdict (unmarked ones
   // optional, which the loop never offers again), the server records them and
