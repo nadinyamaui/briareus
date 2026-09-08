@@ -65,6 +65,19 @@
         </details>
         <details class="side-sec mt-4" open>
           <summary>
+            <span>SSH servers</span
+            ><button
+              id="btn-new-ssh"
+              title="Register an SSH server"
+              class="cursor-pointer rounded border-0 bg-transparent px-1 text-[12px] text-muted hover:text-ink"
+            >
+              ＋ New
+            </button>
+          </summary>
+          <div id="ssh-list"></div>
+        </details>
+        <details class="side-sec mt-4" open>
+          <summary>
             <span>Prompts</span>
           </summary>
           <div id="template-list"></div>
@@ -616,6 +629,69 @@
           </details>
         </form>
 
+        <form
+          id="form-ssh"
+          class="mx-auto hidden max-w-[720px] px-4 pt-[18px] pb-[60px] lg:px-6"
+          autocomplete="off"
+        >
+          <details class="fset" open>
+            <summary>SSH server</summary>
+            <label class="field check"
+              ><input id="ssh-enabled" type="checkbox" /><span
+                >Available to sessions on this project</span
+              ></label
+            >
+            <label class="field"
+              ><span>Label</span><input id="ssh-label" type="text" placeholder="Production web server"
+            /></label>
+            <label class="field"
+              ><span>Project</span
+              ><select id="ssh-repo"></select
+            ></label>
+            <div class="field-row">
+              <label class="field"
+                ><span>Host</span
+                ><input id="ssh-host" type="text" spellcheck="false" placeholder="server.example.com"
+              /></label>
+              <label class="field narrow"
+                ><span>Port</span><input id="ssh-port" type="number" min="1" max="65535"
+              /></label>
+            </div>
+            <label class="field"
+              ><span>Username</span
+              ><input id="ssh-username" type="text" spellcheck="false" placeholder="deploy"
+            /></label>
+            <label class="field"
+              ><span>Private key path</span
+              ><input
+                id="ssh-identityFile"
+                type="text"
+                spellcheck="false"
+                placeholder="/home/nadin/.ssh/id_ed25519"
+              />
+              <em
+                >Absolute path on the machine running Briareus; leave empty for its default SSH keys or agent.
+                Password prompts are not supported.</em
+              ></label
+            >
+            <label class="field"
+              ><span>Permission mode</span
+              ><select id="ssh-permissionMode">
+                <option value="ask">Ask for all commands</option>
+                <option value="allow">Don't ask anything</option>
+              </select>
+              <em
+                >Ask shows the exact command in the dashboard for approval. Don't ask anything sends every
+                command immediately.</em
+              ></label
+            >
+            <p class="text-[12px] text-muted">
+              First verify the server's host key and add it to the Briareus account's known_hosts file.
+              Unknown or changed host keys are refused. SSH configuration aliases and interactive commands are
+              not supported.
+            </p>
+          </details>
+        </form>
         <!-- One database server in the session pool: same page, second entity. -->
         <form
           id="form-db"
@@ -841,5 +917,6 @@
     </div>
 
     <script src="/settings.js"></script>
+    <script src="/ssh-approvals.js"></script>
   </body>
 </html>

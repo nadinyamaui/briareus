@@ -626,3 +626,41 @@ issue.
 ## License
 
 [MIT](LICENSE).
+
+### Registered SSH servers
+
+Open **Settings → SSH servers → ＋ New**, select a project, and register the host, port,
+username and optional absolute private-key path on the machine running Briareus.
+The key must be readable by the operating-system account running the dashboard. An empty
+key path uses that account's default keys or SSH agent; encrypted keys need to be unlocked
+in its agent. Password authentication, SSH config aliases, jump hosts and interactive
+terminals are not supported.
+
+Verify the host key independently and establish trust in that account's `~/.ssh/known_hosts`
+before using the tool. Connections use OpenSSH with `BatchMode=yes` and
+`StrictHostKeyChecking=yes`: unknown or changed host keys fail without connecting to a
+remote shell ([OpenSSH configuration reference](https://man.openbsd.org/ssh_config.5)).
+
+Each server has one permission mode:
+
+- **Ask for all commands** (default): the exact command, destination, project and session
+  appear in an approval panel on both the sessions and settings pages; **Approve command**
+  executes it once, and **Deny** returns the denial to the agent.
+- **Don't ask anything**: every command submitted through the SSH tool starts immediately.
+
+Claude and Codex sessions receive `ssh_list_servers`, `ssh_execute` and `ssh_result` MCP
+tools. Providers without headless MCP configuration use the equivalent session-authenticated
+HTTP routes described in their briefing. Only enabled servers assigned to the session's
+project are available. Each command runs in a fresh noninteractive shell, so include `cd`
+in the command when a working directory is needed. Execution defaults to a 60-second timeout
+(maximum 300 seconds) and 256 KiB per output stream; timeout or excess output terminates the
+local SSH client, but cannot guarantee that a remote process has stopped.
+
+Approvals expire after ten minutes and are cancelled when the session turn ends or the
+server registration changes. Switching to “Don't ask anything” does not execute already
+queued commands. Registrations persist in the existing `app_settings` database table;
+requests and results are held in memory for up to an hour, with at most 100 requests retained
+(old completed results are evicted first).
+A restart discards requests and never replays them. These permissions govern the SSH tool;
+Briareus's coding agents still run with their existing local shell access, so this is not an
+operating-system sandbox restricting every possible way to reach a server.
