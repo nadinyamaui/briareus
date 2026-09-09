@@ -1740,11 +1740,13 @@ app.post('/api/dev/sessions/:id/loop', (req, res) => {
   }
 });
 
-// ⚑ Findings, Complete. On a review-loop round it takes the verdicts: what is
-// marked fix starts an Implement feedback session, the rest is recorded on the
-// pull request, and the screen sends an unmarked finding as optional so it is
-// not offered again. On a hand-started code review it takes nothing and rules
-// nothing — its findings are the author's to fix — and only clears the card.
+// ⚑ Findings, Complete. On a round of the user's own pull request — a
+// review-loop round, or a hand-started review of their own work — it takes the
+// verdicts: what is marked fix starts an Implement feedback session, the rest
+// is recorded on the pull request, and the screen sends an unmarked finding as
+// optional so it is not offered again. On a review of somebody else's pull
+// request it takes nothing and rules nothing — those findings are that
+// author's to fix — and only clears the card.
 app.post('/api/dev/sessions/:id/triage', async (req, res) => {
   try {
     const { verdicts, note } = req.body || {};
@@ -1754,7 +1756,8 @@ app.post('/api/dev/sessions/:id/triage', async (req, res) => {
   }
 });
 
-// ⚑ Findings, Reply on one finding of a hand-started code review: the text
+// ⚑ Findings, Reply on one finding of a review of somebody else's pull
+// request: the text
 // goes on that finding's own thread on the pull request, where its author
 // answers it. It rules nothing and leaves the finding on the card.
 app.post('/api/dev/sessions/:id/findings/reply', async (req, res) => {
