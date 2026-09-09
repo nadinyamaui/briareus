@@ -5506,9 +5506,10 @@
   //
   // Every review result waiting for a decision, across every project, on one
   // screen: both rounds held by a review loop and standalone reviews started
-  // from the pull-request board. Nothing is fixed until somebody marks it so
-  // and sends the result. Sending records every verdict (an unmarked finding
-  // is left optional: real, not now) and starts an Implement feedback session
+  // from the pull-request board. What a card offers follows whose pull request
+  // it is (ownRound), and nothing is fixed until somebody marks it so and
+  // sends the result. Sending records every verdict (an unmarked finding is
+  // left optional: real, not now) and starts an Implement feedback session
   // with what was marked fix. Results are read off the sessions poll, so the
   // same 7-second tick that moves the sidebar moves this list.
 
@@ -5542,6 +5543,17 @@
   // the row says so and the button cannot be pressed twice.
   const findingsDeleting = new Set();
   let findingsDrawn = null; // the signature of the last list drawn
+
+  // Which card a held round gets. Whose pull request it is decides that, not
+  // how the review was started: on the user's own pull request the findings are
+  // theirs to rule on and send to a fix session, and on somebody else's they
+  // are its author's to fix, so the card only replies on the threads and takes
+  // the review off the queue. A loop round is always the session's own work,
+  // and a review whose author the server could not read is treated as somebody
+  // else's — the card that rules nothing is the safe one to be wrong with.
+  function ownRound(held) {
+    return held.standalone ? held.mine === true : true;
+  }
 
   function heldRounds() {
     return sessions
@@ -5786,6 +5798,7 @@
         data-session="${esc(s.id)}" data-key="${esc(f.key)}" data-dec="${dec}">${label}</button>`;
     };
     const standalone = !!held.standalone;
+    const mine = ownRound(held);
     const rows = held.findings
       .map((f) => {
         const [sevLabel, sevCls] = SEV_CHIP[f.severity] || SEV_CHIP.medium;
@@ -5794,12 +5807,12 @@
         const advice = f.parked
           ? `<div class="text-[11px] text-muted">The loop would have parked it: ${esc(f.parkedWhy || f.parked)}.</div>`
           : '';
-        // A loop round takes a verdict and a comment on every finding: what is
-        // marked fix goes to the round's fix session. A hand-started review
-        // takes neither, because nothing it found is fixed from here — the
-        // pull request's author answers it. What it takes instead acts on the
-        // review itself: a reply on the finding's own thread, or deleting the
-        // finding from the review.
+        // A card on the user's own pull request takes a verdict and a comment
+        // on every finding: what is marked fix goes to a fix session. A review
+        // of somebody else's takes neither, because nothing it found is fixed
+        // from here — the pull request's author answers it. What it takes
+        // instead acts on the review itself: a reply on the finding's own
+        // thread, or deleting the finding from the review.
         const mark = `${s.id}\n${f.key}`;
         const deleting = findingsDeleting.has(mark);
         const replying = findingsReplying.has(mark);
@@ -5815,7 +5828,7 @@
                   : ''
               }</div>`
           : '';
-        const controls = standalone
+        const controls = !mine
           ? `<div class="flex flex-wrap items-center gap-1">
           <input class="finding-reason min-w-0 flex-1 rounded border border-line bg-field px-1.5 py-0.5 text-[11px] text-ink placeholder:text-muted" data-session="${esc(s.id)}" data-key="${esc(f.key)}" placeholder="Reply on this finding’s thread" value="${esc(draft.reason)}"${
             replying ? ' disabled' : ''
@@ -5871,12 +5884,12 @@
       ? `<div class="mt-1 text-[12px] text-danger">The branch moved after this round was reviewed: some of these may already be fixed. Sending with nothing to fix reviews the new commits instead of closing the loop.</div>`
       : '';
     const count = `${held.findings.length} finding${held.findings.length === 1 ? '' : 's'}`;
-    // A loop round is triaged here, because its verdicts are what the round's
-    // fix session works from. A hand-started review is only read: it is
-    // somebody else's pull request, its author answers what it found, and the
-    // one thing this screen is for is saying you have read it. So the card
-    // carries Complete and nothing else — no verdicts, no comments to save.
-    const howTo = standalone
+    // Findings on the user's own pull request are triaged here, because the
+    // verdicts are what the fix session works from. A review of somebody
+    // else's is only read: its author answers what it found, and the one thing
+    // this screen is for is saying you have read it. So that card carries
+    // replies, Delete and Complete — no verdicts, no comments to save.
+    const howTo = !mine
       ? held.findings.length
         ? `${count}, already on the pull request. Read them there; Reply says something on a finding’s own thread, Delete takes one out of the review itself, and Complete takes this card off the queue and leaves the rest to the pull request’s author.`
         : 'Every finding was deleted from the review. Complete takes this card off the queue.'
@@ -5884,7 +5897,7 @@
         <button type="button" class="finding-all cursor-pointer border-0 bg-transparent p-0 text-[12px] text-accent hover:underline" data-session="${esc(s.id)}" data-dec="fix">Fix all</button> ·
         <button type="button" class="finding-all cursor-pointer border-0 bg-transparent p-0 text-[12px] text-accent hover:underline" data-session="${esc(s.id)}" data-dec="">Clear</button>`;
     const errorLine = error ? `<span class="text-[12px] text-danger">${esc(error)}</span>` : '';
-    const footer = standalone
+    const footer = !mine
       ? `<div class="mt-2.5 flex flex-wrap items-center gap-2 border-t border-line pt-2.5">
           <button type="button" class="btn finding-send btn-primary" data-session="${esc(s.id)}"${sending ? ' disabled' : ''} title="Take this review off the queue; what it found stays on the pull request for its author">${
             sending ? 'Completing…' : 'Complete'
@@ -5999,7 +6012,7 @@
     const field = e.target.closest('.finding-reason');
     if (!field) return;
     const round = roundOnCard(field);
-    if (!round || !round.held.standalone) return;
+    if (!round || ownRound(round.held)) return; // a verdict card's field is a comment, not a reply
     e.preventDefault();
     await replyToFinding(round, field.dataset.key);
   });
@@ -6151,11 +6164,11 @@
     renderFindingsView({ force: true });
   }
 
-  // Complete one card. A loop round sends its verdicts: every finding gets one
-  // (unmarked ones optional, which the loop never offers again), the server
-  // records them and starts the fix session with what was marked fix. A
-  // hand-started review sends nothing — there is nothing to rule on — and the
-  // server only lets the card go. Either way it leaves the list on the next
+  // Complete one card. A card on the user's own pull request sends its
+  // verdicts: every finding gets one (unmarked ones optional, which the loop
+  // never offers again), the server records them and starts the fix session
+  // with what was marked fix. A review of somebody else's sends nothing —
+  // there is nothing to rule on — and the server only lets the card go. Either way it leaves the list on the next
   // poll, once the session's record no longer holds it, and the answer says
   // what followed. A completion that fails because the round is no longer held
   // (completed from another tab, ruled on by an orchestrator, the loop turned
@@ -6176,7 +6189,7 @@
       const outcome = await api(`/api/dev/sessions/${encodeURIComponent(sessionId)}/triage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(round.held.standalone ? {} : { verdicts, note: findingsNotes.get(key) || '' }),
+        body: JSON.stringify(ownRound(round.held) ? { verdicts, note: findingsNotes.get(key) || '' } : {}),
       });
       for (const f of round.held.findings) findingsDraft.delete(`${key}\n${f.key}`);
       findingsNotes.delete(key);

@@ -631,6 +631,15 @@ describe('postTriageNotes: the comments saved on a held round before it is compl
     expect(gh.writes[0].body.body).toContain("reading this round's findings");
   });
 
+  // A hand-started review has no rounds to number, so its notes comment says
+  // "review" where a loop round's says "round".
+  it('says review, not round, on a hand-started review’s notes', async () => {
+    await postTriageNotes(repo, 5, 'sess-1', findings, { round: 1, standalone: true });
+    const body = gh.writes.find((w) => w.method === 'POST').body.body;
+    expect(body).toContain('## Review triage notes\n');
+    expect(body).toContain("reading this review's findings");
+  });
+
   it('removes the comment when a save leaves nothing to say, and posts none when there never was', async () => {
     gh.comments = [{ id: 41, body: '<!-- reviewer:triage-notes sess-1 -->\nold' }];
     expect(await postTriageNotes(repo, 5, 'sess-1', [{ ...findings[1] }], { note: '  ' })).toBeNull();
