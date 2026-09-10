@@ -46,6 +46,18 @@ it('lists only permitted projects and never exposes their settings or credential
   expect(await call('projects')).toEqual({ projects: [{ repo: project.repo, label: project.label }] });
 });
 
+it('does not offer Zeus starts without a supported way to choose both proposal models', async () => {
+  const start = dashboard.tools().find((tool) => tool.name === 'dashboard_start_session');
+  expect(start.inputSchema.properties).not.toHaveProperty('zeus');
+  await expect(
+    call('start_session', { repo: project.repo, prompt: 'Plan an epic', zeus: true }),
+  ).rejects.toThrow('Unknown argument: zeus');
+  expect(handler).not.toHaveBeenCalled();
+  expect(
+    (await call('start_session', { repo: project.repo, prompt: 'Plan a task', orchestrator: true })).body,
+  ).toMatchObject({ orchestrator: true, provider: 2, model: 'review-model', effort: 'high' });
+});
+
 it('dispatches every menu action with the configured project runtime', async () => {
   for (const action of listActions()) {
     const result = await call(action.id.replaceAll('-', '_'), {

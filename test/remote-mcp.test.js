@@ -297,3 +297,54 @@ it('does not publish newly issued credentials when persistence fails', async () 
   await expect(token()).rejects.toThrow('database down');
   expect(saved.grants).toHaveLength(0);
 });
+
+const gatedRoutes = [
+  ['/mcp', 'POST'],
+  ['/oauth/token', 'POST'],
+  ['/.well-known/oauth-authorization-server', 'GET'],
+  ['/.well-known/oauth-protected-resource', 'GET'],
+  ['/.well-known/oauth-protected-resource/mcp', 'GET'],
+].flatMap(([path, method]) =>
+  [path, `${path}/`, path.toUpperCase(), `${path.toUpperCase()}/`].map((variant) => [variant, method]),
+);
+
+it.each(gatedRoutes)('gates matching route %s (%s) before dispatch', async (path, method) => {
+  const tokens = await token();
+  const options = {
+    method,
+    headers: {
+      ...(path.toLowerCase().startsWith('/mcp') ? { Authorization: `Bearer ${tokens.access_token}` } : {}),
+      Accept: 'application/json, text/event-stream',
+    },
+    ...(method === 'POST'
+      ? {
+          body: path.toLowerCase().startsWith('/mcp')
+            ? {
+                jsonrpc: '2.0',
+                id: 1,
+                method: 'tools/call',
+                params: { name: 'dashboard_projects', arguments: {} },
+              }
+            : tokenBody(),
+        }
+      : {}),
+  };
+  loginOn = false;
+  expect((await request(path, options)).status).toBe(503);
+  loginOn = true;
+  expect(
+    (await request(path, { ...options, headers: { ...options.headers, Origin: 'https://evil.example' } }))
+      .status,
+  ).toBe(403);
+  expect(dashboard.call).not.toHaveBeenCalled();
+  expect(saved.grants).toHaveLength(1);
+  const allowed = await request(path, {
+    ...options,
+    headers: { ...options.headers, Origin: 'https://chatgpt.com' },
+  });
+  expect(allowed.status).toBe(200);
+  expect(allowed.headers.get('cache-control')).toBe('no-store');
+  if (path.toLowerCase().startsWith('/mcp')) expect(dashboard.call).toHaveBeenCalledTimes(1);
+  await auth.configure({ enabled: false, baseUrl: publicUrl });
+  expect((await request(path, options)).status).toBe(404);
+});
