@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "^2.1.261",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@openai/codex": "^0.154.0-alpha.3",
     "express": "^5.2.1",
     "mysql2": "^3.24.3",

@@ -606,6 +606,69 @@ server at a time, so add as many entries as sessions you want to run in parallel
 with a database. Migrations and seeding belong in the project's setup
 commands, which run on every session against the claimed server.
 
+## Control Briareus from ChatGPT web
+
+Open **Settings → ChatGPT connection** (`/settings/mcp`). Configure the public
+HTTPS origin of this installation, enable the connection, and create an OAuth
+client for the projects ChatGPT may manage. Copy the MCP URL, client ID and
+one-time client secret into ChatGPT’s connection form with **OAuth** selected.
+Use the exact redirect URI shown by ChatGPT; the default is its stable
+`https://chatgpt.com/connector_platform_oauth_redirect` callback.
+
+Enable Developer mode in ChatGPT **Settings → Security and login**, then add
+the MCP connection from **ChatGPT Plugins**. Availability depends on the account
+and workspace policy. Sign in to Briareus, approve the selected projects, then
+add Briareus to a chat. See the [OpenAI connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt)
+and [OAuth requirements](https://developers.openai.com/plugins/build/auth).
+
+The connection exposes all eight **Actions** menu errands, code review, QA,
+PR previews, session creation and management, findings triage and replies, and
+reads of permitted projects, PRs, issues, branches, usage and transcripts.
+`dashboard_projects` lists the permitted repositories; use its `repo` values
+for project tools, or a `sessionId` for session tools. The browser and MCP invoke
+the same handlers and validations. Starts require the project's configured
+review runtime, with `testSheet` / `testRun` overrides where configured. They
+return immediately with the session; use `dashboard_session` to check progress.
+Auto-closing errands publish their result on the PR and may remove their session.
+
+This is an **external** connection. Internal sessions receive neither these
+MCP tools nor an HTTP control API. Their existing memory, SSH and orchestrator
+worker tools are unchanged. Global settings, provider credentials, and SSH
+registration/approval controls are not exposed through the remote connection.
+
+### Hosting and authentication
+
+The public transport is **Streamable HTTP** at `/mcp`, implemented with the MCP
+SDK. It requires OAuth bearer tokens; browser cookies and internal session tokens
+do not authorize it. OAuth uses predefined clients, authorization codes, S256
+PKCE, an exact redirect allowlist, resource binding, and rotating refresh tokens.
+Access tokens last one hour; refresh grants last 30 days. Secrets and tokens are
+stored only as hashes in the existing `app_settings` table. Revoke a connection
+in Settings to invalidate its tokens. Disabling MCP or changing the public origin
+also invalidates grants. Restarting preserves existing grants, but invalidates
+pending consent requests and authorization codes.
+
+Password login must be enabled in Briareus (`npm run set-password` and restart)
+before enabling remote access. MCP stays disabled when dashboard login is off.
+The endpoint must be reachable by ChatGPT over HTTPS. If Cloudflare Access or
+another browser-only gateway protects the hostname, permit server-to-server
+access to exactly these paths while leaving the dashboard protected:
+
+- `/mcp`
+- `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/mcp`
+- `/.well-known/oauth-authorization-server`
+- `/oauth/token`
+
+These routes retain Briareus's OAuth protection (discovery metadata is public).
+The browser authorization page `/oauth/authorize` and `/login` must be reachable
+by the user during account linking. The configured origin must match the public
+address exactly; it is never derived from an incoming Host header. Local code
+changes do not update tunnel routing or deploy the running dashboard.
+
+Starting work and enabling loops may incur agent costs; write actions may change
+GitHub or delete sessions. Tool annotations distinguish reads from writes so
+ChatGPT can apply its confirmation flow. Connecting does not itself start agents.
+
 ## Deploying
 
 Nothing here deploys itself: no poller watches `main` and nothing restarts the
