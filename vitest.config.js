@@ -2,6 +2,10 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    // Several lifecycle suites perform an action in beforeAll and assert its
+    // mock calls across the following tests. Vitest 5 clears mocks before each
+    // test by default, so keep the call history those suites intentionally use.
+    clearMocks: false,
     // Agent sessions keep git worktrees under .claude/worktrees: whole copies
     // of this repo, tests and all. Globbed, they ran the suite three times over
     // and folded stale copies of lib/ into the coverage number, so a local run
