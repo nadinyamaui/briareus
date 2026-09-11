@@ -67,8 +67,15 @@ vi.mock('child_process', async () => {
   return { execFile };
 });
 
-const { listWorkspaces, resetSetup, cleanWorkspace, parseSlotName, slotDir } =
-  await import('../lib/workspaces.js');
+const {
+  listWorkspaces,
+  resetSetup,
+  cleanWorkspace,
+  pruneUnusedWorkspaces,
+  startWorkspacePruner,
+  parseSlotName,
+  slotDir,
+} = await import('../lib/workspaces.js');
 
 function slot(name, { branch = 'main', head = 'abc1234', status = '' } = {}) {
   const dir = path.join(state.root, name);
@@ -204,5 +211,34 @@ describe('actions', () => {
     expect(() => resetSetup('acme__missing')).toThrow(expect.objectContaining({ status: 404 }));
     expect(() => cleanWorkspace('../etc')).toThrow(expect.objectContaining({ status: 404 }));
     expect(state.removed).toEqual([]);
+  });
+
+  it('prunes whole idle slots but keeps claimed and unrelated directories', () => {
+    const idle = slot('acme__app');
+    const claimed = slot('acme__app__2');
+    state.files[path.join(state.root, 'notes')] = { dir: true };
+    state.files[path.join(state.root, 'acme__app__3')] = { dir: false };
+    state.sessions = [{ id: 's2', status: 'idle', workDir: claimed }];
+
+    expect(pruneUnusedWorkspaces()).toEqual({ removed: ['acme__app'], errors: [] });
+    expect(state.removed).toEqual([idle]);
+    expect(state.files[claimed]).toBeDefined();
+    expect(state.files[path.join(state.root, 'notes')]).toBeDefined();
+  });
+
+  it('prunes at startup and again on the configured interval', () => {
+    vi.useFakeTimers();
+    try {
+      const first = slot('acme__app');
+      const timer = startWorkspacePruner(() => {}, 1000);
+      expect(state.removed).toEqual([first]);
+
+      const second = slot('acme__app__2');
+      vi.advanceTimersByTime(1000);
+      expect(state.removed).toEqual([first, second]);
+      clearInterval(timer);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -31,10 +31,11 @@ version of the same thing.
    pool (`<owner>__<repo>`, then `…__2`, `…__3` as concurrency demands) and,
    if its project asks for one, claims one of the database servers configured
    in Settings, exclusively for as long as it stays open. The project's
-   database is created on the claimed server if it does not exist yet. Slots
-   are never deleted, and a session that already knows its branch prefers the
-   idle slot that is still on that branch: the one whose dependencies, build
-   output and framework caches are already the right ones.
+   database is created on the claimed server if it does not exist yet. A
+   session that already knows its branch prefers the idle slot that is still
+   on that branch: the one whose dependencies, build output and framework
+   caches are already the right ones. Idle slots are removed when Briareus
+   starts and once every 24 hours; slots claimed by open sessions are skipped.
    The pool itself is visible under **Settings → Workspaces**: every slot's
    branch, HEAD, dirty state, size, dependency trees and which open session
    holds it, with two actions for idle slots: _Reset setup_ forgets the
