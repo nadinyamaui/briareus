@@ -2952,13 +2952,16 @@
   // showing that PR and every session this app has run on it. Set by clicking
   // a branch in the sidebar or a row on the board.
   let boardBranch = null;
-  // What the two header pickers are narrowing the list to: one author, one
-  // label, either or both empty for "all". A pick belongs to the list it was
-  // made on (the pull requests and the issues have their own authors and their
-  // own labels) so each tab keeps its own, and stepping over to the other one
-  // and back finds the picks where they were left. Switching projects drops
-  // both: a name that means something on one repo means nothing on the next.
-  let boardFilters = { repo: null, prs: { author: '', label: '' }, issues: { author: '', label: '' } };
+  // What the header pickers are narrowing the list to: one author, reviewer or
+  // label, all empty for "all". Reviews only belong to pull requests; issues
+  // keep their own author and label picks. Stepping between tabs keeps each
+  // tab's choices, while switching projects drops them because a name that
+  // means something on one repo means nothing on the next.
+  let boardFilters = {
+    repo: null,
+    prs: { author: '', reviewer: '', label: '' },
+    issues: { author: '', label: '' },
+  };
   const tabOf = () => (boardTab === 'issues' ? 'issues' : 'prs');
   const boardFilter = () => boardFilters[tabOf()];
 
@@ -3059,18 +3062,24 @@
     const mine = author && board.pulls.some((p) => fold(p.author) === author);
     boardFilters = {
       repo,
-      prs: { author: mine ? author : '', label: '' },
+      prs: { author: mine ? author : '', reviewer: '', label: '' },
       issues: { author: '', label: '' },
     };
   }
 
   // Does this row survive the filters? `skip` leaves one of them out, which is
   // how each picker below counts what it would show without counting itself.
-  // A row is a pull request or an issue, and both carry an author and labels, which
-  // is all the two pickers ever read.
+  // A row is a pull request or an issue. Both carry an author and labels; pull
+  // requests additionally carry their requested and standing reviewers.
   function passesFilter(row, skip) {
     const picked = boardFilter();
     if (skip !== 'author' && picked.author && fold(row.author) !== picked.author) return false;
+    if (
+      skip !== 'reviewer' &&
+      picked.reviewer &&
+      !(row.reviewers || []).some((reviewer) => fold(reviewer.user) === picked.reviewer)
+    )
+      return false;
     if (skip !== 'label' && picked.label && !row.labels.some((l) => fold(l.name) === picked.label))
       return false;
     return true;
@@ -3086,20 +3095,27 @@
     return boardRows().filter((row) => passesFilter(row, null));
   }
 
-  const filterOn = () => !!(boardFilter().author || boardFilter().label);
+  const filterOn = () => !!(boardFilter().author || boardFilter().reviewer || boardFilter().label);
 
-  // Fills both pickers from the open tab's own rows: there is no list of a
-  // repo's authors or labels to fetch, and the ones with nothing open are not
-  // worth offering anyway. Each option is counted against the *other* filter, so
-  // the number beside a label is what picking it would actually leave on screen.
-  // A pick the other filter has emptied still lists itself, at (0): a board
-  // filtered down to nothing has to stay possible to widen again.
+  // Fills the pickers from the open tab's own rows: there is no separate list
+  // of a repo's authors, reviewers or labels to fetch, and the ones attached to
+  // nothing open are not worth offering anyway. Each option is counted against
+  // the *other* filters, so its number is what picking it would actually leave
+  // on screen. A pick another filter has emptied still lists itself, at (0): a
+  // board filtered down to nothing has to stay possible to widen again.
   function fillBoardFilters() {
-    for (const kind of ['author', 'label']) {
+    for (const kind of ['author', 'reviewer', 'label']) {
       const counts = new Map(); // folded value -> { text, n }
       for (const pr of boardRows()) {
         if (!passesFilter(pr, kind)) continue;
-        const carried = kind === 'author' ? (pr.author ? [pr.author] : []) : pr.labels.map((l) => l.name);
+        const carried =
+          kind === 'author'
+            ? pr.author
+              ? [pr.author]
+              : []
+            : kind === 'reviewer'
+              ? (pr.reviewers || []).map((reviewer) => reviewer.user)
+              : pr.labels.map((l) => l.name);
         for (const text of carried) {
           const seen = counts.get(fold(text)) || { text, n: 0 };
           seen.n += 1;
@@ -3111,7 +3127,9 @@
       const opts = [...counts].sort((a, b) => a[1].text.localeCompare(b[1].text));
       const sel = $(`proj-${kind}`);
       const html =
-        `<option value="">${kind === 'author' ? 'All authors' : 'All labels'}</option>` +
+        `<option value="">${
+          kind === 'author' ? 'All authors' : kind === 'reviewer' ? 'All reviewers' : 'All labels'
+        }</option>` +
         opts.map(([value, o]) => `<option value="${esc(value)}">${esc(o.text)} (${o.n})</option>`).join('');
       // The board redraws on a timer. Rewriting a `<select>` that has not
       // changed would shut the dropdown under whoever had just opened it.
@@ -3121,7 +3139,7 @@
     }
   }
 
-  for (const kind of ['author', 'label']) {
+  for (const kind of ['author', 'reviewer', 'label']) {
     $(`proj-${kind}`).addEventListener('change', (e) => {
       boardFilters = { ...boardFilters, [tabOf()]: { ...boardFilter(), [kind]: e.target.value } };
       renderBoard();
@@ -4555,6 +4573,9 @@
     }
     for (const el of document.querySelectorAll('.proj-filter'))
       el.classList.toggle('hidden', !!boardBranch || dash);
+    // Issues do not have reviewers, so their tab keeps the existing author and
+    // label filters and leaves this pull-request-only picker out of the header.
+    $('proj-reviewer').classList.toggle('hidden', !!boardBranch || dash || issues);
     // The provider and model pickers speak for the board's errands, and the
     // issues have one of their own (▶ Start), so they only step aside on the
     // dashboard, which starts nothing.
@@ -4580,7 +4601,7 @@
     const sub = [currentProject];
     if (board) startBoardFilter(currentProject);
     fillBoardFilters();
-    // Every open pull request the two pickers leave, drafts included: a draft
+    // Every open pull request the pickers leave, drafts included: a draft
     // is still work in flight, and hiding it only left the reader wondering why
     // a branch they had just pushed was nowhere on the list.
     const pulls = visibleRows();
@@ -4618,6 +4639,7 @@
       // same otherwise.
       const why = [
         boardFilter().author ? `from @${esc(boardFilter().author)}` : '',
+        boardFilter().reviewer ? `with @${esc(boardFilter().reviewer)} as reviewer` : '',
         boardFilter().label ? `labelled ${esc(boardFilter().label)}` : '',
       ]
         .filter(Boolean)
@@ -4669,7 +4691,11 @@
       return;
     }
     if (e.target.closest('.pr-unfilter')) {
-      boardFilters = { ...boardFilters, repo: currentProject, [tabOf()]: { author: '', label: '' } };
+      boardFilters = {
+        ...boardFilters,
+        repo: currentProject,
+        [tabOf()]: tabOf() === 'prs' ? { author: '', reviewer: '', label: '' } : { author: '', label: '' },
+      };
       renderBoard();
       return;
     }
