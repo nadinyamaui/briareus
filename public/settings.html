@@ -871,7 +871,8 @@
             Every clone slot in the workspace pool. A slot is claimed for as long as the session in it stays
             open; the actions only work on idle ones. <strong>Reset setup</strong> forgets which installs
             already ran, so the next session runs them all again. <strong>Clean</strong> also removes
-            <code>vendor/</code> and <code>node_modules/</code>. Nothing else is ever deleted.
+            <code>vendor/</code> and <code>node_modules/</code>. Idle slots are removed at startup and once
+            every 24 hours; claimed slots are always kept.
           </p>
           <div id="ws-table" class="overflow-x-auto rounded-lg border border-line"></div>
         </div>

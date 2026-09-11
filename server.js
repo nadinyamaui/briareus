@@ -137,7 +137,7 @@ import {
 } from './lib/auth.js';
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
 import { securityHeaders, sameOriginWrites } from './lib/security.js';
-import { listWorkspaces, resetSetup, cleanWorkspace } from './lib/workspaces.js';
+import { listWorkspaces, resetSetup, cleanWorkspace, startWorkspacePruner } from './lib/workspaces.js';
 import { githubWebhookUrl } from './lib/webhooksecrets.js';
 
 // Before anything else: .env has to be complete. Every setting without a
@@ -1904,6 +1904,10 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   checkProviderAuth();
   setInterval(checkProviderAuth, AUTH_RECHECK_MS).unref();
   await initJobs();
+  // Clone slots are caches, not session records. Drop every unclaimed slot at
+  // boot and once a day so a project's peak concurrency does not permanently
+  // consume disk; the pruner sees the live session registry and skips claims.
+  startWorkspacePruner();
   // Every project gets (or keeps) a hook pointing at this install's public
   // hostname, so an open session's pull request panel keeps up with the reviews,
   // comments and CI runs landing on its branch. Best effort: a repo whose hook
