@@ -162,9 +162,9 @@
               <span class="kbd">Finish</span> and the server exchanges it for the entry's tokens.
             </li>
             <li>
-              <strong>codex</strong>: the server runs <code>codex login</code> hidden; the CLI opens the tab
-              itself and its localhost callback finishes the login. Nothing to paste; the status catches it on
-              its own.
+              <strong>codex</strong>: the server runs <code>codex login --device-auth</code> hidden; the page
+              opens the confirm tab and shows the nine-character device code beside <span class="kbd">Log in</span>.
+              Enter it in the tab; the CLI polls until you approve and the status catches it on its own.
             </li>
             <li>
               <strong>grok</strong>: a device flow, where the CLI prints a confirm URL, the page opens it, and

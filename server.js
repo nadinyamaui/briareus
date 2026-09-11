@@ -1036,13 +1036,13 @@ function watchLogin(providerId) {
   loginWatchers.set(providerId, timer);
 }
 
-// The codex and grok browser logins: no console window, since the CLI's login
-// command runs hidden with the entry's own home dir and prints the
-// authorization URL. codex then waits on its localhost callback (the CLI
-// opens the browser tab itself); grok's device flow just waits for the code
-// to be confirmed, so the page opens the URL. Either way the CLI writes
-// auth.json when the login lands, and the watcher mirrors it into the row.
-// One per binary at a time: codex's callback port is fixed.
+// The codex and grok logins run as device flows: the hidden CLI uses the
+// entry's own home dir, prints an authorization URL and polls until it is
+// approved. The page opens that URL. This deliberately avoids Codex's normal
+// localhost callback, which would be inside the app container rather than the
+// user's browser host. Either way the CLI writes auth.json when the login
+// lands, and the watcher mirrors it into the row.
+// One per binary at a time.
 //
 // opencode has no login flow of any kind: its entries authenticate with a
 // service API key, handed to the CLI from the row.
@@ -1070,8 +1070,9 @@ app.post('/api/providers/:id/login', async (req, res) => {
     provider.binary === 'codex'
       ? { ...process.env, CODEX_HOME: ensureCodexHome(provider) }
       : { ...process.env, GROK_HOME: ensureGrokHome(provider) };
-  // grok's device flow: print the confirm URL and poll, with no localhost callback.
-  const loginArgs = provider.binary === 'codex' ? ['login'] : ['login', '--device-auth'];
+  // Device auth works from Docker and a remote browser alike: no callback port
+  // has to be reachable from the browser.
+  const loginArgs = ['login', '--device-auth'];
   let child;
   try {
     child = spawn(found.bin, loginArgs, { env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -1087,12 +1088,20 @@ app.post('/api/providers/:id/login', async (req, res) => {
     const timer = setTimeout(() => resolve(null), 20000);
     const scan = (chunk) => {
       output += chunk;
-      // The authorization URL is the only https URL in the output; the
-      // callback the CLI mentions alongside it is plain http://localhost.
-      const m = output.match(/https:\/\/\S+/);
+      // The CLI formats its output for a terminal, including ANSI reset codes
+      // immediately after the URL. Strip those first; otherwise a browser
+      // treats the reset sequence as part of the device-auth path.
+      const plain = output.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+      const m = plain.match(/https:\/\/[^\s\x1B]+/);
       if (m) {
+        // Codex device-auth codes are displayed as ABCD-EFGHI. The CLI is
+        // hidden in this app, so return the code to the settings page too.
+        const deviceCode = plain.match(/\b[A-Z0-9]{4}-[A-Z0-9]{5}\b/)?.[0] || null;
+        // Codex prints its URL before the code. Keep collecting until both
+        // have arrived; Grok has no code field in this UI.
+        if (provider.binary === 'codex' && !deviceCode) return;
         clearTimeout(timer);
-        resolve(m[0]);
+        resolve({ url: m[0], deviceCode });
       }
     };
     child.stdout.on('data', scan);
@@ -1119,7 +1128,7 @@ app.post('/api/providers/:id/login', async (req, res) => {
     });
   }
   watchLogin(provider.id);
-  res.json({ url });
+  res.json(url);
 });
 
 // The claude browser login: no console window. The settings page opens the

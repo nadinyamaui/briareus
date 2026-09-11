@@ -856,6 +856,8 @@
     $('p-login-code').classList.add('hidden');
     $('p-login-code').value = '';
     $('p-login-finish').classList.add('hidden');
+    $('p-device-code').classList.add('hidden');
+    $('p-device-code').textContent = '';
     $('p-baseUrl-hint').innerHTML =
       binary === 'claude'
         ? 'Passed to the claude CLI as <code>ANTHROPIC_BASE_URL</code>, for a proxy or an Anthropic-compatible endpoint. Leave empty for the Anthropic API.'
@@ -875,29 +877,27 @@
   // Every login happens in the browser. For claude the server hands the page
   // the claude.ai authorization URL, the user approves there and pastes the
   // code claude.ai shows back into the page, and the server exchanges it for
-  // the entry's tokens. For codex the server runs `codex login` hidden; the
-  // CLI opens the browser tab itself and its localhost callback finishes the
-  // login, and the page opening the URL too would make a second tab. For grok the
-  // server runs `grok login --device-auth` hidden; the CLI only prints the
-  // confirm URL, so the page opens it and the CLI polls until it is approved.
+  // the entry's tokens. Codex and Grok run hidden device-auth flows: each
+  // prints a confirm URL, the page opens it, and the CLI polls until approval.
   // opencode has no login at all: its entries authenticate with an API key.
   $('p-login-btn').addEventListener('click', async () => {
     if (currentType !== 'provider' || !current || isNew) return;
     const id = current.id;
     if (current.binary !== 'claude') {
       try {
-        const { url } = await api(`/api/providers/${id}/login`, { method: 'POST' });
+        const { url, deviceCode } = await api(`/api/providers/${id}/login`, { method: 'POST' });
         if (!url) {
           toast('This entry is already logged in.');
-        } else if (current.binary === 'grok') {
-          // grok's device flow prints the URL and waits, so the page opens it.
-          window.open(url, '_blank');
-          toast('Confirm the code in the tab; the login is picked up automatically.');
         } else {
-          toast('Approve in the tab codex opened; the login is picked up automatically.');
+          // Device auth prints the URL and waits, so the page opens it.
+          window.open(url, '_blank');
+          if (!deviceCode) throw new Error('Could not read the device code from the Codex CLI. Try Log in again.');
+          $('p-device-code').textContent = deviceCode;
+          $('p-device-code').classList.remove('hidden');
+          toast(`Enter device code ${deviceCode} in the tab; login is picked up automatically.`);
         }
-        // The login lands out of band (the CLI's localhost callback), so poll the
-        // status a few times so the section catches it without a reselect.
+        // The login lands out of band, so poll the status a few times so the
+        // section catches it without a reselect.
         for (const wait of [10000, 30000, 60000, 120000]) {
           setTimeout(() => {
             if (currentType === 'provider' && current && current.id === id) loadProviderStatus(current);
