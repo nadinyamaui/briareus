@@ -421,6 +421,35 @@ describe('addPullRequestLabel', () => {
   });
 });
 
+describe('removePullRequestLabel', () => {
+  it('removes one encoded label without replacing the pull request labels', async () => {
+    const { removePullRequestLabel } = await freshGithub();
+    const fetchMock = stubFetch(reply({ body: [{ name: 'code-approved' }] }));
+
+    await removePullRequestLabel(cfg, 'o/r', 3, 'feedback given');
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.github.com/repos/o/r/issues/3/labels/feedback%20given');
+    expect(init.method).toBe('DELETE');
+  });
+
+  it('accepts an already-absent label', async () => {
+    const { removePullRequestLabel } = await freshGithub();
+    stubFetch(reply({ status: 404 }));
+
+    await expect(removePullRequestLabel(cfg, 'o/r', 3, 'feedback-given')).resolves.toEqual([]);
+  });
+
+  it('reports a label removal GitHub refuses', async () => {
+    const { removePullRequestLabel } = await freshGithub();
+    stubFetch(reply({ status: 500 }));
+
+    await expect(removePullRequestLabel(cfg, 'o/r', 3, 'feedback-given')).rejects.toThrow(
+      /answered 500 removing feedback-given from o\/r#3/,
+    );
+  });
+});
+
 describe('listRepoBranches', () => {
   // The branch cache is keyed by repo, so every test uses its own name.
   let n = 0;

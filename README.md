@@ -31,10 +31,11 @@ version of the same thing.
    pool (`<owner>__<repo>`, then `…__2`, `…__3` as concurrency demands) and,
    if its project asks for one, claims one of the database servers configured
    in Settings, exclusively for as long as it stays open. The project's
-   database is created on the claimed server if it does not exist yet. Slots
-   are never deleted, and a session that already knows its branch prefers the
-   idle slot that is still on that branch: the one whose dependencies, build
-   output and framework caches are already the right ones.
+   database is created on the claimed server if it does not exist yet. A
+   session that already knows its branch prefers the idle slot that is still
+   on that branch: the one whose dependencies, build output and framework
+   caches are already the right ones. Idle slots are removed when Briareus
+   starts and once every 24 hours; slots claimed by open sessions are skipped.
    The pool itself is visible under **Settings → Workspaces**: every slot's
    branch, HEAD, dirty state, size, dependency trees and which open session
    holds it, with two actions for idle slots: _Reset setup_ forgets the
@@ -141,9 +142,10 @@ ticks the ones it actually fixed, replies on the threads it addressed and
 resolves them; _dismissed_ and _optional_ are recorded like verdicts given by
 hand in the findings panel and said on the pull request with the reason, so
 no later round offers them again. A round with nothing marked fix converges
-the loop and adds the pull request's `code-approved` label. A standalone
-review sent with nothing marked fix adds the same label as it closes its
-findings card. The loop holds until you send (the session shows _findings waiting
+the loop, adds the pull request's `code-approved` label and removes its
+`feedback-given` label. A standalone review sent with nothing marked fix makes
+the same label transition as it closes its findings card. The loop holds until
+you send (the session shows _findings waiting
 in ⚑ Findings_), across restarts too.
 
 A worker's loop stops there just the same: its orchestrator is told the round
@@ -370,15 +372,15 @@ written idempotently so a database from before then just gets its row in
 - MySQL 5.7+ / MariaDB 10.2+ for session history (created on first run).
   The schema is a set of migrations in `migrations/`, applied automatically
   at boot and by `npm run migrate`; see [Database migrations](#database-migrations)
-- The Claude Code CLI, authenticated. The spawned CLI does **not** share the
-  desktop app's login (`claude auth login`, or `claude setup-token` /
-  `ANTHROPIC_API_KEY` in `.env`)
+- The Claude Code CLI, with a provider login or API token configured in
+  **Settings**. Each provider entry has an isolated login, so spawned sessions
+  do not share the desktop app's login
 - Optionally the Codex, Grok and opencode CLIs (auto-discovered; `CODEX_BIN` /
-  `GROK_BIN` / `OPENCODE_BIN` to override). A `ZAI_API_KEY` in `.env` adds a
-  Z.AI entry that runs GLM models through the codex CLI (own `CODEX_HOME`, so
-  the codex login is untouched). An opencode entry authenticates with an API
-  key and nothing else, since there is no login flow to drive: it names its model
-  the way opencode does (`<service>/<model>`, say
+  `GROK_BIN` / `OPENCODE_BIN` to override). A Z.AI entry is configured in
+  **Settings** with the codex binary, its endpoint and API key; it runs GLM
+  models in its own `CODEX_HOME`, so the codex login is untouched. An opencode
+  entry authenticates with an API key and nothing else, since there is no login
+  flow to drive: it names its model the way opencode does (`<service>/<model>`, say
   `anthropic/claude-sonnet-4-5`), the key is filed under that service (and so
   is an optional base URL, for a proxy or a compatible gateway), and it runs
   with the XDG directories pointed at `~/.opencode-provider-<id>` so the
@@ -605,6 +607,69 @@ server at a time, so add as many entries as sessions you want to run in parallel
 with a database. Migrations and seeding belong in the project's setup
 commands, which run on every session against the claimed server.
 
+## Control Briareus from ChatGPT web
+
+Open **Settings → ChatGPT connection** (`/settings/mcp`). Configure the public
+HTTPS origin of this installation, enable the connection, and create an OAuth
+client for the projects ChatGPT may manage. Copy the MCP URL, client ID and
+one-time client secret into ChatGPT’s connection form with **OAuth** selected.
+Use the exact redirect URI shown by ChatGPT; the default is its stable
+`https://chatgpt.com/connector_platform_oauth_redirect` callback.
+
+Enable Developer mode in ChatGPT **Settings → Security and login**, then add
+the MCP connection from **ChatGPT Plugins**. Availability depends on the account
+and workspace policy. Sign in to Briareus, approve the selected projects, then
+add Briareus to a chat. See the [OpenAI connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt)
+and [OAuth requirements](https://developers.openai.com/plugins/build/auth).
+
+The connection exposes all eight **Actions** menu errands, code review, QA,
+PR previews, session creation and management, findings triage and replies, and
+reads of permitted projects, PRs, issues, branches, usage and transcripts.
+`dashboard_projects` lists the permitted repositories; use its `repo` values
+for project tools, or a `sessionId` for session tools. The browser and MCP invoke
+the same handlers and validations. Starts require the project's configured
+review runtime, with `testSheet` / `testRun` overrides where configured. They
+return immediately with the session; use `dashboard_session` to check progress.
+Auto-closing errands publish their result on the PR and may remove their session.
+
+This is an **external** connection. Internal sessions receive neither these
+MCP tools nor an HTTP control API. Their existing memory, SSH and orchestrator
+worker tools are unchanged. Global settings, provider credentials, and SSH
+registration/approval controls are not exposed through the remote connection.
+
+### Hosting and authentication
+
+The public transport is **Streamable HTTP** at `/mcp`, implemented with the MCP
+SDK. It requires OAuth bearer tokens; browser cookies and internal session tokens
+do not authorize it. OAuth uses predefined clients, authorization codes, S256
+PKCE, an exact redirect allowlist, resource binding, and rotating refresh tokens.
+Access tokens last one hour; refresh grants last 30 days. Secrets and tokens are
+stored only as hashes in the existing `app_settings` table. Revoke a connection
+in Settings to invalidate its tokens. Disabling MCP or changing the public origin
+also invalidates grants. Restarting preserves existing grants, but invalidates
+pending consent requests and authorization codes.
+
+Password login must be enabled in Briareus (`npm run set-password` and restart)
+before enabling remote access. MCP stays disabled when dashboard login is off.
+The endpoint must be reachable by ChatGPT over HTTPS. If Cloudflare Access or
+another browser-only gateway protects the hostname, permit server-to-server
+access to exactly these paths while leaving the dashboard protected:
+
+- `/mcp`
+- `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/mcp`
+- `/.well-known/oauth-authorization-server`
+- `/oauth/token`
+
+These routes retain Briareus's OAuth protection (discovery metadata is public).
+The browser authorization page `/oauth/authorize` and `/login` must be reachable
+by the user during account linking. The configured origin must match the public
+address exactly; it is never derived from an incoming Host header. Local code
+changes do not update tunnel routing or deploy the running dashboard.
+
+Starting work and enabling loops may incur agent costs; write actions may change
+GitHub or delete sessions. Tool annotations distinguish reads from writes so
+ChatGPT can apply its confirmation flow. Connecting does not itself start agents.
+
 ## Deploying
 
 Nothing here deploys itself: no poller watches `main` and nothing restarts the
@@ -625,3 +690,41 @@ issue.
 ## License
 
 [MIT](LICENSE).
+
+### Registered SSH servers
+
+Open **Settings → SSH servers → ＋ New**, select a project, and register the host, port,
+username and optional absolute private-key path on the machine running Briareus.
+The key must be readable by the operating-system account running the dashboard. An empty
+key path uses that account's default keys or SSH agent; encrypted keys need to be unlocked
+in its agent. Password authentication, SSH config aliases, jump hosts and interactive
+terminals are not supported.
+
+Verify the host key independently and establish trust in that account's `~/.ssh/known_hosts`
+before using the tool. Connections use OpenSSH with `BatchMode=yes` and
+`StrictHostKeyChecking=yes`: unknown or changed host keys fail without connecting to a
+remote shell ([OpenSSH configuration reference](https://man.openbsd.org/ssh_config.5)).
+
+Each server has one permission mode:
+
+- **Ask for all commands** (default): the exact command, destination, project and session
+  appear in an approval panel on both the sessions and settings pages; **Approve command**
+  executes it once, and **Deny** returns the denial to the agent.
+- **Don't ask anything**: every command submitted through the SSH tool starts immediately.
+
+Claude and Codex sessions receive `ssh_list_servers`, `ssh_execute` and `ssh_result` MCP
+tools. Providers without headless MCP configuration use the equivalent session-authenticated
+HTTP routes described in their briefing. Only enabled servers assigned to the session's
+project are available. Each command runs in a fresh noninteractive shell, so include `cd`
+in the command when a working directory is needed. Execution defaults to a 60-second timeout
+(maximum 300 seconds) and 256 KiB per output stream; timeout or excess output terminates the
+local SSH client, but cannot guarantee that a remote process has stopped.
+
+Approvals expire after ten minutes and are cancelled when the session turn ends or the
+server registration changes. Switching to “Don't ask anything” does not execute already
+queued commands. Registrations persist in the existing `app_settings` database table;
+requests and results are held in memory for up to an hour, with at most 100 requests retained
+(old completed results are evicted first).
+A restart discards requests and never replays them. These permissions govern the SSH tool;
+Briareus's coding agents still run with their existing local shell access, so this is not an
+operating-system sandbox restricting every possible way to reach a server.

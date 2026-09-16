@@ -1,5 +1,11 @@
 // @ts-check
 import express from 'express';
+import { dashboardRoutes } from './lib/dashboard-routes.js';
+import { createRemoteMcpAuth } from './lib/remote-mcp-auth.js';
+import { remoteMcpRoutes } from './lib/remote-mcp.js';
+import { remoteMcpSettingsRoutes } from './lib/remote-mcp-settings.js';
+import { createSshService } from './lib/ssh.js';
+import { sshRoutes } from './lib/ssh-routes.js';
 import fs from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
@@ -39,6 +45,9 @@ import {
   orchestratorBudgetStatus,
   triageLoopFindings,
   triageReviewFindings,
+  saveReviewFindingsDrafts,
+  deleteReviewFinding,
+  replyToReviewFinding,
   retryLoopRound,
   DEV_OPEN,
 } from './lib/jobs.js';
@@ -132,7 +141,7 @@ import {
 } from './lib/auth.js';
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
 import { securityHeaders, sameOriginWrites } from './lib/security.js';
-import { listWorkspaces, resetSetup, cleanWorkspace } from './lib/workspaces.js';
+import { listWorkspaces, resetSetup, cleanWorkspace, startWorkspacePruner } from './lib/workspaces.js';
 import { githubWebhookUrl } from './lib/webhooksecrets.js';
 
 // Before anything else: .env has to be complete. Every setting without a
@@ -167,16 +176,27 @@ app.use(securityHeaders);
 // itself instead, with an HMAC over the raw body. See lib/webhooks.js.
 app.use('/webhooks', webhookRouter());
 
-// Behind the webhooks (GitHub authenticates itself and sends no Origin),
-// ahead of everything a browser cookie could reach: a write whose Origin
-// names another site is refused before any handler sees it.
+// The external MCP transport authenticates OAuth independently of browser
+// cookies. Its own Origin gate runs before the browser-only middleware below.
+const dashboard = dashboardRoutes({ app, getProject, getJob, listActions });
+const remoteMcpAuth = createRemoteMcpAuth();
+app.use(remoteMcpRoutes({ auth: remoteMcpAuth, dashboard, loginEnabled: authEnabled }));
+// Every remaining write keeps the dashboard’s same-origin and login gates.
 app.use(sameOriginWrites);
-
 app.use(express.json({ limit: '1mb' }));
 
 // Everything below the login gate. Mounted before the static files so pages,
 // videos and APIs are all behind it; see lib/auth.js for what stays public.
 app.use(requireAuth);
+app.use(
+  remoteMcpSettingsRoutes({
+    auth: remoteMcpAuth,
+    loginEnabled: authEnabled,
+    signedIn,
+    getProject,
+    listProjects,
+  }),
+);
 
 // The sign-in page itself, and the two calls it makes.
 app.get('/login', (req, res) => {
@@ -353,13 +373,14 @@ app.get('/projects/:owner/:name/issues', devPage);
 app.get('/projects/:owner/:name/branches/*branch', devPage);
 
 app.get('/settings', (req, res) => res.redirect('/settings/projects'));
-for (const section of ['projects', 'providers', 'servers', 'saved-prompts', 'memory']) {
+for (const section of ['projects', 'providers', 'servers', 'ssh', 'saved-prompts', 'memory']) {
   app.get(`/settings/${section}`, settingsPage);
   app.get(`/settings/${section}/:id`, settingsPage);
 }
 // The prompts are a single shared row, so the section is the whole address.
 app.get('/settings/prompts', settingsPage);
 app.get('/settings/workspaces', settingsPage);
+app.get('/settings/mcp', pageHandler(PUBLIC, 'mcp-settings.html'));
 
 // ---- projects ----
 //
@@ -510,6 +531,9 @@ function agentSession(req, res) {
   }
   return job;
 }
+
+const sshService = createSshService({ getJob });
+app.use(sshRoutes({ service: sshService, agentSession, getProject }));
 
 app.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
@@ -721,7 +745,7 @@ function findingsParams(body) {
   return { repo: project.repo, prNumber };
 }
 
-app.get('/api/pr/findings', async (req, res) => {
+dashboard.register('get', '/api/pr/findings', async (req, res) => {
   try {
     const { repo, prNumber } = findingsParams(req.query);
     res.json(await getFindings(repo, prNumber));
@@ -730,7 +754,7 @@ app.get('/api/pr/findings', async (req, res) => {
   }
 });
 
-app.post('/api/pr/findings/decision', async (req, res) => {
+dashboard.register('post', '/api/pr/findings/decision', async (req, res) => {
   try {
     const { repo, prNumber } = findingsParams(req.body || {});
     const { key, decision } = req.body || {};
@@ -1167,7 +1191,7 @@ app.get('/api/dev/projects', (req, res) => {
 // The project dashboard: one project's open pull requests, with the labels the
 // review workflow speaks in and the errand each one is asking for, and, on the
 // same payload, the repo's open issues, so the board's tabs cost one call.
-app.get('/api/dev/pulls', async (req, res) => {
+dashboard.register('get', '/api/dev/pulls', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
   try {
@@ -1180,7 +1204,7 @@ app.get('/api/dev/pulls', async (req, res) => {
 // What a project has spent this calendar month, from the per-turn ledger:
 // sessions that ran a turn, tokens in and out, and the cost of the turns whose
 // provider priced them.
-app.get('/api/dev/usage', async (req, res) => {
+dashboard.register('get', '/api/dev/usage', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
   res.json(await projectUsage(project));
@@ -1207,7 +1231,7 @@ app.get('/api/dev/usage/all', async (req, res) => {
 // line changes, commits, linked issues, review verdicts and CI checks. It is
 // what the session panel shows for a session's own PR, served here for the
 // board drilled into a pull request, which has no session to read it from.
-app.get('/api/dev/pull', async (req, res) => {
+dashboard.register('get', '/api/dev/pull', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
   const number = Number(req.query.pr);
@@ -1276,7 +1300,7 @@ app.get('/api/dev/providers', async (req, res) => {
 
 // The branches of one project, for the composer's branch picker: the default
 // branch first, then the rest alphabetically.
-app.get('/api/dev/branches', async (req, res) => {
+dashboard.register('get', '/api/dev/branches', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
   try {
@@ -1306,7 +1330,7 @@ app.post('/api/dev/uploads', express.raw({ type: () => true, limit: '25mb' }), (
 // request the user names. The list is served so the menu grows with lib/actions.js
 // rather than with a second copy of it in the client.
 
-app.get('/api/dev/actions', (req, res) => {
+dashboard.register('get', '/api/dev/actions', (req, res) => {
   res.json({ actions: listActions() });
 });
 
@@ -1317,7 +1341,7 @@ app.get('/api/dev/actions', (req, res) => {
 // in the project's local checkout (a fresh clone and a pooled database server
 // would be claimed for nothing) while an action that has to run the app (the
 // test run) gets a workspace clone with the full setup, like a review does.
-app.post('/api/dev/actions', async (req, res) => {
+dashboard.register('post', '/api/dev/actions', async (req, res) => {
   const { action: actionId, repo, prNumber, provider, model, effort, input } = req.body || {};
   const action = getAction(actionId);
   if (!action) return res.status(400).json({ error: `Unknown action: ${actionId}` });
@@ -1408,7 +1432,7 @@ app.post('/api/dev/actions', async (req, res) => {
 // GitHub, then prepare a clean session workspace and serve it without sending
 // an agent turn. The returned session remains available in the sidebar so the
 // user can inspect it, chat in it, or close it to release its resources.
-app.post('/api/dev/pulls/:number/serve', async (req, res) => {
+dashboard.register('post', '/api/dev/pulls/:number/serve', async (req, res) => {
   const { repo, provider, model, effort } = req.body || {};
   const project = getProject(repo || '');
   if (!project) return res.status(400).json({ error: `Unknown project: ${repo || ''}` });
@@ -1472,9 +1496,10 @@ async function currentJobUsageEstimates() {
   }
 }
 
-app.get('/api/dev/sessions', async (req, res) => {
+dashboard.register('get', '/api/dev/sessions', async (req, res) => {
   const estimates = await currentJobUsageEstimates();
-  res.json({ sessions: listDevSessions(estimates) });
+  const sessions = listDevSessions(estimates);
+  res.json({ sessions: req.mcpProject ? sessions.filter((s) => s.repo === req.mcpProject) : sessions });
 });
 
 // ---- the office ----
@@ -1550,7 +1575,7 @@ app.get('/api/dev/office/events', (req, res) => {
 // to start a session over a label.
 const COMPOSER_ACTIVITIES = new Set(['issue']);
 
-app.post('/api/dev/sessions', (req, res) => {
+dashboard.register('post', '/api/dev/sessions', (req, res) => {
   // prNumber is the project dashboard's: a review started from a pull request
   // row already knows which one it is, so the review prompt and the session's
   // title can say so instead of making the agent find out.
@@ -1620,7 +1645,7 @@ app.post('/api/dev/sessions', (req, res) => {
   }
 });
 
-app.get('/api/dev/sessions/:id', async (req, res) => {
+dashboard.register('get', '/api/dev/sessions/:id', async (req, res) => {
   const job = getJob(req.params.id);
   if (!job || job.kind !== 'devchat') return res.status(404).json({ error: 'Session not found' });
   const since = Number(req.query.since || 0);
@@ -1690,7 +1715,7 @@ app.get('/api/dev/sessions/:id/events', (req, res) => {
 // A message mid-turn is queued rather than refused, and one to a session that
 // let go of its workspace reopens it first, so this only fails on a message
 // the session could not accept at all.
-app.post('/api/dev/sessions/:id/message', (req, res) => {
+dashboard.register('post', '/api/dev/sessions/:id/message', (req, res) => {
   try {
     const { text, attachments, zeusRoles } = req.body || {};
     res.json({ session: sendDevMessage(req.params.id, text, attachments, zeusRoles) });
@@ -1701,7 +1726,7 @@ app.post('/api/dev/sessions/:id/message', (req, res) => {
 
 // Session metadata edits do not wake the agent: they only change how this
 // conversation is filed in the dashboard.
-app.patch('/api/dev/sessions/:id', (req, res) => {
+dashboard.register('patch', '/api/dev/sessions/:id', (req, res) => {
   try {
     res.json({ session: renameDevSession(req.params.id, req.body?.title) });
   } catch (e) {
@@ -1711,7 +1736,7 @@ app.patch('/api/dev/sessions/:id', (req, res) => {
 
 // Manual recovery for a PR that automatic branch/URL discovery missed. The
 // jobs layer reads GitHub and verifies the branch before storing the link.
-app.post('/api/dev/sessions/:id/link-pr', async (req, res) => {
+dashboard.register('post', '/api/dev/sessions/:id/link-pr', async (req, res) => {
   try {
     res.json({ session: await linkPrToSession(req.params.id, req.body?.pr) });
   } catch (e) {
@@ -1720,7 +1745,7 @@ app.post('/api/dev/sessions/:id/link-pr', async (req, res) => {
 });
 
 // Take a queued message back before the session gets to it.
-app.delete('/api/dev/sessions/:id/queue/:index', (req, res) => {
+dashboard.register('delete', '/api/dev/sessions/:id/queue/:index', (req, res) => {
   try {
     const dropped = dropQueuedMessage(req.params.id, Number(req.params.index));
     res.json({ ok: true, dropped, session: publicJob(getJob(req.params.id)) });
@@ -1732,7 +1757,7 @@ app.delete('/api/dev/sessions/:id/queue/:index', (req, res) => {
 // 🔁 Review loop: arm or disarm it on a session that is already running. The
 // composer's chip only speaks for a session that does not exist yet, and
 // wanting the reviews is usually something the work teaches you.
-app.post('/api/dev/sessions/:id/loop', (req, res) => {
+dashboard.register('post', '/api/dev/sessions/:id/loop', (req, res) => {
   try {
     const { on } = req.body || {};
     res.json({ session: setReviewLoop(req.params.id, on === true) });
@@ -1741,14 +1766,57 @@ app.post('/api/dev/sessions/:id/loop', (req, res) => {
   }
 });
 
-// ⚑ Findings: verdicts on either a review-loop round or a standalone review
-// started from the pull-request board. What is marked fix starts an Implement
-// feedback session; the rest is recorded on the pull request. The screen sends
-// an unmarked finding as optional, so it is not offered again.
-app.post('/api/dev/sessions/:id/triage', async (req, res) => {
+// ⚑ Findings, Complete. On a round of the user's own pull request — a
+// review-loop round, or a hand-started review of their own work — it takes the
+// verdicts: what is marked fix starts an Implement feedback session, the rest
+// is recorded on the pull request, and the screen sends an unmarked finding as
+// optional so it is not offered again. On a review of somebody else's pull
+// request it takes nothing and rules nothing — those findings are that
+// author's to fix — and only clears the card.
+dashboard.register('post', '/api/dev/sessions/:id/triage', async (req, res) => {
   try {
     const { verdicts, note } = req.body || {};
-    res.json(await triageReviewFindings(req.params.id, { verdicts, note, by: 'the user' }));
+    res.json(await triageReviewFindings(req.params.id, { verdicts, note, by: req.mcpActor || 'the user' }));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ⚑ Findings, Reply on one finding of a review of somebody else's pull
+// request: the text
+// goes on that finding's own thread on the pull request, where its author
+// answers it. It rules nothing and leaves the finding on the card.
+dashboard.register('post', '/api/dev/sessions/:id/findings/reply', async (req, res) => {
+  try {
+    const { key, text } = req.body || {};
+    res.json(await replyToReviewFinding(req.params.id, key, text, { by: req.mcpActor || 'the user' }));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ⚑ Findings, Delete on one finding of a hand-started code review: the finding
+// leaves the review — its inline comment on the pull request and the review's
+// own findings block — rather than only this card. Irreversible on GitHub; the
+// screen asks before calling it.
+dashboard.register('post', '/api/dev/sessions/:id/findings/delete', async (req, res) => {
+  try {
+    const { key } = req.body || {};
+    res.json(await deleteReviewFinding(req.params.id, key, { by: req.mcpActor || 'the user' }));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ⚑ Findings, Save comments: the verdicts picked and the reasons and note
+// typed so far, kept on the held round and posted on the pull request as one
+// comment. Nothing is ruled; the round goes on waiting for Complete.
+dashboard.register('post', '/api/dev/sessions/:id/triage/save', async (req, res) => {
+  try {
+    const { verdicts, note } = req.body || {};
+    res.json(
+      await saveReviewFindingsDrafts(req.params.id, { verdicts, note, by: req.mcpActor || 'the user' }),
+    );
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1756,7 +1824,7 @@ app.post('/api/dev/sessions/:id/triage', async (req, res) => {
 
 // 🎬 QA loop: the second live chip, queued behind an armed review loop. It is
 // armed independently because not every reviewed task should spend a QA run.
-app.post('/api/dev/sessions/:id/qa-loop', (req, res) => {
+dashboard.register('post', '/api/dev/sessions/:id/qa-loop', (req, res) => {
   try {
     const { on } = req.body || {};
     res.json({ session: setQaLoop(req.params.id, on === true) });
@@ -1767,7 +1835,7 @@ app.post('/api/dev/sessions/:id/qa-loop', (req, res) => {
 
 // Reopen a closed / interrupted / failed session: its workspace clone and
 // database server are claimed again, without a message to the agent.
-app.post('/api/dev/sessions/:id/reopen', (req, res) => {
+dashboard.register('post', '/api/dev/sessions/:id/reopen', (req, res) => {
   try {
     res.json({ session: reopenDevSession(req.params.id) });
   } catch (e) {
@@ -1776,7 +1844,7 @@ app.post('/api/dev/sessions/:id/reopen', (req, res) => {
 });
 
 // ▶ Run: serve the session's checkout and hand back the URL for a new tab.
-app.post('/api/dev/sessions/:id/serve', async (req, res) => {
+dashboard.register('post', '/api/dev/sessions/:id/serve', async (req, res) => {
   try {
     res.json(await startDevServe(req.params.id));
   } catch (e) {
@@ -1784,13 +1852,13 @@ app.post('/api/dev/sessions/:id/serve', async (req, res) => {
   }
 });
 
-app.post('/api/dev/sessions/:id/cancel', (req, res) => {
+dashboard.register('post', '/api/dev/sessions/:id/cancel', (req, res) => {
   const session = cancelDevTurn(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session not found' });
   res.json({ session });
 });
 
-app.post('/api/dev/sessions/:id/close', async (req, res) => {
+dashboard.register('post', '/api/dev/sessions/:id/close', async (req, res) => {
   const session = await closeDevSession(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session not found' });
   res.json({ session });
@@ -1798,7 +1866,7 @@ app.post('/api/dev/sessions/:id/close', async (req, res) => {
 
 // Delete = close (release the clone and MySQL instance) then trash the record
 // and its log.
-app.delete('/api/dev/sessions/:id', async (req, res) => {
+dashboard.register('delete', '/api/dev/sessions/:id', async (req, res) => {
   const job = getJob(req.params.id);
   if (!job || job.kind !== 'devchat') return res.status(404).json({ error: 'Session not found' });
   try {
@@ -1836,6 +1904,8 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initTemplates();
     await initProjects();
     await initDbServers();
+    await sshService.init();
+    await remoteMcpAuth.init();
     await initSavedPrompts();
     await initMemories();
     await initProviders();
@@ -1863,6 +1933,10 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   checkProviderAuth();
   setInterval(checkProviderAuth, AUTH_RECHECK_MS).unref();
   await initJobs();
+  // Clone slots are caches, not session records. Drop every unclaimed slot at
+  // boot and once a day so a project's peak concurrency does not permanently
+  // consume disk; the pruner sees the live session registry and skips claims.
+  startWorkspacePruner();
   // Every project gets (or keeps) a hook pointing at this install's public
   // hostname, so an open session's pull request panel keeps up with the reviews,
   // comments and CI runs landing on its branch. Best effort: a repo whose hook
