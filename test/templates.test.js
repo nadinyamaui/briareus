@@ -10,7 +10,6 @@ import {
   normalize,
   renderTemplate,
   templateText,
-  templateSource,
   templateCatalog,
   saveGlobalTemplates,
   TEMPLATE_IDS,
@@ -62,19 +61,17 @@ describe('normalize', () => {
   });
 });
 
-describe('templateText / templateSource', () => {
+describe('templateText', () => {
   it('throws on a template id that does not exist', () => {
     expect(() => templateText('nope')).toThrow(/No such template/);
   });
 
   it('falls back to the built-in text when nothing overrides it', () => {
-    expect(templateSource('testSheet')).toBe('built-in');
     expect(templateText('testSheet')).toContain('{{TEST_SHEET_ANCHOR}}');
   });
 
   it('prefers a global override over the built-in', async () => {
     await saveGlobalTemplates({ testSheet: 'GLOBAL SHEET {{REPO}}' });
-    expect(templateSource('testSheet')).toBe('global');
     expect(templateText('testSheet')).toBe('GLOBAL SHEET {{REPO}}');
     await saveGlobalTemplates({}); // leave no state behind for other tests
   });
@@ -82,13 +79,12 @@ describe('templateText / templateSource', () => {
   it('prefers a project override over global and built-in', async () => {
     await saveGlobalTemplates({ testSheet: 'GLOBAL' });
     const project = { promptTemplates: { testSheet: 'PROJECT SHEET' } };
-    expect(templateSource('testSheet', project)).toBe('project');
     expect(templateText('testSheet', project)).toBe('PROJECT SHEET');
     await saveGlobalTemplates({});
   });
 
   it('treats a project without templates like no project at all', () => {
-    expect(templateSource('prBody', { promptTemplates: null })).toBe('built-in');
+    expect(templateText('prBody', { promptTemplates: null })).toBe(templateText('prBody'));
   });
 });
 
