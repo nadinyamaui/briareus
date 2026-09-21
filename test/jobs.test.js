@@ -170,6 +170,8 @@ import { stepRuntime } from '../lib/projects.js';
 import {
   bus,
   initJobs,
+  sweepExpiredPreviews,
+  PREVIEW_TTL_MS,
   closeDevSession,
   deleteJobById,
   jobEventsSince,
@@ -319,6 +321,49 @@ describe('restart reconciliation for loop jobs', () => {
       kind: 'interrupted',
       reason: 'Server restarted while the job was active',
     });
+  });
+});
+
+describe('sweepExpiredPreviews', () => {
+  const T0 = Date.parse('2026-09-21T10:00:00Z');
+  const preview = (id, extra) => ({
+    id,
+    kind: 'devchat',
+    status: 'idle',
+    repo: 'acme/shop',
+    preview: true,
+    createdAt: new Date(T0).toISOString(),
+    turns: 0,
+    ...extra,
+  });
+
+  beforeAll(async () => {
+    state.stored = [
+      preview('preview-expired', { previewExpiresAt: T0 + PREVIEW_TTL_MS }),
+      preview('preview-fresh', { previewExpiresAt: T0 + 2 * PREVIEW_TTL_MS }),
+      preview('preview-chatted', { previewExpiresAt: T0 + PREVIEW_TTL_MS, chatStarted: true }),
+      preview('preview-legacy', {}),
+      {
+        id: 'not-a-preview',
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/shop',
+        createdAt: new Date(T0).toISOString(),
+      },
+    ];
+    await initJobs();
+    await sweepExpiredPreviews(T0 + PREVIEW_TTL_MS);
+  });
+
+  it('deletes a pristine preview once its ten minutes are up, counting from creation when no expiry was stored', () => {
+    expect(getJob('preview-expired')).toBeNull();
+    expect(getJob('preview-legacy')).toBeNull();
+  });
+
+  it('keeps one still within its time, one somebody chatted in, and every other session', () => {
+    expect(getJob('preview-fresh')).not.toBeNull();
+    expect(getJob('preview-chatted')).not.toBeNull();
+    expect(getJob('not-a-preview')).not.toBeNull();
   });
 });
 
