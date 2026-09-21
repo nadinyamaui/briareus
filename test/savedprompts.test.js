@@ -32,7 +32,6 @@ vi.mock('../lib/db.js', () => ({
 import {
   initSavedPrompts,
   listSavedPrompts,
-  getSavedPrompt,
   createSavedPrompt,
   updateSavedPrompt,
   removeSavedPrompt,
@@ -89,7 +88,7 @@ describe('CRUD', () => {
     const u = await updateSavedPrompt(a.id, { body: 'y' });
     expect(u).toMatchObject({ title: 'A', body: 'y', repo: 'acme/shop' });
     await expect(updateSavedPrompt(a.id, { title: '' })).rejects.toThrow(/needs a title/);
-    expect(getSavedPrompt(a.id).body).toBe('y');
+    expect(listSavedPrompts().find((p) => p.id === a.id).body).toBe('y');
   });
 
   it('leaves the sort order alone when the Order field is cleared', async () => {
