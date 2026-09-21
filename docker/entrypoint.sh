@@ -27,7 +27,8 @@ DEV_MAX_SESSIONS DEV_TIMEOUT_MIN'
 # R2_* is deliberately NOT written to the file: every shell command a session
 # runs can read this .env, and the bucket's write credential must not be in
 # it. lib/config.js reads those five straight from the process environment,
-# which job children never see (jobEnv strips R2_*).
+# which job children never see (jobEnv strips R2_*). CLOUDFLARE_* (the
+# preview tunnel's API token) is left out for the same reason.
 
 # A .env mounted over /app/.env is the operator's own file: it is the whole
 # configuration, and nothing here touches it.

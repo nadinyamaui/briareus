@@ -326,6 +326,74 @@
         </p>
       </div>
 
+      <h2 id="preview-tunnel">▶ Run through a Cloudflare tunnel</h2>
+      <p>
+        Optional. When the dashboard is reached from another computer, the <code>http://127.0.0.1</code> URL a
+        served app answers on is the viewer's own machine. With these set, ▶ Run publishes each app port
+        through the tunnel the first time it is served (an Access application limited to
+        <code>PREVIEW_ACCESS_EMAILS</code>, then the DNS record, then the ingress route, in that order) and
+        opens the public URL. The routes are reused afterwards, one per port.
+      </p>
+      <div class="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Key</th>
+              <th>From</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>CLOUDFLARE_API_TOKEN</code></td>
+              <td>
+                A token with Access: Apps and Policies Edit, Cloudflare Tunnel Edit, and DNS Edit on the zone.
+              </td>
+            </tr>
+            <tr>
+              <td><code>CLOUDFLARE_ACCOUNT_ID</code></td>
+              <td>The account the tunnel and Access applications live in.</td>
+            </tr>
+            <tr>
+              <td><code>CLOUDFLARE_ZONE_ID</code></td>
+              <td>The zone the preview hostnames go under.</td>
+            </tr>
+            <tr>
+              <td><code>CLOUDFLARE_TUNNEL_ID</code></td>
+              <td>A dashboard-managed tunnel running on this machine.</td>
+            </tr>
+            <tr>
+              <td><code>PREVIEW_HOSTNAME</code></td>
+              <td>
+                A template with <code>{port}</code>, one label under the zone, e.g.
+                <code>preview-{port}.example.com</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>PREVIEW_ACCESS_EMAILS</code></td>
+              <td>Comma-separated emails the Access policy lets in.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li>All six or none: half the keys is refused at boot.</li>
+        <li>
+          An Access application that already exists for a hostname is left as it is, and a DNS record at the
+          name that does not point at the tunnel is reported rather than replaced.
+        </li>
+        <li>
+          If publishing fails, Run still opens the loopback URL and the reason lands in the session log.
+        </li>
+      </ul>
+      <div class="callout warn">
+        <div class="callout-title">Prefer the process environment for the token</div>
+        <p>
+          Like <code>R2_*</code>, these keys may be exported in the server's environment instead of written to
+          <code>.env</code>, which every session's shell can read. The environment is stripped of
+          <code>CLOUDFLARE_*</code> before it reaches any job child.
+        </p>
+      </div>
+
       <h2 id="not-here">Not in the file at all</h2>
       <p>
         Projects (repositories, setup steps, PHP version, database, <code>.env</code> template, run commands),

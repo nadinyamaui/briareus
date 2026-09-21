@@ -80,7 +80,8 @@ beforeEach(() => {
   disk.statThrows = new Set();
   disk.whichOutput = null;
   savedEnv = { ...process.env };
-  for (const k of Object.keys(process.env)) if (k.startsWith('R2_')) delete process.env[k];
+  for (const k of Object.keys(process.env))
+    if (k.startsWith('R2_') || k.startsWith('CLOUDFLARE_')) delete process.env[k];
 });
 
 afterEach(() => {
@@ -531,5 +532,70 @@ describe('the R2 video bucket', () => {
     const { getConfig } = await loadConfig(complete(R2));
 
     expect(getConfig().r2.bucket).toBe('videos');
+  });
+});
+
+describe('the preview tunnel', () => {
+  const TUNNEL = {
+    CLOUDFLARE_API_TOKEN: 'cf',
+    CLOUDFLARE_ACCOUNT_ID: 'acct',
+    CLOUDFLARE_ZONE_ID: 'zone',
+    CLOUDFLARE_TUNNEL_ID: 'tun',
+    PREVIEW_HOSTNAME: 'Preview-{port}.example.com',
+    PREVIEW_ACCESS_EMAILS: 'a@example.com, b@example.com',
+  };
+
+  it('is off when none of its keys is set', async () => {
+    const { getConfig } = await loadConfig(complete());
+
+    expect(getConfig().previewTunnel).toBeNull();
+  });
+
+  it('reads all six, lowercasing the hostname and splitting the emails', async () => {
+    const { getConfig } = await loadConfig(complete(TUNNEL));
+
+    expect(getConfig().previewTunnel).toEqual({
+      apiToken: 'cf',
+      accountId: 'acct',
+      zoneId: 'zone',
+      tunnelId: 'tun',
+      hostname: 'preview-{port}.example.com',
+      accessEmails: ['a@example.com', 'b@example.com'],
+    });
+  });
+
+  it('refuses half the keys, naming the rest', async () => {
+    const { getConfig } = await loadConfig(complete({ CLOUDFLARE_API_TOKEN: 'cf' }));
+
+    const message = (() => {
+      try {
+        getConfig();
+      } catch (e) {
+        return e.message;
+      }
+      return '';
+    })();
+    for (const key of [
+      'CLOUDFLARE_ACCOUNT_ID',
+      'CLOUDFLARE_ZONE_ID',
+      'CLOUDFLARE_TUNNEL_ID',
+      'PREVIEW_HOSTNAME',
+      'PREVIEW_ACCESS_EMAILS',
+    ]) {
+      expect(message).toContain(key);
+    }
+  });
+
+  it('refuses a hostname without {port}', async () => {
+    const { getConfig } = await loadConfig(complete({ ...TUNNEL, PREVIEW_HOSTNAME: 'preview.example.com' }));
+
+    expect(() => getConfig()).toThrow(/PREVIEW_HOSTNAME \(a hostname with \{port\}/);
+  });
+
+  it('takes the token from the process environment over the file', async () => {
+    process.env.CLOUDFLARE_API_TOKEN = 'from-env';
+    const { getConfig } = await loadConfig(complete({ ...TUNNEL, CLOUDFLARE_API_TOKEN: '' }));
+
+    expect(getConfig().previewTunnel.apiToken).toBe('from-env');
   });
 });
