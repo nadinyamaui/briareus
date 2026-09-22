@@ -42,6 +42,10 @@ describe('getBinary / BINARIES', () => {
       expect(typeof b.reviewPrompt).toBe('function');
     }
   });
+
+  it('offers Claude Opus 5.5', () => {
+    expect(BINARIES.claude.models()).toContain('claude-opus-5-5');
+  });
 });
 
 describe('the Codex model cache refresh', () => {
