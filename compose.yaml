@@ -25,7 +25,7 @@ services:
       # test run leaves on a pull request both start with it.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:4300}
       GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required, the board is empty without it}
-      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-5}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-5-5}
       CLAUDE_EFFORT: ${CLAUDE_EFFORT:-high}
       DB_HOST: db
       DB_PORT: 3306
