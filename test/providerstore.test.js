@@ -431,6 +431,14 @@ describe('resolving a row against its binary', () => {
     expect(providerEfforts(p, 'gpt-b')).toEqual(['med', 'max']);
   });
 
+  it('keeps Max opt-in for a custom Codex endpoint', () => {
+    const p = row({ binary: 'codex', baseUrl: 'https://example.test' });
+
+    expect(providerEfforts(p)).toEqual(['med']);
+    expect(providerModelEfforts(p, cfg)).toEqual({ 'gpt-a': ['med'], 'gpt-b': ['med'] });
+    expect(providerDefaultEffort(p, cfg, 'gpt-a')).toBe('med');
+  });
+
   it('widens a curated codex list, so a login row need not name the twin itself', () => {
     const p = row({ binary: 'codex', models: ['gpt-a', 'gpt-b'] });
 
