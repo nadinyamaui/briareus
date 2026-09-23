@@ -389,6 +389,19 @@
     );
   }
 
+  function modelEfforts(provider, model) {
+    return (provider && provider.modelEfforts && provider.modelEfforts[model]) || provider?.efforts || [];
+  }
+
+  function fillEffortControl(provider, selected = '') {
+    const efforts = modelEfforts(provider, selModel.value);
+    selEffort.innerHTML = efforts.map((e) => `<option>${esc(e)}</option>`).join('');
+    const fallback = efforts.includes(provider.defaultEffort)
+      ? provider.defaultEffort
+      : efforts[efforts.length - 1] || '';
+    selEffort.value = efforts.includes(selected) ? selected : fallback;
+  }
+
   // A session started before its project was renamed (or deleted) still has
   // to render, so fall back to the repo name.
   function projectLabel(repo) {
@@ -411,9 +424,7 @@
     selModel.innerHTML = p.models
       .map((m) => `<option${m === p.defaultModel ? ' selected' : ''}>${esc(m)}</option>`)
       .join('');
-    selEffort.innerHTML = p.efforts
-      .map((e) => `<option${e === p.defaultEffort ? ' selected' : ''}>${esc(e)}</option>`)
-      .join('');
+    fillEffortControl(p, p.defaultEffort);
   }
 
   // Projects load separately from providers: the provider probes can sit on a
@@ -480,7 +491,7 @@
     fillModelControls();
     if (previous) {
       if (previous.models.includes(selected.model)) selModel.value = selected.model;
-      if (previous.efforts.includes(selected.effort)) selEffort.value = selected.effort;
+      fillEffortControl(previous, selected.effort);
     }
     // The auth probes can resolve long after a session was opened, and the chips
     // must keep showing that session's data, not snap back to the defaults.
@@ -501,6 +512,10 @@
   }
 
   selProvider.addEventListener('change', fillModelControls);
+  selModel.addEventListener('change', () => {
+    const provider = providerById(selProvider.value);
+    if (provider) fillEffortControl(provider, selEffort.value);
+  });
   selProject.addEventListener('change', () => {
     document.querySelector('.wl-repo').textContent = projectLabel(selProject.value);
     loadBranches(selProject.value);
@@ -3185,9 +3200,12 @@
   // whenever the picked provider offers that level, and its own default otherwise.
   function boardEffort(provider) {
     const project = boardProject();
-    return project && provider.efforts.includes(project.reviewEffort)
+    const efforts = modelEfforts(provider, $('proj-model').value);
+    return project && efforts.includes(project.reviewEffort)
       ? project.reviewEffort
-      : provider.defaultEffort;
+      : efforts.includes(provider.defaultEffort)
+        ? provider.defaultEffort
+        : efforts[efforts.length - 1];
   }
 
   // Which label means "a review left findings nobody has answered yet", and so
@@ -3801,16 +3819,33 @@
     const fill = () => {
       const p = providerById(selP.value);
       selM.innerHTML = p ? p.models.map((m) => `<option>${esc(m)}</option>`).join('') : '';
-      selE.innerHTML = p ? p.efforts.map((e) => `<option>${esc(e)}</option>`).join('') : '';
       if (!p) return;
       selM.value = p.models.includes(model) ? model : p.defaultModel;
-      selE.value = p.efforts.includes(effort) ? effort : p.defaultEffort;
+      const efforts = modelEfforts(p, selM.value);
+      selE.innerHTML = efforts.map((e) => `<option>${esc(e)}</option>`).join('');
+      selE.value = efforts.includes(effort)
+        ? effort
+        : efforts.includes(p.defaultEffort)
+          ? p.defaultEffort
+          : efforts[efforts.length - 1] || '';
+    };
+    const fillEfforts = () => {
+      const p = providerById(selP.value);
+      const selected = selE.value;
+      const efforts = modelEfforts(p, selM.value);
+      selE.innerHTML = efforts.map((e) => `<option>${esc(e)}</option>`).join('');
+      selE.value = efforts.includes(selected)
+        ? selected
+        : efforts.includes(p?.defaultEffort)
+          ? p.defaultEffort
+          : efforts[efforts.length - 1] || '';
     };
     const preferred = providerById(providerId);
     const provider = preferred && preferred.available ? preferred : providers.find((p) => p.available);
     if (provider) selP.value = provider.id;
     fill();
     selP.addEventListener('change', fill);
+    selM.addEventListener('change', fillEfforts);
     return () => ({ providerId: selP.value, model: selM.value, effort: selE.value });
   }
 

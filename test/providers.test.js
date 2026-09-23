@@ -21,6 +21,7 @@ import {
   refreshCodexModelCache,
   splitCodexModel,
   codexWideVariants,
+  codexEffortsForModel,
   testProviderEndpoint,
   probeChatEndpoint,
 } from '../lib/providers.js';
@@ -220,6 +221,46 @@ describe('the wide-window twin of a codex model', () => {
         'gpt-odd',
       ]);
     });
+  });
+});
+
+describe('Codex model reasoning efforts', () => {
+  it('reads each model supported efforts from the Codex catalog', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-efforts-'));
+    const provider = { id: 9 };
+    try {
+      fs.mkdirSync(path.join(home, '.codex-provider-9'));
+      fs.writeFileSync(
+        path.join(home, '.codex-provider-9', 'models_cache.json'),
+        JSON.stringify({
+          models: [
+            {
+              slug: 'gpt-6-sol',
+              supported_reasoning_levels: [{ effort: 'high' }, { effort: 'max' }],
+            },
+            {
+              slug: 'gpt-5.5',
+              supported_reasoning_levels: [{ effort: 'high' }, { effort: 'xhigh' }],
+            },
+          ],
+        }),
+      );
+
+      expect(codexEffortsForModel('gpt-6-sol', provider, home)).toEqual(['high', 'max']);
+      expect(codexEffortsForModel('gpt-5.5', provider, home)).toEqual(['high', 'xhigh']);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the conservative fallback when no catalog exists', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-efforts-fallback-'));
+    try {
+      expect(codexEffortsForModel('gpt-6-sol', null, home)).toContain('max');
+      expect(codexEffortsForModel('gpt-5.5', null, home)).not.toContain('max');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
