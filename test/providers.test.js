@@ -46,6 +46,21 @@ describe('getBinary / BINARIES', () => {
   it('offers Claude Opus 5.5', () => {
     expect(BINARIES.claude.models()).toContain('claude-opus-5-5');
   });
+
+  it('offers the GPT-6 family when no Codex model cache exists', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-fallback-'));
+    try {
+      expect(BINARIES.codex.models({}, null, home).slice(0, 3)).toEqual([
+        'gpt-6-astra',
+        'gpt-6-sol',
+        'gpt-6-luna',
+      ]);
+      expect(BINARIES.codex.defaultModel()).toBe('gpt-6-sol');
+      expect(BINARIES.codex.efforts).toContain('max');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('the Codex model cache refresh', () => {
