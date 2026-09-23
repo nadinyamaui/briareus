@@ -56,6 +56,7 @@ describe('getBinary / BINARIES', () => {
         'gpt-6-sol',
         'gpt-6-luna',
       ]);
+      expect(BINARIES.codex.models({}, null, home)).not.toContain('gpt-5.6-sol');
       expect(BINARIES.codex.defaultModel()).toBe('gpt-6-sol');
       expect(BINARIES.codex.efforts).toContain('max');
     } finally {
@@ -135,6 +136,9 @@ describe('the Codex model cache refresh', () => {
         JSON.stringify({
           models: [
             { slug: 'gpt-6-astra', visibility: 'list' },
+            { slug: 'gpt-5.6-sol', visibility: 'list' },
+            { slug: 'gpt-5.6-terra', visibility: 'list' },
+            { slug: 'gpt-5.6-luna', visibility: 'list' },
             { slug: 'gpt-reserve', visibility: 'hide' },
             { slug: 'codex-auto-review', visibility: 'hide' },
           ],
