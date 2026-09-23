@@ -4311,8 +4311,11 @@
   // whole history) and decides how a key reads and how dense the axis is. One
   // hue throughout: the columns encode magnitude, not identity, so a second
   // colour would only claim a distinction the data does not have.
-  function bucketChart(buckets, { unit = 'day', today = '', title = 'Tokens per day', hint = '' } = {}) {
-    const max = Math.max(0, ...buckets.map((b) => b.totalTokens));
+  function bucketChart(
+    buckets,
+    { unit = 'day', today = '', title = 'Tokens per day', hint = '', metric = 'totalTokens' } = {},
+  ) {
+    const max = Math.max(0, ...buckets.map((b) => b[metric] || 0));
     if (!buckets.length || !max) return '';
     // "Has not happened yet" is the server's calendar, the one the buckets are
     // cut on: its `today`, not this browser's clock in whatever zone it is in.
@@ -4321,10 +4324,14 @@
     // A label under every nth column keeps the axis readable without one per
     // bar; the trailing flex-1 runs keep them under their columns.
     const every = unit === 'month' ? (buckets.length > 12 ? 3 : 1) : 7;
+    // Keep bars and axis labels readable even for a year of daily buckets.
+    // The shared canvas scrolls when these minimum widths exceed the viewport.
+    const bucketWidth = Math.ceil(70 / every);
+    const visibleCount = buckets.filter((b) => !future(b)).length;
     const cols = buckets
       .map((b) => {
         if (future(b)) return '';
-        const h = b.totalTokens ? Math.max(3, Math.round((b.totalTokens / max) * 100)) : 0;
+        const h = b[metric] ? Math.max(3, Math.round((b[metric] / max) * 100)) : 0;
         const spent = [
           `${fmtTokens(b.totalTokens)} tok`,
           `${b.turns} turn${b.turns === 1 ? '' : 's'}`,
@@ -4343,14 +4350,20 @@
       .map((b, i) => {
         if (future(b)) return '';
         return `<div class="min-w-0 flex-1 overflow-visible whitespace-nowrap">${
-          i % every === 0 ? fmtBucket(b.date, unit) : ''
+          i % every === 0 && (i === 0 || (visibleCount - i) * bucketWidth >= 70)
+            ? fmtBucket(b.date, unit)
+            : ''
         }</div>`;
       })
       .join('');
     return `<div class="mt-3 rounded-xl border border-line bg-raise px-3.5 py-3">
         <div class="text-[12px] tracking-wide text-muted">${hint ? hinted(esc(title), hint) : esc(title)}</div>
-        <div class="mt-2.5 flex h-28 items-end gap-[2px]">${cols}</div>
-        <div class="mt-1 flex gap-[2px] text-[11px] text-muted">${labels}</div>
+        <div class="overflow-x-auto">
+          <div style="min-width:${Math.max(70, visibleCount * bucketWidth)}px">
+            <div class="mt-2.5 flex h-28 items-end gap-[2px]">${cols}</div>
+            <div class="mt-1 flex gap-[2px] text-[11px] text-muted">${labels}</div>
+          </div>
+        </div>
       </div>`;
   }
 
@@ -4380,7 +4393,7 @@
     const series = shareSeries(models, modelLabel);
     const rows = models
       .map((m, i) => {
-        const on = filterable && homeFilter.model === m.key;
+        const on = filterable && [homeFilter.model].flat().includes(m.key);
         const cls = filterable ? ` cursor-pointer hover:bg-sunken/60${on ? ' bg-sunken' : ''}` : '';
         const attrs = filterable
           ? ` data-filter="model" data-key="${esc(m.key)}" data-label="${esc(modelLabel(m))}" title="${
@@ -4421,10 +4434,8 @@
     );
   }
 
-  // Every provider that ran a turn, biggest first. Coarser than the model
-  // table on purpose: a provider is an account with a bill attached, and its
-  // spend is spread over however many models it was asked for.
-  function providerTable(u) {
+  // Every CLI that ran a turn, across its models and configured accounts.
+  function providerTable(u, { filterable = false } = {}) {
     const providers = u.providers || [];
     if (!providers.length) return '';
     const label = (p) => p.provider || 'unknown';
@@ -4435,7 +4446,7 @@
           ? esc(p.provider)
           : '<span class="text-muted" title="No provider was recorded on these turns">unknown</span>';
         return `<tr class="border-t border-line">
-          <td class="max-w-[200px] truncate py-1.5 pr-3 text-ink">${swatch(series.colors[i])}<span class="font-mono text-[12px]">${name}</span></td>
+          <td class="max-w-[200px] truncate py-1.5 pr-3 text-ink">${swatch(series.colors[i])}<span class="font-mono text-[12px]">${filterable ? `<button class="text-left" data-filter="provider" data-key="${esc(p.provider || 'unknown')}">${name}</button>` : name}</span></td>
           <td class="py-1.5 pr-3 text-right">${p.sessions}</td>
           <td class="py-1.5 pr-3 text-right">${p.turns}</td>
           <td class="py-1.5 pr-3 text-right" title="${p.inputTokens.toLocaleString()} in · ${p.outputTokens.toLocaleString()} out">${fmtTokens(p.inputTokens)} / ${fmtTokens(p.outputTokens)}</td>
@@ -4447,7 +4458,7 @@
     return breakdownCard(
       hinted(
         'By provider',
-        'What each CLI cost, over every model it was asked for. This is the row to read against a subscription or an invoice; the accounts of one provider are summed together, since they bill as one.',
+        'What each CLI cost, over every model it was asked for. This is the row to read against a subscription or an invoice; accounts using the same CLI are summed together. Use the account filter to separate them.',
       ),
       series,
       `<table class="w-full border-collapse text-[13px]">
@@ -4526,7 +4537,7 @@
   // Where the money went, by the kind of work it bought: biggest spender
   // first, the server's ordering. A null activity is a turn written before the
   // ledger recorded one, said plainly rather than guessed at.
-  function activityTable(u) {
+  function activityTable(u, { filterable = false } = {}) {
     const activities = u.activities || [];
     if (!activities.length) return '';
     const label = (a) => (a.activity ? ACTIVITY_LABELS[a.activity] || a.activity : 'Unattributed');
@@ -4544,7 +4555,7 @@
               'Turns recorded before the ledger tracked what kind of work they were. Nothing new lands here.',
             );
         return `<tr class="border-t border-line">
-          <td class="max-w-[220px] truncate py-1.5 pr-3 text-ink">${swatch(series.colors[i])}${name}</td>
+          <td class="max-w-[220px] truncate py-1.5 pr-3 text-ink">${swatch(series.colors[i])}${filterable ? `<button class="text-left" data-filter="activity" data-key="${esc(a.activity || 'unknown')}">${name}</button>` : name}</td>
           <td class="py-1.5 pr-3 text-right">${a.sessions}</td>
           <td class="py-1.5 pr-3 text-right">${a.turns}</td>
           <td class="py-1.5 pr-3 text-right" title="${a.inputTokens.toLocaleString()} in · ${a.outputTokens.toLocaleString()} out">${fmtTokens(a.inputTokens)} / ${fmtTokens(a.outputTokens)}</td>
@@ -4920,12 +4931,14 @@
   const HOME_PERIOD_KEY = 'dev.usagePeriod';
   let homeOpen = false;
   let homePeriod = localStorage.getItem(HOME_PERIOD_KEY) || 'month';
-  // One project, one model, or neither: lib/usage.js's filter keys, straight
-  // off the tables below. Deliberately not remembered across reloads the way
-  // the window is: the window is a preference, a filter is the question being
-  // asked right now, and a sticky one is how a small number gets read as the
-  // whole month's spend.
+  // Filter selections are temporary; the date window and browser budget are
+  // preferences. A fresh visit must not silently show only one account.
   let homeFilter = { project: null, model: null };
+  let homeRange = {
+    from: localStorage.getItem('dev.usageFrom') || '',
+    to: localStorage.getItem('dev.usageTo') || '',
+  };
+  let homeBudget = Number(localStorage.getItem('dev.usageBudget')) || 0;
   // What the pickers offer and what the current picks are called, both from
   // the last payload that landed: the options are the whole window's, so
   // narrowing to one project never empties the list you would widen back with.
@@ -4939,14 +4952,19 @@
 
   // What the pane on screen is drawn from: the window and both filters, so a
   // payload that answered an older pick is never mistaken for this one's.
-  const homeKey = () => [homePeriod, homeFilter.project || '', homeFilter.model || ''].join('\n');
+  const homeKey = () => JSON.stringify([homePeriod, homeFilter, homeRange]);
 
   async function loadHomeUsage() {
     const seq = ++homeSeq;
     const key = homeKey();
     const query = new URLSearchParams({ period: homePeriod });
-    if (homeFilter.project) query.set('project', homeFilter.project);
-    if (homeFilter.model) query.set('model', homeFilter.model);
+    for (const [key, value] of Object.entries(homeFilter)) {
+      for (const item of Array.isArray(value) ? value : value ? [value] : []) query.append(key, item);
+    }
+    if (homePeriod === 'custom') {
+      query.set('from', homeRange.from);
+      query.set('to', homeRange.to);
+    }
     try {
       const data = await api(`/api/dev/usage/all?${query}`);
       if (seq !== homeSeq) return; // a newer pick is already on its way
@@ -4964,7 +4982,11 @@
   // what makes the table rows toggles: click a project to see only it, click
   // it again to come back out.
   function setHomeFilter(which, value, label = '') {
-    const next = homeFilter[which] === value ? null : value || null;
+    const selection = (pick) => (Array.isArray(pick) ? pick : pick ? [pick] : []);
+    const next =
+      JSON.stringify(selection(homeFilter[which])) === JSON.stringify(selection(value))
+        ? null
+        : value || null;
     if (homeFilter[which] === next) return;
     homeFilter = { ...homeFilter, [which]: next };
     homeFilterLabels = { ...homeFilterLabels, [which]: next ? label : '' };
@@ -4978,7 +5000,9 @@
   // and label August's totals July. Only the wording is done here.
   function homeWindowName(u) {
     if (!u) return '';
-    if (!u.month) return 'all time';
+    if (u.period === 'all') return 'all time';
+    if (!['month', 'prev'].includes(u.period))
+      return `${fmtBucket(u.buckets[0]?.date || homeRange.from, 'day')} – ${fmtBucket(u.buckets.at(-1)?.date || homeRange.to, 'day')}`;
     const [y, m] = u.month.split('-').map(Number);
     return new Date(y, m - 1, 1).toLocaleDateString([], { month: 'long', year: 'numeric' });
   }
@@ -5003,7 +5027,7 @@
           : `<span class="text-ink" title="${esc(p.repo || '')}">${esc(p.label)}</span>`;
         // The row is the filter: clicking it narrows the page to this project,
         // clicking it again comes back out (setHomeFilter).
-        const on = homeFilter.project === p.key;
+        const on = [homeFilter.project].flat().includes(p.key);
         const cls = `${p.turns ? '' : ' text-muted'}${on ? ' bg-sunken' : ''}`;
         const attrs = ` data-filter="project" data-key="${esc(p.key)}" data-label="${esc(p.label)}" title="${
           on ? 'Show every project again' : `Show only ${esc(p.label)}`
@@ -5059,35 +5083,82 @@
   // select never goes blank under a filter the page is visibly drawing.
   function fillHomePicker(id, which, all, options) {
     const value = homeFilter[which] || '';
-    const known = options.some((o) => o.key === value);
+    const selected = Array.isArray(value) ? value : value ? [value] : [];
     const rows = options.map((o) => ({ key: o.key, label: o.label }));
-    if (value && !known) rows.push({ key: value, label: homeFilterLabels[which] || value });
-    // The pane redraws itself on a 60-second refresh tick, and replacing the
-    // <option> nodes under a dropdown the reader has open closes it with
-    // nothing on screen saying why. Between two ticks the options are almost
-    // always the same, so the rewrite only happens when they are not.
+    for (const key of selected) if (!rows.some((o) => o.key === key)) rows.push({ key, label: key });
     const el = $(id);
     const sig = JSON.stringify([all, value, rows]);
-    if (el.dataset.pickerSig === sig && el.value === value) return;
+    if (el.dataset.pickerSig === sig) return;
     el.dataset.pickerSig = sig;
-    el.innerHTML = [{ key: '', label: all }, ...rows]
-      .map(
-        (o) => `<option value="${esc(o.key)}"${o.key === value ? ' selected' : ''}>${esc(o.label)}</option>`,
-      )
-      .join('');
+    if (which === 'project' || which === 'model') {
+      $(id + '-summary').textContent = selected.length
+        ? `${selected.length} ${which}${selected.length === 1 ? '' : 's'}`
+        : all;
+      el.innerHTML =
+        rows
+          .map(
+            (o) =>
+              `<label class="flex items-center gap-2 py-1"><input type="checkbox" value="${esc(o.key)}" ${selected.includes(o.key) ? 'checked' : ''}>${esc(o.label)}</label>`,
+          )
+          .join('') || '<span>No usage in this period</span>';
+    } else {
+      el.innerHTML = [{ key: '', label: all }, ...rows]
+        .map(
+          (o) =>
+            `<option value="${esc(o.key)}" ${o.key === value ? 'selected' : ''}>${esc(o.label)}</option>`,
+        )
+        .join('');
+    }
   }
 
   // What a pick is called in the subtitle: whatever the payload calls it now,
   // falling back to the label it was picked by. The payload is preferred so a
   // project renamed in Settings since the click reads as its new name.
   function filterLabel(which, u) {
-    const key = homeFilter[which];
-    const from =
+    const keys = [homeFilter[which]].flat();
+    const options =
       which === 'project'
-        ? (u.projects || []).find((p) => p.key === key)
-        : (u.models || []).find((m) => m.key === key);
-    if (!from) return homeFilterLabels[which] || key;
-    return which === 'project' ? from.label : modelLabel(from);
+        ? u.options.projects
+        : which === 'model'
+          ? u.options.models.map((m) => ({ key: m.key, label: modelLabel(m) }))
+          : u.options[which === 'activity' ? 'activities' : which + 's'] || [];
+    return keys.map((key) => options.find((o) => o.key === key)?.label || key).join(', ');
+  }
+
+  function homeInsights(u) {
+    const i = u.insights;
+    const averageCost = (cost) => fmtCost({ ...u, costUsd: cost }) || '—';
+    const previous = u.comparison;
+    const delta = (key, label) => {
+      const old = previous[key],
+        current = u[key];
+      if (old == null || current == null) return `${label}: unavailable`;
+      if (!old) return `${label}: ${current ? 'new usage (previously zero)' : 'unchanged'}`;
+      const percent = ((current - old) / old) * 100;
+      return `${label}: ${percent > 0 ? '+' : ''}${percent.toFixed(1)}%`;
+    };
+    const comparison = previous
+      ? `<p class="mt-3 text-xs text-muted">Compared with ${esc(new Date(previous.from).toLocaleDateString())} – ${esc(new Date(previous.to - 1).toLocaleDateString())}${previous.partial ? ' (matching elapsed time)' : ''}: ${['costUsd', 'totalTokens', 'sessions'].map((key, n) => delta(key, ['Cost', 'Tokens', 'Sessions'][n])).join(' · ')}${u.estimatedTurns || previous.estimatedTurns ? ' · includes estimates' : ''}${u.unpricedTurns || previous.unpricedTurns ? ' · cost comparison is partial' : ''}</p>`
+      : '';
+    const budgetTotal = u.monthlyTotal;
+    const budget =
+      homeBudget > 0 && u.period === 'month'
+        ? `<p class="mt-3 text-xs">Monthly budget across all projects: ${esc(fmtCost(budgetTotal) || 'Unpriced')} / $${homeBudget.toFixed(2)}${budgetTotal.costUsd == null ? '' : ` (${((budgetTotal.costUsd / homeBudget) * 100).toFixed(1)}%)`} · saved in this browser</p>`
+        : '';
+    const sessions = u.topSessions
+      .map(
+        (session) =>
+          `<tr class="border-t border-line"><td class="py-2 pr-3"><a class="text-accent" href="/sessions/${encodeURIComponent(session.key)}">${esc(session.label)}</a><div class="text-xs text-muted">${esc(session.repo || '')}</div></td><td class="text-right pr-3">${session.turns}</td><td class="text-right pr-3">${fmtTokens(session.totalTokens)}</td><td class="text-right" title="${esc(costNote(session))}">${fmtCost(session) || '—'}</td></tr>`,
+      )
+      .join('');
+    return `<div class="mt-3 grid grid-cols-2 gap-2 lg:grid-cols-4">
+      ${statTile('Cost / session', averageCost(i.costPerSession), 'within this selection', costNote(u))}
+      ${statTile('Cost / turn', averageCost(i.costPerTurn), 'within this selection', costNote(u))}
+      ${statTile('Average turn duration', i.averageDurationMs == null ? '—' : fmtDur(i.averageDurationMs), `${i.timedTurns} turns with timing`, 'Averages only turns whose duration was recorded.')}
+      ${statTile('Pricing coverage', `${u.turns ? Math.round(((u.turns - u.unpricedTurns) / u.turns) * 100) : 0}%`, `${i.reportedTurns} reported · ${u.estimatedTurns} estimated · ${u.unpricedTurns} unpriced`, 'Share of turns with a reported or estimated cost.')}
+    </div>${comparison}${budget}
+    ${bucketChart(u.buckets, { unit: u.unit, today: u.today, metric: 'costUsd', title: u.unit === 'month' ? 'Cost per month' : 'Cost per day', hint: 'Reported and estimated USD costs. Unpriced usage is excluded; hover each bar for details.' }) || '<p class="mt-3 text-xs text-muted">No priced spend to plot in this selection.</p>'}
+    ${sessions ? `<div class="mt-3 rounded-xl border border-line bg-raise p-3"><div class="text-sm">Most expensive sessions in this selection</div><p class="text-xs text-muted">Top 10 by known cost, including estimates. Deleted sessions retain their usage but cannot be reopened.</p><table class="w-full text-sm"><thead><tr><th class="text-left">Session</th><th class="text-right pr-3">Turns</th><th class="text-right pr-3">Tokens</th><th class="text-right">Cost</th></tr></thead><tbody>${sessions}</tbody></table></div>` : ''}`;
   }
 
   function renderHome() {
@@ -5110,6 +5181,33 @@
       'All models',
       (homeOptions.models || []).map((o) => ({ key: o.key, label: modelLabel(o) })),
     );
+    for (const [which, plural] of [
+      ['activity', 'activities'],
+      ['provider', 'providers'],
+      ['account', 'accounts'],
+      ['session', 'sessions'],
+    ]) {
+      fillHomePicker(
+        `home-${which}`,
+        which,
+        `All ${plural}`,
+        (homeOptions[plural] || []).map((o) => ({
+          ...o,
+          label: which === 'activity' ? ACTIVITY_LABELS[o.key] || o.label : o.label,
+        })),
+      );
+    }
+    fillHomePicker(
+      'home-pricing',
+      'pricing',
+      'All pricing',
+      ['reported', 'estimated', 'unpriced'].map((key) => ({
+        key,
+        label: key[0].toUpperCase() + key.slice(1),
+      })),
+    );
+    $('home-dates').classList.toggle('hidden', homePeriod !== 'custom');
+    $('home-budget').value = homeBudget || '';
     const list = $('home-list');
     if (homeError && !u) {
       $('home-sub').textContent = '';
@@ -5119,7 +5217,9 @@
     if (!u) {
       $('home-sub').textContent = '';
       list.innerHTML =
-        '<div class="my-8 animate-pulse text-center text-sm text-muted">Loading the usage ledger…</div>';
+        homePeriod === 'custom' && (!homeRange.from || !homeRange.to)
+          ? '<div class="my-8 text-center text-sm text-muted">Choose start and end dates, then select Apply dates.</div>'
+          : '<div class="my-8 animate-pulse text-center text-sm text-muted">Loading the usage ledger…</div>';
       return;
     }
     const over = homeWindowName(u);
@@ -5129,10 +5229,9 @@
     // A filter is said in the subtitle as well as shown in its picker: these
     // totals are a slice, and the one line every screenshot of this pane
     // carries has to say which slice.
-    const picked = [
-      homeFilter.project ? filterLabel('project', u) : '',
-      homeFilter.model ? filterLabel('model', u) : '',
-    ].filter(Boolean);
+    const picked = Object.keys(homeFilter)
+      .filter((key) => homeFilter[key] && (!Array.isArray(homeFilter[key]) || homeFilter[key].length))
+      .map((key) => filterLabel(key, u));
     $('home-sub').textContent = [
       over,
       ...picked.map((what) => `only ${what}`),
@@ -5148,7 +5247,7 @@
     // rows for.
     if (!u.turns) {
       const what = picked.length ? ` for ${esc(picked.join(' and '))}` : '';
-      list.innerHTML = `<div class="my-8 text-center text-sm text-muted">No usage recorded in ${esc(over)}${what}.</div>${projectTable(u)}`;
+      list.innerHTML = `<div class="my-8 text-center text-sm text-muted">No usage recorded in ${esc(over)}${what}.</div>${homeInsights(u)}${projectTable(u)}`;
       return;
     }
     const tiles = [
@@ -5179,26 +5278,53 @@
         title: u.unit === 'month' ? 'Tokens per month' : 'Tokens per day',
         hint: CHART_HINT,
       })}
+      ${homeInsights(u)}
       ${projectTable(u)}
-      ${activityTable(u)}
-      ${providerTable(u)}
+      ${activityTable(u, { filterable: true })}
+      ${providerTable(u, { filterable: true })}
       ${modelTable(u, { filterable: true })}`;
   }
 
   $('home-period').addEventListener('change', (e) => {
     homePeriod = e.target.value;
+    $('home-dates').classList.toggle('hidden', homePeriod !== 'custom');
+    if (homePeriod === 'custom' && (!homeRange.from || !homeRange.to)) {
+      renderHome();
+      return;
+    }
     localStorage.setItem(HOME_PERIOD_KEY, homePeriod);
     renderHome(); // straight to the loader: the pane must not read as the old window's
     loadHomeUsage();
   });
 
-  $('home-project').addEventListener('change', (e) =>
-    setHomeFilter('project', e.target.value, e.target.selectedOptions[0].textContent),
-  );
-
-  $('home-model').addEventListener('change', (e) =>
-    setHomeFilter('model', e.target.value, e.target.selectedOptions[0].textContent),
-  );
+  for (const which of ['project', 'model', 'activity', 'provider', 'account', 'pricing', 'session']) {
+    $(`home-${which}`).addEventListener('change', (e) => {
+      const value = ['project', 'model'].includes(which)
+        ? [...$(`home-${which}`).querySelectorAll('input:checked')].map((input) => input.value)
+        : e.target.value;
+      setHomeFilter(which, Array.isArray(value) && !value.length ? null : value);
+    });
+  }
+  $('home-from').value = homeRange.from;
+  $('home-to').value = homeRange.to;
+  $('home-apply-dates').addEventListener('click', () => {
+    homeRange = { from: $('home-from').value, to: $('home-to').value };
+    localStorage.setItem('dev.usageFrom', homeRange.from);
+    localStorage.setItem('dev.usageTo', homeRange.to);
+    localStorage.setItem(HOME_PERIOD_KEY, homePeriod);
+    renderHome();
+    loadHomeUsage();
+  });
+  $('home-clear').addEventListener('click', () => {
+    homeFilter = { project: null, model: null };
+    renderHome();
+    loadHomeUsage();
+  });
+  $('home-budget').addEventListener('change', (e) => {
+    homeBudget = Math.max(0, Number(e.target.value) || 0);
+    localStorage.setItem('dev.usageBudget', String(homeBudget));
+    renderHome();
+  });
 
   // The by-project and by-model tables are pickers too; see setHomeFilter.
   $('home-list').addEventListener('click', (e) => {

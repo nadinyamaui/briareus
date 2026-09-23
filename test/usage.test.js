@@ -20,6 +20,8 @@ const {
   turnUsageRecord,
   monthWindow,
   usageWindow,
+  usageInsights,
+  sessionUsage,
   aggregateUsage,
   dailyUsage,
   localMonth,
@@ -52,6 +54,9 @@ describe('turnUsageRecord', () => {
       jobId: 'j1',
       repo: 'o/r',
       provider: 'codex',
+      accountId: null,
+      accountLabel: null,
+      sessionTitle: null,
       model: 'gpt-5',
       activity: null,
       inputTokens: 100,
@@ -944,5 +949,161 @@ describe('session cost estimates', () => {
       events[0],
       { ...events[1], costUsd: 0.25, costEstimated: true },
     ]);
+  });
+});
+
+describe('dashboard filters and insights', () => {
+  const now = new Date(2026, 8, 23, 12).getTime();
+  const projects = [
+    { id: 1, repo: 'o/one', label: 'One' },
+    { id: 2, repo: 'o/two', label: 'Two' },
+  ];
+  const rows = [
+    {
+      jobId: 'a',
+      sessionTitle: 'Build A',
+      projectId: 1,
+      repo: 'o/one',
+      provider: 'codex',
+      model: 'gpt',
+      accountId: 7,
+      accountLabel: 'Work',
+      activity: 'chat',
+      costUsd: 4,
+      costEstimated: true,
+      durationMs: 2000,
+      inputTokens: 50,
+      at: now,
+    },
+    {
+      jobId: 'a',
+      projectId: 1,
+      repo: 'o/one',
+      provider: 'codex',
+      model: 'gpt',
+      accountId: 8,
+      accountLabel: 'Personal',
+      activity: 'chat',
+      costUsd: 2,
+      durationMs: 0,
+      inputTokens: 20,
+      at: now,
+    },
+    {
+      jobId: 'b',
+      projectId: 2,
+      repo: 'o/two',
+      provider: 'claude',
+      model: 'opus',
+      activity: 'qa',
+      costUsd: null,
+      durationMs: null,
+      inputTokens: 10,
+      at: now,
+    },
+  ];
+
+  it('records the actual turn account rather than the session’s configured account', () => {
+    expect(
+      turnUsageRecord(
+        { id: 'a', providerId: 99, title: 'Build' },
+        { costUsd: 1 },
+        { id: 7, label: 'Work', binary: 'codex' },
+        'gpt',
+      ),
+    ).toMatchObject({ accountId: 7, accountLabel: 'Work', sessionTitle: 'Build' });
+  });
+
+  it('combines multiple projects/models with account, activity, provider, pricing and session', () => {
+    expect(
+      filterUsageRows(rows, projects, {
+        project: ['p:1', 'p:2'],
+        model: ['codex|gpt', 'claude|opus'],
+        account: '7',
+        activity: 'chat',
+        provider: 'codex',
+        pricing: 'estimated',
+        session: 'a',
+      }),
+    ).toEqual([rows[0]]);
+    expect(filterUsageRows(rows, projects, { account: 'unknown', pricing: 'unpriced' })).toEqual([rows[2]]);
+    expect(filterUsageRows(rows, projects, { account: 'missing' })).toEqual([]);
+    expect(filterUsageRows(rows, projects, { project: [], model: [] })).toEqual(rows);
+  });
+
+  it('keeps account options separate, including unattributed historical turns', () => {
+    const options = usageFilterOptions(rows, projects);
+    expect(options.accounts.map((o) => o.key)).toEqual(['7', '8', 'unknown']);
+    expect(options.sessions).toEqual([
+      { key: 'a', label: 'Build A' },
+      { key: 'b', label: 'b' },
+    ]);
+  });
+
+  it('averages over sessions/turns and excludes missing timings, preserving zero durations', () => {
+    expect(usageInsights(rows)).toEqual({
+      costPerSession: 3,
+      costPerTurn: 2,
+      averageDurationMs: 1000,
+      reportedTurns: 1,
+      timedTurns: 2,
+    });
+    expect(usageInsights([])).toMatchObject({
+      costPerSession: null,
+      costPerTurn: null,
+      averageDurationMs: null,
+    });
+    expect(sessionUsage(rows)[0]).toMatchObject({ key: 'a', costUsd: 6, turns: 2, estimatedTurns: 1 });
+  });
+
+  it('validates custom dates and includes the end date', () => {
+    expect(usageWindow('custom', now, { from: '2026-09-01', to: '2026-09-23' })).toEqual({
+      period: 'custom',
+      from: +new Date(2026, 8, 1),
+      to: +new Date(2026, 8, 24),
+    });
+    for (const range of [
+      { from: '2026-02-30', to: '2026-03-01' },
+      { from: '2026-09-23', to: '2026-09-01' },
+      { from: '2020-01-01', to: '2026-01-01' },
+      { from: ['2026-09-01'], to: '2026-09-23' },
+    ]) {
+      expect(() => usageWindow('custom', now, range)).toThrow(/Choose/);
+    }
+    expect(usageWindow('7d', now)).toMatchObject({
+      from: +new Date(2026, 8, 17),
+      to: +new Date(2026, 8, 24),
+    });
+    expect(usageWindow('today', now)).toMatchObject({
+      from: +new Date(2026, 8, 23),
+      to: +new Date(2026, 8, 24),
+    });
+  });
+
+  it('compares the same filtered accounts and keeps the monthly budget total global', async () => {
+    const previous = [
+      { ...rows[0], costUsd: 1, at: +new Date(2026, 7, 10) },
+      { ...rows[1], costUsd: 20, at: +new Date(2026, 7, 11) },
+    ];
+    loadAllTurnUsage.mockImplementationOnce(async () => rows).mockImplementationOnce(async () => previous);
+    const result = await overallUsage(projects, 'month', now, { account: '7' });
+    expect(result.costUsd).toBe(4);
+    expect(result.monthlyTotal.costUsd).toBe(6);
+    expect(result.comparison).toMatchObject({
+      costUsd: 1,
+      from: +new Date(2026, 7, 1),
+      to: +new Date(2026, 7, 23, 12),
+    });
+    expect(result.options.accounts).toHaveLength(3);
+  });
+
+  it('compares completed months across a year boundary and omits all-time comparisons', async () => {
+    db.all = [];
+    const result = await overallUsage([], 'prev', +new Date(2026, 0, 20));
+    expect(result.comparison).toMatchObject({ from: +new Date(2025, 10, 1), to: +new Date(2025, 11, 1) });
+    expect((await overallUsage([], 'all', now)).comparison).toBeNull();
+    expect(
+      (await overallUsage([], 'custom', now, { from: '2026-10-01', to: '2026-10-02' })).comparison,
+    ).toBeNull();
   });
 });
