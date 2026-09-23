@@ -4289,6 +4289,10 @@
     // A label under every nth column keeps the axis readable without one per
     // bar; the trailing flex-1 runs keep them under their columns.
     const every = unit === 'month' ? (buckets.length > 12 ? 3 : 1) : 7;
+    // Keep bars and axis labels readable even for a year of daily buckets.
+    // The shared canvas scrolls when these minimum widths exceed the viewport.
+    const bucketWidth = Math.ceil(70 / every);
+    const visibleCount = buckets.filter((b) => !future(b)).length;
     const cols = buckets
       .map((b) => {
         if (future(b)) return '';
@@ -4311,14 +4315,20 @@
       .map((b, i) => {
         if (future(b)) return '';
         return `<div class="min-w-0 flex-1 overflow-visible whitespace-nowrap">${
-          i % every === 0 ? fmtBucket(b.date, unit) : ''
+          i % every === 0 && (i === 0 || (visibleCount - i) * bucketWidth >= 70)
+            ? fmtBucket(b.date, unit)
+            : ''
         }</div>`;
       })
       .join('');
     return `<div class="mt-3 rounded-xl border border-line bg-raise px-3.5 py-3">
         <div class="text-[12px] tracking-wide text-muted">${hint ? hinted(esc(title), hint) : esc(title)}</div>
-        <div class="mt-2.5 flex h-28 items-end gap-[2px]">${cols}</div>
-        <div class="mt-1 flex gap-[2px] text-[11px] text-muted">${labels}</div>
+        <div class="overflow-x-auto">
+          <div style="min-width:${Math.max(70, visibleCount * bucketWidth)}px">
+            <div class="mt-2.5 flex h-28 items-end gap-[2px]">${cols}</div>
+            <div class="mt-1 flex gap-[2px] text-[11px] text-muted">${labels}</div>
+          </div>
+        </div>
       </div>`;
   }
 
@@ -4937,7 +4947,11 @@
   // what makes the table rows toggles: click a project to see only it, click
   // it again to come back out.
   function setHomeFilter(which, value, label = '') {
-    const next = JSON.stringify(homeFilter[which]) === JSON.stringify(value) ? null : value || null;
+    const selection = (pick) => (Array.isArray(pick) ? pick : pick ? [pick] : []);
+    const next =
+      JSON.stringify(selection(homeFilter[which])) === JSON.stringify(selection(value))
+        ? null
+        : value || null;
     if (homeFilter[which] === next) return;
     homeFilter = { ...homeFilter, [which]: next };
     homeFilterLabels = { ...homeFilterLabels, [which]: next ? label : '' };
