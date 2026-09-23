@@ -418,6 +418,13 @@ describe('resolving a row against its binary', () => {
     });
   });
 
+  it('falls back to model-supported Codex efforts when an override has no overlap', () => {
+    const p = row({ binary: 'codex', efforts: ['max'] });
+
+    expect(providerEfforts(p, 'gpt-b')).toEqual(['med']);
+    expect(providerDefaultEffort(p, cfg, 'gpt-b')).toBe('med');
+  });
+
   it('keeps a custom Codex endpoint effort list provider-wide', () => {
     const p = row({ binary: 'codex', baseUrl: 'https://example.test', efforts: ['med', 'max'] });
 
