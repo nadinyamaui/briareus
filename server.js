@@ -27,6 +27,7 @@ import {
   createDevSession,
   sendDevMessage,
   cancelDevTurn,
+  compactDevSession,
   closeDevSession,
   reopenDevSession,
   setReviewLoop,
@@ -1719,6 +1720,15 @@ dashboard.register('post', '/api/dev/sessions/:id/message', (req, res) => {
   try {
     const { text, attachments, zeusRoles } = req.body || {};
     res.json({ session: sendDevMessage(req.params.id, text, attachments, zeusRoles) });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Dashboard only: internal session tokens cannot compact other sessions.
+app.post('/api/dev/sessions/:id/compact', async (req, res) => {
+  try {
+    res.json({ session: await compactDevSession(req.params.id) });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

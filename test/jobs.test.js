@@ -1,9 +1,15 @@
-import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import { BINARIES } from '../lib/providers.js';
+import * as providerTools from '../lib/providers.js';
+import { compactCodexThread } from '../lib/codex-session.js';
+vi.mock('../lib/codex-session.js', async (original) => ({
+  ...(await original()),
+  compactCodexThread: vi.fn(),
+}));
 
 // jobs.js orchestrates processes, clones and MySQL; none of that runs here.
 // These tests cover what is pure: the event windowing, the public projection
@@ -173,6 +179,7 @@ import {
   sweepExpiredPreviews,
   PREVIEW_TTL_MS,
   closeDevSession,
+  compactDevSession,
   deleteJobById,
   jobEventsSince,
   publicJob,
@@ -5803,5 +5810,106 @@ describe('the review loop: what a round runs on, and re-running one that could n
 
   it('a session with no loop has no round to retry', async () => {
     await expect(retryLoopRound('rt-missing')).rejects.toThrow(/Session not found/);
+  });
+});
+
+describe('manual Codex context compaction', () => {
+  let homeSpy;
+  afterEach(() => homeSpy?.mockRestore());
+  beforeEach(async () => {
+    homeSpy = vi.spyOn(providerTools, 'ensureCodexHome').mockReturnValue('/tmp/test-codex-provider-2');
+    state.stored = [
+      {
+        id: 'compact-session',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+        provider: 'codex',
+        model: 'own-model',
+        workDir: '/tmp/workspace',
+        turns: 1,
+        contextUsage: {
+          source: 'codex',
+          providerId: 2,
+          sessionId: 'review-thread',
+          model: 'review-model (872k)',
+          tokens: 40000,
+          inputTokens: 1000,
+          outputTokens: 200,
+        },
+      },
+    ];
+    state.otherProviders = [{ id: 2, binary: 'codex', label: 'Review account', active: true }];
+    await initJobs();
+    getJob('compact-session').status = 'idle';
+    captureProviderAuth.mockResolvedValue(undefined);
+  });
+
+  it('locks the session and compacts the displayed step thread with its configured model', async () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex' });
+    let finish;
+    compactCodexThread.mockImplementationOnce(
+      (opts) =>
+        new Promise((resolve) => {
+          finish = () => {
+            opts.onUsage({ tokens: 5000, inputTokens: 1300, outputTokens: 240 });
+            resolve();
+          };
+        }),
+    );
+    try {
+      const pending = compactDevSession('compact-session');
+      expect(publicJob(getJob('compact-session'))).toMatchObject({
+        status: 'running',
+        compacting: true,
+        canCompact: false,
+      });
+      await expect(compactDevSession('compact-session')).rejects.toThrow('idle');
+      expect(() => sendDevMessage('compact-session', 'next')).toThrow('compaction');
+      expect(compactCodexThread).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          threadId: 'review-thread',
+          model: 'review-model',
+          config: { model_context_window: 872000 },
+          env: expect.objectContaining({ CODEX_HOME: expect.stringContaining('codex-provider-2') }),
+        }),
+      );
+      finish();
+      const result = await pending;
+      expect(result).toMatchObject({
+        status: 'idle',
+        compacting: false,
+        canCompact: true,
+        contextTokens: 5000,
+        inputTokens: 300,
+        outputTokens: 40,
+      });
+      expect(result.contextUsage.compactedAt).toBeTruthy();
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
+  it('returns to idle after a CLI failure and does not claim success', async () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex' });
+    compactCodexThread.mockRejectedValueOnce(new Error('No quota'));
+    try {
+      await expect(compactDevSession('compact-session')).rejects.toThrow('No quota');
+      expect(publicJob(getJob('compact-session'))).toMatchObject({ status: 'idle', compacting: false });
+      expect(getJob('compact-session').contextUsage.compactedAt).toBeUndefined();
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
+  it('rejects missing sessions, busy sessions and non-Codex context', async () => {
+    await expect(compactDevSession('missing')).rejects.toThrow('not found');
+    const job = getJob('compact-session');
+    job.status = 'running';
+    await expect(compactDevSession(job.id)).rejects.toThrow('idle');
+    job.status = 'idle';
+    job.contextUsage = { categories: [] };
+    await expect(compactDevSession(job.id)).rejects.toThrow('No Codex context');
   });
 });
