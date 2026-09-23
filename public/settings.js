@@ -580,6 +580,10 @@
     return group ? group.id : id;
   }
 
+  function modelEfforts(provider, model) {
+    return (provider && provider.modelEfforts && provider.modelEfforts[model]) || provider?.efforts || [];
+  }
+
   function fillReviewModels(selectedModel) {
     const sel = $('f-reviewModel');
     const provider = devProviders.find((p) => String(p.id) === $('f-reviewProviderId').value);
@@ -595,13 +599,17 @@
   function fillReviewEfforts(selectedEffort) {
     const sel = $('f-reviewEffort');
     const provider = devProviders.find((p) => String(p.id) === $('f-reviewProviderId').value);
-    const efforts = provider ? provider.efforts : [];
+    const efforts = modelEfforts(provider, $('f-reviewModel').value);
     sel.innerHTML = efforts.length
       ? efforts.map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join('')
       : '<option value="">—</option>';
     // An effort the provider no longer offers falls back to its default, which
     // is also what the server would do with a stale name.
-    sel.value = efforts.includes(selectedEffort) ? selectedEffort : provider ? provider.defaultEffort : '';
+    sel.value = efforts.includes(selectedEffort)
+      ? selectedEffort
+      : efforts.includes(provider?.defaultEffort)
+        ? provider.defaultEffort
+        : efforts[efforts.length - 1] || '';
   }
 
   // What a 🧭 orchestrator's workers run on when a spawn names nothing. The
@@ -640,12 +648,16 @@
   function fillWorkerEfforts(selectedEffort) {
     const sel = $('f-workerEffort');
     const provider = devProviders.find((p) => String(p.id) === $('f-workerProviderId').value);
-    const efforts = provider ? provider.efforts : [];
+    const efforts = modelEfforts(provider, $('f-workerModel').value);
     sel.disabled = !provider;
     sel.innerHTML = efforts.length
       ? efforts.map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join('')
       : '<option value="">—</option>';
-    sel.value = efforts.includes(selectedEffort) ? selectedEffort : provider ? provider.defaultEffort : '';
+    sel.value = efforts.includes(selectedEffort)
+      ? selectedEffort
+      : efforts.includes(provider?.defaultEffort)
+        ? provider.defaultEffort
+        : efforts[efforts.length - 1] || '';
   }
 
   // ---------- what each step runs on ----------
@@ -700,12 +712,16 @@
   function fillStepEfforts(key, selectedEffort) {
     const sel = stepEl(key, 'effort');
     const provider = devProviders.find((p) => String(p.id) === stepEl(key, 'providerId').value);
-    const efforts = provider ? provider.efforts : [];
+    const efforts = modelEfforts(provider, stepEl(key, 'model').value);
     sel.disabled = !provider;
     sel.innerHTML = efforts.length
       ? efforts.map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join('')
       : '<option value="">—</option>';
-    sel.value = efforts.includes(selectedEffort) ? selectedEffort : provider ? provider.defaultEffort : '';
+    sel.value = efforts.includes(selectedEffort)
+      ? selectedEffort
+      : efforts.includes(provider?.defaultEffort)
+        ? provider.defaultEffort
+        : efforts[efforts.length - 1] || '';
   }
 
   function writeStepRuntimes(runtimes) {
@@ -741,6 +757,7 @@
       fillStepModels(key, '');
       fillStepEfforts(key, '');
     });
+    stepEl(key, 'model').addEventListener('change', () => fillStepEfforts(key, stepEl(key, 'effort').value));
   }
 
   // ---------- prompt templates ----------
@@ -827,10 +844,12 @@
     fillReviewModels('');
     fillReviewEfforts('');
   });
+  $('f-reviewModel').addEventListener('change', () => fillReviewEfforts($('f-reviewEffort').value));
   $('f-workerProviderId').addEventListener('change', () => {
     fillWorkerModels('');
     fillWorkerEfforts('');
   });
+  $('f-workerModel').addEventListener('change', () => fillWorkerEfforts($('f-workerEffort').value));
 
   // Which extras a provider can carry depends on its binary and its auth
   // mode: a login entry is the CLI's own login in a registered dir of its own,

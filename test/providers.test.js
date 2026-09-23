@@ -21,6 +21,7 @@ import {
   refreshCodexModelCache,
   splitCodexModel,
   codexWideVariants,
+  codexEffortsForModel,
   testProviderEndpoint,
   probeChatEndpoint,
 } from '../lib/providers.js';
@@ -45,6 +46,22 @@ describe('getBinary / BINARIES', () => {
 
   it('offers Claude Opus 5.5', () => {
     expect(BINARIES.claude.models()).toContain('claude-opus-5-5');
+  });
+
+  it('offers the GPT-6 family when no Codex model cache exists', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-fallback-'));
+    try {
+      expect(BINARIES.codex.models({}, null, home).slice(0, 3)).toEqual([
+        'gpt-6-astra',
+        'gpt-6-sol',
+        'gpt-6-luna',
+      ]);
+      expect(BINARIES.codex.models({}, null, home)).not.toContain('gpt-5.6-sol');
+      expect(BINARIES.codex.defaultModel()).toBe('gpt-6-sol');
+      expect(BINARIES.codex.efforts).toContain('max');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
@@ -119,6 +136,9 @@ describe('the Codex model cache refresh', () => {
         JSON.stringify({
           models: [
             { slug: 'gpt-6-astra', visibility: 'list' },
+            { slug: 'gpt-5.6-sol', visibility: 'list' },
+            { slug: 'gpt-5.6-terra', visibility: 'list' },
+            { slug: 'gpt-5.6-luna', visibility: 'list' },
             { slug: 'gpt-reserve', visibility: 'hide' },
             { slug: 'codex-auto-review', visibility: 'hide' },
           ],
@@ -187,10 +207,26 @@ describe('the wide-window twin of a codex model', () => {
     });
   });
 
-  it('leaves the list alone when no catalog has been cached yet', () => {
+  it('leaves supported models alone and removes GPT-5.6 when no catalog has been cached yet', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-nocat-'));
     try {
-      expect(codexWideVariants(['gpt-6-astra'], { id: 9 }, home)).toEqual(['gpt-6-astra']);
+      expect(codexWideVariants(['gpt-6-astra', 'gpt-5.6-sol'], { id: 9 }, home)).toEqual(['gpt-6-astra']);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to launchable models when a curated list contains only GPT-5.6', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-filtered-fallback-'));
+    try {
+      expect(codexWideVariants(['gpt-5.6-sol', 'gpt-5.6-terra'], { id: 9 }, home)).toEqual([
+        'gpt-6-astra',
+        'gpt-6-sol',
+        'gpt-6-luna',
+        'gpt-5.5',
+        'gpt-5.4',
+        'gpt-5.4-mini',
+      ]);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
@@ -205,6 +241,46 @@ describe('the wide-window twin of a codex model', () => {
         'gpt-odd',
       ]);
     });
+  });
+});
+
+describe('Codex model reasoning efforts', () => {
+  it('reads each model supported efforts from the Codex catalog', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-efforts-'));
+    const provider = { id: 9 };
+    try {
+      fs.mkdirSync(path.join(home, '.codex-provider-9'));
+      fs.writeFileSync(
+        path.join(home, '.codex-provider-9', 'models_cache.json'),
+        JSON.stringify({
+          models: [
+            {
+              slug: 'gpt-6-sol',
+              supported_reasoning_levels: [{ effort: 'high' }, { effort: 'max' }],
+            },
+            {
+              slug: 'gpt-5.5',
+              supported_reasoning_levels: [{ effort: 'high' }, { effort: 'xhigh' }],
+            },
+          ],
+        }),
+      );
+
+      expect(codexEffortsForModel('gpt-6-sol', provider, home)).toEqual(['high', 'max']);
+      expect(codexEffortsForModel('gpt-5.5', provider, home)).toEqual(['high', 'xhigh']);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the conservative fallback when no catalog exists', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-efforts-fallback-'));
+    try {
+      expect(codexEffortsForModel('gpt-6-sol', null, home)).toContain('max');
+      expect(codexEffortsForModel('gpt-5.5', null, home)).not.toContain('max');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

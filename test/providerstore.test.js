@@ -55,6 +55,7 @@ vi.mock('../lib/providers.js', () => {
     grok: binary('grok', ['grok-1'], ['fast'], 'grok-1', 'fast'),
     opencode: binary('opencode', ['anthropic/x'], ['high'], 'anthropic/x', 'high'),
   };
+  BINARIES.codex.effortsForModel = (model) => (model.startsWith('gpt-a') ? ['med', 'max'] : ['med']);
   const ensure = (kind) => (p) => {
     if (state.ensureThrows) throw state.ensureThrows;
     return `/home/test/.${kind}-provider-${p.id}`;
@@ -83,6 +84,7 @@ const {
   getProviderForJob,
   providerModels,
   providerEfforts,
+  providerModelEfforts,
   providerDefaultModel,
   providerDefaultEffort,
   resolveRuntime,
@@ -405,6 +407,38 @@ describe('resolving a row against its binary', () => {
     expect(providerEfforts(p)).toEqual(['custom-effort']);
   });
 
+  it('narrows Codex efforts to what the selected model supports', () => {
+    const p = row({ binary: 'codex' });
+
+    expect(providerEfforts(p, 'gpt-a')).toEqual(['med', 'max']);
+    expect(providerEfforts(p, 'gpt-b')).toEqual(['med']);
+    expect(providerModelEfforts(p, cfg)).toEqual({
+      'gpt-a': ['med', 'max'],
+      'gpt-b': ['med'],
+    });
+  });
+
+  it('falls back to model-supported Codex efforts when an override has no overlap', () => {
+    const p = row({ binary: 'codex', efforts: ['max'] });
+
+    expect(providerEfforts(p, 'gpt-b')).toEqual(['med']);
+    expect(providerDefaultEffort(p, cfg, 'gpt-b')).toBe('med');
+  });
+
+  it('keeps a custom Codex endpoint effort list provider-wide', () => {
+    const p = row({ binary: 'codex', baseUrl: 'https://example.test', efforts: ['med', 'max'] });
+
+    expect(providerEfforts(p, 'gpt-b')).toEqual(['med', 'max']);
+  });
+
+  it('keeps Max opt-in for a custom Codex endpoint', () => {
+    const p = row({ binary: 'codex', baseUrl: 'https://example.test' });
+
+    expect(providerEfforts(p)).toEqual(['med']);
+    expect(providerModelEfforts(p, cfg)).toEqual({ 'gpt-a': ['med'], 'gpt-b': ['med'] });
+    expect(providerDefaultEffort(p, cfg, 'gpt-a')).toBe('med');
+  });
+
   it('widens a curated codex list, so a login row need not name the twin itself', () => {
     const p = row({ binary: 'codex', models: ['gpt-a', 'gpt-b'] });
 
@@ -461,6 +495,15 @@ describe('resolveRuntime', () => {
     expect(resolveRuntime({ providerId: 1, model: 'retired', effort: 'gone' }, cfg)).toMatchObject({
       model: 'opus',
       effort: 'high',
+    });
+  });
+
+  it('falls back when the effort is not supported by the selected Codex model', async () => {
+    await seed([row({ id: 1, binary: 'codex' })]);
+
+    expect(resolveRuntime({ providerId: 1, model: 'gpt-b', effort: 'max' }, cfg)).toMatchObject({
+      model: 'gpt-b',
+      effort: 'med',
     });
   });
 
