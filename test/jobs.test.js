@@ -6,6 +6,7 @@ import { spawn } from 'child_process';
 import { BINARIES } from '../lib/providers.js';
 import * as providerTools from '../lib/providers.js';
 import { compactCodexThread } from '../lib/codex-session.js';
+import { recordTurnUsage } from '../lib/usage.js';
 vi.mock('../lib/codex-session.js', async (original) => ({
   ...(await original()),
   compactCodexThread: vi.fn(),
@@ -5886,6 +5887,12 @@ describe('manual Codex context compaction', () => {
         outputTokens: 40,
       });
       expect(result.contextUsage.compactedAt).toBeTruthy();
+      expect(recordTurnUsage).toHaveBeenLastCalledWith(
+        getJob('compact-session'),
+        expect.objectContaining({ inputTokens: 300, outputTokens: 40 }),
+        expect.objectContaining({ id: 2 }),
+        'review-model (872k)',
+      );
     } finally {
       bin.mockRestore();
     }
@@ -5898,6 +5905,29 @@ describe('manual Codex context compaction', () => {
       await expect(compactDevSession('compact-session')).rejects.toThrow('No quota');
       expect(publicJob(getJob('compact-session'))).toMatchObject({ status: 'idle', compacting: false });
       expect(getJob('compact-session').contextUsage.compactedAt).toBeUndefined();
+      expect(recordTurnUsage).toHaveBeenLastCalledWith(
+        getJob('compact-session'),
+        expect.objectContaining({ inputTokens: null, outputTokens: null }),
+        expect.objectContaining({ id: 2 }),
+        'review-model (872k)',
+      );
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
+  it('keeps usage unknown when compaction succeeds without reporting usage', async () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex' });
+    compactCodexThread.mockResolvedValueOnce(undefined);
+    try {
+      const result = await compactDevSession('compact-session');
+      expect(result.contextUsage.compactedAt).toBeTruthy();
+      expect(recordTurnUsage).toHaveBeenLastCalledWith(
+        getJob('compact-session'),
+        expect.objectContaining({ inputTokens: null, outputTokens: null }),
+        expect.objectContaining({ id: 2 }),
+        'review-model (872k)',
+      );
     } finally {
       bin.mockRestore();
     }
