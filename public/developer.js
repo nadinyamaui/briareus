@@ -1713,9 +1713,22 @@
     // orchestrator's cover its workers, a task's the reviews its loop ran.
     if (u.sessions)
       rows.push(row('Includes', `${u.sessions} session${u.sessions === 1 ? '' : 's'} it started`));
-    if (!ctx && !rows.length) return '';
+    if (cu.source === 'codex') {
+      if (cu.cachedInputTokens != null)
+        rows.push(row('Thread cached input', fmtTokens(cu.cachedInputTokens)));
+      if (cu.reasoningOutputTokens != null)
+        rows.push(row('Thread reasoning output', fmtTokens(cu.reasoningOutputTokens)));
+      if (cu.at) rows.push(row('Context updated', esc(new Date(cu.at).toLocaleTimeString())));
+      if (cu.compactedAt)
+        rows.push(row('Last manual compact', esc(new Date(cu.compactedAt).toLocaleTimeString())));
+    }
+    const compact =
+      s.canCompact || s.compacting
+        ? `<button class="compact-context rounded border border-line px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50" ${s.compacting ? 'disabled' : ''} title="Summarize this Codex thread to free context; this uses the provider and may incur usage.">${s.compacting ? 'Compacting…' : 'Compact'}</button>`
+        : '';
+    if (!ctx && !rows.length && !compact) return '';
     return `<div class="${hasPr ? 'border-t border-line pt-2.5' : ''}">
-        <div class="mb-1 text-[12px] tracking-wide text-muted">Context usage</div>
+        <div class="mb-1 flex items-center justify-between text-[12px] tracking-wide text-muted"><span>Context usage</span>${compact}</div>
         ${ctx}
         <div class="${ctx ? 'mt-1.5 border-t border-line pt-1.5 ' : ''}flex flex-col gap-0.5">${rows.join('')}</div>
       </div>`;
@@ -1825,6 +1838,22 @@
   }
 
   $('pr-panel').addEventListener('click', async (e) => {
+    const compact = e.target.closest('.compact-context');
+    if (compact) {
+      const s = panelSubject;
+      if (!s?.id || compact.disabled) return;
+      compact.disabled = true;
+      compact.textContent = 'Compacting…';
+      try {
+        await api(`/api/dev/sessions/${encodeURIComponent(s.id)}/compact`, { method: 'POST' });
+        toast('Codex context compacted');
+      } catch (err) {
+        toast(err.message, true);
+      }
+      await loadSessions();
+      return;
+    }
+
     const btn = e.target.closest('.finding-dec');
     if (!btn) return;
     const s = panelSubject;
