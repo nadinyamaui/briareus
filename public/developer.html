@@ -316,19 +316,74 @@
               <option value="month">This month</option>
               <option value="prev">Last month</option>
               <option value="all">All time</option>
-            </select>
-            <!-- The two filters. Their options are lib/usage.js's own keys,
-             filled in from the payload the page is drawn from, so the list is
-             always what this window actually holds. -->
-            <select id="home-project" title="Narrow every number on this page to one project">
-              <option value="">All projects</option>
-            </select>
-            <select id="home-model" title="Narrow every number on this page to one model">
-              <option value="">All models</option>
+              <option value="today">Today</option>
+              <option value="7d">Last 7 days</option>
+              <option value="30d">Last 30 days</option>
+              <option value="custom">Custom dates</option>
             </select>
             <button id="home-refresh" class="btn" title="Read the usage ledger again">⟳</button>
           </div>
         </header>
+        <div
+          class="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2 text-xs"
+          id="home-filters"
+        >
+          <span id="home-dates" class="hidden">
+            <label
+              >From <input id="home-from" type="date" class="rounded border border-line bg-raise p-1"
+            /></label>
+            <label
+              >To <input id="home-to" type="date" class="rounded border border-line bg-raise p-1"
+            /></label>
+            <button id="home-apply-dates" class="btn">Apply dates</button>
+          </span>
+          <details class="relative">
+            <summary class="btn cursor-pointer" id="home-project-summary">All projects</summary>
+            <div
+              id="home-project"
+              class="absolute left-0 z-20 max-h-64 w-64 overflow-auto rounded border border-line bg-raise p-2 shadow-lg"
+            ></div>
+          </details>
+          <details class="relative">
+            <summary class="btn cursor-pointer" id="home-model-summary">All models</summary>
+            <div
+              id="home-model"
+              class="absolute left-0 z-20 max-h-64 w-64 overflow-auto rounded border border-line bg-raise p-2 shadow-lg"
+            ></div>
+          </details>
+          <label
+            >Activity
+            <select id="home-activity" class="rounded border border-line bg-raise p-1"></select
+          ></label>
+          <label
+            >Provider
+            <select id="home-provider" class="rounded border border-line bg-raise p-1"></select
+          ></label>
+          <label
+            >Account
+            <select id="home-account" class="rounded border border-line bg-raise p-1"></select
+          ></label>
+          <label
+            >Pricing
+            <select id="home-pricing" class="rounded border border-line bg-raise p-1"></select
+          ></label>
+          <label
+            >Session
+            <select id="home-session" class="max-w-[200px] rounded border border-line bg-raise p-1"></select
+          ></label>
+          <button id="home-clear" class="btn">Clear filters</button>
+          <label
+            >Monthly budget ($)
+            <input
+              id="home-budget"
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="Not set"
+              title="Saved in this browser; applies to all projects for This month"
+              class="w-24 rounded border border-line bg-raise p-1"
+          /></label>
+        </div>
         <div id="home-list" class="flex-1 overflow-y-auto px-3 py-3.5 lg:px-[18px]"></div>
       </div>
 

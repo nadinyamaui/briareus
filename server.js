@@ -1216,16 +1216,27 @@ dashboard.register('get', '/api/dev/usage', async (req, res) => {
 // switched off mid-month still spent what it spent, and leaving it out would
 // make the per-project rows fail to add up to the headline totals.
 app.get('/api/dev/usage/all', async (req, res) => {
-  // `project` and `model` are lib/usage.js's own filter keys, handed back
-  // verbatim from the options the last payload carried. A key nothing matches
-  // narrows the page to an empty window rather than being dropped, which is
-  // what makes "this model never ran here" readable instead of invisible.
-  res.json(
-    await overallUsage(listProjects(), String(req.query.period || 'month'), Date.now(), {
-      project: req.query.project ? String(req.query.project) : null,
-      model: req.query.model ? String(req.query.model) : null,
-    }),
-  );
+  const filter = {};
+  for (const key of [
+    'project',
+    'model',
+    'provider',
+    'activity',
+    'account',
+    'session',
+    'pricing',
+    'from',
+    'to',
+  ]) {
+    const value = req.query[key];
+    if (value != null) filter[key] = Array.isArray(value) ? value.map(String) : String(value);
+  }
+  try {
+    res.json(await overallUsage(listProjects(), String(req.query.period || 'month'), Date.now(), filter));
+  } catch (error) {
+    if (/^Choose a/.test(error.message)) return res.status(400).json({ error: error.message });
+    throw error;
+  }
 });
 
 // One pull request on its own, in the detail the right-hand panel draws: state,
