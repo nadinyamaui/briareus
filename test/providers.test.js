@@ -207,10 +207,10 @@ describe('the wide-window twin of a codex model', () => {
     });
   });
 
-  it('leaves the list alone when no catalog has been cached yet', () => {
+  it('leaves supported models alone and removes GPT-5.6 when no catalog has been cached yet', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-nocat-'));
     try {
-      expect(codexWideVariants(['gpt-6-astra'], { id: 9 }, home)).toEqual(['gpt-6-astra']);
+      expect(codexWideVariants(['gpt-6-astra', 'gpt-5.6-sol'], { id: 9 }, home)).toEqual(['gpt-6-astra']);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
