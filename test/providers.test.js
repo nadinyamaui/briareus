@@ -216,6 +216,22 @@ describe('the wide-window twin of a codex model', () => {
     }
   });
 
+  it('falls back to launchable models when a curated list contains only GPT-5.6', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-filtered-fallback-'));
+    try {
+      expect(codexWideVariants(['gpt-5.6-sol', 'gpt-5.6-terra'], { id: 9 }, home)).toEqual([
+        'gpt-6-astra',
+        'gpt-6-sol',
+        'gpt-6-luna',
+        'gpt-5.5',
+        'gpt-5.4',
+        'gpt-5.4-mini',
+      ]);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('puts the twin in the picker beside the model it widens', () => {
     withCatalog((home) => {
       expect(BINARIES.codex.models({}, { id: 9 }, home)).toEqual([
