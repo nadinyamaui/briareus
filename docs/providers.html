@@ -55,7 +55,11 @@
           <tbody>
             <tr>
               <td><code>claude</code></td>
-              <td><code>PATH</code>, the npm global prefix, the native installer's path</td>
+              <td>
+                <code>PATH</code>, the npm global prefix, the native installer's path; the copy that
+                <code>package.json</code> bundles under <code>node_modules/.bin</code> comes last, so an
+                install you update with <code>claude update</code> is the one that runs
+              </td>
               <td><code>CLAUDE_BIN</code></td>
             </tr>
             <tr>
