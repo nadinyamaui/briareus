@@ -140,10 +140,11 @@
         once a minute while the pull request is open or its checks are still running; a session sitting on a
         merged or closed pull request is not polled at all. The panel redraws from a pushed session record, so
         it never waits for a poll. With a
-        <a href="operations.html#webhooks">public hostname</a>, GitHub delivers the events instead and the
-        timer drops to a safety net every fifteen minutes. Each sync is a conditional request: a pull request
-        that has not moved answers 304, which GitHub does not count against the rate limit, and the reviews,
-        commits, linked issues and checks are read in one GraphQL query only when it has.
+        <a href="operations.html#webhooks">public hostname</a>, GitHub delivers the events instead and, once
+        deliveries arrive, the timer drops to a safety net every fifteen minutes. Each sync is a conditional
+        request: a pull request that has not moved answers 304, which GitHub does not count against the rate
+        limit, and the reviews, commits, linked issues and checks are read in one GraphQL query only when it
+        has.
       </p>
       <p>
         <strong>A session finds its own pull request.</strong> Being handed a branch that already has one is

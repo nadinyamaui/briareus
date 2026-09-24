@@ -4,7 +4,7 @@ import express from 'express';
 
 const GITHUB_SECRET = 'gh-secret';
 
-vi.mock('../lib/jobs.js', () => ({ syncSessionsOn: vi.fn(), markRepoWebhook: vi.fn() }));
+vi.mock('../lib/jobs.js', () => ({ syncSessionsOn: vi.fn(), noteWebhookDelivery: vi.fn() }));
 
 // The public hostname is what decides whether a hook can be installed at all,
 // so it is driven from state rather than pinned.
@@ -16,7 +16,7 @@ vi.mock('../lib/webhooksecrets.js', () => ({
 }));
 
 import { webhookRouter, ensureRepoWebhook, installRepoWebhooks } from '../lib/webhooks.js';
-import { syncSessionsOn } from '../lib/jobs.js';
+import { syncSessionsOn, noteWebhookDelivery } from '../lib/jobs.js';
 
 let server;
 let base;
@@ -34,6 +34,7 @@ afterAll(() => new Promise((resolve) => server.close(resolve)));
 
 beforeEach(() => {
   vi.mocked(syncSessionsOn).mockClear();
+  vi.mocked(noteWebhookDelivery).mockClear();
   hook.url = 'https://reviewer.example.com/webhooks/github';
 });
 
@@ -83,6 +84,18 @@ describe('POST /webhooks/github', () => {
     const res = await githubDelivery('ping', { repository: { full_name: 'acme/shop' } });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, pong: true });
+  });
+
+  it('stamps every signed delivery as proof the hook reaches this install', async () => {
+    await githubDelivery('ping', { repository: { full_name: 'acme/shop' } });
+    await githubDelivery('issue_comment', { repository: { full_name: 'acme/api' }, issue: { number: 1 } });
+    expect(noteWebhookDelivery).toHaveBeenCalledWith('acme/shop');
+    expect(noteWebhookDelivery).toHaveBeenCalledWith('acme/api');
+  });
+
+  it('stamps nothing for a delivery with a bad signature', async () => {
+    await githubDelivery('ping', { repository: { full_name: 'acme/shop' } }, { secret: 'wrong' });
+    expect(noteWebhookDelivery).not.toHaveBeenCalled();
   });
 
   it('accepts a pull_request event fast and syncs behind the response', async () => {
@@ -201,14 +214,14 @@ describe('the events a delivery can carry', () => {
     });
     await settle();
 
-    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat');
+    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat', null, { checks: true });
   });
 
   it('a check_suite with no suite body syncs on no branch rather than throwing', async () => {
     await githubDelivery('check_suite', { repository: { full_name: 'acme/shop' } });
     await settle();
 
-    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', undefined);
+    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', undefined, null, { checks: true });
   });
 
   it('a check_run reaches through to its suite for the branch', async () => {
@@ -218,14 +231,14 @@ describe('the events a delivery can carry', () => {
     });
     await settle();
 
-    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat');
+    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat', null, { checks: true });
   });
 
   it('a check_run with no suite syncs on no branch rather than throwing', async () => {
     await githubDelivery('check_run', { repository: { full_name: 'acme/shop' }, check_run: {} });
     await settle();
 
-    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', undefined);
+    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', undefined, null, { checks: true });
   });
 
   it('a status syncs every branch the commit belongs to', async () => {
@@ -236,8 +249,8 @@ describe('the events a delivery can carry', () => {
     });
     await settle();
 
-    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'main');
-    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat');
+    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'main', null, { checks: true });
+    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat', null, { checks: true });
   });
 
   it('a status naming no branches syncs nothing', async () => {
