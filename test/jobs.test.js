@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 import fs from 'fs';
@@ -192,6 +192,8 @@ import {
   cancelDevTurn,
   closeDevSessionWithReason,
   syncSessionsOn,
+  markRepoWebhook,
+  repoHasWebhook,
   spottedPrIsThisSession,
   setReviewLoop,
   setQaLoop,
@@ -4742,15 +4744,28 @@ describe('the CI verdict a worker hands its orchestrator', () => {
           }),
         };
       }
-      const checks = url.match(/^\/repos\/acme\/ci\/commits\/sha(\d+)\/check-runs/);
-      if (checks) {
-        const runs =
-          checks[1] === '202'
-            ? [run('Fast checks', 'success'), run('Tests', 'failure')]
-            : [run('Fast checks', 'success'), run('Tests', 'success')];
-        return { ok: true, json: async () => ({ check_runs: runs }) };
-      }
       return { ok: false, status: 404, json: async () => ({}) };
+    });
+    // The head commit's check runs ride on the one GraphQL details query.
+    githubGraphql.mockImplementation(async (_cfg, _query, { number }) => {
+      const runs =
+        number === 202
+          ? [run('Fast checks', 'success'), run('Tests', 'failure')]
+          : [run('Fast checks', 'success'), run('Tests', 'success')];
+      const contexts = runs.map((r) => ({
+        __typename: 'CheckRun',
+        name: r.name,
+        status: String(r.status).toUpperCase(),
+        conclusion: r.conclusion ? String(r.conclusion).toUpperCase() : null,
+        detailsUrl: r.html_url,
+      }));
+      return {
+        repository: {
+          pullRequest: {
+            head: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: contexts } } } }] },
+          },
+        },
+      };
     });
   });
 
@@ -4784,6 +4799,236 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     syncSessionsOn('acme/ci', null, 205);
     await vi.waitFor(() => expect(getJob('ci-again').prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
     expect(notices('ci-again')).toBe('');
+  });
+});
+
+// The sync tick's budget. Every sync used to cost five GitHub calls on every
+// session whose status was idle, its pull request merged or not, and a few
+// dozen of those spent the whole hourly budget on their own.
+describe('the sync tick and the GitHub budget', () => {
+  const row = (id, over = {}) => ({
+    id,
+    kind: 'devchat',
+    status: 'closed',
+    repo: 'acme/budget',
+    providerId: 1,
+    turns: 1,
+    branch: `dev-${id}`,
+    baseBranch: 'main',
+    prStatus: {
+      number: 1,
+      state: 'open',
+      headSha: 'sha-1',
+      checks: { total: 1, passed: 1, failed: 0, pending: 0, runs: [] },
+      syncedAt: '2026-08-25T13:00:00.000Z',
+    },
+    ...over,
+  });
+  const pr = (number, over = {}) => ({
+    number,
+    html_url: `https://github.com/acme/budget/pull/${number}`,
+    state: 'open',
+    head: { ref: `dev-${number}`, sha: `sha-${number}` },
+    base: { ref: 'main' },
+    ...over,
+  });
+  const syncedPrs = () =>
+    githubRest.mock.calls.map(([, , url]) => url.match(/\/pulls\/(\d+)$/)?.[1]).filter(Boolean);
+
+  beforeAll(async () => {
+    // The tick is registered by initJobs, so the clock must be fake before it.
+    vi.useFakeTimers();
+    state.stored = [
+      row('budget-merged', { prStatus: { ...row('x').prStatus, number: 11, state: 'merged' } }),
+      row('budget-closed', { prStatus: { ...row('x').prStatus, number: 12, state: 'closed' } }),
+      row('budget-open', { prStatus: { ...row('x').prStatus, number: 13 } }),
+      row('budget-running', { prStatus: { ...row('x').prStatus, number: 14, state: 'merged' } }),
+      row('budget-ci', {
+        prStatus: {
+          ...row('x').prStatus,
+          number: 15,
+          state: 'merged',
+          checks: { total: 1, passed: 0, failed: 0, pending: 1, runs: [] },
+        },
+      }),
+      row('budget-hooked', { repo: 'acme/hooked', prStatus: { ...row('x').prStatus, number: 16 } }),
+    ];
+    await initJobs();
+    for (const j of state.stored) getJob(j.id).status = 'idle';
+    getJob('budget-running').status = 'running';
+    markRepoWebhook('acme/hooked', true);
+  });
+
+  afterAll(() => {
+    markRepoWebhook('acme/hooked', false);
+    vi.useRealTimers();
+  });
+
+  beforeEach(() => {
+    githubRest.mockReset();
+    githubGraphql.mockReset();
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      const m = url.match(/^\/repos\/acme\/(?:budget|hooked)\/pulls\/(\d+)$/);
+      if (m) {
+        const number = Number(m[1]);
+        return {
+          ok: true,
+          json: async () => pr(number, { state: number === 13 || number === 16 ? 'open' : 'merged' }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    githubGraphql.mockResolvedValue({ repository: { pullRequest: {} } });
+    for (const j of state.stored) getJob(j.id).prStatus.syncedAt = '2026-08-25T13:00:00.000Z';
+  });
+
+  it('leaves an idle session on a merged or closed pull request alone', async () => {
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(syncedPrs()).not.toContain('11');
+    expect(syncedPrs()).not.toContain('12');
+  });
+
+  it('still syncs an open pull request, a running turn, and CI that is still pending', async () => {
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(syncedPrs()).toEqual(expect.arrayContaining(['13', '14', '15']));
+  });
+
+  it('registers which repositories have a live webhook', () => {
+    expect(repoHasWebhook('ACME/Hooked')).toBe(true);
+    expect(repoHasWebhook('acme/budget')).toBe(false);
+  });
+
+  it('on a hooked repository an idle session waits fifteen minutes between syncs', async () => {
+    getJob('budget-hooked').prStatus.syncedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(syncedPrs()).not.toContain('16');
+    getJob('budget-hooked').prStatus.syncedAt = new Date(Date.now() - 16 * 60_000).toISOString();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(syncedPrs()).toContain('16');
+  });
+
+  it('reads reviews, commits, issues and checks in one GraphQL query when the pull request moved', async () => {
+    githubGraphql.mockResolvedValue({
+      repository: {
+        pullRequest: {
+          reviews: {
+            nodes: [
+              { state: 'APPROVED', url: 'https://r/1', author: { login: 'codex' } },
+              { state: 'COMMENTED', url: 'https://r/2', author: { login: 'codex' } },
+              { state: 'CHANGES_REQUESTED', url: 'https://r/3', author: { login: 'nadin' } },
+              { state: 'DISMISSED', url: 'https://r/4', author: { login: 'nadin' } },
+            ],
+          },
+          commits: { nodes: [{ commit: { oid: 'abc', messageHeadline: 'Fix it', url: 'https://c/abc' } }] },
+          closingIssuesReferences: {
+            nodes: [{ number: 7, title: 'Bug', state: 'OPEN', url: 'https://i/7' }],
+          },
+          head: {
+            nodes: [
+              {
+                commit: {
+                  statusCheckRollup: {
+                    contexts: {
+                      nodes: [
+                        {
+                          __typename: 'CheckRun',
+                          name: 'Tests',
+                          status: 'COMPLETED',
+                          conclusion: 'TIMED_OUT',
+                          detailsUrl: 'https://ci/1',
+                        },
+                        {
+                          __typename: 'CheckRun',
+                          name: 'Lint',
+                          status: 'IN_PROGRESS',
+                          conclusion: null,
+                          detailsUrl: 'https://ci/2',
+                        },
+                        { __typename: 'StatusContext', context: 'deploy', state: 'SUCCESS' },
+                      ],
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(getJob('budget-open').prStatus.commitList).toHaveLength(1));
+    const status = getJob('budget-open').prStatus;
+    expect(
+      githubGraphql.mock.calls.some(([, q, v]) => q.includes('statusCheckRollup') && v.number === 13),
+    ).toBe(true);
+    expect(status.reviews).toEqual([
+      { user: 'codex', state: 'approved', url: 'https://r/1' },
+      { user: 'nadin', state: 'commented', url: 'https://r/4' },
+    ]);
+    expect(status.commitList).toEqual([{ sha: 'abc', message: 'Fix it', url: 'https://c/abc' }]);
+    expect(status.issues).toEqual([{ number: 7, title: 'Bug', state: 'open', url: 'https://i/7' }]);
+    expect(status.checks).toMatchObject({ total: 2, passed: 0, failed: 1, pending: 1 });
+    expect(status.checks.runs[0]).toEqual({
+      name: 'Tests',
+      status: 'completed',
+      conclusion: 'timed_out',
+      url: 'https://ci/1',
+    });
+  });
+
+  it('skips the details query when GitHub answered 304 on an unchanged head with settled checks', async () => {
+    const job = getJob('budget-open');
+    job.prStatus.reviews = [{ user: 'codex', state: 'approved', url: null }];
+    job.prStatus.checks = { total: 1, passed: 1, failed: 0, pending: 0, runs: [] };
+    job.prStatus.headSha = 'sha-13';
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      const number = Number(url.match(/\/pulls\/(\d+)$/)?.[1]);
+      return {
+        ok: true,
+        notModified: true,
+        json: async () => pr(number, { state: number === 13 ? 'open' : 'merged' }),
+      };
+    });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
+    expect(githubGraphql.mock.calls.filter(([, , v]) => v.number === 13)).toHaveLength(0);
+    expect(job.prStatus.reviews).toEqual([{ user: 'codex', state: 'approved', url: null }]);
+  });
+
+  it('keeps querying after a 304 while the checks are still pending', async () => {
+    const job = getJob('budget-open');
+    job.prStatus.checks = { total: 1, passed: 0, failed: 0, pending: 1, runs: [] };
+    job.prStatus.headSha = 'sha-13';
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      const number = Number(url.match(/\/pulls\/(\d+)$/)?.[1]);
+      return {
+        ok: true,
+        notModified: true,
+        json: async () => pr(number, { state: number === 13 ? 'open' : 'merged' }),
+      };
+    });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() =>
+      expect(githubGraphql.mock.calls.filter(([, , v]) => v.number === 13)).toHaveLength(1),
+    );
+  });
+
+  it('queries again when the head moved, 304 or not', async () => {
+    const job = getJob('budget-open');
+    job.prStatus.checks = { total: 1, passed: 1, failed: 0, pending: 0, runs: [] };
+    job.prStatus.headSha = 'sha-old';
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      const number = Number(url.match(/\/pulls\/(\d+)$/)?.[1]);
+      return {
+        ok: true,
+        notModified: true,
+        json: async () => pr(number, { state: number === 13 ? 'open' : 'merged' }),
+      };
+    });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() =>
+      expect(githubGraphql.mock.calls.filter(([, , v]) => v.number === 13)).toHaveLength(1),
+    );
   });
 });
 

@@ -4,7 +4,7 @@ import express from 'express';
 
 const GITHUB_SECRET = 'gh-secret';
 
-vi.mock('../lib/jobs.js', () => ({ syncSessionsOn: vi.fn() }));
+vi.mock('../lib/jobs.js', () => ({ syncSessionsOn: vi.fn(), markRepoWebhook: vi.fn() }));
 
 // The public hostname is what decides whether a hook can be installed at all,
 // so it is driven from state rather than pinned.

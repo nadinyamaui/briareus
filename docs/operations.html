@@ -93,7 +93,8 @@
         <strong>Nothing is started by a delivery.</strong> <code>pull_request</code>,
         <code>pull_request_review</code>, <code>issue_comment</code>, <code>check_suite</code> and
         <code>check_run</code> refresh the pull request panel of any open session on that branch as the event
-        lands, rather than on the next twenty-second tick.
+        lands, rather than on the next twenty-second tick. A repository whose hook installed is polled only
+        every fifteen minutes as a safety net, which is most of what keeps the GitHub rate limit intact.
       </p>
       <p>
         The sync timer remains as the fallback. Nothing about a laptop-only install changes: no public

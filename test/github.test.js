@@ -254,6 +254,67 @@ describe('rate limiting', () => {
   });
 });
 
+describe('conditional requests', () => {
+  const tagged = (body, etag = '"v1"') => reply({ headers: { etag }, body });
+
+  it('sends the ETag back on the next GET of the same URL and answers a 304 from the cache', async () => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = stubFetch(tagged({ n: 1 }), reply({ status: 304 }));
+
+    const first = await githubRest(cfg, 'GET', '/repos/a/b/pulls/1');
+    expect(first.notModified).toBe(false);
+    expect(await first.json()).toEqual({ n: 1 });
+
+    const second = await githubRest(cfg, 'GET', '/repos/a/b/pulls/1');
+    expect(fetchMock.mock.calls[0][1].headers['If-None-Match']).toBeUndefined();
+    expect(fetchMock.mock.calls[1][1].headers['If-None-Match']).toBe('"v1"');
+    expect(second.ok).toBe(true);
+    expect(second.status).toBe(200);
+    expect(second.notModified).toBe(true);
+    expect(await second.json()).toEqual({ n: 1 });
+  });
+
+  it('replaces the cached body when GitHub answers 200 with a new tag', async () => {
+    const { githubRest } = await freshGithub();
+    stubFetch(tagged({ n: 1 }), tagged({ n: 2 }, '"v2"'), reply({ status: 304 }));
+
+    await githubRest(cfg, 'GET', '/repos/a/b');
+    const changed = await githubRest(cfg, 'GET', '/repos/a/b');
+    expect(changed.notModified).toBe(false);
+    expect(await changed.json()).toEqual({ n: 2 });
+    expect(await (await githubRest(cfg, 'GET', '/repos/a/b')).json()).toEqual({ n: 2 });
+  });
+
+  it('caches nothing for an answer without an ETag, a non-ok answer, or a write', async () => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = stubFetch(
+      reply({ body: { a: 1 } }),
+      reply({ body: { a: 2 } }),
+      reply({ status: 404 }),
+      reply(),
+      tagged({}),
+      reply(),
+    );
+
+    await githubRest(cfg, 'GET', '/repos/a/b');
+    await githubRest(cfg, 'GET', '/repos/a/b');
+    await githubRest(cfg, 'GET', '/repos/a/missing');
+    await githubRest(cfg, 'GET', '/repos/a/missing');
+    await githubRest(cfg, 'POST', '/repos/a/b/issues', { title: 'x' });
+    await githubRest(cfg, 'POST', '/repos/a/b/issues', { title: 'x' });
+    for (const [, init] of fetchMock.mock.calls) expect(init.headers['If-None-Match']).toBeUndefined();
+  });
+
+  it("keeps one token's tags away from another", async () => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = stubFetch(tagged({ n: 1 }), tagged({ n: 1 }));
+
+    await githubRest(cfg, 'GET', '/repos/a/b');
+    await githubRest({ githubToken: 'other' }, 'GET', '/repos/a/b');
+    expect(fetchMock.mock.calls[1][1].headers['If-None-Match']).toBeUndefined();
+  });
+});
+
 describe('githubGraphql', () => {
   it('posts the query and variables and unwraps data', async () => {
     const { githubGraphql } = await freshGithub();

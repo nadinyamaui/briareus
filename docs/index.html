@@ -132,8 +132,9 @@
           <p>
             If the session's branch gets a pull request, its state and CI checks are mirrored into the header
             and the right panel: at the end of every turn, every 20 seconds while a turn runs, and once a
-            minute otherwise. With a public hostname configured, GitHub webhooks deliver it instead of the
-            timer polling for it.
+            minute while the pull request is open or its checks are still running. With a public hostname
+            configured, GitHub webhooks deliver it instead, and the timer drops to a safety net every fifteen
+            minutes.
           </p>
         </li>
         <li>
