@@ -4833,6 +4833,28 @@ describe('the sync tick and the GitHub budget', () => {
   });
   const syncedPrs = () =>
     githubRest.mock.calls.map(([, , url]) => url.match(/\/pulls\/(\d+)$/)?.[1]).filter(Boolean);
+  const detailsQueries = (number) => githubGraphql.mock.calls.filter(([, , v]) => v.number === number);
+  // A details answer with every list in it, and these check runs on the head.
+  const fullDetails = (runs = []) => ({
+    repository: {
+      pullRequest: {
+        reviews: { nodes: [] },
+        commits: { nodes: [] },
+        closingIssuesReferences: { nodes: [] },
+      },
+      headCommit: { statusCheckRollup: runs.length ? { contexts: { nodes: runs } } : null },
+    },
+  });
+  const unchangedPr = () =>
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      const number = Number(url.match(/\/pulls\/(\d+)$/)?.[1]);
+      return {
+        ok: true,
+        notModified: true,
+        etag: `"e${number}"`,
+        json: async () => pr(number, { state: number === 13 || number === 16 ? 'open' : 'merged' }),
+      };
+    });
 
   beforeAll(async () => {
     // The tick is registered by initJobs, so the clock must be fake before it.
@@ -4878,6 +4900,12 @@ describe('the sync tick and the GitHub budget', () => {
     });
     githubGraphql.mockResolvedValue({ repository: { pullRequest: {} } });
     for (const j of state.stored) getJob(j.id).prStatus.syncedAt = '2026-08-25T13:00:00.000Z';
+    // A merged pull request whose CI started on a head seen just now.
+    Object.assign(getJob('budget-ci').prStatus, {
+      headSha: 'sha-15',
+      headSeenAt: new Date().toISOString(),
+      checks: { total: 1, passed: 0, failed: 0, pending: 1, runs: [] },
+    });
   });
 
   it('leaves an idle session on a merged or closed pull request alone', async () => {
@@ -5052,11 +5080,95 @@ describe('the sync tick and the GitHub budget', () => {
         json: async () => pr(number, { state: number === 13 ? 'open' : 'merged' }),
       };
     });
+    githubGraphql.mockResolvedValue(fullDetails());
     await vi.advanceTimersByTimeAsync(20_000);
     await vi.waitFor(() =>
       expect(githubGraphql.mock.calls.filter(([, , v]) => v.number === 13)).toHaveLength(1),
     );
     await vi.waitFor(() => expect(job.prStatus.detailsEtag).toBe('"e13"'));
+  });
+
+  it('keeps reading a fresh head that has no checks yet, and settles on none once CI had time to register', async () => {
+    const job = getJob('budget-open');
+    job.prStatus.checks = { total: 0, passed: 0, failed: 0, pending: 0, runs: [] };
+    job.prStatus.headSha = 'sha-13';
+    job.prStatus.detailsEtag = '"e13"';
+    job.prStatus.headSeenAt = new Date().toISOString();
+    unchangedPr();
+    githubGraphql.mockResolvedValue(fullDetails());
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(detailsQueries(13)).toHaveLength(1));
+    // Eleven minutes after the head was first seen, none is the answer.
+    githubGraphql.mockClear();
+    job.prStatus.headSeenAt = new Date(Date.now() - 11 * 60_000).toISOString();
+    job.prStatus.syncedAt = '2026-08-25T13:00:00.000Z';
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
+    expect(detailsQueries(13)).toHaveLength(0);
+  });
+
+  it('does not record the tag when part of the details failed, and drops the old head checks on a push', async () => {
+    const job = getJob('budget-open');
+    job.prStatus.checks = { total: 1, passed: 1, failed: 0, pending: 0, runs: [] };
+    job.prStatus.headSha = 'sha-old';
+    job.prStatus.detailsEtag = '"e13-old"';
+    unchangedPr();
+    const data = fullDetails();
+    data.repository.headCommit = { statusCheckRollup: null };
+    githubGraphql.mockRejectedValue(
+      Object.assign(new Error('timeout'), {
+        errors: [{ message: 'timeout', path: ['repository', 'headCommit', 'statusCheckRollup'] }],
+        data,
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(job.prStatus.headSha).toBe('sha-13'));
+    expect(job.prStatus.checks).toBeNull();
+    expect(job.prStatus.commitList).toEqual([]);
+    expect(job.prStatus.detailsEtag).toBe('"e13-old"');
+  });
+
+  it('remembers checks the token may not read, and stops querying for them', async () => {
+    const job = getJob('budget-open');
+    job.prStatus.checks = null;
+    job.prStatus.headSha = 'sha-13';
+    job.prStatus.detailsEtag = null;
+    unchangedPr();
+    const data = fullDetails();
+    data.repository.headCommit = { statusCheckRollup: null };
+    githubGraphql.mockRejectedValue(
+      Object.assign(new Error('Resource not accessible by personal access token'), {
+        errors: [
+          {
+            type: 'FORBIDDEN',
+            message: 'Resource not accessible by personal access token',
+            path: ['repository', 'headCommit', 'statusCheckRollup'],
+          },
+        ],
+        data,
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(job.prStatus.detailsEtag).toBe('"e13"'));
+    expect(job.prStatus.checks).toBeNull();
+    expect(job.prStatus.checksUnreadable).toBe(true);
+    githubGraphql.mockClear();
+    job.prStatus.syncedAt = '2026-08-25T13:00:00.000Z';
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
+    expect(detailsQueries(13)).toHaveLength(0);
+  });
+
+  it('stops watching a merged pull request whose checks have been pending for over an hour', async () => {
+    getJob('budget-ci').prStatus.headSeenAt = new Date(Date.now() - 61 * 60_000).toISOString();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(syncedPrs()).not.toContain('15');
+  });
+
+  it('still syncs a pull request whose syncedAt does not parse', async () => {
+    getJob('budget-open').prStatus.syncedAt = 'not a date';
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(syncedPrs()).toContain('13');
   });
 
   it('a check event reads the checks even on an unchanged pull request with settled checks', async () => {
@@ -5111,6 +5223,8 @@ describe('the sync tick and the GitHub budget', () => {
       expect(syncedPrs()).toContain('16');
       const said = logged.mock.calls.filter(([m]) => String(m).includes('no delivery for an hour'));
       expect(said).toHaveLength(1);
+      // Quiet is not broken: the line does not blame the hook alone.
+      expect(said[0][0]).toContain('a quiet repository');
       // The next delivery makes it live again.
       noteWebhookDelivery('acme/hooked');
       expect(repoHasWebhook('acme/hooked')).toBe(true);
@@ -5176,6 +5290,17 @@ describe('syncSessionsOn', () => {
       repo: 'acme/reconcile',
       providerId: 1,
       branch: 'dev-reconcile-later',
+      baseBranch: 'main',
+      prStatus: null,
+      reviewLoop: null,
+    },
+    {
+      id: 'reconcile-race',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/reconcile',
+      providerId: 1,
+      branch: 'dev-reconcile-race',
       baseBranch: 'main',
       prStatus: null,
       reviewLoop: null,
@@ -5246,6 +5371,31 @@ describe('syncSessionsOn', () => {
     details.set(later.number, later);
     expect(syncSessionsOn('acme/reconcile', later.head.ref)).toBe(1);
     await vi.waitFor(() => expect(getJob('reconcile-later').prStatus).toMatchObject({ number: 302 }));
+  });
+
+  it('a nudge that lands during a lookup asks again once that lookup comes back empty', async () => {
+    const raced = pr(303, 'dev-reconcile-race');
+    const answer = githubRest.getMockImplementation();
+    let lists = 0;
+    let release;
+    const gate = new Promise((resolve) => (release = resolve));
+    githubRest.mockImplementation(async (cfg, method, url, ...rest) => {
+      // The first list request went out before the pull request existed.
+      if (url.includes('head=acme:dev-reconcile-race') && ++lists === 1) {
+        await gate;
+        return { ok: true, json: async () => [] };
+      }
+      return answer(cfg, method, url, ...rest);
+    });
+    expect(syncSessionsOn('acme/reconcile', raced.head.ref)).toBe(1);
+    await vi.waitFor(() => expect(lists).toBe(1));
+    // pull_request/opened arrives while that lookup is still out.
+    openPrs.set(raced.head.ref, [{ number: raced.number, base: raced.base }]);
+    details.set(raced.number, raced);
+    expect(syncSessionsOn('acme/reconcile', raced.head.ref)).toBe(1);
+    release();
+    await vi.waitFor(() => expect(getJob('reconcile-race').prStatus).toMatchObject({ number: 303 }));
+    expect(lists).toBe(2);
   });
 });
 
