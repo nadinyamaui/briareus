@@ -393,6 +393,38 @@ describe('finding the claude binary', () => {
     expect(getConfig()).toMatchObject({ claudeBin: '/usr/bin/claude', claudeBinSource: 'PATH' });
   });
 
+  it('lets a machine install outrank the copy bundled in node_modules', async () => {
+    // `npm start` puts the app's own node_modules/.bin first on PATH, and that
+    // copy only moves with `npm ci`; the install the operator updates by hand
+    // is the one that has to win.
+    disk.whichOutput = '/srv/app/node_modules/.bin/claude\n/home/test/.local/bin/claude\n';
+    disk.files.add('/srv/app/node_modules/.bin/claude');
+    disk.files.add('/home/test/.local/bin/claude');
+    const { getConfig } = await loadConfig(complete());
+
+    expect(getConfig()).toMatchObject({ claudeBin: '/home/test/.local/bin/claude', claudeBinSource: 'PATH' });
+  });
+
+  it('puts the bundled copy behind the known install locations too', async () => {
+    disk.whichOutput = '/srv/app/node_modules/.bin/claude\n';
+    disk.files.add('/srv/app/node_modules/.bin/claude');
+    disk.files.add('/home/test/.npm-global/bin/claude');
+    const { getConfig } = await loadConfig(complete());
+
+    expect(getConfig().claudeBinSource).toBe('npm global');
+  });
+
+  it('runs the bundled copy when nothing else is installed', async () => {
+    disk.whichOutput = '/srv/app/node_modules/.bin/claude\n';
+    disk.files.add('/srv/app/node_modules/.bin/claude');
+    const { getConfig } = await loadConfig(complete());
+
+    expect(getConfig()).toMatchObject({
+      claudeBin: '/srv/app/node_modules/.bin/claude',
+      claudeBinSource: 'bundled dependency',
+    });
+  });
+
   it('never runs a binary on a mounted Windows drive', async () => {
     // WSL inherits the Windows PATH, whose npm shim points at JS under a drive
     // letter no Linux node can load.
