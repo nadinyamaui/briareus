@@ -1080,7 +1080,7 @@ describe('dashboard filters and insights', () => {
     });
   });
 
-  it('compares the same filtered accounts and keeps the monthly budget total global', async () => {
+  it('compares the same filtered accounts', async () => {
     const previous = [
       { ...rows[0], costUsd: 1, at: +new Date(2026, 7, 10) },
       { ...rows[1], costUsd: 20, at: +new Date(2026, 7, 11) },
@@ -1088,7 +1088,7 @@ describe('dashboard filters and insights', () => {
     loadAllTurnUsage.mockImplementationOnce(async () => rows).mockImplementationOnce(async () => previous);
     const result = await overallUsage(projects, 'month', now, { account: '7' });
     expect(result.costUsd).toBe(4);
-    expect(result.monthlyTotal.costUsd).toBe(6);
+    expect(result.monthlyTotal).toBeUndefined();
     expect(result.comparison).toMatchObject({
       costUsd: 1,
       from: +new Date(2026, 7, 1),

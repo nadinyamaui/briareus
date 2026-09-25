@@ -4931,14 +4931,13 @@
   const HOME_PERIOD_KEY = 'dev.usagePeriod';
   let homeOpen = false;
   let homePeriod = localStorage.getItem(HOME_PERIOD_KEY) || 'month';
-  // Filter selections are temporary; the date window and browser budget are
-  // preferences. A fresh visit must not silently show only one account.
+  // Filter selections are temporary; the date window is a preference. A
+  // fresh visit must not silently show only one account.
   let homeFilter = { project: null, model: null };
   let homeRange = {
     from: localStorage.getItem('dev.usageFrom') || '',
     to: localStorage.getItem('dev.usageTo') || '',
   };
-  let homeBudget = Number(localStorage.getItem('dev.usageBudget')) || 0;
   // What the pickers offer and what the current picks are called, both from
   // the last payload that landed: the options are the whole window's, so
   // narrowing to one project never empties the list you would widen back with.
@@ -5140,11 +5139,6 @@
     const comparison = previous
       ? `<p class="mt-3 text-xs text-muted">Compared with ${esc(new Date(previous.from).toLocaleDateString())} – ${esc(new Date(previous.to - 1).toLocaleDateString())}${previous.partial ? ' (matching elapsed time)' : ''}: ${['costUsd', 'totalTokens', 'sessions'].map((key, n) => delta(key, ['Cost', 'Tokens', 'Sessions'][n])).join(' · ')}${u.estimatedTurns || previous.estimatedTurns ? ' · includes estimates' : ''}${u.unpricedTurns || previous.unpricedTurns ? ' · cost comparison is partial' : ''}</p>`
       : '';
-    const budgetTotal = u.monthlyTotal;
-    const budget =
-      homeBudget > 0 && u.period === 'month'
-        ? `<p class="mt-3 text-xs">Monthly budget across all projects: ${esc(fmtCost(budgetTotal) || 'Unpriced')} / $${homeBudget.toFixed(2)}${budgetTotal.costUsd == null ? '' : ` (${((budgetTotal.costUsd / homeBudget) * 100).toFixed(1)}%)`} · saved in this browser</p>`
-        : '';
     const sessions = u.topSessions
       .map(
         (session) =>
@@ -5156,7 +5150,7 @@
       ${statTile('Cost / turn', averageCost(i.costPerTurn), 'within this selection', costNote(u))}
       ${statTile('Average turn duration', i.averageDurationMs == null ? '—' : fmtDur(i.averageDurationMs), `${i.timedTurns} turns with timing`, 'Averages only turns whose duration was recorded.')}
       ${statTile('Pricing coverage', `${u.turns ? Math.round(((u.turns - u.unpricedTurns) / u.turns) * 100) : 0}%`, `${i.reportedTurns} reported · ${u.estimatedTurns} estimated · ${u.unpricedTurns} unpriced`, 'Share of turns with a reported or estimated cost.')}
-    </div>${comparison}${budget}
+    </div>${comparison}
     ${bucketChart(u.buckets, { unit: u.unit, today: u.today, metric: 'costUsd', title: u.unit === 'month' ? 'Cost per month' : 'Cost per day', hint: 'Reported and estimated USD costs. Unpriced usage is excluded; hover each bar for details.' }) || '<p class="mt-3 text-xs text-muted">No priced spend to plot in this selection.</p>'}
     ${sessions ? `<div class="mt-3 rounded-xl border border-line bg-raise p-3"><div class="text-sm">Most expensive sessions in this selection</div><p class="text-xs text-muted">Top 10 by known cost, including estimates. Deleted sessions retain their usage but cannot be reopened.</p><table class="w-full text-sm"><thead><tr><th class="text-left">Session</th><th class="text-right pr-3">Turns</th><th class="text-right pr-3">Tokens</th><th class="text-right">Cost</th></tr></thead><tbody>${sessions}</tbody></table></div>` : ''}`;
   }
@@ -5207,7 +5201,6 @@
       })),
     );
     $('home-dates').classList.toggle('hidden', homePeriod !== 'custom');
-    $('home-budget').value = homeBudget || '';
     const list = $('home-list');
     if (homeError && !u) {
       $('home-sub').textContent = '';
@@ -5319,11 +5312,6 @@
     homeFilter = { project: null, model: null };
     renderHome();
     loadHomeUsage();
-  });
-  $('home-budget').addEventListener('change', (e) => {
-    homeBudget = Math.max(0, Number(e.target.value) || 0);
-    localStorage.setItem('dev.usageBudget', String(homeBudget));
-    renderHome();
   });
 
   // The by-project and by-model tables are pickers too; see setHomeFilter.
