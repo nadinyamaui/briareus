@@ -474,6 +474,18 @@ describe('ensureProfileDatabase', () => {
     expect(j.profileDbs).toEqual(['casos_abc123_projects']);
   });
 
+  it('creates a name not built off the session database, but never remembers it for the close', async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };
+
+    // The developer's own base database, and one every session's profile shares.
+    expect(await ensureProfileDatabase(j, 'casos')).toBe(true);
+    expect(await ensureProfileDatabase(j, 'casos_projects')).toBe(true);
+
+    expect(state.mysqlQueries).toHaveLength(2);
+    expect(j.profileDbs).toBeUndefined();
+  });
+
   it("does nothing for the session's own database, or one this app does not manage", async () => {
     state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
     const own = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };
@@ -498,6 +510,8 @@ describe('ensureProfileDatabase', () => {
     state.project = { dbPoolEnabled: true, dbPoolDatabase: 'heedly' };
     expect(sessionDatabaseName({ ...job(), repo: 'r/r' })).toBe('heedly');
     expect(sessionDatabaseName({ ...job(), repo: 'r/r', sessionDb: 'heedly_abc' })).toBe('heedly_abc');
+    // A local checkout runs against its own .env, not the pool's name.
+    expect(sessionDatabaseName({ ...job(), repo: 'r/r', local: true })).toBe('');
   });
 });
 
@@ -521,6 +535,15 @@ describe('dropping the run profiles databases with the session', () => {
     ]);
     expect(j.profileDbs).toEqual([]);
     expect(events).toHaveLength(3);
+  });
+
+  it('never drops a listed name that was not built off the session database', async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123', profileDbs: ['casos', 'casos_projects'] };
+
+    expect(await dropSessionDatabase(j, () => {})).toBe(true);
+
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual(['DROP DATABASE IF EXISTS `casos_abc123`']);
   });
 
   it('leaves the list in place when the server cannot be reached', async () => {

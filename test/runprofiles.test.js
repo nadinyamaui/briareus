@@ -71,6 +71,9 @@ describe('parseRunProfiles', () => {
     ['profile: a\ntenants: -demo', /is not a tenant key/],
     ['profile: a\nenv: A=1', /takes its entries on the lines below it/],
     ['profile: a\n  php artisan', /line 2: .* is not under/],
+    ['profile: a\n  before:\n    echo one\n  env:\n    A=1', /line 2: "before:" is indented/],
+    ['profile: a\nbefore:\n  echo one\n  env:\n  A=1', /line 4: "env:" is indented/],
+    ['profile: a\nbefore:\n  echo one\n  tenants: demo', /line 4: "tenants: demo" is indented/],
   ])('refuses %j', (text, error) => {
     expect(() => parseRunProfiles(text)).toThrow(error);
   });

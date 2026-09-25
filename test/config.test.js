@@ -632,8 +632,12 @@ describe('the preview tunnel', () => {
     expect(getConfig().previewTunnel.hostname).toBe('{tenant}--preview-{port}.example.com');
   });
 
-  it('refuses {tenant} outside the first label, or twice', async () => {
-    for (const hostname of ['preview-{port}.{tenant}.example.com', '{tenant}-{tenant}-{port}.example.com']) {
+  it('refuses {tenant} outside the first label, apart from {port}, or twice', async () => {
+    for (const hostname of [
+      'preview-{port}.{tenant}.example.com',
+      '{tenant}.preview-{port}.example.com',
+      '{tenant}-{tenant}-{port}.example.com',
+    ]) {
       const { getConfig } = await loadConfig(complete({ ...TUNNEL, PREVIEW_HOSTNAME: hostname }));
 
       expect(() => getConfig()).toThrow(/PREVIEW_HOSTNAME/);
