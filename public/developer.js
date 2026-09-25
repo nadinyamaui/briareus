@@ -793,8 +793,10 @@
     insertPrompt(item.body);
   });
   $('prompt-save').addEventListener('click', async () => {
-    const body = inputEl.value.trim();
     closePromptPop();
+    // The phrase still being dictated lands first, not the interim guess.
+    await finishVoice();
+    const body = inputEl.value.trim();
     if (!body) return;
     const title = await openPrompt({
       title: 'Save as prompt',
@@ -2278,7 +2280,9 @@
     closeProjectView();
     closeStream();
     current = id;
-    navSeq++;
+    // The composer that just created this session is still the one on
+    // screen, so a send waiting on its voice note carries on into it.
+    if (!keepVoice) navSeq++;
     syncPath();
     // The conversation loads over the network, so show a loader instead of a
     // blank pane while it does, and drop it only if this session is still the
@@ -2659,9 +2663,15 @@
   const VOICE_MAX_MS = 5 * 60 * 1000;
   // How long ⏹ waits for the last phrase before dropping the round.
   const VOICE_STOP_MS = 3000;
-  // One round of recognition while dictating: { rec, base, heard, stopping,
-  // restart, sending, kept, merged, note }. note is the voice note the rounds
-  // carry on, { done, resolve, cap }: done resolves once the note ends.
+  // One round of recognition while dictating: { rec, state, base, heard, kept,
+  // merged, note }. note is the voice note the rounds carry on, { done,
+  // resolve, cap }: done resolves once the note ends. state is one of
+  //   listening   the round is live, and onend carries on if it heard something
+  //   restarting  stopped for the language or a 🎤 after ⏹: onend starts the
+  //               next round of the same note once the last phrase has landed
+  //   finishing   ⏹ or the time cap: onend ends the note
+  //   sending     finishing for finishVoice(), which 🎤 cannot resume
+  // and only setVoiceState() moves it.
   let voice = null;
 
   if (Recognition && window.isSecureContext) {
@@ -2684,8 +2694,14 @@
     renderVoice();
   }
 
+  // The last phrase is still landing and the note ends after it, so nothing
+  // may abort the round.
+  function voiceFinishing() {
+    return voice?.state === 'finishing' || voice?.state === 'sending';
+  }
+
   function renderVoice() {
-    const on = !!voice && !voice.stopping;
+    const on = !!voice && !voiceFinishing();
     voiceBtn.textContent = on ? '⏹' : '🎤';
     voiceBtn.title = on
       ? 'Stop the voice note'
@@ -2703,19 +2719,26 @@
     'audio-capture': 'No microphone was found',
     network: 'Speech recognition needs a network connection',
     'language-not-supported': 'That language is not supported for voice notes',
+    aborted: 'The voice note was cut off; another tab or app may be using speech recognition',
   };
 
   function newVoiceNote() {
     const note = {};
     note.done = new Promise((resolve) => (note.resolve = resolve));
-    // A timer rather than a check in onend: a continuous round that keeps
-    // hearing a noisy room may never end by itself.
+    armVoiceCap(note);
+    return note;
+  }
+
+  // A timer rather than a check in onend: a continuous round that keeps
+  // hearing a noisy room may never end by itself. A spent cap is null, so a
+  // 🎤 that resumes the note while its last phrase lands arms a new one.
+  function armVoiceCap(note) {
     note.cap = setTimeout(() => {
-      if (voice?.note !== note || voice.stopping) return;
-      stopVoice(true);
+      note.cap = null;
+      if (voice?.note !== note || voiceFinishing()) return;
+      setVoiceState('finishing');
       toast('The voice note stopped after 5 minutes; press 🎤 to carry on');
     }, VOICE_MAX_MS);
-    return note;
   }
 
   // note: the voice note a restarted round carries on; a fresh one otherwise.
@@ -2731,11 +2754,9 @@
     const value = inputEl.value;
     voice = {
       rec,
+      state: 'listening',
       base: value + (value && !/\s$/.test(value) ? ' ' : ''),
       heard: false,
-      stopping: false,
-      restart: false,
-      sending: false,
       // The text of the results below upTo, which no later event changes:
       // every result before the last one joined, and that last one apart.
       kept: { text: '', last: '', upTo: 0 },
@@ -2793,26 +2814,15 @@
     };
     rec.onerror = (e) => {
       if (voice?.rec !== rec) return;
-      // Silence and our own abort end quietly: onend follows either way.
-      if (e.error === 'no-speech' || e.error === 'aborted') return;
+      // Silence ends quietly: onend follows. Every abort of ours drops the
+      // round first, so an 'aborted' that gets here came from the browser
+      // (another tab took the recognizer), and restarting would take it back.
+      if (e.error === 'no-speech') return;
       stopVoice();
       toast(VOICE_ERRORS[e.error] || `Voice note failed: ${e.error}`, true);
     };
     rec.onend = () => {
-      if (voice?.rec !== rec) return;
-      // Recognition stops by itself after a pause: carry on from what the box
-      // holds now until ⏹ is pressed. A round that heard nothing ends it, or
-      // a forgotten microphone would listen forever (the time cap is the
-      // note's own timer).
-      // restart: the language changed or 🎤 was pressed again while ⏹ was
-      // finishing, and the last phrase has landed now.
-      if (!voice.restart && (voice.stopping || !voice.heard)) {
-        const silent = !voice.stopping;
-        endVoice();
-        if (silent) toast('The voice note stopped after a silence; press 🎤 to carry on');
-      } else {
-        startVoice(voice.note);
-      }
+      if (voice?.rec === rec) roundEnded();
     };
     try {
       rec.start();
@@ -2823,25 +2833,45 @@
     renderVoice();
   }
 
-  // finish: let the last phrase land before stopping (the ⏹ button). Without
-  // it the recognition is dropped where it stands, for a send or an error.
-  function stopVoice(finish) {
+  // Recognition stops by itself after a pause: carry on from what the box
+  // holds now until ⏹ is pressed. A round that heard nothing ends it, or a
+  // forgotten microphone would listen forever (the time cap is the note's own
+  // timer).
+  function roundEnded() {
+    const { state, heard, note } = voice;
+    if (state === 'restarting' || (state === 'listening' && heard)) {
+      startVoice(note);
+      return;
+    }
+    endVoice();
+    if (state === 'listening') toast('The voice note stopped after a silence; press 🎤 to carry on');
+  }
+
+  // A round leaving listening is stopped rather than aborted, so the phrase in
+  // flight lands before onend acts on the new state. An engine can fail to
+  // fire onend after stop(): the round is then dropped and treated as ended,
+  // or the note would stay on with nothing listening.
+  function setVoiceState(to) {
+    const { rec, state } = voice;
+    voice.state = to;
+    if (state === 'listening') {
+      rec.stop();
+      setTimeout(() => {
+        if (voice?.rec !== rec) return;
+        rec.abort();
+        roundEnded();
+      }, VOICE_STOP_MS);
+    }
+    renderVoice();
+  }
+
+  // Drops the recognition where it stands, for typing, leaving the chat or an
+  // error.
+  function stopVoice() {
     if (!voice) return;
     const { rec } = voice;
-    if (finish) {
-      voice.stopping = true;
-      voice.restart = false;
-      rec.stop();
-      // An engine can fail to fire onend after stop(): the round is dropped
-      // then, or the note would stay on with nothing listening.
-      setTimeout(() => {
-        if (voice?.rec === rec) stopVoice();
-      }, VOICE_STOP_MS);
-      renderVoice();
-    } else {
-      endVoice();
-      rec.abort();
-    }
+    endVoice();
+    rec.abort();
   }
 
   // Every way a voice note ends comes through here, and resumes whoever
@@ -2857,27 +2887,25 @@
   // Stops the voice note and resolves once its last phrase has landed, so a
   // send reads the final transcript rather than the engine's interim guess
   // (abort() would throw that final text away). An engine that never ends
-  // is aborted by stopVoice()'s own fallback.
+  // is dropped by setVoiceState()'s fallback.
   async function finishVoice() {
     if (!voice) return;
     const { note } = voice;
-    stopVoice(true);
-    voice.sending = true;
+    setVoiceState('sending');
     await note.done;
   }
 
   voiceBtn.addEventListener('click', () => {
     if (!voice) startVoice();
-    else if (!voice.stopping) stopVoice(true);
-    // A send waits for the last phrase: a new round would start from the text
-    // about to go out, and the send would then cut it off.
-    else if (!voice.sending) {
+    else if (voice.state === 'finishing') {
       // ⏹ is still finishing: aborting now would drop its last phrase, so
       // listening resumes from onend once that phrase has landed.
-      voice.stopping = false;
-      voice.restart = true;
-      renderVoice();
+      if (!voice.note.cap) armVoiceCap(voice.note);
+      setVoiceState('restarting');
     }
+    // A send waits for the last phrase: a new round would start from the text
+    // about to go out, and the send would then cut it off.
+    else if (voice.state !== 'sending') setVoiceState('finishing');
     // A clicked button keeps the focus, and Enter would then press ⏹ rather
     // than send the message.
     if (!isMobile()) inputEl.focus();
@@ -2885,19 +2913,21 @@
   voiceLangEl.addEventListener('change', () => {
     renderVoice();
     if (!isMobile()) inputEl.focus();
-    if (!voice || voice.stopping) return;
-    // stop(), not abort(): the phrase in flight lands before onend restarts
-    // in the new language.
-    voice.restart = true;
-    voice.rec.stop();
+    // The phrase in flight lands before onend restarts in the new language. A
+    // round already restarting picks the new language up by itself.
+    if (voice?.state === 'listening') setVoiceState('restarting');
   });
   // Typing takes over: a transcript still arriving would write over the edit.
-  inputEl.addEventListener('input', () => stopVoice());
   // Except while the last phrase is still landing, after ⏹ or during a send
   // wait: a key would abort that phrase, leave the interim guess in the box
   // and, for a send, go out with the message, so it is held back until then.
+  // Composition input (Android keyboards, IMEs) cannot be held back, so it
+  // does not stop the note either; the stop fallback bounds that wait.
+  inputEl.addEventListener('input', () => {
+    if (!voiceFinishing()) stopVoice();
+  });
   inputEl.addEventListener('beforeinput', (e) => {
-    if (voice?.stopping) e.preventDefault();
+    if (voiceFinishing()) e.preventDefault();
   });
 
   // A failed or dismissed send gives its text back. A voice note started
