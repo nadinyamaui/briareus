@@ -76,6 +76,18 @@ describe('parseRunProfiles', () => {
     ]);
   });
 
+  it('checks the {host:<tenant>} tokens of an env value, not of its cut comment', () => {
+    const [p] = parseRunProfiles('profile: a\nenv:\n  APP_URL=http://{host} # was {host:old}');
+    expect(p.env).toEqual([['APP_URL', 'http://{host}']]);
+  });
+
+  it('takes a DB_DATABASE that renders to a plain identifier', () => {
+    const [p] = parseRunProfiles(
+      'profile: a\nenv:\n  DB_DATABASE={database}_{profile}_{port}\nprofile: b\nenv:\n  DB_DATABASE=app$2',
+    );
+    expect(p.env).toEqual([['DB_DATABASE', '{database}_{profile}_{port}']]);
+  });
+
   it('takes {profile} in DB_DATABASE under a name without a hyphen', () => {
     const [p] = parseRunProfiles('profile: vertical_a\nenv:\n  DB_DATABASE={database}_{profile}');
     expect(p.env).toEqual([['DB_DATABASE', '{database}_{profile}']]);
@@ -109,6 +121,13 @@ describe('parseRunProfiles', () => {
       'profile: vertical-a\nenv:\n  DB_DATABASE={database}_{profile}',
       /line 3: \{profile\} renders "vertical-a"/,
     ],
+    ['profile: a\nenv:\n  DB_DATABASE={database}-x', /line 3: DB_DATABASE renders to a name like "db-x"/],
+    [
+      'profile: a\nenv:\n  DB_DATABASE=app-projects',
+      /line 3: DB_DATABASE renders to a name like "app-projects"/,
+    ],
+    ['profile: a\nenv:\n  DB_DATABASE={dir}_x', /line 3: DB_DATABASE renders to a name like "\{dir\}_x"/],
+    ['profile: a\nenv:\n  APP_URL=http://{host:old} # a comment', /line 3: \{host:old\} names a tenant/],
   ])('refuses %j', (text, error) => {
     expect(() => parseRunProfiles(text)).toThrow(error);
   });

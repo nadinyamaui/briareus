@@ -109,6 +109,7 @@ const {
   instanceEnv,
   dropSessionDatabase,
   ensureProfileDatabase,
+  profileDbElsewhere,
   sessionDatabaseName,
   _resetForTests,
 } = await import('../lib/dbpool.js');
@@ -552,6 +553,34 @@ describe('ensureProfileDatabase', () => {
   });
 });
 
+describe('profileDbElsewhere', () => {
+  it("names only the keys that differ from the claimed server's", () => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'heedly' };
+    state.servers = [server({ id: 4, host: '10.0.0.4', port: 3307 })];
+    const j = { ...job(), repo: 'r/r', dbServerId: 4 };
+
+    // A block copied from a .env restates the session's own server.
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'mysql', DB_HOST: '10.0.0.4', DB_PORT: '3307' })).toEqual(
+      [],
+    );
+    expect(profileDbElsewhere(j, { DB_HOST: 'reports-db', DB_PORT: '3306' })).toEqual(['DB_HOST', 'DB_PORT']);
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'pgsql' })).toEqual(['DB_CONNECTION']);
+  });
+
+  it('compares an unpooled session against the server its .env template points at', () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: PG_TEMPLATE };
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };
+
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'postgres', DB_PORT: '5432' })).toEqual([]);
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'mysql' })).toEqual(['DB_CONNECTION']);
+  });
+
+  it('leaves a session with no managed server to ensureProfileDatabase', () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    expect(profileDbElsewhere({ ...job(), repo: 'r/r', local: true }, { DB_HOST: 'x' })).toEqual([]);
+  });
+});
+
 describe('dropping the run profiles databases with the session', () => {
   it('drops them before the session database, keeping one that would not drop', async () => {
     state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
@@ -976,6 +1005,31 @@ describe('restoring the project dump into the claimed database', () => {
     expect(events[0]).toMatch(/Dropping the run profiles' databases casos_projects, casos_named/);
     expect(events[1]).toContain('Restoring casos');
     expect(state.psqlCalls.at(-1).bin).toBe('mysql');
+    releaseInstance(j);
+  });
+
+  it('drops no database for a profile that points the app at another server', async () => {
+    state.project.runProfiles = [
+      'profile: restated',
+      'env:',
+      '  DB_CONNECTION=mysql',
+      '  DB_HOST=127.0.0.1',
+      '  DB_PORT=3306',
+      '  DB_DATABASE={database}_restated',
+      'profile: reports',
+      'env:',
+      '  DB_HOST=reports-db',
+      '  DB_DATABASE={database}_reports',
+    ].join('\n');
+    const j = job();
+    const events = [];
+
+    await acquire(j, 'r/r', (t) => events.push(t));
+
+    expect(state.mysqlQueries.map((q) => q.sql).filter((q) => q.startsWith('DROP'))).toEqual([
+      'DROP DATABASE IF EXISTS `casos_restated`',
+    ]);
+    expect(events[0]).toMatch(/Dropping the run profiles' databases casos_restated on/);
     releaseInstance(j);
   });
 

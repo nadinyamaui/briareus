@@ -395,9 +395,11 @@ before:
               (<code>{database}_x</code>) on a claimed server whose project restores a dump goes when the
               server is released. A local checkout is the exception: its databases are its own, so create that
               one yourself (the Run log says so). The same goes for an unpooled project that names no
-              database, and for a profile whose <code>env:</code> also sets <code>DB_HOST</code>,
-              <code>DB_PORT</code> or <code>DB_CONNECTION</code>, since its database lives on that other
-              server.
+              database, and for a profile whose <code>env:</code> points <code>DB_HOST</code>,
+              <code>DB_PORT</code> or <code>DB_CONNECTION</code> at another server than the session's
+              (restating the session's own values is fine), since its database lives on that other server. A
+              <code>DB_DATABASE</code> has to render to a plain identifier (<code>A–Z a–z 0–9 _ $</code>), or
+              the save is refused.
             </li>
             <li><code>before:</code> runs ahead of the run commands, chained with them.</li>
             <li>
@@ -405,7 +407,9 @@ before:
               <code>&lt;tenant&gt;--preview-{port}.&lt;zone&gt;</code> through the Cloudflare tunnel (its own
               Access application, same policy as the port's), or
               <code>&lt;tenant&gt;--preview-{port}.localhost</code> without one. The Run log and the session
-              header show one link per tenant.
+              header show one link per tenant. That first label must stay within the 63 characters DNS allows,
+              or ▶ Run refuses the profile: shorten the tenant key or <code>PREVIEW_HOSTNAME</code>'s first
+              label.
             </li>
             <li>
               Placeholders, in commands and env values alike: <code>{port}</code>, <code>{dir}</code>,

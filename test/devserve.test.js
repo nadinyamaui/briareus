@@ -14,6 +14,8 @@ import path from 'path';
 const state = vi.hoisted(() => ({
   projects: [],
   database: 'shop',
+  // The first label of the hostnames serveHostname answers, before the port.
+  label: 'preview',
   // (port, tenant) => Promise<url|null>; null means no tunnel.
   publish: null,
   // The fakes spawned, in order. `holdExit` delays a killed fake's exit.
@@ -90,6 +92,7 @@ vi.mock('../lib/dbpool.js', () => ({
   releaseInstance: vi.fn(async () => {}),
   ensureSessionDatabase: vi.fn(),
   ensureProfileDatabase: vi.fn(async () => true),
+  profileDbElsewhere: vi.fn(() => []),
   sessionDatabaseName: () => state.database,
   dropSessionDatabase: vi.fn(async () => false),
   instanceEnv: vi.fn(() => ({})),
@@ -127,7 +130,7 @@ vi.mock('../lib/projects.js', async () => {
 vi.mock('../lib/tunnel.js', () => ({
   publicAppUrl: vi.fn((port, tenant) => state.publish(port, tenant)),
   serveHostname: (port, tenant) =>
-    tenant ? `${tenant}--preview-${port}.example.com` : `preview-${port}.example.com`,
+    tenant ? `${tenant}--${state.label}-${port}.example.com` : `${state.label}-${port}.example.com`,
   localHostname: (port, tenant) => (tenant ? `${tenant}--preview-${port}.localhost` : '127.0.0.1'),
 }));
 
@@ -139,7 +142,7 @@ vi.mock('../lib/usage.js', () => ({
 }));
 
 import { spawn } from 'child_process';
-import { ensureProfileDatabase, dropSessionDatabase } from '../lib/dbpool.js';
+import { ensureProfileDatabase, profileDbElsewhere, dropSessionDatabase } from '../lib/dbpool.js';
 import { publicAppUrl } from '../lib/tunnel.js';
 import { bus, initJobs, getJob, startDevServe, closeDevSession } from '../lib/jobs.js';
 
@@ -199,6 +202,7 @@ beforeEach(() => {
     },
   ];
   state.database = 'shop';
+  state.label = 'preview';
   state.publish = async () => null;
   state.procs = [];
   state.holdExit = null;
@@ -288,15 +292,42 @@ describe('▶ Run: switching profile', () => {
 
   it('creates no database for a profile that points the app at another server', async () => {
     state.projects[0].runProfiles = 'profile: reports\nenv:\n  DB_HOST=reports-db\n  DB_DATABASE=reports';
+    profileDbElsewhere.mockReturnValueOnce(['DB_HOST']);
     const job = session();
 
     await startDevServe(job.id);
 
+    expect(profileDbElsewhere).toHaveBeenCalledWith(job, { DB_HOST: 'reports-db', DB_DATABASE: 'reports' });
     expect(ensureProfileDatabase).not.toHaveBeenCalled();
     expect(state.procs[0].env.DB_HOST).toBe('reports-db');
     expect(
       job.events.some((e) => /sets DB_HOST, so its database reports is not created/.test(e.text || '')),
     ).toBe(true);
+  });
+
+  it("still creates the database of a profile that restates the session's own server", async () => {
+    state.projects[0].runProfiles = 'profile: restated\nenv:\n  DB_PORT=3306\n  DB_DATABASE={database}_x';
+    const job = session();
+
+    await startDevServe(job.id);
+
+    expect(ensureProfileDatabase).toHaveBeenCalledWith(job, 'shop_x', expect.any(Function));
+  });
+
+  it('refuses a tenant whose hostname label would pass the 63 characters DNS allows', async () => {
+    state.projects[0].runProfiles = `profile: long\ntenants: ${'a'.repeat(30)}`;
+    state.label = 'p'.repeat(27);
+    const job = session();
+
+    await expect(startDevServe(job.id)).rejects.toThrow(
+      /tenant a{30} makes the hostname a{30}--p{27}-8101\.example\.com, whose first label is longer than the 63 characters/,
+    );
+    expect(spawn).not.toHaveBeenCalled();
+
+    // One character less fits exactly.
+    state.label = 'p'.repeat(26);
+    await startDevServe(job.id);
+    expect(spawn).toHaveBeenCalledTimes(1);
   });
 
   it('leaves the old server running when the new profile is refused', async () => {
