@@ -496,7 +496,7 @@ covers it), recognising its own by URL so an existing deploy hook is never
 touched, and re-pointing it if the hostname changes.
 
 What each delivery does: nothing is started by one. `pull_request`,
-`pull_request_review`, `issue_comment`, `check_suite` and `check_run` refresh
+`pull_request_review`, `issue_comment`, `check_suite`, `check_run` and `status` refresh
 the PR panel of any open session on that branch as the event lands rather than
 on the next twenty-second tick, and a repository whose hook has delivered within
 the last hour is polled only every fifteen minutes as a safety net (the minute

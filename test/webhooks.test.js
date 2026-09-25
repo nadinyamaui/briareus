@@ -138,7 +138,7 @@ describe('POST /webhooks/github', () => {
 describe('ensureRepoWebhook', () => {
   const cfg = { githubToken: 'tok' };
   const url = 'https://reviewer.example.com/webhooks/github';
-  const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite'];
+  const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite', 'status'];
 
   function restServing(hooks, responses = {}) {
     return vi.fn(async (c, method, _path, _body) => {
@@ -345,7 +345,7 @@ describe('ensureRepoWebhook without a hostname to point at', () => {
 describe('ensureRepoWebhook when GitHub refuses the write', () => {
   const cfg = { githubToken: 'tok' };
   const url = 'https://reviewer.example.com/webhooks/github';
-  const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite'];
+  const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite', 'status'];
 
   const restServing = (hooks, responses = {}) =>
     vi.fn(async (c, method) => {
@@ -451,7 +451,7 @@ describe('installRepoWebhooks', () => {
   });
 
   it('stays quiet about a hook that was already right', async () => {
-    const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite'];
+    const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite', 'status'];
     const url = 'https://reviewer.example.com/webhooks/github';
     const rest = vi.fn(async () => ({
       ok: true,

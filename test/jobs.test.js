@@ -5048,6 +5048,7 @@ describe('the sync tick and the GitHub budget', () => {
     job.prStatus.checks = { total: 1, passed: 1, failed: 0, pending: 0, runs: [] };
     job.prStatus.headSha = 'sha-13';
     job.prStatus.detailsEtag = '"e13"';
+    job.prStatus.detailsReadAt = new Date().toISOString();
     githubRest.mockImplementation(async (_cfg, _method, url) => {
       const number = Number(url.match(/\/pulls\/(\d+)$/)?.[1]);
       return {
@@ -5071,6 +5072,7 @@ describe('the sync tick and the GitHub budget', () => {
     job.prStatus.checks = { total: 1, passed: 1, failed: 0, pending: 0, runs: [] };
     job.prStatus.headSha = 'sha-13';
     job.prStatus.detailsEtag = '"e13-old"';
+    job.prStatus.etag = '"e13"';
     githubRest.mockImplementation(async (_cfg, _method, url) => {
       const number = Number(url.match(/\/pulls\/(\d+)$/)?.[1]);
       return {
@@ -5101,6 +5103,7 @@ describe('the sync tick and the GitHub budget', () => {
     // Eleven minutes after the head was first seen, none is the answer.
     githubGraphql.mockClear();
     job.prStatus.headSeenAt = new Date(Date.now() - 11 * 60_000).toISOString();
+    job.prStatus.detailsReadAt = new Date().toISOString();
     job.prStatus.syncedAt = '2026-08-25T13:00:00.000Z';
     await vi.advanceTimersByTimeAsync(20_000);
     await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
@@ -5125,7 +5128,8 @@ describe('the sync tick and the GitHub budget', () => {
     await vi.waitFor(() => expect(job.prStatus.headSha).toBe('sha-13'));
     expect(job.prStatus.checks).toBeNull();
     expect(job.prStatus.commitList).toEqual([]);
-    expect(job.prStatus.detailsEtag).toBe('"e13-old"');
+    // Cleared rather than left as it was, so nothing can skip on it.
+    expect(job.prStatus.detailsEtag).toBeNull();
   });
 
   it('remembers checks the token may not read, and stops querying for them', async () => {
@@ -5133,6 +5137,7 @@ describe('the sync tick and the GitHub budget', () => {
     job.prStatus.checks = null;
     job.prStatus.headSha = 'sha-13';
     job.prStatus.detailsEtag = null;
+    job.prStatus.etag = '"e13"';
     unchangedPr();
     const data = fullDetails();
     data.repository.headCommit = { statusCheckRollup: null };
@@ -5176,6 +5181,7 @@ describe('the sync tick and the GitHub budget', () => {
     job.prStatus.checks = { total: 1, passed: 0, failed: 1, pending: 0, runs: [] };
     job.prStatus.headSha = 'sha-16';
     job.prStatus.detailsEtag = '"e16"';
+    job.prStatus.detailsReadAt = new Date().toISOString();
     job.prStatus.syncedAt = new Date().toISOString(); // the tick leaves it alone
     githubRest.mockImplementation(async (_cfg, _method, url) => {
       const number = Number(url.match(/\/pulls\/(\d+)$/)?.[1]);
@@ -5267,6 +5273,153 @@ describe('the sync tick and the GitHub budget', () => {
     await vi.waitFor(() =>
       expect(githubGraphql.mock.calls.filter(([, , v]) => v.number === 13)).toHaveLength(1),
     );
+  });
+
+  it('records a new tag only once a second sync has seen it, so a lagging GraphQL read is read again', async () => {
+    const job = getJob('budget-open');
+    Object.assign(job.prStatus, {
+      checks: { total: 1, passed: 1, failed: 0, pending: 0, runs: [] },
+      headSha: 'sha-13',
+      detailsEtag: '"e13-old"',
+      etag: '"e13-old"',
+      detailsReadAt: new Date().toISOString(),
+    });
+    unchangedPr(); // now answers "e13"
+    githubGraphql.mockResolvedValue(
+      fullDetails([{ __typename: 'CheckRun', name: 'Tests', status: 'COMPLETED', conclusion: 'SUCCESS' }]),
+    );
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(detailsQueries(13)).toHaveLength(1));
+    // The sync a change sets off may have read GraphQL from before it.
+    expect(job.prStatus.detailsEtag).toBeNull();
+    job.prStatus.syncedAt = '2026-08-25T13:00:00.000Z';
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(detailsQueries(13)).toHaveLength(2));
+    await vi.waitFor(() => expect(job.prStatus.detailsEtag).toBe('"e13"'));
+    job.prStatus.syncedAt = '2026-08-25T13:00:00.000Z';
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
+    expect(detailsQueries(13)).toHaveLength(2);
+  });
+
+  it('re-reads the details of an idle pull request once the last read is old, for what its tag does not cover', async () => {
+    // A linked issue closed on GitHub leaves the pull request's tag alone.
+    const job = getJob('budget-open');
+    Object.assign(job.prStatus, {
+      checks: { total: 1, passed: 1, failed: 0, pending: 0, runs: [] },
+      headSha: 'sha-13',
+      detailsEtag: '"e13"',
+      etag: '"e13"',
+      issues: [{ number: 7, title: 'Bug', state: 'open', url: 'https://i/7' }],
+      detailsReadAt: new Date(Date.now() - 16 * 60_000).toISOString(),
+    });
+    unchangedPr();
+    const data = fullDetails();
+    data.repository.pullRequest.closingIssuesReferences.nodes = [
+      { number: 7, title: 'Bug', state: 'CLOSED', url: 'https://i/7' },
+    ];
+    githubGraphql.mockResolvedValue(data);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(job.prStatus.issues[0].state).toBe('closed'));
+    expect(Date.now() - Date.parse(job.prStatus.detailsReadAt)).toBeLessThan(60_000);
+    expect(job.prStatus.detailsEtag).toBe('"e13"');
+  });
+
+  it('keeps the rest of a list when an error names one node inside it', async () => {
+    const job = getJob('budget-open');
+    Object.assign(job.prStatus, {
+      checks: { total: 2, passed: 2, failed: 0, pending: 0, runs: [] },
+      headSha: 'sha-13',
+      detailsEtag: null,
+      etag: '"e13"',
+      checksUnreadable: false,
+    });
+    unchangedPr();
+    const data = fullDetails([
+      { __typename: 'CheckRun', name: 'Tests', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      null,
+    ]);
+    data.repository.pullRequest.reviews.nodes = [
+      { state: 'APPROVED', url: 'https://r/1', author: { login: 'codex' } },
+      { state: 'COMMENTED', url: 'https://r/2', author: null },
+    ];
+    githubGraphql.mockRejectedValue(
+      Object.assign(new Error('partial'), {
+        errors: [
+          { message: 'no', path: ['repository', 'pullRequest', 'reviews', 'nodes', 1, 'author'] },
+          {
+            type: 'FORBIDDEN',
+            message: 'no',
+            path: ['repository', 'headCommit', 'statusCheckRollup', 'contexts', 'nodes', 1],
+          },
+        ],
+        data,
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(job.prStatus.detailsEtag).toBe('"e13"'));
+    expect(job.prStatus.reviews).toEqual([{ user: 'codex', state: 'approved', url: 'https://r/1' }]);
+    expect(job.prStatus.checks).toMatchObject({ total: 1, passed: 1, pending: 0 });
+    // One context it may not read is not a token that may read no checks.
+    expect(job.prStatus.checksUnreadable).toBe(false);
+  });
+
+  it('a failed forced read clears the tag, so the next sync reads the checks again', async () => {
+    const job = getJob('budget-hooked');
+    Object.assign(job.prStatus, {
+      checks: { total: 1, passed: 0, failed: 1, pending: 0, runs: [] },
+      headSha: 'sha-16',
+      detailsEtag: '"e16"',
+      etag: '"e16"',
+      detailsReadAt: new Date().toISOString(),
+      syncedAt: new Date().toISOString(), // the tick leaves it alone
+    });
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      const number = Number(url.match(/\/pulls\/(\d+)$/)?.[1]);
+      return { ok: true, notModified: true, etag: `"e${number}"`, json: async () => pr(number) };
+    });
+    githubGraphql.mockRejectedValue(new Error('GitHub GraphQL answered 502'));
+    syncSessionsOn('acme/hooked', 'dev-budget-hooked', null, { checks: true });
+    await vi.waitFor(() => expect(job.prStatus.detailsEtag).toBeNull());
+    expect(job.prStatus.checks.failed).toBe(1);
+    // A plain event now reads them, where it would have trusted the tag.
+    githubGraphql.mockResolvedValue(
+      fullDetails([{ __typename: 'CheckRun', name: 'Tests', status: 'COMPLETED', conclusion: 'SUCCESS' }]),
+    );
+    syncSessionsOn('acme/hooked', 'dev-budget-hooked');
+    await vi.waitFor(() => expect(job.prStatus.checks.passed).toBe(1));
+  });
+
+  it('check events queued behind one sync start a single pass between them', async () => {
+    const job = getJob('budget-hooked');
+    Object.assign(job.prStatus, {
+      checks: { total: 1, passed: 0, failed: 0, pending: 1, runs: [] },
+      headSha: 'sha-16',
+      syncedAt: new Date().toISOString(), // the tick leaves it alone
+    });
+    let release;
+    const gate = new Promise((resolve) => (release = resolve));
+    let first = true;
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      const number = Number(url.match(/\/pulls\/(\d+)$/)?.[1]);
+      if (number === 16 && first) {
+        first = false;
+        await gate;
+      }
+      return { ok: true, notModified: true, etag: `"e${number}"`, json: async () => pr(number) };
+    });
+    githubGraphql.mockResolvedValue(
+      fullDetails([{ __typename: 'CheckRun', name: 'Tests', status: 'COMPLETED', conclusion: 'SUCCESS' }]),
+    );
+    syncSessionsOn('acme/hooked', 'dev-budget-hooked', null, { checks: true });
+    await vi.waitFor(() => expect(syncedPrs().filter((n) => n === '16')).toHaveLength(1));
+    // Three more suites report while that one is still reading.
+    for (let i = 0; i < 3; i++) syncSessionsOn('acme/hooked', 'dev-budget-hooked', null, { checks: true });
+    release();
+    await vi.waitFor(() => expect(detailsQueries(16)).toHaveLength(2));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(syncedPrs().filter((n) => n === '16')).toHaveLength(2);
+    expect(detailsQueries(16)).toHaveLength(2);
   });
 });
 
