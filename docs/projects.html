@@ -394,7 +394,10 @@ before:
               an unpooled project goes when the session is closed, and one named off the pooled database
               (<code>{database}_x</code>) on a claimed server whose project restores a dump goes when the
               server is released. A local checkout is the exception: its databases are its own, so create that
-              one yourself (the Run log says so).
+              one yourself (the Run log says so). The same goes for an unpooled project that names no
+              database, and for a profile whose <code>env:</code> also sets <code>DB_HOST</code>,
+              <code>DB_PORT</code> or <code>DB_CONNECTION</code>, since its database lives on that other
+              server.
             </li>
             <li><code>before:</code> runs ahead of the run commands, chained with them.</li>
             <li>

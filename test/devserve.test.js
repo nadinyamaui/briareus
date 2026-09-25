@@ -249,6 +249,25 @@ describe('▶ Run: the serial queue', () => {
     expect(job.serveProfile).toBe('crm');
     expect(state.procs[1].env.VERTICAL).toBe('crm');
   });
+
+  it('lets a switch go ahead while the press before it is still publishing its tab', async () => {
+    const held = deferred();
+    let publishes = 0;
+    state.publish = () => (publishes++ === 0 ? held.promise : Promise.resolve(null));
+    const job = session();
+
+    const plain = startDevServe(job.id);
+    const switched = await startDevServe(job.id, { profile: 'crm' });
+
+    expect(switched).toEqual({ url: 'http://127.0.0.1:8101', profile: 'crm' });
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(state.procs[0].exitCode).not.toBeNull();
+    held.resolve(null);
+    expect(await plain).toEqual({ url: 'http://127.0.0.1:8101', profile: 'projects' });
+    // The stopped server's late links do not land on the session.
+    await tick();
+    expect(job.serveLinks).toEqual([{ tenant: null, url: 'http://127.0.0.1:8101' }]);
+  });
 });
 
 describe('▶ Run: switching profile', () => {
@@ -265,6 +284,19 @@ describe('▶ Run: switching profile', () => {
     expect(state.procs[1].command).toBe('php -S 127.0.0.1:8101');
     expect(state.procs[1].env.DB_DATABASE).toBe('shop_crm');
     expect(ensureProfileDatabase).toHaveBeenCalledWith(job, 'shop_crm', expect.any(Function));
+  });
+
+  it('creates no database for a profile that points the app at another server', async () => {
+    state.projects[0].runProfiles = 'profile: reports\nenv:\n  DB_HOST=reports-db\n  DB_DATABASE=reports';
+    const job = session();
+
+    await startDevServe(job.id);
+
+    expect(ensureProfileDatabase).not.toHaveBeenCalled();
+    expect(state.procs[0].env.DB_HOST).toBe('reports-db');
+    expect(
+      job.events.some((e) => /sets DB_HOST, so its database reports is not created/.test(e.text || '')),
+    ).toBe(true);
   });
 
   it('leaves the old server running when the new profile is refused', async () => {

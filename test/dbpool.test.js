@@ -521,6 +521,19 @@ describe('ensureProfileDatabase', () => {
     expect(events[0]).toMatch(/mydb_projects is not created: create it yourself/);
   });
 
+  it('tells an unpooled session without a database of its own the same', async () => {
+    // No database name in Settings: every session shares the template's.
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: '', envTemplate: MYSQL_TEMPLATE };
+    const events = [];
+    const j = { ...job(), repo: 'r/r' };
+
+    expect(await ensureProfileDatabase(j, 'myapp_projects', (t) => events.push(t))).toBe(false);
+
+    expect(state.mysqlQueries).toHaveLength(0);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatch(/myapp_projects is not created: create it yourself/);
+  });
+
   it('refuses a name that is not an identifier, or too long for the engine', async () => {
     state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: PG_TEMPLATE };
     const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };

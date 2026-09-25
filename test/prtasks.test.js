@@ -207,6 +207,24 @@ describe('testRunPrompt', () => {
     expect(prompt).toContain("`{database}` is this session's own database name");
   });
 
+  it('does not hand over run commands naming a tenant the served profile does not list', () => {
+    const prompt = testRunPrompt({
+      ...base,
+      project: {
+        runCommands: ['php artisan register {host:central}', 'php -S 127.0.0.1:{port}'],
+        runProfiles: 'profile: projects\ntenants: demo',
+      },
+    });
+
+    expect(prompt).toContain(
+      'use `{host:central}`, but its run profile `projects` does not list `central` under tenants:',
+    );
+    expect(prompt).not.toContain('php artisan register');
+    expect(testRunPrompt({ ...base, project: { runCommands: ['x {host:central}'] } })).toContain(
+      'no run profile is served, so there is no tenant to name',
+    );
+  });
+
   it('tells the agent to work the run command out when none is configured', () => {
     const prompt = testRunPrompt({ ...base, project: { runCommands: [] } });
     expect(prompt).toContain('no run command configured');

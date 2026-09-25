@@ -6,6 +6,7 @@ import {
   runVars,
   profileRun,
   render,
+  unknownHostTenant,
 } from '../lib/runprofiles.js';
 
 const HEEDLY = `
@@ -63,6 +64,23 @@ describe('parseRunProfiles', () => {
     expect(p.tenants).toEqual(['central']);
   });
 
+  it("cuts a trailing ' # comment' off an env value, as the checkout's .env is read", () => {
+    const [p] = parseRunProfiles(
+      'profile: a\nenv:\n  A=projects # main vertical\n  B=\'x # y\' # z\n  C=a#b\n  D="quoted"',
+    );
+    expect(p.env).toEqual([
+      ['A', 'projects'],
+      ['B', 'x # y'],
+      ['C', 'a#b'],
+      ['D', 'quoted'],
+    ]);
+  });
+
+  it('takes {profile} in DB_DATABASE under a name without a hyphen', () => {
+    const [p] = parseRunProfiles('profile: vertical_a\nenv:\n  DB_DATABASE={database}_{profile}');
+    expect(p.env).toEqual([['DB_DATABASE', '{database}_{profile}']]);
+  });
+
   it('keeps the last value of a key set twice', () => {
     const [p] = parseRunProfiles('profile: a\nenv:\n  A=1\n  B=2\n  A=3');
     expect(p.env).toEqual([
@@ -87,6 +105,10 @@ describe('parseRunProfiles', () => {
     ['profile: a\ntenants: central\nbefore:\n  register {host:demo}', /line 4: \{host:demo\} names a tenant/],
     ['profile: a\nenv:\n  APP_URL=https://{host:demo}', /line 3: \{host:demo\} names a tenant profile "a"/],
     ['profile: a\nbefore:\n  x {host:demo}\nprofile: b\ntenants: demo', /line 3: \{host:demo\}/],
+    [
+      'profile: vertical-a\nenv:\n  DB_DATABASE={database}_{profile}',
+      /line 3: \{profile\} renders "vertical-a"/,
+    ],
   ])('refuses %j', (text, error) => {
     expect(() => parseRunProfiles(text)).toThrow(error);
   });
@@ -158,5 +180,13 @@ describe('filling a profile in', () => {
 
   it('leaves a tenant the profile does not name as typed', () => {
     expect(render('{host:nobody} {host} {port}', vars)).toBe('{host:nobody} preview-8101.example.com 8101');
+  });
+});
+
+describe('unknownHostTenant', () => {
+  it('names the first {host:<tenant>} the vars have no hostname for', () => {
+    const vars = { 'host:central': 'c.example.com' };
+    expect(unknownHostTenant(['a {host:Central}', 'b {host:demo}'], vars)).toBe('demo');
+    expect(unknownHostTenant(['a {host:central} {host}'], vars)).toBeNull();
   });
 });
