@@ -254,6 +254,94 @@ describe('rate limiting', () => {
   });
 });
 
+describe('conditional requests', () => {
+  const tagged = (body, etag = '"v1"') => reply({ headers: { etag }, body });
+  const on = { conditional: true };
+
+  it('sends the ETag back on the next GET of the same URL and answers a 304 from the cache', async () => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = stubFetch(tagged({ n: 1 }), reply({ status: 304 }));
+
+    const first = await githubRest(cfg, 'GET', '/repos/a/b/pulls/1', undefined, on);
+    expect(first.notModified).toBe(false);
+    expect(await first.json()).toEqual({ n: 1 });
+
+    const second = await githubRest(cfg, 'GET', '/repos/a/b/pulls/1', undefined, on);
+    expect(fetchMock.mock.calls[0][1].headers['If-None-Match']).toBeUndefined();
+    expect(fetchMock.mock.calls[1][1].headers['If-None-Match']).toBe('"v1"');
+    expect(second.ok).toBe(true);
+    expect(second.status).toBe(200);
+    expect(second.notModified).toBe(true);
+    expect(second.etag).toBe('"v1"');
+    expect(await second.json()).toEqual({ n: 1 });
+  });
+
+  it('replaces the cached body when GitHub answers 200 with a new tag', async () => {
+    const { githubRest } = await freshGithub();
+    stubFetch(tagged({ n: 1 }), tagged({ n: 2 }, '"v2"'), reply({ status: 304 }));
+
+    await githubRest(cfg, 'GET', '/repos/a/b', undefined, on);
+    const changed = await githubRest(cfg, 'GET', '/repos/a/b', undefined, on);
+    expect(changed.notModified).toBe(false);
+    expect(changed.etag).toBe('"v2"');
+    expect(await changed.json()).toEqual({ n: 2 });
+    expect(await (await githubRest(cfg, 'GET', '/repos/a/b', undefined, on)).json()).toEqual({ n: 2 });
+  });
+
+  it('caches nothing for an answer without an ETag, a non-ok answer, or a write', async () => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = stubFetch(
+      reply({ body: { a: 1 } }),
+      reply({ body: { a: 2 } }),
+      reply({ status: 404 }),
+      reply(),
+      tagged({}),
+      reply(),
+    );
+
+    await githubRest(cfg, 'GET', '/repos/a/b', undefined, on);
+    await githubRest(cfg, 'GET', '/repos/a/b', undefined, on);
+    await githubRest(cfg, 'GET', '/repos/a/missing', undefined, on);
+    await githubRest(cfg, 'GET', '/repos/a/missing', undefined, on);
+    await githubRest(cfg, 'POST', '/repos/a/b/issues', { title: 'x' }, on);
+    await githubRest(cfg, 'POST', '/repos/a/b/issues', { title: 'x' }, on);
+    for (const [, init] of fetchMock.mock.calls) expect(init.headers['If-None-Match']).toBeUndefined();
+  });
+
+  it("keeps one token's tags away from another", async () => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = stubFetch(tagged({ n: 1 }), tagged({ n: 1 }));
+
+    await githubRest(cfg, 'GET', '/repos/a/b', undefined, on);
+    await githubRest({ githubToken: 'other' }, 'GET', '/repos/a/b', undefined, on);
+    expect(fetchMock.mock.calls[1][1].headers['If-None-Match']).toBeUndefined();
+  });
+
+  it('holds nothing for a GET that did not ask for it', async () => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = stubFetch(tagged({ n: 1 }), tagged({ n: 1 }));
+
+    const first = await githubRest(cfg, 'GET', '/user');
+    expect(first.notModified).toBeUndefined();
+    expect(await first.json()).toEqual({ n: 1 });
+    await githubRest(cfg, 'GET', '/user');
+    expect(fetchMock.mock.calls[1][1].headers['If-None-Match']).toBeUndefined();
+  });
+
+  it('hands every caller a copy of its own, so one editing the answer cannot corrupt the next', async () => {
+    const { githubRest } = await freshGithub();
+    stubFetch(tagged({ list: [1, 2] }), reply({ status: 304 }), reply({ status: 304 }));
+
+    (await (await githubRest(cfg, 'GET', '/repos/a/b', undefined, on)).json()).list.push(3);
+    const second = await (await githubRest(cfg, 'GET', '/repos/a/b', undefined, on)).json();
+    expect(second).toEqual({ list: [1, 2] });
+    second.list.length = 0;
+    expect(await (await githubRest(cfg, 'GET', '/repos/a/b', undefined, on)).json()).toEqual({
+      list: [1, 2],
+    });
+  });
+});
+
 describe('githubGraphql', () => {
   it('posts the query and variables and unwraps data', async () => {
     const { githubGraphql } = await freshGithub();

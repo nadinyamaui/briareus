@@ -4,7 +4,11 @@ import express from 'express';
 
 const GITHUB_SECRET = 'gh-secret';
 
-vi.mock('../lib/jobs.js', () => ({ syncSessionsOn: vi.fn() }));
+vi.mock('../lib/jobs.js', () => ({
+  syncSessionsOn: vi.fn(),
+  noteWebhookDelivery: vi.fn(),
+  noteWebhookCurrent: vi.fn(),
+}));
 
 // The public hostname is what decides whether a hook can be installed at all,
 // so it is driven from state rather than pinned.
@@ -16,7 +20,7 @@ vi.mock('../lib/webhooksecrets.js', () => ({
 }));
 
 import { webhookRouter, ensureRepoWebhook, installRepoWebhooks } from '../lib/webhooks.js';
-import { syncSessionsOn } from '../lib/jobs.js';
+import { syncSessionsOn, noteWebhookDelivery, noteWebhookCurrent } from '../lib/jobs.js';
 
 let server;
 let base;
@@ -34,6 +38,8 @@ afterAll(() => new Promise((resolve) => server.close(resolve)));
 
 beforeEach(() => {
   vi.mocked(syncSessionsOn).mockClear();
+  vi.mocked(noteWebhookDelivery).mockClear();
+  vi.mocked(noteWebhookCurrent).mockClear();
   hook.url = 'https://reviewer.example.com/webhooks/github';
 });
 
@@ -85,6 +91,18 @@ describe('POST /webhooks/github', () => {
     expect(await res.json()).toEqual({ ok: true, pong: true });
   });
 
+  it('stamps every signed delivery as proof the hook reaches this install', async () => {
+    await githubDelivery('ping', { repository: { full_name: 'acme/shop' } });
+    await githubDelivery('issue_comment', { repository: { full_name: 'acme/api' }, issue: { number: 1 } });
+    expect(noteWebhookDelivery).toHaveBeenCalledWith('acme/shop');
+    expect(noteWebhookDelivery).toHaveBeenCalledWith('acme/api');
+  });
+
+  it('stamps nothing for a delivery with a bad signature', async () => {
+    await githubDelivery('ping', { repository: { full_name: 'acme/shop' } }, { secret: 'wrong' });
+    expect(noteWebhookDelivery).not.toHaveBeenCalled();
+  });
+
   it('accepts a pull_request event fast and syncs behind the response', async () => {
     const payload = {
       repository: { full_name: 'acme/shop' },
@@ -125,7 +143,7 @@ describe('POST /webhooks/github', () => {
 describe('ensureRepoWebhook', () => {
   const cfg = { githubToken: 'tok' };
   const url = 'https://reviewer.example.com/webhooks/github';
-  const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite'];
+  const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite', 'status'];
 
   function restServing(hooks, responses = {}) {
     return vi.fn(async (c, method, _path, _body) => {
@@ -232,12 +250,24 @@ describe('the events a delivery can carry', () => {
     // A commit status names no branch of its own.
     await githubDelivery('status', {
       repository: { full_name: 'acme/shop' },
+      state: 'success',
       branches: [{ name: 'main' }, { name: 'feat' }],
     });
     await settle();
 
     expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'main');
     expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat');
+  });
+
+  it('a pending status syncs nothing: only one reaching a result is worth a read', async () => {
+    await githubDelivery('status', {
+      repository: { full_name: 'acme/shop' },
+      state: 'pending',
+      branches: [{ name: 'feat' }],
+    });
+    await settle();
+
+    expect(syncSessionsOn).not.toHaveBeenCalled();
   });
 
   it('a status naming no branches syncs nothing', async () => {
@@ -332,7 +362,7 @@ describe('ensureRepoWebhook without a hostname to point at', () => {
 describe('ensureRepoWebhook when GitHub refuses the write', () => {
   const cfg = { githubToken: 'tok' };
   const url = 'https://reviewer.example.com/webhooks/github';
-  const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite'];
+  const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite', 'status'];
 
   const restServing = (hooks, responses = {}) =>
     vi.fn(async (c, method) => {
@@ -435,10 +465,12 @@ describe('installRepoWebhooks', () => {
       'webhooks: acme/shop: hook created → https://reviewer.example.com/webhooks/github',
       'webhooks: acme/api: hook created → https://reviewer.example.com/webhooks/github',
     ]);
+    expect(noteWebhookCurrent).toHaveBeenCalledWith('acme/shop');
+    expect(noteWebhookCurrent).toHaveBeenCalledWith('acme/api');
   });
 
   it('stays quiet about a hook that was already right', async () => {
-    const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite'];
+    const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite', 'status'];
     const url = 'https://reviewer.example.com/webhooks/github';
     const rest = vi.fn(async () => ({
       ok: true,
@@ -448,6 +480,25 @@ describe('installRepoWebhooks', () => {
     await installRepoWebhooks(projects, { githubToken: 't' }, rest);
 
     expect(logged).toEqual([]);
+    expect(noteWebhookCurrent).toHaveBeenCalledWith('acme/shop');
+  });
+
+  it('does not count a hook it could not bring up to date as carrying every event', async () => {
+    // An older hook without `status` still delivers, so a delivery alone must
+    // not slow the timer down for this repository.
+    const url = 'https://reviewer.example.com/webhooks/github';
+    const rest = vi.fn(async (c, method) =>
+      method === 'GET'
+        ? { ok: true, json: async () => [{ id: 5, active: true, events: ['pull_request'], config: { url } }] }
+        : { ok: false, status: 502 },
+    );
+
+    await installRepoWebhooks([projects[0]], { githubToken: 't' }, rest);
+
+    expect(logged[0]).toMatch(
+      /acme\/shop: GitHub answered 502 updating the hook.*falling back to the sync timer/,
+    );
+    expect(noteWebhookCurrent).not.toHaveBeenCalled();
   });
 
   it('falls back to the sync timer for a repository it cannot manage', async () => {

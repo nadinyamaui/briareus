@@ -137,9 +137,16 @@
       <p>
         If the session's branch gets a pull request, its state and CI checks are mirrored into the header and
         the right-hand panel. Synced at the end of every turn, every 20 seconds while a turn is running, and
-        once a minute otherwise, and the panel redraws from a pushed session record, so it never waits for a
-        poll. With a
-        <a href="operations.html#webhooks">public hostname</a>, GitHub delivers the events instead.
+        once a minute while the pull request is open or its checks are still running; a session sitting on a
+        merged or closed pull request is polled only while a turn is running, or while its checks are still
+        awaited within an hour of its head first being seen. The panel redraws from a pushed session record,
+        so it never waits for a poll. With a
+        <a href="operations.html#webhooks">public hostname</a>, GitHub delivers the events instead and, once
+        deliveries arrive, the timer drops to a safety net every fifteen minutes. Each sync is a conditional
+        request: a pull request that has not moved answers 304, which GitHub does not count against the rate
+        limit, and the reviews, commits, linked issues and checks are read in one GraphQL query only when it
+        has, when a webhook says something moved, while CI is running, or once the last read is fifteen
+        minutes old.
       </p>
       <p>
         <strong>A session finds its own pull request.</strong> Being handed a branch that already has one is
