@@ -926,6 +926,48 @@ describe('restoring the project dump into the claimed database', () => {
     releaseInstance(j);
   });
 
+  it("drops the run profiles' databases before the restore, so a claim after a restart starts them over", async () => {
+    state.project.runProfiles = [
+      'profile: projects',
+      'env:',
+      '  DB_DATABASE={database}_projects',
+      'profile: central',
+      'env:',
+      '  DB_DATABASE={database}',
+      'profile: other',
+      'env:',
+      '  DB_DATABASE=shared_db',
+      'profile: named',
+      'env:',
+      '  DB_DATABASE={database}_{profile}',
+    ].join('\n');
+    // What a previous session left: no release ever ran for it.
+    const j = job();
+    const events = [];
+
+    await acquire(j, 'r/r', (t) => events.push(t));
+
+    // Only the names built off the pooled one: never the pooled database
+    // itself, nor one that may be somebody else's.
+    expect(state.mysqlQueries.map((q) => q.sql).filter((q) => q.startsWith('DROP'))).toEqual([
+      'DROP DATABASE IF EXISTS `casos_projects`',
+      'DROP DATABASE IF EXISTS `casos_named`',
+    ]);
+    expect(events[0]).toMatch(/Dropping the run profiles' databases casos_projects, casos_named/);
+    expect(events[1]).toContain('Restoring casos');
+    expect(state.psqlCalls.at(-1).bin).toBe('mysql');
+    releaseInstance(j);
+  });
+
+  it('drops no profile database on a server whose project restores no dump', async () => {
+    state.project.dbRestoreSql = '';
+    state.project.runProfiles = 'profile: projects\nenv:\n  DB_DATABASE={database}_projects';
+
+    await acquire(job());
+
+    expect(state.mysqlQueries.some((q) => q.sql.startsWith('DROP'))).toBe(false);
+  });
+
   it('refuses a dump that is not on disk', async () => {
     state.files = new Set();
 

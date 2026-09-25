@@ -58,6 +58,11 @@ describe('parseRunProfiles', () => {
     expect(p.tenants).toEqual(['demo']);
   });
 
+  it('takes a mixed-case {host:<tenant>} for the tenant its lowercased key names', () => {
+    const [p] = parseRunProfiles('profile: a\ntenants: Central\nbefore:\n  register {host:Central}');
+    expect(p.tenants).toEqual(['central']);
+  });
+
   it('keeps the last value of a key set twice', () => {
     const [p] = parseRunProfiles('profile: a\nenv:\n  A=1\n  B=2\n  A=3');
     expect(p.env).toEqual([
@@ -145,6 +150,10 @@ describe('filling a profile in', () => {
 
   it('adds nothing without a profile', () => {
     expect(profileRun(null, vars)).toEqual({ before: [], env: {} });
+  });
+
+  it('renders a mixed-case {host:<tenant>} as its lowercased tenant', () => {
+    expect(render('{host:Central}', vars)).toBe('central--preview-8101.example.com');
   });
 
   it('leaves a tenant the profile does not name as typed', () => {
