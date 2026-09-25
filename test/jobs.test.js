@@ -354,6 +354,8 @@ describe('sweepExpiredPreviews', () => {
       preview('preview-fresh', { previewExpiresAt: T0 + 2 * PREVIEW_TTL_MS }),
       preview('preview-chatted', { previewExpiresAt: T0 + PREVIEW_TTL_MS, chatStarted: true }),
       preview('preview-legacy', {}),
+      preview('preview-kept', { previewExpiresAt: T0 + PREVIEW_TTL_MS, previewKept: true }),
+      preview('preview-typed-into', { previewExpiresAt: T0 + PREVIEW_TTL_MS }),
       {
         id: 'not-a-preview',
         kind: 'devchat',
@@ -363,7 +365,14 @@ describe('sweepExpiredPreviews', () => {
       },
     ];
     await initJobs();
+    // Somebody typed while it was still preparing: the message is queued, not
+    // sent, so no provider conversation exists yet.
+    const typed = getJob('preview-typed-into');
+    typed.status = 'preparing';
+    sendDevMessage(typed.id, 'Update the .env too');
+    typed.status = 'interrupted';
     await sweepExpiredPreviews(T0 + PREVIEW_TTL_MS);
+    dropQueuedMessage(typed.id, 0);
   });
 
   it('deletes a pristine preview once its ten minutes are up, counting from creation when no expiry was stored', () => {
@@ -375,6 +384,11 @@ describe('sweepExpiredPreviews', () => {
     expect(getJob('preview-fresh')).not.toBeNull();
     expect(getJob('preview-chatted')).not.toBeNull();
     expect(getJob('not-a-preview')).not.toBeNull();
+  });
+
+  it('keeps a preview somebody wrote in before any turn of theirs has run', () => {
+    expect(getJob('preview-kept')).not.toBeNull();
+    expect(getJob('preview-typed-into')).toMatchObject({ previewKept: true });
   });
 });
 
