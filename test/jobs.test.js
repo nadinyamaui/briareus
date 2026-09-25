@@ -4690,6 +4690,30 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     },
     ...over,
   });
+  // Per pull request number, what the details query answers instead of the
+  // green/red default below.
+  const answers = new Map();
+  const failOnce = (number, then) => {
+    let calls = 0;
+    answers.set(number, () => {
+      if (calls++ === 0) throw new Error('GitHub GraphQL answered 502');
+      return then();
+    });
+  };
+  const rollupOf = (contexts) => ({
+    repository: { pullRequest: {}, headCommit: { statusCheckRollup: { contexts: { nodes: contexts } } } },
+  });
+  const identified = (id, name, conclusion, completedAt) => ({
+    __typename: 'CheckRun',
+    databaseId: id,
+    name,
+    status: 'COMPLETED',
+    conclusion: conclusion.toUpperCase(),
+    url: null,
+    completedAt,
+  });
+  const green = () =>
+    rollupOf([identified(1, 'Fast checks', 'success', 't1'), identified(2, 'Tests', 'success', 't2')]);
   // The updates this worker put in the orchestrator's buffer, joined.
   const notices = (workerId) =>
     (getJob('ci-orch').pendingWorkerNotices || [])
@@ -4750,6 +4774,88 @@ describe('the CI verdict a worker hands its orchestrator', () => {
           syncedAt: '2026-08-25T13:00:00.000Z',
         },
       }),
+      // Attached to a pull request whose CI finished long ago, and the first
+      // details read falls short: the read that then succeeds is still the
+      // first this session mirrored, and says nothing.
+      worker('ci-attach', 210, { prStatus: null }),
+      // A push this session saw land, whose first details read falls short:
+      // the verdict is still owed once a read goes through.
+      worker('ci-push', 211, {
+        prStatus: {
+          number: 211,
+          state: 'open',
+          headSha: 'sha-old',
+          checks: { total: 2, passed: 2, failed: 0, pending: 0, runs: [] },
+          syncedAt: '2026-08-25T13:00:00.000Z',
+        },
+      }),
+      // A failed job re-run on the same head, failing again: the counts do not
+      // move, the run's identity does.
+      worker('ci-rerun-same', 212, {
+        prStatus: {
+          number: 212,
+          state: 'open',
+          headSha: 'sha212',
+          checks: {
+            total: 2,
+            passed: 1,
+            failed: 1,
+            pending: 0,
+            runs: [
+              {
+                name: 'Fast checks',
+                status: 'completed',
+                conclusion: 'success',
+                url: null,
+                id: 1,
+                completedAt: 't1',
+              },
+              {
+                name: 'Tests',
+                status: 'completed',
+                conclusion: 'failure',
+                url: null,
+                id: 2,
+                completedAt: 't2',
+              },
+            ],
+          },
+          syncedAt: '2026-08-25T13:00:00.000Z',
+        },
+      }),
+      // The very runs the last sync mirrored, read again.
+      worker('ci-same-runs', 213, {
+        prStatus: {
+          number: 213,
+          state: 'open',
+          headSha: 'sha213',
+          checks: {
+            total: 2,
+            passed: 1,
+            failed: 1,
+            pending: 0,
+            runs: [
+              {
+                name: 'Fast checks',
+                status: 'completed',
+                conclusion: 'success',
+                url: null,
+                id: 1,
+                completedAt: 't1',
+              },
+              {
+                name: 'Tests',
+                status: 'completed',
+                conclusion: 'failure',
+                url: null,
+                id: 2,
+                completedAt: 't2',
+              },
+            ],
+          },
+          syncedAt: '2026-08-25T13:00:00.000Z',
+        },
+      }),
       // Already green on the sha GitHub is about to report again.
       worker('ci-again', 205, {
         prStatus: {
@@ -4784,6 +4890,8 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     });
     // The head commit's check runs ride on the one GraphQL details query.
     githubGraphql.mockImplementation(async (_cfg, _query, { number }) => {
+      const custom = answers.get(number);
+      if (custom) return custom();
       const runs =
         number === 202 || number === 209
           ? [run('Fast checks', 'success'), run('Tests', 'failure')]
@@ -4867,6 +4975,49 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     expect(notices('ci-late')).toContain('1 of 2 failing (Tests)');
   });
 
+  it('says nothing about a finished run whose first read fell short, even once a read goes through', async () => {
+    failOnce(210, green);
+    syncSessionsOn('acme/ci', 'dev-ci-attach', null);
+    const job = getJob('ci-attach');
+    await vi.waitFor(() => expect(job.prStatus).toMatchObject({ number: 210, checks: null }));
+    expect(job.prStatus.awaitingVerdict).toBe(false);
+    syncSessionsOn('acme/ci', null, 210);
+    await vi.waitFor(() => expect(job.prStatus.checks).toMatchObject({ passed: 2 }));
+    expect(notices('ci-attach')).toBe('');
+  });
+
+  it('still hands over the verdict of a push it saw land when the first read after it fell short', async () => {
+    failOnce(211, green);
+    syncSessionsOn('acme/ci', null, 211);
+    const job = getJob('ci-push');
+    await vi.waitFor(() => expect(job.prStatus.headSha).toBe('sha211'));
+    expect(job.prStatus.checks).toBeNull();
+    expect(job.prStatus.awaitingVerdict).toBe(true);
+    expect(notices('ci-push')).toBe('');
+    syncSessionsOn('acme/ci', null, 211);
+    await vi.waitFor(() => expect(notices('ci-push')).toContain('every check on PR #211 passed (2/2)'));
+    expect(job.prStatus.awaitingVerdict).toBe(false);
+  });
+
+  it('hands over a re-run that fails again: same counts, other runs', async () => {
+    answers.set(212, () =>
+      rollupOf([identified(1, 'Fast checks', 'success', 't1'), identified(3, 'Tests', 'failure', 't3')]),
+    );
+    syncSessionsOn('acme/ci', null, 212);
+    await vi.waitFor(() => expect(notices('ci-rerun-same')).toContain('PR #212'));
+    expect(notices('ci-rerun-same')).toContain('1 of 2 failing (Tests)');
+  });
+
+  it('says nothing when the runs read are the ones the last sync mirrored', async () => {
+    answers.set(213, () =>
+      rollupOf([identified(1, 'Fast checks', 'success', 't1'), identified(2, 'Tests', 'failure', 't2')]),
+    );
+    syncSessionsOn('acme/ci', null, 213);
+    const job = getJob('ci-same-runs');
+    await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
+    expect(notices('ci-same-runs')).toBe('');
+  });
+
   it('says nothing again on the next sync of the same finished run', async () => {
     syncSessionsOn('acme/ci', null, 205);
     await vi.waitFor(() => expect(getJob('ci-again').prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
@@ -4892,6 +5043,8 @@ describe('the sync tick and the GitHub budget', () => {
       state: 'open',
       headSha: 'sha-1',
       checks: { total: 1, passed: 1, failed: 0, pending: 0, runs: [] },
+      // A confirmed details read: the hooked cadence needs one.
+      detailsReadAt: '2026-08-25T13:00:00.000Z',
       syncedAt: '2026-08-25T13:00:00.000Z',
     },
     ...over,
@@ -4973,7 +5126,19 @@ describe('the sync tick and the GitHub budget', () => {
       return { ok: false, status: 404, json: async () => ({}) };
     });
     githubGraphql.mockResolvedValue({ repository: { pullRequest: {} } });
-    for (const j of state.stored) getJob(j.id).prStatus.syncedAt = '2026-08-25T13:00:00.000Z';
+    // Back to the fixture's state and a confirmed read: an earlier test's sync
+    // may have mirrored a merge (and closed the session) or left a read
+    // unconfirmed. The restored record is the fixture object itself, so the
+    // states are spelled out here.
+    const fixtureState = { 'budget-closed': 'closed', 'budget-open': 'open', 'budget-hooked': 'open' };
+    for (const j of state.stored) {
+      getJob(j.id).status = j.id === 'budget-running' ? 'running' : 'idle';
+      Object.assign(getJob(j.id).prStatus, {
+        syncedAt: '2026-08-25T13:00:00.000Z',
+        state: fixtureState[j.id] || 'merged',
+        detailsReadAt: '2026-08-25T13:00:00.000Z',
+      });
+    }
     // A merged pull request whose CI started on a head seen just now.
     Object.assign(getJob('budget-ci').prStatus, {
       headSha: 'sha-15',
@@ -5119,6 +5284,8 @@ describe('the sync tick and the GitHub budget', () => {
       status: 'completed',
       conclusion: 'timed_out',
       url: 'https://ci/1',
+      id: null,
+      completedAt: null,
     });
     // A commit status is listed too, the same way the pull request board shows it.
     expect(status.checks.runs[2]).toEqual({
@@ -5209,11 +5376,27 @@ describe('the sync tick and the GitHub budget', () => {
       expect(githubGraphql.mock.calls.filter(([, , v]) => v.number === 13)).toHaveLength(1),
     );
     await vi.waitFor(() => expect(job.prStatus.etag).toBe('"e13"'));
-    // The next sync has seen that tag already, and reads nothing more.
+    // A read under a tag this session had not seen is not yet the last word
+    // (GraphQL can answer from just before the change): the next sync, which
+    // has seen the tag, reads once more and that read is the one that counts.
+    expect(job.prStatus.detailsReadAt).toBeNull();
+    job.prStatus.syncedAt = '2026-08-25T13:00:00.000Z';
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(detailsQueries(13)).toHaveLength(2));
+    await vi.waitFor(() => expect(job.prStatus.detailsReadAt).toBeTruthy());
+    // The sync after that has a confirmed read under a tag it saw, and reads nothing more.
     job.prStatus.syncedAt = '2026-08-25T13:00:00.000Z';
     await vi.advanceTimersByTimeAsync(20_000);
     await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
-    expect(detailsQueries(13)).toHaveLength(1);
+    expect(detailsQueries(13)).toHaveLength(2);
+  });
+
+  it('an unconfirmed details read keeps a hooked session on the minute cadence', async () => {
+    const job = getJob('budget-hooked');
+    job.prStatus.detailsReadAt = null;
+    job.prStatus.syncedAt = new Date(Date.now() - 2 * 60_000).toISOString();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(syncedPrs()).toContain('16');
   });
 
   it('keeps reading a fresh head that has no checks yet, and settles on none once CI had time to register', async () => {
