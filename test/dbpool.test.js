@@ -7,6 +7,7 @@ import { EventEmitter } from 'node:events';
 // module can be walked through an empty pool, a contended one and a healthy one.
 const state = vi.hoisted(() => ({
   project: null,
+  otherProjects: [], // what listProjects answers beside `project`
   servers: [],
   config: null,
   psqlCalls: [],
@@ -25,7 +26,10 @@ const state = vi.hoisted(() => ({
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => state.config }));
 
-vi.mock('../lib/projects.js', () => ({ getProject: () => state.project }));
+vi.mock('../lib/projects.js', () => ({
+  getProject: () => state.project,
+  listProjects: () => [state.project, ...state.otherProjects],
+}));
 
 vi.mock('../lib/dbservers.js', () => ({
   activeDbServers: () => state.servers,
@@ -106,6 +110,7 @@ const {
   dropSessionDatabase,
   ensureProfileDatabase,
   sessionDatabaseName,
+  _resetForTests,
 } = await import('../lib/dbpool.js');
 
 const PG_TEMPLATE = [
@@ -155,6 +160,7 @@ async function acquire(j, repo = 'r/r', onEvent = () => {}) {
 
 afterEach(() => {
   for (const j of claimed.splice(0)) releaseInstance(j);
+  _resetForTests();
 });
 
 beforeEach(() => {
@@ -170,6 +176,7 @@ beforeEach(() => {
   state.stdinError = null;
   state.files = new Set();
   state.servers = [];
+  state.otherProjects = [];
   state.config = config();
   state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: PG_TEMPLATE };
 });
@@ -1033,7 +1040,9 @@ describe("a run profile's database on a claimed server", () => {
     state.files = new Set(['/dumps/casos.sql']);
   });
 
-  it('is dropped when the server is released, and the claim only freed once it has been', async () => {
+  const drops = () => state.mysqlQueries.map((q) => q.sql).filter((q) => q.startsWith('DROP'));
+
+  it('is recorded when the server is released, and dropped at the next claim before its restore', async () => {
     const j = { ...job(), repo: 'r/r' };
     await acquire(j, 'r/r', () => {});
     await ensureProfileDatabase(j, 'casos_projects');
@@ -1044,15 +1053,34 @@ describe("a run profile's database on a claimed server", () => {
     state.mysqlQueries = [];
 
     const released = releaseInstance(j);
-    expect(claimHolder(1)).toBe('abc123');
-    await released;
-
-    expect(state.mysqlQueries.map((q) => q.sql)).toEqual(['DROP DATABASE IF EXISTS `casos_projects`']);
+    // Nothing is dropped while the claim is held: it is freed in the same tick.
     expect(claimHolder(1)).toBeNull();
+    await released;
+    expect(drops()).toEqual([]);
     expect(j.poolProfileDbs).toEqual([]);
+
+    const events = [];
+    await acquire(job('next'), 'r/r', (t) => events.push(t));
+
+    expect(drops()).toEqual(['DROP DATABASE IF EXISTS `casos_projects`']);
+    expect(events[0]).toMatch(/Dropping the run profiles' databases casos_projects/);
+    expect(events[1]).toContain('Restoring casos');
   });
 
-  it('is dropped too when the release lands while it is being created, before the claim is freed', async () => {
+  it('drops a name both recorded and rendered by the profiles only once', async () => {
+    state.project.runProfiles = 'profile: projects\nenv:\n  DB_DATABASE={database}_projects';
+    const j = { ...job(), repo: 'r/r' };
+    await acquire(j, 'r/r', () => {});
+    await ensureProfileDatabase(j, 'casos_projects');
+    await releaseInstance(j);
+    state.mysqlQueries = [];
+
+    await acquire(job('next'), 'r/r', () => {});
+
+    expect(drops()).toEqual(['DROP DATABASE IF EXISTS `casos_projects`']);
+  });
+
+  it('is recorded too when the release lands while it is being created, the claim freed once it is in', async () => {
     const j = { ...job(), repo: 'r/r' };
     await acquire(j, 'r/r', () => {});
     state.mysqlQueries = [];
@@ -1066,27 +1094,71 @@ describe("a run profile's database on a claimed server", () => {
     letGo();
     await creating;
     await released;
+    expect(claimHolder(1)).toBeNull();
+    expect(j.poolProfileDbs).toEqual([]);
+
+    await acquire(job('next'), 'r/r', () => {});
 
     expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
       expect.stringMatching(/^CREATE DATABASE IF NOT EXISTS `casos_projects`/),
+      expect.stringMatching(/^CREATE DATABASE IF NOT EXISTS `casos`/),
       'DROP DATABASE IF EXISTS `casos_projects`',
     ]);
-    expect(claimHolder(1)).toBeNull();
-    expect(j.poolProfileDbs).toEqual([]);
   });
 
-  it('still frees the claim when the drop fails', async () => {
+  it('still claims the server when the drop fails, and tries the recorded one again at the next claim', async () => {
+    state.project.runProfiles = 'profile: crm\nenv:\n  DB_DATABASE={database}_crm';
     const j = { ...job(), repo: 'r/r' };
     await acquire(j, 'r/r', () => {});
     await ensureProfileDatabase(j, 'casos_projects');
-    state.mysqlFailOn = /^DROP/;
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-
     await releaseInstance(j);
+    state.mysqlFailOn = /^DROP/;
+    state.mysqlQueries = [];
+    const events = [];
 
-    expect(claimHolder(1)).toBeNull();
-    expect(error).toHaveBeenCalled();
-    error.mockRestore();
+    const next = job('next');
+    expect(await acquire(next, 'r/r', (t) => events.push(t))).toBe(1);
+
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/Could not drop the run profile's database casos_projects on 127.0.0.1:3306/),
+        expect.stringMatching(/Could not drop the run profile's database casos_crm on 127.0.0.1:3306/),
+        expect.stringContaining('Restoring casos'),
+      ]),
+    );
+    expect(state.psqlCalls.at(-1).bin).toBe('mysql');
+    releaseInstance(next);
+    claimed.splice(claimed.indexOf(next), 1);
+    state.mysqlFailOn = null;
+    state.mysqlQueries = [];
+
+    await acquire(job('third'), 'r/r', () => {});
+
+    expect(drops()).toEqual([
+      'DROP DATABASE IF EXISTS `casos_projects`',
+      'DROP DATABASE IF EXISTS `casos_crm`',
+    ]);
+  });
+
+  it("never drops another project's pooled database, whatever the prefix", async () => {
+    state.otherProjects = [{ dbPoolEnabled: true, dbPoolDatabase: 'casos_crm' }];
+    state.project.runProfiles = [
+      'profile: crm',
+      'env:',
+      '  DB_DATABASE={database}_crm',
+      'profile: projects',
+      'env:',
+      '  DB_DATABASE={database}_projects',
+    ].join('\n');
+    const j = { ...job(), repo: 'r/r' };
+    await acquire(j, 'r/r', () => {});
+    await ensureProfileDatabase(j, 'casos_crm');
+    await releaseInstance(j);
+    state.mysqlQueries = [];
+
+    await acquire(job('next'), 'r/r', () => {});
+
+    expect(drops()).toEqual(['DROP DATABASE IF EXISTS `casos_projects`']);
   });
 
   it('stays, like the pooled database, when the project restores no dump', async () => {
@@ -1094,12 +1166,13 @@ describe("a run profile's database on a claimed server", () => {
     const j = { ...job(), repo: 'r/r' };
     await acquire(j, 'r/r', () => {});
     await ensureProfileDatabase(j, 'casos_projects');
+    await releaseInstance(j);
     state.mysqlQueries = [];
 
-    await releaseInstance(j);
+    await acquire(job('next'), 'r/r', () => {});
 
     expect(j.poolProfileDbs).toBeUndefined();
-    expect(state.mysqlQueries).toHaveLength(0);
+    expect(drops()).toEqual([]);
   });
 });
 
