@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../lib/config.js', () => ({ getConfig: () => ({ githubToken: 'token' }) }));
-vi.mock('../lib/github.js', () => ({ githubRest: vi.fn() }));
+const cfg = vi.hoisted(() => ({ githubToken: 'token' }));
+vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
+vi.mock('../lib/github.js', () => ({ githubRest: vi.fn(), githubGraphql: vi.fn() }));
 import { githubRest } from '../lib/github.js';
 import { pullRequestView } from '../lib/prviewer.js';
 
@@ -32,6 +33,7 @@ const file = {
 const ok = (data) => ({ ok: true, json: async () => structuredClone(data) });
 let respond;
 beforeEach(() => {
+  cfg.githubToken = 'token';
   githubRest.mockReset();
   respond = (path) => {
     if (path.endsWith('/pulls/42')) return ok(raw);
@@ -54,6 +56,28 @@ describe('in-app pull request content', () => {
       state: 'open',
     });
     expect(githubRest).toHaveBeenCalledTimes(1);
+    expect(githubRest).toHaveBeenCalledWith(
+      expect.anything(),
+      'GET',
+      '/repos/owner/repo/pulls/42',
+      undefined,
+      { conditional: true },
+    );
+  });
+
+  it('reports a missing token as 503 rather than a bad gateway', async () => {
+    cfg.githubToken = '';
+    await expect(pullRequestView(project, 42)).rejects.toMatchObject({ status: 503 });
+    expect(githubRest).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [404, 404],
+    [403, 403],
+    [500, 502],
+  ])('maps GitHub %s on the pull request to HTTP %s', async (githubStatus, status) => {
+    respond = () => ({ ok: false, status: githubStatus });
+    await expect(pullRequestView(project, 42)).rejects.toMatchObject({ status });
   });
 
   it.each([
@@ -139,7 +163,30 @@ describe('in-app pull request content', () => {
     const result = await pullRequestView(project, 42, { section: 'checks' });
     expect(result.checks).toHaveLength(102);
     expect(result.checks.at(-1)).toMatchObject({ name: 'external', status: 'in_progress', conclusion: null });
+    expect(result.checks.find((c) => c.name === 'lint')).toMatchObject({
+      conclusion: 'failure',
+      failed: true,
+    });
     expect(result.warnings).toEqual([]);
+  });
+
+  it('does not mark cancelled or stale check runs as failed', async () => {
+    respond = (path) => {
+      if (path.endsWith('/pulls/42')) return ok(raw);
+      if (path.includes('/status?')) return ok({ total_count: 0, statuses: [] });
+      return ok({
+        total_count: 2,
+        check_runs: [
+          { name: 'old', status: 'completed', conclusion: 'cancelled' },
+          { name: 'stale', status: 'completed', conclusion: 'stale' },
+        ],
+      });
+    };
+    const result = await pullRequestView(project, 42, { section: 'checks' });
+    expect(result.checks).toMatchObject([
+      { name: 'old', conclusion: 'cancelled', failed: false },
+      { name: 'stale', conclusion: 'stale', failed: false },
+    ]);
   });
 
   it('keeps available checks visible when the token cannot read check runs', async () => {

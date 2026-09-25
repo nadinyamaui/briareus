@@ -70,6 +70,33 @@ window.createPrViewer = ({ api, esc, md }) => {
     });
   }
 
+  function hideTemplateComments(text) {
+    // Strip HTML comments the way GitHub hides template notes, but leave
+    // fenced samples alone so a ``` block that contains <!-- --> still shows it.
+    let out = '';
+    let buf = '';
+    let fence = false;
+    const take = (s) => {
+      out += fence ? s : s.replace(/<!--[\s\S]*?-->/g, '');
+    };
+    for (const line of String(text).split('\n')) {
+      const piece = (buf || out ? '\n' : '') + line;
+      if (/^\s*```/.test(line)) {
+        if (fence) {
+          take(buf + piece);
+          buf = '';
+          fence = false;
+        } else {
+          take(buf);
+          buf = piece;
+          fence = true;
+        }
+      } else buf += piece;
+    }
+    take(buf);
+    return out;
+  }
+
   function diffTable(file, full) {
     if (!file.patch)
       return (
@@ -117,34 +144,64 @@ window.createPrViewer = ({ api, esc, md }) => {
     return `${warning}<div class="prv-diff-scroll"><table class="prv-diff${state.split ? ' prv-split' : ''}" aria-label="Changes to ${esc(file.filename)}"><tbody>${body}</tbody></table></div>${all.length > rows.length ? '<button class="btn prv-expand" data-full>Show remaining diff lines</button>' : ''}`;
   }
 
+  function fileNavItem(f, i) {
+    return `<button data-file="${i}" title="${esc(f.filename)}"><span class="prv-file-status">${esc(f.status)}</span> ${esc(f.filename)}</button>`;
+  }
+
+  function fileBlock(f, i) {
+    const open = state.expanded[i] ?? i < 5;
+    return `<details class="prv-file" id="prv-file-${i}" data-index="${i}"${open ? ' open' : ''}>
+        <summary><span class="prv-filename">${esc(f.filename)}</span><span class="prv-file-status">${esc(f.status)}</span><span class="prv-added">+${f.additions}</span><span class="prv-removed">−${f.deletions}</span></summary>
+        ${f.previousFilename ? `<div class="prv-rename">Renamed from ${esc(f.previousFilename)}</div>` : ''}
+        <div class="prv-diff-body">${open ? diffTable(f, !!state.full[i]) : ''}</div>
+      </details>`;
+  }
+
+  function filesFooter(data) {
+    const retry = data.stale
+      ? '<button class="btn prv-more" data-refresh>Refresh</button>'
+      : data.nextPage
+        ? `<button class="btn prv-more" data-more${data.loading ? ' disabled' : ''}>${data.loading ? 'Loading…' : data.error ? 'Retry loading more files' : 'Load more files'}</button>`
+        : '';
+    return `${data.error ? notice(data.error) : ''}${retry}`;
+  }
+
+  function paintFilesFooter(data) {
+    const footer = content.querySelector('#prv-files-footer');
+    if (footer) footer.innerHTML = filesFooter(data);
+    const count = content.querySelector('#prv-file-count');
+    if (count && data.files)
+      count.textContent = `${data.files.length} of ${state.pr.changedFiles} files loaded`;
+  }
+
+  function appendFileEntries(start, files) {
+    const nav = content.querySelector('.prv-file-nav');
+    const sentinel = content.querySelector('#prv-no-files');
+    if (!nav || !sentinel) return false;
+    files.forEach((f, j) => {
+      const i = start + j;
+      nav.insertAdjacentHTML('beforeend', fileNavItem(f, i));
+      sentinel.insertAdjacentHTML('beforebegin', fileBlock(f, i));
+    });
+    return true;
+  }
+
   function renderFiles() {
     const data = state.files;
     const files = data.files;
     content.innerHTML = `<div class="prv-file-tools">
       <input type="search" id="prv-filter" placeholder="Filter changed files…" aria-label="Filter changed files" value="${esc(state.filter)}">
       <label><input type="checkbox" id="prv-split"${state.split ? ' checked' : ''}> Split diff</label>
-      <span>${files.length} of ${state.pr.changedFiles} files loaded</span>
+      <span id="prv-file-count">${files.length} of ${state.pr.changedFiles} files loaded</span>
     </div>
     ${data.truncated ? notice('GitHub makes only the first 3,000 changed files available here. Open in GitHub for the full PR.') : ''}
     <div class="prv-files-layout">
-      <nav class="prv-file-nav" aria-label="Changed files">${files.map((f, i) => `<button data-file="${i}" title="${esc(f.filename)}"><span class="prv-file-status">${esc(f.status)}</span> ${esc(f.filename)}</button>`).join('')}</nav>
-      <div class="prv-file-list">${files
-        .map(
-          (
-            f,
-            i,
-          ) => `<details class="prv-file" id="prv-file-${i}" data-index="${i}"${(state.expanded[i] ?? i < 5) ? ' open' : ''}>
-        <summary><span class="prv-filename">${esc(f.filename)}</span><span class="prv-file-status">${esc(f.status)}</span><span class="prv-added">+${f.additions}</span><span class="prv-removed">−${f.deletions}</span></summary>
-        ${f.previousFilename ? `<div class="prv-rename">Renamed from ${esc(f.previousFilename)}</div>` : ''}
-        <div class="prv-diff-body">${(state.expanded[i] ?? i < 5) ? diffTable(f, false) : ''}</div>
-      </details>`,
-        )
-        .join('')}
+      <nav class="prv-file-nav" aria-label="Changed files">${files.map((f, i) => fileNavItem(f, i)).join('')}</nav>
+      <div class="prv-file-list">${files.map((f, i) => fileBlock(f, i)).join('')}
       <p id="prv-no-files" class="prv-notice" hidden>No matching files.</p>
       </div>
     </div>
-    ${data.error ? notice(data.error) : ''}
-    ${data.nextPage ? `<button class="btn prv-more" data-more${data.loading ? ' disabled' : ''}>${data.loading ? 'Loading…' : data.error ? 'Retry loading more files' : 'Load more files'}</button>` : ''}`;
+    <div id="prv-files-footer">${filesFooter(data)}</div>`;
     filterFiles();
   }
 
@@ -169,12 +226,15 @@ window.createPrViewer = ({ api, esc, md }) => {
       return;
     }
     if (data.error && !data.files) {
-      content.innerHTML = `${notice(data.error)}<button class="btn" data-retry>Try again</button>`;
+      const action = data.stale
+        ? '<button class="btn" data-refresh>Refresh</button>'
+        : '<button class="btn" data-retry>Try again</button>';
+      content.innerHTML = `${notice(data.error)}${action}`;
       return;
     }
     if (state.tab === 'description') {
-      // Hide template comments, then use the app's escape-first Markdown renderer.
-      const body = state.pr.body.replace(/<!--[\s\S]*?-->/g, '');
+      // Hide template comments outside fences, then use the app's escape-first Markdown renderer.
+      const body = hideTemplateComments(state.pr.body);
       content.innerHTML = `<article class="prv-description"><div class="prv-description-author">${esc(state.pr.author)} · Description</div><div class="md prose-chat">${body.trim() ? md(body).replace(/<li>\[([ xX])\] /g, (_, checked) => `<li><input type="checkbox" disabled${checked.toLowerCase() === 'x' ? ' checked' : ''}> `) : '<p class="prv-notice">No description provided.</p>'}</div></article>`;
     } else if (state.tab === 'files') renderFiles();
     else {
@@ -186,17 +246,21 @@ window.createPrViewer = ({ api, esc, md }) => {
           .map((c) => {
             const pending = c.status !== 'completed';
             const good = c.conclusion === 'success';
-            const neutral = ['neutral', 'skipped'].includes(c.conclusion);
-            const tone = pending ? 'pending' : good ? 'added' : neutral ? 'neutral' : 'removed';
+            const failed = c.failed === true;
+            const tone = pending ? 'pending' : good ? 'added' : failed ? 'removed' : 'neutral';
             const status = pending ? c.status : c.conclusion || 'unknown';
             const elapsed =
               c.startedAt && c.completedAt
                 ? Math.max(0, Math.round((new Date(c.completedAt) - new Date(c.startedAt)) / 1000))
                 : null;
-            return `<div class="prv-check"><span class="prv-check-icon prv-${tone}">${pending ? '●' : good ? '✓' : neutral ? '○' : '✗'}</span><div><strong>${esc(c.name)}</strong><div class="prv-check-note">${esc([c.app, status.replaceAll('_', ' '), elapsed === null ? '' : `${elapsed}s`].filter(Boolean).join(' · '))}</div>${c.description ? `<div class="prv-check-note">${esc(c.description)}</div>` : ''}</div><span class="prv-check-link">${link(c.url, 'Details')}</span></div>`;
+            return `<div class="prv-check"><span class="prv-check-icon prv-${tone}">${pending ? '●' : good ? '✓' : failed ? '✗' : '○'}</span><div><strong>${esc(c.name)}</strong><div class="prv-check-note">${esc([c.app, status.replaceAll('_', ' '), elapsed === null ? '' : `${elapsed}s`].filter(Boolean).join(' · '))}</div>${c.description ? `<div class="prv-check-note">${esc(c.description)}</div>` : ''}</div><span class="prv-check-link">${link(c.url, 'Details')}</span></div>`;
           })
           .join('')}</div>`;
     }
+  }
+
+  function filesViewOpen() {
+    return state?.tab === 'files' && !!content.querySelector('.prv-file-list');
   }
 
   async function load(section, more = false) {
@@ -204,8 +268,11 @@ window.createPrViewer = ({ api, esc, md }) => {
     if (!current || current[section]?.loading) return;
     const previous = more ? current.files : null;
     const page = previous?.nextPage || 1;
-    current[section] = { ...previous, loading: true };
-    render();
+    current[section] = { ...previous, loading: true, error: undefined, stale: false };
+    if (more && filesViewOpen()) {
+      paintFilesFooter(current.files);
+      content.setAttribute('aria-busy', 'true');
+    } else render();
     const params = new URLSearchParams({ repo: current.repo, pr: current.number, section, page });
     if (current.pr) {
       params.set('headSha', current.pr.headSha);
@@ -214,23 +281,32 @@ window.createPrViewer = ({ api, esc, md }) => {
     try {
       const data = await api(`/api/pr/view?${params}`);
       if (state !== current) return;
-      if (current.pr && (current.pr.headSha !== data.pr.headSha || current.pr.baseSha !== data.pr.baseSha))
-        throw new Error('This pull request changed. Refresh to load its latest revision.');
       current.pr ||= data.pr;
       current[section] = { ...data, ...(previous ? { files: [...previous.files, ...data.files] } : {}) };
     } catch (error) {
       if (state !== current) return;
-      current[section] = { ...previous, error: error.message };
+      current[section] = {
+        ...previous,
+        error: error.message,
+        stale: error.message === 'This pull request changed. Refresh to load its latest revision.',
+      };
     }
-    if (state === current) {
-      if (state.tab === section) render();
-      else header();
-    }
+    if (state !== current) return;
+    if (state.tab !== section) return header();
+    if (more && previous?.files && filesViewOpen()) {
+      const next = current.files;
+      if (!next.error && next.files.length > previous.files.length)
+        appendFileEntries(previous.files.length, next.files.slice(previous.files.length));
+      paintFilesFooter(next);
+      filterFiles();
+      content.setAttribute('aria-busy', 'false');
+      header();
+    } else render();
   }
 
   function open(repo, number, tab = 'description') {
     if (!dialog.open) opener = document.activeElement;
-    state = { repo, number, tab, pr: null, split: false, filter: '', expanded: {} };
+    state = { repo, number, tab, pr: null, split: false, filter: '', expanded: {}, full: {} };
     if (!dialog.open) dialog.showModal();
     load(tab);
   }
@@ -274,6 +350,7 @@ window.createPrViewer = ({ api, esc, md }) => {
     }
     if (target.hasAttribute('data-full')) {
       const file = target.closest('[data-index]');
+      state.full[file.dataset.index] = true;
       file.querySelector('.prv-diff-body').innerHTML = diffTable(state.files.files[file.dataset.index], true);
     }
   });
@@ -285,7 +362,8 @@ window.createPrViewer = ({ api, esc, md }) => {
       state.expanded[file.dataset.index] = file.open;
       if (!file.open) return;
       const body = file.querySelector('.prv-diff-body');
-      if (!body.innerHTML) body.innerHTML = diffTable(state.files.files[file.dataset.index], false);
+      if (!body.innerHTML)
+        body.innerHTML = diffTable(state.files.files[file.dataset.index], !!state.full[file.dataset.index]);
     },
     true,
   );
@@ -300,7 +378,7 @@ window.createPrViewer = ({ api, esc, md }) => {
       state.split = event.target.checked;
       for (const file of content.querySelectorAll('.prv-file')) {
         file.querySelector('.prv-diff-body').innerHTML = file.open
-          ? diffTable(state.files.files[file.dataset.index], false)
+          ? diffTable(state.files.files[file.dataset.index], !!state.full[file.dataset.index])
           : '';
       }
     }
