@@ -7,12 +7,15 @@ import { EventEmitter } from 'node:events';
 // module can be walked through an empty pool, a contended one and a healthy one.
 const state = vi.hoisted(() => ({
   project: null,
+  otherProjects: [], // what listProjects answers beside `project`
   servers: [],
   config: null,
   psqlCalls: [],
   psqlResults: [], // per call: {code, stdout, stderr}
   mysqlQueries: [],
   mysqlConnectError: null,
+  mysqlFailOn: null, // a query matching this regex rejects
+  mysqlHold: null, // { on: regex, until: promise }: a matching query waits for it
   mysqlVersion: '8.0.36',
   mysqlDatabases: [],
   spawnError: null, // makes the child emit 'error' instead of running
@@ -23,7 +26,10 @@ const state = vi.hoisted(() => ({
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => state.config }));
 
-vi.mock('../lib/projects.js', () => ({ getProject: () => state.project }));
+vi.mock('../lib/projects.js', () => ({
+  getProject: () => state.project,
+  listProjects: () => [state.project, ...state.otherProjects],
+}));
 
 vi.mock('../lib/dbservers.js', () => ({
   activeDbServers: () => state.servers,
@@ -36,7 +42,9 @@ vi.mock('mysql2/promise', () => ({
       if (state.mysqlConnectError) throw state.mysqlConnectError;
       return {
         query: async (sql) => {
+          if (state.mysqlHold && state.mysqlHold.on.test(sql)) await state.mysqlHold.until;
           state.mysqlQueries.push({ opts, sql });
+          if (state.mysqlFailOn && state.mysqlFailOn.test(sql)) throw new Error('ER_DB_DROP_EXISTS');
           if (/VERSION\(\)/.test(sql)) return [[{ version: state.mysqlVersion }]];
           if (/SHOW DATABASES/.test(sql)) return [state.mysqlDatabases];
           return [[]];
@@ -100,6 +108,10 @@ const {
   instanceAppPort,
   instanceEnv,
   dropSessionDatabase,
+  ensureProfileDatabase,
+  profileDbElsewhere,
+  sessionDatabaseName,
+  _resetForTests,
 } = await import('../lib/dbpool.js');
 
 const PG_TEMPLATE = [
@@ -149,6 +161,7 @@ async function acquire(j, repo = 'r/r', onEvent = () => {}) {
 
 afterEach(() => {
   for (const j of claimed.splice(0)) releaseInstance(j);
+  _resetForTests();
 });
 
 beforeEach(() => {
@@ -156,12 +169,15 @@ beforeEach(() => {
   state.psqlResults = [];
   state.mysqlQueries = [];
   state.mysqlConnectError = null;
+  state.mysqlFailOn = null;
+  state.mysqlHold = null;
   state.mysqlDatabases = [];
   state.spawnError = null;
   state.dumpError = null;
   state.stdinError = null;
   state.files = new Set();
   state.servers = [];
+  state.otherProjects = [];
   state.config = config();
   state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: PG_TEMPLATE };
 });
@@ -441,6 +457,233 @@ describe('dropSessionDatabase', () => {
     // able to read this record as "there was never one".
     expect(j.sessionDb).toBe('casos_abc123');
     expect(events[0]).toMatch(/Could not drop this session's database casos_abc123 .*ECONNREFUSED/);
+  });
+});
+
+describe('ensureProfileDatabase', () => {
+  it("creates a run profile's database on the session's claimed server, and keeps no drop list", async () => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'heedly', dbExtensions: [] };
+    state.servers = [server({ id: 4, host: '10.0.0.4', port: 3307 })];
+    const events = [];
+    const j = { ...job(), repo: 'r/r', dbServerId: 4 };
+
+    expect(await ensureProfileDatabase(j, 'heedly_projects', (t) => events.push(t))).toBe(true);
+
+    expect(state.mysqlQueries).toHaveLength(1);
+    expect(state.mysqlQueries[0].sql).toMatch(/^CREATE DATABASE IF NOT EXISTS `heedly_projects`/);
+    expect(state.mysqlQueries[0].opts).toMatchObject({ host: '10.0.0.4', port: 3307 });
+    // Pooled: shared by every session on that server, like the pooled database.
+    expect(j.profileDbs).toBeUndefined();
+    expect(events[0]).toContain('heedly_projects');
+  });
+
+  it("creates it next to an unpooled session's own database, remembered for the close", async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };
+
+    await ensureProfileDatabase(j, 'casos_abc123_projects');
+    await ensureProfileDatabase(j, 'casos_abc123_projects');
+
+    expect(state.mysqlQueries[0].opts.port).toBe(3306);
+    expect(j.profileDbs).toEqual(['casos_abc123_projects']);
+  });
+
+  it('creates a name not built off the session database, but never remembers it for the close', async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };
+
+    // The developer's own base database, and one every session's profile shares.
+    expect(await ensureProfileDatabase(j, 'casos')).toBe(true);
+    expect(await ensureProfileDatabase(j, 'casos_projects')).toBe(true);
+
+    expect(state.mysqlQueries).toHaveLength(2);
+    expect(j.profileDbs).toBeUndefined();
+  });
+
+  it("does nothing for the session's own database, or one this app does not manage", async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    const own = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };
+    const local = { ...job(), repo: 'r/r' };
+
+    expect(await ensureProfileDatabase(own, 'casos_abc123')).toBe(false);
+    expect(await ensureProfileDatabase(local, 'casos_projects')).toBe(false);
+    expect(await ensureProfileDatabase(own, '')).toBe(false);
+    expect(state.mysqlQueries).toHaveLength(0);
+  });
+
+  it('tells a local checkout its profile database is its own to create', async () => {
+    const events = [];
+    const local = { ...job(), repo: 'r/r', local: true };
+
+    expect(await ensureProfileDatabase(local, 'mydb_projects', (t) => events.push(t))).toBe(false);
+
+    expect(state.mysqlQueries).toHaveLength(0);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatch(/mydb_projects is not created: create it yourself/);
+  });
+
+  it('tells an unpooled session without a database of its own the same', async () => {
+    // No database name in Settings: every session shares the template's.
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: '', envTemplate: MYSQL_TEMPLATE };
+    const events = [];
+    const j = { ...job(), repo: 'r/r' };
+
+    expect(await ensureProfileDatabase(j, 'myapp_projects', (t) => events.push(t))).toBe(false);
+
+    expect(state.mysqlQueries).toHaveLength(0);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatch(/myapp_projects is not created: create it yourself/);
+  });
+
+  it('refuses a name that is not an identifier, or too long for the engine', async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: PG_TEMPLATE };
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };
+
+    await expect(ensureProfileDatabase(j, 'casos; DROP')).rejects.toThrow(/not a plain database identifier/);
+    await expect(ensureProfileDatabase(j, 'x'.repeat(64))).rejects.toThrow(/longer than 63/);
+    expect(state.psqlCalls).toHaveLength(0);
+  });
+
+  it('names the session database {database} stands for', () => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'heedly' };
+    expect(sessionDatabaseName({ ...job(), repo: 'r/r' })).toBe('heedly');
+    expect(sessionDatabaseName({ ...job(), repo: 'r/r', sessionDb: 'heedly_abc' })).toBe('heedly_abc');
+    // A local checkout runs against its own .env, not the pool's name.
+    expect(sessionDatabaseName({ ...job(), repo: 'r/r', local: true })).toBe('');
+  });
+});
+
+describe('profileDbElsewhere', () => {
+  it("names only the keys that differ from the claimed server's", () => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'heedly' };
+    state.servers = [server({ id: 4, host: '10.0.0.4', port: 3307 })];
+    const j = { ...job(), repo: 'r/r', dbServerId: 4 };
+
+    // A block copied from a .env restates the session's own server.
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'mysql', DB_HOST: '10.0.0.4', DB_PORT: '3307' })).toEqual(
+      [],
+    );
+    expect(profileDbElsewhere(j, { DB_HOST: 'reports-db', DB_PORT: '3306' })).toEqual(['DB_HOST', 'DB_PORT']);
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'pgsql' })).toEqual(['DB_CONNECTION']);
+  });
+
+  it('compares an unpooled session against the server its .env template points at', () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: PG_TEMPLATE };
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };
+
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'postgres', DB_PORT: '5432' })).toEqual([]);
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'mysql' })).toEqual(['DB_CONNECTION']);
+  });
+
+  it("takes the connection name the .env template gives the session as the session's own", () => {
+    // A multi-tenant app names its central connection in config/database.php.
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'heedly', envTemplate: 'DB_CONNECTION=central' };
+    state.servers = [server({ id: 4, host: '10.0.0.4', port: 3307 })];
+    const j = { ...job(), repo: 'r/r', dbServerId: 4 };
+
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'central', DB_HOST: '10.0.0.4' })).toEqual([]);
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'CENTRAL' })).toEqual([]);
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'mariadb' })).toEqual([]);
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'landlord' })).toEqual(['DB_CONNECTION']);
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'pgsql' })).toEqual(['DB_CONNECTION']);
+  });
+
+  it('leaves a session with no managed server to ensureProfileDatabase', () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    expect(profileDbElsewhere({ ...job(), repo: 'r/r', local: true }, { DB_HOST: 'x' })).toEqual([]);
+  });
+});
+
+describe('dropping the run profiles databases with the session', () => {
+  it('drops them before the session database, keeping one that would not drop', async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    const events = [];
+    const j = {
+      ...job(),
+      repo: 'r/r',
+      sessionDb: 'casos_abc123',
+      profileDbs: ['casos_abc123_projects', 'casos_abc123_commerce'],
+    };
+
+    expect(await dropSessionDatabase(j, (t) => events.push(t))).toBe(true);
+
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
+      'DROP DATABASE IF EXISTS `casos_abc123_projects`',
+      'DROP DATABASE IF EXISTS `casos_abc123_commerce`',
+      'DROP DATABASE IF EXISTS `casos_abc123`',
+    ]);
+    expect(j.profileDbs).toEqual([]);
+    expect(events).toHaveLength(3);
+  });
+
+  it('never drops a listed name that was not built off the session database', async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123', profileDbs: ['casos', 'casos_projects'] };
+
+    expect(await dropSessionDatabase(j, () => {})).toBe(true);
+
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual(['DROP DATABASE IF EXISTS `casos_abc123`']);
+  });
+
+  it('keeps the session database name while a profile database will not drop, so the next close retries it', async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    state.mysqlFailOn = /casos_abc123_projects/;
+    const events = [];
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123', profileDbs: ['casos_abc123_projects'] };
+
+    expect(await dropSessionDatabase(j, (t) => events.push(t))).toBe(true);
+
+    // The session's own database goes all the same: a reopen's CREATE ... IF
+    // NOT EXISTS must start from scratch, not land on the old one.
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
+      'DROP DATABASE IF EXISTS `casos_abc123_projects`',
+      'DROP DATABASE IF EXISTS `casos_abc123`',
+    ]);
+    expect(j.sessionDb).toBe('casos_abc123');
+    expect(j.profileDbs).toEqual(['casos_abc123_projects']);
+    expect(events.at(-1)).toMatch(/Kept this session's database name casos_abc123/);
+
+    // The next close (or the delete) finds both again.
+    state.mysqlFailOn = null;
+    state.mysqlQueries = [];
+    expect(await dropSessionDatabase(j, () => {})).toBe(true);
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
+      'DROP DATABASE IF EXISTS `casos_abc123_projects`',
+      'DROP DATABASE IF EXISTS `casos_abc123`',
+    ]);
+    expect(j.sessionDb).toBeNull();
+  });
+
+  it('waits for a profile database being created, so the close finds it and drops it', async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    let letGo;
+    state.mysqlHold = { on: /^CREATE/, until: new Promise((resolve) => (letGo = resolve)) };
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };
+
+    const creating = ensureProfileDatabase(j, 'casos_abc123_projects');
+    const dropping = dropSessionDatabase(j, () => {});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(state.mysqlQueries).toHaveLength(0);
+    letGo();
+
+    expect(await creating).toBe(true);
+    expect(await dropping).toBe(true);
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
+      expect.stringMatching(/^CREATE DATABASE IF NOT EXISTS `casos_abc123_projects`/),
+      'DROP DATABASE IF EXISTS `casos_abc123_projects`',
+      'DROP DATABASE IF EXISTS `casos_abc123`',
+    ]);
+    expect(j.profileDbs).toEqual([]);
+    expect(j.sessionDb).toBeNull();
+  });
+
+  it('leaves the list in place when the server cannot be reached', async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    state.mysqlConnectError = new Error('ECONNREFUSED');
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123', profileDbs: ['casos_abc123_projects'] };
+
+    expect(await dropSessionDatabase(j, () => {})).toBe(false);
+    expect(j.profileDbs).toEqual(['casos_abc123_projects']);
   });
 });
 
@@ -745,6 +988,73 @@ describe('restoring the project dump into the claimed database', () => {
     releaseInstance(j);
   });
 
+  it("drops the run profiles' databases before the restore, so a claim after a restart starts them over", async () => {
+    state.project.runProfiles = [
+      'profile: projects',
+      'env:',
+      '  DB_DATABASE={database}_projects',
+      'profile: central',
+      'env:',
+      '  DB_DATABASE={database}',
+      'profile: other',
+      'env:',
+      '  DB_DATABASE=shared_db',
+      'profile: named',
+      'env:',
+      '  DB_DATABASE={database}_{profile}',
+    ].join('\n');
+    // What a previous session left: no release ever ran for it.
+    const j = job();
+    const events = [];
+
+    await acquire(j, 'r/r', (t) => events.push(t));
+
+    // Only the names built off the pooled one: never the pooled database
+    // itself, nor one that may be somebody else's.
+    expect(state.mysqlQueries.map((q) => q.sql).filter((q) => q.startsWith('DROP'))).toEqual([
+      'DROP DATABASE IF EXISTS `casos_projects`',
+      'DROP DATABASE IF EXISTS `casos_named`',
+    ]);
+    expect(events[0]).toMatch(/Dropping the run profiles' databases casos_projects, casos_named/);
+    expect(events[1]).toContain('Restoring casos');
+    expect(state.psqlCalls.at(-1).bin).toBe('mysql');
+    releaseInstance(j);
+  });
+
+  it('drops no database for a profile that points the app at another server', async () => {
+    state.project.runProfiles = [
+      'profile: restated',
+      'env:',
+      '  DB_CONNECTION=mysql',
+      '  DB_HOST=127.0.0.1',
+      '  DB_PORT=3306',
+      '  DB_DATABASE={database}_restated',
+      'profile: reports',
+      'env:',
+      '  DB_HOST=reports-db',
+      '  DB_DATABASE={database}_reports',
+    ].join('\n');
+    const j = job();
+    const events = [];
+
+    await acquire(j, 'r/r', (t) => events.push(t));
+
+    expect(state.mysqlQueries.map((q) => q.sql).filter((q) => q.startsWith('DROP'))).toEqual([
+      'DROP DATABASE IF EXISTS `casos_restated`',
+    ]);
+    expect(events[0]).toMatch(/Dropping the run profiles' databases casos_restated on/);
+    releaseInstance(j);
+  });
+
+  it('drops no profile database on a server whose project restores no dump', async () => {
+    state.project.dbRestoreSql = '';
+    state.project.runProfiles = 'profile: projects\nenv:\n  DB_DATABASE={database}_projects';
+
+    await acquire(job());
+
+    expect(state.mysqlQueries.some((q) => q.sql.startsWith('DROP'))).toBe(false);
+  });
+
   it('refuses a dump that is not on disk', async () => {
     state.files = new Set();
 
@@ -795,6 +1105,154 @@ describe('restoring the project dump into the claimed database', () => {
 
     expect(state.psqlCalls.at(-1).env.MYSQL_PWD).toBe('');
     releaseInstance(j);
+  });
+});
+
+describe("a run profile's database on a claimed server", () => {
+  beforeEach(() => {
+    state.servers = [server({ id: 1 })];
+    state.project = {
+      dbPoolEnabled: true,
+      dbPoolDatabase: 'casos',
+      dbRestoreSql: '/dumps/casos.sql',
+      envTemplate: MYSQL_TEMPLATE,
+    };
+    state.files = new Set(['/dumps/casos.sql']);
+  });
+
+  const drops = () => state.mysqlQueries.map((q) => q.sql).filter((q) => q.startsWith('DROP'));
+
+  it('is recorded when the server is released, and dropped at the next claim before its restore', async () => {
+    const j = { ...job(), repo: 'r/r' };
+    await acquire(j, 'r/r', () => {});
+    await ensureProfileDatabase(j, 'casos_projects');
+    await ensureProfileDatabase(j, 'casos_projects');
+    // Not built off the pooled database: it may be anybody's.
+    await ensureProfileDatabase(j, 'shared');
+    expect(j.poolProfileDbs).toEqual(['casos_projects']);
+    state.mysqlQueries = [];
+
+    const released = releaseInstance(j);
+    // Nothing is dropped while the claim is held: it is freed in the same tick.
+    expect(claimHolder(1)).toBeNull();
+    await released;
+    expect(drops()).toEqual([]);
+    expect(j.poolProfileDbs).toEqual([]);
+
+    const events = [];
+    await acquire(job('next'), 'r/r', (t) => events.push(t));
+
+    expect(drops()).toEqual(['DROP DATABASE IF EXISTS `casos_projects`']);
+    expect(events[0]).toMatch(/Dropping the run profiles' databases casos_projects/);
+    expect(events[1]).toContain('Restoring casos');
+  });
+
+  it('drops a name both recorded and rendered by the profiles only once', async () => {
+    state.project.runProfiles = 'profile: projects\nenv:\n  DB_DATABASE={database}_projects';
+    const j = { ...job(), repo: 'r/r' };
+    await acquire(j, 'r/r', () => {});
+    await ensureProfileDatabase(j, 'casos_projects');
+    await releaseInstance(j);
+    state.mysqlQueries = [];
+
+    await acquire(job('next'), 'r/r', () => {});
+
+    expect(drops()).toEqual(['DROP DATABASE IF EXISTS `casos_projects`']);
+  });
+
+  it('is recorded too when the release lands while it is being created, the claim freed once it is in', async () => {
+    const j = { ...job(), repo: 'r/r' };
+    await acquire(j, 'r/r', () => {});
+    state.mysqlQueries = [];
+    let letGo;
+    state.mysqlHold = { on: /^CREATE/, until: new Promise((resolve) => (letGo = resolve)) };
+
+    const creating = ensureProfileDatabase(j, 'casos_projects');
+    const released = releaseInstance(j);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(claimHolder(1)).toBe('abc123');
+    letGo();
+    await creating;
+    await released;
+    expect(claimHolder(1)).toBeNull();
+    expect(j.poolProfileDbs).toEqual([]);
+
+    await acquire(job('next'), 'r/r', () => {});
+
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
+      expect.stringMatching(/^CREATE DATABASE IF NOT EXISTS `casos_projects`/),
+      expect.stringMatching(/^CREATE DATABASE IF NOT EXISTS `casos`/),
+      'DROP DATABASE IF EXISTS `casos_projects`',
+    ]);
+  });
+
+  it('still claims the server when the drop fails, and tries the recorded one again at the next claim', async () => {
+    state.project.runProfiles = 'profile: crm\nenv:\n  DB_DATABASE={database}_crm';
+    const j = { ...job(), repo: 'r/r' };
+    await acquire(j, 'r/r', () => {});
+    await ensureProfileDatabase(j, 'casos_projects');
+    await releaseInstance(j);
+    state.mysqlFailOn = /^DROP/;
+    state.mysqlQueries = [];
+    const events = [];
+
+    const next = job('next');
+    expect(await acquire(next, 'r/r', (t) => events.push(t))).toBe(1);
+
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/Could not drop the run profile's database casos_projects on 127.0.0.1:3306/),
+        expect.stringMatching(/Could not drop the run profile's database casos_crm on 127.0.0.1:3306/),
+        expect.stringContaining('Restoring casos'),
+      ]),
+    );
+    expect(state.psqlCalls.at(-1).bin).toBe('mysql');
+    releaseInstance(next);
+    claimed.splice(claimed.indexOf(next), 1);
+    state.mysqlFailOn = null;
+    state.mysqlQueries = [];
+
+    await acquire(job('third'), 'r/r', () => {});
+
+    expect(drops()).toEqual([
+      'DROP DATABASE IF EXISTS `casos_projects`',
+      'DROP DATABASE IF EXISTS `casos_crm`',
+    ]);
+  });
+
+  it("never drops another project's pooled database, whatever the prefix", async () => {
+    state.otherProjects = [{ dbPoolEnabled: true, dbPoolDatabase: 'casos_crm' }];
+    state.project.runProfiles = [
+      'profile: crm',
+      'env:',
+      '  DB_DATABASE={database}_crm',
+      'profile: projects',
+      'env:',
+      '  DB_DATABASE={database}_projects',
+    ].join('\n');
+    const j = { ...job(), repo: 'r/r' };
+    await acquire(j, 'r/r', () => {});
+    await ensureProfileDatabase(j, 'casos_crm');
+    await releaseInstance(j);
+    state.mysqlQueries = [];
+
+    await acquire(job('next'), 'r/r', () => {});
+
+    expect(drops()).toEqual(['DROP DATABASE IF EXISTS `casos_projects`']);
+  });
+
+  it('stays, like the pooled database, when the project restores no dump', async () => {
+    state.project = { ...state.project, dbRestoreSql: '' };
+    const j = { ...job(), repo: 'r/r' };
+    await acquire(j, 'r/r', () => {});
+    await ensureProfileDatabase(j, 'casos_projects');
+    await releaseInstance(j);
+    state.mysqlQueries = [];
+
+    await acquire(job('next'), 'r/r', () => {});
+
+    expect(j.poolProfileDbs).toBeUndefined();
+    expect(drops()).toEqual([]);
   });
 });
 

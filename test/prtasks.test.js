@@ -146,6 +146,85 @@ describe('testRunPrompt', () => {
     expect(prompt).toContain('try 8104 first');
   });
 
+  it('serves the run profile it is given: env as exports, its commands first, tenants on .localhost', () => {
+    const prompt = testRunPrompt({
+      ...base,
+      portHint: 8101,
+      profile: 'projects',
+      database: 'heedly',
+      project: {
+        runCommands: ['php -S 127.0.0.1:{port} -t public server.php'],
+        runProfiles: [
+          'profile: veterinary',
+          'env:',
+          '  VERTICAL=veterinary',
+          'profile: projects',
+          'env:',
+          "  VERTICAL=it's projects",
+          '  DB_DATABASE={database}_projects',
+          'tenants: central, demo',
+          'before:',
+          '  php artisan tenants:register-domain demo {host:demo}',
+        ].join('\n'),
+      },
+    });
+
+    expect(prompt).toContain('run profile `projects`');
+    expect(prompt).toContain(
+      "export VERTICAL='it'\\''s projects' && export DB_DATABASE='heedly_projects' && php artisan tenants:register-domain demo demo--preview-{port}.localhost && php -S 127.0.0.1:{port} -t public server.php",
+    );
+    expect(prompt).toContain('`central` at `http://central--preview-{port}.localhost:{port}`');
+    expect(prompt).not.toContain('`{database}` is');
+  });
+
+  it("renders the profile's placeholders in the project's run commands too, as ▶ Run does", () => {
+    const prompt = testRunPrompt({
+      ...base,
+      profile: 'projects',
+      database: 'heedly',
+      project: {
+        runCommands: ['VERTICAL={profile} DB={database} php -S {host}:{port} -t {dir}/public {host:demo}'],
+        runProfiles: 'profile: projects\ntenants: demo',
+      },
+    });
+
+    expect(prompt).toContain(
+      'VERTICAL=projects DB=heedly php -S 127.0.0.1:{port} -t {dir}/public demo--preview-{port}.localhost',
+    );
+  });
+
+  it('falls back to the default profile, and explains {database} when the session is not known yet', () => {
+    const prompt = testRunPrompt({
+      ...base,
+      profile: 'gone',
+      project: {
+        runCommands: ['npm start'],
+        runProfiles: 'profile: first\nenv:\n  DB_DATABASE={database}_first',
+      },
+    });
+
+    expect(prompt).toContain("export DB_DATABASE='{database}_first' && npm start");
+    expect(prompt).toContain("`{database}` is this session's own database name");
+  });
+
+  it('does not hand over run commands naming a tenant the served profile does not list', () => {
+    const prompt = testRunPrompt({
+      ...base,
+      project: {
+        runCommands: ['php artisan register {host:central}', 'php -S 127.0.0.1:{port}'],
+        runProfiles: 'profile: projects\ntenants: demo',
+      },
+    });
+
+    expect(prompt).toContain(
+      'use `{host:central}`, but its run profile `projects` does not list `central` under tenants:',
+    );
+    expect(prompt).not.toContain('php artisan register');
+    expect(testRunPrompt({ ...base, project: { runCommands: ['x {host:central}'] } })).toContain(
+      'no run profile is served, so there is no tenant to name',
+    );
+  });
+
   it('tells the agent to work the run command out when none is configured', () => {
     const prompt = testRunPrompt({ ...base, project: { runCommands: [] } });
     expect(prompt).toContain('no run command configured');

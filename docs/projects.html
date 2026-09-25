@@ -367,6 +367,66 @@ node server.js --port {port}</code></pre>
             app the same way before driving the scenarios.
           </p>
         </div>
+        <div class="f">
+          <div class="f-name">Run profiles <span class="f-meta">optional</span></div>
+          <p>
+            Named configurations of the app, for a multi-tenant app whose vertical comes from the environment
+            and whose tenant comes from the Host header. With profiles defined,
+            <span class="kbd">▶ Run</span> becomes a split button: a click serves the profile the session last
+            served (the first one to begin with), <span class="kbd">▾</span> picks another, and picking a
+            different one stops the running app and starts it again. With none, nothing changes.
+          </p>
+          <pre><code>profile: projects
+env:
+  VERTICAL=projects
+  TENANT_SIGNUP_STATUS=active
+  DB_DATABASE={database}_projects
+tenants: central, demo
+before:
+  php artisan migrate --force
+  php artisan tenants:register-domain central {host:central}
+  php artisan tenants:register-domain demo {host:demo}</code></pre>
+          <ul>
+            <li>
+              <code>env:</code> is set over the session's own environment (its <code>DB_*</code> included), so
+              it beats the checkout's <code>.env</code>. When <code>DB_DATABASE</code> names another database,
+              it is created on the session's database server before anything runs; a per-session database in
+              an unpooled project goes when the session is closed, and one named off the pooled database
+              (<code>{database}_x</code>) on a claimed server whose project restores a dump goes when the
+              server is released. A local checkout is the exception: its databases are its own, so create that
+              one yourself (the Run log says so). The same goes for an unpooled project that names no
+              database, and for a profile whose <code>env:</code> points <code>DB_HOST</code>,
+              <code>DB_PORT</code> or <code>DB_CONNECTION</code> at another server than the session's
+              (restating the session's own values is fine, the <code>DB_CONNECTION</code> name the
+              <code>.env</code> template sets included), since its database lives on that other server. A
+              <code>DB_DATABASE</code> has to render to a plain identifier (<code>A–Z a–z 0–9 _ $</code>)
+              built from <code>{database}</code> and <code>{profile}</code> only, or the save is refused.
+            </li>
+            <li><code>before:</code> runs ahead of the run commands, chained with them.</li>
+            <li>
+              <code>tenants:</code> each get a hostname of their own on the session's port,
+              <code>&lt;tenant&gt;--preview-{port}.&lt;zone&gt;</code> through the Cloudflare tunnel (its own
+              Access application, same policy as the port's), or
+              <code>&lt;tenant&gt;--preview-{port}.localhost</code> without one. The Run log and the session
+              header show one link per tenant. That first label must stay within the 63 characters DNS allows,
+              or ▶ Run refuses the profile: shorten the tenant key or <code>PREVIEW_HOSTNAME</code>'s first
+              label.
+            </li>
+            <li>
+              Placeholders, in commands and env values alike: <code>{port}</code>, <code>{dir}</code>,
+              <code>{profile}</code>, <code>{database}</code> (the session's own database name, or the
+              <code>DB_DATABASE</code> of a local checkout's <code>.env</code>; ▶ Run refuses a profile using
+              it when there is none), <code>{host}</code> (the port's hostname, published alongside the
+              tenants' when a tenant profile uses it) and <code>{host:&lt;tenant&gt;}</code> (a tenant the
+              profile lists).
+            </li>
+            <li>
+              The QA test run serves the profile the session (or the session it was run for) last served, so
+              the agent sees what you saw; it uses the <code>.localhost</code> tenant names, which its browser
+              reaches without the tunnel's login.
+            </li>
+          </ul>
+        </div>
       </div>
 
       <h2 id="checklist">A working example, end to end</h2>

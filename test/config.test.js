@@ -624,10 +624,68 @@ describe('the preview tunnel', () => {
     expect(() => getConfig()).toThrow(/PREVIEW_HOSTNAME \(a hostname with \{port\}/);
   });
 
+  it('takes {tenant} in the first label, on either side of {port}', async () => {
+    for (const hostname of ['{tenant}--preview-{port}.example.com', 'preview-{port}--{tenant}.example.com']) {
+      const { getConfig } = await loadConfig(complete({ ...TUNNEL, PREVIEW_HOSTNAME: hostname }));
+
+      expect(getConfig().previewTunnel.hostname).toBe(hostname);
+    }
+  });
+
+  it('refuses {tenant} outside the first label, apart from {port}, or twice', async () => {
+    for (const hostname of [
+      'preview-{port}.{tenant}.example.com',
+      '{tenant}.preview-{port}.example.com',
+      '{tenant}-{tenant}-{port}.example.com',
+      '{tenant}-{port}-{tenant}.example.com',
+      '{tenant}-{port}..example.com',
+    ]) {
+      const { getConfig } = await loadConfig(complete({ ...TUNNEL, PREVIEW_HOSTNAME: hostname }));
+
+      expect(() => getConfig()).toThrow(/PREVIEW_HOSTNAME/);
+    }
+  });
+
   it('takes the token from the process environment over the file', async () => {
     process.env.CLOUDFLARE_API_TOKEN = 'from-env';
     const { getConfig } = await loadConfig(complete({ ...TUNNEL, CLOUDFLARE_API_TOKEN: '' }));
 
     expect(getConfig().previewTunnel.apiToken).toBe('from-env');
+  });
+});
+
+describe('reading a .env file', () => {
+  it('takes export, spaces around =, quotes and a trailing comment', async () => {
+    const { parseEnvFile } = await loadConfig('');
+
+    expect(
+      parseEnvFile(
+        [
+          '# a comment',
+          'export DB_DATABASE=mydb',
+          'DB_HOST = 127.0.0.1',
+          'DB_PORT=3306 # the default',
+          'DB_PASSWORD="se#cret" # quoted',
+          "APP_NAME='My App'",
+          'APP_URL="http://x"y"',
+        ].join('\n'),
+        { inlineComments: true },
+      ),
+    ).toEqual({
+      DB_DATABASE: 'mydb',
+      DB_HOST: '127.0.0.1',
+      DB_PORT: '3306',
+      DB_PASSWORD: 'se#cret',
+      APP_NAME: 'My App',
+      APP_URL: 'http://x"y',
+    });
+  });
+
+  it("keeps ' #' in an unquoted value by default, as this app's own .env has always been read", async () => {
+    const { parseEnvFile } = await loadConfig('');
+
+    expect(
+      parseEnvFile(['export AUTH_USER=me', 'AUTH_PASSWORD=abc #123', 'DB_PASSWORD="se#cret"'].join('\n')),
+    ).toEqual({ AUTH_USER: 'me', AUTH_PASSWORD: 'abc #123', DB_PASSWORD: 'se#cret' });
   });
 });

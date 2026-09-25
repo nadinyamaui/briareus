@@ -499,6 +499,23 @@
                 <code>{dir}</code> the checkout.</em
               >
             </label>
+            <label class="field">
+              <span>Run profiles</span>
+              <textarea
+                id="f-runProfiles"
+                rows="8"
+                spellcheck="false"
+                placeholder="profile: projects&#10;env:&#10;  VERTICAL=projects&#10;  DB_DATABASE={database}_projects&#10;tenants: central, demo&#10;before:&#10;  php artisan tenants:register-domain central {host:central}"
+              ></textarea>
+              <em
+                >Optional named configurations ▶ Run can serve instead, the first being the default.
+                <code>env:</code> is set over the session's environment (a <code>DB_DATABASE</code> of its own
+                is created on the session's server), <code>before:</code> runs ahead of the run commands, and
+                each of the <code>tenants:</code> gets a hostname of its own on the session's port. Extra
+                placeholders: <code>{profile}</code>, <code>{database}</code>, <code>{host}</code> and
+                <code>{host:&lt;tenant&gt;}</code>.</em
+              >
+            </label>
           </details>
         </form>
 

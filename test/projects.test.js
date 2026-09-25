@@ -228,6 +228,29 @@ describe('the command lists', () => {
   });
 });
 
+describe('the run profiles', () => {
+  it('stores them as typed, once they read', async () => {
+    const text = 'profile: projects\r\nenv:\r\n  VERTICAL=projects\r\n';
+    const saved = await createProject({ ...base, runProfiles: text });
+
+    expect(saved.runProfiles).toBe('profile: projects\nenv:\n  VERTICAL=projects');
+  });
+
+  it('keeps leading blank lines, so an error names the line the textarea shows', async () => {
+    await expect(createProject({ ...base, runProfiles: '\n\nprofile: a\nenv:\n  1A=x\n\n' })).rejects.toThrow(
+      /Run profiles, line 5/,
+    );
+    const saved = await createProject({ ...base, runProfiles: '\n\nprofile: a\nenv:\n  A=1\n\n' });
+    expect(saved.runProfiles).toBe('\n\nprofile: a\nenv:\n  A=1');
+  });
+
+  it('refuses a save whose profiles do not read, naming the line', async () => {
+    await expect(createProject({ ...base, runProfiles: 'env:\n  A=1' })).rejects.toThrow(
+      /Run profiles, line 1/,
+    );
+  });
+});
+
 describe('the text fields', () => {
   it.each([
     'envTemplate',
