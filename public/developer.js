@@ -2185,7 +2185,9 @@
 
   // An answer is an ordinary message: it goes through the composer so it
   // queues, reopens and reports failures exactly like a typed one would.
-  function answerAsk(text) {
+  async function answerAsk(text) {
+    // The phrase still being dictated lands before the box is read.
+    await finishVoice();
     inputEl.value = inputEl.value.trim() ? `${inputEl.value.trim()}\n${text}` : text;
     autoGrow();
     send();
@@ -2643,6 +2645,8 @@
   const VOICE_MAX_MS = 5 * 60 * 1000;
   // { rec, base, heard, stopping, restart, since } while dictating
   let voice = null;
+  // finishVoice() callers waiting for the voice note to end
+  let voiceWaiters = [];
 
   if (Recognition && window.isSecureContext) {
     const langs = [
@@ -2658,6 +2662,9 @@
     voiceLangEl.innerHTML = langs.map((l) => `<option value="${esc(l)}">${esc(l)}</option>`).join('');
     voiceLangEl.value = langs[0];
     voiceBtn.classList.remove('hidden');
+    // The picker stays up beside the button, so the language can be set
+    // before speaking and changed after the engine rejects one.
+    voiceLangEl.classList.remove('hidden');
     renderVoice();
   }
 
@@ -2672,9 +2679,6 @@
     voiceBtn.classList.toggle('text-danger', on);
     voiceBtn.classList.toggle('border-line', !on);
     voiceBtn.classList.toggle('text-muted', !on);
-    // The picker stays up beside the button, so the language can be set
-    // before speaking and changed after the engine rejects one.
-    voiceLangEl.classList.remove('hidden');
   }
 
   const VOICE_ERRORS = {
@@ -2690,10 +2694,10 @@
     const rec = new Recognition();
     rec.lang = voiceLangEl.value;
     rec.interimResults = true;
-    // Each phrase is a recognition of its own, restarted from onend: continuous
-    // mode repeats every earlier phrase inside each new result on Android
-    // (desktop-site mode included) and misbehaves on iOS WebKit.
-    rec.continuous = false;
+    // Continuous, so the microphone stays open between phrases: every restart
+    // leaves a gap where words are lost, and Android chimes on each one. An
+    // engine that ends anyway is restarted from onend.
+    rec.continuous = true;
     // Whatever the box already holds stays in front of the transcript.
     const value = inputEl.value;
     voice = {
@@ -2706,15 +2710,25 @@
     };
     rec.onresult = (e) => {
       if (voice?.rec !== rec) return;
-      // Not every engine starts a later result with a space.
-      const text = [...e.results]
-        .map((r) => r[0].transcript.trim())
-        .filter(Boolean)
-        .join(' ');
-      voice.heard = true;
+      // Not every engine starts a later result with a space, and Android's
+      // continuous mode repeats the earlier phrases at the start of each new
+      // result (desktop-site mode included): such a result replaces the one
+      // before it rather than following it.
+      const parts = [];
+      for (const r of e.results) {
+        const t = r[0].transcript.trim();
+        if (!t) continue;
+        const last = parts.at(-1)?.toLowerCase();
+        const low = t.toLowerCase();
+        if (last && (low === last || low.startsWith(`${last} `))) parts[parts.length - 1] = t;
+        else parts.push(t);
+      }
+      const text = parts.join(' ');
       // Kept only once the engine has understood something in it, so a
-      // language it rejects is not the one every later voice note starts in.
-      localStorage.setItem(VOICE_LANG_KEY, rec.lang);
+      // language it rejects is not the one every later voice note starts in;
+      // once a round, not on every interim result.
+      if (!voice.heard) localStorage.setItem(VOICE_LANG_KEY, rec.lang);
+      voice.heard = true;
       inputEl.value = voice.base + text;
       autoGrow();
       inputEl.scrollTop = inputEl.scrollHeight;
@@ -2737,9 +2751,12 @@
       if (voice.restart) {
         startVoice(voice.since);
       } else if (voice.stopping || !voice.heard || expired) {
+        const silent = !voice.stopping && !voice.heard;
         voice = null;
+        voiceEnded();
         renderVoice();
         if (expired) toast('The voice note stopped after 5 minutes; press 🎤 to carry on');
+        else if (silent) toast('The voice note stopped after a silence; press 🎤 to carry on');
       } else {
         startVoice(voice.since);
       }
@@ -2748,6 +2765,7 @@
       rec.start();
     } catch (err) {
       voice = null;
+      voiceEnded();
       toast(`Voice note failed: ${err.message}`, true);
     }
     renderVoice();
@@ -2764,9 +2782,29 @@
     } else {
       const { rec } = voice;
       voice = null;
+      voiceEnded();
       rec.abort();
     }
     renderVoice();
+  }
+
+  function voiceEnded() {
+    for (const resolve of voiceWaiters) resolve();
+    voiceWaiters = [];
+  }
+
+  // Stops the voice note and resolves once its last phrase has landed, so a
+  // send reads the final transcript rather than the engine's interim guess
+  // (abort() would throw that final text away). An engine that never ends
+  // is aborted after `ms`.
+  async function finishVoice(ms = 3000) {
+    if (!voice) return;
+    stopVoice(true);
+    await new Promise((resolve) => {
+      voiceWaiters.push(resolve);
+      setTimeout(resolve, ms);
+    });
+    stopVoice();
   }
 
   voiceBtn.addEventListener('click', () => {
@@ -2779,9 +2817,13 @@
       voice.restart = true;
       renderVoice();
     }
+    // A clicked button keeps the focus, and Enter would then press ⏹ rather
+    // than send the message.
+    if (!isMobile()) inputEl.focus();
   });
   voiceLangEl.addEventListener('change', () => {
     renderVoice();
+    if (!isMobile()) inputEl.focus();
     if (!voice || voice.stopping) return;
     // stop(), not abort(): the phrase in flight lands before onend restarts
     // in the new language.
@@ -2824,13 +2866,18 @@
   }
 
   async function send() {
-    const text = inputEl.value.trim();
-    if ((!text && !attachments.length) || $('btn-send').disabled) return;
+    if ((!inputEl.value.trim() && !attachments.length) || $('btn-send').disabled) return;
     if (attachments.some((a) => a.uploading)) {
       toast('A file is still uploading, one moment', true);
       return;
     }
-    stopVoice(); // or a late phrase lands in the emptied box
+    if (voice) {
+      // The phrase in flight lands first, and no late one after the box empties.
+      await finishVoice();
+      // A second Enter while waiting has sent it already.
+      if (!inputEl.value.trim() && !attachments.length) return;
+    }
+    const text = inputEl.value.trim();
     const sent = attachments;
     const ids = sent.map((a) => a.id);
     attachments = [];
