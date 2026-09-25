@@ -2198,6 +2198,9 @@
     // former, so read it first.
     const inProject = currentProject || sidebarRepo;
     current = null;
+    // Every other pane (board, dashboard, office, findings) opens through
+    // here and hides the composer, ⏹ with it, so dictation cannot outlive it.
+    stopVoice();
     closeProjectView();
     closeStream();
     $('welcome').classList.remove('hidden');
@@ -2256,6 +2259,7 @@
   async function openSession(id) {
     closeDrawersOnMobile();
     if (current === id) return;
+    stopVoice(); // the composer is shared, so it would write into this session
     closeProjectView();
     closeStream();
     current = id;
@@ -2634,10 +2638,11 @@
   const voiceBtn = $('btn-voice');
   const voiceLangEl = $('voice-lang');
   const VOICE_LANG_KEY = 'dev.voiceLang';
-  // Android's continuous mode repeats every earlier phrase inside each new
-  // result, so there each phrase is a recognition of its own, restarted below.
-  const VOICE_CONTINUOUS = !/Android/i.test(navigator.userAgent);
-  let voice = null; // { rec, base, heard, stopping } while dictating
+  // Past this a voice note stops by itself: a room with a television on keeps
+  // every round hearing something, so the heard-nothing rule alone never ends it.
+  const VOICE_MAX_MS = 5 * 60 * 1000;
+  // { rec, base, heard, stopping, restart, since } while dictating
+  let voice = null;
 
   if (Recognition && window.isSecureContext) {
     const langs = [
@@ -2667,8 +2672,9 @@
     voiceBtn.classList.toggle('text-danger', on);
     voiceBtn.classList.toggle('border-line', !on);
     voiceBtn.classList.toggle('text-muted', !on);
-    // The language only matters while speaking; the button's title names it.
-    voiceLangEl.classList.toggle('hidden', !on);
+    // The picker stays up beside the button, so the language can be set
+    // before speaking and changed after the engine rejects one.
+    voiceLangEl.classList.remove('hidden');
   }
 
   const VOICE_ERRORS = {
@@ -2679,20 +2685,37 @@
     'language-not-supported': 'That language is not supported for voice notes',
   };
 
-  function startVoice() {
+  // since: when the voice note began, carried across the rounds it restarts.
+  function startVoice(since = Date.now()) {
     const rec = new Recognition();
     rec.lang = voiceLangEl.value;
     rec.interimResults = true;
-    rec.continuous = VOICE_CONTINUOUS;
+    // Each phrase is a recognition of its own, restarted from onend: continuous
+    // mode repeats every earlier phrase inside each new result on Android
+    // (desktop-site mode included) and misbehaves on iOS WebKit.
+    rec.continuous = false;
     // Whatever the box already holds stays in front of the transcript.
     const value = inputEl.value;
-    voice = { rec, base: value + (value && !/\s$/.test(value) ? ' ' : ''), heard: false, stopping: false };
+    voice = {
+      rec,
+      base: value + (value && !/\s$/.test(value) ? ' ' : ''),
+      heard: false,
+      stopping: false,
+      restart: false,
+      since,
+    };
     rec.onresult = (e) => {
       if (voice?.rec !== rec) return;
-      let text = '';
-      for (const r of e.results) text += r[0].transcript;
+      // Not every engine starts a later result with a space.
+      const text = [...e.results]
+        .map((r) => r[0].transcript.trim())
+        .filter(Boolean)
+        .join(' ');
       voice.heard = true;
-      inputEl.value = voice.base + text.trimStart();
+      // Kept only once the engine has understood something in it, so a
+      // language it rejects is not the one every later voice note starts in.
+      localStorage.setItem(VOICE_LANG_KEY, rec.lang);
+      inputEl.value = voice.base + text;
       autoGrow();
       inputEl.scrollTop = inputEl.scrollHeight;
     };
@@ -2706,13 +2729,19 @@
     rec.onend = () => {
       if (voice?.rec !== rec) return;
       // Recognition stops by itself after a pause: carry on from what the box
-      // holds now until ⏹ is pressed. A round that heard nothing ends it, or
-      // a forgotten microphone would listen forever.
-      if (voice.stopping || !voice.heard) {
+      // holds now until ⏹ is pressed. A round that heard nothing ends it, and
+      // so does the time cap, or a forgotten microphone would listen forever.
+      // restart: the language changed or 🎤 was pressed again while ⏹ was
+      // finishing, and the last phrase has landed now.
+      const expired = Date.now() - voice.since > VOICE_MAX_MS;
+      if (voice.restart) {
+        startVoice(voice.since);
+      } else if (voice.stopping || !voice.heard || expired) {
         voice = null;
         renderVoice();
+        if (expired) toast('The voice note stopped after 5 minutes; press 🎤 to carry on');
       } else {
-        startVoice();
+        startVoice(voice.since);
       }
     };
     try {
@@ -2730,6 +2759,7 @@
     if (!voice) return;
     if (finish) {
       voice.stopping = true;
+      voice.restart = false;
       voice.rec.stop();
     } else {
       const { rec } = voice;
@@ -2740,17 +2770,23 @@
   }
 
   voiceBtn.addEventListener('click', () => {
-    if (voice && !voice.stopping) stopVoice(true);
+    if (!voice) startVoice();
+    else if (!voice.stopping) stopVoice(true);
     else {
-      stopVoice();
-      startVoice();
+      // ⏹ is still finishing: aborting now would drop its last phrase, so
+      // listening resumes from onend once that phrase has landed.
+      voice.stopping = false;
+      voice.restart = true;
+      renderVoice();
     }
   });
   voiceLangEl.addEventListener('change', () => {
-    localStorage.setItem(VOICE_LANG_KEY, voiceLangEl.value);
-    if (!voice) return;
-    stopVoice();
-    startVoice();
+    renderVoice();
+    if (!voice || voice.stopping) return;
+    // stop(), not abort(): the phrase in flight lands before onend restarts
+    // in the new language.
+    voice.restart = true;
+    voice.rec.stop();
   });
   // Typing takes over: a transcript still arriving would write over the edit.
   inputEl.addEventListener('input', () => stopVoice());
