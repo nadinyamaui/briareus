@@ -789,6 +789,7 @@ describe('spawnWorkerSession', () => {
       row('zeus-resume-codex', { orchestrator: true, zeus: true }),
       row('zeus-resume-grok', { orchestrator: true, zeus: true }),
       row('zeus-resume-opencode', { orchestrator: true, zeus: true }),
+      row('bg-claude', {}),
       // Started from the composer's dialog with a pick for two roles; its own
       // effort is the provider's default, so an analyst on 'low' proves the
       // role's pick was used, and one on 'high' that the fallback was.
@@ -924,6 +925,150 @@ describe('spawnWorkerSession', () => {
       }
     },
   );
+
+  it('a claude answer that leaves agents in the background takes the next message live', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    getProviderForJob.mockReturnValue(state.provider);
+    captureProviderAuth.mockResolvedValue(undefined);
+    const bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    const children = [];
+    const writes = [];
+    let ended = false;
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin.on('data', (chunk) => writes.push(JSON.parse(chunk.toString())));
+      child.stdin.on('finish', () => (ended = true));
+      children.push(child);
+      return child;
+    });
+    const emit = (...msgs) => {
+      for (const m of msgs) children[0].stdout.write(JSON.stringify(m) + '\n');
+    };
+    try {
+      sendDevMessage(job.id, 'Start the agents');
+      expect(writes[0]).toEqual({ type: 'user', message: { role: 'user', content: 'Start the agents' } });
+      emit(
+        {
+          type: 'assistant',
+          message: { content: [{ type: 'tool_use', id: 'call-1', name: 'Agent', input: { prompt: 'dig' } }] },
+        },
+        {
+          type: 'system',
+          subtype: 'task_started',
+          task_id: 't1',
+          tool_use_id: 'call-1',
+          is_backgrounded: true,
+        },
+        { type: 'result', subtype: 'success', result: 'Agents are on it.' },
+      );
+      await vi.waitFor(() => expect(publicJob(job).waitingOnBackground).toBe(true));
+      expect(ended).toBe(false);
+      expect(job.status).toBe('running');
+
+      // Straight into the live CLI, not the queue.
+      const sent = sendDevMessage(job.id, 'Meanwhile, one question');
+      expect(sent.queued).toBeUndefined();
+      expect(writes[1].message.content).toBe('Meanwhile, one question');
+      expect(publicJob(job).waitingOnBackground).toBe(false);
+      expect(job.events.filter((e) => e.kind === 'user').at(-1).text).toBe('Meanwhile, one question');
+
+      emit({ type: 'result', subtype: 'success', result: '4' });
+      await vi.waitFor(() => expect(publicJob(job).waitingOnBackground).toBe(true));
+      expect(ended).toBe(false);
+
+      // The last agent is done: stdin closes so the CLI can wake up and exit.
+      emit({ type: 'system', subtype: 'background_tasks_changed', tasks: [] });
+      await vi.waitFor(() => expect(ended).toBe(true));
+      const settled = new Promise((resolve) => {
+        const onJob = (session) => {
+          if (session.id !== job.id || session.status !== 'idle') return;
+          bus.off('job', onJob);
+          resolve();
+        };
+        bus.on('job', onJob);
+      });
+      children[0].emit('close', 0);
+      await settled;
+      expect(children).toHaveLength(1);
+      expect(job.backgroundTasks).toEqual([]);
+    } finally {
+      bin.mockRestore();
+      spawn.mockReset();
+      getProviderForJob.mockReset();
+      captureProviderAuth.mockReset();
+    }
+  });
+
+  it('a claude answer with nothing left in the background closes stdin at once', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    getProviderForJob.mockReturnValue(state.provider);
+    captureProviderAuth.mockResolvedValue(undefined);
+    const bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    let child;
+    let ended = false;
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
+      child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin.resume();
+      child.stdin.on('finish', () => (ended = true));
+      return child;
+    });
+    try {
+      sendDevMessage(job.id, 'Quick one');
+      // A background Bash does not hold the turn open; print mode reaps it.
+      child.stdout.write(
+        JSON.stringify({
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'b1',
+                name: 'Bash',
+                input: { command: 'npm run dev', run_in_background: true },
+              },
+            ],
+          },
+        }) +
+          '\n' +
+          JSON.stringify({ type: 'system', subtype: 'task_started', task_id: 'x1', tool_use_id: 'b1' }) +
+          '\n' +
+          JSON.stringify({ type: 'result', subtype: 'success', result: 'done' }) +
+          '\n',
+      );
+      await vi.waitFor(() => expect(ended).toBe(true));
+      // Mid-turn messages still wait for the turn to end.
+      expect(sendDevMessage(job.id, 'Later').queued[0].text).toBe('Later');
+      dropQueuedMessage(job.id, 0);
+      const settled = new Promise((resolve) => {
+        const onJob = (session) => {
+          if (session.id !== job.id || session.status !== 'idle') return;
+          bus.off('job', onJob);
+          resolve();
+        };
+        bus.on('job', onJob);
+      });
+      child.emit('close', 0);
+      await settled;
+    } finally {
+      bin.mockRestore();
+      spawn.mockReset();
+      getProviderForJob.mockReset();
+      captureProviderAuth.mockReset();
+    }
+  });
 
   it('a role is a Zeus analyst’s and one of the four', () => {
     expect(() => spawnWorkerSession(getJob('orch-a'), { title: 'R', prompt: 'x', role: 'qa' })).toThrow(

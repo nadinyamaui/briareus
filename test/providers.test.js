@@ -309,7 +309,8 @@ describe('buildArgs', () => {
     expect(withFile.args).toContain('--append-system-prompt-file');
     const without = BINARIES.claude.buildArgs({ model: 'm', effort: 'low', sessionId: 's' });
     expect(without.args).not.toContain('--append-system-prompt-file');
-    expect(without.promptVia).toBe('stdin');
+    expect(without.promptVia).toBe('stream-json');
+    expect(without.args).toEqual(expect.arrayContaining(['--input-format', 'stream-json']));
     expect(without.briefingInPrompt).toBe(false);
   });
 
@@ -709,6 +710,62 @@ describe('the claude parser', () => {
       },
     });
     expect(onNotify).toContainEqual({ kind: 'agent', state: 'end', id: 'bg-1' });
+  });
+
+  it('tracks the background agents and Monitors the process waits on', () => {
+    const turn = newTurn();
+    const parser = parserFor('claude', turn);
+    parser.feed({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'a1',
+            name: 'Agent',
+            input: { subagent_type: 'Explore', description: 'map' },
+          },
+          { type: 'tool_use', id: 'm1', name: 'Monitor', input: { description: 'replies', command: 'poll' } },
+          { type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'npm run dev' } },
+        ],
+      },
+    });
+    const started = (task_id, tool_use_id) =>
+      parser.feed({ type: 'system', subtype: 'task_started', task_id, tool_use_id, is_backgrounded: true });
+    expect(started('ta', 'a1')).toEqual([
+      { kind: 'background', tasks: [{ name: 'Explore', summary: 'map' }] },
+    ]);
+    expect(started('tm', 'm1').at(-1).tasks).toHaveLength(2);
+    expect(started('tb', 'b1')).toEqual([]); // a background Bash is not waited on
+    // The agent's notification ends both its background task and its sub-agent row.
+    expect(
+      parser.feed({ type: 'system', subtype: 'task_notification', task_id: 'ta', tool_use_id: 'a1' }),
+    ).toEqual([
+      { kind: 'agent', state: 'end', id: 'a1' },
+      { kind: 'background', tasks: [{ name: 'Monitor', summary: 'replies' }] },
+    ]);
+    // The CLI's own list prunes whatever it no longer runs.
+    expect(
+      parser.feed({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'tb' }] }),
+    ).toEqual([{ kind: 'background', tasks: [] }]);
+  });
+
+  it('adds up the tokens and time of every answer one process gives', () => {
+    const { turn } = feedAll([
+      {
+        type: 'result',
+        total_cost_usd: 0.1,
+        duration_ms: 1000,
+        usage: { input_tokens: 10, cache_read_input_tokens: 90, output_tokens: 5 },
+      },
+      {
+        type: 'result',
+        total_cost_usd: 0.25, // already a running total
+        duration_ms: 500,
+        usage: { input_tokens: 20, cache_read_input_tokens: 180, output_tokens: 7 },
+      },
+    ]);
+    expect(turn).toMatchObject({ costUsd: 0.25, durationMs: 1500, inputTokens: 300, outputTokens: 12 });
   });
 
   it('flush ends whatever a dead stream left running', () => {

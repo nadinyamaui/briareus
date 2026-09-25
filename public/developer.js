@@ -1594,6 +1594,7 @@
     paintLoopChip(!!s.reviewLoop);
     paintQaLoopChip(!!s.qaLoop);
     setComposerState(s);
+    if (spinner && s.status === 'running') spinner.textContent = runningText(s);
     renderQueued(s);
     refreshAskCards();
     renderPrPanel(s);
@@ -1770,7 +1771,11 @@
   function subagentsSection(s) {
     // Gated on the turn actually running: a session restored after a crash can
     // carry the sub-agents its killed turn never got to close.
-    const live = (s && s.status === 'running' && s.subagents) || [];
+    const running = s && s.status === 'running';
+    // Monitors hold the turn open the way background agents do, so they get a
+    // row too; the agents themselves are already in s.subagents.
+    const monitors = ((running && s.backgroundTasks) || []).filter((t) => t.name === 'Monitor');
+    const live = [...((running && s.subagents) || []), ...monitors];
     if (!live.length) return '';
     const rows = live
       .map((a) => {
@@ -1783,7 +1788,7 @@
       })
       .join('');
     return `<div>
-        <div class="mb-1 text-[12px] tracking-wide text-muted">Sub-agents (${live.length} working)</div>
+        <div class="mb-1 text-[12px] tracking-wide text-muted">${monitors.length ? 'Background' : 'Sub-agents'} (${live.length} working)</div>
         <div class="flex flex-col gap-0.5">${rows}</div>
       </div>`;
   }
@@ -2076,13 +2081,15 @@
     $('btn-send').disabled = false;
     inputEl.placeholder = !s
       ? 'Describe what to build…'
-      : busy
-        ? `Session is ${s.status}; your message goes in when this turn ends…`
-        : down
-          ? 'Reply, this reopens the session…'
-          : s.awaitingAnswer
-            ? 'Answer the question above…'
-            : 'Reply…';
+      : s.waitingOnBackground
+        ? 'Sub-agents are still working; your message goes in now…'
+        : busy
+          ? `Session is ${s.status}; your message goes in when this turn ends…`
+          : down
+            ? 'Reply, this reopens the session…'
+            : s.awaitingAnswer
+              ? 'Answer the question above…'
+              : 'Reply…';
     $('composer-note').textContent = down
       ? 'The session has no workspace right now. Reopen, or just send: the next message re-prepares it and resumes.'
       : '';
@@ -2547,9 +2554,17 @@
     if (['running', 'preparing', 'queued'].includes(status)) {
       spinner = document.createElement('div');
       spinner.className = 'my-2 inline-block animate-pulse text-accent';
-      spinner.textContent = status === 'running' ? 'working…' : `${status}…`;
+      spinner.textContent = status === 'running' ? runningText(currentSession()) : `${status}…`;
       messagesEl.appendChild(spinner);
     }
+  }
+
+  // A running claude turn that has already answered and only waits on its
+  // background agents or Monitors says so, instead of a "working…" that reads
+  // as stuck for as long as they take.
+  function runningText(s) {
+    const n = (s && s.waitingOnBackground && s.backgroundTasks?.length) || 0;
+    return n ? `waiting on ${n} background task${n === 1 ? '' : 's'}… you can keep writing` : 'working…';
   }
 
   function scrollBottom(force) {
