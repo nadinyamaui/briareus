@@ -575,6 +575,19 @@ describe('profileDbElsewhere', () => {
     expect(profileDbElsewhere(j, { DB_CONNECTION: 'mysql' })).toEqual(['DB_CONNECTION']);
   });
 
+  it("takes the connection name the .env template gives the session as the session's own", () => {
+    // A multi-tenant app names its central connection in config/database.php.
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'heedly', envTemplate: 'DB_CONNECTION=central' };
+    state.servers = [server({ id: 4, host: '10.0.0.4', port: 3307 })];
+    const j = { ...job(), repo: 'r/r', dbServerId: 4 };
+
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'central', DB_HOST: '10.0.0.4' })).toEqual([]);
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'CENTRAL' })).toEqual([]);
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'mariadb' })).toEqual([]);
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'landlord' })).toEqual(['DB_CONNECTION']);
+    expect(profileDbElsewhere(j, { DB_CONNECTION: 'pgsql' })).toEqual(['DB_CONNECTION']);
+  });
+
   it('leaves a session with no managed server to ensureProfileDatabase', () => {
     state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
     expect(profileDbElsewhere({ ...job(), repo: 'r/r', local: true }, { DB_HOST: 'x' })).toEqual([]);

@@ -1,8 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   parseRunProfiles,
   pickRunProfile,
   projectRunProfiles,
+  runProfilesError,
   runVars,
   profileRun,
   render,
@@ -83,9 +84,9 @@ describe('parseRunProfiles', () => {
 
   it('takes a DB_DATABASE that renders to a plain identifier', () => {
     const [p] = parseRunProfiles(
-      'profile: a\nenv:\n  DB_DATABASE={database}_{profile}_{port}\nprofile: b\nenv:\n  DB_DATABASE=app$2',
+      'profile: a\nenv:\n  DB_DATABASE={database}_{profile}\nprofile: b\nenv:\n  DB_DATABASE=app$2',
     );
-    expect(p.env).toEqual([['DB_DATABASE', '{database}_{profile}_{port}']]);
+    expect(p.env).toEqual([['DB_DATABASE', '{database}_{profile}']]);
   });
 
   it('takes {profile} in DB_DATABASE under a name without a hyphen', () => {
@@ -127,6 +128,11 @@ describe('parseRunProfiles', () => {
       /line 3: DB_DATABASE renders to a name like "app-projects"/,
     ],
     ['profile: a\nenv:\n  DB_DATABASE={dir}_x', /line 3: DB_DATABASE renders to a name like "\{dir\}_x"/],
+    // The claim-time drop has no port to render it with.
+    [
+      'profile: a\nenv:\n  DB_DATABASE={database}_{port}',
+      /line 3: DB_DATABASE renders to a name like "db_\{port\}"/,
+    ],
     ['profile: a\nenv:\n  APP_URL=http://{host:old} # a comment', /line 3: \{host:old\} names a tenant/],
   ])('refuses %j', (text, error) => {
     expect(() => parseRunProfiles(text)).toThrow(error);
@@ -153,7 +159,23 @@ describe('pickRunProfile', () => {
   });
 
   it('reads a row that does not parse as no profiles, rather than failing the run', () => {
-    expect(projectRunProfiles({ runProfiles: 'env:\n  A=1' })).toEqual([]);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const project = { repo: 'acme/stale', runProfiles: 'env:\n  A=1' };
+
+    expect(projectRunProfiles(project)).toEqual([]);
+    expect(projectRunProfiles(project)).toEqual([]);
+    // Logged once per text, not on every read.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/acme\/stale: the saved run profiles no longer read.*line 1/);
+    warn.mockRestore();
+  });
+
+  it('says why a row does not parse, and nothing for one that does', () => {
+    expect(runProfilesError({ runProfiles: 'env:\n  A=1' })).toMatch(
+      /line 1: "env:" comes before any "profile:"/,
+    );
+    expect(runProfilesError({ runProfiles: HEEDLY })).toBeNull();
+    expect(runProfilesError(null)).toBeNull();
   });
 });
 

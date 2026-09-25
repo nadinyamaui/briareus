@@ -397,9 +397,10 @@ before:
               one yourself (the Run log says so). The same goes for an unpooled project that names no
               database, and for a profile whose <code>env:</code> points <code>DB_HOST</code>,
               <code>DB_PORT</code> or <code>DB_CONNECTION</code> at another server than the session's
-              (restating the session's own values is fine), since its database lives on that other server. A
-              <code>DB_DATABASE</code> has to render to a plain identifier (<code>A–Z a–z 0–9 _ $</code>), or
-              the save is refused.
+              (restating the session's own values is fine, the <code>DB_CONNECTION</code> name the
+              <code>.env</code> template sets included), since its database lives on that other server. A
+              <code>DB_DATABASE</code> has to render to a plain identifier (<code>A–Z a–z 0–9 _ $</code>)
+              built from <code>{database}</code> and <code>{profile}</code> only, or the save is refused.
             </li>
             <li><code>before:</code> runs ahead of the run commands, chained with them.</li>
             <li>

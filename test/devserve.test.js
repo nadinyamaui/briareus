@@ -449,6 +449,18 @@ describe('▶ Run: the links it answers with', () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it('refuses saved profiles that no longer read rather than serving the plain run commands', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    state.projects[0].runProfiles = 'profile: a\nenv:\n  DB_DATABASE={database}_{port}';
+    const job = session();
+
+    await expect(startDevServe(job.id)).rejects.toThrow(
+      /run profiles saved for .* no longer read \(Run profiles, line 3: DB_DATABASE renders/,
+    );
+    expect(spawn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it('leaves no unhandled rejection when the run commands exit at once', async () => {
     const unhandled = vi.fn();
     process.on('unhandledRejection', unhandled);
