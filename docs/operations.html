@@ -90,10 +90,11 @@
         deploy hook is never touched, and re-pointing it if the hostname changes.
       </p>
       <p>
-        <strong>Nothing is started by a delivery.</strong> <code>pull_request</code>,
-        <code>pull_request_review</code>, <code>issue_comment</code>, <code>check_suite</code>,
-        <code>check_run</code> and <code>status</code> refresh the pull request panel of any open session on
-        that branch as the event lands, rather than on the next twenty-second tick (a commit status still
+        <strong>Nothing is started by a delivery.</strong> The hook subscribes to <code>pull_request</code>,
+        <code>pull_request_review</code>, <code>issue_comment</code>, <code>check_suite</code> and
+        <code>status</code> (not <code>check_run</code>: a repository hook hears a suite finish, not a run
+        start), and each refreshes the pull request panel of any open session on that branch as the event
+        lands, rather than on the next twenty-second tick (a commit status still
         <code>pending</code> refreshes nothing). A repository whose hook has delivered within the last hour,
         and which this boot found or left carrying every one of those events, is polled only every fifteen
         minutes as a safety net, which is most of what keeps the GitHub rate limit intact; one that goes an

@@ -1100,6 +1100,7 @@ describe('pullOverview', () => {
                       status: 'IN_PROGRESS',
                       conclusion: null,
                       detailsUrl: null,
+                      url: 'https://gh/runs/3',
                     },
                     { __typename: 'StatusContext', context: 'ci/legacy', state: 'PENDING', targetUrl: 't' },
                   ],
@@ -1113,6 +1114,8 @@ describe('pullOverview', () => {
     const { checks } = await pullOverview(project(), 7);
     expect(checks).toMatchObject({ total: 4, passed: 1, failed: 1, pending: 2 });
     expect(checks.runs[1]).toEqual({ name: 'e2e', status: 'completed', conclusion: 'timed_out', url: null });
+    // No detailsUrl of its own: linked to its page on GitHub instead.
+    expect(checks.runs[2].url).toBe('https://gh/runs/3');
     expect(checks.runs[3]).toEqual({
       name: 'ci/legacy',
       status: 'in_progress',

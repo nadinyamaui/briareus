@@ -4729,6 +4729,27 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       }),
       // Green check runs beside a failing advisory commit status.
       worker('ci-status', 206),
+      // Reported failing on this very head, then re-run: nobody saw the re-run
+      // pending, and it comes back green.
+      worker('ci-rerun', 208, {
+        prStatus: {
+          number: 208,
+          state: 'open',
+          headSha: 'sha208',
+          checks: { total: 2, passed: 1, failed: 1, pending: 0, runs: [] },
+          syncedAt: '2026-08-25T13:00:00.000Z',
+        },
+      }),
+      // Reported green on one suite; a second registered after it settled.
+      worker('ci-late', 209, {
+        prStatus: {
+          number: 209,
+          state: 'open',
+          headSha: 'sha209',
+          checks: { total: 1, passed: 1, failed: 0, pending: 0, runs: [] },
+          syncedAt: '2026-08-25T13:00:00.000Z',
+        },
+      }),
       // Already green on the sha GitHub is about to report again.
       worker('ci-again', 205, {
         prStatus: {
@@ -4764,7 +4785,7 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     // The head commit's check runs ride on the one GraphQL details query.
     githubGraphql.mockImplementation(async (_cfg, _query, { number }) => {
       const runs =
-        number === 202
+        number === 202 || number === 209
           ? [run('Fast checks', 'success'), run('Tests', 'failure')]
           : [run('Fast checks', 'success'), run('Tests', 'success')];
       const contexts = runs.map((r) => ({
@@ -4772,7 +4793,8 @@ describe('the CI verdict a worker hands its orchestrator', () => {
         name: r.name,
         status: String(r.status).toUpperCase(),
         conclusion: r.conclusion ? String(r.conclusion).toUpperCase() : null,
-        detailsUrl: r.html_url,
+        // The run's page on GitHub: the session query asks for no detailsUrl.
+        url: r.html_url,
       }));
       if (number === 206)
         contexts.push({
@@ -4795,6 +4817,9 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     await vi.waitFor(() => expect(notices('ci-green')).toContain('PR #201'));
     expect(notices('ci-green')).toContain('every check on PR #201 passed (2/2)');
     expect(notices('ci-green')).toContain('ready to merge');
+    expect(getJob('ci-green').prStatus.checks.runs[0].url).toBe(
+      'https://github.com/acme/ci/runs/Fast checks',
+    );
   });
 
   it('names the failing checks and says not to merge', async () => {
@@ -4828,6 +4853,18 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     syncSessionsOn('acme/ci', 'dev-ci-first', null);
     await vi.waitFor(() => expect(getJob('ci-first').prStatus.checks.passed).toBe(2));
     expect(notices('ci-first')).toBe('');
+  });
+
+  it('hands over a re-run on the same head that nobody saw pending', async () => {
+    syncSessionsOn('acme/ci', null, 208);
+    await vi.waitFor(() => expect(notices('ci-rerun')).toContain('PR #208'));
+    expect(notices('ci-rerun')).toContain('every check on PR #208 passed (2/2)');
+  });
+
+  it('hands over a suite that registered and failed after the first one settled', async () => {
+    syncSessionsOn('acme/ci', null, 209);
+    await vi.waitFor(() => expect(notices('ci-late')).toContain('PR #209'));
+    expect(notices('ci-late')).toContain('1 of 2 failing (Tests)');
   });
 
   it('says nothing again on the next sync of the same finished run', async () => {
@@ -5246,6 +5283,41 @@ describe('the sync tick and the GitHub budget', () => {
     await vi.waitFor(() => expect(job.prStatus.detailsReadAt).toBeTruthy());
     expect(job.prStatus.checks).toBeNull();
     expect(job.prStatus.checksUnreadable).toBe(true);
+    githubGraphql.mockClear();
+    job.prStatus.syncedAt = '2026-08-25T13:00:00.000Z';
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
+    expect(detailsQueries(13)).toHaveLength(0);
+  });
+
+  it('counts a read whose only failure is linked issues the token may not read', async () => {
+    const job = getJob('budget-open');
+    job.prStatus.checks = { total: 1, passed: 1, failed: 0, pending: 0, runs: [] };
+    job.prStatus.headSha = 'sha-13';
+    job.prStatus.detailsReadAt = null;
+    job.prStatus.etag = '"e13"';
+    job.prStatus.issues = [{ number: 1, title: 'old', state: 'open', url: 'u' }];
+    unchangedPr();
+    const data = fullDetails([
+      { __typename: 'CheckRun', name: 'Tests', status: 'COMPLETED', conclusion: 'SUCCESS' },
+    ]);
+    data.repository.pullRequest.closingIssuesReferences = null;
+    githubGraphql.mockRejectedValue(
+      Object.assign(new Error('Resource not accessible by personal access token'), {
+        errors: [
+          {
+            type: 'FORBIDDEN',
+            message: 'Resource not accessible by personal access token',
+            path: ['repository', 'pullRequest', 'closingIssuesReferences'],
+          },
+        ],
+        data,
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(job.prStatus.detailsReadAt).toBeTruthy());
+    expect(job.prStatus.issues).toBeNull();
+    expect(job.prStatus.checks).toMatchObject({ total: 1, passed: 1 });
     githubGraphql.mockClear();
     job.prStatus.syncedAt = '2026-08-25T13:00:00.000Z';
     await vi.advanceTimersByTimeAsync(20_000);

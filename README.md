@@ -495,16 +495,18 @@ every project it works on (the `repo` scope the token already needs
 covers it), recognising its own by URL so an existing deploy hook is never
 touched, and re-pointing it if the hostname changes.
 
-What each delivery does: nothing is started by one. `pull_request`,
-`pull_request_review`, `issue_comment`, `check_suite`, `check_run` and `status` refresh
-the PR panel of any open session on that branch as the event lands rather than
-on the next twenty-second tick (a commit status still `pending` refreshes
-nothing), and a repository whose hook has delivered within the last hour, and
-which this boot found or left carrying every one of those events, is polled only
-every fifteen minutes as a safety net (the minute cadence stays while check runs
-are going, or a fresh push has none registered yet). Sessions on a merged or closed pull
-request are not polled at all, and every poll is a conditional request (a 304
-costs nothing against the rate limit). Delete the `webhooks` row in `app_settings` to
+What each delivery does: nothing is started by one. The hook subscribes to
+`pull_request`, `pull_request_review`, `issue_comment`, `check_suite` and `status`
+(not `check_run`: a repository hook hears a suite finish, not a run start), and each
+refreshes the PR panel of any open session on that branch as the event lands rather
+than on the next twenty-second tick (a commit status still `pending` refreshes
+nothing). A repository whose hook has delivered within the last hour, and which
+this boot found or left carrying every one of those events, is polled only every
+fifteen minutes as a safety net (the minute cadence stays while check runs are
+going, or a fresh push has none registered yet). A session on a merged or closed pull
+request is polled only while a turn is running, or while its checks are still
+awaited within an hour of its head first being seen, and every poll is a
+conditional request (a 304 costs nothing against the rate limit). Delete the `webhooks` row in `app_settings` to
 rotate the secret; the hook is rewritten at the next boot.
 
 The sync timer remains as the fallback. Nothing about a laptop-only install
