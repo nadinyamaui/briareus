@@ -403,8 +403,11 @@ before:
             </li>
             <li>
               Placeholders, in commands and env values alike: <code>{port}</code>, <code>{dir}</code>,
-              <code>{profile}</code>, <code>{database}</code> (the session's own database name),
-              <code>{host}</code> (the port's hostname) and <code>{host:&lt;tenant&gt;}</code>.
+              <code>{profile}</code>, <code>{database}</code> (the session's own database name, or the
+              <code>DB_DATABASE</code> of a local checkout's <code>.env</code>; ▶ Run refuses a profile using
+              it when there is none), <code>{host}</code> (the port's hostname, published alongside the
+              tenants' when a tenant profile uses it) and <code>{host:&lt;tenant&gt;}</code> (a tenant the
+              profile lists).
             </li>
             <li>
               The QA test run serves the profile the session (or the session it was run for) last served, so

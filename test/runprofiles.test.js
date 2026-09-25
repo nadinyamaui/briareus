@@ -53,6 +53,11 @@ describe('parseRunProfiles', () => {
     expect(p.before).toEqual(['echo one', 'env: not a header']);
   });
 
+  it('takes a {host:<tenant>} listed on a tenants: line below it', () => {
+    const [p] = parseRunProfiles('profile: a\nbefore:\n  register {host:demo}\ntenants: demo');
+    expect(p.tenants).toEqual(['demo']);
+  });
+
   it('keeps the last value of a key set twice', () => {
     const [p] = parseRunProfiles('profile: a\nenv:\n  A=1\n  B=2\n  A=3');
     expect(p.env).toEqual([
@@ -74,6 +79,9 @@ describe('parseRunProfiles', () => {
     ['profile: a\n  before:\n    echo one\n  env:\n    A=1', /line 2: "before:" is indented/],
     ['profile: a\nbefore:\n  echo one\n  env:\n  A=1', /line 4: "env:" is indented/],
     ['profile: a\nbefore:\n  echo one\n  tenants: demo', /line 4: "tenants: demo" is indented/],
+    ['profile: a\ntenants: central\nbefore:\n  register {host:demo}', /line 4: \{host:demo\} names a tenant/],
+    ['profile: a\nenv:\n  APP_URL=https://{host:demo}', /line 3: \{host:demo\} names a tenant profile "a"/],
+    ['profile: a\nbefore:\n  x {host:demo}\nprofile: b\ntenants: demo', /line 3: \{host:demo\}/],
   ])('refuses %j', (text, error) => {
     expect(() => parseRunProfiles(text)).toThrow(error);
   });

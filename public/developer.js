@@ -449,6 +449,8 @@
     const open = currentSession();
     if (open) {
       reflectSession(open);
+      // A session restored before the list landed was painted with no profiles.
+      paintServeButton(open);
     } else {
       loadBranches(selProject.value);
       syncWorkspaceModes();
@@ -2881,7 +2883,12 @@
     $('btn-serve').textContent = profile ? `▶ Run · ${profile}` : '▶ Run';
     $('btn-serve').classList.toggle('rounded-r-none', split);
     $('btn-serve-menu').classList.toggle('hidden', !split);
-    if (!split) $('serve-pop').classList.add('hidden');
+    // The list on screen is another session's once the header shows a
+    // different one (or none it can serve), and a pick would go to this one.
+    const pop = $('serve-pop');
+    if (!split || pop.dataset.session !== s.id || $('serve-group').classList.contains('hidden')) {
+      pop.classList.add('hidden');
+    }
   }
 
   // A tenant link is labelled with its tenant; the one link of a run without
@@ -2937,6 +2944,7 @@
     if (!s) return;
     const profiles = runProfilesOf(s);
     const running = s.serveLinks?.length ? s.serveProfile : null;
+    servePop.dataset.session = s.id;
     servePop.innerHTML = profiles
       .map(
         (name, i) =>
@@ -2956,6 +2964,7 @@
     const item = e.target.closest('.serve-item');
     if (!item) return;
     closeServePop();
+    if (servePop.dataset.session !== current) return;
     serve(item.dataset.profile);
   });
   document.addEventListener('mousedown', (e) => {
