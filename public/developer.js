@@ -772,7 +772,11 @@
 
   // Inserting never replaces what is typed: a saved prompt is a starting
   // point, and the text already in the box may be the specifics to go with it.
-  function insertPrompt(body) {
+  async function insertPrompt(body) {
+    // The phrase still being dictated lands first: the input event below
+    // would otherwise abort it, and during a send wait the prompt would go
+    // out with the message.
+    await finishVoice();
     const current = inputEl.value;
     inputEl.value = current.trim() ? `${current.replace(/\s+$/, '')}\n\n${body}` : body;
     inputEl.dispatchEvent(new Event('input')); // re-grows the box
@@ -2265,10 +2269,12 @@
     toolBox = null;
   }
 
-  async function openSession(id) {
+  // keepVoice: the session is the one this composer just created, so a note
+  // dictated while it was being created belongs to it.
+  async function openSession(id, keepVoice) {
     closeDrawersOnMobile();
     if (current === id) return;
-    stopVoice(); // the composer is shared, so it would write into this session
+    if (!keepVoice) stopVoice(); // the composer is shared, so it would write into this session
     closeProjectView();
     closeStream();
     current = id;
@@ -2821,8 +2827,8 @@
   // it the recognition is dropped where it stands, for a send or an error.
   function stopVoice(finish) {
     if (!voice) return;
+    const { rec } = voice;
     if (finish) {
-      const { rec } = voice;
       voice.stopping = true;
       voice.restart = false;
       rec.stop();
@@ -2833,7 +2839,6 @@
       }, VOICE_STOP_MS);
       renderVoice();
     } else {
-      const { rec } = voice;
       endVoice();
       rec.abort();
     }
@@ -2888,15 +2893,27 @@
   });
   // Typing takes over: a transcript still arriving would write over the edit.
   inputEl.addEventListener('input', () => stopVoice());
-  // Except while a send waits for the last phrase: a key would abort that
-  // phrase and go out with the message, so it is held back until then.
+  // Except while the last phrase is still landing, after ⏹ or during a send
+  // wait: a key would abort that phrase, leave the interim guess in the box
+  // and, for a send, go out with the message, so it is held back until then.
   inputEl.addEventListener('beforeinput', (e) => {
-    if (voice?.sending) e.preventDefault();
+    if (voice?.stopping) e.preventDefault();
   });
+
+  // A failed or dismissed send gives its text back. A voice note started
+  // while the request was out writes base + transcript on every result, so
+  // the text goes in front of the box and of that base, not over them.
+  function giveBack(text) {
+    const rest = inputEl.value;
+    inputEl.value = rest.trim() ? `${text}\n${rest}` : text;
+    if (voice) voice.base = `${text}\n${voice.base}`;
+    autoGrow();
+  }
 
   // ---------- actions ----------
 
   async function createSession(prompt, extra = {}) {
+    const nav = navSeq;
     const { session } = await api('/api/dev/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2923,7 +2940,9 @@
       }),
     });
     sessions.unshift(session);
-    await openSession(session.id);
+    // Still on the composer that sent it: a voice note started meanwhile is
+    // the follow-up for this session and carries on into it.
+    await openSession(session.id, navSeq === nav);
   }
 
   async function send() {
@@ -2965,7 +2984,7 @@
           !current && zeusDraft?.repo === selProject.value ? zeusDraft.roles : await pickZeusRoles(session);
         if (!roles) {
           // Dismissed: the brief goes back into the composer, no error.
-          inputEl.value = text;
+          giveBack(text);
           attachments = sent;
           renderAttachments();
           return;
@@ -2984,7 +3003,7 @@
       }
       loadSessions();
     } catch (e) {
-      inputEl.value = text; // give the message back
+      giveBack(text); // give the message back
       attachments = sent; // and its files
       renderAttachments();
       toast(e.message, true);
