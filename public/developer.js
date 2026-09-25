@@ -2186,8 +2186,11 @@
   // An answer is an ordinary message: it goes through the composer so it
   // queues, reopens and reports failures exactly like a typed one would.
   async function answerAsk(text) {
+    const target = current;
     // The phrase still being dictated lands before the box is read.
     await finishVoice();
+    // The question belongs to the chat that was open when it was answered.
+    if (current !== target) return;
     inputEl.value = inputEl.value.trim() ? `${inputEl.value.trim()}\n${text}` : text;
     autoGrow();
     send();
@@ -2643,10 +2646,10 @@
   // Past this a voice note stops by itself: a room with a television on keeps
   // every round hearing something, so the heard-nothing rule alone never ends it.
   const VOICE_MAX_MS = 5 * 60 * 1000;
-  // { rec, base, heard, stopping, restart, since } while dictating
+  // One round of recognition while dictating: { rec, base, heard, stopping,
+  // restart, sending, kept, merged, note }. note is the voice note the rounds
+  // carry on, { done, resolve, cap }: done resolves once the note ends.
   let voice = null;
-  // finishVoice() callers waiting for the voice note to end
-  let voiceWaiters = [];
 
   if (Recognition && window.isSecureContext) {
     const langs = [
@@ -2689,8 +2692,21 @@
     'language-not-supported': 'That language is not supported for voice notes',
   };
 
-  // since: when the voice note began, carried across the rounds it restarts.
-  function startVoice(since = Date.now()) {
+  function newVoiceNote() {
+    const note = {};
+    note.done = new Promise((resolve) => (note.resolve = resolve));
+    // A timer rather than a check in onend: a continuous round that keeps
+    // hearing a noisy room may never end by itself.
+    note.cap = setTimeout(() => {
+      if (voice?.note !== note || voice.stopping) return;
+      stopVoice(true);
+      toast('The voice note stopped after 5 minutes; press 🎤 to carry on');
+    }, VOICE_MAX_MS);
+    return note;
+  }
+
+  // note: the voice note a restarted round carries on; a fresh one otherwise.
+  function startVoice(note = newVoiceNote()) {
     const rec = new Recognition();
     rec.lang = voiceLangEl.value;
     rec.interimResults = true;
@@ -2706,24 +2722,45 @@
       heard: false,
       stopping: false,
       restart: false,
-      since,
+      sending: false,
+      // The text of the results below upTo, which no later event changes:
+      // every result before the last one joined, and that last one apart.
+      kept: { text: '', last: '', upTo: 0 },
+      // merged[i]: result i replaces the one before it.
+      merged: [],
+      note,
     };
     rec.onresult = (e) => {
       if (voice?.rec !== rec) return;
-      // Not every engine starts a later result with a space, and Android's
-      // continuous mode repeats the earlier phrases at the start of each new
-      // result (desktop-site mode included): such a result replaces the one
-      // before it rather than following it.
-      const parts = [];
-      for (const r of e.results) {
-        const t = r[0].transcript.trim();
+      // Not every engine starts a later result with a space. Android's
+      // continuous mode sends every earlier result again and repeats them at
+      // the start of each new one (desktop-site mode included): a result that
+      // repeats the one before it in the same event replaces it. Desktop
+      // engines never send a finished phrase again, so there a phrase that
+      // only starts like the last one ("yes", then "yes that works") is kept.
+      const join = (...texts) => texts.filter(Boolean).join(' ');
+      const { kept, merged } = voice;
+      // The results below resultIndex did not change, so they are folded in
+      // once rather than rebuilt from result 0 on every interim event.
+      for (; kept.upTo < Math.min(e.resultIndex, e.results.length); kept.upTo++) {
+        const t = e.results[kept.upTo][0].transcript.trim();
         if (!t) continue;
-        const last = parts.at(-1)?.toLowerCase();
-        const low = t.toLowerCase();
-        if (last && (low === last || low.startsWith(`${last} `))) parts[parts.length - 1] = t;
+        if (!merged[kept.upTo]) kept.text = join(kept.text, kept.last);
+        kept.last = t;
+      }
+      const parts = [];
+      for (let i = kept.upTo; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript.trim();
+        if (!t) continue;
+        if (parts.length) {
+          const last = parts.at(-1).toLowerCase();
+          const low = t.toLowerCase();
+          merged[i] = low === last || low.startsWith(`${last} `);
+        }
+        if (merged[i] && parts.length) parts[parts.length - 1] = t;
         else parts.push(t);
       }
-      const text = parts.join(' ');
+      const text = join(kept.text, kept.last, ...parts);
       // Kept only once the engine has understood something in it, so a
       // language it rejects is not the one every later voice note starts in;
       // once a round, not on every interim result.
@@ -2743,29 +2780,25 @@
     rec.onend = () => {
       if (voice?.rec !== rec) return;
       // Recognition stops by itself after a pause: carry on from what the box
-      // holds now until ⏹ is pressed. A round that heard nothing ends it, and
-      // so does the time cap, or a forgotten microphone would listen forever.
+      // holds now until ⏹ is pressed. A round that heard nothing ends it, or
+      // a forgotten microphone would listen forever (the time cap is the
+      // note's own timer).
       // restart: the language changed or 🎤 was pressed again while ⏹ was
       // finishing, and the last phrase has landed now.
-      const expired = Date.now() - voice.since > VOICE_MAX_MS;
       if (voice.restart) {
-        startVoice(voice.since);
-      } else if (voice.stopping || !voice.heard || expired) {
-        const silent = !voice.stopping && !voice.heard;
-        voice = null;
-        voiceEnded();
-        renderVoice();
-        if (expired) toast('The voice note stopped after 5 minutes; press 🎤 to carry on');
-        else if (silent) toast('The voice note stopped after a silence; press 🎤 to carry on');
+        startVoice(voice.note);
+      } else if (voice.stopping || !voice.heard) {
+        const silent = !voice.stopping;
+        endVoice();
+        if (silent) toast('The voice note stopped after a silence; press 🎤 to carry on');
       } else {
-        startVoice(voice.since);
+        startVoice(voice.note);
       }
     };
     try {
       rec.start();
     } catch (err) {
-      voice = null;
-      voiceEnded();
+      endVoice();
       toast(`Voice note failed: ${err.message}`, true);
     }
     renderVoice();
@@ -2779,18 +2812,22 @@
       voice.stopping = true;
       voice.restart = false;
       voice.rec.stop();
+      renderVoice();
     } else {
       const { rec } = voice;
-      voice = null;
-      voiceEnded();
+      endVoice();
       rec.abort();
     }
-    renderVoice();
   }
 
-  function voiceEnded() {
-    for (const resolve of voiceWaiters) resolve();
-    voiceWaiters = [];
+  // Every way a voice note ends comes through here, and resumes whoever
+  // waits on it in finishVoice().
+  function endVoice() {
+    const { note } = voice;
+    voice = null;
+    clearTimeout(note.cap);
+    note.resolve();
+    renderVoice();
   }
 
   // Stops the voice note and resolves once its last phrase has landed, so a
@@ -2799,18 +2836,21 @@
   // is aborted after `ms`.
   async function finishVoice(ms = 3000) {
     if (!voice) return;
+    const { note } = voice;
     stopVoice(true);
-    await new Promise((resolve) => {
-      voiceWaiters.push(resolve);
-      setTimeout(resolve, ms);
-    });
-    stopVoice();
+    voice.sending = true;
+    let timer;
+    await Promise.race([note.done, new Promise((resolve) => (timer = setTimeout(resolve, ms)))]);
+    clearTimeout(timer);
+    if (voice?.note === note) stopVoice();
   }
 
   voiceBtn.addEventListener('click', () => {
     if (!voice) startVoice();
     else if (!voice.stopping) stopVoice(true);
-    else {
+    // A send waits for the last phrase: a new round would start from the text
+    // about to go out, and the send would then cut it off.
+    else if (!voice.sending) {
       // ⏹ is still finishing: aborting now would drop its last phrase, so
       // listening resumes from onend once that phrase has landed.
       voice.stopping = false;
@@ -2866,16 +2906,23 @@
   }
 
   async function send() {
+    if ($('btn-send').disabled) return;
+    const target = current;
+    if (voice) {
+      // The phrase in flight lands first, and no late one after the box
+      // empties. Waited for before the box is checked: an Enter pressed right
+      // after a short phrase can come before its first result.
+      await finishVoice();
+      // Left for another chat or pane while waiting: the note stays in the
+      // box rather than going to whichever one is open now.
+      if (current !== target) return;
+    }
+    // After the wait: a second Enter while waiting has sent it already, and
+    // a file pasted meanwhile may still be uploading.
     if ((!inputEl.value.trim() && !attachments.length) || $('btn-send').disabled) return;
     if (attachments.some((a) => a.uploading)) {
       toast('A file is still uploading, one moment', true);
       return;
-    }
-    if (voice) {
-      // The phrase in flight lands first, and no late one after the box empties.
-      await finishVoice();
-      // A second Enter while waiting has sent it already.
-      if (!inputEl.value.trim() && !attachments.length) return;
     }
     const text = inputEl.value.trim();
     const sent = attachments;
