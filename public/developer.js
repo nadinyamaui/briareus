@@ -2620,6 +2620,141 @@
     if (e.dataTransfer?.files?.length) addFiles([...e.dataTransfer.files]);
   });
 
+  // ---------- voice notes ----------
+  //
+  // 🎤 dictates into the message box through the browser's own speech
+  // recognition. No provider CLI can take audio, so a voice note has to reach
+  // the agent as text anyway, and landing in the box leaves the transcript
+  // there to correct before Enter sends it. Chrome, Edge and Safari have the
+  // API (Chrome sends the audio to Google to transcribe); Firefox has none,
+  // and neither does a page served over plain http from another host, so the
+  // button stays hidden there.
+
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const voiceBtn = $('btn-voice');
+  const voiceLangEl = $('voice-lang');
+  const VOICE_LANG_KEY = 'dev.voiceLang';
+  // Android's continuous mode repeats every earlier phrase inside each new
+  // result, so there each phrase is a recognition of its own, restarted below.
+  const VOICE_CONTINUOUS = !/Android/i.test(navigator.userAgent);
+  let voice = null; // { rec, base, heard, stopping } while dictating
+
+  if (Recognition && window.isSecureContext) {
+    const langs = [
+      ...new Set(
+        [
+          localStorage.getItem(VOICE_LANG_KEY),
+          ...(navigator.languages || [navigator.language]),
+          'es-ES',
+          'en-US',
+        ].filter(Boolean),
+      ),
+    ];
+    voiceLangEl.innerHTML = langs.map((l) => `<option value="${esc(l)}">${esc(l)}</option>`).join('');
+    voiceLangEl.value = langs[0];
+    voiceBtn.classList.remove('hidden');
+    renderVoice();
+  }
+
+  function renderVoice() {
+    const on = !!voice && !voice.stopping;
+    voiceBtn.textContent = on ? '⏹' : '🎤';
+    voiceBtn.title = on
+      ? 'Stop the voice note'
+      : `Voice note: speak and it is written into the message box (${voiceLangEl.value})`;
+    voiceBtn.classList.toggle('animate-pulse', on);
+    voiceBtn.classList.toggle('border-danger', on);
+    voiceBtn.classList.toggle('text-danger', on);
+    voiceBtn.classList.toggle('border-line', !on);
+    voiceBtn.classList.toggle('text-muted', !on);
+    // The language only matters while speaking; the button's title names it.
+    voiceLangEl.classList.toggle('hidden', !on);
+  }
+
+  const VOICE_ERRORS = {
+    'not-allowed': 'Microphone access was denied',
+    'service-not-allowed': 'This browser does not allow speech recognition here',
+    'audio-capture': 'No microphone was found',
+    network: 'Speech recognition needs a network connection',
+    'language-not-supported': 'That language is not supported for voice notes',
+  };
+
+  function startVoice() {
+    const rec = new Recognition();
+    rec.lang = voiceLangEl.value;
+    rec.interimResults = true;
+    rec.continuous = VOICE_CONTINUOUS;
+    // Whatever the box already holds stays in front of the transcript.
+    const value = inputEl.value;
+    voice = { rec, base: value + (value && !/\s$/.test(value) ? ' ' : ''), heard: false, stopping: false };
+    rec.onresult = (e) => {
+      if (voice?.rec !== rec) return;
+      let text = '';
+      for (const r of e.results) text += r[0].transcript;
+      voice.heard = true;
+      inputEl.value = voice.base + text.trimStart();
+      autoGrow();
+      inputEl.scrollTop = inputEl.scrollHeight;
+    };
+    rec.onerror = (e) => {
+      if (voice?.rec !== rec) return;
+      // Silence and our own abort end quietly: onend follows either way.
+      if (e.error === 'no-speech' || e.error === 'aborted') return;
+      stopVoice();
+      toast(VOICE_ERRORS[e.error] || `Voice note failed: ${e.error}`, true);
+    };
+    rec.onend = () => {
+      if (voice?.rec !== rec) return;
+      // Recognition stops by itself after a pause: carry on from what the box
+      // holds now until ⏹ is pressed. A round that heard nothing ends it, or
+      // a forgotten microphone would listen forever.
+      if (voice.stopping || !voice.heard) {
+        voice = null;
+        renderVoice();
+      } else {
+        startVoice();
+      }
+    };
+    try {
+      rec.start();
+    } catch (err) {
+      voice = null;
+      toast(`Voice note failed: ${err.message}`, true);
+    }
+    renderVoice();
+  }
+
+  // finish: let the last phrase land before stopping (the ⏹ button). Without
+  // it the recognition is dropped where it stands, for a send or an error.
+  function stopVoice(finish) {
+    if (!voice) return;
+    if (finish) {
+      voice.stopping = true;
+      voice.rec.stop();
+    } else {
+      const { rec } = voice;
+      voice = null;
+      rec.abort();
+    }
+    renderVoice();
+  }
+
+  voiceBtn.addEventListener('click', () => {
+    if (voice && !voice.stopping) stopVoice(true);
+    else {
+      stopVoice();
+      startVoice();
+    }
+  });
+  voiceLangEl.addEventListener('change', () => {
+    localStorage.setItem(VOICE_LANG_KEY, voiceLangEl.value);
+    if (!voice) return;
+    stopVoice();
+    startVoice();
+  });
+  // Typing takes over: a transcript still arriving would write over the edit.
+  inputEl.addEventListener('input', () => stopVoice());
+
   // ---------- actions ----------
 
   async function createSession(prompt, extra = {}) {
@@ -2659,6 +2794,7 @@
       toast('A file is still uploading, one moment', true);
       return;
     }
+    stopVoice(); // or a late phrase lands in the emptied box
     const sent = attachments;
     const ids = sent.map((a) => a.id);
     attachments = [];
