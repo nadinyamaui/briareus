@@ -618,13 +618,29 @@
               class="max-h-[220px] w-full resize-none border-0 bg-transparent font-[inherit] text-[16px] text-ink outline-none lg:text-[length:inherit]"
             ></textarea>
             <div class="mt-1.5 flex items-center justify-between">
-              <button
-                id="btn-attach"
-                title="Attach files, or paste or drop them into the message box"
-                class="h-9 w-9 cursor-pointer rounded-lg border border-line bg-transparent text-[15px] text-muted hover:border-accent-dim hover:text-ink lg:h-[30px] lg:w-8"
-              >
-                📎
-              </button>
+              <div class="flex items-center gap-1.5">
+                <button
+                  id="btn-attach"
+                  title="Attach files, or paste or drop them into the message box"
+                  class="h-9 w-9 cursor-pointer rounded-lg border border-line bg-transparent text-[15px] text-muted hover:border-accent-dim hover:text-ink lg:h-[30px] lg:w-8"
+                >
+                  📎
+                </button>
+                <!-- Voice note: dictated into the message box by the browser's
+                 speech recognition. Hidden where the browser has none. -->
+                <button
+                  id="btn-voice"
+                  type="button"
+                  class="hidden h-9 w-9 cursor-pointer rounded-lg border border-line bg-transparent text-[15px] text-muted hover:border-accent-dim hover:text-ink lg:h-[30px] lg:w-8"
+                >
+                  🎤
+                </button>
+                <select
+                  id="voice-lang"
+                  title="Language the voice note is spoken in"
+                  class="hidden h-9 cursor-pointer rounded-lg border border-line bg-field px-1.5 text-[12px] text-ink outline-none lg:h-[30px]"
+                ></select>
+              </div>
               <button
                 id="btn-send"
                 title="Send (Enter)"

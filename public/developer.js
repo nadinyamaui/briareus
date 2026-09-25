@@ -18,6 +18,9 @@
   let projects = []; // [{ repo, label }], the enabled ones, from settings
   let sessions = [];
   let current = null; // session id being viewed (null = new-session view)
+  // Bumped on every move to another chat or pane: current alone cannot tell
+  // staying in the new-session view from leaving it for a board (null both).
+  let navSeq = 0;
   let currentProject = null; // repo whose dashboard is open, if any
   let es = null; // EventSource for the open session
   let lastSeq = 0;
@@ -771,7 +774,11 @@
 
   // Inserting never replaces what is typed: a saved prompt is a starting
   // point, and the text already in the box may be the specifics to go with it.
-  function insertPrompt(body) {
+  async function insertPrompt(body) {
+    // The phrase still being dictated lands first: the input event below
+    // would otherwise abort it, and during a send wait the prompt would go
+    // out with the message.
+    await finishVoice();
     const current = inputEl.value;
     inputEl.value = current.trim() ? `${current.replace(/\s+$/, '')}\n\n${body}` : body;
     inputEl.dispatchEvent(new Event('input')); // re-grows the box
@@ -788,8 +795,10 @@
     insertPrompt(item.body);
   });
   $('prompt-save').addEventListener('click', async () => {
-    const body = inputEl.value.trim();
     closePromptPop();
+    // The phrase still being dictated lands first, not the interim guess.
+    await finishVoice();
+    const body = inputEl.value.trim();
     if (!body) return;
     const title = await openPrompt({
       title: 'Save as prompt',
@@ -2190,7 +2199,12 @@
 
   // An answer is an ordinary message: it goes through the composer so it
   // queues, reopens and reports failures exactly like a typed one would.
-  function answerAsk(text) {
+  async function answerAsk(text) {
+    const nav = navSeq;
+    // The phrase still being dictated lands before the box is read.
+    await finishVoice();
+    // The question belongs to the chat that was open when it was answered.
+    if (navSeq !== nav) return;
     inputEl.value = inputEl.value.trim() ? `${inputEl.value.trim()}\n${text}` : text;
     autoGrow();
     send();
@@ -2203,6 +2217,10 @@
     // former, so read it first.
     const inProject = currentProject || sidebarRepo;
     current = null;
+    navSeq++;
+    // Every other pane (board, dashboard, office, findings) opens through
+    // here and hides the composer, ⏹ with it, so dictation cannot outlive it.
+    stopVoice();
     closeProjectView();
     closeStream();
     $('welcome').classList.remove('hidden');
@@ -2258,12 +2276,18 @@
     toolBox = null;
   }
 
-  async function openSession(id) {
+  // keepVoice: the session is the one this composer just created, so a note
+  // dictated while it was being created belongs to it.
+  async function openSession(id, keepVoice) {
     closeDrawersOnMobile();
     if (current === id) return;
+    if (!keepVoice) stopVoice(); // the composer is shared, so it would write into this session
     closeProjectView();
     closeStream();
     current = id;
+    // The composer that just created this session is still the one on
+    // screen, so a send waiting on its voice note carries on into it.
+    if (!keepVoice) navSeq++;
     syncPath();
     // The conversation loads over the network, so show a loader instead of a
     // blank pane while it does, and drop it only if this session is still the
@@ -2636,9 +2660,306 @@
     if (e.dataTransfer?.files?.length) addFiles([...e.dataTransfer.files]);
   });
 
+  // ---------- voice notes ----------
+  //
+  // 🎤 dictates into the message box through the browser's own speech
+  // recognition. No provider CLI can take audio, so a voice note has to reach
+  // the agent as text anyway, and landing in the box leaves the transcript
+  // there to correct before Enter sends it. Chrome, Edge and Safari have the
+  // API (Chrome sends the audio to Google to transcribe); Firefox has none,
+  // and neither does a page served over plain http from another host, so the
+  // button stays hidden there.
+
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const voiceBtn = $('btn-voice');
+  const voiceLangEl = $('voice-lang');
+  const VOICE_LANG_KEY = 'dev.voiceLang';
+  // Past this a voice note stops by itself: a room with a television on keeps
+  // every round hearing something, so the heard-nothing rule alone never ends it.
+  const VOICE_MAX_MS = 5 * 60 * 1000;
+  // How long ⏹ waits for the last phrase before dropping the round.
+  const VOICE_STOP_MS = 3000;
+  // One round of recognition while dictating: { rec, state, base, heard, kept,
+  // merged, note }. note is the voice note the rounds carry on, { done,
+  // resolve, cap }: done resolves once the note ends. state is one of
+  //   listening   the round is live, and onend carries on if it heard something
+  //   restarting  stopped for the language or a 🎤 after ⏹: onend starts the
+  //               next round of the same note once the last phrase has landed
+  //   finishing   ⏹ or the time cap: onend ends the note
+  //   sending     finishing for finishVoice(), which 🎤 cannot resume
+  // and only setVoiceState() moves it.
+  let voice = null;
+
+  if (Recognition && window.isSecureContext) {
+    const langs = [
+      ...new Set(
+        [
+          localStorage.getItem(VOICE_LANG_KEY),
+          ...(navigator.languages || [navigator.language]),
+          'es-ES',
+          'en-US',
+        ].filter(Boolean),
+      ),
+    ];
+    voiceLangEl.innerHTML = langs.map((l) => `<option value="${esc(l)}">${esc(l)}</option>`).join('');
+    voiceLangEl.value = langs[0];
+    voiceBtn.classList.remove('hidden');
+    // The picker stays up beside the button, so the language can be set
+    // before speaking and changed after the engine rejects one.
+    voiceLangEl.classList.remove('hidden');
+    renderVoice();
+  }
+
+  // The last phrase is still landing and the note ends after it, so nothing
+  // may abort the round.
+  function voiceFinishing() {
+    return voice?.state === 'finishing' || voice?.state === 'sending';
+  }
+
+  function renderVoice() {
+    const on = !!voice && !voiceFinishing();
+    voiceBtn.textContent = on ? '⏹' : '🎤';
+    voiceBtn.title = on
+      ? 'Stop the voice note'
+      : `Voice note: speak and it is written into the message box (${voiceLangEl.value})`;
+    voiceBtn.classList.toggle('animate-pulse', on);
+    voiceBtn.classList.toggle('border-danger', on);
+    voiceBtn.classList.toggle('text-danger', on);
+    voiceBtn.classList.toggle('border-line', !on);
+    voiceBtn.classList.toggle('text-muted', !on);
+  }
+
+  const VOICE_ERRORS = {
+    'not-allowed': 'Microphone access was denied',
+    'service-not-allowed': 'This browser does not allow speech recognition here',
+    'audio-capture': 'No microphone was found',
+    network: 'Speech recognition needs a network connection',
+    'language-not-supported': 'That language is not supported for voice notes',
+    aborted: 'The voice note was cut off; another tab or app may be using speech recognition',
+  };
+
+  function newVoiceNote() {
+    const note = {};
+    note.done = new Promise((resolve) => (note.resolve = resolve));
+    armVoiceCap(note);
+    return note;
+  }
+
+  // A timer rather than a check in onend: a continuous round that keeps
+  // hearing a noisy room may never end by itself. A spent cap is null, so a
+  // 🎤 that resumes the note while its last phrase lands arms a new one.
+  function armVoiceCap(note) {
+    note.cap = setTimeout(() => {
+      note.cap = null;
+      if (voice?.note !== note || voiceFinishing()) return;
+      setVoiceState('finishing');
+      toast('The voice note stopped after 5 minutes; press 🎤 to carry on');
+    }, VOICE_MAX_MS);
+  }
+
+  // note: the voice note a restarted round carries on; a fresh one otherwise.
+  function startVoice(note = newVoiceNote()) {
+    const rec = new Recognition();
+    rec.lang = voiceLangEl.value;
+    rec.interimResults = true;
+    // Continuous, so the microphone stays open between phrases: every restart
+    // leaves a gap where words are lost, and Android chimes on each one. An
+    // engine that ends anyway is restarted from onend.
+    rec.continuous = true;
+    // Whatever the box already holds stays in front of the transcript.
+    const value = inputEl.value;
+    voice = {
+      rec,
+      state: 'listening',
+      base: value + (value && !/\s$/.test(value) ? ' ' : ''),
+      heard: false,
+      // The text of the results below upTo, which no later event changes:
+      // every result before the last one joined, and that last one apart.
+      kept: { text: '', last: '', upTo: 0 },
+      // merged[i]: result i replaces the one before it.
+      merged: [],
+      note,
+    };
+    rec.onresult = (e) => {
+      if (voice?.rec !== rec) return;
+      // Not every engine starts a later result with a space. Android's
+      // continuous mode sends every earlier result again and repeats them at
+      // the start of each new one (desktop-site mode included): a result that
+      // repeats the one before it in the same event replaces it. Desktop
+      // engines never send a finished phrase again, so there a phrase that
+      // only starts like the last one ("yes", then "yes that works") is kept.
+      const join = (...texts) => texts.filter(Boolean).join(' ');
+      const { kept, merged } = voice;
+      // The results below resultIndex did not change, so they are folded in
+      // once rather than rebuilt from result 0 on every interim event.
+      for (; kept.upTo < Math.min(e.resultIndex, e.results.length); kept.upTo++) {
+        const t = e.results[kept.upTo][0].transcript.trim();
+        if (!t) continue;
+        if (!merged[kept.upTo]) kept.text = join(kept.text, kept.last);
+        kept.last = t;
+      }
+      const parts = [];
+      // The first result in flight replaces kept.last when an earlier event,
+      // which still held both, found it repeating that one: shown the way the
+      // fold above will settle it.
+      let lastReplaced = false;
+      for (let i = kept.upTo; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript.trim();
+        if (!t) continue;
+        if (parts.length) {
+          const last = parts.at(-1).toLowerCase();
+          const low = t.toLowerCase();
+          merged[i] = low === last || low.startsWith(`${last} `);
+        }
+        if (!merged[i]) parts.push(t);
+        else if (parts.length) parts[parts.length - 1] = t;
+        else {
+          lastReplaced = true;
+          parts.push(t);
+        }
+      }
+      const text = join(kept.text, lastReplaced ? '' : kept.last, ...parts);
+      // Kept only once the engine has understood something in it, so a
+      // language it rejects is not the one every later voice note starts in;
+      // once a round, not on every interim result.
+      if (!voice.heard) localStorage.setItem(VOICE_LANG_KEY, rec.lang);
+      voice.heard = true;
+      inputEl.value = voice.base + text;
+      autoGrow();
+      inputEl.scrollTop = inputEl.scrollHeight;
+    };
+    rec.onerror = (e) => {
+      if (voice?.rec !== rec) return;
+      // Silence ends quietly: onend follows. Every abort of ours drops the
+      // round first, so an 'aborted' that gets here came from the browser
+      // (another tab took the recognizer), and restarting would take it back.
+      if (e.error === 'no-speech') return;
+      stopVoice();
+      toast(VOICE_ERRORS[e.error] || `Voice note failed: ${e.error}`, true);
+    };
+    rec.onend = () => {
+      if (voice?.rec === rec) roundEnded();
+    };
+    try {
+      rec.start();
+    } catch (err) {
+      endVoice();
+      toast(`Voice note failed: ${err.message}`, true);
+    }
+    renderVoice();
+  }
+
+  // Recognition stops by itself after a pause: carry on from what the box
+  // holds now until ⏹ is pressed. A round that heard nothing ends it, or a
+  // forgotten microphone would listen forever (the time cap is the note's own
+  // timer).
+  function roundEnded() {
+    const { state, heard, note } = voice;
+    if (state === 'restarting' || (state === 'listening' && heard)) {
+      startVoice(note);
+      return;
+    }
+    endVoice();
+    if (state === 'listening') toast('The voice note stopped after a silence; press 🎤 to carry on');
+  }
+
+  // A round leaving listening is stopped rather than aborted, so the phrase in
+  // flight lands before onend acts on the new state. An engine can fail to
+  // fire onend after stop(): the round is then dropped and treated as ended,
+  // or the note would stay on with nothing listening.
+  function setVoiceState(to) {
+    const { rec, state } = voice;
+    voice.state = to;
+    if (state === 'listening') {
+      rec.stop();
+      setTimeout(() => {
+        if (voice?.rec !== rec) return;
+        rec.abort();
+        roundEnded();
+      }, VOICE_STOP_MS);
+    }
+    renderVoice();
+  }
+
+  // Drops the recognition where it stands, for typing, leaving the chat or an
+  // error.
+  function stopVoice() {
+    if (!voice) return;
+    const { rec } = voice;
+    endVoice();
+    rec.abort();
+  }
+
+  // Every way a voice note ends comes through here, and resumes whoever
+  // waits on it in finishVoice().
+  function endVoice() {
+    const { note } = voice;
+    voice = null;
+    clearTimeout(note.cap);
+    note.resolve();
+    renderVoice();
+  }
+
+  // Stops the voice note and resolves once its last phrase has landed, so a
+  // send reads the final transcript rather than the engine's interim guess
+  // (abort() would throw that final text away). An engine that never ends
+  // is dropped by setVoiceState()'s fallback.
+  async function finishVoice() {
+    if (!voice) return;
+    const { note } = voice;
+    setVoiceState('sending');
+    await note.done;
+  }
+
+  voiceBtn.addEventListener('click', () => {
+    if (!voice) startVoice();
+    else if (voice.state === 'finishing') {
+      // ⏹ is still finishing: aborting now would drop its last phrase, so
+      // listening resumes from onend once that phrase has landed.
+      if (!voice.note.cap) armVoiceCap(voice.note);
+      setVoiceState('restarting');
+    }
+    // A send waits for the last phrase: a new round would start from the text
+    // about to go out, and the send would then cut it off.
+    else if (voice.state !== 'sending') setVoiceState('finishing');
+    // A clicked button keeps the focus, and Enter would then press ⏹ rather
+    // than send the message.
+    if (!isMobile()) inputEl.focus();
+  });
+  voiceLangEl.addEventListener('change', () => {
+    renderVoice();
+    if (!isMobile()) inputEl.focus();
+    // The phrase in flight lands before onend restarts in the new language. A
+    // round already restarting picks the new language up by itself.
+    if (voice?.state === 'listening') setVoiceState('restarting');
+  });
+  // Typing takes over: a transcript still arriving would write over the edit.
+  // Except while the last phrase is still landing, after ⏹ or during a send
+  // wait: a key would abort that phrase, leave the interim guess in the box
+  // and, for a send, go out with the message, so it is held back until then.
+  // Composition input (Android keyboards, IMEs) cannot be held back, so it
+  // does not stop the note either; the stop fallback bounds that wait.
+  inputEl.addEventListener('input', () => {
+    if (!voiceFinishing()) stopVoice();
+  });
+  inputEl.addEventListener('beforeinput', (e) => {
+    if (voiceFinishing()) e.preventDefault();
+  });
+
+  // A failed or dismissed send gives its text back. A voice note started
+  // while the request was out writes base + transcript on every result, so
+  // the text goes in front of the box and of that base, not over them.
+  function giveBack(text) {
+    const rest = inputEl.value;
+    inputEl.value = rest.trim() ? `${text}\n${rest}` : text;
+    if (voice) voice.base = `${text}\n${voice.base}`;
+    autoGrow();
+  }
+
   // ---------- actions ----------
 
   async function createSession(prompt, extra = {}) {
+    const nav = navSeq;
     const { session } = await api('/api/dev/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2665,16 +2986,31 @@
       }),
     });
     sessions.unshift(session);
-    await openSession(session.id);
+    // Still on the composer that sent it: a voice note started meanwhile is
+    // the follow-up for this session and carries on into it.
+    await openSession(session.id, navSeq === nav);
   }
 
   async function send() {
-    const text = inputEl.value.trim();
-    if ((!text && !attachments.length) || $('btn-send').disabled) return;
+    if ($('btn-send').disabled) return;
+    const nav = navSeq;
+    if (voice) {
+      // The phrase in flight lands first, and no late one after the box
+      // empties. Waited for before the box is checked: an Enter pressed right
+      // after a short phrase can come before its first result.
+      await finishVoice();
+      // Left for another chat or pane while waiting: the note stays in the
+      // box rather than going to whichever one is open now.
+      if (navSeq !== nav) return;
+    }
+    // After the wait: a second Enter while waiting has sent it already, and
+    // a file pasted meanwhile may still be uploading.
+    if ((!inputEl.value.trim() && !attachments.length) || $('btn-send').disabled) return;
     if (attachments.some((a) => a.uploading)) {
       toast('A file is still uploading, one moment', true);
       return;
     }
+    const text = inputEl.value.trim();
     const sent = attachments;
     const ids = sent.map((a) => a.id);
     attachments = [];
@@ -2694,7 +3030,7 @@
           !current && zeusDraft?.repo === selProject.value ? zeusDraft.roles : await pickZeusRoles(session);
         if (!roles) {
           // Dismissed: the brief goes back into the composer, no error.
-          inputEl.value = text;
+          giveBack(text);
           attachments = sent;
           renderAttachments();
           return;
@@ -2713,7 +3049,7 @@
       }
       loadSessions();
     } catch (e) {
-      inputEl.value = text; // give the message back
+      giveBack(text); // give the message back
       attachments = sent; // and its files
       renderAttachments();
       toast(e.message, true);
