@@ -669,6 +669,7 @@ describe('reading a .env file', () => {
           "APP_NAME='My App'",
           'APP_URL="http://x"y"',
         ].join('\n'),
+        { inlineComments: true },
       ),
     ).toEqual({
       DB_DATABASE: 'mydb',
@@ -678,5 +679,13 @@ describe('reading a .env file', () => {
       APP_NAME: 'My App',
       APP_URL: 'http://x"y',
     });
+  });
+
+  it("keeps ' #' in an unquoted value by default, as this app's own .env has always been read", async () => {
+    const { parseEnvFile } = await loadConfig('');
+
+    expect(
+      parseEnvFile(['export AUTH_USER=me', 'AUTH_PASSWORD=abc #123', 'DB_PASSWORD="se#cret"'].join('\n')),
+    ).toEqual({ AUTH_USER: 'me', AUTH_PASSWORD: 'abc #123', DB_PASSWORD: 'se#cret' });
   });
 });

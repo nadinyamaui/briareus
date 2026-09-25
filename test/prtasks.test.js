@@ -177,6 +177,22 @@ describe('testRunPrompt', () => {
     expect(prompt).not.toContain('`{database}` is');
   });
 
+  it("renders the profile's placeholders in the project's run commands too, as ▶ Run does", () => {
+    const prompt = testRunPrompt({
+      ...base,
+      profile: 'projects',
+      database: 'heedly',
+      project: {
+        runCommands: ['VERTICAL={profile} DB={database} php -S {host}:{port} -t {dir}/public {host:demo}'],
+        runProfiles: 'profile: projects\ntenants: demo',
+      },
+    });
+
+    expect(prompt).toContain(
+      'VERTICAL=projects DB=heedly php -S 127.0.0.1:{port} -t {dir}/public demo--preview-{port}.localhost',
+    );
+  });
+
   it('falls back to the default profile, and explains {database} when the session is not known yet', () => {
     const prompt = testRunPrompt({
       ...base,
