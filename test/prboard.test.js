@@ -1118,6 +1118,7 @@ describe('pullOverview', () => {
       status: 'in_progress',
       conclusion: null,
       url: 't',
+      commitStatus: true,
     });
   });
 

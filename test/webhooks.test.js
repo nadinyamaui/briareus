@@ -4,7 +4,11 @@ import express from 'express';
 
 const GITHUB_SECRET = 'gh-secret';
 
-vi.mock('../lib/jobs.js', () => ({ syncSessionsOn: vi.fn(), noteWebhookDelivery: vi.fn() }));
+vi.mock('../lib/jobs.js', () => ({
+  syncSessionsOn: vi.fn(),
+  noteWebhookDelivery: vi.fn(),
+  noteWebhookCurrent: vi.fn(),
+}));
 
 // The public hostname is what decides whether a hook can be installed at all,
 // so it is driven from state rather than pinned.
@@ -16,7 +20,7 @@ vi.mock('../lib/webhooksecrets.js', () => ({
 }));
 
 import { webhookRouter, ensureRepoWebhook, installRepoWebhooks } from '../lib/webhooks.js';
-import { syncSessionsOn, noteWebhookDelivery } from '../lib/jobs.js';
+import { syncSessionsOn, noteWebhookDelivery, noteWebhookCurrent } from '../lib/jobs.js';
 
 let server;
 let base;
@@ -35,6 +39,7 @@ afterAll(() => new Promise((resolve) => server.close(resolve)));
 beforeEach(() => {
   vi.mocked(syncSessionsOn).mockClear();
   vi.mocked(noteWebhookDelivery).mockClear();
+  vi.mocked(noteWebhookCurrent).mockClear();
   hook.url = 'https://reviewer.example.com/webhooks/github';
 });
 
@@ -214,14 +219,14 @@ describe('the events a delivery can carry', () => {
     });
     await settle();
 
-    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat', null, { checks: true });
+    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat');
   });
 
   it('a check_suite with no suite body syncs on no branch rather than throwing', async () => {
     await githubDelivery('check_suite', { repository: { full_name: 'acme/shop' } });
     await settle();
 
-    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', undefined, null, { checks: true });
+    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', undefined);
   });
 
   it('a check_run reaches through to its suite for the branch', async () => {
@@ -231,26 +236,38 @@ describe('the events a delivery can carry', () => {
     });
     await settle();
 
-    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat', null, { checks: true });
+    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat');
   });
 
   it('a check_run with no suite syncs on no branch rather than throwing', async () => {
     await githubDelivery('check_run', { repository: { full_name: 'acme/shop' }, check_run: {} });
     await settle();
 
-    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', undefined, null, { checks: true });
+    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', undefined);
   });
 
   it('a status syncs every branch the commit belongs to', async () => {
     // A commit status names no branch of its own.
     await githubDelivery('status', {
       repository: { full_name: 'acme/shop' },
+      state: 'success',
       branches: [{ name: 'main' }, { name: 'feat' }],
     });
     await settle();
 
-    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'main', null, { checks: true });
-    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat', null, { checks: true });
+    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'main');
+    expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat');
+  });
+
+  it('a pending status syncs nothing: only one reaching a result is worth a read', async () => {
+    await githubDelivery('status', {
+      repository: { full_name: 'acme/shop' },
+      state: 'pending',
+      branches: [{ name: 'feat' }],
+    });
+    await settle();
+
+    expect(syncSessionsOn).not.toHaveBeenCalled();
   });
 
   it('a status naming no branches syncs nothing', async () => {
@@ -448,6 +465,8 @@ describe('installRepoWebhooks', () => {
       'webhooks: acme/shop: hook created → https://reviewer.example.com/webhooks/github',
       'webhooks: acme/api: hook created → https://reviewer.example.com/webhooks/github',
     ]);
+    expect(noteWebhookCurrent).toHaveBeenCalledWith('acme/shop');
+    expect(noteWebhookCurrent).toHaveBeenCalledWith('acme/api');
   });
 
   it('stays quiet about a hook that was already right', async () => {
@@ -461,6 +480,25 @@ describe('installRepoWebhooks', () => {
     await installRepoWebhooks(projects, { githubToken: 't' }, rest);
 
     expect(logged).toEqual([]);
+    expect(noteWebhookCurrent).toHaveBeenCalledWith('acme/shop');
+  });
+
+  it('does not count a hook it could not bring up to date as carrying every event', async () => {
+    // An older hook without `status` still delivers, so a delivery alone must
+    // not slow the timer down for this repository.
+    const url = 'https://reviewer.example.com/webhooks/github';
+    const rest = vi.fn(async (c, method) =>
+      method === 'GET'
+        ? { ok: true, json: async () => [{ id: 5, active: true, events: ['pull_request'], config: { url } }] }
+        : { ok: false, status: 502 },
+    );
+
+    await installRepoWebhooks([projects[0]], { githubToken: 't' }, rest);
+
+    expect(logged[0]).toMatch(
+      /acme\/shop: GitHub answered 502 updating the hook.*falling back to the sync timer/,
+    );
+    expect(noteWebhookCurrent).not.toHaveBeenCalled();
   });
 
   it('falls back to the sync timer for a repository it cannot manage', async () => {

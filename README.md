@@ -498,9 +498,11 @@ touched, and re-pointing it if the hostname changes.
 What each delivery does: nothing is started by one. `pull_request`,
 `pull_request_review`, `issue_comment`, `check_suite`, `check_run` and `status` refresh
 the PR panel of any open session on that branch as the event lands rather than
-on the next twenty-second tick, and a repository whose hook has delivered within
-the last hour is polled only every fifteen minutes as a safety net (the minute
-cadence stays while checks are running). Sessions on a merged or closed pull
+on the next twenty-second tick (a commit status still `pending` refreshes
+nothing), and a repository whose hook has delivered within the last hour, and
+which this boot found or left carrying every one of those events, is polled only
+every fifteen minutes as a safety net (the minute cadence stays while check runs
+are going, or a fresh push has none registered yet). Sessions on a merged or closed pull
 request are not polled at all, and every poll is a conditional request (a 304
 costs nothing against the rate limit). Delete the `webhooks` row in `app_settings` to
 rotate the secret; the hook is rewritten at the next boot.
