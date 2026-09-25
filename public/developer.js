@@ -18,6 +18,9 @@
   let projects = []; // [{ repo, label }], the enabled ones, from settings
   let sessions = [];
   let current = null; // session id being viewed (null = new-session view)
+  // Bumped on every move to another chat or pane: current alone cannot tell
+  // staying in the new-session view from leaving it for a board (null both).
+  let navSeq = 0;
   let currentProject = null; // repo whose dashboard is open, if any
   let es = null; // EventSource for the open session
   let lastSeq = 0;
@@ -2186,11 +2189,11 @@
   // An answer is an ordinary message: it goes through the composer so it
   // queues, reopens and reports failures exactly like a typed one would.
   async function answerAsk(text) {
-    const target = current;
+    const nav = navSeq;
     // The phrase still being dictated lands before the box is read.
     await finishVoice();
     // The question belongs to the chat that was open when it was answered.
-    if (current !== target) return;
+    if (navSeq !== nav) return;
     inputEl.value = inputEl.value.trim() ? `${inputEl.value.trim()}\n${text}` : text;
     autoGrow();
     send();
@@ -2203,6 +2206,7 @@
     // former, so read it first.
     const inProject = currentProject || sidebarRepo;
     current = null;
+    navSeq++;
     // Every other pane (board, dashboard, office, findings) opens through
     // here and hides the composer, ⏹ with it, so dictation cannot outlive it.
     stopVoice();
@@ -2268,6 +2272,7 @@
     closeProjectView();
     closeStream();
     current = id;
+    navSeq++;
     syncPath();
     // The conversation loads over the network, so show a loader instead of a
     // blank pane while it does, and drop it only if this session is still the
@@ -2646,6 +2651,8 @@
   // Past this a voice note stops by itself: a room with a television on keeps
   // every round hearing something, so the heard-nothing rule alone never ends it.
   const VOICE_MAX_MS = 5 * 60 * 1000;
+  // How long ⏹ waits for the last phrase before dropping the round.
+  const VOICE_STOP_MS = 3000;
   // One round of recognition while dictating: { rec, base, heard, stopping,
   // restart, sending, kept, merged, note }. note is the voice note the rounds
   // carry on, { done, resolve, cap }: done resolves once the note ends.
@@ -2749,6 +2756,10 @@
         kept.last = t;
       }
       const parts = [];
+      // The first result in flight replaces kept.last when an earlier event,
+      // which still held both, found it repeating that one: shown the way the
+      // fold above will settle it.
+      let lastReplaced = false;
       for (let i = kept.upTo; i < e.results.length; i++) {
         const t = e.results[i][0].transcript.trim();
         if (!t) continue;
@@ -2757,10 +2768,14 @@
           const low = t.toLowerCase();
           merged[i] = low === last || low.startsWith(`${last} `);
         }
-        if (merged[i] && parts.length) parts[parts.length - 1] = t;
-        else parts.push(t);
+        if (!merged[i]) parts.push(t);
+        else if (parts.length) parts[parts.length - 1] = t;
+        else {
+          lastReplaced = true;
+          parts.push(t);
+        }
       }
-      const text = join(kept.text, kept.last, ...parts);
+      const text = join(kept.text, lastReplaced ? '' : kept.last, ...parts);
       // Kept only once the engine has understood something in it, so a
       // language it rejects is not the one every later voice note starts in;
       // once a round, not on every interim result.
@@ -2785,9 +2800,7 @@
       // note's own timer).
       // restart: the language changed or 🎤 was pressed again while ⏹ was
       // finishing, and the last phrase has landed now.
-      if (voice.restart) {
-        startVoice(voice.note);
-      } else if (voice.stopping || !voice.heard) {
+      if (!voice.restart && (voice.stopping || !voice.heard)) {
         const silent = !voice.stopping;
         endVoice();
         if (silent) toast('The voice note stopped after a silence; press 🎤 to carry on');
@@ -2809,9 +2822,15 @@
   function stopVoice(finish) {
     if (!voice) return;
     if (finish) {
+      const { rec } = voice;
       voice.stopping = true;
       voice.restart = false;
-      voice.rec.stop();
+      rec.stop();
+      // An engine can fail to fire onend after stop(): the round is dropped
+      // then, or the note would stay on with nothing listening.
+      setTimeout(() => {
+        if (voice?.rec === rec) stopVoice();
+      }, VOICE_STOP_MS);
       renderVoice();
     } else {
       const { rec } = voice;
@@ -2833,16 +2852,13 @@
   // Stops the voice note and resolves once its last phrase has landed, so a
   // send reads the final transcript rather than the engine's interim guess
   // (abort() would throw that final text away). An engine that never ends
-  // is aborted after `ms`.
-  async function finishVoice(ms = 3000) {
+  // is aborted by stopVoice()'s own fallback.
+  async function finishVoice() {
     if (!voice) return;
     const { note } = voice;
     stopVoice(true);
     voice.sending = true;
-    let timer;
-    await Promise.race([note.done, new Promise((resolve) => (timer = setTimeout(resolve, ms)))]);
-    clearTimeout(timer);
-    if (voice?.note === note) stopVoice();
+    await note.done;
   }
 
   voiceBtn.addEventListener('click', () => {
@@ -2872,6 +2888,11 @@
   });
   // Typing takes over: a transcript still arriving would write over the edit.
   inputEl.addEventListener('input', () => stopVoice());
+  // Except while a send waits for the last phrase: a key would abort that
+  // phrase and go out with the message, so it is held back until then.
+  inputEl.addEventListener('beforeinput', (e) => {
+    if (voice?.sending) e.preventDefault();
+  });
 
   // ---------- actions ----------
 
@@ -2907,7 +2928,7 @@
 
   async function send() {
     if ($('btn-send').disabled) return;
-    const target = current;
+    const nav = navSeq;
     if (voice) {
       // The phrase in flight lands first, and no late one after the box
       // empties. Waited for before the box is checked: an Enter pressed right
@@ -2915,7 +2936,7 @@
       await finishVoice();
       // Left for another chat or pane while waiting: the note stays in the
       // box rather than going to whichever one is open now.
-      if (current !== target) return;
+      if (navSeq !== nav) return;
     }
     // After the wait: a second Enter while waiting has sent it already, and
     // a file pasted meanwhile may still be uploading.
