@@ -391,7 +391,10 @@ before:
               <code>env:</code> is set over the session's own environment (its <code>DB_*</code> included), so
               it beats the checkout's <code>.env</code>. When <code>DB_DATABASE</code> names another database,
               it is created on the session's database server before anything runs; a per-session database in
-              an unpooled project goes when the session is closed.
+              an unpooled project goes when the session is closed, and one named off the pooled database
+              (<code>{database}_x</code>) on a claimed server whose project restores a dump goes when the
+              server is released. A local checkout is the exception: its databases are its own, so create that
+              one yourself (the Run log says so).
             </li>
             <li><code>before:</code> runs ahead of the run commands, chained with them.</li>
             <li>

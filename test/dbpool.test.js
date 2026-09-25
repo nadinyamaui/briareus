@@ -13,6 +13,7 @@ const state = vi.hoisted(() => ({
   psqlResults: [], // per call: {code, stdout, stderr}
   mysqlQueries: [],
   mysqlConnectError: null,
+  mysqlFailOn: null, // a query matching this regex rejects
   mysqlVersion: '8.0.36',
   mysqlDatabases: [],
   spawnError: null, // makes the child emit 'error' instead of running
@@ -37,6 +38,7 @@ vi.mock('mysql2/promise', () => ({
       return {
         query: async (sql) => {
           state.mysqlQueries.push({ opts, sql });
+          if (state.mysqlFailOn && state.mysqlFailOn.test(sql)) throw new Error('ER_DB_DROP_EXISTS');
           if (/VERSION\(\)/.test(sql)) return [[{ version: state.mysqlVersion }]];
           if (/SHOW DATABASES/.test(sql)) return [state.mysqlDatabases];
           return [[]];
@@ -158,6 +160,7 @@ beforeEach(() => {
   state.psqlResults = [];
   state.mysqlQueries = [];
   state.mysqlConnectError = null;
+  state.mysqlFailOn = null;
   state.mysqlDatabases = [];
   state.spawnError = null;
   state.dumpError = null;
@@ -497,6 +500,17 @@ describe('ensureProfileDatabase', () => {
     expect(state.mysqlQueries).toHaveLength(0);
   });
 
+  it('tells a local checkout its profile database is its own to create', async () => {
+    const events = [];
+    const local = { ...job(), repo: 'r/r', local: true };
+
+    expect(await ensureProfileDatabase(local, 'mydb_projects', (t) => events.push(t))).toBe(false);
+
+    expect(state.mysqlQueries).toHaveLength(0);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatch(/mydb_projects is not created: create it yourself/);
+  });
+
   it('refuses a name that is not an identifier, or too long for the engine', async () => {
     state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: PG_TEMPLATE };
     const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };
@@ -544,6 +558,30 @@ describe('dropping the run profiles databases with the session', () => {
     expect(await dropSessionDatabase(j, () => {})).toBe(true);
 
     expect(state.mysqlQueries.map((q) => q.sql)).toEqual(['DROP DATABASE IF EXISTS `casos_abc123`']);
+  });
+
+  it('keeps the session database while a profile database will not drop, so the next close retries both', async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    state.mysqlFailOn = /casos_abc123_projects/;
+    const events = [];
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123', profileDbs: ['casos_abc123_projects'] };
+
+    expect(await dropSessionDatabase(j, (t) => events.push(t))).toBe(false);
+
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual(['DROP DATABASE IF EXISTS `casos_abc123_projects`']);
+    expect(j.sessionDb).toBe('casos_abc123');
+    expect(j.profileDbs).toEqual(['casos_abc123_projects']);
+    expect(events.at(-1)).toMatch(/Kept this session's database casos_abc123/);
+
+    // The next close (or the delete) finds both again.
+    state.mysqlFailOn = null;
+    state.mysqlQueries = [];
+    expect(await dropSessionDatabase(j, () => {})).toBe(true);
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
+      'DROP DATABASE IF EXISTS `casos_abc123_projects`',
+      'DROP DATABASE IF EXISTS `casos_abc123`',
+    ]);
+    expect(j.sessionDb).toBeNull();
   });
 
   it('leaves the list in place when the server cannot be reached', async () => {
@@ -907,6 +945,65 @@ describe('restoring the project dump into the claimed database', () => {
 
     expect(state.psqlCalls.at(-1).env.MYSQL_PWD).toBe('');
     releaseInstance(j);
+  });
+});
+
+describe("a run profile's database on a claimed server", () => {
+  beforeEach(() => {
+    state.servers = [server({ id: 1 })];
+    state.project = {
+      dbPoolEnabled: true,
+      dbPoolDatabase: 'casos',
+      dbRestoreSql: '/dumps/casos.sql',
+      envTemplate: MYSQL_TEMPLATE,
+    };
+    state.files = new Set(['/dumps/casos.sql']);
+  });
+
+  it('is dropped when the server is released, and the claim only freed once it has been', async () => {
+    const j = { ...job(), repo: 'r/r' };
+    await acquire(j, 'r/r', () => {});
+    await ensureProfileDatabase(j, 'casos_projects');
+    await ensureProfileDatabase(j, 'casos_projects');
+    // Not built off the pooled database: it may be anybody's.
+    await ensureProfileDatabase(j, 'shared');
+    expect(j.poolProfileDbs).toEqual(['casos_projects']);
+    state.mysqlQueries = [];
+
+    const released = releaseInstance(j);
+    expect(claimHolder(1)).toBe('abc123');
+    await released;
+
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual(['DROP DATABASE IF EXISTS `casos_projects`']);
+    expect(claimHolder(1)).toBeNull();
+    expect(j.poolProfileDbs).toEqual([]);
+  });
+
+  it('still frees the claim when the drop fails', async () => {
+    const j = { ...job(), repo: 'r/r' };
+    await acquire(j, 'r/r', () => {});
+    await ensureProfileDatabase(j, 'casos_projects');
+    state.mysqlFailOn = /^DROP/;
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await releaseInstance(j);
+
+    expect(claimHolder(1)).toBeNull();
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  it('stays, like the pooled database, when the project restores no dump', async () => {
+    state.project = { ...state.project, dbRestoreSql: '' };
+    const j = { ...job(), repo: 'r/r' };
+    await acquire(j, 'r/r', () => {});
+    await ensureProfileDatabase(j, 'casos_projects');
+    state.mysqlQueries = [];
+
+    await releaseInstance(j);
+
+    expect(j.poolProfileDbs).toBeUndefined();
+    expect(state.mysqlQueries).toHaveLength(0);
   });
 });
 

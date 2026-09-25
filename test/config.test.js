@@ -624,12 +624,12 @@ describe('the preview tunnel', () => {
     expect(() => getConfig()).toThrow(/PREVIEW_HOSTNAME \(a hostname with \{port\}/);
   });
 
-  it('takes {tenant} in the first label', async () => {
-    const { getConfig } = await loadConfig(
-      complete({ ...TUNNEL, PREVIEW_HOSTNAME: '{tenant}--preview-{port}.example.com' }),
-    );
+  it('takes {tenant} in the first label, on either side of {port}', async () => {
+    for (const hostname of ['{tenant}--preview-{port}.example.com', 'preview-{port}--{tenant}.example.com']) {
+      const { getConfig } = await loadConfig(complete({ ...TUNNEL, PREVIEW_HOSTNAME: hostname }));
 
-    expect(getConfig().previewTunnel.hostname).toBe('{tenant}--preview-{port}.example.com');
+      expect(getConfig().previewTunnel.hostname).toBe(hostname);
+    }
   });
 
   it('refuses {tenant} outside the first label, apart from {port}, or twice', async () => {
@@ -637,6 +637,8 @@ describe('the preview tunnel', () => {
       'preview-{port}.{tenant}.example.com',
       '{tenant}.preview-{port}.example.com',
       '{tenant}-{tenant}-{port}.example.com',
+      '{tenant}-{port}-{tenant}.example.com',
+      '{tenant}-{port}..example.com',
     ]) {
       const { getConfig } = await loadConfig(complete({ ...TUNNEL, PREVIEW_HOSTNAME: hostname }));
 
@@ -649,5 +651,32 @@ describe('the preview tunnel', () => {
     const { getConfig } = await loadConfig(complete({ ...TUNNEL, CLOUDFLARE_API_TOKEN: '' }));
 
     expect(getConfig().previewTunnel.apiToken).toBe('from-env');
+  });
+});
+
+describe('reading a .env file', () => {
+  it('takes export, spaces around =, quotes and a trailing comment', async () => {
+    const { parseEnvFile } = await loadConfig('');
+
+    expect(
+      parseEnvFile(
+        [
+          '# a comment',
+          'export DB_DATABASE=mydb',
+          'DB_HOST = 127.0.0.1',
+          'DB_PORT=3306 # the default',
+          'DB_PASSWORD="se#cret" # quoted',
+          "APP_NAME='My App'",
+          'APP_URL="http://x"y"',
+        ].join('\n'),
+      ),
+    ).toEqual({
+      DB_DATABASE: 'mydb',
+      DB_HOST: '127.0.0.1',
+      DB_PORT: '3306',
+      DB_PASSWORD: 'se#cret',
+      APP_NAME: 'My App',
+      APP_URL: 'http://x"y',
+    });
   });
 });
