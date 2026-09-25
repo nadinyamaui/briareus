@@ -228,6 +228,21 @@ describe('the command lists', () => {
   });
 });
 
+describe('the run profiles', () => {
+  it('stores them as typed, once they read', async () => {
+    const text = 'profile: projects\r\nenv:\r\n  VERTICAL=projects\r\n';
+    const saved = await createProject({ ...base, runProfiles: text });
+
+    expect(saved.runProfiles).toBe('profile: projects\nenv:\n  VERTICAL=projects');
+  });
+
+  it('refuses a save whose profiles do not read, naming the line', async () => {
+    await expect(createProject({ ...base, runProfiles: 'env:\n  A=1' })).rejects.toThrow(
+      /Run profiles, line 1/,
+    );
+  });
+});
+
 describe('the text fields', () => {
   it.each([
     'envTemplate',

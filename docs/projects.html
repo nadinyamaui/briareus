@@ -367,6 +367,52 @@ node server.js --port {port}</code></pre>
             app the same way before driving the scenarios.
           </p>
         </div>
+        <div class="f">
+          <div class="f-name">Run profiles <span class="f-meta">optional</span></div>
+          <p>
+            Named configurations of the app, for a multi-tenant app whose vertical comes from the environment
+            and whose tenant comes from the Host header. With profiles defined,
+            <span class="kbd">▶ Run</span> becomes a split button: a click serves the profile the session last
+            served (the first one to begin with), <span class="kbd">▾</span> picks another, and picking a
+            different one stops the running app and starts it again. With none, nothing changes.
+          </p>
+          <pre><code>profile: projects
+env:
+  VERTICAL=projects
+  TENANT_SIGNUP_STATUS=active
+  DB_DATABASE={database}_projects
+tenants: central, demo
+before:
+  php artisan migrate --force
+  php artisan tenants:register-domain central {host:central}
+  php artisan tenants:register-domain demo {host:demo}</code></pre>
+          <ul>
+            <li>
+              <code>env:</code> is set over the session's own environment (its <code>DB_*</code> included), so
+              it beats the checkout's <code>.env</code>. When <code>DB_DATABASE</code> names another database,
+              it is created on the session's database server before anything runs; a per-session database in
+              an unpooled project goes when the session is closed.
+            </li>
+            <li><code>before:</code> runs ahead of the run commands, chained with them.</li>
+            <li>
+              <code>tenants:</code> each get a hostname of their own on the session's port,
+              <code>&lt;tenant&gt;--preview-{port}.&lt;zone&gt;</code> through the Cloudflare tunnel (its own
+              Access application, same policy as the port's), or
+              <code>&lt;tenant&gt;--preview-{port}.localhost</code> without one. The Run log and the session
+              header show one link per tenant.
+            </li>
+            <li>
+              Placeholders, in commands and env values alike: <code>{port}</code>, <code>{dir}</code>,
+              <code>{profile}</code>, <code>{database}</code> (the session's own database name),
+              <code>{host}</code> (the port's hostname) and <code>{host:&lt;tenant&gt;}</code>.
+            </li>
+            <li>
+              The QA test run serves the profile the session (or the session it was run for) last served, so
+              the agent sees what you saw; it uses the <code>.localhost</code> tenant names, which its browser
+              reaches without the tunnel's login.
+            </li>
+          </ul>
+        </div>
       </div>
 
       <h2 id="checklist">A working example, end to end</h2>

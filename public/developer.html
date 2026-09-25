@@ -179,13 +179,27 @@
           >
             🔗 Link PR
           </button>
-          <button
-            id="btn-serve"
-            class="btn hidden"
-            title="Serve this session's checkout (php -S against its own database) and open it in a new tab"
-          >
-            ▶ Run
-          </button>
+          <!-- ▶ Run, split when the project has run profiles: the button serves
+           the profile the session served last (the default to begin with), ▾
+           opens #serve-pop to pick another. -->
+          <div id="serve-group" class="flex hidden shrink-0">
+            <button
+              id="btn-serve"
+              class="btn"
+              title="Serve this session's checkout (php -S against its own database) and open it in a new tab"
+            >
+              ▶ Run
+            </button>
+            <button
+              id="btn-serve-menu"
+              class="btn hidden -ml-px rounded-l-none px-1.5"
+              title="Serve another run profile"
+              aria-label="Pick a run profile"
+              aria-haspopup="menu"
+            >
+              ▾
+            </button>
+          </div>
           <button id="btn-cancel-turn" class="btn hidden" title="Stop the current turn">■ Stop</button>
           <button
             id="btn-reopen"
@@ -210,6 +224,12 @@
           </button>
         </div>
       </header>
+
+      <div
+        id="serve-pop"
+        role="menu"
+        class="fixed z-40 hidden min-w-[180px] overflow-hidden rounded-lg border border-line bg-raise p-1 shadow-2xl shadow-black/50"
+      ></div>
 
       <div id="chat-scroll" class="flex-1 scroll-smooth overflow-y-auto">
         <div id="welcome" class="mx-auto mt-[6vh] max-w-[640px] px-4 text-center lg:mt-[14vh] lg:px-6">

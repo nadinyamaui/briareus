@@ -5,7 +5,13 @@ vi.mock('../lib/config.js', () => ({
   getConfig: () => ({ previewTunnel: cfgState.previewTunnel }),
 }));
 
-import { publicAppUrl, previewHostname, _resetForTests } from '../lib/tunnel.js';
+import {
+  publicAppUrl,
+  previewHostname,
+  localHostname,
+  serveHostname,
+  _resetForTests,
+} from '../lib/tunnel.js';
 
 const TUNNEL = {
   apiToken: 'cf-token',
@@ -193,5 +199,61 @@ describe('publicAppUrl', () => {
       'preview-8101.example.com',
       undefined,
     ]);
+  });
+});
+
+describe('tenant hostnames', () => {
+  it('puts the tenant in front of the port label, keeping it one label', () => {
+    expect(previewHostname(8101, 'demo')).toBe('demo--preview-8101.example.com');
+  });
+
+  it('places the tenant where the template says, and drops it for the port itself', () => {
+    cfgState.previewTunnel = { ...TUNNEL, hostname: '{tenant}--preview-{port}.example.com' };
+    expect(previewHostname(8101, 'demo')).toBe('demo--preview-8101.example.com');
+    expect(previewHostname(8101)).toBe('preview-8101.example.com');
+
+    cfgState.previewTunnel = { ...TUNNEL, hostname: 'preview-{port}-{tenant}.example.com' };
+    expect(previewHostname(8101, 'demo')).toBe('preview-8101-demo.example.com');
+    expect(previewHostname(8101)).toBe('preview-8101.example.com');
+  });
+
+  it('falls back to .localhost names without a tunnel', () => {
+    cfgState.previewTunnel = null;
+    expect(localHostname(8101, 'demo')).toBe('demo--preview-8101.localhost');
+    expect(serveHostname(8101, 'demo')).toBe('demo--preview-8101.localhost');
+    expect(serveHostname(8101)).toBe('127.0.0.1');
+    expect(previewHostname(8101, 'demo')).toBeNull();
+  });
+
+  it('publishes each tenant with an Access app, a CNAME and a route of its own, on the port', async () => {
+    const urls = await Promise.all([publicAppUrl(8101, 'central'), publicAppUrl(8101, 'demo')]);
+
+    expect(urls).toEqual([
+      'https://central--preview-8101.example.com',
+      'https://demo--preview-8101.example.com',
+    ]);
+    expect(cf.apps.map((a) => a.domain)).toEqual([
+      'central--preview-8101.example.com',
+      'demo--preview-8101.example.com',
+    ]);
+    expect(cf.apps[1].policies[0].include).toEqual(cf.apps[0].policies[0].include);
+    expect(cf.dns.map((r) => r.name)).toEqual([
+      'central--preview-8101.example.com',
+      'demo--preview-8101.example.com',
+    ]);
+    expect(cf.config.ingress.slice(1, 3)).toEqual([
+      { hostname: 'central--preview-8101.example.com', service: 'http://127.0.0.1:8101' },
+      { hostname: 'demo--preview-8101.example.com', service: 'http://127.0.0.1:8101' },
+    ]);
+  });
+
+  it('publishes a tenant once per process, apart from its port', async () => {
+    await publicAppUrl(8101);
+    await publicAppUrl(8101, 'demo');
+    const after = calls.length;
+
+    await publicAppUrl(8101, 'demo');
+    expect(calls.length).toBe(after);
+    expect(cf.apps).toHaveLength(2);
   });
 });

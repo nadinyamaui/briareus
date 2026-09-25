@@ -100,6 +100,8 @@ const {
   instanceAppPort,
   instanceEnv,
   dropSessionDatabase,
+  ensureProfileDatabase,
+  sessionDatabaseName,
 } = await import('../lib/dbpool.js');
 
 const PG_TEMPLATE = [
@@ -441,6 +443,93 @@ describe('dropSessionDatabase', () => {
     // able to read this record as "there was never one".
     expect(j.sessionDb).toBe('casos_abc123');
     expect(events[0]).toMatch(/Could not drop this session's database casos_abc123 .*ECONNREFUSED/);
+  });
+});
+
+describe('ensureProfileDatabase', () => {
+  it("creates a run profile's database on the session's claimed server, and keeps no drop list", async () => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'heedly', dbExtensions: [] };
+    state.servers = [server({ id: 4, host: '10.0.0.4', port: 3307 })];
+    const events = [];
+    const j = { ...job(), repo: 'r/r', dbServerId: 4 };
+
+    expect(await ensureProfileDatabase(j, 'heedly_projects', (t) => events.push(t))).toBe(true);
+
+    expect(state.mysqlQueries).toHaveLength(1);
+    expect(state.mysqlQueries[0].sql).toMatch(/^CREATE DATABASE IF NOT EXISTS `heedly_projects`/);
+    expect(state.mysqlQueries[0].opts).toMatchObject({ host: '10.0.0.4', port: 3307 });
+    // Pooled: shared by every session on that server, like the pooled database.
+    expect(j.profileDbs).toBeUndefined();
+    expect(events[0]).toContain('heedly_projects');
+  });
+
+  it("creates it next to an unpooled session's own database, remembered for the close", async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };
+
+    await ensureProfileDatabase(j, 'casos_abc123_projects');
+    await ensureProfileDatabase(j, 'casos_abc123_projects');
+
+    expect(state.mysqlQueries[0].opts.port).toBe(3306);
+    expect(j.profileDbs).toEqual(['casos_abc123_projects']);
+  });
+
+  it("does nothing for the session's own database, or one this app does not manage", async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    const own = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };
+    const local = { ...job(), repo: 'r/r' };
+
+    expect(await ensureProfileDatabase(own, 'casos_abc123')).toBe(false);
+    expect(await ensureProfileDatabase(local, 'casos_projects')).toBe(false);
+    expect(await ensureProfileDatabase(own, '')).toBe(false);
+    expect(state.mysqlQueries).toHaveLength(0);
+  });
+
+  it('refuses a name that is not an identifier, or too long for the engine', async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: PG_TEMPLATE };
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123' };
+
+    await expect(ensureProfileDatabase(j, 'casos; DROP')).rejects.toThrow(/not a plain database identifier/);
+    await expect(ensureProfileDatabase(j, 'x'.repeat(64))).rejects.toThrow(/longer than 63/);
+    expect(state.psqlCalls).toHaveLength(0);
+  });
+
+  it('names the session database {database} stands for', () => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'heedly' };
+    expect(sessionDatabaseName({ ...job(), repo: 'r/r' })).toBe('heedly');
+    expect(sessionDatabaseName({ ...job(), repo: 'r/r', sessionDb: 'heedly_abc' })).toBe('heedly_abc');
+  });
+});
+
+describe('dropping the run profiles databases with the session', () => {
+  it('drops them before the session database, keeping one that would not drop', async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    const events = [];
+    const j = {
+      ...job(),
+      repo: 'r/r',
+      sessionDb: 'casos_abc123',
+      profileDbs: ['casos_abc123_projects', 'casos_abc123_commerce'],
+    };
+
+    expect(await dropSessionDatabase(j, (t) => events.push(t))).toBe(true);
+
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
+      'DROP DATABASE IF EXISTS `casos_abc123_projects`',
+      'DROP DATABASE IF EXISTS `casos_abc123_commerce`',
+      'DROP DATABASE IF EXISTS `casos_abc123`',
+    ]);
+    expect(j.profileDbs).toEqual([]);
+    expect(events).toHaveLength(3);
+  });
+
+  it('leaves the list in place when the server cannot be reached', async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: MYSQL_TEMPLATE };
+    state.mysqlConnectError = new Error('ECONNREFUSED');
+    const j = { ...job(), repo: 'r/r', sessionDb: 'casos_abc123', profileDbs: ['casos_abc123_projects'] };
+
+    expect(await dropSessionDatabase(j, () => {})).toBe(false);
+    expect(j.profileDbs).toEqual(['casos_abc123_projects']);
   });
 });
 

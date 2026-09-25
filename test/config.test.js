@@ -624,6 +624,22 @@ describe('the preview tunnel', () => {
     expect(() => getConfig()).toThrow(/PREVIEW_HOSTNAME \(a hostname with \{port\}/);
   });
 
+  it('takes {tenant} in the first label', async () => {
+    const { getConfig } = await loadConfig(
+      complete({ ...TUNNEL, PREVIEW_HOSTNAME: '{tenant}--preview-{port}.example.com' }),
+    );
+
+    expect(getConfig().previewTunnel.hostname).toBe('{tenant}--preview-{port}.example.com');
+  });
+
+  it('refuses {tenant} outside the first label, or twice', async () => {
+    for (const hostname of ['preview-{port}.{tenant}.example.com', '{tenant}-{tenant}-{port}.example.com']) {
+      const { getConfig } = await loadConfig(complete({ ...TUNNEL, PREVIEW_HOSTNAME: hostname }));
+
+      expect(() => getConfig()).toThrow(/PREVIEW_HOSTNAME/);
+    }
+  });
+
   it('takes the token from the process environment over the file', async () => {
     process.env.CLOUDFLARE_API_TOKEN = 'from-env';
     const { getConfig } = await loadConfig(complete({ ...TUNNEL, CLOUDFLARE_API_TOKEN: '' }));

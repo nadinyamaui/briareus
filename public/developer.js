@@ -1558,11 +1558,14 @@
     if (s.error) bits.push(`⚠ ${s.error}`);
     let sub = bits.map((b) => esc(b)).join('  ·  ');
     if (s.prStatus) sub += `  ·  ${prBadge(s.prStatus)}`;
+    // The app ▶ Run is serving right now, one link per tenant host.
+    if (s.serveLinks?.length) sub += `  ·  ▶ ${serveLinksHtml(s.serveLinks)}`;
     $('chat-sub').innerHTML = sub;
     reflectSession(s);
     const open = ['queued', 'preparing', 'running', 'idle'].includes(s.status);
     // ▶ Run serves a checkout, which an orchestrator does not have.
-    $('btn-serve').classList.toggle('hidden', !open || !!s.orchestrator);
+    $('serve-group').classList.toggle('hidden', !open || !!s.orchestrator);
+    paintServeButton(s);
     $('btn-cancel-turn').classList.toggle('hidden', s.status !== 'running');
     // Closed, interrupted and failed all mean the same thing here: the session
     // let go of its workspace and can take it back.
@@ -2346,6 +2349,17 @@
       return;
     }
 
+    // What ▶ Run published is something to click, so it stands in the log on
+    // its own line, one link per tenant host, rather than folding into prep.
+    if (e.kind === 'info' && e.links?.length) {
+      prepBox = null;
+      const div = document.createElement('div');
+      div.className = 'ev-log';
+      div.innerHTML = `▶ ${e.links.some((l) => l.tenant) ? 'Tenants' : 'Serving'}: ${serveLinksHtml(e.links)}`;
+      messagesEl.appendChild(div);
+      return;
+    }
+
     // Workspace prep lines fold into one collapsible block instead of
     // burying the conversation.
     if (PREP_KINDS.has(e.kind) || (e.kind === 'info' && !prepClosed(e))) {
@@ -2843,20 +2857,115 @@
     }
   });
 
+  // ---------- ▶ Run and its run profiles ----------
+  //
+  // A project with run profiles turns ▶ Run into a split button: the button
+  // serves the profile the session served last (the project's first to begin
+  // with) and says which, ▾ picks another. Picking a different one restarts
+  // the app on the server's side.
+
+  function runProfilesOf(s) {
+    const repo = String(s?.repo || '').toLowerCase();
+    return projects.find((p) => p.repo.toLowerCase() === repo)?.runProfiles || [];
+  }
+
+  function servedProfile(s) {
+    const profiles = runProfilesOf(s);
+    return profiles.includes(s.serveProfile) ? s.serveProfile : profiles[0] || null;
+  }
+
+  function paintServeButton(s) {
+    const profiles = runProfilesOf(s);
+    const split = profiles.length > 1;
+    const profile = servedProfile(s);
+    $('btn-serve').textContent = profile ? `▶ Run · ${profile}` : '▶ Run';
+    $('btn-serve').classList.toggle('rounded-r-none', split);
+    $('btn-serve-menu').classList.toggle('hidden', !split);
+    if (!split) $('serve-pop').classList.add('hidden');
+  }
+
+  // A tenant link is labelled with its tenant; the one link of a run without
+  // tenants with the host it opens.
+  function serveLinksHtml(links) {
+    return links
+      .map((l) => {
+        let label = l.tenant;
+        if (!label) {
+          try {
+            label = new URL(l.url).host;
+          } catch {
+            label = l.url;
+          }
+        }
+        return `<a href="${esc(l.url)}" target="_blank" rel="noopener" class="text-accent hover:underline">${esc(label)}</a>`;
+      })
+      .join(' ');
+  }
+
   // Open the tab synchronously on the click (popup blockers) and point it at
   // the served app once the server confirms php -S is up.
-  $('btn-serve').addEventListener('click', async () => {
+  async function serve(profile = null) {
     if (!current) return;
     const w = window.open('about:blank', '_blank');
     try {
-      const { url } = await api(`/api/dev/sessions/${current}/serve`, { method: 'POST' });
+      const { url } = await api(`/api/dev/sessions/${current}/serve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(profile ? { profile } : {}),
+      });
       if (w) w.location = url;
       else window.open(url, '_blank');
     } catch (e) {
       if (w) w.close();
       toast(e.message, true);
     }
+  }
+
+  $('btn-serve').addEventListener('click', () => serve());
+
+  // The popup is fixed rather than absolute: the header's button row scrolls
+  // sideways on a phone, and would clip anything hanging out of it.
+  const servePop = $('serve-pop');
+  const servePopOpen = () => !servePop.classList.contains('hidden');
+
+  function closeServePop() {
+    servePop.classList.add('hidden');
+  }
+
+  function openServePop() {
+    const s = currentSession();
+    if (!s) return;
+    const profiles = runProfilesOf(s);
+    const running = s.serveLinks?.length ? s.serveProfile : null;
+    servePop.innerHTML = profiles
+      .map(
+        (name, i) =>
+          `<button type="button" role="menuitem" data-profile="${esc(name)}" class="serve-item flex w-full cursor-pointer items-center justify-between gap-3 rounded-md border-0 bg-transparent px-2.5 py-1.5 text-left text-xs text-ink hover:bg-field">` +
+          `<span>${esc(name)}${i === 0 ? ' <span class="text-muted">default</span>' : ''}</span>` +
+          `${name === running ? '<span class="text-accent">● running</span>' : ''}</button>`,
+      )
+      .join('');
+    const r = $('btn-serve-menu').getBoundingClientRect();
+    servePop.style.top = `${r.bottom + 5}px`;
+    servePop.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
+    servePop.classList.remove('hidden');
+  }
+
+  $('btn-serve-menu').addEventListener('click', () => (servePopOpen() ? closeServePop() : openServePop()));
+  servePop.addEventListener('click', (e) => {
+    const item = e.target.closest('.serve-item');
+    if (!item) return;
+    closeServePop();
+    serve(item.dataset.profile);
   });
+  document.addEventListener('mousedown', (e) => {
+    if (servePopOpen() && !servePop.contains(e.target) && !$('btn-serve-menu').contains(e.target))
+      closeServePop();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && servePopOpen()) closeServePop();
+  });
+  window.addEventListener('resize', closeServePop);
 
   $('btn-cancel-turn').addEventListener('click', async () => {
     if (!current) return;

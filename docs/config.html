@@ -365,7 +365,9 @@
               <td><code>PREVIEW_HOSTNAME</code></td>
               <td>
                 A template with <code>{port}</code>, one label under the zone, e.g.
-                <code>preview-{port}.example.com</code>.
+                <code>preview-{port}.example.com</code>. A run profile's tenants get
+                <code>&lt;tenant&gt;--preview-{port}.example.com</code>; put <code>{tenant}</code> in the
+                first label to place the key yourself.
               </td>
             </tr>
             <tr>

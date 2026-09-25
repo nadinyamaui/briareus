@@ -71,6 +71,7 @@
         dbExtensions: 'list',
         envTemplate: 'text',
         runCommands: 'list',
+        runProfiles: 'text',
         reviewPublishInstructions: 'text',
         reviewTestSheet: 'bool',
         reviewTestRun: 'bool',

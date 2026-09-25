@@ -97,6 +97,7 @@ import {
   removeProject,
   PROJECT_DEFAULTS,
 } from './lib/projects.js';
+import { projectRunProfiles } from './lib/runprofiles.js';
 import {
   initDbServers,
   listDbServers,
@@ -1186,6 +1187,8 @@ app.get('/api/dev/projects', (req, res) => {
       reviewProviderId: p.reviewProviderId,
       reviewModel: p.reviewModel || '',
       reviewEffort: p.reviewEffort || '',
+      // The names ▶ Run's dropdown offers, the default first.
+      runProfiles: projectRunProfiles(p).map((r) => r.name),
     })),
   });
 });
@@ -1866,10 +1869,14 @@ dashboard.register('post', '/api/dev/sessions/:id/reopen', (req, res) => {
   }
 });
 
-// ▶ Run: serve the session's checkout and hand back the URL for a new tab.
+// ▶ Run: serve the session's checkout and hand back the URL for a new tab,
+// with one link per tenant host when the run profile names tenants. `profile`
+// picks one of the project's run profiles; without it the session serves the
+// one it served last.
 dashboard.register('post', '/api/dev/sessions/:id/serve', async (req, res) => {
   try {
-    res.json(await startDevServe(req.params.id));
+    const profile = req.body && typeof req.body.profile === 'string' ? req.body.profile : null;
+    res.json(await startDevServe(req.params.id, { profile }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
