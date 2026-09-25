@@ -197,6 +197,19 @@
     toastTimer = setTimeout(() => t.classList.add('hidden'), 4000);
   }
 
+  const prViewer = window.createPrViewer({ api, esc, md });
+  document.addEventListener(
+    'click',
+    (event) => {
+      const button = event.target.closest('[data-view-pr]');
+      if (!button) return;
+      event.preventDefault();
+      event.stopPropagation();
+      prViewer.open(button.dataset.repo, Number(button.dataset.viewPr));
+    },
+    true,
+  );
+
   // ---------- confirm modal ----------
 
   // Replaces window.confirm: same call shape (await a boolean), but rendered in
@@ -2032,6 +2045,7 @@
         <a class="text-sm font-semibold text-ink hover:text-accent hover:underline" href="${esc(pr.url)}" target="_blank" rel="noopener">${esc(pr.title || `PR #${pr.number}`)}</a>
         <div class="flex items-center gap-1.5 text-[12px] text-muted"><a class="hover:text-ink hover:underline" href="${esc(pr.url)}" target="_blank" rel="noopener">#${pr.number}</a>${stateChip}</div>
         ${diff}
+        <button class="btn" data-view-pr="${pr.number}" data-repo="${esc(s.repo)}">View PR</button>
       </div>
       ${agents ? `<div class="border-t border-line pt-2.5">${agents}</div>` : ''}
       ${commits}
@@ -3582,7 +3596,7 @@
         <div class="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px] text-muted">${meta}</div>
         ${pr.labels.length ? `<div class="mt-1.5 flex flex-wrap gap-1">${labelChips(pr.labels)}</div>` : ''}
         ${issueRows(pr)}
-        <div class="mt-2 flex flex-wrap items-center gap-1.5">${buttons}
+        <div class="mt-2 flex flex-wrap items-center gap-1.5"><button class="btn" data-view-pr="${pr.number}" data-repo="${esc(board.repo)}">View PR</button>${buttons}
           ${
             working
               ? `<span class="ml-auto flex shrink-0 items-center gap-1.5 text-[12px] text-accent" title="${working} run${working === 1 ? ' is' : 's are'} working on this pull request right now"><span class="dot running"></span>${working} running${runs && !boardBranch ? ` · ${runs} run${runs === 1 ? '' : 's'} ›` : ''}</span>`

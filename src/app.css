@@ -7,6 +7,7 @@
    `text-accent`… all fall out of these. Shared with the documentation site so
    the two cannot drift apart; see src/theme.css. */
 @import './theme.css';
+@import './pr-viewer.css';
 
 @source "../public";
 /* The build output lives in the directory being scanned, so without this it
