@@ -926,7 +926,7 @@ describe('spawnWorkerSession', () => {
     },
   );
 
-  it('a claude answer that leaves agents in the background takes the next message live', async () => {
+  it('a claude turn takes messages live until it answers with nothing in the background', async () => {
     const job = getJob('bg-claude');
     job.status = 'idle';
     job.chats = { 1: { sessionId: 'bg-sid', started: true } };
@@ -954,6 +954,9 @@ describe('spawnWorkerSession', () => {
     try {
       sendDevMessage(job.id, 'Start the agents');
       expect(writes[0]).toEqual({ type: 'user', message: { role: 'user', content: 'Start the agents' } });
+      // Mid-turn, the message goes in right away rather than queueing.
+      expect(sendDevMessage(job.id, 'And check the logs').queued).toBeUndefined();
+      expect(writes[1].message.content).toBe('And check the logs');
       emit(
         {
           type: 'assistant',
@@ -968,19 +971,20 @@ describe('spawnWorkerSession', () => {
         },
         { type: 'result', subtype: 'success', result: 'Agents are on it.' },
       );
-      await vi.waitFor(() => expect(publicJob(job).waitingOnBackground).toBe(true));
+      // Answered, with the agent still out: the CLI keeps reading.
+      await vi.waitFor(() => expect(job.events.some((e) => e.kind === 'result')).toBe(true));
       expect(ended).toBe(false);
+      expect(publicJob(job).liveInput).toBe(true);
       expect(job.status).toBe('running');
 
       // Straight into the live CLI, not the queue.
       const sent = sendDevMessage(job.id, 'Meanwhile, one question');
       expect(sent.queued).toBeUndefined();
-      expect(writes[1].message.content).toBe('Meanwhile, one question');
-      expect(publicJob(job).waitingOnBackground).toBe(false);
+      expect(writes[2].message.content).toBe('Meanwhile, one question');
       expect(job.events.filter((e) => e.kind === 'user').at(-1).text).toBe('Meanwhile, one question');
 
       emit({ type: 'result', subtype: 'success', result: '4' });
-      await vi.waitFor(() => expect(publicJob(job).waitingOnBackground).toBe(true));
+      await vi.waitFor(() => expect(job.events.filter((e) => e.kind === 'result')).toHaveLength(2));
       expect(ended).toBe(false);
 
       // The last agent is done: stdin closes so the CLI can wake up and exit.
@@ -1049,7 +1053,8 @@ describe('spawnWorkerSession', () => {
           '\n',
       );
       await vi.waitFor(() => expect(ended).toBe(true));
-      // Mid-turn messages still wait for the turn to end.
+      expect(publicJob(job).liveInput).toBe(false);
+      // stdin is closed, so a message now waits for the process to exit.
       expect(sendDevMessage(job.id, 'Later').queued[0].text).toBe('Later');
       dropQueuedMessage(job.id, 0);
       const settled = new Promise((resolve) => {
