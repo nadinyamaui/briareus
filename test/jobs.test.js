@@ -1231,6 +1231,88 @@ describe('spawnWorkerSession', () => {
     }
   });
 
+  it('a crashed claude turn drops what it never answered instead of leaving it queued', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Do the thing');
+      children[0].emitLines(replay('Do the thing'));
+      sendDevMessage(job.id, 'Also update the docs');
+      const idle = new Promise((resolve) => {
+        const onJob = (session) => {
+          if (session.id !== job.id || session.status !== 'idle') return;
+          bus.off('job', onJob);
+          resolve();
+        };
+        bus.on('job', onJob);
+      });
+      children[0].emit('close', 1);
+      await idle;
+      // Nothing is left to sit as queued behind an idle session, and the
+      // transcript says what was not sent again.
+      expect(job.error).toMatch(/exited with code 1/);
+      expect(publicJob(job).queued).toBeUndefined();
+      expect(job.events.filter((e) => e.kind === 'info').at(-1).text).toMatch(
+        /never answered 1 message\(s\).*"Also update the docs"/,
+      );
+      expect(children).toHaveLength(1);
+    } finally {
+      job.error = null;
+      restore();
+    }
+  });
+
+  it('live sends count against the queue cap', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Start');
+      for (let n = 1; n <= 20; n++) sendDevMessage(job.id, `More ${n}`);
+      expect(() => sendDevMessage(job.id, 'One too many')).toThrow(/Already 20 message\(s\) waiting/);
+      expect(children[0].writes).toHaveLength(21);
+      // Stop takes the input away, and the unanswered ones still count.
+      cancelDevTurn(job.id);
+      expect(() => sendDevMessage(job.id, 'Still too many')).toThrow(/Already 20 message\(s\) waiting/);
+      children[0].emit('close', null);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      const done = settled(job);
+      const replays = children[1].writes.map((w) => replay(w));
+      children[1].emitLines(...replays, result('ok'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('stdin closes after 30 quiet minutes, counted from the latest output', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Start the monitor');
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      children[0].emitLines(replay('Start the monitor'));
+      await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+      // 35 min since the spawn, 15 since the CLI last spoke: still open.
+      expect(children[0].ended).toBe(false);
+      await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+      expect(children[0].ended).toBe(true);
+      expect(job.events.filter((e) => e.kind === 'info').at(-1).text).toMatch(/No word from .* for 30 min/);
+      const done = settled(job);
+      children[0].emitLines(result('ok'));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      vi.useRealTimers();
+      restore();
+    }
+  });
+
   it('a role is a Zeus analyst’s and one of the four', () => {
     expect(() => spawnWorkerSession(getJob('orch-a'), { title: 'R', prompt: 'x', role: 'qa' })).toThrow(
       /Only a Zeus session starts analysts by role/,

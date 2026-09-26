@@ -2075,16 +2075,18 @@
     const busy = s && ['queued', 'preparing', 'running'].includes(s.status);
     const down = s && ['closed', 'interrupted', 'failed'].includes(s.status);
     $('btn-send').disabled = false;
+    // A question outranks the live hint: a live turn gets the answer at once
+    // either way, and the user has to know one is owed.
     inputEl.placeholder = !s
       ? 'Describe what to build…'
-      : s.liveInput
-        ? 'Reply, it reaches the agent now…'
-        : busy
-          ? `Session is ${s.status}; your message goes in when this turn ends…`
-          : down
-            ? 'Reply, this reopens the session…'
-            : s.awaitingAnswer
-              ? 'Answer the question above…'
+      : s.awaitingAnswer && (s.liveInput || !(busy || down))
+        ? 'Answer the question above…'
+        : s.liveInput
+          ? 'Reply, it reaches the agent now…'
+          : busy
+            ? `Session is ${s.status}; your message goes in when this turn ends…`
+            : down
+              ? 'Reply, this reopens the session…'
               : 'Reply…';
     $('composer-note').textContent = down
       ? 'The session has no workspace right now. Reopen, or just send: the next message re-prepares it and resumes.'
