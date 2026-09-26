@@ -789,7 +789,7 @@ describe('the claude parser', () => {
   });
 
   it('adds up the tokens and time of every answer one process gives', () => {
-    const { turn } = feedAll([
+    const { turn, events } = feedAll([
       {
         type: 'result',
         total_cost_usd: 0.1,
@@ -804,6 +804,11 @@ describe('the claude parser', () => {
       },
     ]);
     expect(turn).toMatchObject({ costUsd: 0.25, durationMs: 1500, inputTokens: 300, outputTokens: 12 });
+    // Each answer's footer is its own, not the process's total so far.
+    const [first, second] = events;
+    expect(first).toMatchObject({ costUsd: 0.1, durationMs: 1000, inputTokens: 100, outputTokens: 5 });
+    expect(second).toMatchObject({ durationMs: 500, inputTokens: 200, outputTokens: 7 });
+    expect(second.costUsd).toBeCloseTo(0.15);
   });
 
   it('flush ends whatever a dead stream left running', () => {

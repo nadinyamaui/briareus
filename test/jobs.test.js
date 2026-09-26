@@ -1288,6 +1288,17 @@ describe('spawnWorkerSession', () => {
     }
   });
 
+  // A Monitor the CLI reports as backgrounded, as the real CLI sends it.
+  const monitorStarted = [
+    {
+      type: 'assistant',
+      message: {
+        content: [{ type: 'tool_use', id: 'call-m', name: 'Monitor', input: { command: 'tail -f log' } }],
+      },
+    },
+    { type: 'system', subtype: 'task_started', task_id: 'm1', tool_use_id: 'call-m', is_backgrounded: true },
+  ];
+
   it('stdin closes after 30 quiet minutes, counted from the latest output', async () => {
     const job = getJob('bg-claude');
     job.status = 'idle';
@@ -1296,7 +1307,8 @@ describe('spawnWorkerSession', () => {
     try {
       sendDevMessage(job.id, 'Start the monitor');
       await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
-      children[0].emitLines(replay('Start the monitor'));
+      // Answered, with a Monitor out that never reports finishing.
+      children[0].emitLines(replay('Start the monitor'), ...monitorStarted, result('Watching.'));
       await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
       // 35 min since the spawn, 15 since the CLI last spoke: still open.
       expect(children[0].ended).toBe(false);
@@ -1309,6 +1321,96 @@ describe('spawnWorkerSession', () => {
       await done;
     } finally {
       vi.useRealTimers();
+      restore();
+    }
+  });
+
+  it('a message still waiting for its answer keeps stdin open past 30 quiet minutes', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    try {
+      sendDevMessage(job.id, 'Run the whole test suite');
+      // A foreground command prints nothing to the stream while it runs.
+      children[0].emitLines(replay('Run the whole test suite'));
+      await vi.advanceTimersByTimeAsync(45 * 60 * 1000);
+      expect(children[0].ended).toBe(false);
+      expect(publicJob(job).liveInput).toBe(true);
+      expect(job.events.slice(before).some((e) => e.kind === 'info' && /No word from/.test(e.text))).toBe(
+        false,
+      );
+      const done = settled(job);
+      children[0].emitLines(result('All green.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      vi.useRealTimers();
+      restore();
+    }
+  });
+
+  it('a timed-out claude turn drops what it never answered and keeps what was queued after', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.dbServerId = 7;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const { children, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Migrate the schema');
+      children[0].emitLines(replay('Migrate the schema'));
+      sendDevMessage(job.id, 'Also rename the table');
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+      expect(job.events.some((e) => e.kind === 'info' && /Timeout after 60 min/.test(e.text))).toBe(true);
+      // Sent once the limit took the input away: an ordinary queued message.
+      expect(sendDevMessage(job.id, 'Then fix the lint').queued).toEqual([{ text: 'Then fix the lint' }]);
+      const idle = new Promise((resolve) => {
+        const onJob = (session) => {
+          if (session.id !== job.id || session.status !== 'idle') return;
+          bus.off('job', onJob);
+          resolve();
+        };
+        bus.on('job', onJob);
+      });
+      children[0].emit('close', null);
+      await vi.advanceTimersByTimeAsync(2000);
+      await idle;
+      // What the dead turn was handed is not left to run unannounced at some
+      // later reopen; the transcript says it was not sent again.
+      expect(publicJob(job).queued).toEqual([{ text: 'Then fix the lint' }]);
+      expect(job.events.filter((e) => e.kind === 'info').at(-1).text).toMatch(
+        /never answered 1 message\(s\).*"Also rename the table"/,
+      );
+      expect(children).toHaveLength(1);
+    } finally {
+      dropQueuedMessage(job.id, 0);
+      job.error = null;
+      delete job.dbServerId;
+      vi.useRealTimers();
+      restore();
+    }
+  });
+
+  it('a session stored with only a provider slug still takes messages live', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    delete job.providerId;
+    job.provider = 'claude';
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Start');
+      expect(publicJob(job).liveInput).toBe(true);
+      expect(sendDevMessage(job.id, 'And more').queued).toBeUndefined();
+      expect(children[0].writes).toEqual(['Start', 'And more']);
+      const done = settled(job);
+      children[0].emitLines(replay('Start'), replay('And more'), result('ok'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      job.providerId = 1;
       restore();
     }
   });
