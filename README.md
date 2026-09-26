@@ -678,6 +678,20 @@ Starting work and enabling loops may incur agent costs; write actions may change
 GitHub or delete sessions. Tool annotations distinguish reads from writes so
 ChatGPT can apply its confirmation flow. Connecting does not itself start agents.
 
+## Native mobile API
+
+For a separately developed iPhone app, **Settings → Mobile devices** issues
+revocable device tokens scoped to selected projects, with read-only or manage
+permissions and an expiry. The native API lives under `/api/mobile/v1` and
+reuses the dashboard operations for projects, conversations, messages, pull
+requests and findings. Password login must be enabled; mobile tokens never
+authorize browser settings or internal agent APIs.
+
+See the [mobile integration guide](docs/mobile-api.md) for setup, the narrow
+Cloudflare Access exception, the authenticated OpenAPI document, request
+examples and incremental conversation polling. This prepares the backend;
+it does not include an iOS app or change the live Cloudflare configuration.
+
 ## Deploying
 
 Nothing here deploys itself: no poller watches `main` and nothing restarts the
