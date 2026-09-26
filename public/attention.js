@@ -1,5 +1,5 @@
 (() => {
-  if (location.pathname !== '/attention') return;
+  if (location.pathname.replace(/\/+$/, '') !== '/attention') return;
   const { api, esc, content, status } = window.BriareusOperations;
   const ssh = window.BriareusSshRequest;
   // `items` is what the cards on screen were drawn from, so it only changes
@@ -30,13 +30,16 @@
       );
       const next = JSON.stringify(data.items);
       if (next === signature) return;
-      // An answer being written survives the redraw: drafts are keyed by item,
-      // and the focused one gets its focus and caret back.
+      // An answer being written survives the redraw: drafts are keyed by item
+      // and by when its question was asked, so a newer question on the same
+      // session does not inherit an answer written for the one before, and the
+      // focused one gets its focus and caret back.
+      const draftKey = (t) => {
+        const card = t.closest('[data-item]');
+        return `${card.dataset.item}@${card.dataset.at}`;
+      };
       const drafts = new Map(
-        [...content.querySelectorAll('[data-item] textarea')].map((t) => [
-          t.closest('[data-item]').dataset.item,
-          t,
-        ]),
+        [...content.querySelectorAll('[data-item] textarea')].map((t) => [draftKey(t), t]),
       );
       const focused = document.activeElement instanceof HTMLTextAreaElement ? document.activeElement : null;
       signature = next;
@@ -44,7 +47,8 @@
       for (const [id, at] of sent) if (!items.some((i) => i.id === id && i.at === at)) sent.delete(id);
       content.innerHTML = items
         .map(
-          (i) => `<article class="mb-4 rounded-lg border border-line bg-raise p-4" data-item="${esc(i.id)}">
+          (i) => `<article class="mb-4 rounded-lg border border-line bg-raise p-4" data-item="${esc(i.id)}"
+          data-at="${esc(i.at)}">
         ${
           i.request
             ? ssh.card(i.request)
@@ -63,7 +67,7 @@
         )
         .join('');
       for (const t of content.querySelectorAll('[data-item] textarea')) {
-        const old = drafts.get(t.closest('[data-item]').dataset.item);
+        const old = drafts.get(draftKey(t));
         if (!old) continue;
         t.value = old.value;
         if (old === focused) {

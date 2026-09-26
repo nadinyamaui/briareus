@@ -80,6 +80,16 @@ describe('operator attention', () => {
       ['y:question', 'The agent needs your answer'],
     ]);
   });
+  it('leaves a worker failure and its loop failure to an open orchestrator', () => {
+    const failure = { status: 'failed', error: 'boom', reviewLoop: { failure: { reason: 'quota' } } };
+    const items = attentionItems([
+      { id: 'o', status: 'idle', orchestrator: true },
+      { id: 'w', parentId: 'o', ...failure },
+      { id: 'c', status: 'closed', orchestrator: true },
+      { id: 'x', parentId: 'c', ...failure },
+    ]);
+    expect(items.map((i) => i.id)).toEqual(['x:recovery', 'x:review-failed']);
+  });
   it('drops loop failures and QA results once the pull request is merged or closed', () => {
     const loops = {
       reviewLoop: { failure: { reason: 'quota' } },

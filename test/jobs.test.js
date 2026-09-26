@@ -1456,6 +1456,46 @@ describe('spawnWorkerSession', () => {
     }
   });
 
+  it('keeps every question a turn asks for the inbox, and starts over once they are answered', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    try {
+      let done = settled(job);
+      sendDevMessage(job.id, 'Set up the database');
+      children[0].emitLines(
+        init,
+        replay('Set up the database'),
+        said(
+          '<ask-user>\nWhich DB?\n- MySQL\n- Postgres\n</ask-user>\n<ask-user>\nKeep the migration?\n</ask-user>',
+        ),
+        result('Asked.'),
+      );
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(job.awaitingAnswer).toBe(true);
+      expect(job.askText).toBe('Which DB?\nOptions: MySQL | Postgres\n\nKeep the migration?');
+      // The answer covers both; the next question is shown on its own.
+      done = settled(job);
+      sendDevMessage(job.id, 'Postgres, and keep it');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      children[1].emitLines(
+        init,
+        replay('Postgres, and keep it'),
+        said('<ask-user>\nSeed it too?\n</ask-user>'),
+        result('Asked.'),
+      );
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+      expect(job.awaitingAnswer).toBe(true);
+      expect(job.askText).toBe('Seed it too?');
+    } finally {
+      restore();
+    }
+  });
+
   it('a wake-up for one of several tasks, or a Monitor event, answers no message', async () => {
     const job = getJob('bg-claude');
     job.status = 'idle';
