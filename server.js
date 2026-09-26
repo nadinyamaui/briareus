@@ -127,6 +127,7 @@ import {
 } from './lib/memories.js';
 import { initTemplates, globalTemplates, saveGlobalTemplates, templateCatalog } from './lib/templates.js';
 import { projectPulls, pullOverview } from './lib/prboard.js';
+import { pullRequestView } from './lib/prviewer.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload } from './lib/uploads.js';
@@ -744,9 +745,26 @@ function findingsParams(body) {
   const project = getProject(String(body.repo || ''));
   if (!project) throw Object.assign(new Error(`Unknown project: ${body.repo || ''}`), { status: 404 });
   const prNumber = Number(body.pr);
-  if (!Number.isInteger(prNumber) || prNumber < 1) throw new Error('The PR number must be a whole number');
+  if (!Number.isInteger(prNumber) || prNumber < 1)
+    throw Object.assign(new Error('The PR number must be a whole number'), { status: 400 });
   return { repo: project.repo, prNumber };
 }
+
+dashboard.register('get', '/api/pr/view', async (req, res) => {
+  try {
+    const { repo, prNumber } = findingsParams(req.query);
+    res.json(
+      await pullRequestView({ repo }, prNumber, {
+        section: String(req.query.section || 'description'),
+        page: Number(req.query.page || 1),
+        headSha: String(req.query.headSha || ''),
+        baseSha: String(req.query.baseSha || ''),
+      }),
+    );
+  } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
 
 dashboard.register('get', '/api/pr/findings', async (req, res) => {
   try {
