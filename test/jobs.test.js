@@ -54,6 +54,7 @@ vi.mock('../lib/config.js', () => ({
 
 vi.mock('../lib/db.js', () => ({
   saveJob: vi.fn(async () => {}),
+  saveTaskSession: vi.fn(async () => {}),
   saveJobEvents: vi.fn(async () => {}),
   loadJobs: vi.fn(async () => state.stored),
   loadJobEvents: vi.fn(async () => []),
