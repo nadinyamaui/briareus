@@ -81,7 +81,8 @@ beforeEach(() => {
   disk.whichOutput = null;
   savedEnv = { ...process.env };
   for (const k of Object.keys(process.env))
-    if (k.startsWith('R2_') || k.startsWith('CLOUDFLARE_')) delete process.env[k];
+    if (k.startsWith('R2_') || k.startsWith('CLOUDFLARE_') || k.startsWith('OPENAI_TRANSCRIBE_'))
+      delete process.env[k];
 });
 
 afterEach(() => {
@@ -651,6 +652,35 @@ describe('the preview tunnel', () => {
     const { getConfig } = await loadConfig(complete({ ...TUNNEL, CLOUDFLARE_API_TOKEN: '' }));
 
     expect(getConfig().previewTunnel.apiToken).toBe('from-env');
+  });
+});
+
+describe('voice note transcription', () => {
+  it('is off when neither key is set', async () => {
+    const { getConfig } = await loadConfig(complete());
+
+    expect(getConfig().transcribe).toBeNull();
+  });
+
+  it('reads the key and the model', async () => {
+    const { getConfig } = await loadConfig(
+      complete({ OPENAI_TRANSCRIBE_API_KEY: 'sk-x', OPENAI_TRANSCRIBE_MODEL: 'gpt-4o-transcribe' }),
+    );
+
+    expect(getConfig().transcribe).toEqual({ apiKey: 'sk-x', model: 'gpt-4o-transcribe' });
+  });
+
+  it('refuses a key without a model', async () => {
+    const { getConfig } = await loadConfig(complete({ OPENAI_TRANSCRIBE_API_KEY: 'sk-x' }));
+
+    expect(() => getConfig()).toThrow(/OPENAI_TRANSCRIBE_MODEL/);
+  });
+
+  it('takes the key from the process environment over the file', async () => {
+    process.env.OPENAI_TRANSCRIBE_API_KEY = 'from-env';
+    const { getConfig } = await loadConfig(complete({ OPENAI_TRANSCRIBE_MODEL: 'gpt-4o-transcribe' }));
+
+    expect(getConfig().transcribe.apiKey).toBe('from-env');
   });
 });
 

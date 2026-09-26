@@ -84,12 +84,14 @@
       </div>
       <p>Files can be attached with the 📎 button, or pasted or dropped straight into the message box.</p>
       <p>
-        The 🎤 button records a voice note: speak and the browser writes what it hears into the message box,
-        where it can be corrected before Enter sends it. It keeps listening through short pauses until ⏹ is
-        pressed (or for five minutes at most; a longer silence ends it, with a notice), a language picker
-        beside it sets the spoken language, and typing in the box stops it. It uses the browser's own speech
-        recognition, so it shows in Chrome, Edge and Safari (Chrome sends the audio to Google to transcribe)
-        but not in Firefox, and only on a page served over https or from localhost.
+        The 🎤 button records a voice note, and ⏹ sends the recording to OpenAI's transcription API through
+        the server; the text lands at the end of the message box, where it can be corrected before Enter sends
+        it. Typing while recording is fine, and pressing Enter while recording transcribes the note first and
+        sends it along. A note stops by itself after five minutes, with a notice, and a language picker beside
+        the button tells OpenAI the spoken language. It needs
+        <code>OPENAI_TRANSCRIBE_API_KEY</code> and <code>OPENAI_TRANSCRIBE_MODEL</code> in the server's
+        environment or <code>.env</code> (pressing 🎤 without them says so), and a page served over https or
+        from localhost, since browsers only hand the microphone to those.
       </p>
 
       <h2 id="preparing">What happens before the agent sees your message</h2>

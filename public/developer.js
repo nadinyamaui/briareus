@@ -787,11 +787,7 @@
 
   // Inserting never replaces what is typed: a saved prompt is a starting
   // point, and the text already in the box may be the specifics to go with it.
-  async function insertPrompt(body) {
-    // The phrase still being dictated lands first: the input event below
-    // would otherwise abort it, and during a send wait the prompt would go
-    // out with the message.
-    await finishVoice();
+  function insertPrompt(body) {
     const current = inputEl.value;
     inputEl.value = current.trim() ? `${current.replace(/\s+$/, '')}\n\n${body}` : body;
     inputEl.dispatchEvent(new Event('input')); // re-grows the box
@@ -809,7 +805,7 @@
   });
   $('prompt-save').addEventListener('click', async () => {
     closePromptPop();
-    // The phrase still being dictated lands first, not the interim guess.
+    // A voice note being recorded is transcribed first, so it is saved too.
     await finishVoice();
     const body = inputEl.value.trim();
     if (!body) return;
@@ -2215,10 +2211,11 @@
   // queues, reopens and reports failures exactly like a typed one would.
   async function answerAsk(text) {
     const nav = navSeq;
-    // The phrase still being dictated lands before the box is read.
-    await finishVoice();
+    // A voice note being recorded lands before the box is read; one that
+    // failed to transcribe holds the answer back rather than leave it out.
+    const landed = await finishVoice();
     // The question belongs to the chat that was open when it was answered.
-    if (navSeq !== nav) return;
+    if (navSeq !== nav || !landed) return;
     inputEl.value = inputEl.value.trim() ? `${inputEl.value.trim()}\n${text}` : text;
     autoGrow();
     send();
@@ -2676,35 +2673,31 @@
 
   // ---------- voice notes ----------
   //
-  // 🎤 dictates into the message box through the browser's own speech
-  // recognition. No provider CLI can take audio, so a voice note has to reach
-  // the agent as text anyway, and landing in the box leaves the transcript
-  // there to correct before Enter sends it. Chrome, Edge and Safari have the
-  // API (Chrome sends the audio to Google to transcribe); Firefox has none,
-  // and neither does a page served over plain http from another host, so the
-  // button stays hidden there.
+  // 🎤 records a voice note and ⏹ has OpenAI transcribe it: the server holds
+  // the key and makes the call (lib/transcribe.js). No provider CLI can take
+  // audio, so a voice note has to reach the agent as text anyway, and landing
+  // at the end of the box leaves the transcript there to correct before Enter
+  // sends it. Recording needs a secure context, so a page served over plain
+  // http from another host has no button.
 
-  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   const voiceBtn = $('btn-voice');
   const voiceLangEl = $('voice-lang');
   const VOICE_LANG_KEY = 'dev.voiceLang';
-  // Past this a voice note stops by itself: a room with a television on keeps
-  // every round hearing something, so the heard-nothing rule alone never ends it.
+  // Past this a voice note stops by itself and is transcribed: a forgotten
+  // microphone would otherwise record until the upload limit refused it all.
   const VOICE_MAX_MS = 5 * 60 * 1000;
-  // How long ⏹ waits for the last phrase before dropping the round.
-  const VOICE_STOP_MS = 3000;
-  // One round of recognition while dictating: { rec, state, base, heard, kept,
-  // merged, note }. note is the voice note the rounds carry on, { done,
-  // resolve, cap }: done resolves once the note ends. state is one of
-  //   listening   the round is live, and onend carries on if it heard something
-  //   restarting  stopped for the language or a 🎤 after ⏹: onend starts the
-  //               next round of the same note once the last phrase has landed
-  //   finishing   ⏹ or the time cap: onend ends the note
-  //   sending     finishing for finishVoice(), which 🎤 cannot resume
-  // and only setVoiceState() moves it.
+  // Whether the server has a key to transcribe with; null until it answers.
+  let voiceAvailable = null;
+  // The voice note in progress: { state, recorder, stream, chunks, cap, done,
+  // resolve }. state is one of
+  //   starting      the browser is asking for the microphone
+  //   recording     until ⏹, a send or the time cap
+  //   transcribing  the recording is with OpenAI and its text is on its way
+  // done resolves once the note ends: true when its text landed (or it had
+  // none), false when it was dropped or its transcription failed.
   let voice = null;
 
-  if (Recognition && window.isSecureContext) {
+  if (navigator.mediaDevices?.getUserMedia && window.MediaRecorder && window.isSecureContext) {
     const langs = [
       ...new Set(
         [
@@ -2718,224 +2711,185 @@
     voiceLangEl.innerHTML = langs.map((l) => `<option value="${esc(l)}">${esc(l)}</option>`).join('');
     voiceLangEl.value = langs[0];
     voiceBtn.classList.remove('hidden');
-    // The picker stays up beside the button, so the language can be set
-    // before speaking and changed after the engine rejects one.
+    // The picker stays up beside the button: the language is read when the
+    // note is transcribed, so it can be set before speaking or while recording.
     voiceLangEl.classList.remove('hidden');
     renderVoice();
-  }
-
-  // The last phrase is still landing and the note ends after it, so nothing
-  // may abort the round.
-  function voiceFinishing() {
-    return voice?.state === 'finishing' || voice?.state === 'sending';
+    // Shown either way: a button that vanished would not say which setting
+    // brings it back, and a press does.
+    api('/api/dev/transcribe')
+      .then((d) => (voiceAvailable = !!d.available))
+      .catch(() => {});
   }
 
   function renderVoice() {
-    const on = !!voice && !voiceFinishing();
-    voiceBtn.textContent = on ? '⏹' : '🎤';
+    const state = voice?.state;
+    const on = state === 'starting' || state === 'recording';
+    voiceBtn.textContent = on ? '⏹' : state === 'transcribing' ? '⏳' : '🎤';
     voiceBtn.title = on
-      ? 'Stop the voice note'
-      : `Voice note: speak and it is written into the message box (${voiceLangEl.value})`;
-    voiceBtn.classList.toggle('animate-pulse', on);
+      ? 'Stop and transcribe the voice note'
+      : state === 'transcribing'
+        ? 'Transcribing the voice note…'
+        : `Voice note: speak, and OpenAI writes it into the message box (${voiceLangEl.value})`;
+    voiceBtn.classList.toggle('animate-pulse', on || state === 'transcribing');
     voiceBtn.classList.toggle('border-danger', on);
     voiceBtn.classList.toggle('text-danger', on);
     voiceBtn.classList.toggle('border-line', !on);
     voiceBtn.classList.toggle('text-muted', !on);
   }
 
-  const VOICE_ERRORS = {
-    'not-allowed': 'Microphone access was denied',
-    'service-not-allowed': 'This browser does not allow speech recognition here',
-    'audio-capture': 'No microphone was found',
-    network: 'Speech recognition needs a network connection',
-    'language-not-supported': 'That language is not supported for voice notes',
-    aborted: 'The voice note was cut off; another tab or app may be using speech recognition',
+  const MIC_ERRORS = {
+    NotAllowedError: 'Microphone access was denied',
+    NotFoundError: 'No microphone was found',
+    NotReadableError: 'The microphone is in use by another app',
   };
 
-  function newVoiceNote() {
-    const note = {};
-    note.done = new Promise((resolve) => (note.resolve = resolve));
-    armVoiceCap(note);
-    return note;
-  }
+  // What OpenAI reads, in the order a browser records it best: opus in webm
+  // (Chrome, Edge, Firefox) or ogg, and mp4 on Safari, which has neither.
+  const VOICE_TYPES = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4'];
 
-  // A timer rather than a check in onend: a continuous round that keeps
-  // hearing a noisy room may never end by itself. A spent cap is null, so a
-  // 🎤 that resumes the note while its last phrase lands arms a new one.
-  function armVoiceCap(note) {
-    note.cap = setTimeout(() => {
-      note.cap = null;
-      if (voice?.note !== note || voiceFinishing()) return;
-      setVoiceState('finishing');
-      toast('The voice note stopped after 5 minutes; press 🎤 to carry on');
-    }, VOICE_MAX_MS);
-  }
-
-  // note: the voice note a restarted round carries on; a fresh one otherwise.
-  function startVoice(note = newVoiceNote()) {
-    const rec = new Recognition();
-    rec.lang = voiceLangEl.value;
-    rec.interimResults = true;
-    // Continuous, so the microphone stays open between phrases: every restart
-    // leaves a gap where words are lost, and Android chimes on each one. An
-    // engine that ends anyway is restarted from onend.
-    rec.continuous = true;
-    // Whatever the box already holds stays in front of the transcript.
-    const value = inputEl.value;
-    voice = {
-      rec,
-      state: 'listening',
-      base: value + (value && !/\s$/.test(value) ? ' ' : ''),
-      heard: false,
-      // The text of the results below upTo, which no later event changes:
-      // every result before the last one joined, and that last one apart.
-      kept: { text: '', last: '', upTo: 0 },
-      // merged[i]: result i replaces the one before it.
-      merged: [],
-      note,
-    };
-    rec.onresult = (e) => {
-      if (voice?.rec !== rec) return;
-      // Not every engine starts a later result with a space. Android's
-      // continuous mode sends every earlier result again and repeats them at
-      // the start of each new one (desktop-site mode included): a result that
-      // repeats the one before it in the same event replaces it. Desktop
-      // engines never send a finished phrase again, so there a phrase that
-      // only starts like the last one ("yes", then "yes that works") is kept.
-      const join = (...texts) => texts.filter(Boolean).join(' ');
-      const { kept, merged } = voice;
-      // The results below resultIndex did not change, so they are folded in
-      // once rather than rebuilt from result 0 on every interim event.
-      for (; kept.upTo < Math.min(e.resultIndex, e.results.length); kept.upTo++) {
-        const t = e.results[kept.upTo][0].transcript.trim();
-        if (!t) continue;
-        if (!merged[kept.upTo]) kept.text = join(kept.text, kept.last);
-        kept.last = t;
-      }
-      const parts = [];
-      // The first result in flight replaces kept.last when an earlier event,
-      // which still held both, found it repeating that one: shown the way the
-      // fold above will settle it.
-      let lastReplaced = false;
-      for (let i = kept.upTo; i < e.results.length; i++) {
-        const t = e.results[i][0].transcript.trim();
-        if (!t) continue;
-        if (parts.length) {
-          const last = parts.at(-1).toLowerCase();
-          const low = t.toLowerCase();
-          merged[i] = low === last || low.startsWith(`${last} `);
-        }
-        if (!merged[i]) parts.push(t);
-        else if (parts.length) parts[parts.length - 1] = t;
-        else {
-          lastReplaced = true;
-          parts.push(t);
-        }
-      }
-      const text = join(kept.text, lastReplaced ? '' : kept.last, ...parts);
-      // Kept only once the engine has understood something in it, so a
-      // language it rejects is not the one every later voice note starts in;
-      // once a round, not on every interim result.
-      if (!voice.heard) localStorage.setItem(VOICE_LANG_KEY, rec.lang);
-      voice.heard = true;
-      inputEl.value = voice.base + text;
-      autoGrow();
-      inputEl.scrollTop = inputEl.scrollHeight;
-    };
-    rec.onerror = (e) => {
-      if (voice?.rec !== rec) return;
-      // Silence ends quietly: onend follows. Every abort of ours drops the
-      // round first, so an 'aborted' that gets here came from the browser
-      // (another tab took the recognizer), and restarting would take it back.
-      if (e.error === 'no-speech') return;
-      stopVoice();
-      toast(VOICE_ERRORS[e.error] || `Voice note failed: ${e.error}`, true);
-    };
-    rec.onend = () => {
-      if (voice?.rec === rec) roundEnded();
-    };
-    try {
-      rec.start();
-    } catch (err) {
-      endVoice();
-      toast(`Voice note failed: ${err.message}`, true);
-    }
-    renderVoice();
-  }
-
-  // Recognition stops by itself after a pause: carry on from what the box
-  // holds now until ⏹ is pressed. A round that heard nothing ends it, or a
-  // forgotten microphone would listen forever (the time cap is the note's own
-  // timer).
-  function roundEnded() {
-    const { state, heard, note } = voice;
-    if (state === 'restarting' || (state === 'listening' && heard)) {
-      startVoice(note);
+  async function startVoice() {
+    if (voiceAvailable === false) {
+      toast(
+        'Voice notes are off: the server needs OPENAI_TRANSCRIBE_API_KEY and OPENAI_TRANSCRIBE_MODEL',
+        true,
+      );
       return;
     }
-    endVoice();
-    if (state === 'listening') toast('The voice note stopped after a silence; press 🎤 to carry on');
-  }
-
-  // A round leaving listening is stopped rather than aborted, so the phrase in
-  // flight lands before onend acts on the new state. An engine can fail to
-  // fire onend after stop(): the round is then dropped and treated as ended,
-  // or the note would stay on with nothing listening.
-  function setVoiceState(to) {
-    const { rec, state } = voice;
-    voice.state = to;
-    if (state === 'listening') {
-      rec.stop();
-      setTimeout(() => {
-        if (voice?.rec !== rec) return;
-        rec.abort();
-        roundEnded();
-      }, VOICE_STOP_MS);
+    const note = { state: 'starting', chunks: [] };
+    note.done = new Promise((resolve) => (note.resolve = resolve));
+    voice = note;
+    renderVoice();
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      if (voice === note) endVoice(false);
+      toast(MIC_ERRORS[err.name] || `Voice note failed: ${err.message}`, true);
+      return;
     }
+    // Dropped while the browser asked (another chat, ⏹, a send): the
+    // microphone is let go at once rather than left recording nothing.
+    if (voice !== note) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    const type = VOICE_TYPES.find((t) => MediaRecorder.isTypeSupported(t));
+    let recorder;
+    try {
+      recorder = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+      recorder.ondataavailable = (e) => {
+        if (e.data.size) note.chunks.push(e.data);
+      };
+      // Comes after the last chunk, so the recording is whole by then.
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        if (voice === note && note.state === 'transcribing') transcribeVoice(note);
+      };
+      recorder.onerror = (e) => {
+        if (voice !== note) return;
+        stopVoice();
+        toast(`Voice note failed: ${e.error?.message || 'the recording stopped'}`, true);
+      };
+      recorder.start();
+    } catch (err) {
+      stream.getTracks().forEach((t) => t.stop());
+      endVoice(false);
+      toast(`Voice note failed: ${err.message}`, true);
+      return;
+    }
+    Object.assign(note, { state: 'recording', recorder, stream });
+    note.cap = setTimeout(() => {
+      if (voice !== note || note.state !== 'recording') return;
+      stopRecording();
+      toast('The voice note stopped after 5 minutes; press 🎤 to record the rest');
+    }, VOICE_MAX_MS);
     renderVoice();
   }
 
-  // Drops the recognition where it stands, for typing, leaving the chat or an
-  // error.
+  // The recorder hands over what it holds and onstop sends it off.
+  function stopRecording() {
+    clearTimeout(voice.cap);
+    voice.state = 'transcribing';
+    voice.recorder.stop();
+    renderVoice();
+  }
+
+  async function transcribeVoice(note) {
+    const blob = new Blob(note.chunks, { type: note.recorder.mimeType });
+    const lang = voiceLangEl.value;
+    let text;
+    try {
+      ({ text } = await api(`/api/dev/transcribe?lang=${encodeURIComponent(lang)}`, {
+        method: 'POST',
+        // The type is what the server names the file after, for OpenAI to
+        // tell the format by.
+        headers: { 'Content-Type': blob.type || 'application/octet-stream' },
+        body: blob,
+      }));
+    } catch (e) {
+      if (voice !== note) return;
+      endVoice(false);
+      toast(`The voice note could not be transcribed: ${e.message}`, true);
+      return;
+    }
+    // Dropped meanwhile: the box now belongs to another chat.
+    if (voice !== note) return;
+    if (text) {
+      // Kept once the language gave text back, so every later voice note
+      // starts in it.
+      localStorage.setItem(VOICE_LANG_KEY, lang);
+      // At the end, whatever was typed while recording: that went in before
+      // the note finished.
+      const value = inputEl.value;
+      inputEl.value = value + (value && !/\s$/.test(value) ? ' ' : '') + text;
+      autoGrow();
+      inputEl.scrollTop = inputEl.scrollHeight;
+    } else toast('Nothing was heard in the voice note');
+    endVoice(true);
+  }
+
+  // Drops the voice note where it stands, recording or on its way back, for
+  // leaving the chat or an error: the composer is shared, so its text would
+  // land in whichever chat is open by then.
   function stopVoice() {
     if (!voice) return;
-    const { rec } = voice;
-    endVoice();
-    rec.abort();
+    const { recorder, stream } = voice;
+    endVoice(false);
+    stream?.getTracks().forEach((t) => t.stop());
+    if (recorder?.state === 'recording') recorder.stop();
   }
 
   // Every way a voice note ends comes through here, and resumes whoever
   // waits on it in finishVoice().
-  function endVoice() {
-    const { note } = voice;
+  function endVoice(landed) {
+    const note = voice;
     voice = null;
     clearTimeout(note.cap);
-    note.resolve();
+    note.resolve(landed);
     renderVoice();
   }
 
-  // Stops the voice note and resolves once its last phrase has landed, so a
-  // send reads the final transcript rather than the engine's interim guess
-  // (abort() would throw that final text away). An engine that never ends
-  // is dropped by setVoiceState()'s fallback.
+  // Stops the voice note and resolves once its text is in the box, so a send
+  // or a save reads it: false when the transcription failed and the box is
+  // missing what was said. A note still waiting on the microphone had nothing
+  // in it yet, and is dropped.
   async function finishVoice() {
-    if (!voice) return;
-    const { note } = voice;
-    setVoiceState('sending');
-    await note.done;
+    if (!voice) return true;
+    if (voice.state === 'starting') {
+      stopVoice();
+      return true;
+    }
+    const { done } = voice;
+    if (voice.state === 'recording') stopRecording();
+    return done;
   }
 
   voiceBtn.addEventListener('click', () => {
     if (!voice) startVoice();
-    else if (voice.state === 'finishing') {
-      // ⏹ is still finishing: aborting now would drop its last phrase, so
-      // listening resumes from onend once that phrase has landed.
-      if (!voice.note.cap) armVoiceCap(voice.note);
-      setVoiceState('restarting');
-    }
-    // A send waits for the last phrase: a new round would start from the text
-    // about to go out, and the send would then cut it off.
-    else if (voice.state !== 'sending') setVoiceState('finishing');
+    else if (voice.state === 'recording') stopRecording();
+    else if (voice.state === 'starting') stopVoice();
+    // Transcribing: its text is on the way, and a new note waits for it.
     // A clicked button keeps the focus, and Enter would then press ⏹ rather
     // than send the message.
     if (!isMobile()) inputEl.focus();
@@ -2943,30 +2897,13 @@
   voiceLangEl.addEventListener('change', () => {
     renderVoice();
     if (!isMobile()) inputEl.focus();
-    // The phrase in flight lands before onend restarts in the new language. A
-    // round already restarting picks the new language up by itself.
-    if (voice?.state === 'listening') setVoiceState('restarting');
-  });
-  // Typing takes over: a transcript still arriving would write over the edit.
-  // Except while the last phrase is still landing, after ⏹ or during a send
-  // wait: a key would abort that phrase, leave the interim guess in the box
-  // and, for a send, go out with the message, so it is held back until then.
-  // Composition input (Android keyboards, IMEs) cannot be held back, so it
-  // does not stop the note either; the stop fallback bounds that wait.
-  inputEl.addEventListener('input', () => {
-    if (!voiceFinishing()) stopVoice();
-  });
-  inputEl.addEventListener('beforeinput', (e) => {
-    if (voiceFinishing()) e.preventDefault();
   });
 
-  // A failed or dismissed send gives its text back. A voice note started
-  // while the request was out writes base + transcript on every result, so
-  // the text goes in front of the box and of that base, not over them.
+  // A failed or dismissed send gives its text back, in front of whatever the
+  // box holds now: a voice note's text may have landed there meanwhile.
   function giveBack(text) {
     const rest = inputEl.value;
     inputEl.value = rest.trim() ? `${text}\n${rest}` : text;
-    if (voice) voice.base = `${text}\n${voice.base}`;
     autoGrow();
   }
 
@@ -3009,13 +2946,16 @@
     if ($('btn-send').disabled) return;
     const nav = navSeq;
     if (voice) {
-      // The phrase in flight lands first, and no late one after the box
-      // empties. Waited for before the box is checked: an Enter pressed right
-      // after a short phrase can come before its first result.
-      await finishVoice();
-      // Left for another chat or pane while waiting: the note stays in the
-      // box rather than going to whichever one is open now.
+      // The voice note is transcribed first, and its text goes out with the
+      // message. Waited for before the box is checked: an Enter pressed right
+      // after speaking finds the box still empty.
+      const landed = await finishVoice();
+      // Left for another chat or pane while waiting: nothing goes to
+      // whichever one is open now.
       if (navSeq !== nav) return;
+      // Its text is missing, and the rest alone would read as the whole
+      // message; the failure has been toasted.
+      if (!landed) return;
     }
     // After the wait: a second Enter while waiting has sent it already, and
     // a file pasted meanwhile may still be uploading.

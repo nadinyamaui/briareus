@@ -131,6 +131,7 @@ import { pullRequestView } from './lib/prviewer.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload } from './lib/uploads.js';
+import { transcribe, transcribeAvailable } from './lib/transcribe.js';
 import { projectUsage, overallUsage, jobUsageEstimates, estimateEventCosts } from './lib/usage.js';
 import {
   requireAuth,
@@ -1356,6 +1357,28 @@ app.post('/api/dev/uploads', express.raw({ type: () => true, limit: '25mb' }), (
     res.status(201).json({ file: storeUpload(String(req.query.name || ''), req.body) });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// Voice notes: the composer asks once whether the server can transcribe, and
+// posts each recording as the raw body, typed with what the browser recorded
+// (the type is what names the file for OpenAI) and the picked language in the
+// query. The answer is the text only; the recording is not kept.
+app.get('/api/dev/transcribe', (req, res) => {
+  res.json({ available: transcribeAvailable() });
+});
+
+app.post('/api/dev/transcribe', express.raw({ type: () => true, limit: '25mb' }), async (req, res) => {
+  if (!Buffer.isBuffer(req.body) || !req.body.length)
+    return res.status(400).json({ error: 'Empty recording' });
+  try {
+    const text = await transcribe(req.body, {
+      type: String(req.headers['content-type'] || ''),
+      language: String(req.query.lang || ''),
+    });
+    res.json({ text });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
