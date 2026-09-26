@@ -1440,6 +1440,7 @@ describe('spawnWorkerSession', () => {
       children[0].emitLines(said('<ask-user>\nWhich plan?\n- A\n- B\n</ask-user>'), result('Asked.'));
       await vi.waitFor(() => expect(job.events.some((e) => e.kind === 'result')).toBe(true));
       expect(job.awaitingAnswer).toBe(true);
+      expect(job.askText).toBe('Which plan?\nOptions: A | B'); // what the /attention inbox shows
       expect(children[0].ended).toBe(false);
       // Now it reads the message, which is that question's answer.
       children[0].emitLines(init, replay('go with option B'));

@@ -61,6 +61,48 @@ describe('operator attention', () => {
       ['new:review-failed', '2026-09-24'],
     ]);
   });
+  it('shows what was asked, and leaves a worker question to its open orchestrator', () => {
+    const items = attentionItems([
+      { id: 'o', status: 'idle', orchestrator: true },
+      { id: 'w', status: 'idle', parentId: 'o', awaitingAnswer: true, askText: 'Keep it?' },
+      { id: 'c', status: 'closed', orchestrator: true },
+      {
+        id: 'x',
+        status: 'idle',
+        parentId: 'c',
+        awaitingAnswer: true,
+        askText: 'Drop it?\nOptions: Drop | Keep',
+      },
+      { id: 'y', status: 'idle', parentId: 'gone', awaitingAnswer: true },
+    ]);
+    expect(items.map((i) => [i.id, i.summary])).toEqual([
+      ['x:question', 'Drop it?\nOptions: Drop | Keep'],
+      ['y:question', 'The agent needs your answer'],
+    ]);
+  });
+  it('drops loop failures and QA results once the pull request is merged or closed', () => {
+    const loops = {
+      reviewLoop: { failure: { reason: 'quota' } },
+      qaLoop: { failedScenarios: 2, verdictError: 'sheet 404' },
+    };
+    const items = attentionItems([
+      { id: 'open', status: 'idle', prStatus: { state: 'open' }, ...loops },
+      { id: 'merged', status: 'idle', prStatus: { state: 'merged' }, ...loops },
+      { id: 'closed', status: 'idle', prStatus: { state: 'closed' }, ...loops },
+    ]);
+    expect(items.map((i) => i.id)).toEqual(['open:review-failed', 'open:qa-failed', 'open:qa-verdict']);
+  });
+  it('lists a loop failure beside the recovery of an interrupted parent, as QA is', () => {
+    const items = attentionItems([
+      {
+        id: 'p',
+        status: 'interrupted',
+        reviewLoop: { failure: { reason: 'restart' } },
+        qaLoop: { failedScenarios: 1 },
+      },
+    ]);
+    expect(items.map((i) => i.id)).toEqual(['p:recovery', 'p:review-failed', 'p:qa-failed']);
+  });
   it('preserves the exact SSH approval and its destination', () => {
     const request = {
       id: 'ssh1',

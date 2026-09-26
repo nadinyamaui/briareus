@@ -25,6 +25,7 @@ import {
   publicJob,
   bus,
   listDevSessions,
+  devSessionRecords,
   createDevSession,
   sendDevMessage,
   cancelDevTurn,
@@ -542,7 +543,7 @@ function agentSession(req, res) {
 
 const sshService = createSshService({ getJob });
 app.use(sshRoutes({ service: sshService, agentSession, getProject }));
-app.use(operationsRoutes({ listSessions: listDevSessions, ssh: sshService }));
+app.use(operationsRoutes({ listSessions: devSessionRecords, ssh: sshService }));
 
 app.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);

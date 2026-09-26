@@ -19,9 +19,6 @@
     esc,
     api,
     content: document.getElementById('operations-content'),
-    title: (text) => {
-      document.getElementById('operations-title').textContent = text;
-    },
     status: (text) => {
       document.getElementById('operations-status').textContent = text;
     },

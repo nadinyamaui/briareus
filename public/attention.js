@@ -10,12 +10,24 @@
     busy = false,
     signature = '',
     latest = 0;
+  // `sent` holds the questions answered from here, by item id and the time
+  // the question was asked: an answer handed to a live turn leaves the
+  // question standing until the CLI reads it, and an empty box under it would
+  // look unsent.
+  const sent = new Map();
   async function refresh() {
     if (busy) return;
     const mine = ++latest;
     try {
       const data = await api('/api/operations/attention');
       if (mine !== latest || busy) return;
+      // Before the unchanged check: a success after a failed poll has to
+      // replace that poll's error even when the items are the same.
+      status(
+        data.items.length
+          ? `${data.items.length} item(s) need your attention`
+          : 'Nothing needs your attention.',
+      );
       const next = JSON.stringify(data.items);
       if (next === signature) return;
       // An answer being written survives the redraw: drafts are keyed by item,
@@ -29,7 +41,7 @@
       const focused = document.activeElement instanceof HTMLTextAreaElement ? document.activeElement : null;
       signature = next;
       items = data.items;
-      status(items.length ? `${items.length} item(s) need your attention` : 'Nothing needs your attention.');
+      for (const [id, at] of sent) if (!items.some((i) => i.id === id && i.at === at)) sent.delete(id);
       content.innerHTML = items
         .map(
           (i) => `<article class="mb-4 rounded-lg border border-line bg-raise p-4" data-item="${esc(i.id)}">
@@ -39,7 +51,13 @@
             : `<p class="text-xs text-muted">${esc(i.repo)} · ${esc(i.kind)}</p><h2 class="my-2 font-semibold">${esc(i.title)}</h2>
         <p class="whitespace-pre-wrap break-words">${esc(i.summary)}</p>`
         }
-        ${i.kind === 'question' ? '<label class="mt-3 block">Answer<textarea class="mt-1 w-full rounded border border-line bg-canvas p-2" rows="3"></textarea></label><button class="btn" data-action="answer">Send answer</button>' : ''}
+        ${
+          i.kind !== 'question'
+            ? ''
+            : sent.get(i.id) === i.at
+              ? '<p class="mt-3 text-muted">Answer sent; the agent reads it when its turn takes it in.</p>'
+              : '<label class="mt-3 block">Answer<textarea class="mt-1 w-full rounded border border-line bg-canvas p-2" rows="3"></textarea></label><button class="btn" data-action="answer">Send answer</button>'
+        }
         <a class="ml-3 inline-block py-3 underline" href="${esc(i.href)}">${i.kind === 'findings' ? 'Decide findings' : 'Open conversation'}</a>
         <p class="text-danger" role="status"></p></article>`,
         )
@@ -74,6 +92,7 @@
         if (!text) throw new Error('Write an answer first');
         await api(`/api/dev/sessions/${encodeURIComponent(item.sessionId)}/message`, { text });
         card.querySelector('textarea').value = ''; // sent: not a draft to restore
+        sent.set(item.id, item.at);
       } else await ssh.decide(item.request.id, button.dataset.decision);
       signature = '';
     } catch (error) {
