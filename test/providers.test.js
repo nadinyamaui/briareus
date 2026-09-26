@@ -785,7 +785,7 @@ describe('the claude parser', () => {
         parent_tool_use_id: null,
         isReplay: true,
       }),
-    ).toEqual([{ kind: 'ack' }]);
+    ).toEqual([{ kind: 'ack', text: 'Also check the logs' }]);
   });
 
   it('adds up the tokens and time of every answer one process gives', () => {

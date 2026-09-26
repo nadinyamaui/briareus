@@ -2107,7 +2107,7 @@
       <span class="flex items-center gap-1.5 rounded-lg border border-line bg-field px-2 py-1 text-[12px] text-muted">
         <span class="shrink-0">⏳</span>
         <span class="flex-1 truncate" title="${esc(label)}">${esc(label)}</span>
-        <span class="shrink-0">queued</span>
+        <span class="shrink-0">${m.resend ? 'sending again' : 'queued'}</span>
         <button class="queued-drop shrink-0 cursor-pointer border-0 bg-transparent px-0.5 text-muted hover:text-danger" data-n="${n}" title="Don't send this">✕</button>
       </span>`;
       })

@@ -990,8 +990,12 @@ describe('spawnWorkerSession', () => {
       await vi.waitFor(() => expect(job.events.filter((e) => e.kind === 'result')).toHaveLength(2));
       expect(ended).toBe(false);
 
-      // The last agent is done: stdin closes so the CLI can wake up and exit.
+      // The last agent is done. That wakes the CLI for one more answer, which
+      // could start new work, so stdin stays open until that answer is in.
       emit({ type: 'system', subtype: 'background_tasks_changed', tasks: [] });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(ended).toBe(false);
+      emit({ type: 'result', subtype: 'success', result: 'The agent found it.' });
       await vi.waitFor(() => expect(ended).toBe(true));
       const settled = new Promise((resolve) => {
         const onJob = (session) => {
@@ -1227,6 +1231,162 @@ describe('spawnWorkerSession', () => {
       children[1].emit('close', 0);
       await done;
     } finally {
+      restore();
+    }
+  });
+
+  it('flushing the pre-turn queue publishes the session once', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    let emits = 0;
+    const onJob = (session) => {
+      if (session.id === job.id) emits++;
+    };
+    try {
+      sendDevMessage(job.id, 'First');
+      children[0].emitLines(replay('First'), result('done'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      for (const text of ['A', 'B', 'C', 'D']) sendDevMessage(job.id, text);
+      bus.on('job', onJob);
+      children[0].emit('close', 0);
+      await vi.waitFor(() => expect(children[1]?.writes).toHaveLength(4));
+      // One per message would be four more than this.
+      expect(emits).toBeLessThanOrEqual(3);
+      bus.off('job', onJob);
+      const done = settled(job);
+      children[1].emitLines(replay('A'), replay('B\nC\nD'), result('ok'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+    } finally {
+      bus.off('job', onJob);
+      restore();
+    }
+  });
+
+  it('one echo carrying several messages read at once acks every one of them', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    try {
+      sendDevMessage(job.id, 'Write a long story');
+      children[0].emitLines(replay('Write a long story'));
+      sendDevMessage(job.id, 'One');
+      sendDevMessage(job.id, 'Two');
+      // The real CLI answers the story first, then takes both messages as
+      // one next answer, echoed as one line.
+      children[0].emitLines(result('Once upon a time'));
+      await vi.waitFor(() => expect(job.events.slice(before).some((e) => e.kind === 'result')).toBe(true));
+      expect(children[0].ended).toBe(false);
+      children[0].emitLines(replay('One\nTwo'), result('1 and 2'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('the answer to a finished Monitor can start new background work and keep taking messages', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    const results = () => job.events.slice(before).filter((e) => e.kind === 'result');
+    try {
+      sendDevMessage(job.id, 'Watch the log, then start the next wave');
+      children[0].emitLines(
+        replay('Watch the log, then start the next wave'),
+        ...monitorStarted,
+        result('Watching.'),
+      );
+      await vi.waitFor(() => expect(results()).toHaveLength(1));
+      // The Monitor reports done: the CLI wakes up, with no echo.
+      children[0].emitLines({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'm1',
+        tool_use_id: 'call-m',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(children[0].ended).toBe(false);
+      // That answer starts agent B in the background.
+      children[0].emitLines(
+        {
+          type: 'assistant',
+          message: {
+            content: [{ type: 'tool_use', id: 'call-b', name: 'Agent', input: { prompt: 'wave B' } }],
+          },
+        },
+        {
+          type: 'system',
+          subtype: 'task_started',
+          task_id: 'b1',
+          tool_use_id: 'call-b',
+          is_backgrounded: true,
+        },
+        result('Wave B is running.'),
+      );
+      await vi.waitFor(() => expect(results()).toHaveLength(2));
+      expect(children[0].ended).toBe(false);
+      expect(publicJob(job).liveInput).toBe(true);
+      expect(sendDevMessage(job.id, 'what is 2+2?').queued).toBeUndefined();
+      expect(children[0].writes.at(-1)).toBe('what is 2+2?');
+      children[0].emitLines(replay('what is 2+2?'), result('4'));
+      children[0].emitLines({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'b1',
+        tool_use_id: 'call-b',
+      });
+      children[0].emitLines(result('Wave B is done.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('a message Stop puts back says it is going in again, and withdrawing it says so', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    const { children, settled, restore } = fakeClaude();
+    const chips = [];
+    // The ✕ is pressed while the chip shows, before the drain picks it up.
+    const onJob = (session) => {
+      if (session.id !== job.id || !session.queued?.some((q) => q.resend)) return;
+      chips.push(session.queued);
+      bus.off('job', onJob);
+      expect(dropQueuedMessage(job.id, 0)).toBe(true);
+    };
+    try {
+      sendDevMessage(job.id, 'Run the long migration');
+      children[0].emitLines(replay('Run the long migration'));
+      sendDevMessage(job.id, 'Actually, do X instead');
+      cancelDevTurn(job.id);
+      sendDevMessage(job.id, 'And then Y');
+      bus.on('job', onJob);
+      children[0].emit('close', null);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(chips[0]).toEqual([{ text: 'Actually, do X instead', resend: true }, { text: 'And then Y' }]);
+      expect(children[1].writes).toEqual(['And then Y']);
+      const info = job.events.filter((e) => e.kind === 'info').map((e) => e.text);
+      expect(info).toContain(
+        'Withdrawn: "Actually, do X instead" was never answered and will not be sent again.',
+      );
+      const done = settled(job);
+      children[1].emitLines(replay('And then Y'), result('ok'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+    } finally {
+      bus.off('job', onJob);
       restore();
     }
   });

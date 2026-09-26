@@ -1729,7 +1729,8 @@ app.get('/api/dev/sessions/:id/events', (req, res) => {
   });
 });
 
-// A message mid-turn is queued rather than refused, and one to a session that
+// A message mid-turn goes into a claude turn still reading its input, or is
+// queued rather than refused otherwise, and one to a session that
 // let go of its workspace reopens it first, so this only fails on a message
 // the session could not accept at all.
 dashboard.register('post', '/api/dev/sessions/:id/message', (req, res) => {
