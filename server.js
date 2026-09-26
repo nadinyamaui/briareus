@@ -4,6 +4,8 @@ import { dashboardRoutes } from './lib/dashboard-routes.js';
 import { createRemoteMcpAuth } from './lib/remote-mcp-auth.js';
 import { remoteMcpRoutes } from './lib/remote-mcp.js';
 import { remoteMcpSettingsRoutes } from './lib/remote-mcp-settings.js';
+import { createMobileAuth } from './lib/mobile-auth.js';
+import { mobileApiRoutes, mobileSettingsRoutes } from './lib/mobile-api.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
 import fs from 'fs';
@@ -187,6 +189,13 @@ app.use('/webhooks', webhookRouter());
 const dashboard = dashboardRoutes({ app, getProject, getJob, listActions });
 const remoteMcpAuth = createRemoteMcpAuth();
 app.use(remoteMcpRoutes({ auth: remoteMcpAuth, dashboard, loginEnabled: authEnabled }));
+const mobileAuth = createMobileAuth();
+const mobileOptions = {
+  auth: mobileAuth,
+  loginEnabled: authEnabled,
+  ownerSecret: () => getConfig().auth.secret,
+};
+app.use(mobileApiRoutes({ ...mobileOptions, dashboard }));
 // Every remaining write keeps the dashboard’s same-origin and login gates.
 app.use(sameOriginWrites);
 app.use(express.json({ limit: '1mb' }));
@@ -194,6 +203,7 @@ app.use(express.json({ limit: '1mb' }));
 // Everything below the login gate. Mounted before the static files so pages,
 // videos and APIs are all behind it; see lib/auth.js for what stays public.
 app.use(requireAuth);
+app.use(mobileSettingsRoutes({ ...mobileOptions, signedIn, getProject, listProjects }));
 app.use(
   remoteMcpSettingsRoutes({
     auth: remoteMcpAuth,
@@ -387,6 +397,7 @@ for (const section of ['projects', 'providers', 'servers', 'ssh', 'saved-prompts
 app.get('/settings/prompts', settingsPage);
 app.get('/settings/workspaces', settingsPage);
 app.get('/settings/mcp', pageHandler(PUBLIC, 'mcp-settings.html'));
+app.get('/settings/mobile', pageHandler(PUBLIC, 'mobile-settings.html'));
 
 // ---- projects ----
 //
@@ -1987,6 +1998,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initDbServers();
     await sshService.init();
     await remoteMcpAuth.init();
+    await mobileAuth.init();
     await initSavedPrompts();
     await initMemories();
     await initProviders();
