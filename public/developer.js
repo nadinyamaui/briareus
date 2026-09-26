@@ -1587,6 +1587,8 @@
     // ▶ Run serves a checkout, which an orchestrator does not have.
     $('serve-group').classList.toggle('hidden', !open || !!s.orchestrator);
     paintServeButton(s);
+    $('btn-preview-feedback').classList.toggle('hidden', !s.serveLinks?.length);
+    $('btn-preview-feedback').href = `/preview-feedback/${encodeURIComponent(s.id)}`;
     $('btn-cancel-turn').classList.toggle('hidden', s.status !== 'running');
     // Closed, interrupted and failed all mean the same thing here: the session
     // let go of its workspace and can take it back.

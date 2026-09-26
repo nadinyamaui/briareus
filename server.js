@@ -1,5 +1,6 @@
 // @ts-check
 import express from 'express';
+import { previewFeedbackRoutes } from './lib/preview-feedback.js';
 import { initMemorySelection } from './lib/memory-selection.js';
 import { memoryMaintenanceRoutes } from './lib/memory-maintenance-routes.js';
 import { operationsRoutes } from './lib/operations-routes.js';
@@ -134,7 +135,7 @@ import { projectPulls, pullOverview } from './lib/prboard.js';
 import { pullRequestView } from './lib/prviewer.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
-import { storeUpload } from './lib/uploads.js';
+import { storeUpload, getUpload } from './lib/uploads.js';
 import { transcribe, transcribeAvailable } from './lib/transcribe.js';
 import { projectUsage, overallUsage, jobUsageEstimates, estimateEventCosts } from './lib/usage.js';
 import {
@@ -375,7 +376,7 @@ app.get('/dashboard', devPage);
 app.get('/office', devPage);
 app.get('/findings', devPage);
 app.get(
-  ['/attention', '/maintenance', '/recovery/:id', '/memory-health'],
+  ['/attention', '/maintenance', '/recovery/:id', '/memory-health', '/preview-feedback/:id'],
   pageHandler(PUBLIC, 'operations.html'),
 );
 app.get('/sessions/:id', devPage);
@@ -553,6 +554,7 @@ app.use(
 );
 
 app.use(memoryMaintenanceRoutes({ listMemories, updateMemory }));
+app.use(previewFeedbackRoutes({ getJob, getUpload, sendMessage: sendDevMessage }));
 
 app.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);

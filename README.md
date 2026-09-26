@@ -771,3 +771,14 @@ removing its text. Verification applies to the exact content and expires after
 90 days for maintenance purposes; it never automatically invalidates a fact.
 Archived memories remain readable in Settings and through the memory tools,
 but are omitted from briefings. Metadata persists in `app_settings`.
+
+### Visual preview feedback
+
+A running session offers **Comment on preview**. Open the app, capture its tab
+with the browser's screen-sharing picker (desktop), or upload a screenshot
+(mobile or desktop), then click the element and type or dictate your feedback.
+The annotated PNG, exact page URL and image coordinates go to the same agent
+conversation. Preview origins are checked against that session's Run links;
+no cross-origin iframe access or injected application scripts are required.
+Capture dimensions are image pixels, not an inferred CSS viewport. Voice uses
+the existing transcription service and is offered only when configured.
