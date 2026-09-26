@@ -636,7 +636,7 @@ describe('the claude parser', () => {
     expect(parser.feed(started('t2', 'a2'))).toEqual([]);
     parser.feed(agent('a3'));
     expect(parser.feed(started('t3', 'a3'))).toEqual([
-      { kind: 'background', tasks: [{ name: 'agent', summary: 'a3' }] },
+      { kind: 'background', tasks: [{ name: 'agent', summary: 'a3' }], ended: [] },
     ]);
   });
 
@@ -795,7 +795,7 @@ describe('the claude parser', () => {
     const started = (task_id, tool_use_id) =>
       parser.feed({ type: 'system', subtype: 'task_started', task_id, tool_use_id, is_backgrounded: true });
     expect(started('ta', 'a1')).toEqual([
-      { kind: 'background', tasks: [{ name: 'Explore', summary: 'map' }] },
+      { kind: 'background', tasks: [{ name: 'Explore', summary: 'map' }], ended: [] },
     ]);
     expect(started('tm', 'm1').at(-1).tasks).toHaveLength(2);
     expect(started('tb', 'b1')).toEqual([]); // a background Bash is not waited on
@@ -804,12 +804,44 @@ describe('the claude parser', () => {
       parser.feed({ type: 'system', subtype: 'task_notification', task_id: 'ta', tool_use_id: 'a1' }),
     ).toEqual([
       { kind: 'agent', state: 'end', id: 'a1' },
-      { kind: 'background', tasks: [{ name: 'Monitor', summary: 'replies' }] },
+      { kind: 'background', tasks: [{ name: 'Monitor', summary: 'replies' }], ended: ['ta'] },
     ]);
     // The CLI's own list prunes whatever it no longer runs.
     expect(
       parser.feed({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'tb' }] }),
-    ).toEqual([{ kind: 'background', tasks: [] }]);
+    ).toEqual([{ kind: 'background', tasks: [], ended: ['tm'] }]);
+  });
+
+  it('says when a task was stopped rather than done, after the drop that ended it', () => {
+    const parser = parserFor('claude', newTurn());
+    parser.feed({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id: 'm1', name: 'Monitor', input: { description: 'tick' } }] },
+    });
+    parser.feed({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'tm',
+      tool_use_id: 'm1',
+      is_backgrounded: true,
+    });
+    // What claude 2.1.281 sends for a TaskStop: the list drops it first.
+    expect(parser.feed({ type: 'system', subtype: 'background_tasks_changed', tasks: [] })).toEqual([
+      { kind: 'background', tasks: [], ended: ['tm'] },
+    ]);
+    expect(
+      parser.feed({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'tm',
+        tool_use_id: 'm1',
+        status: 'stopped',
+      }),
+    ).toEqual([{ kind: 'task_settled', id: 'tm' }]);
+    // A task that finished wakes the CLI: nothing settles it.
+    expect(
+      parser.feed({ type: 'system', subtype: 'task_notification', task_id: 'tx', status: 'completed' }),
+    ).toEqual([]);
   });
 
   it('only counts a task the CLI says it backgrounded', () => {
@@ -846,7 +878,29 @@ describe('the claude parser', () => {
         parent_tool_use_id: null,
         isReplay: true,
       }),
-    ).toEqual([{ kind: 'ack', text: 'Also check the logs' }]);
+    ).toEqual([{ kind: 'ack', text: 'Also check the logs', opens: true }]);
+  });
+
+  it('reads a notification folded into the answer under way as a settled task, not a message', () => {
+    const parser = parserFor('claude', newTurn());
+    const note =
+      '<task-notification>\n<task-id>tm</task-id>\n<status>completed</status>\n</task-notification>';
+    const echo = (content) => ({ type: 'user', message: { role: 'user', content }, isReplay: true });
+    expect(parser.feed(echo(note))).toEqual([{ kind: 'task_settled', id: 'tm' }]);
+    // Echoed along with a message, the message is still acked.
+    expect(parser.feed(echo(`hi\n${note}`))).toEqual([
+      { kind: 'task_settled', id: 'tm' },
+      { kind: 'ack', text: 'hi', opens: true },
+    ]);
+  });
+
+  it('says whether an echo opens an answer or joins one under way', () => {
+    const parser = parserFor('claude', newTurn());
+    const echo = { type: 'user', message: { role: 'user', content: 'hi' }, isReplay: true };
+    parser.feed({ type: 'system', subtype: 'init', model: 'fable' });
+    expect(parser.feed(echo)[0].opens).toBe(true);
+    parser.feed({ type: 'assistant', message: { content: [{ type: 'text', text: 'working' }] } });
+    expect(parser.feed(echo)[0].opens).toBe(false);
   });
 
   it('adds up the tokens and time of every answer one process gives', () => {

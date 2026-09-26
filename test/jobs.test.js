@@ -1523,6 +1523,124 @@ describe('spawnWorkerSession', () => {
     }
   });
 
+  it('a Monitor whose notification is read into the answer to a message owes no wake-up', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    try {
+      sendDevMessage(job.id, 'Watch the log');
+      children[0].emitLines(init, replay('Watch the log'), ...monitorStarted, result('Watching.'));
+      await vi.waitFor(() => expect(job.events.slice(before).some((e) => e.kind === 'result')).toBe(true));
+      sendDevMessage(job.id, 'Run the tests');
+      children[0].emitLines(init, replay('Run the tests'), said('Running them.'));
+      // The Monitor ends while that answer's Bash runs: claude 2.1.281 folds
+      // its notification into the answer, echoed, and wakes up for nothing.
+      children[0].emitLines(
+        { type: 'system', subtype: 'background_tasks_changed', tasks: [] },
+        {
+          type: 'system',
+          subtype: 'task_notification',
+          task_id: 'm1',
+          tool_use_id: 'call-m',
+          status: 'completed',
+        },
+        replay(
+          '<task-notification>\n<task-id>m1</task-id>\n<status>completed</status>\n</task-notification>',
+        ),
+        said('The tests pass, and the log went quiet.'),
+      );
+      const done = settled(job);
+      children[0].emitLines(result('The tests pass.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('a task the agent stopped itself owes no wake-up', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    try {
+      sendDevMessage(job.id, 'Watch the log');
+      children[0].emitLines(init, replay('Watch the log'), ...monitorStarted, result('Watching.'));
+      await vi.waitFor(() => expect(job.events.slice(before).some((e) => e.kind === 'result')).toBe(true));
+      sendDevMessage(job.id, 'Stop watching');
+      // What claude 2.1.281 sends for a TaskStop; no wake-up follows it.
+      children[0].emitLines(
+        init,
+        replay('Stop watching'),
+        { type: 'system', subtype: 'background_tasks_changed', tasks: [] },
+        {
+          type: 'system',
+          subtype: 'task_notification',
+          task_id: 'm1',
+          tool_use_id: 'call-m',
+          status: 'stopped',
+        },
+        said('Stopped.'),
+      );
+      const done = settled(job);
+      children[0].emitLines(result('Stopped.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('a live Zeus brief starts a new proposal round only once the answer under way is over', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.zeus = true;
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Compare two designs');
+      children[0].emitLines(
+        init,
+        replay('Compare two designs'),
+        ...monitorStarted,
+        said('Spawning the product analyst.'),
+      );
+      // The answer spawned its first proposal model with this prompt.
+      job.zeusProposalPrompt = 'the brief';
+      sendDevMessage(job.id, 'Keep it small');
+      expect(job.zeusProposalPrompt).toBe('the brief');
+      // Read into that answer, which may still spawn the second model.
+      children[0].emitLines(replay('Keep it small'));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(job.zeusProposalPrompt).toBe('the brief');
+      children[0].emitLines(said('Spawned both.'), result('Spawned both.'));
+      await vi.waitFor(() => expect(job.zeusProposalPrompt).toBe(null));
+      job.zeusProposalPrompt = 'the next brief';
+      sendDevMessage(job.id, 'Now a third one');
+      expect(job.zeusProposalPrompt).toBe('the next brief');
+      // A brief that opens an answer of its own starts its round at once.
+      children[0].emitLines(init, replay('Now a third one'));
+      await vi.waitFor(() => expect(job.zeusProposalPrompt).toBe(null));
+      const done = settled(job);
+      children[0].emitLines(said('On it.'), result('On it.'));
+      children[0].emitLines(
+        { type: 'system', subtype: 'task_notification', task_id: 'm1', tool_use_id: 'call-m' },
+        init,
+        said('The log is quiet.'),
+        result('The log is quiet.'),
+      );
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      job.zeus = false;
+      job.zeusProposalPrompt = null;
+      restore();
+    }
+  });
+
   it('a short reply is not read off a line of the same text in another message', async () => {
     const job = getJob('bg-claude');
     job.status = 'idle';
@@ -1772,10 +1890,19 @@ describe('spawnWorkerSession', () => {
     try {
       sendDevMessage(job.id, 'Start the monitor');
       await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
-      // Answered, with a Monitor out that never reports finishing.
       children[0].emitLines(replay('Start the monitor'), ...monitorStarted, result('Watching.'));
+      // A background task is silent while it works, however long that takes.
+      await vi.advanceTimersByTimeAsync(45 * 60 * 1000);
+      expect(children[0].ended).toBe(false);
+      // It reports done, and the wake-up that is owed never comes.
+      children[0].emitLines({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'm1',
+        tool_use_id: 'call-m',
+      });
       await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
-      // 35 min since the spawn, 15 since the CLI last spoke: still open.
+      // 15 min since the CLI last spoke: still open.
       expect(children[0].ended).toBe(false);
       await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
       expect(children[0].ended).toBe(true);
