@@ -827,3 +827,22 @@ ambiguous network failure; requests persist across dashboard restarts. A dispatc
 is reported as requested, never deployed, until GitHub reports its outcome.
 See [workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
 and [deployment statuses](https://docs.github.com/en/rest/deployments/statuses).
+
+### Opt-in Web Push
+
+`/notifications` configures an installation contact (HTTPS URL or `mailto:`)
+and enables alerts on the current browser, optionally filtered by project.
+Signing keys are generated once and kept with subscriptions in `app_settings`;
+only the public key is exposed. Nothing subscribes or asks browser permission
+until **Enable on this browser** is pressed. Disable removes both the server
+record and browser subscription. Push requires a supported secure browser;
+iOS requires installation as a home-screen web app.
+
+Every 15 seconds the server projects the attention inbox and sends new items,
+grouped by task. Delivery state survives restarts; expired subscriptions are
+removed and transient failures back off. Notifications show counts and open
+the inbox, without exposing commands or conversation text. Delivery may be
+repeated if the process dies after sending but before saving; the task tag
+replaces the previous notification. Only known browser push-service HTTPS
+endpoints are accepted. The `web-push` dependency supplies standard VAPID and
+payload encryption instead of maintaining a custom cryptographic implementation.

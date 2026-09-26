@@ -1,5 +1,8 @@
 // @ts-check
 import express from 'express';
+import { createNotificationService } from './lib/notifications.js';
+import { notificationRoutes } from './lib/notification-routes.js';
+import { attentionItems } from './lib/attention.js';
 import { createDeploymentService } from './lib/deployments.js';
 import { deploymentRoutes } from './lib/deployment-routes.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
@@ -388,6 +391,7 @@ app.get(
     '/preview-feedback/:id',
     '/tasks/:id',
     '/deployments',
+    '/notifications',
   ],
   pageHandler(PUBLIC, 'operations.html'),
 );
@@ -583,6 +587,8 @@ app.use(
     readyForSelfDeploy: () => maintenanceState(listDevSessions(), sshService.runningCount()).ready,
   }),
 );
+const notificationService = createNotificationService();
+app.use(notificationRoutes({ service: notificationService, getProject }));
 
 app.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
@@ -2034,6 +2040,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initSavedPrompts();
     await initMemorySelection();
     await initMemories();
+    await notificationService.init();
     await initProviders();
     // Warm the balancer's quota cache so the first session started after boot
     // already lands on the account with the most headroom.
@@ -2059,6 +2066,11 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   checkProviderAuth();
   setInterval(checkProviderAuth, AUTH_RECHECK_MS).unref();
   await initJobs();
+  setInterval(() => {
+    notificationService
+      .tick(attentionItems(listDevSessions(), sshService.pending()))
+      .catch((e) => console.error('Notification delivery failed:', e.message));
+  }, 15000).unref();
   // Clone slots are caches, not session records. Drop every unclaimed slot at
   // boot and once a day so a project's peak concurrency does not permanently
   // consume disk; the pruner sees the live session registry and skips claims.

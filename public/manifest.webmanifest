@@ -1,0 +1,10 @@
+{
+  "name": "Briareus",
+  "short_name": "Briareus",
+  "start_url": "/attention",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#262624",
+  "theme_color": "#262624",
+  "icons": [{ "src": "/briareus-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
