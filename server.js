@@ -1,5 +1,7 @@
 // @ts-check
 import express from 'express';
+import { initMemorySelection } from './lib/memory-selection.js';
+import { memoryMaintenanceRoutes } from './lib/memory-maintenance-routes.js';
 import { operationsRoutes } from './lib/operations-routes.js';
 import { dashboardRoutes } from './lib/dashboard-routes.js';
 import { createRemoteMcpAuth } from './lib/remote-mcp-auth.js';
@@ -372,7 +374,10 @@ app.get('/', devPage);
 app.get('/dashboard', devPage);
 app.get('/office', devPage);
 app.get('/findings', devPage);
-app.get(['/attention', '/maintenance', '/recovery/:id'], pageHandler(PUBLIC, 'operations.html'));
+app.get(
+  ['/attention', '/maintenance', '/recovery/:id', '/memory-health'],
+  pageHandler(PUBLIC, 'operations.html'),
+);
 app.get('/sessions/:id', devPage);
 app.get('/projects/:owner/:name', devPage);
 app.get('/projects/:owner/:name/dashboard', devPage);
@@ -546,6 +551,8 @@ app.use(sshRoutes({ service: sshService, agentSession, getProject }));
 app.use(
   operationsRoutes({ listSessions: listDevSessions, ssh: sshService, getJob, sendMessage: sendDevMessage }),
 );
+
+app.use(memoryMaintenanceRoutes({ listMemories, updateMemory }));
 
 app.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
@@ -1995,6 +2002,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await sshService.init();
     await remoteMcpAuth.init();
     await initSavedPrompts();
+    await initMemorySelection();
     await initMemories();
     await initProviders();
     // Warm the balancer's quota cache so the first session started after boot

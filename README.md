@@ -758,3 +758,16 @@ refused while existing turns and automatic child work finish. The ready state
 also waits for running SSH commands. Resume accepting work cancels draining.
 This is an in-process gate, reset on restart; it does not deploy or restart the
 server. Wait for ready before the normal deployment procedure.
+
+### Relevant memory and maintenance
+
+Briefings prioritize user/feedback memories and matches against the session
+title and latest user message, then recency, within the existing body budget.
+Selection is local lexical matching, with no model call or embedding service.
+`/memory-health` lists possible duplicates and memories needing verification:
+mark facts checked, archive/restore them, or review a combined text before
+merging. Merging saves the edited target and archives the source without
+removing its text. Verification applies to the exact content and expires after
+90 days for maintenance purposes; it never automatically invalidates a fact.
+Archived memories remain readable in Settings and through the memory tools,
+but are omitted from briefings. Metadata persists in `app_settings`.
