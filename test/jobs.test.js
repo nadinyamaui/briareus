@@ -389,6 +389,21 @@ describe('workspaceGitProbeOptions', () => {
     expect(options.env).toHaveProperty('REVIEWER_GIT_TOKEN');
     expect(options.env).toHaveProperty('GIT_CONFIG_KEY_0', 'credential.https://github.com.helper');
   });
+
+  it("keeps the server's own credentials out of a job child's environment", () => {
+    vi.stubEnv('OPENAI_TRANSCRIBE_API_KEY', 'sk-secret');
+    vi.stubEnv('R2_SECRET_ACCESS_KEY', 'r2-secret');
+    vi.stubEnv('CLOUDFLARE_API_TOKEN', 'cf-secret');
+    try {
+      const { env } = workspaceGitProbeOptions({ repo: 'acme/shop' });
+
+      expect(env).not.toHaveProperty('OPENAI_TRANSCRIBE_API_KEY');
+      expect(env).not.toHaveProperty('R2_SECRET_ACCESS_KEY');
+      expect(env).not.toHaveProperty('CLOUDFLARE_API_TOKEN');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 describe('workspaceStartBranch', () => {
