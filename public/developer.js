@@ -2078,22 +2078,27 @@
     true,
   );
 
-  // The composer never refuses a message any more: mid-turn it queues, and on a
+  // The composer never refuses a message any more: a claude turn still reading
+  // its input takes it at once, any other turn in flight queues it, and on a
   // session that let go of its workspace it reopens one. Only the placeholder
-  // and the note say which of the three is about to happen.
+  // and the note say which of these is about to happen.
   function setComposerState(s) {
     const busy = s && ['queued', 'preparing', 'running'].includes(s.status);
     const down = s && ['closed', 'interrupted', 'failed'].includes(s.status);
     $('btn-send').disabled = false;
+    // A question outranks the live hint: a live turn gets the answer at once
+    // either way, and the user has to know one is owed.
     inputEl.placeholder = !s
       ? 'Describe what to build…'
-      : busy
-        ? `Session is ${s.status}; your message goes in when this turn ends…`
-        : down
-          ? 'Reply, this reopens the session…'
-          : s.awaitingAnswer
-            ? 'Answer the question above…'
-            : 'Reply…';
+      : s.awaitingAnswer && (s.liveInput || !(busy || down))
+        ? 'Answer the question above…'
+        : s.liveInput
+          ? 'Reply, it reaches the agent now…'
+          : busy
+            ? `Session is ${s.status}; your message goes in when this turn ends…`
+            : down
+              ? 'Reply, this reopens the session…'
+              : 'Reply…';
     $('composer-note').textContent = down
       ? 'The session has no workspace right now. Reopen, or just send: the next message re-prepares it and resumes.'
       : '';
@@ -2113,7 +2118,7 @@
       <span class="flex items-center gap-1.5 rounded-lg border border-line bg-field px-2 py-1 text-[12px] text-muted">
         <span class="shrink-0">⏳</span>
         <span class="flex-1 truncate" title="${esc(label)}">${esc(label)}</span>
-        <span class="shrink-0">queued</span>
+        <span class="shrink-0">${m.resend ? 'sending again' : 'queued'}</span>
         <button class="queued-drop shrink-0 cursor-pointer border-0 bg-transparent px-0.5 text-muted hover:text-danger" data-n="${n}" title="Don't send this">✕</button>
       </span>`;
       })

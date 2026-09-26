@@ -804,6 +804,7 @@ describe('spawnWorkerSession', () => {
       row('zeus-resume-codex', { orchestrator: true, zeus: true }),
       row('zeus-resume-grok', { orchestrator: true, zeus: true }),
       row('zeus-resume-opencode', { orchestrator: true, zeus: true }),
+      row('bg-claude', {}),
       // Started from the composer's dialog with a pick for two roles; its own
       // effort is the provider's default, so an analyst on 'low' proves the
       // role's pick was used, and one on 'high' that the fallback was.
@@ -939,6 +940,1087 @@ describe('spawnWorkerSession', () => {
       }
     },
   );
+
+  it('a claude turn takes messages live until it answers with nothing in the background', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    getProviderForJob.mockReturnValue(state.provider);
+    captureProviderAuth.mockResolvedValue(undefined);
+    const bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    const children = [];
+    const writes = [];
+    let ended = false;
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin.on('data', (chunk) => writes.push(JSON.parse(chunk.toString())));
+      child.stdin.on('finish', () => (ended = true));
+      children.push(child);
+      return child;
+    });
+    const emit = (...msgs) => {
+      for (const m of msgs) children[0].stdout.write(JSON.stringify(m) + '\n');
+    };
+    const replay = (content) => ({ type: 'user', message: { role: 'user', content }, isReplay: true });
+    try {
+      sendDevMessage(job.id, 'Start the agents');
+      expect(writes[0]).toEqual({ type: 'user', message: { role: 'user', content: 'Start the agents' } });
+      // Mid-turn, the message goes in right away rather than queueing.
+      expect(sendDevMessage(job.id, 'And check the logs').queued).toBeUndefined();
+      expect(writes[1].message.content).toBe('And check the logs');
+      // The CLI echoes each message it reads; both are part of this answer.
+      emit(replay('Start the agents'), replay('And check the logs'));
+      emit(
+        {
+          type: 'assistant',
+          message: { content: [{ type: 'tool_use', id: 'call-1', name: 'Agent', input: { prompt: 'dig' } }] },
+        },
+        {
+          type: 'system',
+          subtype: 'task_started',
+          task_id: 't1',
+          tool_use_id: 'call-1',
+          is_backgrounded: true,
+        },
+        { type: 'result', subtype: 'success', result: 'Agents are on it.' },
+      );
+      // Answered, with the agent still out: the CLI keeps reading.
+      await vi.waitFor(() => expect(job.events.some((e) => e.kind === 'result')).toBe(true));
+      expect(ended).toBe(false);
+      expect(publicJob(job).liveInput).toBe(true);
+      expect(job.status).toBe('running');
+
+      // Straight into the live CLI, not the queue.
+      const sent = sendDevMessage(job.id, 'Meanwhile, one question');
+      expect(sent.queued).toBeUndefined();
+      expect(writes[2].message.content).toBe('Meanwhile, one question');
+      expect(job.events.filter((e) => e.kind === 'user').at(-1).text).toBe('Meanwhile, one question');
+
+      emit(replay('Meanwhile, one question'), { type: 'result', subtype: 'success', result: '4' });
+      await vi.waitFor(() => expect(job.events.filter((e) => e.kind === 'result')).toHaveLength(2));
+      expect(ended).toBe(false);
+
+      // The last agent is done. That wakes the CLI for one more answer, which
+      // could start new work, so stdin stays open until that answer is in.
+      emit({ type: 'system', subtype: 'background_tasks_changed', tasks: [] });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(ended).toBe(false);
+      emit({ type: 'result', subtype: 'success', result: 'The agent found it.' });
+      await vi.waitFor(() => expect(ended).toBe(true));
+      const settled = new Promise((resolve) => {
+        const onJob = (session) => {
+          if (session.id !== job.id || session.status !== 'idle') return;
+          bus.off('job', onJob);
+          resolve();
+        };
+        bus.on('job', onJob);
+      });
+      children[0].emit('close', 0);
+      await settled;
+      expect(children).toHaveLength(1);
+      // Which tasks are out is the turn's own business, not the record's.
+      expect(job).not.toHaveProperty('backgroundTasks');
+    } finally {
+      bin.mockRestore();
+      spawn.mockReset();
+      getProviderForJob.mockReset();
+      captureProviderAuth.mockReset();
+    }
+  });
+
+  it('a claude answer with nothing left in the background closes stdin at once', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    getProviderForJob.mockReturnValue(state.provider);
+    captureProviderAuth.mockResolvedValue(undefined);
+    const bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    let child;
+    let ended = false;
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
+      child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin.resume();
+      child.stdin.on('finish', () => (ended = true));
+      return child;
+    });
+    try {
+      sendDevMessage(job.id, 'Quick one');
+      // A background Bash does not hold the turn open; print mode reaps it.
+      child.stdout.write(
+        JSON.stringify({
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'b1',
+                name: 'Bash',
+                input: { command: 'npm run dev', run_in_background: true },
+              },
+            ],
+          },
+        }) +
+          '\n' +
+          JSON.stringify({ type: 'system', subtype: 'task_started', task_id: 'x1', tool_use_id: 'b1' }) +
+          '\n' +
+          JSON.stringify({ type: 'result', subtype: 'success', result: 'done' }) +
+          '\n',
+      );
+      await vi.waitFor(() => expect(ended).toBe(true));
+      expect(publicJob(job).liveInput).toBe(false);
+      // stdin is closed, so a message now waits for the process to exit.
+      expect(sendDevMessage(job.id, 'Later').queued[0].text).toBe('Later');
+      dropQueuedMessage(job.id, 0);
+      const settled = new Promise((resolve) => {
+        const onJob = (session) => {
+          if (session.id !== job.id || session.status !== 'idle') return;
+          bus.off('job', onJob);
+          resolve();
+        };
+        bus.on('job', onJob);
+      });
+      child.emit('close', 0);
+      await settled;
+    } finally {
+      bin.mockRestore();
+      spawn.mockReset();
+      getProviderForJob.mockReset();
+      captureProviderAuth.mockReset();
+    }
+  });
+
+  // A fake claude CLI for the live-input tests: every spawn is recorded with
+  // what was written to its stdin and whether stdin was closed.
+  const fakeClaude = () => {
+    getProviderForJob.mockReturnValue(state.provider);
+    captureProviderAuth.mockResolvedValue(undefined);
+    const bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    const children = [];
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.writes = [];
+      child.ended = false;
+      child.stdin.on('data', (chunk) => {
+        for (const line of chunk.toString().split('\n').filter(Boolean)) {
+          child.writes.push(JSON.parse(line).message.content);
+        }
+      });
+      child.stdin.on('finish', () => (child.ended = true));
+      child.emitLines = (...msgs) => {
+        for (const m of msgs) child.stdout.write(JSON.stringify(m) + '\n');
+      };
+      children.push(child);
+      return child;
+    });
+    const settled = (job) =>
+      new Promise((resolve) => {
+        const onJob = (session) => {
+          if (session.id !== job.id || session.status !== 'idle') return;
+          bus.off('job', onJob);
+          resolve();
+        };
+        bus.on('job', onJob);
+      });
+    const restore = () => {
+      bin.mockRestore();
+      spawn.mockReset();
+      getProviderForJob.mockReset();
+      captureProviderAuth.mockReset();
+    };
+    return { children, settled, restore };
+  };
+  const replay = (content) => ({ type: 'user', message: { role: 'user', content }, isReplay: true });
+  const result = (text) => ({ type: 'result', subtype: 'success', result: text });
+
+  it('Stop hands what a claude turn was told and never answered to the next turn', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Run the long migration');
+      children[0].emitLines(replay('Run the long migration'));
+      sendDevMessage(job.id, 'Actually, do X instead');
+      expect(children[0].writes).toEqual(['Run the long migration', 'Actually, do X instead']);
+      cancelDevTurn(job.id);
+      // A turn being killed takes nothing more: this one waits for the next.
+      expect(publicJob(job).liveInput).toBe(false);
+      expect(sendDevMessage(job.id, 'And then Y').queued).toEqual([{ text: 'And then Y' }]);
+      children[0].emit('close', null);
+      // The unanswered message leads the next turn; the queue follows it in.
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(children[1].writes).toEqual(['Actually, do X instead', 'And then Y']);
+      expect(publicJob(job).queued).toBeUndefined();
+      const users = job.events.filter((e) => e.kind === 'user').map((e) => e.text);
+      expect(users.filter((t) => t === 'Actually, do X instead')).toHaveLength(1);
+      expect(users.at(-1)).toBe('And then Y');
+      const done = settled(job);
+      children[1].emitLines(replay('Actually, do X instead'), replay('And then Y'), result('ok'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('an answer to an older message leaves stdin open for the one not read yet', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'One');
+      sendDevMessage(job.id, 'Two');
+      // The CLI answers One before it reads Two.
+      children[0].emitLines(replay('One'), result('1'));
+      await vi.waitFor(() => expect(job.events.some((e) => e.kind === 'result')).toBe(true));
+      expect(children[0].ended).toBe(false);
+      expect(publicJob(job).liveInput).toBe(true);
+      children[0].emitLines(replay('Two'), result('2'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('each live message restarts the time limit', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.dbServerId = 7;
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Start');
+      const first = job.timeout;
+      expect(first).toBeTruthy();
+      sendDevMessage(job.id, 'More');
+      expect(job.timeout).toBeTruthy();
+      expect(job.timeout).not.toBe(first);
+      const done = settled(job);
+      children[0].emitLines(replay('Start'), replay('More'), result('ok'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      delete job.dbServerId;
+      restore();
+    }
+  });
+
+  it('messages queued before a claude turn starts go into it at once', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'First');
+      children[0].emitLines(replay('First'), result('done'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      sendDevMessage(job.id, 'Later');
+      expect(sendDevMessage(job.id, 'Later too').queued).toHaveLength(2);
+      children[0].emit('close', 0);
+      // The drain starts a turn with the first; the other joins it straight
+      // away instead of waiting for that whole process to exit.
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(children[1].writes).toEqual(['Later', 'Later too']);
+      expect(publicJob(job).queued).toBeUndefined();
+      expect(publicJob(job).liveInput).toBe(true);
+      const done = settled(job);
+      children[1].emitLines(replay('Later'), replay('Later too'), result('ok'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('flushing the pre-turn queue publishes the session once', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    let emits = 0;
+    const onJob = (session) => {
+      if (session.id === job.id) emits++;
+    };
+    try {
+      sendDevMessage(job.id, 'First');
+      children[0].emitLines(replay('First'), result('done'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      for (const text of ['A', 'B', 'C', 'D']) sendDevMessage(job.id, text);
+      bus.on('job', onJob);
+      children[0].emit('close', 0);
+      await vi.waitFor(() => expect(children[1]?.writes).toHaveLength(4));
+      // One per message would be four more than this.
+      expect(emits).toBeLessThanOrEqual(3);
+      bus.off('job', onJob);
+      const done = settled(job);
+      children[1].emitLines(replay('A'), replay('B\nC\nD'), result('ok'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+    } finally {
+      bus.off('job', onJob);
+      restore();
+    }
+  });
+
+  it('one echo carrying several messages read at once acks every one of them', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    try {
+      sendDevMessage(job.id, 'Write a long story');
+      children[0].emitLines(replay('Write a long story'));
+      sendDevMessage(job.id, 'One');
+      sendDevMessage(job.id, 'Two');
+      // The real CLI answers the story first, then takes both messages as
+      // one next answer, echoed as one line.
+      children[0].emitLines(result('Once upon a time'));
+      await vi.waitFor(() => expect(job.events.slice(before).some((e) => e.kind === 'result')).toBe(true));
+      expect(children[0].ended).toBe(false);
+      children[0].emitLines(replay('One\nTwo'), result('1 and 2'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('the answer to a finished Monitor can start new background work and keep taking messages', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    const results = () => job.events.slice(before).filter((e) => e.kind === 'result');
+    try {
+      sendDevMessage(job.id, 'Watch the log, then start the next wave');
+      children[0].emitLines(
+        replay('Watch the log, then start the next wave'),
+        ...monitorStarted,
+        result('Watching.'),
+      );
+      await vi.waitFor(() => expect(results()).toHaveLength(1));
+      // The Monitor reports done: the CLI wakes up, with no echo.
+      children[0].emitLines({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'm1',
+        tool_use_id: 'call-m',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(children[0].ended).toBe(false);
+      // That answer starts agent B in the background.
+      children[0].emitLines(
+        {
+          type: 'assistant',
+          message: {
+            content: [{ type: 'tool_use', id: 'call-b', name: 'Agent', input: { prompt: 'wave B' } }],
+          },
+        },
+        {
+          type: 'system',
+          subtype: 'task_started',
+          task_id: 'b1',
+          tool_use_id: 'call-b',
+          is_backgrounded: true,
+        },
+        result('Wave B is running.'),
+      );
+      await vi.waitFor(() => expect(results()).toHaveLength(2));
+      expect(children[0].ended).toBe(false);
+      expect(publicJob(job).liveInput).toBe(true);
+      expect(sendDevMessage(job.id, 'what is 2+2?').queued).toBeUndefined();
+      expect(children[0].writes.at(-1)).toBe('what is 2+2?');
+      children[0].emitLines(replay('what is 2+2?'), result('4'));
+      children[0].emitLines({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'b1',
+        tool_use_id: 'call-b',
+      });
+      children[0].emitLines(result('Wave B is done.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('an echo that is not the first message word for word still acks every message it carries', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    try {
+      sendDevMessage(job.id, 'Write a long story');
+      children[0].emitLines(replay('Write a long story'));
+      sendDevMessage(job.id, '/hello');
+      sendDevMessage(job.id, 'fix X');
+      children[0].emitLines(result('Once upon a time'));
+      await vi.waitFor(() => expect(job.events.slice(before).some((e) => e.kind === 'result')).toBe(true));
+      expect(children[0].ended).toBe(false);
+      // A prompt command comes back expanded, not as the text that was sent.
+      children[0].emitLines(replay('Say hello to the user.\nfix X'), result('Hello, and X is fixed'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('a background task that ends mid-answer keeps stdin open for its own wake-up', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    const results = () => job.events.slice(before).filter((e) => e.kind === 'result');
+    try {
+      sendDevMessage(job.id, 'Watch the log');
+      children[0].emitLines(replay('Watch the log'), ...monitorStarted, result('Watching.'));
+      await vi.waitFor(() => expect(results()).toHaveLength(1));
+      sendDevMessage(job.id, 'Meanwhile, check the config');
+      children[0].emitLines(replay('Meanwhile, check the config'));
+      // The Monitor finishes while that answer is still under way.
+      children[0].emitLines(
+        { type: 'system', subtype: 'task_notification', task_id: 'm1', tool_use_id: 'call-m' },
+        result('The config is fine.'),
+      );
+      await vi.waitFor(() => expect(results()).toHaveLength(2));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(children[0].ended).toBe(false);
+      // The wake-up opens with an init, and has no echo.
+      children[0].emitLines(
+        { type: 'system', subtype: 'init', session_id: 'bg-sid', model: 'fable' },
+        result('The log shows the error.'),
+      );
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  const init = { type: 'system', subtype: 'init', session_id: 'bg-sid', model: 'fable' };
+  const said = (text) => ({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+
+  it('a live message answers a question the agent asked before the CLI read it', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Pick a plan and start on it');
+      children[0].emitLines(init, replay('Pick a plan and start on it'));
+      sendDevMessage(job.id, 'go with option B');
+      // The answer under way ends on a question before the CLI reads it.
+      children[0].emitLines(said('<ask-user>\nWhich plan?\n- A\n- B\n</ask-user>'), result('Asked.'));
+      await vi.waitFor(() => expect(job.events.some((e) => e.kind === 'result')).toBe(true));
+      expect(job.awaitingAnswer).toBe(true);
+      expect(children[0].ended).toBe(false);
+      // Now it reads the message, which is that question's answer.
+      children[0].emitLines(init, replay('go with option B'));
+      await vi.waitFor(() => expect(job.awaitingAnswer).toBe(false));
+      const done = settled(job);
+      children[0].emitLines(said('Doing B.'), result('Doing B.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(job.awaitingAnswer).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a wake-up for one of several tasks, or a Monitor event, answers no message', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    const results = () => job.events.slice(before).filter((e) => e.kind === 'result');
+    const agent = (id) => [
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id, name: 'Agent', input: { prompt: id } }] },
+      },
+      { type: 'system', subtype: 'task_started', task_id: `t-${id}`, tool_use_id: id, is_backgrounded: true },
+    ];
+    const notified = (id) => ({
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: `t-${id}`,
+      tool_use_id: id,
+    });
+    try {
+      sendDevMessage(job.id, 'Start both agents');
+      children[0].emitLines(
+        init,
+        replay('Start both agents'),
+        ...agent('a'),
+        ...agent('b'),
+        result('On it.'),
+      );
+      await vi.waitFor(() => expect(results()).toHaveLength(1));
+      sendDevMessage(job.id, 'stop, use the other API instead');
+      // Agent A reports back, and the CLI answers that before it reads the
+      // message; a Monitor event would wake it the same way.
+      children[0].emitLines(notified('a'), init, said('A is done.'), result('A is done.'));
+      children[0].emitLines(init, said('A log line.'), result('Noted.'));
+      await vi.waitFor(() => expect(results()).toHaveLength(3));
+      // B reports back last: its wake-up is answered, the message still is not.
+      children[0].emitLines(notified('b'), init, said('B is done.'), result('B is done.'));
+      await vi.waitFor(() => expect(results()).toHaveLength(4));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(children[0].ended).toBe(false);
+      children[0].emitLines(init, replay('stop, use the other API instead'), result('Switching.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('the answer to a waiting message leaves the wake-up that follows it owed', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    const results = () => job.events.slice(before).filter((e) => e.kind === 'result');
+    try {
+      sendDevMessage(job.id, 'Watch the log');
+      children[0].emitLines(init, replay('Watch the log'), ...monitorStarted, result('Watching.'));
+      await vi.waitFor(() => expect(results()).toHaveLength(1));
+      sendDevMessage(job.id, 'Meanwhile, check the config');
+      // The Monitor finishes while the message waits to be read.
+      children[0].emitLines({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'm1',
+        tool_use_id: 'call-m',
+      });
+      // The CLI answers the message first, and that answer opens with an init too.
+      children[0].emitLines(init, replay('Meanwhile, check the config'), said('Fine.'), result('Fine.'));
+      await vi.waitFor(() => expect(results()).toHaveLength(2));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(children[0].ended).toBe(false);
+      children[0].emitLines(init, said('The log shows the error.'), result('The log shows the error.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('a Monitor whose notification is read into the answer to a message owes no wake-up', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    try {
+      sendDevMessage(job.id, 'Watch the log');
+      children[0].emitLines(init, replay('Watch the log'), ...monitorStarted, result('Watching.'));
+      await vi.waitFor(() => expect(job.events.slice(before).some((e) => e.kind === 'result')).toBe(true));
+      sendDevMessage(job.id, 'Run the tests');
+      children[0].emitLines(init, replay('Run the tests'), said('Running them.'));
+      // The Monitor ends while that answer's Bash runs: claude 2.1.281 folds
+      // its notification into the answer, echoed, and wakes up for nothing.
+      children[0].emitLines(
+        { type: 'system', subtype: 'background_tasks_changed', tasks: [] },
+        {
+          type: 'system',
+          subtype: 'task_notification',
+          task_id: 'm1',
+          tool_use_id: 'call-m',
+          status: 'completed',
+        },
+        replay(
+          '<task-notification>\n<task-id>m1</task-id>\n<status>completed</status>\n</task-notification>',
+        ),
+        said('The tests pass, and the log went quiet.'),
+      );
+      const done = settled(job);
+      children[0].emitLines(result('The tests pass.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('a task the agent stopped itself owes no wake-up', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    try {
+      sendDevMessage(job.id, 'Watch the log');
+      children[0].emitLines(init, replay('Watch the log'), ...monitorStarted, result('Watching.'));
+      await vi.waitFor(() => expect(job.events.slice(before).some((e) => e.kind === 'result')).toBe(true));
+      sendDevMessage(job.id, 'Stop watching');
+      // What claude 2.1.281 sends for a TaskStop; no wake-up follows it.
+      children[0].emitLines(
+        init,
+        replay('Stop watching'),
+        { type: 'system', subtype: 'background_tasks_changed', tasks: [] },
+        {
+          type: 'system',
+          subtype: 'task_notification',
+          task_id: 'm1',
+          tool_use_id: 'call-m',
+          status: 'stopped',
+        },
+        said('Stopped.'),
+      );
+      const done = settled(job);
+      children[0].emitLines(result('Stopped.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('a live Zeus brief starts a new proposal round only once the answer under way is over', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.zeus = true;
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Compare two designs');
+      children[0].emitLines(
+        init,
+        replay('Compare two designs'),
+        ...monitorStarted,
+        said('Spawning the product analyst.'),
+      );
+      // The answer spawned its first proposal model with this prompt.
+      job.zeusProposalPrompt = 'the brief';
+      sendDevMessage(job.id, 'Keep it small');
+      expect(job.zeusProposalPrompt).toBe('the brief');
+      // Read into that answer, which may still spawn the second model.
+      children[0].emitLines(replay('Keep it small'));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(job.zeusProposalPrompt).toBe('the brief');
+      children[0].emitLines(said('Spawned both.'), result('Spawned both.'));
+      await vi.waitFor(() => expect(job.zeusProposalPrompt).toBe(null));
+      job.zeusProposalPrompt = 'the next brief';
+      sendDevMessage(job.id, 'Now a third one');
+      expect(job.zeusProposalPrompt).toBe('the next brief');
+      // A brief that opens an answer of its own starts its round at once.
+      children[0].emitLines(init, replay('Now a third one'));
+      await vi.waitFor(() => expect(job.zeusProposalPrompt).toBe(null));
+      const done = settled(job);
+      children[0].emitLines(said('On it.'), result('On it.'));
+      children[0].emitLines(
+        { type: 'system', subtype: 'task_notification', task_id: 'm1', tool_use_id: 'call-m' },
+        init,
+        said('The log is quiet.'),
+        result('The log is quiet.'),
+      );
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      job.zeus = false;
+      job.zeusProposalPrompt = null;
+      restore();
+    }
+  });
+
+  it('a short reply is not read off a line of the same text in another message', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    try {
+      sendDevMessage(job.id, '/review');
+      sendDevMessage(job.id, 'yes');
+      // The prompt command comes back expanded, with a line that reads "yes".
+      children[0].emitLines(init, replay('Review the diff.\nyes\nThen report.'), result('Reviewed.'));
+      await vi.waitFor(() => expect(job.events.slice(before).some((e) => e.kind === 'result')).toBe(true));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(children[0].ended).toBe(false);
+      children[0].emitLines(init, replay('yes'), result('ok'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('a local command, which has no echo either, still answers its message', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    try {
+      sendDevMessage(job.id, 'Watch the log');
+      children[0].emitLines(init, replay('Watch the log'), ...monitorStarted, result('Watching.'));
+      await vi.waitFor(() => expect(job.events.slice(before).some((e) => e.kind === 'result')).toBe(true));
+      sendDevMessage(job.id, '/context');
+      children[0].emitLines(
+        init,
+        {
+          type: 'assistant',
+          message: { model: '<synthetic>', content: [{ type: 'text', text: '## Context' }] },
+        },
+        { ...result('## Context'), num_turns: 0 },
+        { type: 'system', subtype: 'task_notification', task_id: 'm1', tool_use_id: 'call-m' },
+        init,
+        said('The log shows the error.'),
+        result('The log shows the error.'),
+      );
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it("a live answer's footer waits for its ledger row, and the lines after it wait behind it", async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    let land;
+    recordTurnUsage.mockClear();
+    recordTurnUsage.mockImplementationOnce(() => new Promise((r) => (land = r)));
+    try {
+      sendDevMessage(job.id, 'Watch the log');
+      children[0].emitLines(replay('Watch the log'), ...monitorStarted, {
+        ...result('Watching.'),
+        total_cost_usd: 0.1,
+      });
+      await vi.waitFor(() => expect(recordTurnUsage).toHaveBeenCalledTimes(1));
+      children[0].emitLines(said('Still watching.'));
+      await new Promise((r) => setTimeout(r, 20));
+      const shown = () => job.events.slice(before).filter((e) => e.kind === 'result' || e.kind === 'text');
+      expect(shown()).toEqual([]);
+      land(true);
+      await vi.waitFor(() => expect(shown().map((e) => e.kind)).toEqual(['result', 'text']));
+      children[0].emitLines(
+        { type: 'system', subtype: 'task_notification', task_id: 'm1', tool_use_id: 'call-m' },
+        init,
+        result('The log shows the error.'),
+      );
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('a live claude process records each answer as its result comes in', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const priced = (text, cost, ms) => ({ ...result(text), total_cost_usd: cost, duration_ms: ms });
+    const cost = job.costUsd || 0;
+    const time = job.durationMs || 0;
+    recordTurnUsage.mockClear();
+    try {
+      sendDevMessage(job.id, 'Watch the log');
+      children[0].emitLines(replay('Watch the log'), ...monitorStarted, priced('Watching.', 0.1, 1000));
+      await vi.waitFor(() => expect(recordTurnUsage).toHaveBeenCalledTimes(1));
+      expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({ costUsd: 0.1, durationMs: 1000 });
+      expect(job.costUsd).toBeCloseTo(cost + 0.1);
+      expect(job.durationMs).toBe(time + 1000);
+
+      sendDevMessage(job.id, 'What is 2+2?');
+      children[0].emitLines(replay('What is 2+2?'), priced('4', 0.25, 500));
+      await vi.waitFor(() => expect(recordTurnUsage).toHaveBeenCalledTimes(2));
+      // Only what this answer added, not the process's total so far.
+      expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+        costUsd: expect.closeTo(0.15),
+        durationMs: 500,
+      });
+      expect(job.costUsd).toBeCloseTo(cost + 0.25);
+      expect(children[0].ended).toBe(false);
+
+      children[0].emitLines(
+        { type: 'system', subtype: 'task_notification', task_id: 'm1', tool_use_id: 'call-m' },
+        { type: 'system', subtype: 'init', session_id: 'bg-sid', model: 'fable' },
+        priced('The log shows the error.', 0.3, 200),
+      );
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+      // Every answer is already in: the exit adds nothing twice.
+      expect(recordTurnUsage).toHaveBeenCalledTimes(3);
+      expect(job.costUsd).toBeCloseTo(cost + 0.3);
+      expect(job.durationMs).toBe(time + 1700);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a message Stop puts back says it is going in again, and withdrawing it says so', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    const { children, settled, restore } = fakeClaude();
+    const chips = [];
+    // The ✕ is pressed while the chip shows, before the drain picks it up.
+    const onJob = (session) => {
+      if (session.id !== job.id || !session.queued?.some((q) => q.resend)) return;
+      chips.push(session.queued);
+      bus.off('job', onJob);
+      expect(dropQueuedMessage(job.id, 0)).toBe(true);
+    };
+    try {
+      sendDevMessage(job.id, 'Run the long migration');
+      children[0].emitLines(replay('Run the long migration'));
+      sendDevMessage(job.id, 'Actually, do X instead');
+      cancelDevTurn(job.id);
+      sendDevMessage(job.id, 'And then Y');
+      bus.on('job', onJob);
+      children[0].emit('close', null);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(chips[0]).toEqual([{ text: 'Actually, do X instead', resend: true }, { text: 'And then Y' }]);
+      expect(children[1].writes).toEqual(['And then Y']);
+      const info = job.events.filter((e) => e.kind === 'info').map((e) => e.text);
+      expect(info).toContain(
+        'Withdrawn: "Actually, do X instead" was never answered and will not be sent again.',
+      );
+      const done = settled(job);
+      children[1].emitLines(replay('And then Y'), result('ok'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+    } finally {
+      bus.off('job', onJob);
+      restore();
+    }
+  });
+
+  it('a crashed claude turn drops what it never answered instead of leaving it queued', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Do the thing');
+      children[0].emitLines(replay('Do the thing'));
+      sendDevMessage(job.id, 'Also update the docs');
+      const idle = new Promise((resolve) => {
+        const onJob = (session) => {
+          if (session.id !== job.id || session.status !== 'idle') return;
+          bus.off('job', onJob);
+          resolve();
+        };
+        bus.on('job', onJob);
+      });
+      children[0].emit('close', 1);
+      await idle;
+      // Nothing is left to sit as queued behind an idle session, and the
+      // transcript says what was not sent again.
+      expect(job.error).toMatch(/exited with code 1/);
+      expect(publicJob(job).queued).toBeUndefined();
+      expect(job.events.filter((e) => e.kind === 'info').at(-1).text).toMatch(
+        /never answered 1 message\(s\).*"Also update the docs"/,
+      );
+      expect(children).toHaveLength(1);
+    } finally {
+      job.error = null;
+      restore();
+    }
+  });
+
+  it('live sends count against the queue cap', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Start');
+      for (let n = 1; n <= 20; n++) sendDevMessage(job.id, `More ${n}`);
+      expect(() => sendDevMessage(job.id, 'One too many')).toThrow(/Already 20 message\(s\) waiting/);
+      expect(children[0].writes).toHaveLength(21);
+      // Stop takes the input away, and the unanswered ones still count.
+      cancelDevTurn(job.id);
+      expect(() => sendDevMessage(job.id, 'Still too many')).toThrow(/Already 20 message\(s\) waiting/);
+      children[0].emit('close', null);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      const done = settled(job);
+      const replays = children[1].writes.map((w) => replay(w));
+      children[1].emitLines(...replays, result('ok'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  // A Monitor the CLI reports as backgrounded, as the real CLI sends it.
+  const monitorStarted = [
+    {
+      type: 'assistant',
+      message: {
+        content: [{ type: 'tool_use', id: 'call-m', name: 'Monitor', input: { command: 'tail -f log' } }],
+      },
+    },
+    { type: 'system', subtype: 'task_started', task_id: 'm1', tool_use_id: 'call-m', is_backgrounded: true },
+  ];
+
+  it('stdin closes after 30 quiet minutes, counted from the latest output', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Start the monitor');
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      children[0].emitLines(replay('Start the monitor'), ...monitorStarted, result('Watching.'));
+      // A background task is silent while it works, however long that takes.
+      await vi.advanceTimersByTimeAsync(45 * 60 * 1000);
+      expect(children[0].ended).toBe(false);
+      // It reports done, and the wake-up that is owed never comes.
+      children[0].emitLines({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'm1',
+        tool_use_id: 'call-m',
+      });
+      await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+      // 15 min since the CLI last spoke: still open.
+      expect(children[0].ended).toBe(false);
+      await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+      expect(children[0].ended).toBe(true);
+      expect(job.events.filter((e) => e.kind === 'info').at(-1).text).toMatch(/No word from .* for 30 min/);
+      const done = settled(job);
+      children[0].emitLines(result('ok'));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      vi.useRealTimers();
+      restore();
+    }
+  });
+
+  it('a message still waiting for its answer keeps stdin open past 30 quiet minutes', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    try {
+      sendDevMessage(job.id, 'Run the whole test suite');
+      // A foreground command prints nothing to the stream while it runs.
+      children[0].emitLines(replay('Run the whole test suite'));
+      await vi.advanceTimersByTimeAsync(45 * 60 * 1000);
+      expect(children[0].ended).toBe(false);
+      expect(publicJob(job).liveInput).toBe(true);
+      expect(job.events.slice(before).some((e) => e.kind === 'info' && /No word from/.test(e.text))).toBe(
+        false,
+      );
+      const done = settled(job);
+      children[0].emitLines(result('All green.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      vi.useRealTimers();
+      restore();
+    }
+  });
+
+  it('a timed-out claude turn drops what it never answered and keeps what was queued after', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.dbServerId = 7;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const { children, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Migrate the schema');
+      children[0].emitLines(replay('Migrate the schema'));
+      sendDevMessage(job.id, 'Also rename the table');
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+      expect(job.events.some((e) => e.kind === 'info' && /Timeout after 60 min/.test(e.text))).toBe(true);
+      // Sent once the limit took the input away: an ordinary queued message.
+      expect(sendDevMessage(job.id, 'Then fix the lint').queued).toEqual([{ text: 'Then fix the lint' }]);
+      const idle = new Promise((resolve) => {
+        const onJob = (session) => {
+          if (session.id !== job.id || session.status !== 'idle') return;
+          bus.off('job', onJob);
+          resolve();
+        };
+        bus.on('job', onJob);
+      });
+      children[0].emit('close', null);
+      await vi.advanceTimersByTimeAsync(2000);
+      await idle;
+      // What the dead turn was handed is not left to run unannounced at some
+      // later reopen; the transcript says it was not sent again.
+      expect(publicJob(job).queued).toEqual([{ text: 'Then fix the lint' }]);
+      expect(job.events.filter((e) => e.kind === 'info').at(-1).text).toMatch(
+        /never answered 1 message\(s\).*"Also rename the table"/,
+      );
+      expect(children).toHaveLength(1);
+    } finally {
+      dropQueuedMessage(job.id, 0);
+      job.error = null;
+      delete job.dbServerId;
+      vi.useRealTimers();
+      restore();
+    }
+  });
+
+  it('a session stored with only a provider slug still takes messages live', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    delete job.providerId;
+    job.provider = 'claude';
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Start');
+      expect(publicJob(job).liveInput).toBe(true);
+      expect(sendDevMessage(job.id, 'And more').queued).toBeUndefined();
+      expect(children[0].writes).toEqual(['Start', 'And more']);
+      const done = settled(job);
+      children[0].emitLines(replay('Start'), replay('And more'), result('ok'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      job.providerId = 1;
+      restore();
+    }
+  });
 
   it('a role is a Zeus analyst’s and one of the four', () => {
     expect(() => spawnWorkerSession(getJob('orch-a'), { title: 'R', prompt: 'x', role: 'qa' })).toThrow(

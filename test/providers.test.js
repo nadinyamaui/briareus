@@ -309,7 +309,9 @@ describe('buildArgs', () => {
     expect(withFile.args).toContain('--append-system-prompt-file');
     const without = BINARIES.claude.buildArgs({ model: 'm', effort: 'low', sessionId: 's' });
     expect(without.args).not.toContain('--append-system-prompt-file');
-    expect(without.promptVia).toBe('stdin');
+    expect(without.promptVia).toBe('stream-json');
+    expect(without.args).toEqual(expect.arrayContaining(['--input-format', 'stream-json']));
+    expect(without.args).toContain('--replay-user-messages');
     expect(without.briefingInPrompt).toBe(false);
   });
 
@@ -577,6 +579,67 @@ describe('the claude parser', () => {
     expect(events[0]).toEqual({ kind: 'info', text: 'Claude session started: model fable' });
   });
 
+  it('announces the session once, however many answers a live process opens', () => {
+    const init = { type: 'system', subtype: 'init', session_id: 'sid-1', model: 'fable' };
+    const { events } = feedAll([init, { type: 'result' }, init, { type: 'result' }]);
+    expect(events.filter((e) => e.kind === 'info')).toHaveLength(1);
+    expect(events.filter((e) => e.kind === 'init')).toHaveLength(2);
+  });
+
+  it('tells a wake-up (no echo before its first word) from the answer to a message', () => {
+    const init = { type: 'system', subtype: 'init', session_id: 'sid-1', model: 'fable' };
+    const echo = { type: 'user', message: { role: 'user', content: 'hi' }, isReplay: true };
+    const said = (text, parent = null) => ({
+      type: 'assistant',
+      parent_tool_use_id: parent,
+      message: { content: [{ type: 'text', text }] },
+    });
+    const wakes = (msgs) => feedAll(msgs).events.filter((e) => e.kind === 'wake').length;
+    expect(wakes([init, echo, said('hello'), { type: 'result' }])).toBe(0);
+    expect(wakes([init, said('the agent is done'), { type: 'result' }])).toBe(1);
+    // A message sent while a wake-up is under way is folded into it.
+    expect(wakes([init, said('the agent is done'), echo, said('and hi'), { type: 'result' }])).toBe(1);
+    // A background sub-agent speaking first is not the answer's first word.
+    expect(wakes([init, said('digging', 'call-1'), echo, said('hello'), { type: 'result' }])).toBe(0);
+    // Nor is a local command (/context): no echo either, but the CLI's own words.
+    const local = {
+      type: 'assistant',
+      message: { model: '<synthetic>', content: [{ type: 'text', text: 'ctx' }] },
+    };
+    expect(wakes([init, local, { type: 'result', num_turns: 0 }])).toBe(0);
+    expect(wakes([{ type: 'result' }])).toBe(0);
+  });
+
+  it('forgets a keep-alive call once the CLI says where it went', () => {
+    const turn = newTurn();
+    const parser = parserFor('claude', turn);
+    const agent = (id) => ({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id, name: 'Agent', input: { description: id } }] },
+    });
+    const started = (task, id) => ({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: task,
+      tool_use_id: id,
+      is_backgrounded: true,
+    });
+    parser.feed(agent('a1'));
+    parser.feed({ type: 'system', subtype: 'task_started', task_id: 't1', tool_use_id: 'a1' });
+    // Already settled as a foreground call: a second start for it counts nothing.
+    expect(parser.feed(started('t1b', 'a1'))).toEqual([]);
+    parser.feed(agent('a2'));
+    parser.feed({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'a2', content: 'x' }] },
+    });
+    expect(parser.feed(started('t2', 'a2'))).toEqual([]);
+    parser.feed(agent('a3'));
+    expect(parser.feed(started('t3', 'a3'))).toEqual([
+      { kind: 'background', tasks: [{ name: 'agent', summary: 'a3' }], ended: [] },
+    ]);
+  });
+
   it('turns assistant blocks into text and tool events, tracking live context', () => {
     const { turn, events } = feedAll([
       {
@@ -709,6 +772,170 @@ describe('the claude parser', () => {
       },
     });
     expect(onNotify).toContainEqual({ kind: 'agent', state: 'end', id: 'bg-1' });
+  });
+
+  it('tracks the background agents and Monitors the process waits on', () => {
+    const turn = newTurn();
+    const parser = parserFor('claude', turn);
+    parser.feed({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'a1',
+            name: 'Agent',
+            input: { subagent_type: 'Explore', description: 'map' },
+          },
+          { type: 'tool_use', id: 'm1', name: 'Monitor', input: { description: 'replies', command: 'poll' } },
+          { type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'npm run dev' } },
+        ],
+      },
+    });
+    const started = (task_id, tool_use_id) =>
+      parser.feed({ type: 'system', subtype: 'task_started', task_id, tool_use_id, is_backgrounded: true });
+    expect(started('ta', 'a1')).toEqual([
+      { kind: 'background', tasks: [{ name: 'Explore', summary: 'map' }], ended: [] },
+    ]);
+    expect(started('tm', 'm1').at(-1).tasks).toHaveLength(2);
+    expect(started('tb', 'b1')).toEqual([]); // a background Bash is not waited on
+    // The agent's notification ends both its background task and its sub-agent row.
+    expect(
+      parser.feed({ type: 'system', subtype: 'task_notification', task_id: 'ta', tool_use_id: 'a1' }),
+    ).toEqual([
+      { kind: 'agent', state: 'end', id: 'a1' },
+      { kind: 'background', tasks: [{ name: 'Monitor', summary: 'replies' }], ended: ['ta'] },
+    ]);
+    // The CLI's own list prunes whatever it no longer runs.
+    expect(
+      parser.feed({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'tb' }] }),
+    ).toEqual([{ kind: 'background', tasks: [], ended: ['tm'] }]);
+  });
+
+  it('says when a task was stopped rather than done, after the drop that ended it', () => {
+    const parser = parserFor('claude', newTurn());
+    parser.feed({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id: 'm1', name: 'Monitor', input: { description: 'tick' } }] },
+    });
+    parser.feed({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'tm',
+      tool_use_id: 'm1',
+      is_backgrounded: true,
+    });
+    // What claude 2.1.281 sends for a TaskStop: the list drops it first.
+    expect(parser.feed({ type: 'system', subtype: 'background_tasks_changed', tasks: [] })).toEqual([
+      { kind: 'background', tasks: [], ended: ['tm'] },
+    ]);
+    expect(
+      parser.feed({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'tm',
+        tool_use_id: 'm1',
+        status: 'stopped',
+      }),
+    ).toEqual([{ kind: 'task_settled', id: 'tm' }]);
+    // A task that finished wakes the CLI: nothing settles it.
+    expect(
+      parser.feed({ type: 'system', subtype: 'task_notification', task_id: 'tx', status: 'completed' }),
+    ).toEqual([]);
+  });
+
+  it('only counts a task the CLI says it backgrounded', () => {
+    const parser = parserFor('claude', newTurn());
+    parser.feed({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'tool_use', id: 'a1', name: 'Agent', input: { description: 'fg' } },
+          { type: 'tool_use', id: 'a2', name: 'Agent', input: { description: 'fg too' } },
+        ],
+      },
+    });
+    expect(
+      parser.feed({ type: 'system', subtype: 'task_started', task_id: 't1', tool_use_id: 'a1' }),
+    ).toEqual([]);
+    expect(
+      parser.feed({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 't2',
+        tool_use_id: 'a2',
+        is_backgrounded: false,
+      }),
+    ).toEqual([]);
+  });
+
+  it('turns the echo of a message it read into an ack', () => {
+    const parser = parserFor('claude', newTurn());
+    expect(
+      parser.feed({
+        type: 'user',
+        message: { role: 'user', content: 'Also check the logs' },
+        parent_tool_use_id: null,
+        isReplay: true,
+      }),
+    ).toEqual([{ kind: 'ack', text: 'Also check the logs', opens: true }]);
+  });
+
+  it('reads a notification folded into the answer under way as a settled task, not a message', () => {
+    const parser = parserFor('claude', newTurn());
+    const note =
+      '<task-notification>\n<task-id>tm</task-id>\n<status>completed</status>\n</task-notification>';
+    const echo = (content) => ({ type: 'user', message: { role: 'user', content }, isReplay: true });
+    expect(parser.feed(echo(note))).toEqual([{ kind: 'task_settled', id: 'tm' }]);
+    // Echoed along with a message, the message is still acked.
+    expect(parser.feed(echo(`hi\n${note}`))).toEqual([
+      { kind: 'task_settled', id: 'tm' },
+      { kind: 'ack', text: 'hi', opens: true },
+    ]);
+  });
+
+  it('says whether an echo opens an answer or joins one under way', () => {
+    const parser = parserFor('claude', newTurn());
+    const echo = { type: 'user', message: { role: 'user', content: 'hi' }, isReplay: true };
+    parser.feed({ type: 'system', subtype: 'init', model: 'fable' });
+    expect(parser.feed(echo)[0].opens).toBe(true);
+    parser.feed({ type: 'assistant', message: { content: [{ type: 'text', text: 'working' }] } });
+    expect(parser.feed(echo)[0].opens).toBe(false);
+  });
+
+  it('adds up the tokens and time of every answer one process gives', () => {
+    const { turn, events } = feedAll([
+      {
+        type: 'result',
+        total_cost_usd: 0.1,
+        duration_ms: 1000,
+        usage: { input_tokens: 10, cache_read_input_tokens: 90, output_tokens: 5 },
+      },
+      {
+        type: 'result',
+        total_cost_usd: 0.25, // already a running total
+        duration_ms: 500,
+        usage: { input_tokens: 20, cache_read_input_tokens: 180, output_tokens: 7 },
+      },
+    ]);
+    expect(turn).toMatchObject({ costUsd: 0.25, durationMs: 1500, inputTokens: 300, outputTokens: 12 });
+    // Each answer's footer is its own, not the process's total so far.
+    const [first, second] = events;
+    expect(first).toMatchObject({ costUsd: 0.1, durationMs: 1000, inputTokens: 100, outputTokens: 5 });
+    expect(second).toMatchObject({ durationMs: 500, inputTokens: 200, outputTokens: 7 });
+    expect(second.costUsd).toBeCloseTo(0.15);
+  });
+
+  it('a result with no price keeps the cost of the answers before it', () => {
+    const { turn, events } = feedAll([
+      { type: 'result', total_cost_usd: 0.4, duration_ms: 1000 },
+      { type: 'result', duration_ms: 10 }, // a local command
+      { type: 'result', total_cost_usd: 0.5, duration_ms: 500 },
+    ]);
+    expect(turn.costUsd).toBe(0.5);
+    expect(events[1].costUsd).toBeNull();
+    expect(events[2].costUsd).toBeCloseTo(0.1);
+    expect(feedAll([{ type: 'result', total_cost_usd: 0.4 }, { type: 'result' }]).turn.costUsd).toBe(0.4);
   });
 
   it('flush ends whatever a dead stream left running', () => {
