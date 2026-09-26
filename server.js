@@ -11,6 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
 import { getConfig, ROOT } from './lib/config.js';
+import { assertAcceptingWork } from './lib/recovery.js';
 import { workerTranscript } from './lib/worker-transcript.js';
 import { assetCacheHeaders, pageHandler } from './lib/assets.js';
 import { initDb, dbHealthy } from './lib/db.js';
@@ -371,7 +372,7 @@ app.get('/', devPage);
 app.get('/dashboard', devPage);
 app.get('/office', devPage);
 app.get('/findings', devPage);
-app.get('/attention', pageHandler(PUBLIC, 'operations.html'));
+app.get(['/attention', '/maintenance', '/recovery/:id'], pageHandler(PUBLIC, 'operations.html'));
 app.get('/sessions/:id', devPage);
 app.get('/projects/:owner/:name', devPage);
 app.get('/projects/:owner/:name/dashboard', devPage);
@@ -542,7 +543,9 @@ function agentSession(req, res) {
 
 const sshService = createSshService({ getJob });
 app.use(sshRoutes({ service: sshService, agentSession, getProject }));
-app.use(operationsRoutes({ listSessions: listDevSessions, ssh: sshService }));
+app.use(
+  operationsRoutes({ listSessions: listDevSessions, ssh: sshService, getJob, sendMessage: sendDevMessage }),
+);
 
 app.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
@@ -1788,6 +1791,7 @@ app.get('/api/dev/sessions/:id/events', (req, res) => {
 // the session could not accept at all.
 dashboard.register('post', '/api/dev/sessions/:id/message', (req, res) => {
   try {
+    assertAcceptingWork();
     const { text, attachments, zeusRoles } = req.body || {};
     res.json({ session: sendDevMessage(req.params.id, text, attachments, zeusRoles) });
   } catch (e) {

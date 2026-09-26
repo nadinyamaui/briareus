@@ -744,3 +744,17 @@ questions, held findings, interrupted sessions, review/QA failures and pending
 SSH commands across projects. Answer questions or approve/deny an exact SSH
 command there; findings open the existing decision screen. The inbox is a live
 projection, refreshed every seven seconds, and does not dismiss unresolved work.
+
+### Recovery and maintenance
+
+Interrupted/failed inbox cards open a recovery report: expected and actual
+branch, HEAD, working-file changes and the pending phase. Resume checks that
+report again and refuses missing, recycled or busy workspaces. Reopening the
+same branch now preserves commits and working files before running setup; a
+new agent turn inspects what already happened before continuing.
+
+`/maintenance` drains work: new top-level sessions and manual messages are
+refused while existing turns and automatic child work finish. The ready state
+also waits for running SSH commands. Resume accepting work cancels draining.
+This is an in-process gate, reset on restart; it does not deploy or restart the
+server. Wait for ready before the normal deployment procedure.

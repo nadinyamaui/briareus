@@ -4,7 +4,12 @@ import { operationsRoutes } from '../lib/operations-routes.js';
 it('only exposes operator projections to browser requests', async () => {
   const app = express();
   app.use(
-    operationsRoutes({ listSessions: () => [{ id: 's', status: 'failed' }], ssh: { pending: () => [] } }),
+    operationsRoutes({
+      listSessions: () => [{ id: 's', status: 'failed' }],
+      ssh: { pending: () => [], runningCount: () => 0 },
+      getJob: () => null,
+      sendMessage: () => null,
+    }),
   );
   const server = app.listen(0, '127.0.0.1');
   await new Promise((r) => server.once('listening', r));
