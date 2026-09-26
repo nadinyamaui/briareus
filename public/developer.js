@@ -2067,9 +2067,10 @@
     true,
   );
 
-  // The composer never refuses a message any more: mid-turn it queues, and on a
+  // The composer never refuses a message any more: a claude turn still reading
+  // its input takes it at once, any other turn in flight queues it, and on a
   // session that let go of its workspace it reopens one. Only the placeholder
-  // and the note say which of the three is about to happen.
+  // and the note say which of these is about to happen.
   function setComposerState(s) {
     const busy = s && ['queued', 'preparing', 'running'].includes(s.status);
     const down = s && ['closed', 'interrupted', 'failed'].includes(s.status);

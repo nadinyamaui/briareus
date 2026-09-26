@@ -951,12 +951,15 @@ describe('spawnWorkerSession', () => {
     const emit = (...msgs) => {
       for (const m of msgs) children[0].stdout.write(JSON.stringify(m) + '\n');
     };
+    const replay = (content) => ({ type: 'user', message: { role: 'user', content }, isReplay: true });
     try {
       sendDevMessage(job.id, 'Start the agents');
       expect(writes[0]).toEqual({ type: 'user', message: { role: 'user', content: 'Start the agents' } });
       // Mid-turn, the message goes in right away rather than queueing.
       expect(sendDevMessage(job.id, 'And check the logs').queued).toBeUndefined();
       expect(writes[1].message.content).toBe('And check the logs');
+      // The CLI echoes each message it reads; both are part of this answer.
+      emit(replay('Start the agents'), replay('And check the logs'));
       emit(
         {
           type: 'assistant',
@@ -983,7 +986,7 @@ describe('spawnWorkerSession', () => {
       expect(writes[2].message.content).toBe('Meanwhile, one question');
       expect(job.events.filter((e) => e.kind === 'user').at(-1).text).toBe('Meanwhile, one question');
 
-      emit({ type: 'result', subtype: 'success', result: '4' });
+      emit(replay('Meanwhile, one question'), { type: 'result', subtype: 'success', result: '4' });
       await vi.waitFor(() => expect(job.events.filter((e) => e.kind === 'result')).toHaveLength(2));
       expect(ended).toBe(false);
 
@@ -1001,7 +1004,8 @@ describe('spawnWorkerSession', () => {
       children[0].emit('close', 0);
       await settled;
       expect(children).toHaveLength(1);
-      expect(job.backgroundTasks).toEqual([]);
+      // Which tasks are out is the turn's own business, not the record's.
+      expect(job).not.toHaveProperty('backgroundTasks');
     } finally {
       bin.mockRestore();
       spawn.mockReset();
@@ -1072,6 +1076,158 @@ describe('spawnWorkerSession', () => {
       spawn.mockReset();
       getProviderForJob.mockReset();
       captureProviderAuth.mockReset();
+    }
+  });
+
+  // A fake claude CLI for the live-input tests: every spawn is recorded with
+  // what was written to its stdin and whether stdin was closed.
+  const fakeClaude = () => {
+    getProviderForJob.mockReturnValue(state.provider);
+    captureProviderAuth.mockResolvedValue(undefined);
+    const bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    const children = [];
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.writes = [];
+      child.ended = false;
+      child.stdin.on('data', (chunk) => {
+        for (const line of chunk.toString().split('\n').filter(Boolean)) {
+          child.writes.push(JSON.parse(line).message.content);
+        }
+      });
+      child.stdin.on('finish', () => (child.ended = true));
+      child.emitLines = (...msgs) => {
+        for (const m of msgs) child.stdout.write(JSON.stringify(m) + '\n');
+      };
+      children.push(child);
+      return child;
+    });
+    const settled = (job) =>
+      new Promise((resolve) => {
+        const onJob = (session) => {
+          if (session.id !== job.id || session.status !== 'idle') return;
+          bus.off('job', onJob);
+          resolve();
+        };
+        bus.on('job', onJob);
+      });
+    const restore = () => {
+      bin.mockRestore();
+      spawn.mockReset();
+      getProviderForJob.mockReset();
+      captureProviderAuth.mockReset();
+    };
+    return { children, settled, restore };
+  };
+  const replay = (content) => ({ type: 'user', message: { role: 'user', content }, isReplay: true });
+  const result = (text) => ({ type: 'result', subtype: 'success', result: text });
+
+  it('Stop hands what a claude turn was told and never answered to the next turn', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Run the long migration');
+      children[0].emitLines(replay('Run the long migration'));
+      sendDevMessage(job.id, 'Actually, do X instead');
+      expect(children[0].writes).toEqual(['Run the long migration', 'Actually, do X instead']);
+      cancelDevTurn(job.id);
+      // A turn being killed takes nothing more: this one waits for the next.
+      expect(publicJob(job).liveInput).toBe(false);
+      expect(sendDevMessage(job.id, 'And then Y').queued).toEqual([{ text: 'And then Y' }]);
+      children[0].emit('close', null);
+      // The unanswered message leads the next turn; the queue follows it in.
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(children[1].writes).toEqual(['Actually, do X instead', 'And then Y']);
+      expect(publicJob(job).queued).toBeUndefined();
+      const users = job.events.filter((e) => e.kind === 'user').map((e) => e.text);
+      expect(users.filter((t) => t === 'Actually, do X instead')).toHaveLength(1);
+      expect(users.at(-1)).toBe('And then Y');
+      const done = settled(job);
+      children[1].emitLines(replay('Actually, do X instead'), replay('And then Y'), result('ok'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('an answer to an older message leaves stdin open for the one not read yet', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'One');
+      sendDevMessage(job.id, 'Two');
+      // The CLI answers One before it reads Two.
+      children[0].emitLines(replay('One'), result('1'));
+      await vi.waitFor(() => expect(job.events.some((e) => e.kind === 'result')).toBe(true));
+      expect(children[0].ended).toBe(false);
+      expect(publicJob(job).liveInput).toBe(true);
+      children[0].emitLines(replay('Two'), result('2'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('each live message restarts the time limit', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.dbServerId = 7;
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Start');
+      const first = job.timeout;
+      expect(first).toBeTruthy();
+      sendDevMessage(job.id, 'More');
+      expect(job.timeout).toBeTruthy();
+      expect(job.timeout).not.toBe(first);
+      const done = settled(job);
+      children[0].emitLines(replay('Start'), replay('More'), result('ok'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      delete job.dbServerId;
+      restore();
+    }
+  });
+
+  it('messages queued before a claude turn starts go into it at once', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'First');
+      children[0].emitLines(replay('First'), result('done'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      sendDevMessage(job.id, 'Later');
+      expect(sendDevMessage(job.id, 'Later too').queued).toHaveLength(2);
+      children[0].emit('close', 0);
+      // The drain starts a turn with the first; the other joins it straight
+      // away instead of waiting for that whole process to exit.
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(children[1].writes).toEqual(['Later', 'Later too']);
+      expect(publicJob(job).queued).toBeUndefined();
+      expect(publicJob(job).liveInput).toBe(true);
+      const done = settled(job);
+      children[1].emitLines(replay('Later'), replay('Later too'), result('ok'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+    } finally {
+      restore();
     }
   });
 

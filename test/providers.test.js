@@ -311,6 +311,7 @@ describe('buildArgs', () => {
     expect(without.args).not.toContain('--append-system-prompt-file');
     expect(without.promptVia).toBe('stream-json');
     expect(without.args).toEqual(expect.arrayContaining(['--input-format', 'stream-json']));
+    expect(without.args).toContain('--replay-user-messages');
     expect(without.briefingInPrompt).toBe(false);
   });
 
@@ -748,6 +749,43 @@ describe('the claude parser', () => {
     expect(
       parser.feed({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'tb' }] }),
     ).toEqual([{ kind: 'background', tasks: [] }]);
+  });
+
+  it('only counts a task the CLI says it backgrounded', () => {
+    const parser = parserFor('claude', newTurn());
+    parser.feed({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'tool_use', id: 'a1', name: 'Agent', input: { description: 'fg' } },
+          { type: 'tool_use', id: 'a2', name: 'Agent', input: { description: 'fg too' } },
+        ],
+      },
+    });
+    expect(
+      parser.feed({ type: 'system', subtype: 'task_started', task_id: 't1', tool_use_id: 'a1' }),
+    ).toEqual([]);
+    expect(
+      parser.feed({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 't2',
+        tool_use_id: 'a2',
+        is_backgrounded: false,
+      }),
+    ).toEqual([]);
+  });
+
+  it('turns the echo of a message it read into an ack', () => {
+    const parser = parserFor('claude', newTurn());
+    expect(
+      parser.feed({
+        type: 'user',
+        message: { role: 'user', content: 'Also check the logs' },
+        parent_tool_use_id: null,
+        isReplay: true,
+      }),
+    ).toEqual([{ kind: 'ack' }]);
   });
 
   it('adds up the tokens and time of every answer one process gives', () => {
