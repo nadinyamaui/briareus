@@ -736,3 +736,11 @@ requests and results are held in memory for up to an hour, with at most 100 requ
 A restart discards requests and never replays them. These permissions govern the SSH tool;
 Briareus's coding agents still run with their existing local shell access, so this is not an
 operating-system sandbox restricting every possible way to reach a server.
+
+### Operator attention
+
+**Needs attention** in the session sidebar opens `/attention`: unanswered agent
+questions, held findings, interrupted sessions, review/QA failures and pending
+SSH commands across projects. Answer questions or approve/deny an exact SSH
+command there; findings open the existing decision screen. The inbox is a live
+projection, refreshed every seven seconds, and does not dismiss unresolved work.
