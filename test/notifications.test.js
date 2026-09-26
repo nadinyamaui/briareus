@@ -1,3 +1,4 @@
+import { attentionItems } from '../lib/attention.js';
 import { createECDH } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { createNotificationService, notificationGroups, pushSubscription } from '../lib/notifications.js';
@@ -79,4 +80,58 @@ it('backs off failures and rejects arbitrary endpoints and invalid keys', async 
   ])
     expect(() => pushSubscription({ ...sub, endpoint })).toThrow();
   expect(() => pushSubscription({ ...sub, keys: { auth: 'invalid', p256dh: 'invalid' } })).toThrow();
+});
+
+it.each(['loopParentId', 'qaParentId', 'loopFixParentId'])(
+  'groups SSH approval with the question owned through %s',
+  (parentKey) => {
+    const child = { id: 'child', [parentKey]: 'task', awaitingAnswer: true, questionSeq: 10 };
+    const request = { id: 'req', jobId: child.id, createdAt: 1 };
+    const groups = notificationGroups(attentionItems([child], [request]));
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ task: 'task', payload: { url: '/attention?task=task' } });
+    expect(groups[0].items).toHaveLength(2);
+    expect(groups[0].items.every((i) => i.taskId === 'task' && i.sessionId === 'child')).toBe(true);
+    expect(notificationGroups(attentionItems([], [request]))[0].task).toBe('child');
+  },
+);
+it('announces each question occurrence once even when a turn finishes or the service restarts', async () => {
+  const { service, options, send } = fixture();
+  await service.init();
+  await service.configure('mailto:operator@example.com');
+  await service.subscribe(sub);
+  const session = { id: 's', status: 'running', turns: 0, awaitingAnswer: true, questionSeq: 7 };
+  await service.tick(attentionItems([session]));
+  session.status = 'idle';
+  session.turns++;
+  await service.tick(attentionItems([session]));
+  const restarted = createNotificationService(options);
+  await restarted.init();
+  await restarted.tick(attentionItems([session]));
+  expect(send).toHaveBeenCalledTimes(1);
+  // No empty poll between questions: a new occurrence must still notify.
+  session.questionSeq = 12;
+  await restarted.tick(attentionItems([session]));
+  expect(send).toHaveBeenCalledTimes(2);
+});
+it('does not reannounce unchanged review or QA failures on unrelated turns', async () => {
+  const { service, send } = fixture();
+  await service.init();
+  await service.configure('mailto:operator@example.com');
+  await service.subscribe(sub);
+  const session = {
+    id: 's',
+    status: 'idle',
+    turns: 1,
+    reviewLoop: { failure: { reason: 'quota', at: 'first' } },
+    qaLoop: { failure: { reason: 'quota', at: 'first' } },
+  };
+  await service.tick(attentionItems([session]));
+  session.turns++;
+  session.status = 'running';
+  await service.tick(attentionItems([session]));
+  expect(send).toHaveBeenCalledTimes(1);
+  session.qaLoop.failure.at = 'second';
+  await service.tick(attentionItems([session]));
+  expect(send).toHaveBeenCalledTimes(2);
 });

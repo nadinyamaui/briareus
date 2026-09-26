@@ -188,6 +188,14 @@
         $('send').disabled = true;
         $('voice').disabled = true;
         try {
+          // toBlob snapshots the canvas when called; capture its metadata before yielding too.
+          const submission = {
+            url: $('url').value,
+            text: $('text').value,
+            width: canvas.width,
+            height: canvas.height,
+            ...point,
+          };
           const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
           const response = await fetch('/api/dev/uploads?name=preview-feedback.png', {
             method: 'POST',
@@ -199,11 +207,7 @@
           if (!response.ok) throw new Error(data.error || 'Screenshot upload failed');
           await api(`/api/operations/preview/${id}`, {
             uploadId: data.file.id,
-            url: $('url').value,
-            text: $('text').value,
-            width: canvas.width,
-            height: canvas.height,
-            ...point,
+            ...submission,
           });
           location.href = `/sessions/${id}`;
         } catch (e) {
