@@ -797,3 +797,33 @@ the title, branch, relationships, lifecycle and PR/QA metadata survive with its
 usage ledger. Records deleted before this feature cannot be reconstructed. The
 migration rollback drops this audit history, without touching conversations or
 usage. A task URL remains readable after its conversation is deleted.
+
+### Deployment state and actions
+
+`/deployments` reads the latest 20 GitHub deployments, their latest status and
+active successful revision per environment, with a 30-second cache. Failed or
+requested deployments never count as the currently published commit. An optional
+configured HTTP(S) health URL is probed with a five-second timeout and no redirects;
+health alone does not prove which commit is deployed.
+
+Configure each project's environment, workflow filename/ID, workflow branch/tag,
+source branch/tag and SHA input name. None of these machine/project choices is
+guessed. **Inspect deployment** resolves the source revision and CI; **Deploy this
+revision** rechecks CI and dispatches the workflow with that immutable SHA input.
+The workflow must accept that input, check out that SHA, perform the project's
+deploy procedure and report deployment status for the configured environment.
+For example its `workflow_dispatch.inputs.revision` is a required string and
+`actions/checkout` uses `ref: ${{ inputs.revision }}`. Configure GitHub environment
+protection and the actual deployment steps in that workflow. Briareus does not
+invent a shell command or change a server registration's SSH permissions.
+
+The workflow must publish its deployment record for the supplied SHA, since an
+automatic environment record can otherwise name the workflow branch revision.
+Projects marked as Briareus itself must be drained in Maintenance before dispatch.
+
+The existing GitHub token needs Actions write access to dispatch. The operator
+must check/acknowledge the previous request before another dispatch, including an
+ambiguous network failure; requests persist across dashboard restarts. A dispatch
+is reported as requested, never deployed, until GitHub reports its outcome.
+See [workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
+and [deployment statuses](https://docs.github.com/en/rest/deployments/statuses).
