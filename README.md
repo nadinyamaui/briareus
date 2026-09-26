@@ -782,3 +782,18 @@ conversation. Preview origins are checked against that session's Run links;
 no cross-origin iframe access or injected application scripts are required.
 Capture dimensions are image pixels, not an inferred CSS viewport. Voice uses
 the existing transcription service and is offered only when configured.
+
+### Task history
+
+**Task history** in a conversation opens its implementation, review, fix and QA
+sessions together, including independent errands linked to the same PR. It
+shows their times/statuses, review rounds, QA outcome, PR evidence link and
+combined ledger cost (estimated and unpriced turns stay marked). Workers remain
+separate from sibling tasks under the same orchestrator.
+
+The `task_sessions` migration stores small audit snapshots alongside session
+writes and before deletion. Deleting a conversation still deletes its transcript;
+the title, branch, relationships, lifecycle and PR/QA metadata survive with its
+usage ledger. Records deleted before this feature cannot be reconstructed. The
+migration rollback drops this audit history, without touching conversations or
+usage. A task URL remains readable after its conversation is deleted.
