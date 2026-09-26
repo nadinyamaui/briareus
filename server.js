@@ -1,5 +1,7 @@
 // @ts-check
 import express from 'express';
+import { createDeploymentService } from './lib/deployments.js';
+import { deploymentRoutes } from './lib/deployment-routes.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
 import { estimateCosts } from './lib/prices.js';
 import { previewFeedbackRoutes } from './lib/preview-feedback.js';
@@ -16,7 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
 import { getConfig, ROOT } from './lib/config.js';
-import { assertAcceptingWork } from './lib/recovery.js';
+import { assertAcceptingWork, maintenanceState } from './lib/recovery.js';
 import { workerTranscript } from './lib/worker-transcript.js';
 import { assetCacheHeaders, pageHandler } from './lib/assets.js';
 import { initDb, dbHealthy, loadTaskSessions, loadJobTurnUsage } from './lib/db.js';
@@ -378,7 +380,15 @@ app.get('/dashboard', devPage);
 app.get('/office', devPage);
 app.get('/findings', devPage);
 app.get(
-  ['/attention', '/maintenance', '/recovery/:id', '/memory-health', '/preview-feedback/:id', '/tasks/:id'],
+  [
+    '/attention',
+    '/maintenance',
+    '/recovery/:id',
+    '/memory-health',
+    '/preview-feedback/:id',
+    '/tasks/:id',
+    '/deployments',
+  ],
   pageHandler(PUBLIC, 'operations.html'),
 );
 app.get('/sessions/:id', devPage);
@@ -563,6 +573,14 @@ app.use(
     listSessions: listDevSessions,
     loadUsage: loadJobTurnUsage,
     estimateCosts,
+  }),
+);
+
+app.use(
+  deploymentRoutes({
+    service: createDeploymentService(),
+    getProject,
+    readyForSelfDeploy: () => maintenanceState(listDevSessions(), sshService.runningCount()).ready,
   }),
 );
 
