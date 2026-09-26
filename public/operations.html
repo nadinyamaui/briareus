@@ -5,13 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Operations · Briareus</title>
     <link rel="stylesheet" href="/app.css" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#262624" />
   </head>
   <body class="overflow-auto">
     <main class="mx-auto w-full max-w-5xl p-4 lg:p-8">
       <nav class="mb-6 flex flex-wrap gap-4" aria-label="Operations">
         <a href="/">← Sessions</a><a href="/attention">Needs attention</a
         ><a href="/maintenance">Maintenance</a><a href="/memory-health">Memory</a
-        ><a href="/deployments">Deployments</a>
+        ><a href="/deployments">Deployments</a><a href="/notifications">Notifications</a>
       </nav>
       <h1 id="operations-title" class="mb-4 text-xl font-semibold">Needs attention</h1>
       <p id="operations-status" role="status" class="mb-4 text-muted"></p>
@@ -24,5 +26,6 @@
     <script src="/preview-feedback.js"></script>
     <script src="/task-history.js"></script>
     <script src="/deployments.js"></script>
+    <script src="/notifications.js"></script>
   </body>
 </html>

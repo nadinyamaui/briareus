@@ -15,8 +15,8 @@ describe('operator attention', () => {
       },
     ]);
     expect(items.map((i) => i.id)).toEqual([
-      'a:question',
       'a:findings',
+      'a:question',
       'b:recovery',
       'e:review-failed',
       'e:qa-failed',
@@ -26,4 +26,10 @@ describe('operator attention', () => {
     const request = { id: 'ssh1', createdAt: 1, jobId: 'a', command: 'echo hello', host: 'host' };
     expect(attentionItems([], [request])[0]).toMatchObject({ id: 'ssh:ssh1', request, href: '/sessions/a' });
   });
+});
+
+it('keeps closed standalone findings in the inbox', () => {
+  expect(attentionItems([{ id: 'review', status: 'closed', reviewTriage: { round: 1 } }])).toMatchObject([
+    { kind: 'findings' },
+  ]);
 });
