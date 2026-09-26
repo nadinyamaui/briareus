@@ -1587,6 +1587,7 @@
     // ▶ Run serves a checkout, which an orchestrator does not have.
     $('serve-group').classList.toggle('hidden', !open || !!s.orchestrator);
     paintServeButton(s);
+    $('btn-task-history').href = `/tasks/${encodeURIComponent(s.id)}`;
     $('btn-preview-feedback').classList.toggle('hidden', !s.serveLinks?.length);
     $('btn-preview-feedback').href = `/preview-feedback/${encodeURIComponent(s.id)}`;
     $('btn-cancel-turn').classList.toggle('hidden', s.status !== 'running');
