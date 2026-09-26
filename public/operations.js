@@ -1,9 +1,5 @@
 (() => {
-  const esc = (value) =>
-    String(value ?? '').replace(
-      /[&<>"']/g,
-      (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
-    );
+  const { esc } = window.BriareusSshRequest;
   async function api(url, body, method = 'POST') {
     const response = await fetch(
       url,

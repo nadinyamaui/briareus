@@ -8,11 +8,7 @@
   document.body.append(panel);
   let previous = '';
   let busy = false;
-  const esc = (value) =>
-    String(value ?? '').replace(
-      /[&<>"']/g,
-      (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
-    );
+  const { esc, card, decide } = window.BriareusSshRequest;
   async function refresh() {
     if (busy) return;
     try {
@@ -28,12 +24,7 @@
         requests
           .map(
             (r) => `
-        <article class="mb-4 border-t border-line pt-3" data-request="${esc(r.id)}">
-          <div class="font-semibold">${esc(r.serverLabel)} · ${esc(r.username)}@${esc(r.host)}:${r.port}</div>
-          <div class="text-xs text-muted">${esc(r.repo)} · ${esc(r.sessionTitle)}</div>
-          <pre class="my-3 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-sunken p-2 text-xs">${esc(r.command)}</pre>
-          <div class="mb-2 text-xs text-muted">Timeout: ${r.timeoutSeconds}s · approval expires ${esc(new Date(r.expiresAt).toLocaleTimeString())}</div>
-          <div class="flex gap-2"><button type="button" class="btn btn-primary" data-decision="approve">Approve command</button><button type="button" class="btn" data-decision="deny">Deny</button></div>
+        <article class="mb-4 border-t border-line pt-3" data-request="${esc(r.id)}">${card(r)}
           <div class="mt-2 text-xs text-danger" role="status"></div>
         </article>`,
           )
@@ -45,25 +36,19 @@
   panel.addEventListener('click', async (event) => {
     const button = event.target.closest('[data-decision]');
     if (!button || busy) return;
-    const card = button.closest('[data-request]');
+    const article = button.closest('[data-request]');
     busy = true;
-    card.querySelectorAll('button').forEach((b) => {
+    article.querySelectorAll('button').forEach((b) => {
       b.disabled = true;
     });
     try {
-      const res = await fetch(`/api/ssh/requests/${encodeURIComponent(card.dataset.request)}/decision`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decision: button.dataset.decision }),
-      });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error || 'Could not save this decision');
+      await decide(article.dataset.request, button.dataset.decision);
       previous = '';
     } catch (e) {
-      card.querySelector('[role="status"]').textContent = e.message;
+      article.querySelector('[role="status"]').textContent = e.message;
     } finally {
       busy = false;
-      card.querySelectorAll('button').forEach((b) => {
+      article.querySelectorAll('button').forEach((b) => {
         b.disabled = false;
       });
     }
