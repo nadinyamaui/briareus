@@ -811,6 +811,18 @@ describe('the claude parser', () => {
     expect(second.costUsd).toBeCloseTo(0.15);
   });
 
+  it('a result with no price keeps the cost of the answers before it', () => {
+    const { turn, events } = feedAll([
+      { type: 'result', total_cost_usd: 0.4, duration_ms: 1000 },
+      { type: 'result', duration_ms: 10 }, // a local command
+      { type: 'result', total_cost_usd: 0.5, duration_ms: 500 },
+    ]);
+    expect(turn.costUsd).toBe(0.5);
+    expect(events[1].costUsd).toBeNull();
+    expect(events[2].costUsd).toBeCloseTo(0.1);
+    expect(feedAll([{ type: 'result', total_cost_usd: 0.4 }, { type: 'result' }]).turn.costUsd).toBe(0.4);
+  });
+
   it('flush ends whatever a dead stream left running', () => {
     const turn = newTurn();
     const parser = parserFor('claude', turn);

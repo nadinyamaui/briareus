@@ -1352,6 +1352,109 @@ describe('spawnWorkerSession', () => {
     }
   });
 
+  it('an echo that is not the first message word for word still acks every message it carries', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    try {
+      sendDevMessage(job.id, 'Write a long story');
+      children[0].emitLines(replay('Write a long story'));
+      sendDevMessage(job.id, '/hello');
+      sendDevMessage(job.id, 'fix X');
+      children[0].emitLines(result('Once upon a time'));
+      await vi.waitFor(() => expect(job.events.slice(before).some((e) => e.kind === 'result')).toBe(true));
+      expect(children[0].ended).toBe(false);
+      // A prompt command comes back expanded, not as the text that was sent.
+      children[0].emitLines(replay('Say hello to the user.\nfix X'), result('Hello, and X is fixed'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('a background task that ends mid-answer keeps stdin open for its own wake-up', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const before = job.events.length;
+    const results = () => job.events.slice(before).filter((e) => e.kind === 'result');
+    try {
+      sendDevMessage(job.id, 'Watch the log');
+      children[0].emitLines(replay('Watch the log'), ...monitorStarted, result('Watching.'));
+      await vi.waitFor(() => expect(results()).toHaveLength(1));
+      sendDevMessage(job.id, 'Meanwhile, check the config');
+      children[0].emitLines(replay('Meanwhile, check the config'));
+      // The Monitor finishes while that answer is still under way.
+      children[0].emitLines(
+        { type: 'system', subtype: 'task_notification', task_id: 'm1', tool_use_id: 'call-m' },
+        result('The config is fine.'),
+      );
+      await vi.waitFor(() => expect(results()).toHaveLength(2));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(children[0].ended).toBe(false);
+      // The wake-up opens with an init, and has no echo.
+      children[0].emitLines(
+        { type: 'system', subtype: 'init', session_id: 'bg-sid', model: 'fable' },
+        result('The log shows the error.'),
+      );
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      restore();
+    }
+  });
+
+  it('a live claude process records each answer as its result comes in', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    const priced = (text, cost, ms) => ({ ...result(text), total_cost_usd: cost, duration_ms: ms });
+    const cost = job.costUsd || 0;
+    const time = job.durationMs || 0;
+    recordTurnUsage.mockClear();
+    try {
+      sendDevMessage(job.id, 'Watch the log');
+      children[0].emitLines(replay('Watch the log'), ...monitorStarted, priced('Watching.', 0.1, 1000));
+      await vi.waitFor(() => expect(recordTurnUsage).toHaveBeenCalledTimes(1));
+      expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({ costUsd: 0.1, durationMs: 1000 });
+      expect(job.costUsd).toBeCloseTo(cost + 0.1);
+      expect(job.durationMs).toBe(time + 1000);
+
+      sendDevMessage(job.id, 'What is 2+2?');
+      children[0].emitLines(replay('What is 2+2?'), priced('4', 0.25, 500));
+      await vi.waitFor(() => expect(recordTurnUsage).toHaveBeenCalledTimes(2));
+      // Only what this answer added, not the process's total so far.
+      expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+        costUsd: expect.closeTo(0.15),
+        durationMs: 500,
+      });
+      expect(job.costUsd).toBeCloseTo(cost + 0.25);
+      expect(children[0].ended).toBe(false);
+
+      children[0].emitLines(
+        { type: 'system', subtype: 'task_notification', task_id: 'm1', tool_use_id: 'call-m' },
+        { type: 'system', subtype: 'init', session_id: 'bg-sid', model: 'fable' },
+        priced('The log shows the error.', 0.3, 200),
+      );
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+      // Every answer is already in: the exit adds nothing twice.
+      expect(recordTurnUsage).toHaveBeenCalledTimes(3);
+      expect(job.costUsd).toBeCloseTo(cost + 0.3);
+      expect(job.durationMs).toBe(time + 1700);
+    } finally {
+      restore();
+    }
+  });
+
   it('a message Stop puts back says it is going in again, and withdrawing it says so', async () => {
     const job = getJob('bg-claude');
     job.status = 'idle';
