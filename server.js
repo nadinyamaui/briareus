@@ -148,6 +148,7 @@ import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
 import { securityHeaders, sameOriginWrites } from './lib/security.js';
 import { listWorkspaces, resetSetup, cleanWorkspace, startWorkspacePruner } from './lib/workspaces.js';
 import { githubWebhookUrl } from './lib/webhooksecrets.js';
+import { childEnv } from './lib/childenv.js';
 
 // Before anything else: .env has to be complete. Every setting without a
 // default names something about this machine (its database, its port, its
@@ -275,7 +276,7 @@ const claudeAuthByDir = new Map(); // config dir -> { checkedAt, loggedIn, authM
 // the banner reflects the auth state they will actually run with.
 function probeClaudeCli(cfg, configDir, apply) {
   const checkedAt = new Date().toISOString();
-  const env = { ...process.env };
+  const env = childEnv();
   delete env.ANTHROPIC_API_KEY;
   delete env.CLAUDE_CODE_OAUTH_TOKEN;
   delete env.CLAUDE_CONFIG_DIR;
@@ -1090,8 +1091,8 @@ app.post('/api/providers/:id/login', async (req, res) => {
   }
   const env =
     provider.binary === 'codex'
-      ? { ...process.env, CODEX_HOME: ensureCodexHome(provider) }
-      : { ...process.env, GROK_HOME: ensureGrokHome(provider) };
+      ? childEnv({ CODEX_HOME: ensureCodexHome(provider) })
+      : childEnv({ GROK_HOME: ensureGrokHome(provider) });
   // Device auth works from Docker and a remote browser alike: no callback port
   // has to be reachable from the browser.
   const loginArgs = ['login', '--device-auth'];
@@ -1371,10 +1372,18 @@ app.get('/api/dev/transcribe', (req, res) => {
 app.post('/api/dev/transcribe', express.raw({ type: () => true, limit: '25mb' }), async (req, res) => {
   if (!Buffer.isBuffer(req.body) || !req.body.length)
     return res.status(400).json({ error: 'Empty recording' });
+  // A note the composer dropped (another chat opened meanwhile) closes its
+  // request, and OpenAI's call goes with it rather than billing for text
+  // nobody reads.
+  const gone = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) gone.abort();
+  });
   try {
     const text = await transcribe(req.body, {
       type: String(req.headers['content-type'] || ''),
       language: String(req.query.lang || ''),
+      signal: gone.signal,
     });
     res.json({ text });
   } catch (e) {

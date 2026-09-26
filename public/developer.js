@@ -805,8 +805,9 @@
   });
   $('prompt-save').addEventListener('click', async () => {
     closePromptPop();
-    // A voice note being recorded is transcribed first, so it is saved too.
-    await finishVoice();
+    // A voice note being recorded is transcribed first, so it is saved too;
+    // one that failed leaves the box short of it, so nothing is saved.
+    if (!(await finishVoice())) return;
     const body = inputEl.value.trim();
     if (!body) return;
     const title = await openPrompt({
@@ -2689,12 +2690,14 @@
   // Whether the server has a key to transcribe with; null until it answers.
   let voiceAvailable = null;
   // The voice note in progress: { state, recorder, stream, chunks, cap, done,
-  // resolve }. state is one of
+  // resolve, upload, next }. state is one of
   //   starting      the browser is asking for the microphone
   //   recording     until ⏹, a send or the time cap
   //   transcribing  the recording is with OpenAI and its text is on its way
   // done resolves once the note ends: true when its text landed (or it had
-  // none), false when it was dropped or its transcription failed.
+  // none), false when it was dropped or its transcription failed. upload
+  // aborts the request to OpenAI, and next says ⏳ was pressed for another
+  // note once this one lands.
   let voice = null;
 
   if (navigator.mediaDevices?.getUserMedia && window.MediaRecorder && window.isSecureContext) {
@@ -2729,7 +2732,7 @@
     voiceBtn.title = on
       ? 'Stop and transcribe the voice note'
       : state === 'transcribing'
-        ? 'Transcribing the voice note…'
+        ? `Transcribing the voice note…${voice.next ? ' a new one starts once it lands' : ''}`
         : `Voice note: speak, and OpenAI writes it into the message box (${voiceLangEl.value})`;
     voiceBtn.classList.toggle('animate-pulse', on || state === 'transcribing');
     voiceBtn.classList.toggle('border-danger', on);
@@ -2781,10 +2784,19 @@
       recorder.ondataavailable = (e) => {
         if (e.data.size) note.chunks.push(e.data);
       };
-      // Comes after the last chunk, so the recording is whole by then.
+      // Comes after the last chunk, so the recording is whole by then. It
+      // also comes unasked, still recording, when the microphone goes away
+      // (a headset disconnects, another app takes it, iOS backgrounds the
+      // tab): what was recorded until then is transcribed as if ⏹ was pressed.
       recorder.onstop = () => {
         stream.getTracks().forEach((t) => t.stop());
-        if (voice === note && note.state === 'transcribing') transcribeVoice(note);
+        if (voice !== note) return;
+        if (note.state === 'recording') {
+          clearTimeout(note.cap);
+          note.state = 'transcribing';
+          renderVoice();
+        }
+        if (note.state === 'transcribing') transcribeVoice(note);
       };
       recorder.onerror = (e) => {
         if (voice !== note) return;
@@ -2807,21 +2819,26 @@
     renderVoice();
   }
 
-  // The recorder hands over what it holds and onstop sends it off.
+  // The recorder hands over what it holds and onstop sends it off. A
+  // recorder that stopped by itself is already inactive, and stop() does
+  // nothing then; its onstop is the one still on its way (inactive comes
+  // before the last chunk), and sends the note off.
   function stopRecording() {
     clearTimeout(voice.cap);
     voice.state = 'transcribing';
-    voice.recorder.stop();
+    if (voice.recorder.state !== 'inactive') voice.recorder.stop();
     renderVoice();
   }
 
   async function transcribeVoice(note) {
     const blob = new Blob(note.chunks, { type: note.recorder.mimeType });
     const lang = voiceLangEl.value;
+    note.upload = new AbortController();
     let text;
     try {
       ({ text } = await api(`/api/dev/transcribe?lang=${encodeURIComponent(lang)}`, {
         method: 'POST',
+        signal: note.upload.signal,
         // The type is what the server names the file after, for OpenAI to
         // tell the format by.
         headers: { 'Content-Type': blob.type || 'application/octet-stream' },
@@ -2847,6 +2864,7 @@
       inputEl.scrollTop = inputEl.scrollHeight;
     } else toast('Nothing was heard in the voice note');
     endVoice(true);
+    if (note.next) startVoice();
   }
 
   // Drops the voice note where it stands, recording or on its way back, for
@@ -2854,10 +2872,13 @@
   // land in whichever chat is open by then.
   function stopVoice() {
     if (!voice) return;
-    const { recorder, stream } = voice;
+    const { recorder, stream, upload } = voice;
     endVoice(false);
     stream?.getTracks().forEach((t) => t.stop());
     if (recorder?.state === 'recording') recorder.stop();
+    // Its text is thrown away, so OpenAI is not left to transcribe (and
+    // bill) it.
+    upload?.abort();
   }
 
   // Every way a voice note ends comes through here, and resumes whoever
@@ -2882,6 +2903,8 @@
     }
     const { done } = voice;
     if (voice.state === 'recording') stopRecording();
+    // A new note ⏳ asked for gives way to the send or save that reads this one.
+    voice.next = false;
     return done;
   }
 
@@ -2889,7 +2912,12 @@
     if (!voice) startVoice();
     else if (voice.state === 'recording') stopRecording();
     else if (voice.state === 'starting') stopVoice();
-    // Transcribing: its text is on the way, and a new note waits for it.
+    // Transcribing: its text is on the way, and a new note starts once it
+    // lands (not when it fails: the toast says why first).
+    else {
+      voice.next = true;
+      renderVoice();
+    }
     // A clicked button keeps the focus, and Enter would then press ⏹ rather
     // than send the message.
     if (!isMobile()) inputEl.focus();

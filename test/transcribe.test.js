@@ -60,6 +60,38 @@ describe('transcribe', () => {
     expect(form.has('language')).toBe(false);
   });
 
+  it.each([
+    ['nb-NO', 'no'],
+    ['nn', 'no'],
+    ['fil-PH', 'tl'],
+    ['iw-IL', 'he'],
+  ])('sends %s under the code the API knows it by (%s)', async (tag, code) => {
+    const fetchMock = answer(200, { text: 'x' });
+
+    await transcribe(AUDIO, { type: 'audio/webm', language: tag });
+
+    expect(fetchMock.mock.calls[0][1].body.get('language')).toBe(code);
+  });
+
+  it('leaves a language the API has no two-letter code for to be detected', async () => {
+    const fetchMock = answer(200, { text: 'x' });
+
+    await transcribe(AUDIO, { type: 'audio/webm', language: 'yue-HK' });
+
+    expect(fetchMock.mock.calls[0][1].body.has('language')).toBe(false);
+  });
+
+  it('aborts the call to OpenAI with the signal it is given', async () => {
+    const fetchMock = answer(200, { text: 'x' });
+    const gone = new AbortController();
+
+    await transcribe(AUDIO, { type: 'audio/webm', signal: gone.signal });
+    const { signal } = fetchMock.mock.calls[0][1];
+    expect(signal.aborted).toBe(false);
+    gone.abort();
+    expect(signal.aborted).toBe(true);
+  });
+
   it('refuses a format the API does not read before calling it', async () => {
     const fetchMock = answer(200, { text: 'x' });
 
