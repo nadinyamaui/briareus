@@ -579,6 +579,67 @@ describe('the claude parser', () => {
     expect(events[0]).toEqual({ kind: 'info', text: 'Claude session started: model fable' });
   });
 
+  it('announces the session once, however many answers a live process opens', () => {
+    const init = { type: 'system', subtype: 'init', session_id: 'sid-1', model: 'fable' };
+    const { events } = feedAll([init, { type: 'result' }, init, { type: 'result' }]);
+    expect(events.filter((e) => e.kind === 'info')).toHaveLength(1);
+    expect(events.filter((e) => e.kind === 'init')).toHaveLength(2);
+  });
+
+  it('tells a wake-up (no echo before its first word) from the answer to a message', () => {
+    const init = { type: 'system', subtype: 'init', session_id: 'sid-1', model: 'fable' };
+    const echo = { type: 'user', message: { role: 'user', content: 'hi' }, isReplay: true };
+    const said = (text, parent = null) => ({
+      type: 'assistant',
+      parent_tool_use_id: parent,
+      message: { content: [{ type: 'text', text }] },
+    });
+    const wakes = (msgs) => feedAll(msgs).events.filter((e) => e.kind === 'wake').length;
+    expect(wakes([init, echo, said('hello'), { type: 'result' }])).toBe(0);
+    expect(wakes([init, said('the agent is done'), { type: 'result' }])).toBe(1);
+    // A message sent while a wake-up is under way is folded into it.
+    expect(wakes([init, said('the agent is done'), echo, said('and hi'), { type: 'result' }])).toBe(1);
+    // A background sub-agent speaking first is not the answer's first word.
+    expect(wakes([init, said('digging', 'call-1'), echo, said('hello'), { type: 'result' }])).toBe(0);
+    // Nor is a local command (/context): no echo either, but the CLI's own words.
+    const local = {
+      type: 'assistant',
+      message: { model: '<synthetic>', content: [{ type: 'text', text: 'ctx' }] },
+    };
+    expect(wakes([init, local, { type: 'result', num_turns: 0 }])).toBe(0);
+    expect(wakes([{ type: 'result' }])).toBe(0);
+  });
+
+  it('forgets a keep-alive call once the CLI says where it went', () => {
+    const turn = newTurn();
+    const parser = parserFor('claude', turn);
+    const agent = (id) => ({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id, name: 'Agent', input: { description: id } }] },
+    });
+    const started = (task, id) => ({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: task,
+      tool_use_id: id,
+      is_backgrounded: true,
+    });
+    parser.feed(agent('a1'));
+    parser.feed({ type: 'system', subtype: 'task_started', task_id: 't1', tool_use_id: 'a1' });
+    // Already settled as a foreground call: a second start for it counts nothing.
+    expect(parser.feed(started('t1b', 'a1'))).toEqual([]);
+    parser.feed(agent('a2'));
+    parser.feed({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'a2', content: 'x' }] },
+    });
+    expect(parser.feed(started('t2', 'a2'))).toEqual([]);
+    parser.feed(agent('a3'));
+    expect(parser.feed(started('t3', 'a3'))).toEqual([
+      { kind: 'background', tasks: [{ name: 'agent', summary: 'a3' }] },
+    ]);
+  });
+
   it('turns assistant blocks into text and tool events, tracking live context', () => {
     const { turn, events } = feedAll([
       {
