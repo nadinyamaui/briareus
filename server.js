@@ -89,8 +89,15 @@ import {
   providerDefaultModel,
   providerDefaultEffort,
   providerGroups,
+  runtimeCatalog,
 } from './lib/providerstore.js';
-import { providerUsage, zaiHost, rememberProviderAuth, forgetProviderUsage } from './lib/balancer.js';
+import {
+  providerUsage,
+  zaiHost,
+  rememberProviderAuth,
+  cachedProviderAuth,
+  forgetProviderUsage,
+} from './lib/balancer.js';
 import {
   initProjects,
   listProjects,
@@ -100,6 +107,7 @@ import {
   updateProject,
   removeProject,
   PROJECT_DEFAULTS,
+  reviewerRuntime,
 } from './lib/projects.js';
 import { projectRunProfiles } from './lib/runprofiles.js';
 import {
@@ -131,7 +139,7 @@ import {
 } from './lib/memories.js';
 import { initTemplates, globalTemplates, saveGlobalTemplates, templateCatalog } from './lib/templates.js';
 import { projectPulls, pullOverview } from './lib/prboard.js';
-import { mergePullRequest, pullRequestView } from './lib/prviewer.js';
+import { mergePullRequest, pullRequestView, pullRequestViewOptions } from './lib/prviewer.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload } from './lib/uploads.js';
@@ -770,14 +778,7 @@ function findingsParams(body) {
 dashboard.register('get', '/api/pr/view', async (req, res) => {
   try {
     const { repo, prNumber } = findingsParams(req.query);
-    res.json(
-      await pullRequestView({ repo }, prNumber, {
-        section: String(req.query.section || 'description'),
-        page: Number(req.query.page || 1),
-        headSha: String(req.query.headSha || ''),
-        baseSha: String(req.query.baseSha || ''),
-      }),
-    );
+    res.json(await pullRequestView({ repo }, prNumber, pullRequestViewOptions(req.query)));
   } catch (e) {
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
   }
@@ -1365,6 +1366,16 @@ app.get('/api/dev/providers', async (req, res) => {
     }),
   );
   res.set('Cache-Control', 'no-store').json({ providers });
+});
+
+// The mobile API's runtimes operation: what /api/dev/providers offers, without
+// the accounts behind each entry, plus the project's own default (see
+// runtimeCatalog). Availability goes on the login probes already made rather
+// than probing on every poll.
+dashboard.register('get', '/api/dev/runtimes', (req, res) => {
+  const project = getProject(req.query.repo || '');
+  if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
+  res.json(runtimeCatalog(reviewerRuntime(project), getConfig(), (p) => cachedProviderAuth(p.id)));
 });
 
 // The branches of one project, for the composer's branch picker: the default
