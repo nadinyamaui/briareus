@@ -137,6 +137,30 @@ describe('recovery', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+  it('trusts a marker naming the session over another record that ended later', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'recovery-'));
+    try {
+      execFileSync('git', ['-C', dir, 'init', '-b', 'x'], { stdio: 'pipe' });
+      const job = {
+        id: 'j',
+        kind: 'devchat',
+        status: 'interrupted',
+        branch: 'x',
+        workDir: dir,
+        endedAt: '2026-09-02',
+      };
+      // An older session that used the slot is closed after j was interrupted.
+      const tidied = { id: 's0', status: 'closed', workDir: dir, endedAt: '2026-09-05' };
+      expect(slotTakenOver(job, [tidied])).toBe(true);
+      claimSlot(dir, 'j', { prepared: true });
+      expect(slotTakenOver(job, [tidied])).toBe(false);
+      expect((await inspectRecovery(job, [tidied])).reason).not.toBe('Another session owns this workspace');
+      // A session open in the slot now still takes it over.
+      expect(slotTakenOver(job, [{ id: 'c', status: 'running', workDir: dir }])).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
   it('reserves only slots that hold work someone can recover', () => {
     const s = {
       status: 'interrupted',
@@ -253,6 +277,14 @@ describe('recovery', () => {
     expect(maintenanceState([{ id: 's', status: 'idle', reviewLoop: { reviewing: true } }]).ready).toBe(
       false,
     );
+    // A closed or failed parent is not reconciled after a restart, so its loop
+    // flags can be stale; a child still running is counted on its own.
+    for (const status of ['closed', 'failed', 'interrupted'])
+      expect(
+        maintenanceState([
+          { id: 's', status, reviewLoop: { reviewing: true, fixing: true }, qaLoop: { running: true } },
+        ]).ready,
+      ).toBe(true);
     // publicJob's projection fields, restored stale onto a raw record by a
     // restart, say nothing about live work.
     expect(maintenanceState([{ id: 's', status: 'idle', compacting: true, queued: [{}] }]).ready).toBe(true);
