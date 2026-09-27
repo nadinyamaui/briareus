@@ -90,6 +90,29 @@ describe('operator attention', () => {
     ]);
     expect(items.map((i) => i.id)).toEqual(['x:recovery', 'x:review-failed']);
   });
+  it('leaves a worker stall and its QA results to an open orchestrator', () => {
+    const loops = {
+      status: 'idle',
+      reviewLoop: { stalled: true },
+      qaLoop: { failedScenarios: 2, verdictError: 'sheet 404' },
+    };
+    const items = attentionItems([
+      { id: 'o', status: 'idle', orchestrator: true },
+      { id: 'w', parentId: 'o', ...loops },
+      { id: 'c', status: 'closed', orchestrator: true },
+      { id: 'x', parentId: 'c', ...loops },
+    ]);
+    expect(items.map((i) => i.id)).toEqual(['x:review-stalled', 'x:qa-failed', 'x:qa-verdict']);
+  });
+  it('lists a failed loop child whose parent no longer tracked it', () => {
+    const items = attentionItems([
+      { id: 'p', status: 'idle', reviewLoop: null },
+      { id: 'rev', status: 'failed', error: 'quota', loopParentId: 'p', failureUnreported: true },
+      { id: 'fix', status: 'interrupted', loopFixParentId: 'p', failureUnreported: true },
+      { id: 'qa', status: 'failed', qaParentId: 'p' },
+    ]);
+    expect(items.map((i) => i.id)).toEqual(['rev:recovery', 'fix:recovery']);
+  });
   it('drops loop failures and QA results once the pull request is merged or closed', () => {
     const loops = {
       reviewLoop: { failure: { reason: 'quota' } },

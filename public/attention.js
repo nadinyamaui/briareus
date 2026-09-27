@@ -5,19 +5,25 @@
   // `items` is what the cards on screen were drawn from, so it only changes
   // when they are redrawn. `latest` numbers each refresh: a poll that set out
   // before a decision and answers after it is dropped rather than repainting
-  // the request that was just decided.
+  // the request that was just decided. `inFlight` counts the refreshes under
+  // way: a poll tick skips while one is, so a server slower than the interval
+  // is waited for rather than every answer being superseded by the next tick.
   let items = [],
     busy = false,
     signature = '',
-    latest = 0;
+    latest = 0,
+    inFlight = 0;
   // `sent` holds the questions answered from here, by item id and the time
   // the question was asked: an answer handed to a live turn leaves the
   // question standing until the CLI reads it, and an empty box under it would
   // look unsent.
   const sent = new Map();
-  async function refresh() {
-    if (busy) return;
+  // A hidden tab does not poll (every poll walks every session record); it
+  // catches up as soon as it is shown again.
+  async function refresh({ poll = false } = {}) {
+    if (busy || document.hidden || (poll && inFlight)) return;
     const mine = ++latest;
+    inFlight++;
     try {
       const data = await api('/api/operations/attention');
       if (mine !== latest || busy) return;
@@ -77,6 +83,8 @@
       }
     } catch (error) {
       if (mine === latest) status(error.message);
+    } finally {
+      inFlight--;
     }
   }
   content.addEventListener('click', async (event) => {
@@ -109,5 +117,6 @@
     await refresh();
   });
   void refresh();
-  setInterval(refresh, 7000);
+  setInterval(() => refresh({ poll: true }), 7000);
+  document.addEventListener('visibilitychange', () => void refresh({ poll: true }));
 })();

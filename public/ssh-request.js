@@ -19,7 +19,7 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ decision }),
     });
-    const body = await res.json();
+    const body = await res.json().catch(() => ({})); // a proxy's error page is not JSON
     if (!res.ok) throw new Error(body.error || 'Could not save this decision');
     return body;
   }

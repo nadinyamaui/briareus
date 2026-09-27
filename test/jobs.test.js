@@ -332,6 +332,9 @@ describe('restart reconciliation for loop jobs', () => {
       kind: 'interrupted',
       reason: 'Server restarted while the job was active',
     });
+    // Each parent took its child's failure, so the inbox lists it there only.
+    for (const id of ['restart-review', 'restart-fix', 'restart-qa'])
+      expect(getJob(id).failureUnreported).toBeUndefined();
   });
 });
 
@@ -1466,16 +1469,19 @@ describe('spawnWorkerSession', () => {
       children[0].emitLines(
         init,
         replay('Set up the database'),
-        said(
-          '<ask-user>\nWhich DB?\n- MySQL\n- Postgres\n</ask-user>\n<ask-user>\nKeep the migration?\n</ask-user>',
-        ),
-        result('Asked.'),
+        said('<ask-user>\nWhich DB?\n- MySQL\n- Postgres\n</ask-user>'),
       );
+      await vi.waitFor(() => expect(job.awaitingAnswer).toBe(true));
+      const askedAt = job.askedAt;
+      await new Promise((r) => setTimeout(r, 5));
+      children[0].emitLines(said('<ask-user>\nKeep the migration?\n</ask-user>'), result('Asked.'));
       await vi.waitFor(() => expect(children[0].ended).toBe(true));
       children[0].emit('close', 0);
       await done;
       expect(job.awaitingAnswer).toBe(true);
       expect(job.askText).toBe('Which DB?\nOptions: MySQL | Postgres\n\nKeep the migration?');
+      // Still the same question: the inbox keeps its draft and "sent" note.
+      expect(job.askedAt).toBe(askedAt);
       // The answer covers both; the next question is shown on its own.
       done = settled(job);
       sendDevMessage(job.id, 'Postgres, and keep it');
@@ -1491,6 +1497,30 @@ describe('spawnWorkerSession', () => {
       await done;
       expect(job.awaitingAnswer).toBe(true);
       expect(job.askText).toBe('Seed it too?');
+      expect(job.askedAt > askedAt).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('marks a cut in the questions the inbox shows rather than dropping the rest unseen', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    try {
+      const done = settled(job);
+      sendDevMessage(job.id, 'Plan the release');
+      const options = Array.from({ length: 10 }, (_, k) => `- ${String(k).repeat(60)}`).join('\n');
+      const blocks = ['a', 'b', 'c', 'd']
+        .map((q) => `<ask-user>\n${q.repeat(600)}\n${options}\n</ask-user>`)
+        .join('\n');
+      children[0].emitLines(init, replay('Plan the release'), said(blocks), result('Asked.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(job.askText.length).toBeLessThanOrEqual(2000);
+      expect(job.askText.startsWith(`${'a'.repeat(499)}…\nOptions: `)).toBe(true);
+      expect(job.askText.endsWith('\n… (more in the conversation)')).toBe(true);
     } finally {
       restore();
     }
