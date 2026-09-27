@@ -1,5 +1,5 @@
 // A read-only GitHub-style viewer, shared by board cards and session PR panels.
-window.createPrViewer = ({ api, esc, md, onMerged }) => {
+window.createPrViewer = ({ api, esc, md, onMerged, onMergeFailed }) => {
   const dialog = document.createElement('dialog');
   dialog.className = 'pr-viewer';
   dialog.setAttribute('aria-labelledby', 'pr-viewer-title');
@@ -33,10 +33,15 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
   // One icon for every check on the head commit, the way GitHub marks a PR:
   // any completed check that didn't pass (cancelled and stale included) is ✗,
   // anything still running is ●, checks that couldn't all be loaded are ?,
-  // otherwise ✓.
+  // otherwise ✓. Until the checks have loaded, CI status is unknown too.
   const PASSED = ['success', 'neutral', 'skipped'];
   function checksRollup() {
     const data = state.checks;
+    if (state.pr && !data?.checks) {
+      if (data?.error)
+        return { tone: 'neutral', icon: '?', label: 'Checks could not be loaded, so CI status is unknown' };
+      return { tone: 'neutral', icon: '…', label: 'Checks are still loading' };
+    }
     if (!data?.checks || (!data.checks.length && !data.warnings.length)) return null;
     const checks = data.checks;
     const failed = checks.filter((c) => c.status === 'completed' && !PASSED.includes(c.conclusion)).length;
@@ -89,6 +94,7 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
     const warnings = [];
     if (pr.mergeable === false)
       warnings.push('This branch has conflicts that must be resolved before it can merge.');
+    if (pr.mergeable === null) warnings.push('GitHub is still checking whether this branch can merge.');
     const checksWarning = rollup && rollup.tone !== 'added';
     if (checksWarning) warnings.push(`${rollup.label}.`);
     // unstable only says checks are failing, which the rollup already told.
@@ -326,7 +332,8 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
     } else if (state.tab === 'files') renderFiles();
     else {
       const checks = data.checks;
-      const passed = checks.filter((c) => c.conclusion === 'success').length;
+      // Counted the way the title's rollup counts them, so the two agree.
+      const passed = checks.filter((c) => c.status === 'completed' && PASSED.includes(c.conclusion)).length;
       content.innerHTML = `${data.warnings.map(notice).join('')}
         <div class="prv-check-summary">${checks.length ? `${passed} of ${checks.length} checks passed` : data.warnings.length ? 'Checks are unavailable.' : 'No checks have been reported for this commit.'}<span>Commit ${esc(state.pr.headSha.slice(0, 7))}</span></div>
         <div class="prv-checks">${checks
@@ -366,9 +373,11 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
       params.set('headSha', current.pr.headSha);
       params.set('baseSha', current.pr.baseSha);
     }
+    let first = false;
     try {
       const data = await api(`/api/pr/view?${params}`);
       if (state !== current) return;
+      first = !current.pr;
       current.pr ||= data.pr;
       current[section] = { ...data, ...(previous ? { files: [...previous.files, ...data.files] } : {}) };
     } catch (error) {
@@ -380,8 +389,8 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
       };
     }
     if (state !== current) return;
-    if (state.tab !== section) return header();
-    if (more && previous?.files && filesViewOpen()) {
+    if (state.tab !== section) header();
+    else if (more && previous?.files && filesViewOpen()) {
       const next = current.files;
       if (!next.error && next.files.length > previous.files.length)
         appendFileEntries(previous.files.length, next.files.slice(previous.files.length));
@@ -390,18 +399,41 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
       content.setAttribute('aria-busy', 'false');
       header();
     } else render();
+    if (!first) return;
+    // The title's checks icon needs the checks whichever tab loaded the PR
+    // first (on open or on Try again). Load them now, pinned to its head.
+    if (!current.checks) load('checks');
+    if (current.pr.state === 'open' && current.pr.mergeable === null) recheckMergeable(current);
+  }
+
+  // GitHub computes mergeability lazily, so the first read after a push
+  // often has mergeable null. Read it once more, pinned to the same head.
+  async function recheckMergeable(current) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    if (state !== current || current.pr.mergeable !== null) return;
+    const params = new URLSearchParams({
+      repo: current.repo,
+      pr: current.number,
+      section: 'description',
+      headSha: current.pr.headSha,
+      baseSha: current.pr.baseSha,
+    });
+    try {
+      const { pr } = await api(`/api/pr/view?${params}`);
+      if (state !== current) return;
+      current.pr.mergeable = pr.mergeable;
+      current.pr.mergeableState = pr.mergeableState;
+      header();
+    } catch {
+      // A moved head or a failed read leaves the "still checking" warning up.
+    }
   }
 
   function open(repo, number, tab = 'description') {
     if (!dialog.open) opener = document.activeElement;
-    const current = { repo, number, tab, pr: null, split: false, filter: '', expanded: {}, full: {} };
-    state = current;
+    state = { repo, number, tab, pr: null, split: false, filter: '', expanded: {}, full: {} };
     if (!dialog.open) dialog.showModal();
-    // The title's checks icon needs the checks whichever tab opened first.
-    // Load them once that tab has the PR, so they are pinned to its head.
-    load(tab).then(() => {
-      if (state === current && current.pr && !current.checks) load('checks');
-    });
+    load(tab);
   }
 
   async function merge() {
@@ -426,7 +458,9 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
       if (state !== current) return;
       open(current.repo, current.number, current.tab);
     } catch (error) {
-      if (state !== current) return;
+      // Chromium lets a second Escape close the dialog mid-merge anyway;
+      // GitHub's reason must still reach the user.
+      if (state !== current) return onMergeFailed?.(current.repo, current.number, error.message);
       m.busy = false;
       m.error = error.message;
       mergeBox();

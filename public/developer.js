@@ -209,6 +209,8 @@
     onMerged: (repo) => {
       if (currentProject === repo) loadBoard(repo, true);
     },
+    // Only when the dialog closed mid-merge; otherwise it shows the failure itself.
+    onMergeFailed: (repo, number, message) => toast(`Merging ${repo}#${number} failed: ${message}`, true),
   });
   document.addEventListener(
     'click',
