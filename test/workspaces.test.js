@@ -12,6 +12,7 @@ const state = vi.hoisted(() => ({
   git: {},
   duOut: '2048\t/pool/x\n',
   sessions: [],
+  registryComplete: true,
   removed: [],
 }));
 
@@ -19,6 +20,7 @@ vi.mock('../lib/config.js', () => ({ getConfig: () => ({ workspaceDir: state.roo
 vi.mock('../lib/jobs.js', () => ({
   DEV_OPEN: ['queued', 'preparing', 'running', 'idle'],
   listDevSessions: () => state.sessions,
+  sessionRegistryComplete: () => state.registryComplete,
 }));
 
 vi.mock('fs', () => {
@@ -93,6 +95,7 @@ beforeEach(() => {
   state.files = {};
   state.git = {};
   state.sessions = [];
+  state.registryComplete = true;
   state.removed = [];
 });
 
@@ -266,6 +269,26 @@ describe('actions', () => {
     ]);
     expect(state.removed.sort()).toEqual([child, unprepared, neverStarted, idleAtRestart].sort());
     expect(() => cleanWorkspace('acme__app')).toThrow(expect.objectContaining({ status: 409 }));
+  });
+
+  it('prunes only slots owned by a known session while the registry is incomplete', () => {
+    // A failed (or truncated) restore: the sessions are still stored, just not
+    // loaded, so a slot the registry cannot account for may hold their work.
+    state.registryComplete = false;
+    const known = slot('acme__app');
+    const unknown = slot('acme__app__2');
+    const unmarked = slot('acme__app__3');
+    state.files[path.join(known, '.git', 'briareus-owner')] = { content: 's1' };
+    state.files[path.join(unknown, '.git', 'briareus-owner')] = { content: 's9' };
+    state.sessions = [{ id: 's1', status: 'closed', workDir: known }];
+
+    expect(pruneUnusedWorkspaces()).toEqual({ removed: ['acme__app'], errors: [] });
+    expect(state.removed).toEqual([known]);
+    expect(state.files[unknown]).toBeDefined();
+    expect(state.files[unmarked]).toBeDefined();
+
+    state.registryComplete = true;
+    expect(pruneUnusedWorkspaces().removed.sort()).toEqual(['acme__app__2', 'acme__app__3']);
   });
 
   it('prunes at startup and again on the configured interval', () => {

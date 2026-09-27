@@ -44,6 +44,11 @@ describe('recovery', () => {
       };
       const report = await inspectRecovery(job);
       expect(report.canResume).toBe(true);
+      expect((await inspectRecovery({ ...job, interruptedFrom: 'running' })).canResume).toBe(true);
+      // Idle when the restart came: no turn was cut short, so nothing is offered to resume.
+      const idle = await inspectRecovery({ ...job, interruptedFrom: 'idle' });
+      expect(idle.canResume).toBe(false);
+      expect(idle.reason).toContain('Nothing was interrupted');
       // Interrupted during its first preparation: the checkout is there, but no
       // conversation holds the task a resume prompt would point back to.
       const unstarted = await inspectRecovery({ ...job, chatStarted: false });
