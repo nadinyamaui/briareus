@@ -1,5 +1,6 @@
 (() => {
-  if (location.pathname !== '/attention') return;
+  // Express also serves /attention/ here (non-strict routing).
+  if (location.pathname.replace(/\/+$/, '') !== '/attention') return;
   const { api, esc, content, status } = window.BriareusOperations;
   const ssh = window.BriareusSshRequest;
   // `items` is what the cards on screen were drawn from, so it only changes

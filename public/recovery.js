@@ -1,6 +1,8 @@
 (() => {
   const { api, esc, content, status, title } = window.BriareusOperations;
-  if (location.pathname === '/maintenance') {
+  // Express also serves these pages with a trailing slash (non-strict routing).
+  const pathname = location.pathname.replace(/\/+$/, '');
+  if (pathname === '/maintenance') {
     title('Maintenance');
     // `latest` numbers each refresh, so a poll that set out before a toggle
     // and answers after it is dropped instead of repainting the old state. A
@@ -42,9 +44,9 @@
     document.addEventListener('visibilitychange', () => void refresh({ poll: true }));
     return;
   }
-  if (!location.pathname.startsWith('/recovery/')) return;
+  if (!pathname.startsWith('/recovery/')) return;
   title('Resume interrupted work');
-  const id = location.pathname.split('/').pop();
+  const id = pathname.split('/').pop();
   async function refresh() {
     try {
       const r = await api(`/api/operations/recovery/${encodeURIComponent(id)}`);

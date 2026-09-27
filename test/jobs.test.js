@@ -8236,6 +8236,24 @@ describe('maintenance drain at the operator entry points', () => {
           triage: { round: 1, prNumber: 77, findings: [{ key: 'k1', severity: 'high', title: 'A thing' }] },
         },
       },
+      {
+        id: 'drain-review',
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/shop',
+        providerId: 1,
+        turns: 1,
+        reviewBranch: 'task/review',
+        prStatus: { number: 78, state: 'open' },
+        reviewTriage: {
+          prNumber: 78,
+          round: 1,
+          branch: 'task/review',
+          standalone: true,
+          mine: true,
+          findings: [{ key: 'r1', severity: 'high', title: 'B thing' }],
+        },
+      },
     ];
     await initJobs();
     getJob('drain-idle').status = 'idle';
@@ -8287,6 +8305,23 @@ describe('maintenance drain at the operator entry points', () => {
     ).rejects.toThrow(/Maintenance/);
     expect(recordTriage).not.toHaveBeenCalled();
     expect(getJob('drain-held').reviewLoop.triage).toMatchObject({ round: 1 });
+  });
+
+  it('refuses a standalone review triage that starts a fix before it posts the verdicts', async () => {
+    recordTriage.mockClear();
+    await expect(
+      triageStandaloneReviewFindings('drain-review', { verdicts: [{ key: 'r1', decision: 'fix' }] }),
+    ).rejects.toThrow(/Maintenance/);
+    expect(recordTriage).not.toHaveBeenCalled();
+    expect(getJob('drain-review').reviewTriage).toMatchObject({ prNumber: 78, mine: true });
+  });
+
+  it('refuses a message that would start a turn on a settled session, whoever sends it', () => {
+    const job = getJob('drain-idle');
+    const events = job.events.length;
+    expect(() => sendDevMessage('drain-idle', 'one more thing')).toThrow(/Maintenance/);
+    expect(job.events).toHaveLength(events);
+    expect(job.status).toBe('idle');
   });
 
   it('refuses a PR preview before it closes the one already there', async () => {

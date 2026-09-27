@@ -12,7 +12,9 @@ import {
   maintenanceState,
   setDraining,
   slotOwner,
+  slotPrepared,
   slotTakenOver,
+  RECOVERY_HOLD_MS,
 } from '../lib/recovery.js';
 afterEach(() => setDraining(false));
 describe('recovery', () => {
@@ -146,7 +148,8 @@ describe('recovery', () => {
     expect(holdsRecoverableWork(s)).toBe(true);
     // Idle at the restart: no unfinished turn, so it reopens like a closed one.
     expect(holdsRecoverableWork({ ...s, interruptedFrom: 'idle' })).toBe(false);
-    expect(holdsRecoverableWork({ ...s, interruptedFrom: undefined })).toBe(false);
+    // Interrupted before the field existed: held as the mid-turn it may be.
+    expect(holdsRecoverableWork({ ...s, interruptedFrom: undefined })).toBe(true);
     expect(holdsRecoverableWork({ ...s, status: 'failed', interruptedFrom: undefined })).toBe(true);
     // The branch is set before the first fetch and setup, so a first
     // preparation that failed leaves one with no agent work behind it.
@@ -160,6 +163,36 @@ describe('recovery', () => {
     expect(holdsRecoverableWork({ ...s, loopFixParentId: 'p' })).toBe(false);
     expect(holdsRecoverableWork({ ...s, qaParentId: 'p' })).toBe(false);
     expect(holdsRecoverableWork({ ...s, loopParentId: 'p', failureUnreported: true })).toBe(true);
+  });
+  it('lets a recovery hold lapse a while after the session ended', () => {
+    const at = Date.parse('2026-09-27T12:00:00Z');
+    const ago = (ms) => new Date(at - ms).toISOString();
+    const s = { status: 'failed', workDir: '/pool/x', branch: 'x', chatStarted: true };
+    expect(holdsRecoverableWork({ ...s, endedAt: ago(60_000) }, at)).toBe(true);
+    expect(holdsRecoverableWork({ ...s, endedAt: ago(RECOVERY_HOLD_MS) }, at)).toBe(false);
+    const interrupted = { ...s, status: 'interrupted', interruptedFrom: 'running' };
+    expect(holdsRecoverableWork({ ...interrupted, endedAt: ago(60_000) }, at)).toBe(true);
+    expect(holdsRecoverableWork({ ...interrupted, endedAt: ago(RECOVERY_HOLD_MS + 1) }, at)).toBe(false);
+  });
+  it('tells a slot whose preparation stopped before the checkout from a prepared one', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'recovery-'));
+    try {
+      execFileSync('git', ['-C', dir, 'init', '-b', 'main'], { stdio: 'pipe' });
+      // No marker: older than it, and the session records decide.
+      expect(slotPrepared(dir, 'a')).toBe(true);
+      claimSlot(dir, 'a');
+      expect(slotOwner(dir)).toBe('a');
+      expect(slotPrepared(dir, 'a')).toBe(false);
+      claimSlot(dir, 'a', { prepared: true });
+      expect(slotOwner(dir)).toBe('a');
+      expect(slotPrepared(dir, 'a')).toBe(true);
+      expect(slotPrepared(dir, 'b')).toBe(false);
+      // Another session's claim resets it, even before its checkout.
+      claimSlot(dir, 'b');
+      expect(slotPrepared(dir, 'a')).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
   it('refuses only messages that would start a turn on a settled session while draining', () => {
     setDraining(true);
@@ -185,6 +218,10 @@ describe('recovery', () => {
     expect(maintenanceState([{ id: 's', status: 'idle', compacting: true, queued: [{}] }]).ready).toBe(true);
     expect(maintenanceState([], 1).ready).toBe(false);
     expect(maintenanceState([{ id: 's', status: 'idle' }]).ready).toBe(true);
+    // A question still open is work a restart would cut off.
+    const asking = maintenanceState([{ id: 's', status: 'idle', awaitingAnswer: true }]);
+    expect(asking.ready).toBe(false);
+    expect(asking.active).toEqual([{ id: 's', title: undefined, status: 'waiting on a question' }]);
     setDraining(false);
     expect(assertAcceptingWork).not.toThrow();
   });
