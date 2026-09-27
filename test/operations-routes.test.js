@@ -62,7 +62,7 @@ it('toggles draining only on a boolean', async () => {
 });
 
 it('resumes only the recovery report the operator saw, and never while draining', async () => {
-  const job = { id: 's', kind: 'devchat', status: 'interrupted', orchestrator: true };
+  const job = { id: 's', kind: 'devchat', status: 'interrupted', orchestrator: true, chatStarted: true };
   const sendMessage = vi.fn(() => ({ id: 's' }));
   const { call, close } = await serve({ getJob: (id) => (id === 's' ? job : null), sendMessage });
   try {
@@ -84,6 +84,16 @@ it('resumes only the recovery report the operator saw, and never while draining'
     ).toBe(409);
     expect(sendMessage).not.toHaveBeenCalled();
     job.status = 'interrupted';
+    // A conversation that never started has nothing a resume prompt could
+    // point back to.
+    job.chatStarted = false;
+    const unstarted = await (await call('/api/operations/recovery/s')).json();
+    expect(unstarted.canResume).toBe(false);
+    expect(
+      (await call('/api/operations/recovery/s', { body: { fingerprint: unstarted.fingerprint } })).status,
+    ).toBe(409);
+    expect(sendMessage).not.toHaveBeenCalled();
+    job.chatStarted = true;
     const ok = await call('/api/operations/recovery/s', { body: { fingerprint: report.fingerprint } });
     expect(ok.status).toBe(200);
     expect(sendMessage).toHaveBeenCalledWith('s', expect.stringContaining('Resume the interrupted task'));

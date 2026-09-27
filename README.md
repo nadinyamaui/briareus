@@ -763,19 +763,23 @@ projection, refreshed every seven seconds, and does not dismiss unresolved work.
 
 Interrupted/failed inbox cards open a recovery report: expected and actual
 branch, HEAD, working-file changes and the pending phase. Resume checks that
-report again and refuses missing, recycled or busy workspaces. Reopening a
+report again and refuses missing, recycled or busy workspaces, and a session
+whose provider conversation never started. Reopening a
 session in its own clone slot preserves commits and working files and
-refreshes the origin refs before running setup; a new agent turn inspects what
+refreshes the origin refs before running setup; a clean branch that is only
+behind origin is fast-forwarded, and otherwise the next turn is told the branch
+differs from origin. A new agent turn inspects what
 already happened before continuing. A slot another session has used since, or
-one whose checkout is off the session's branch, is never reset in its place:
-the first gets a different clone, the second fails the reopen until someone
-inspects it. The clone pool does not hand out, and the daily workspace cleanup
-does not delete, a slot an interrupted or failed session left work in (loop
-review, fix and QA children excepted: their parent retries them).
+one whose checkout is off the session's branch or unreadable, is never reset in
+its place: the first gets a different clone, the others fail the reopen until
+someone inspects them. The clone pool does not hand out, and the daily workspace
+cleanup does not delete, a slot an interrupted or failed session left work in
+(except loop review, fix and QA children, which their parent retries, and
+sessions whose agent never started).
 
 `/maintenance` drains work: new top-level sessions, messages that would start
-a turn on a settled session, compaction, arming the review or QA loop and
-review retries are refused, while answers to questions, messages to running
+a turn on a settled session, reopening, compaction, arming the review or QA
+loop, review retries and ▶ Run previews are refused, while answers to questions, messages to running
 turns and automatic child work still go through. The ready state
 also waits for running SSH commands. Resume accepting work cancels draining.
 This is an in-process gate, reset on restart; it does not deploy or restart the

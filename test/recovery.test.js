@@ -29,9 +29,22 @@ describe('recovery', () => {
         'start',
       );
       await writeFile(join(dir, 'unfinished.txt'), 'preserve me');
-      const job = { id: 's', kind: 'devchat', status: 'interrupted', branch: 'work', workDir: dir };
+      const job = {
+        id: 's',
+        kind: 'devchat',
+        status: 'interrupted',
+        branch: 'work',
+        workDir: dir,
+        chatStarted: true,
+      };
       const report = await inspectRecovery(job);
       expect(report.canResume).toBe(true);
+      // Interrupted during its first preparation: the checkout is there, but no
+      // conversation holds the task a resume prompt would point back to.
+      const unstarted = await inspectRecovery({ ...job, chatStarted: false });
+      expect(unstarted.available).toBe(true);
+      expect(unstarted.canResume).toBe(false);
+      expect(unstarted.reason).toContain('never started');
       expect(report.changes).toContain('unfinished.txt');
       expect((await inspectRecovery(job)).fingerprint).toBe(report.fingerprint);
       expect((await inspectRecovery(job, [{ id: 'other', workDir: dir, status: 'idle' }])).canResume).toBe(
@@ -62,7 +75,14 @@ describe('recovery', () => {
       await Promise.all(
         Array.from({ length: 6000 }, (_, i) => writeFile(join(dir, `${'f'.repeat(90)}${i}`), '')),
       );
-      const job = { id: 's', kind: 'devchat', status: 'interrupted', branch: 'work', workDir: dir };
+      const job = {
+        id: 's',
+        kind: 'devchat',
+        status: 'interrupted',
+        branch: 'work',
+        workDir: dir,
+        chatStarted: true,
+      };
       const report = await inspectRecovery(job);
       expect(report.available).toBe(true);
       expect(report.canResume).toBe(true);
@@ -94,8 +114,12 @@ describe('recovery', () => {
     expect(report.reason).toBe('Another session owns this workspace');
   });
   it('reserves only slots that hold work someone can recover', () => {
-    const s = { status: 'interrupted', workDir: '/pool/x', branch: 'x' };
+    const s = { status: 'interrupted', workDir: '/pool/x', branch: 'x', chatStarted: true };
     expect(holdsRecoverableWork(s)).toBe(true);
+    // The branch is set before the first fetch and setup, so a first
+    // preparation that failed leaves one with no agent work behind it.
+    expect(holdsRecoverableWork({ ...s, chatStarted: false })).toBe(false);
+    expect(holdsRecoverableWork({ ...s, chatStarted: undefined, turns: 2 })).toBe(true);
     expect(holdsRecoverableWork({ ...s, status: 'failed' })).toBe(true);
     expect(holdsRecoverableWork({ ...s, status: 'closed' })).toBe(false);
     expect(holdsRecoverableWork({ ...s, branch: null })).toBe(false);

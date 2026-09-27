@@ -13,7 +13,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
 import { getConfig, ROOT } from './lib/config.js';
-import { assertAcceptingWork } from './lib/recovery.js';
+import { ACTIVE, assertAcceptingWork } from './lib/recovery.js';
 import { workerTranscript } from './lib/worker-transcript.js';
 import { assetCacheHeaders, pageHandler } from './lib/assets.js';
 import { initDb, dbHealthy } from './lib/db.js';
@@ -1805,9 +1805,10 @@ dashboard.register('post', '/api/dev/sessions/:id/message', (req, res) => {
   try {
     // Draining refuses only a message that would start a turn on a settled
     // session: an answer to a question, or a word to a turn under way, is how
-    // the work already in flight gets to finish.
+    // the work already in flight gets to finish. Only an open session's question
+    // counts: an interrupted one still flagged as asking would reopen first.
     const job = getJob(req.params.id);
-    if (!job || !(['queued', 'preparing', 'running'].includes(job.status) || job.awaitingAnswer))
+    if (!job || !(ACTIVE.includes(job.status) || (job.status === 'idle' && job.awaitingAnswer)))
       assertAcceptingWork();
     const { text, attachments, zeusRoles } = req.body || {};
     res.json({ session: sendDevMessage(req.params.id, text, attachments, zeusRoles) });

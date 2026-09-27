@@ -219,6 +219,8 @@ import {
   replyToReviewFinding,
   saveReviewFindingsDrafts,
   retryLoopRound,
+  reopenDevSession,
+  startPullRequestPreview,
   workspaceStartBranch,
   workspaceBranchPlan,
   workspaceCheckoutPlan,
@@ -8195,9 +8197,20 @@ describe('maintenance drain at the operator entry points', () => {
           failure: { round: 1, reason: 'boom', at: '2026-09-05' },
         },
       },
+      {
+        id: 'drain-preview',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+        preview: true,
+        startedOnPr: 77,
+        chatStarted: false,
+      },
     ];
     await initJobs();
     getJob('drain-idle').status = 'idle';
+    getJob('drain-preview').status = 'idle';
     setDraining(true);
   });
   afterAll(() => setDraining(false));
@@ -8217,5 +8230,18 @@ describe('maintenance drain at the operator entry points', () => {
     expect(job.reviewLoop.retryPending).toBeFalsy();
     expect(job.events).toHaveLength(events);
     expect(job.status).toBe('interrupted');
+  });
+
+  it('reopens an open session as the no-op it is, and refuses a settled one', () => {
+    expect(reopenDevSession('drain-idle').id).toBe('drain-idle');
+    expect(() => reopenDevSession('drain-interrupted')).toThrow(/Maintenance/);
+    expect(getJob('drain-interrupted').status).toBe('interrupted');
+  });
+
+  it('refuses a PR preview before it closes the one already there', async () => {
+    await expect(
+      startPullRequestPreview({ provider: 1, repo: 'acme/shop', branch: 'feat/x', prNumber: 77 }),
+    ).rejects.toThrow(/Maintenance/);
+    expect(getJob('drain-preview')).toMatchObject({ status: 'idle', preview: true });
   });
 });

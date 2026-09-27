@@ -231,15 +231,18 @@ describe('actions', () => {
     const failed = slot('acme__app__2');
     const child = slot('acme__app__3');
     const unprepared = slot('acme__app__4');
+    const neverStarted = slot('acme__app__5');
     state.sessions = [
-      { id: 's1', status: 'interrupted', workDir: kept, branch: 'feat/x' },
-      { id: 's2', status: 'failed', workDir: failed, branch: 'feat/y' },
-      { id: 's3', status: 'failed', workDir: child, branch: 'feat/x', loopParentId: 's1' },
+      { id: 's1', status: 'interrupted', workDir: kept, branch: 'feat/x', chatStarted: true },
+      { id: 's2', status: 'failed', workDir: failed, branch: 'feat/y', chatStarted: true },
+      { id: 's3', status: 'failed', workDir: child, branch: 'feat/x', chatStarted: true, loopParentId: 's1' },
       { id: 's4', status: 'failed', workDir: unprepared, branch: null },
+      // Failed in its first preparation: the branch was set, no agent ever ran.
+      { id: 's5', status: 'failed', workDir: neverStarted, branch: 'feat/z', chatStarted: false },
     ];
 
-    expect(pruneUnusedWorkspaces().removed.sort()).toEqual(['acme__app__3', 'acme__app__4']);
-    expect(state.removed.sort()).toEqual([child, unprepared].sort());
+    expect(pruneUnusedWorkspaces().removed.sort()).toEqual(['acme__app__3', 'acme__app__4', 'acme__app__5']);
+    expect(state.removed.sort()).toEqual([child, unprepared, neverStarted].sort());
     expect(() => cleanWorkspace('acme__app')).toThrow(expect.objectContaining({ status: 409 }));
   });
 
