@@ -33,7 +33,9 @@ const file = {
 const repoRaw = { allow_squash_merge: true, allow_merge_commit: false, allow_rebase_merge: true };
 const ok = (data) => ({ ok: true, json: async () => structuredClone(data) });
 let respond;
+let repoAnswer;
 beforeEach(() => {
+  repoAnswer = () => ok(repoRaw);
   cfg.githubToken = 'token';
   githubRest.mockReset();
   respond = (path) => {
@@ -42,8 +44,8 @@ beforeEach(() => {
   };
   githubRest.mockImplementation(async (_cfg, method, path) => {
     expect(method).toBe('GET');
-    // The repository's merge settings ride along with every section.
-    if (path === '/repos/owner/repo') return ok(repoRaw);
+    // The repository's merge settings ride along with the viewer's first read.
+    if (path === '/repos/owner/repo') return repoAnswer();
     return respond(path);
   });
 });
@@ -68,6 +70,27 @@ describe('in-app pull request content', () => {
       undefined,
       { conditional: true },
     );
+  });
+
+  it('offers every merge method when GitHub hides the repository merge settings', async () => {
+    repoAnswer = () => ok({ name: 'repo' });
+    expect((await pullRequestView(project, 42)).pr.mergeMethods).toEqual(['squash', 'merge', 'rebase']);
+  });
+
+  it('still shows the pull request when the repository read fails', async () => {
+    repoAnswer = () => ({ ok: false, status: 403 });
+    const { pr } = await pullRequestView(project, 42);
+    expect(pr).toMatchObject({ title: 'Example', mergeMethods: ['squash', 'merge', 'rebase'] });
+    repoAnswer = () => {
+      throw new Error('socket hang up');
+    };
+    await expect(pullRequestView(project, 42)).resolves.toMatchObject({ pr: { title: 'Example' } });
+  });
+
+  it('skips the repository read once the viewer is pinned to a head', async () => {
+    const { pr } = await pullRequestView(project, 42, { headSha: 'abc', baseSha: 'def' });
+    expect(pr.mergeMethods).toBeUndefined();
+    expect(githubRest.mock.calls.map((call) => call[2])).toEqual(['/repos/owner/repo/pulls/42']);
   });
 
   it('reports a missing token as 503 rather than a bad gateway', async () => {

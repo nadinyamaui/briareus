@@ -31,15 +31,26 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
   const notice = (text) => `<p class="prv-notice" role="status">${esc(text)}</p>`;
 
   // One icon for every check on the head commit, the way GitHub marks a PR:
-  // any failure is ✗, anything still running is ●, otherwise ✓.
+  // any completed check that didn't pass (cancelled and stale included) is ✗,
+  // anything still running is ●, checks that couldn't all be loaded are ?,
+  // otherwise ✓.
+  const PASSED = ['success', 'neutral', 'skipped'];
   function checksRollup() {
-    const checks = state.checks?.checks;
-    if (!checks?.length) return null;
-    const failed = checks.filter((c) => c.failed).length;
+    const data = state.checks;
+    if (!data?.checks || (!data.checks.length && !data.warnings.length)) return null;
+    const checks = data.checks;
+    const failed = checks.filter((c) => c.status === 'completed' && !PASSED.includes(c.conclusion)).length;
     const pending = checks.filter((c) => c.status !== 'completed').length;
-    if (failed) return { tone: 'removed', icon: '✗', label: `${failed} of ${checks.length} checks failed` };
+    if (failed)
+      return { tone: 'removed', icon: '✗', label: `${failed} of ${checks.length} checks did not pass` };
     if (pending)
       return { tone: 'pending', icon: '●', label: `${pending} of ${checks.length} checks still running` };
+    if (data.warnings.length)
+      return {
+        tone: 'neutral',
+        icon: '?',
+        label: 'Not every check could be loaded, so CI status is unknown',
+      };
     return { tone: 'added', icon: '✓', label: `All ${checks.length} checks passed` };
   }
 
@@ -48,6 +59,16 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
     merge: 'Create a merge commit',
     rebase: 'Rebase and merge',
   };
+  // GitHub's mergeable_state values worth a word before the confirm; dirty
+  // is the conflict case, which `mergeable === false` already covers.
+  const MERGE_STATE_WARNINGS = {
+    blocked: 'GitHub reports this pull request as blocked: a required review or check is missing.',
+    behind: 'This branch is behind its base branch and may need updating before it can merge.',
+    unstable: 'GitHub reports some checks on this branch as not passing.',
+  };
+  // What the merge box last drew, so background loads that change none of
+  // its inputs leave its focus and open dropdown alone.
+  let mergeKey = '';
 
   function mergeBox() {
     const pr = state.pr;
@@ -56,18 +77,28 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
     const open = pr?.state === 'open' && pr.mergeMethods?.length > 0;
     button.hidden = !open || !!state.merge;
     box.hidden = !open || !state.merge;
-    if (box.hidden) return (box.innerHTML = '');
+    // No closing or refreshing while a merge is in flight: its outcome would be lost.
+    for (const b of dialog.querySelectorAll('.prv-toolbar [data-refresh], [data-close]'))
+      b.disabled = !!state.merge?.busy;
+    if (box.hidden) {
+      mergeKey = '';
+      return (box.innerHTML = '');
+    }
     const m = state.merge;
     const rollup = checksRollup();
-    const warning =
-      pr.mergeable === false
-        ? 'This branch has conflicts that must be resolved before it can merge.'
-        : rollup?.tone === 'removed'
-          ? `${rollup.label}.`
-          : rollup?.tone === 'pending'
-            ? `${rollup.label}.`
-            : '';
-    box.innerHTML = `${warning ? `<p class="prv-merge-warning">${esc(warning)}</p>` : ''}
+    const warnings = [];
+    if (pr.mergeable === false)
+      warnings.push('This branch has conflicts that must be resolved before it can merge.');
+    const checksWarning = rollup && rollup.tone !== 'added';
+    if (checksWarning) warnings.push(`${rollup.label}.`);
+    // unstable only says checks are failing, which the rollup already told.
+    if (!(checksWarning && pr.mergeableState === 'unstable') && MERGE_STATE_WARNINGS[pr.mergeableState])
+      warnings.push(MERGE_STATE_WARNINGS[pr.mergeableState]);
+    // The method is left out: only the dropdown itself changes it.
+    const key = JSON.stringify([pr.headSha, pr.mergeable, m.busy, m.error, warnings]);
+    if (key === mergeKey) return;
+    mergeKey = key;
+    box.innerHTML = `${warnings.map((w) => `<p class="prv-merge-warning">${esc(w)}</p>`).join('')}
       <select id="prv-merge-method" aria-label="Merge method"${m.busy ? ' disabled' : ''}>${pr.mergeMethods
         .map((k) => `<option value="${k}"${k === m.method ? ' selected' : ''}>${METHOD_LABELS[k]}</option>`)
         .join('')}</select>
@@ -363,11 +394,14 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
 
   function open(repo, number, tab = 'description') {
     if (!dialog.open) opener = document.activeElement;
-    state = { repo, number, tab, pr: null, split: false, filter: '', expanded: {}, full: {} };
+    const current = { repo, number, tab, pr: null, split: false, filter: '', expanded: {}, full: {} };
+    state = current;
     if (!dialog.open) dialog.showModal();
-    load(tab);
     // The title's checks icon needs the checks whichever tab opened first.
-    if (tab !== 'checks') load('checks');
+    // Load them once that tab has the PR, so they are pinned to its head.
+    load(tab).then(() => {
+      if (state === current && current.pr && !current.checks) load('checks');
+    });
   }
 
   async function merge() {
@@ -388,8 +422,8 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
           headSha: current.pr.headSha,
         }),
       });
-      if (state !== current) return;
       onMerged?.(current.repo, current.number);
+      if (state !== current) return;
       open(current.repo, current.number, current.tab);
     } catch (error) {
       if (state !== current) return;
@@ -399,6 +433,10 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
     }
   }
 
+  const merging = () => !!state?.merge?.busy;
+  dialog.addEventListener('cancel', (event) => {
+    if (merging()) event.preventDefault();
+  });
   dialog.addEventListener('close', () => {
     state = null;
     if (opener?.isConnected) opener.focus();
@@ -421,8 +459,8 @@ window.createPrViewer = ({ api, esc, md, onMerged }) => {
   dialog.addEventListener('click', (event) => {
     const target = event.target.closest('button');
     if (!target || !state) return;
-    if (target.hasAttribute('data-close')) return dialog.close();
-    if (target.hasAttribute('data-refresh')) return open(state.repo, state.number, state.tab);
+    if (target.hasAttribute('data-close')) return merging() || dialog.close();
+    if (target.hasAttribute('data-refresh')) return merging() || open(state.repo, state.number, state.tab);
     if (target.hasAttribute('data-merge')) {
       state.merge = { method: state.pr.mergeMethods[0], busy: false, error: '' };
       mergeBox();
