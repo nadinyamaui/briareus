@@ -62,11 +62,13 @@ describe('webhookSecrets', () => {
     const { webhookSecrets } = await freshModule();
     const secrets = await webhookSecrets();
     expect(secrets.github).toMatch(/^[0-9a-f]{64}$/);
+    expect(secrets.sessions).toMatch(/^[0-9a-f]{64}$/);
+    expect(secrets.sessions).not.toBe(secrets.github);
     expect(state.saves).toEqual([{ key: 'webhooks', value: secrets }]);
   });
 
   it('reuses what is already stored instead of rotating on every boot', async () => {
-    state.stored = { github: 'g'.repeat(64) };
+    state.stored = { github: 'g'.repeat(64), sessions: 's'.repeat(64) };
     const { webhookSecrets } = await freshModule();
     expect(await webhookSecrets()).toEqual(state.stored);
     expect(state.saves).toEqual([]);
@@ -78,5 +80,36 @@ describe('webhookSecrets', () => {
     state.stored = { github: 'other' };
     expect(await webhookSecrets()).toBe(first);
     expect(state.saves).toHaveLength(1);
+  });
+});
+
+describe('session webhooks', () => {
+  it('a row from before them gains the sessions secret, the GitHub one unchanged', async () => {
+    state.stored = { github: 'g'.repeat(64) };
+    const { webhookSecrets } = await freshModule();
+    const secrets = await webhookSecrets();
+    expect(secrets.github).toBe('g'.repeat(64));
+    expect(secrets.sessions).toMatch(/^[0-9a-f]{64}$/);
+    expect(state.saves).toEqual([{ key: 'webhooks', value: secrets }]);
+  });
+
+  it('derives one stable key per session, different for every session', async () => {
+    state.stored = { github: 'g'.repeat(64), sessions: 's'.repeat(64) };
+    const { sessionWebhookKey } = await freshModule();
+    const a = await sessionWebhookKey('abc123');
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(await sessionWebhookKey('abc123')).toBe(a);
+    expect(await sessionWebhookKey('abc124')).not.toBe(a);
+    // Rotating the master secret changes every key.
+    state.stored = { github: 'g'.repeat(64), sessions: 't'.repeat(64) };
+    const rotated = await freshModule();
+    expect(await rotated.sessionWebhookKey('abc123')).not.toBe(a);
+  });
+
+  it('hangs the URL off the configured origin, reachable from the internet or not', async () => {
+    const mod = await freshModule();
+    expect(mod.sessionWebhookUrl('abc123')).toBe('https://reviewer.example.com/webhooks/session/abc123');
+    state.publicBaseUrl = 'http://127.0.0.1:4301';
+    expect(mod.sessionWebhookUrl('abc123')).toBe('http://127.0.0.1:4301/webhooks/session/abc123');
   });
 });

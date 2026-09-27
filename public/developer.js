@@ -3368,6 +3368,58 @@
     }
   });
 
+  // ⚡ Webhook: what another system needs to wake this session with a message
+  // (lib/webhooks.js). The key is fetched when asked for, never carried in the
+  // session list the dashboard polls.
+  $('btn-webhook').addEventListener('click', async () => {
+    const s = currentSession();
+    if (!s) return;
+    let hook;
+    try {
+      hook = await api(`/api/dev/sessions/${encodeURIComponent(s.id)}/webhook`);
+    } catch (e) {
+      return toast(e.message, true);
+    }
+    const q = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
+    const curl = `curl -X POST ${q(hook.url)} -H ${q(`Authorization: Bearer ${hook.key}`)} -H 'Content-Type: application/json' -d '{"text":"The nightly build failed, have a look","source":"ci"}'`;
+    const copies = { url: hook.url, key: hook.key, curl };
+    const field = (label, name, value) => `
+      <div class="flex flex-col gap-1">
+        <span class="text-[12px] text-muted">${label}</span>
+        <div class="flex gap-1.5">
+          <input readonly value="${esc(value)}" class="min-w-0 flex-1 rounded border border-line bg-field px-1.5 py-1 font-mono text-[12px] text-ink" />
+          <button type="button" class="btn px-2 py-0.5 text-[12px]" data-webhook-copy="${name}">Copy</button>
+        </div>
+      </div>`;
+    const pending = openConfirm({
+      title: 'Session webhook',
+      body: 'A POST here reaches this session as a message, reopening it if it is closed. Sign the raw body with the key (X-Briareus-Signature-256: sha256=<HMAC-SHA256>) or send it as a bearer token. Send JSON with "text" (and optionally "source"), or plain text; the agent is told it came from a webhook, not from you. Anyone holding the key can talk to this session.',
+      icon: '⚡',
+      confirmLabel: 'Copy curl example',
+      form: `<div class="flex flex-col gap-2">${field('URL', 'url', hook.url)}${field('Key', 'key', hook.key)}</div>`,
+    });
+    $('modal-form').onclick = (e) => {
+      const btn = e.target.closest('[data-webhook-copy]');
+      if (!btn) return;
+      navigator.clipboard
+        .writeText(copies[btn.dataset.webhookCopy])
+        .then(() => {
+          btn.textContent = '✓';
+          setTimeout(() => {
+            btn.textContent = 'Copy';
+          }, 1200);
+        })
+        .catch(() => toast('Could not copy to clipboard', true));
+    };
+    const copyCurl = await pending;
+    $('modal-form').onclick = null;
+    if (!copyCurl) return;
+    navigator.clipboard
+      .writeText(curl)
+      .then(() => toast('curl example copied'))
+      .catch(() => toast('Could not copy to clipboard', true));
+  });
+
   // ⟳ Reopen: claim a clone and a database server for this session again
   // without saying anything to the agent. The conversation picks up where it
   // stopped, and ▶ Run works again.

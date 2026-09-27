@@ -80,6 +80,14 @@
               <td>GitHub</td>
               <td><code>X-Hub-Signature-256</code>, HMAC-SHA256 over the raw body</td>
             </tr>
+            <tr>
+              <td><code>POST /webhooks/session/:id</code></td>
+              <td>anything you point it</td>
+              <td>
+                <code>X-Briareus-Signature-256</code> (HMAC-SHA256 over the raw body with the session's key)
+                or <code>Authorization: Bearer</code> with that key
+              </td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -105,8 +113,19 @@
         hostname means no hook, and the timer keeps the panels fresh.
       </p>
       <p class="!text-[14px] !text-muted">
-        To rotate the secret, delete the <code>webhooks</code> row in <code>app_settings</code>; the hook is
-        rewritten at the next boot.
+        To rotate the secrets, delete the <code>webhooks</code> row in <code>app_settings</code>; the hook is
+        rewritten at the next boot, and every session webhook key changes.
+      </p>
+      <p>
+        <strong>Session webhooks are the one delivery that starts work.</strong> A POST to a session's URL
+        reaches it as a message, exactly as if it had been sent from the composer: queued behind a turn in
+        flight, or reopening a closed session. <strong>⚡ Webhook</strong> in the session header shows the URL
+        and that session's key, derived from a master secret and the session id, so it opens that one session
+        and no other. Send JSON <code>{"text": "…", "source": "ci"}</code>, plain text, or any other JSON
+        (handed to the agent as it came), up to 20,000 characters. The agent is told the message came from a
+        webhook and was not typed by you, and a delivery does not re-arm an orchestrator's unattended-turn
+        breaker. The answer is <code>202</code>, <code>401</code> for a bad key (whether the session exists or
+        not), <code>404</code> for a deleted session and <code>409</code> when it cannot take a message now.
       </p>
 
       <h2 id="workspaces">The workspace pool</h2>

@@ -170,7 +170,7 @@ import {
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
 import { securityHeaders, sameOriginWrites } from './lib/security.js';
 import { listWorkspaces, resetSetup, cleanWorkspace, startWorkspacePruner } from './lib/workspaces.js';
-import { githubWebhookUrl } from './lib/webhooksecrets.js';
+import { githubWebhookUrl, sessionWebhookKey, sessionWebhookUrl } from './lib/webhooksecrets.js';
 import { childEnv } from './lib/childenv.js';
 
 // Before anything else: .env has to be complete. Every setting without a
@@ -1873,6 +1873,16 @@ app.post('/api/dev/sessions/:id/compact', async (req, res) => {
   }
 });
 
+// Where an outside system posts to wake this session, and the key it signs
+// with (lib/webhooks.js). Dashboard only, and not a dashboard action: neither
+// an agent's session token nor a remote connection may read a key that lets it
+// put words in a session's mouth.
+app.get('/api/dev/sessions/:id/webhook', async (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job || job.kind !== 'devchat') return res.status(404).json({ error: 'Session not found' });
+  res.json({ url: sessionWebhookUrl(job.id), key: await sessionWebhookKey(job.id) });
+});
+
 // Session metadata edits do not wake the agent: they only change how this
 // conversation is filed in the dashboard.
 dashboard.register('patch', '/api/dev/sessions/:id', (req, res) => {
@@ -2132,8 +2142,8 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
       `  webhooks: ${
         githubWebhookUrl()
           ? `github → ${githubWebhookUrl()}`
-          : 'off, PUBLIC_BASE_URL is not a public https hostname, so session panels sync on the timer alone'
-      }`,
+          : 'github off, PUBLIC_BASE_URL is not a public https hostname, so session panels sync on the timer alone'
+      }; sessions → ${getConfig().publicBaseUrl}/webhooks/session/<id>`,
     );
   });
 })();

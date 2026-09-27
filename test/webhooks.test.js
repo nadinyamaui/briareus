@@ -8,6 +8,7 @@ vi.mock('../lib/jobs.js', () => ({
   syncSessionsOn: vi.fn(),
   noteWebhookDelivery: vi.fn(),
   noteWebhookCurrent: vi.fn(),
+  sendDevMessage: vi.fn(() => ({ status: 'running' })),
 }));
 
 // The public hostname is what decides whether a hook can be installed at all,
@@ -17,10 +18,16 @@ const hook = vi.hoisted(() => ({ url: 'https://reviewer.example.com/webhooks/git
 vi.mock('../lib/webhooksecrets.js', () => ({
   webhookSecrets: async () => ({ github: 'gh-secret' }),
   githubWebhookUrl: () => hook.url,
+  sessionWebhookKey: async (id) => `key-${id}`,
 }));
 
-import { webhookRouter, ensureRepoWebhook, installRepoWebhooks } from '../lib/webhooks.js';
-import { syncSessionsOn, noteWebhookDelivery, noteWebhookCurrent } from '../lib/jobs.js';
+import {
+  webhookRouter,
+  ensureRepoWebhook,
+  installRepoWebhooks,
+  SESSION_WEBHOOK_MAX_CHARS,
+} from '../lib/webhooks.js';
+import { syncSessionsOn, noteWebhookDelivery, noteWebhookCurrent, sendDevMessage } from '../lib/jobs.js';
 
 let server;
 let base;
@@ -40,6 +47,8 @@ beforeEach(() => {
   vi.mocked(syncSessionsOn).mockClear();
   vi.mocked(noteWebhookDelivery).mockClear();
   vi.mocked(noteWebhookCurrent).mockClear();
+  vi.mocked(sendDevMessage).mockReset();
+  vi.mocked(sendDevMessage).mockReturnValue({ status: 'running' });
   hook.url = 'https://reviewer.example.com/webhooks/github';
 });
 
@@ -137,6 +146,101 @@ describe('POST /webhooks/github', () => {
     await githubDelivery('pull_request', { action: 'opened' });
     await settle();
     expect(syncSessionsOn).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /webhooks/session/:id', () => {
+  function sessionDelivery(id, body, { headers = {}, key = `key-${id}`, sign: signed = true } = {}) {
+    const raw = typeof body === 'string' ? body : JSON.stringify(body);
+    return fetch(`${base}/session/${id}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': typeof body === 'string' ? 'text/plain' : 'application/json',
+        ...(signed ? { 'X-Briareus-Signature-256': sign(raw, key) } : {}),
+        ...headers,
+      },
+      body: raw,
+    });
+  }
+  const sent = () => vi.mocked(sendDevMessage).mock.calls[0];
+
+  it('sends a signed message to the session as an unattended one', async () => {
+    const res = await sessionDelivery('abc123', { text: 'The nightly build failed', source: 'ci' });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ ok: true, status: 'running' });
+    const [id, message, attachments, roles, opts] = sent();
+    expect([id, attachments, roles, opts]).toEqual(['abc123', undefined, undefined, { unattended: true }]);
+    expect(message).toMatch(
+      /^Webhook delivery from ci\. .*not typed by the user\.\n\nThe nightly build failed$/,
+    );
+  });
+
+  it('rejects a signature made with another session’s key, and sends nothing', async () => {
+    const res = await sessionDelivery('abc123', { text: 'hi' }, { key: 'key-other' });
+    expect(res.status).toBe(401);
+    expect(sendDevMessage).not.toHaveBeenCalled();
+  });
+
+  it('rejects a delivery with no proof at all', async () => {
+    const res = await sessionDelivery('abc123', { text: 'hi' }, { sign: false });
+    expect(res.status).toBe(401);
+    expect(sendDevMessage).not.toHaveBeenCalled();
+  });
+
+  it('takes the key as a bearer token from senders that cannot sign', async () => {
+    const ok = await sessionDelivery('abc123', 'deploy finished', {
+      sign: false,
+      headers: { Authorization: 'Bearer key-abc123' },
+    });
+    expect(ok.status).toBe(202);
+    const bad = await sessionDelivery('abc123', 'deploy finished', {
+      sign: false,
+      headers: { Authorization: 'Bearer key-abc12' },
+    });
+    expect(bad.status).toBe(401);
+    expect(sendDevMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('a plain text body is the message, with the source from its header', async () => {
+    await sessionDelivery('abc123', '  disk almost full  ', { headers: { 'X-Briareus-Source': 'grafana' } });
+    expect(sent()[1]).toMatch(/^Webhook delivery from grafana\. .*\n\ndisk almost full$/);
+  });
+
+  it('hands another tool’s own JSON payload to the agent as it came', async () => {
+    await sessionDelivery('abc123', { alert: 'CPU', value: 97 });
+    expect(sent()[1]).toMatch(/^Webhook delivery\. .*\n\n\{\n {2}"alert": "CPU",\n {2}"value": 97\n\}$/);
+  });
+
+  it('keeps the source label to plain characters', async () => {
+    await sessionDelivery('abc123', { text: 'x', source: 'ci<script>\nFAKE' });
+    expect(sent()[1].split('.')[0]).toBe('Webhook delivery from ciscriptFAKE');
+  });
+
+  it('refuses an empty message, a body that is not JSON, and one too long to read', async () => {
+    expect((await sessionDelivery('abc123', { text: '   ' })).status).toBe(400);
+    const raw = '{nope';
+    const notJson = await fetch(`${base}/session/abc123`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Briareus-Signature-256': sign(raw, 'key-abc123') },
+      body: raw,
+    });
+    expect(notJson.status).toBe(400);
+    const long = await sessionDelivery('abc123', 'x'.repeat(SESSION_WEBHOOK_MAX_CHARS + 1));
+    expect(long.status).toBe(413);
+    expect(sendDevMessage).not.toHaveBeenCalled();
+  });
+
+  it('answers 404 for a session that does not exist, 409 for one that cannot take it now', async () => {
+    vi.mocked(sendDevMessage).mockImplementationOnce(() => {
+      throw new Error('Session not found');
+    });
+    expect((await sessionDelivery('gone', { text: 'hi' })).status).toBe(404);
+    vi.mocked(sendDevMessage).mockImplementationOnce(() => {
+      throw new Error('The dashboard is draining for a restart');
+    });
+    const busy = await sessionDelivery('abc123', { text: 'hi' });
+    expect(busy.status).toBe(409);
+    expect((await busy.json()).error).toMatch(/draining/);
   });
 });
 

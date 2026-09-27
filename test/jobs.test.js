@@ -2472,6 +2472,7 @@ describe('the unattended-turn breaker and the delivery holds', () => {
         pendingWorkerNotices: [notice('brk-w1')],
       }),
       row('brk-reset', { orchestrator: true, unattendedTurns: 7, unattendedSaid: true }),
+      row('brk-hook', { orchestrator: true, unattendedTurns: 7, unattendedSaid: true }),
       row('brk-stop', {
         orchestrator: true,
         turnCanceled: true,
@@ -2485,7 +2486,8 @@ describe('the unattended-turn breaker and the delivery holds', () => {
       row('brk-closed', { parentId: 'brk-gone' }), // stays closed
     ];
     await initJobs();
-    for (const id of ['brk-orch', 'brk-reset', 'brk-stop', 'brk-gone', 'brk-w1']) getJob(id).status = 'idle';
+    for (const id of ['brk-orch', 'brk-reset', 'brk-hook', 'brk-stop', 'brk-gone', 'brk-w1'])
+      getJob(id).status = 'idle';
   });
 
   it('past the cap, updates arrive as lines the user reads, not injected turns', () => {
@@ -2506,6 +2508,14 @@ describe('the unattended-turn breaker and the delivery holds', () => {
     const orch = getJob('brk-reset');
     expect(orch.unattendedTurns).toBe(0);
     expect(orch.unattendedSaid).toBe(false);
+  });
+
+  it('a webhook delivery is no sign of the user either: the breaker stays tripped', () => {
+    sendDevMessage('brk-hook', 'CI failed', undefined, undefined, { unattended: true });
+    const orch = getJob('brk-hook');
+    expect(orch.unattendedTurns).toBe(7);
+    expect(orch.unattendedSaid).toBe(true);
+    expect(orch.events.some((e) => e.kind === 'user' && e.text === 'CI failed')).toBe(true);
   });
 
   it('■ Stop holds delivery: the next turn is the user’s, not an injected one', () => {

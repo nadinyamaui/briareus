@@ -485,9 +485,10 @@ machine with its git and GitHub credentials:
 With a public https hostname, the PR state an open session mirrors is delivered
 instead of polled for:
 
-| Route                   | Sender | Authenticated by                                     |
-| ----------------------- | ------ | ---------------------------------------------------- |
-| `POST /webhooks/github` | GitHub | `X-Hub-Signature-256`, HMAC-SHA256 over the raw body |
+| Route                        | Sender                | Authenticated by                                                                      |
+| ---------------------------- | --------------------- | ------------------------------------------------------------------------------------- |
+| `POST /webhooks/github`      | GitHub                | `X-Hub-Signature-256`, HMAC-SHA256 over the raw body                                  |
+| `POST /webhooks/session/:id` | anything you point it | `X-Briareus-Signature-256` (HMAC-SHA256 over the raw body) or `Authorization: Bearer` |
 
 The secret is generated on first boot and kept in the `app_settings` table;
 there is nothing to paste anywhere. The app installs its own repository hook on
@@ -507,7 +508,25 @@ going, or a fresh push has none registered yet). A session on a merged or closed
 request is polled only while a turn is running, or while its checks are still
 awaited within an hour of its head first being seen, and every poll is a
 conditional request (a 304 costs nothing against the rate limit). Delete the `webhooks` row in `app_settings` to
-rotate the secret; the hook is rewritten at the next boot.
+rotate the secrets; the hook is rewritten at the next boot, and every session webhook key changes.
+
+**Session webhooks** are the one delivery that starts work: a POST to a session's URL reaches it as a message,
+exactly as if it had been sent from the composer (queued behind a turn in flight, reopening a closed session).
+**⚡ Webhook** in the session header shows the URL and that session's key, which is derived from a master secret
+and the session id, so it opens that one session and no other. Send JSON `{"text": "…", "source": "ci"}`, plain
+text, or any other JSON (handed to the agent as it came), up to 20,000 characters. The agent is told the message
+came from a webhook and was not typed by you, and a delivery does not re-arm an orchestrator's unattended-turn
+breaker. The answer is `202 {"ok": true, "status": …}`, `401` for a bad key (whether the session exists or not),
+`404` for a deleted session and `409` when it cannot take a message now (a drain for a restart, no free slot).
+
+```sh
+curl -X POST "$URL" -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"text":"The nightly build failed","source":"ci"}'
+# or signed, so the key never travels:
+BODY='{"text":"The nightly build failed","source":"ci"}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$KEY" -hex | sed 's/^.* //')
+curl -X POST "$URL" -H "X-Briareus-Signature-256: sha256=$SIG" -H 'Content-Type: application/json' -d "$BODY"
+```
 
 The sync timer remains as the fallback. Nothing about a laptop-only install
 changes: no public hostname means no hook, and the timer keeps the panels
