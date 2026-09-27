@@ -763,12 +763,16 @@ projection, refreshed every seven seconds, and does not dismiss unresolved work.
 
 Interrupted/failed inbox cards open a recovery report: expected and actual
 branch, HEAD, working-file changes and the pending phase. Resume checks that
-report again and refuses missing, recycled or busy workspaces. Reopening the
-same branch now preserves commits and working files before running setup; a
-new agent turn inspects what already happened before continuing.
+report again and refuses missing, recycled or busy workspaces. Reopening a
+session in its own clone slot preserves commits and working files before
+running setup; a new agent turn inspects what already happened before
+continuing. The clone pool does not hand an interrupted or failed session's
+slot to another session.
 
-`/maintenance` drains work: new top-level sessions and manual messages are
-refused while existing turns and automatic child work finish. The ready state
+`/maintenance` drains work: new top-level sessions, messages that would start
+a turn on a settled session, compaction, arming the review or QA loop and
+review retries are refused, while answers to questions, messages to running
+turns and automatic child work still go through. The ready state
 also waits for running SSH commands. Resume accepting work cancels draining.
 This is an in-process gate, reset on restart; it does not deploy or restart the
 server. Wait for ready before the normal deployment procedure.

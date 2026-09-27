@@ -1803,7 +1803,12 @@ app.get('/api/dev/sessions/:id/events', (req, res) => {
 // the session could not accept at all.
 dashboard.register('post', '/api/dev/sessions/:id/message', (req, res) => {
   try {
-    assertAcceptingWork();
+    // Draining refuses only a message that would start a turn on a settled
+    // session: an answer to a question, or a word to a turn under way, is how
+    // the work already in flight gets to finish.
+    const job = getJob(req.params.id);
+    if (!job || !(['queued', 'preparing', 'running'].includes(job.status) || job.awaitingAnswer))
+      assertAcceptingWork();
     const { text, attachments, zeusRoles } = req.body || {};
     res.json({ session: sendDevMessage(req.params.id, text, attachments, zeusRoles) });
   } catch (e) {

@@ -39,7 +39,13 @@ describe('recovery', () => {
   it('drains active turns, queues, loops and SSH commands', () => {
     setDraining(true);
     expect(assertAcceptingWork).toThrow('Maintenance');
-    expect(maintenanceState([{ id: 's', status: 'idle', queued: [{}] }]).ready).toBe(false);
+    expect(maintenanceState([{ id: 's', status: 'running' }]).ready).toBe(false);
+    expect(maintenanceState([{ id: 's', status: 'idle', reviewLoop: { reviewing: true } }]).ready).toBe(
+      false,
+    );
+    // publicJob's projection fields, restored stale onto a raw record by a
+    // restart, say nothing about live work.
+    expect(maintenanceState([{ id: 's', status: 'idle', compacting: true, queued: [{}] }]).ready).toBe(true);
     expect(maintenanceState([], 1).ready).toBe(false);
     expect(maintenanceState([{ id: 's', status: 'idle' }]).ready).toBe(true);
     setDraining(false);

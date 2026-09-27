@@ -7,6 +7,7 @@ import { BINARIES } from '../lib/providers.js';
 import * as providerTools from '../lib/providers.js';
 import { compactCodexThread } from '../lib/codex-session.js';
 import { recordTurnUsage } from '../lib/usage.js';
+import { setDraining } from '../lib/recovery.js';
 vi.mock('../lib/codex-session.js', async (original) => ({
   ...(await original()),
   compactCodexThread: vi.fn(),
@@ -8165,5 +8166,56 @@ describe('manual Codex context compaction', () => {
     job.status = 'idle';
     job.contextUsage = { categories: [] };
     await expect(compactDevSession(job.id)).rejects.toThrow('No Codex context');
+  });
+});
+
+describe('maintenance drain at the operator entry points', () => {
+  beforeAll(async () => {
+    state.stored = [
+      {
+        id: 'drain-idle',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+        turns: 1,
+        reviewLoop: { rounds: 1, done: true },
+      },
+      {
+        id: 'drain-interrupted',
+        kind: 'devchat',
+        status: 'interrupted',
+        repo: 'acme/rt',
+        orchestrator: true,
+        providerId: 99,
+        turns: 1,
+        reviewLoop: {
+          rounds: 1,
+          lastSha: 'sha-drain',
+          failure: { round: 1, reason: 'boom', at: '2026-09-05' },
+        },
+      },
+    ];
+    await initJobs();
+    getJob('drain-idle').status = 'idle';
+    setDraining(true);
+  });
+  afterAll(() => setDraining(false));
+
+  it('refuses arming the loops and compaction, but lets a loop be switched off', async () => {
+    expect(() => setReviewLoop('drain-idle', true)).toThrow(/Maintenance/);
+    expect(() => setQaLoop('drain-idle', true)).toThrow(/Maintenance/);
+    await expect(compactDevSession('drain-idle')).rejects.toThrow(/Maintenance/);
+    expect(setReviewLoop('drain-idle', false).reviewLoop).toBeFalsy();
+  });
+
+  it('refuses a retry before it touches the loop or the transcript', async () => {
+    const job = getJob('drain-interrupted');
+    const events = job.events.length;
+    await expect(retryLoopRound('drain-interrupted')).rejects.toThrow(/Maintenance/);
+    expect(job.reviewLoop).toMatchObject({ lastSha: 'sha-drain', failure: { round: 1 } });
+    expect(job.reviewLoop.retryPending).toBeFalsy();
+    expect(job.events).toHaveLength(events);
+    expect(job.status).toBe('interrupted');
   });
 });

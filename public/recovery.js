@@ -2,10 +2,17 @@
   const { api, esc, content, status, title } = window.BriareusOperations;
   if (location.pathname === '/maintenance') {
     title('Maintenance');
-    let busy = false;
-    async function refresh() {
+    // `latest` numbers each refresh, so a poll that set out before a toggle
+    // and answers after it is dropped instead of repainting the old state. A
+    // hidden tab does not poll; it catches up when shown again.
+    let busy = false,
+      latest = 0;
+    async function refresh({ poll = false } = {}) {
+      if (poll && (busy || document.hidden)) return;
+      const mine = ++latest;
       try {
         const state = await api('/api/operations/maintenance');
+        if (mine !== latest || (poll && busy)) return;
         status(
           state.ready
             ? 'Active work has finished. The server is ready for your deployment procedure.'
@@ -13,7 +20,7 @@
               ? 'Waiting for active work to finish…'
               : 'Accepting new work.',
         );
-        content.innerHTML = `<button class="btn" id="maintenance-toggle">${state.draining ? 'Resume accepting work' : 'Drain active work'}</button><p class="my-4">Draining refuses new tasks and manual messages while existing turns and their automatic follow-up work finish. It does not restart the server.</p>${state.active.map((s) => `<p><a class="underline" href="/sessions/${esc(s.id)}">${esc(s.title || s.id)}</a> · ${esc(s.status)}</p>`).join('')}<p>Running SSH commands: ${state.sshRunning}</p>`;
+        content.innerHTML = `<button class="btn" id="maintenance-toggle">${state.draining ? 'Resume accepting work' : 'Drain active work'}</button><p class="my-4">Draining refuses new tasks and messages that would start a new turn, while existing turns, answers to their questions and their automatic follow-up work finish. It does not restart the server.</p>${state.active.map((s) => `<p><a class="underline" href="/sessions/${esc(s.id)}">${esc(s.title || s.id)}</a> · ${esc(s.status)}</p>`).join('')}<p>Running SSH commands: ${state.sshRunning}</p>`;
         content.querySelector('button').onclick = async () => {
           if (busy) return;
           busy = true;
@@ -27,13 +34,12 @@
           }
         };
       } catch (e) {
-        status(e.message);
+        if (mine === latest) status(e.message);
       }
     }
     void refresh();
-    setInterval(() => {
-      if (!busy) void refresh();
-    }, 5000);
+    setInterval(() => void refresh({ poll: true }), 5000);
+    document.addEventListener('visibilitychange', () => void refresh({ poll: true }));
     return;
   }
   if (!location.pathname.startsWith('/recovery/')) return;
