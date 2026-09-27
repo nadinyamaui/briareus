@@ -194,6 +194,46 @@ describe('recovery', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+  it('neither holds nor offers to resume a slot whose reopen stopped before the checkout', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'recovery-'));
+    const git = (...args) => execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' });
+    try {
+      // A fallback slot already on the session's branch, with another use's
+      // leftovers in it.
+      git('init', '-b', 'x');
+      git(
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'start',
+      );
+      await writeFile(join(dir, 'leftover.txt'), 'not the session work');
+      const job = {
+        id: 'a',
+        kind: 'devchat',
+        status: 'failed',
+        branch: 'x',
+        workDir: dir,
+        chatStarted: true,
+      };
+      claimSlot(dir, 'a');
+      expect(holdsRecoverableWork(job)).toBe(false);
+      const report = await inspectRecovery(job);
+      expect(report.canResume).toBe(false);
+      expect(report.available).toBe(false);
+      expect(report.changes).toBe('');
+      expect(report.reason).toContain('never prepared');
+      claimSlot(dir, 'a', { prepared: true });
+      expect(holdsRecoverableWork(job)).toBe(true);
+      expect((await inspectRecovery(job)).canResume).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
   it('refuses only messages that would start a turn on a settled session while draining', () => {
     setDraining(true);
     expect(() => assertAcceptingMessage({ status: 'running' })).not.toThrow();
