@@ -104,6 +104,22 @@ describe('operator attention', () => {
     ]);
     expect(items.map((i) => i.id)).toEqual(['x:review-stalled', 'x:qa-failed', 'x:qa-verdict']);
   });
+  it('lists a worker item its open orchestrator only got as a plain line', () => {
+    const items = attentionItems([
+      { id: 'o', status: 'idle', orchestrator: true, unattendedTurns: 10 },
+      {
+        id: 'w',
+        status: 'idle',
+        parentId: 'o',
+        awaitingAnswer: true,
+        askText: 'Keep it?',
+        noticeUnheard: true,
+      },
+      { id: 'f', status: 'failed', error: 'boom', parentId: 'o', noticeUnheard: true },
+      { id: 'h', status: 'idle', parentId: 'o', awaitingAnswer: true, noticeUnheard: false },
+    ]);
+    expect(items.map((i) => i.id)).toEqual(['w:question', 'f:recovery']);
+  });
   it('lists a failed loop child whose parent no longer tracked it', () => {
     const items = attentionItems([
       { id: 'p', status: 'idle', reviewLoop: null },

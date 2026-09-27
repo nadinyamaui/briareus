@@ -295,6 +295,35 @@ describe('restart reconciliation for loop jobs', () => {
         repo: 'acme/shop',
         qaParentId: 'restart-qa-parent',
       },
+      // Children whose loop was switched off (or re-armed) while they ran.
+      {
+        id: 'restart-untracked-parent',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        turns: 1,
+        reviewLoop: null,
+        qaLoop: null,
+      },
+      ...[
+        ['restart-untracked-review', 'loopParentId'],
+        ['restart-untracked-fix', 'loopFixParentId'],
+        ['restart-untracked-qa', 'qaParentId'],
+      ].map(([id, key]) => ({
+        id,
+        kind: 'devchat',
+        status: 'running',
+        repo: 'acme/shop',
+        [key]: 'restart-untracked-parent',
+      })),
+      // Interrupted before this boot: not this restart's to mark.
+      {
+        id: 'restart-old-review',
+        kind: 'devchat',
+        status: 'interrupted',
+        repo: 'acme/shop',
+        loopParentId: 'restart-untracked-parent',
+      },
     ];
     await initJobs();
   });
@@ -335,6 +364,14 @@ describe('restart reconciliation for loop jobs', () => {
     // Each parent took its child's failure, so the inbox lists it there only.
     for (const id of ['restart-review', 'restart-fix', 'restart-qa'])
       expect(getJob(id).failureUnreported).toBeUndefined();
+  });
+
+  it('marks interrupted loop children their parent no longer tracked, for the inbox to list', () => {
+    for (const id of ['restart-untracked-review', 'restart-untracked-fix', 'restart-untracked-qa']) {
+      expect(getJob(id).status).toBe('interrupted');
+      expect(getJob(id).failureUnreported).toBe(true);
+    }
+    expect(getJob('restart-old-review').failureUnreported).toBeUndefined();
   });
 });
 
@@ -2357,7 +2394,7 @@ describe('deliverWorkerNotices', () => {
         orchestrator: true,
         pendingWorkerNotices: [{ workerId: 'not-w1', kind: 'ask', text: 'answered already' }],
       }),
-      row('not-w1', { parentId: 'not-orch', awaitingAnswer: false }),
+      row('not-w1', { parentId: 'not-orch', awaitingAnswer: false, noticeUnheard: true }),
       row('not-plain', {}),
     ];
     await initJobs();
@@ -2378,6 +2415,8 @@ describe('deliverWorkerNotices', () => {
     const user = orch.events.filter((e) => e.kind === 'user');
     expect(user).toHaveLength(1);
     expect(user[0].text).toContain('Worker not-w1 finished.');
+    // Taken as a turn: the worker's items are the orchestrator's again.
+    expect(getJob('not-w1').noticeUnheard).toBe(false);
   });
 
   it('an orchestrator standing on its own question holds the buffer', () => {
@@ -2442,6 +2481,8 @@ describe('the unattended-turn breaker and the delivery holds', () => {
     expect(info.some((t) => t.includes('update from brk-w1'))).toBe(true);
     expect(orch.pendingWorkerNotices).toHaveLength(0);
     expect(orch.unattendedSaid).toBe(true);
+    // No turn acts on a line, so the inbox lists the worker's item instead.
+    expect(getJob('brk-w1').noticeUnheard).toBe(true);
   });
 
   it('a genuine user message re-arms the breaker; an injected one would not', () => {
@@ -2608,6 +2649,7 @@ describe('the worker budget', () => {
     expect(info.some((t) => t.includes('update from bud-w2'))).toBe(true);
     expect(orch.pendingWorkerNotices).toHaveLength(0);
     expect(orch.budgetSaid).toBe(true);
+    expect(getJob('bud-w2').noticeUnheard).toBe(true);
   });
 });
 
