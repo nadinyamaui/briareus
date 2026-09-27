@@ -85,14 +85,18 @@
       };
       $('capture').disabled = !navigator.mediaDevices?.getDisplayMedia;
       $('capture').onclick = async () => {
+        if (leaving || $('capture').disabled) return;
+        $('capture').disabled = true;
+        let stream, video;
         try {
-          captureStream = await navigator.mediaDevices.getDisplayMedia({
+          stream = await navigator.mediaDevices.getDisplayMedia({
             video: { displaySurface: 'browser' },
             audio: false,
           });
+          captureStream = stream;
           if (leaving) return;
-          const video = document.createElement('video');
-          video.srcObject = captureStream;
+          video = document.createElement('video');
+          video.srcObject = stream;
           await video.play();
           await new Promise((resolve) => video.requestVideoFrameCallback(resolve));
           const screenshot = document.createElement('canvas');
@@ -100,12 +104,13 @@
           screenshot.height = video.videoHeight;
           screenshot.getContext('2d').drawImage(video, 0, 0);
           await load(await new Promise((resolve) => screenshot.toBlob(resolve, 'image/png')));
-          video.srcObject = null;
         } catch (e) {
           status(e.message);
         } finally {
-          stopTracks(captureStream);
-          captureStream = null;
+          stopTracks(stream);
+          if (video) video.srcObject = null;
+          if (captureStream === stream) captureStream = null;
+          $('capture').disabled = leaving;
         }
       };
       const transcription = await api('/api/dev/transcribe').catch(() => ({ available: false }));
@@ -188,6 +193,14 @@
         $('send').disabled = true;
         $('voice').disabled = true;
         try {
+          // toBlob snapshots the canvas when called; capture its metadata before yielding too.
+          const submission = {
+            url: $('url').value,
+            text: $('text').value,
+            width: canvas.width,
+            height: canvas.height,
+            ...point,
+          };
           const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
           const response = await fetch('/api/dev/uploads?name=preview-feedback.png', {
             method: 'POST',
@@ -199,11 +212,7 @@
           if (!response.ok) throw new Error(data.error || 'Screenshot upload failed');
           await api(`/api/operations/preview/${id}`, {
             uploadId: data.file.id,
-            url: $('url').value,
-            text: $('text').value,
-            width: canvas.width,
-            height: canvas.height,
-            ...point,
+            ...submission,
           });
           location.href = `/sessions/${id}`;
         } catch (e) {
