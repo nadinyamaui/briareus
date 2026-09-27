@@ -19,6 +19,7 @@ import { createMobileAuth } from './lib/mobile-auth.js';
 import { mobileApiRoutes, mobileSettingsRoutes } from './lib/mobile-api.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
+import { sessionWebhookRoutes } from './lib/webhook-routes.js';
 import fs from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
@@ -58,6 +59,9 @@ import {
   workerSummary,
   assertWorkerSlot,
   assertWorkerBudget,
+  sessionWebhookState,
+  setSessionWebhook,
+  rotateSessionWebhook,
   orchestratorBudgetStatus,
   triageLoopFindings,
   triageReviewFindings,
@@ -1873,15 +1877,17 @@ app.post('/api/dev/sessions/:id/compact', async (req, res) => {
   }
 });
 
-// Where an outside system posts to wake this session, and the key it signs
-// with (lib/webhooks.js). Dashboard only, and not a dashboard action: neither
-// an agent's session token nor a remote connection may read a key that lets it
-// put words in a session's mouth.
-app.get('/api/dev/sessions/:id/webhook', async (req, res) => {
-  const job = getJob(req.params.id);
-  if (!job || job.kind !== 'devchat') return res.status(404).json({ error: 'Session not found' });
-  res.json({ url: sessionWebhookUrl(job.id), key: await sessionWebhookKey(job.id) });
-});
+// Where an outside system posts to wake this session, the key it signs with,
+// and the caps its turns run under (lib/webhook-routes.js).
+app.use(
+  sessionWebhookRoutes({
+    state: sessionWebhookState,
+    update: setSessionWebhook,
+    rotate: rotateSessionWebhook,
+    url: sessionWebhookUrl,
+    key: sessionWebhookKey,
+  }),
+);
 
 // Session metadata edits do not wake the agent: they only change how this
 // conversation is filed in the dashboard.

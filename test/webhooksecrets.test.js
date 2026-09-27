@@ -4,6 +4,8 @@ const state = vi.hoisted(() => ({
   publicBaseUrl: 'https://reviewer.example.com',
   stored: null,
   saves: [],
+  // How many reads fail before the database answers.
+  down: 0,
 }));
 
 vi.mock('../lib/config.js', () => ({
@@ -11,7 +13,13 @@ vi.mock('../lib/config.js', () => ({
 }));
 
 vi.mock('../lib/db.js', () => ({
-  loadAppSetting: vi.fn(async () => state.stored),
+  loadAppSetting: vi.fn(async () => {
+    if (state.down > 0) {
+      state.down--;
+      throw new Error('Database down');
+    }
+    return state.stored;
+  }),
   saveAppSetting: vi.fn(async (key, value) => {
     state.saves.push({ key, value });
   }),
@@ -28,6 +36,7 @@ beforeEach(() => {
   state.publicBaseUrl = 'https://reviewer.example.com';
   state.stored = null;
   state.saves = [];
+  state.down = 0;
 });
 
 describe('webhookBase', () => {
@@ -104,6 +113,39 @@ describe('session webhooks', () => {
     state.stored = { github: 'g'.repeat(64), sessions: 't'.repeat(64) };
     const rotated = await freshModule();
     expect(await rotated.sessionWebhookKey('abc123')).not.toBe(a);
+  });
+
+  it('two first reads at once mint one secret between them, and write it once', async () => {
+    state.stored = { github: 'g'.repeat(64) };
+    const { webhookSecrets, sessionWebhookKey } = await freshModule();
+    const [a, b, key] = await Promise.all([webhookSecrets(), webhookSecrets(), sessionWebhookKey('abc123')]);
+    expect(b).toBe(a);
+    expect(state.saves).toEqual([{ key: 'webhooks', value: a }]);
+    // What the dashboard showed is what a restart computes from the row.
+    state.stored = state.saves[0].value;
+    const restarted = await freshModule();
+    expect(await restarted.sessionWebhookKey('abc123')).toBe(key);
+  });
+
+  it('a read that failed is not held on to: the next caller reads again', async () => {
+    state.stored = { github: 'g'.repeat(64), sessions: 's'.repeat(64) };
+    state.down = 1;
+    const { webhookSecrets } = await freshModule();
+    await expect(webhookSecrets()).rejects.toThrow('Database down');
+    expect(await webhookSecrets()).toEqual(state.stored);
+  });
+
+  it('rotating one session raises its epoch: a new key for it, and the same one for the rest', async () => {
+    state.stored = { github: 'g'.repeat(64), sessions: 's'.repeat(64) };
+    const { sessionWebhookKey } = await freshModule();
+    const first = await sessionWebhookKey('abc123');
+    expect(await sessionWebhookKey('abc123', 0)).toBe(first);
+    const rotated = await sessionWebhookKey('abc123', 1);
+    expect(rotated).toMatch(/^[0-9a-f]{64}$/);
+    expect(rotated).not.toBe(first);
+    expect(await sessionWebhookKey('abc123', 2)).not.toBe(rotated);
+    expect(await sessionWebhookKey('abc124', 1)).not.toBe(rotated);
+    expect(await sessionWebhookKey('abc124')).not.toBe(first);
   });
 
   it('hangs the URL off the configured origin, reachable from the internet or not', async () => {

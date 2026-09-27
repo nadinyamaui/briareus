@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import crypto from 'crypto';
+import http from 'http';
 import express from 'express';
 
 const GITHUB_SECRET = 'gh-secret';
@@ -8,7 +9,8 @@ vi.mock('../lib/jobs.js', () => ({
   syncSessionsOn: vi.fn(),
   noteWebhookDelivery: vi.fn(),
   noteWebhookCurrent: vi.fn(),
-  sendDevMessage: vi.fn(() => ({ status: 'running' })),
+  getJob: vi.fn(() => null),
+  deliverToSession: vi.fn(() => ({ status: 'running', held: 0 })),
 }));
 
 // The public hostname is what decides whether a hook can be installed at all,
@@ -18,16 +20,18 @@ const hook = vi.hoisted(() => ({ url: 'https://reviewer.example.com/webhooks/git
 vi.mock('../lib/webhooksecrets.js', () => ({
   webhookSecrets: async () => ({ github: 'gh-secret' }),
   githubWebhookUrl: () => hook.url,
-  sessionWebhookKey: async (id) => `key-${id}`,
+  sessionWebhookKey: async (id, epoch = 0) => `key-${id}${epoch ? `-e${epoch}` : ''}`,
 }));
 
+import { webhookRouter, ensureRepoWebhook, installRepoWebhooks } from '../lib/webhooks.js';
 import {
-  webhookRouter,
-  ensureRepoWebhook,
-  installRepoWebhooks,
-  SESSION_WEBHOOK_MAX_CHARS,
-} from '../lib/webhooks.js';
-import { syncSessionsOn, noteWebhookDelivery, noteWebhookCurrent, sendDevMessage } from '../lib/jobs.js';
+  syncSessionsOn,
+  noteWebhookDelivery,
+  noteWebhookCurrent,
+  getJob,
+  deliverToSession,
+} from '../lib/jobs.js';
+import { deliveryId, DELIVERY_MAX_CHARS } from '../lib/deliveries.js';
 
 let server;
 let base;
@@ -47,8 +51,10 @@ beforeEach(() => {
   vi.mocked(syncSessionsOn).mockClear();
   vi.mocked(noteWebhookDelivery).mockClear();
   vi.mocked(noteWebhookCurrent).mockClear();
-  vi.mocked(sendDevMessage).mockReset();
-  vi.mocked(sendDevMessage).mockReturnValue({ status: 'running' });
+  vi.mocked(getJob).mockReset();
+  vi.mocked(getJob).mockReturnValue(null);
+  vi.mocked(deliverToSession).mockReset();
+  vi.mocked(deliverToSession).mockReturnValue({ status: 'running', held: 0 });
   hook.url = 'https://reviewer.example.com/webhooks/github';
 });
 
@@ -150,97 +156,214 @@ describe('POST /webhooks/github', () => {
 });
 
 describe('POST /webhooks/session/:id', () => {
-  function sessionDelivery(id, body, { headers = {}, key = `key-${id}`, sign: signed = true } = {}) {
+  const seconds = () => Math.floor(Date.now() / 1000);
+  const signed = (raw, key, stamp) =>
+    `sha256=${crypto.createHmac('sha256', key).update(`${stamp}.`).update(raw).digest('hex')}`;
+
+  function sessionDelivery(
+    id,
+    body,
+    { headers = {}, key = `key-${id}`, sign: signIt = true, stamp = seconds() } = {},
+  ) {
     const raw = typeof body === 'string' ? body : JSON.stringify(body);
     return fetch(`${base}/session/${id}`, {
       method: 'POST',
       headers: {
         'Content-Type': typeof body === 'string' ? 'text/plain' : 'application/json',
-        ...(signed ? { 'X-Briareus-Signature-256': sign(raw, key) } : {}),
+        ...(signIt
+          ? { 'X-Briareus-Timestamp': String(stamp), 'X-Briareus-Signature-256': signed(raw, key, stamp) }
+          : {}),
         ...headers,
       },
       body: raw,
     });
   }
-  const sent = () => vi.mocked(sendDevMessage).mock.calls[0];
+  // A header byte fetch would refuse to send, sent the way a stranger can.
+  function rawPost(path, headers, body) {
+    return new Promise((resolve, reject) => {
+      const { port } = server.address();
+      const req = http.request({ host: '127.0.0.1', port, path, method: 'POST', headers }, (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode));
+      });
+      req.on('error', reject);
+      req.end(Buffer.from(body));
+    });
+  }
+  const delivered = () => vi.mocked(deliverToSession).mock.calls[0];
 
-  it('sends a signed message to the session as an unattended one', async () => {
-    const res = await sessionDelivery('abc123', { text: 'The nightly build failed', source: 'ci' });
+  it('hands a signed delivery to the session’s intake', async () => {
+    const res = await sessionDelivery('abc123', {
+      text: 'The nightly build failed',
+      source: 'ci',
+      id: 'run-1',
+    });
     expect(res.status).toBe(202);
-    expect(await res.json()).toEqual({ ok: true, status: 'running' });
-    const [id, message, attachments, roles, opts] = sent();
-    expect([id, attachments, roles, opts]).toEqual(['abc123', undefined, undefined, { unattended: true }]);
-    expect(message).toMatch(
-      /^Webhook delivery from ci\. .*not typed by the user\.\n\nThe nightly build failed$/,
-    );
+    expect(await res.json()).toEqual({ ok: true, status: 'running', held: 0 });
+    expect(delivered()).toEqual([
+      'abc123',
+      { text: 'The nightly build failed', source: 'ci', id: deliveryId('run-1') },
+    ]);
   });
 
-  it('rejects a signature made with another session’s key, and sends nothing', async () => {
+  it('says so when the session holds the delivery for later, or had taken it already', async () => {
+    vi.mocked(deliverToSession).mockReturnValueOnce({ status: 'held', held: 2 });
+    const held = await sessionDelivery('abc123', { text: 'hi' });
+    expect(held.status).toBe(202);
+    expect(await held.json()).toEqual({ ok: true, status: 'held', held: 2 });
+    vi.mocked(deliverToSession).mockReturnValueOnce({ status: 'duplicate' });
+    const again = await sessionDelivery('abc123', { text: 'hi' });
+    expect(again.status).toBe(200);
+    expect(await again.json()).toEqual({ ok: true, status: 'duplicate' });
+  });
+
+  it('rejects a signature made with another session’s key, and delivers nothing', async () => {
     const res = await sessionDelivery('abc123', { text: 'hi' }, { key: 'key-other' });
     expect(res.status).toBe(401);
-    expect(sendDevMessage).not.toHaveBeenCalled();
+    expect(deliverToSession).not.toHaveBeenCalled();
   });
 
   it('rejects a delivery with no proof at all', async () => {
     const res = await sessionDelivery('abc123', { text: 'hi' }, { sign: false });
     expect(res.status).toBe(401);
-    expect(sendDevMessage).not.toHaveBeenCalled();
+    expect(deliverToSession).not.toHaveBeenCalled();
+  });
+
+  it('a signature covers when it was made: one over the body alone is refused', async () => {
+    const raw = JSON.stringify({ text: 'hi' });
+    const bodyOnly = sign(raw, 'key-abc123');
+    for (const headers of [
+      { 'X-Briareus-Signature-256': bodyOnly },
+      { 'X-Briareus-Signature-256': bodyOnly, 'X-Briareus-Timestamp': String(seconds()) },
+      { 'X-Briareus-Signature-256': signed(raw, 'key-abc123', 'soon'), 'X-Briareus-Timestamp': 'soon' },
+    ]) {
+      const res = await sessionDelivery('abc123', { text: 'hi' }, { sign: false, headers });
+      expect(res.status).toBe(401);
+    }
+    expect(deliverToSession).not.toHaveBeenCalled();
+  });
+
+  it('refuses a signed delivery made too long ago, or too far ahead, and tells its sender why', async () => {
+    for (const stamp of [seconds() - 301, seconds() + 301]) {
+      const res = await sessionDelivery('abc123', { text: 'hi' }, { stamp });
+      expect(res.status).toBe(401);
+      expect((await res.json()).error).toMatch(/Timestamp too far/);
+    }
+    expect((await sessionDelivery('abc123', { text: 'hi' }, { stamp: seconds() - 200 })).status).toBe(202);
+    expect(deliverToSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('names an unnamed signed delivery after its signed bytes, so the same ones twice are one', async () => {
+    const stamp = seconds();
+    await sessionDelivery('abc123', { text: 'hi' }, { stamp });
+    await sessionDelivery('abc123', { text: 'hi' }, { stamp });
+    await sessionDelivery('abc123', { text: 'hi' }, { stamp: stamp - 1 });
+    const ids = vi.mocked(deliverToSession).mock.calls.map(([, d]) => d.id);
+    expect(ids[0]).toMatch(/^[0-9a-f]{32}$/);
+    expect(ids[1]).toBe(ids[0]);
+    expect(ids[2]).not.toBe(ids[0]);
   });
 
   it('takes the key as a bearer token from senders that cannot sign', async () => {
     const ok = await sessionDelivery('abc123', 'deploy finished', {
       sign: false,
-      headers: { Authorization: 'Bearer key-abc123' },
+      headers: { Authorization: 'Bearer key-abc123', 'X-Briareus-Delivery': 'deploy-9' },
     });
     expect(ok.status).toBe(202);
+    expect(delivered()[1]).toEqual({ text: 'deploy finished', source: '', id: deliveryId('deploy-9') });
     const bad = await sessionDelivery('abc123', 'deploy finished', {
       sign: false,
       headers: { Authorization: 'Bearer key-abc12' },
     });
     expect(bad.status).toBe(401);
-    expect(sendDevMessage).toHaveBeenCalledTimes(1);
+    expect(deliverToSession).toHaveBeenCalledTimes(1);
   });
 
-  it('a plain text body is the message, with the source from its header', async () => {
-    await sessionDelivery('abc123', '  disk almost full  ', { headers: { 'X-Briareus-Source': 'grafana' } });
-    expect(sent()[1]).toMatch(/^Webhook delivery from grafana\. .*\n\ndisk almost full$/);
+  it('a bearer delivery nobody named has no id to be deduplicated on', async () => {
+    await sessionDelivery('abc123', 'x', { sign: false, headers: { Authorization: 'Bearer key-abc123' } });
+    expect(delivered()[1].id).toBe(null);
   });
 
-  it('hands another tool’s own JSON payload to the agent as it came', async () => {
-    await sessionDelivery('abc123', { alert: 'CPU', value: 97 });
-    expect(sent()[1]).toMatch(/^Webhook delivery\. .*\n\n\{\n {2}"alert": "CPU",\n {2}"value": 97\n\}$/);
+  it('checks against the key of the session’s epoch: a rotated key ends the old one', async () => {
+    vi.mocked(getJob).mockReturnValue({ id: 'abc123', webhook: { armed: true, epoch: 2 } });
+    expect((await sessionDelivery('abc123', { text: 'hi' })).status).toBe(401);
+    expect((await sessionDelivery('abc123', { text: 'hi' }, { key: 'key-abc123-e2' })).status).toBe(202);
+    expect(getJob).toHaveBeenCalledWith('abc123');
   });
 
-  it('keeps the source label to plain characters', async () => {
-    await sessionDelivery('abc123', { text: 'x', source: 'ci<script>\nFAKE' });
-    expect(sent()[1].split('.')[0]).toBe('Webhook delivery from ciscriptFAKE');
+  it('answers 401, never 500, to a key of the right length in characters and the wrong one in bytes', async () => {
+    const sig = `sha256=${'a'.repeat(63)}é`;
+    const stamp = String(seconds());
+    expect(
+      await rawPost(
+        '/webhooks/session/abc123',
+        { 'X-Briareus-Signature-256': sig, 'X-Briareus-Timestamp': stamp },
+        'hi',
+      ),
+    ).toBe(401);
+    expect(await rawPost('/webhooks/session/abc123', { Authorization: `Bearer key-abc12é` }, 'hi')).toBe(401);
+    expect(await rawPost('/webhooks/github', { 'X-Hub-Signature-256': sig }, '{}')).toBe(401);
+    expect(deliverToSession).not.toHaveBeenCalled();
+  });
+
+  it('answers an id no session could have like a wrong key, before it is read or logged', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const forged = 'x%0A2026-09-27T00:00:00.000Z%20webhooks:%20session%20abc%20%E2%86%90%20ci';
+      for (const id of [forged, 'a%20b', 'a.b', 'x'.repeat(65)]) {
+        const res = await fetch(`${base}/session/${id}`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer key-x' },
+          body: 'hi',
+        });
+        expect(res.status).toBe(401);
+        expect(await res.json()).toEqual({ error: 'Bad signature' });
+      }
+      expect(getJob).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+      await sessionDelivery('abc123', { text: 'hi' }, { key: 'key-other' });
+      expect(log.mock.calls.flat().join('')).not.toContain('\n');
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it('refuses an empty message, a body that is not JSON, and one too long to read', async () => {
     expect((await sessionDelivery('abc123', { text: '   ' })).status).toBe(400);
-    const raw = '{nope';
-    const notJson = await fetch(`${base}/session/abc123`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Briareus-Signature-256': sign(raw, 'key-abc123') },
-      body: raw,
-    });
-    expect(notJson.status).toBe(400);
-    const long = await sessionDelivery('abc123', 'x'.repeat(SESSION_WEBHOOK_MAX_CHARS + 1));
-    expect(long.status).toBe(413);
-    expect(sendDevMessage).not.toHaveBeenCalled();
+    expect(
+      (await sessionDelivery('abc123', '{nope', { headers: { 'Content-Type': 'application/json' } })).status,
+    ).toBe(400);
+    expect((await sessionDelivery('abc123', 'x'.repeat(DELIVERY_MAX_CHARS + 1))).status).toBe(413);
+    expect(deliverToSession).not.toHaveBeenCalled();
   });
 
-  it('answers 404 for a session that does not exist, 409 for one that cannot take it now', async () => {
-    vi.mocked(sendDevMessage).mockImplementationOnce(() => {
-      throw new Error('Session not found');
-    });
+  it('reads no more of a body than a delivery can be', async () => {
+    const res = await sessionDelivery('abc123', 'x'.repeat(300 * 1024));
+    expect(res.status).toBe(413);
+    expect(getJob).not.toHaveBeenCalled();
+  });
+
+  it('answers what the intake refused with: its status, and when to come back', async () => {
+    const refuse = (status, message, retryAfter = 0) =>
+      vi.mocked(deliverToSession).mockImplementationOnce(() => {
+        throw Object.assign(new Error(message), { status, retryAfter });
+      });
+    refuse(404, 'Session not found');
     expect((await sessionDelivery('gone', { text: 'hi' })).status).toBe(404);
-    vi.mocked(sendDevMessage).mockImplementationOnce(() => {
+    refuse(409, 'This session’s webhook is off');
+    const off = await sessionDelivery('abc123', { text: 'hi' });
+    expect(off.status).toBe(409);
+    expect((await off.json()).error).toMatch(/webhook is off/);
+    refuse(429, 'This session takes 30 deliveries an hour and has had them', 120);
+    const capped = await sessionDelivery('abc123', { text: 'hi' });
+    expect(capped.status).toBe(429);
+    expect(capped.headers.get('Retry-After')).toBe('120');
+    vi.mocked(deliverToSession).mockImplementationOnce(() => {
       throw new Error('The dashboard is draining for a restart');
     });
     const busy = await sessionDelivery('abc123', { text: 'hi' });
     expect(busy.status).toBe(409);
-    expect((await busy.json()).error).toMatch(/draining/);
+    expect(busy.headers.get('Retry-After')).toBe(null);
   });
 });
 

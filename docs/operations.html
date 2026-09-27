@@ -84,8 +84,8 @@
               <td><code>POST /webhooks/session/:id</code></td>
               <td>anything you point it</td>
               <td>
-                <code>X-Briareus-Signature-256</code> (HMAC-SHA256 over the raw body with the session's key)
-                or <code>Authorization: Bearer</code> with that key
+                <code>X-Briareus-Signature-256</code> (HMAC-SHA256 over the time sent and the raw body, with
+                the session's key) or <code>Authorization: Bearer</code> with that key
               </td>
             </tr>
           </tbody>
@@ -114,18 +114,45 @@
       </p>
       <p class="!text-[14px] !text-muted">
         To rotate the secrets, delete the <code>webhooks</code> row in <code>app_settings</code>; the hook is
-        rewritten at the next boot, and every session webhook key changes.
+        rewritten at the next boot, and every session webhook key changes. One session's key is rotated from
+        its <strong>⚡ Webhook</strong> dialog, without touching the row.
       </p>
       <p>
-        <strong>Session webhooks are the one delivery that starts work.</strong> A POST to a session's URL
-        reaches it as a message, exactly as if it had been sent from the composer: queued behind a turn in
-        flight, or reopening a closed session. <strong>⚡ Webhook</strong> in the session header shows the URL
-        and that session's key, derived from a master secret and the session id, so it opens that one session
-        and no other. Send JSON <code>{"text": "…", "source": "ci"}</code>, plain text, or any other JSON
-        (handed to the agent as it came), up to 20,000 characters. The agent is told the message came from a
-        webhook and was not typed by you, and a delivery does not re-arm an orchestrator's unattended-turn
-        breaker. The answer is <code>202</code>, <code>401</code> for a bad key (whether the session exists or
-        not), <code>404</code> for a deleted session and <code>409</code> when it cannot take a message now.
+        <strong>Session webhooks are the one delivery that starts work.</strong> They are how a system outside
+        the dashboard (a support platform relaying what a customer wrote, an alert, a CI) wakes one
+        conversation with a message. A session's webhook is off until you arm it:
+        <strong>⚡ Webhook</strong> in the session header arms it, shows the URL and the key, and sets the
+        caps its turns run under. The key is derived from a master secret, the session id and an epoch, so it
+        opens that one session and no other, and rotating it ends it without touching any other session's.
+        Only a session somebody talks to can be armed: not a worker, not a review, fix or QA session.
+      </p>
+      <p>
+        <strong>What arrives is information, never your word.</strong> A delivery answers no question: while
+        the agent stands on one, it is held until you have answered. It joins no turn: it waits for the turn
+        under way to end (and after <strong>■ Stop</strong>, for your next message), then everything held goes
+        to the agent as one turn of its own, waking the session if it was closed. The agent is told whose
+        words these are not, the text sits between two lines carrying a mark drawn for that message, and no
+        <code>&lt;</code> in it opens a tag. A server registered in <strong>allow</strong> mode under SSH asks
+        for approval in a turn a delivery started, unless the session's webhook is set to let it run.
+      </p>
+      <p>
+        Each armed session has three caps: deliveries an hour (30), turns in a row with no word from you (10)
+        and, when you set one, dollars in 24 hours. Past the first the sender gets <code>429</code> and a
+        <code>Retry-After</code>; past the others the webhook pauses, says so once in the transcript and is
+        listed in <strong>/attention</strong>, until you say anything in the session or the spend frees up. An
+        orchestrator's project budget is a cap as well, and so is a turn that a delivery started and that
+        failed.
+      </p>
+      <p>
+        Send JSON <code>{"text": "…", "source": "ci", "id": "run-4711"}</code>, plain text, or any other JSON
+        (handed over as it came), up to 20,000 characters. <code>source</code> is a label, not an identity;
+        <code>id</code> (or <code>X-Briareus-Delivery</code>) names the delivery, so a retry is answered as
+        the duplicate it is. A signature covers <code>X-Briareus-Timestamp</code> (in seconds), a dot and the
+        raw body, and is refused once it is five minutes old. The answer is <code>202</code> with
+        <code>running</code> or <code>held</code>, <code>200</code> for a duplicate, <code>401</code> for a
+        bad key (whether the session exists or not), <code>404</code> for a deleted session,
+        <code>409</code> when the webhook is off or the session cannot be woken now, <code>413</code> for a
+        message too long and <code>429</code> at a cap.
       </p>
 
       <h2 id="workspaces">The workspace pool</h2>

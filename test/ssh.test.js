@@ -93,8 +93,35 @@ describe('SSH permission boundary', () => {
   it('runs allow mode immediately without an approval card', async () => {
     const { request } = await submit({ permissionMode: 'allow' });
     expect(request.status).toBe('running');
+    expect(request.unattended).toBe(false);
     expect(execute).toHaveBeenCalledTimes(1);
     expect(service.pending()).toEqual([]);
+  });
+  it('asks in allow mode too when a webhook delivery started the turn', async () => {
+    job.unattendedTurn = true;
+    job.webhook = { armed: true, sshUnattended: false };
+    const { request } = await submit({ permissionMode: 'allow' });
+    expect(request.status).toBe('pending');
+    expect(request.unattended).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+    expect(service.pending().map((r) => r.id)).toEqual([request.id]);
+    service.decide(request.id, 'approve');
+    await Promise.resolve();
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+  it('runs it unasked there only on a session whose operator said so', async () => {
+    job.unattendedTurn = true;
+    job.webhook = { armed: true, sshUnattended: true };
+    const { request } = await submit({ permissionMode: 'allow' });
+    expect(request.status).toBe('running');
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+  it('an ask-mode server asks whoever started the turn', async () => {
+    job.unattendedTurn = true;
+    job.webhook = { armed: true, sshUnattended: true };
+    const { request } = await submit();
+    expect(request.status).toBe('pending');
+    expect(execute).not.toHaveBeenCalled();
   });
   it('denies commands without any execution', async () => {
     const { request } = await submit();

@@ -11,6 +11,7 @@
     <div class="font-semibold">${esc(r.serverLabel)} · ${esc(r.username)}@${esc(r.host)}:${esc(r.port)}</div>
     <div class="text-xs text-muted">${esc(r.repo)} · ${esc(r.sessionTitle)}</div>
     <pre class="my-3 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-sunken p-2 text-xs">${esc(r.command)}</pre>
+    ${r.unattended ? '<div class="mb-2 text-xs text-warn">A webhook delivery started this turn, not you: read the command before approving it.</div>' : ''}
     <div class="mb-2 text-xs text-muted">Timeout: ${esc(r.timeoutSeconds)}s · approval expires ${esc(new Date(r.expiresAt).toLocaleTimeString())}</div>
     <div class="flex gap-2"><button type="button" class="btn btn-primary" data-decision="approve">Approve command</button><button type="button" class="btn" data-decision="deny">Deny</button></div>`;
   async function decide(id, decision) {

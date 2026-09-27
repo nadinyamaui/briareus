@@ -485,10 +485,10 @@ machine with its git and GitHub credentials:
 With a public https hostname, the PR state an open session mirrors is delivered
 instead of polled for:
 
-| Route                        | Sender                | Authenticated by                                                                      |
-| ---------------------------- | --------------------- | ------------------------------------------------------------------------------------- |
-| `POST /webhooks/github`      | GitHub                | `X-Hub-Signature-256`, HMAC-SHA256 over the raw body                                  |
-| `POST /webhooks/session/:id` | anything you point it | `X-Briareus-Signature-256` (HMAC-SHA256 over the raw body) or `Authorization: Bearer` |
+| Route                        | Sender                | Authenticated by                                                                                        |
+| ---------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------- |
+| `POST /webhooks/github`      | GitHub                | `X-Hub-Signature-256`, HMAC-SHA256 over the raw body                                                    |
+| `POST /webhooks/session/:id` | anything you point it | `X-Briareus-Signature-256` (HMAC-SHA256 over the time sent and the raw body) or `Authorization: Bearer` |
 
 The secret is generated on first boot and kept in the `app_settings` table;
 there is nothing to paste anywhere. The app installs its own repository hook on
@@ -508,25 +508,74 @@ going, or a fresh push has none registered yet). A session on a merged or closed
 request is polled only while a turn is running, or while its checks are still
 awaited within an hour of its head first being seen, and every poll is a
 conditional request (a 304 costs nothing against the rate limit). Delete the `webhooks` row in `app_settings` to
-rotate the secrets; the hook is rewritten at the next boot, and every session webhook key changes.
+rotate the secrets; the hook is rewritten at the next boot, and every session webhook key changes. One session's
+key is rotated from its **⚡ Webhook** dialog, without touching the row.
 
-**Session webhooks** are the one delivery that starts work: a POST to a session's URL reaches it as a message,
-exactly as if it had been sent from the composer (queued behind a turn in flight, reopening a closed session).
-**⚡ Webhook** in the session header shows the URL and that session's key, which is derived from a master secret
-and the session id, so it opens that one session and no other. Send JSON `{"text": "…", "source": "ci"}`, plain
-text, or any other JSON (handed to the agent as it came), up to 20,000 characters. The agent is told the message
-came from a webhook and was not typed by you, and a delivery does not re-arm an orchestrator's unattended-turn
-breaker. The answer is `202 {"ok": true, "status": …}`, `401` for a bad key (whether the session exists or not),
-`404` for a deleted session and `409` when it cannot take a message now (a drain for a restart, no free slot).
+### Session webhooks
+
+A session's webhook is the one delivery that starts work: it is how a system outside the dashboard (a support
+platform relaying what a customer wrote, an alert, a CI) wakes one conversation with a message.
+
+**It is off until you arm it.** **⚡ Webhook** in the session header arms it, shows the URL and the key, and sets
+the caps its turns run under. The key is derived from a master secret, the session id and an epoch, so it opens
+that one session and no other, and **Rotate key** ends it without touching any other session's. Only a session
+somebody talks to can be armed: not a worker, not a review, fix or QA session.
+
+**What arrives is information, never your word.** Whoever wrote a delivery is not the operator, so:
+
+- It answers no question. While the agent stands on a question, a delivery is held until you have answered.
+- It joins no turn. It waits for the turn under way to end (and after **■ Stop**, for your next message), then
+  everything held goes to the agent as **one** turn of its own. A closed session is woken for it.
+- The agent is told so, in the briefing of an armed session and in the first lines of every delivery, and the text
+  sits between two lines carrying a mark drawn for that message. No `<` in it opens a tag, so a sender cannot write
+  the app's own context tags or a question card.
+- A server registered in **allow** mode under SSH asks for approval in a turn a delivery started, unless the
+  session's webhook is set to let it run.
+
+The prompt is the last of those defences, not the first: what holds is that the approval the agent asked you for
+cannot be given by anybody else.
+
+**Caps**, per session, set in the dialog:
+
+| Cap                | Default | What happens past it                                                          |
+| ------------------ | ------- | ----------------------------------------------------------------------------- |
+| Deliveries an hour | 30      | `429` with `Retry-After`                                                      |
+| Turns in a row     | 10      | The webhook pauses until you say anything in the session (or save the dialog) |
+| $ in 24 hours      | none    | The webhook pauses until the spend frees up or the cap is raised              |
+
+An orchestrator's project budget is a cap as well, and a turn that a delivery started and that failed pauses the
+webhook until you have looked. A pause is said once in the transcript and listed in **/attention**, so it reaches
+your phone with the other items.
+
+**Sending.** JSON `{"text": "…", "source": "ci", "id": "run-4711"}`, plain text, or any other JSON (handed over as
+it came), up to 20,000 characters. `source` is a label the transcript shows, not an identity: whoever holds the key
+can write any name. `id` (or `X-Briareus-Delivery`) names the delivery, so a retry after a timeout is answered as
+the duplicate it is instead of running the agent twice.
 
 ```sh
 curl -X POST "$URL" -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-  -d '{"text":"The nightly build failed","source":"ci"}'
-# or signed, so the key never travels:
-BODY='{"text":"The nightly build failed","source":"ci"}'
-SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$KEY" -hex | sed 's/^.* //')
-curl -X POST "$URL" -H "X-Briareus-Signature-256: sha256=$SIG" -H 'Content-Type: application/json' -d "$BODY"
+  -d '{"text":"The nightly build failed","source":"ci","id":"run-4711"}'
+# or signed, so the key never travels and a captured request is worth nothing five minutes later:
+BODY='{"text":"The nightly build failed","source":"ci","id":"run-4711"}'
+TS=$(date +%s)
+SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$KEY" -hex | sed 's/^.* //')
+curl -X POST "$URL" -H "X-Briareus-Timestamp: $TS" -H "X-Briareus-Signature-256: sha256=$SIG" \
+  -H 'Content-Type: application/json' -d "$BODY"
 ```
+
+| Answer | Meaning                                                                                                      |
+| ------ | ------------------------------------------------------------------------------------------------------------ |
+| `202`  | Taken: `{"ok": true, "status": "running"}`, or `"held"` with how many are waiting                            |
+| `200`  | `{"ok": true, "status": "duplicate"}`: this delivery had been taken already                                  |
+| `401`  | Bad key or signature, or a signed timestamp more than five minutes off (the same whether the session exists) |
+| `404`  | The session was deleted                                                                                      |
+| `409`  | The webhook is off, the session failed, or it cannot be woken now (a drain for a restart, no free slot)      |
+| `413`  | The message is longer than 20,000 characters                                                                 |
+| `429`  | A cap was reached, or 30 deliveries are already waiting; `Retry-After` says when, where there is a when      |
+
+A delivery that was taken is kept on the session's record, which is written within half a second and on shutdown,
+so one held for a session a restart interrupted is delivered afterwards. Only a crash inside that half second loses
+one.
 
 The sync timer remains as the fallback. Nothing about a laptop-only install
 changes: no public hostname means no hook, and the timer keeps the panels
