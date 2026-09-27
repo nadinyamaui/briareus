@@ -359,6 +359,18 @@ describe('developer sessions', () => {
     expect(getConfig().dev).toEqual({ maxSessions: 8, timeoutMin: 15, autoCompactTokens: 200000 });
   });
 
+  it('reads an auto-compact threshold left empty as the default, not as off', async () => {
+    const { getConfig } = await loadConfig(complete({ DEV_AUTO_COMPACT_TOKENS: '' }));
+
+    expect(getConfig().dev.autoCompactTokens).toBe(350000);
+  });
+
+  it('switches auto-compaction off on 0', async () => {
+    const { getConfig } = await loadConfig(complete({ DEV_AUTO_COMPACT_TOKENS: '0' }));
+
+    expect(getConfig().dev.autoCompactTokens).toBe(0);
+  });
+
   it('leaves the other two CLIs to be looked up the usual way', async () => {
     const { getConfig } = await loadConfig(complete());
 

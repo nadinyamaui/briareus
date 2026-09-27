@@ -8322,6 +8322,143 @@ describe('auto-compaction after a turn', () => {
   });
 });
 
+describe('auto-compaction while the context probe is out', () => {
+  let bin;
+  let children;
+  let job;
+  let sessions = 0;
+  // What `claude -p /context` prints for a thread of that size.
+  const report = (tokens) =>
+    JSON.stringify({
+      result: `**Tokens:** ${tokens} / 1m\n\n### Estimated usage by category\n\n| Messages | ${tokens} | 40.0% |\n`,
+    });
+  beforeEach(async () => {
+    // A session of its own per test: who is compacting, and which probe is
+    // out, are kept per session id for as long as the module lives.
+    const id = `auto-compact-claude-${++sessions}`;
+    state.stored = [
+      {
+        id,
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+        model: 'claude-fable-5-1',
+        workDir: '/tmp/workspace',
+        turns: 1,
+        chats: { 1: { sessionId: 'sid-1', started: true } },
+        contextTokens: 400000,
+        autoCompact: true,
+      },
+    ];
+    await initJobs();
+    job = getJob(id);
+    job.status = 'idle';
+    getProviderForJob.mockReturnValue(state.provider);
+    captureProviderAuth.mockResolvedValue(undefined);
+    bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    children = [];
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, args, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, args, ...rest);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin.resume();
+      child.args = args;
+      children.push(child);
+      return child;
+    });
+  });
+  afterEach(() => {
+    bin.mockRestore();
+    spawn.mockReset();
+    getProviderForJob.mockReset();
+    captureProviderAuth.mockReset();
+  });
+
+  const settled = () => vi.waitFor(() => expect(job.status).toBe('idle'));
+  // The turn's CLI exits, which leaves the /context probe it fired as the only
+  // thing the session is waiting on.
+  const endTurn = async () => {
+    children[0].emit('close', 0);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(children[1].args).toContain('/context');
+  };
+  const answer = (child, body) => {
+    child.stdout.end(body);
+    setImmediate(() => child.emit('close', 0));
+  };
+
+  it('compacts a claude thread on the number its probe reports, and books what the summary cost', async () => {
+    sendDevMessage(job.id, 'Go');
+    await endTurn();
+    answer(children[1], report('400k'));
+    await vi.waitFor(() => expect(children).toHaveLength(3));
+    expect(children[2].args.slice(0, 4)).toEqual(['-p', '/compact', '--resume', 'sid-1']);
+    expect(publicJob(job)).toMatchObject({ status: 'running', compacting: true });
+    answer(
+      children[2],
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: '',
+        total_cost_usd: 0.5,
+      }),
+    );
+    // The compacted thread is measured again, and that number is the one left.
+    await vi.waitFor(() => expect(children).toHaveLength(4));
+    expect(children[3].args).toContain('/context');
+    answer(children[3], report('30k'));
+    await settled();
+    expect(job.contextUsage).toMatchObject({ tokens: 30000, sessionId: 'sid-1' });
+    expect(job.contextUsage.compactedAt).toBeTruthy();
+    expect(job.costUsd).toBe(0.5);
+    expect(recordTurnUsage).toHaveBeenLastCalledWith(
+      job,
+      expect.objectContaining({ costUsd: 0.5 }),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(publicJob(job).compacting).toBe(false);
+  });
+
+  it('a Stop pressed while the probe is out calls the compaction off', async () => {
+    sendDevMessage(job.id, 'Go');
+    await endTurn();
+    cancelDevTurn(job.id);
+    answer(children[1], report('400k'));
+    await settled();
+    // Past the threshold all the same: it is the Stop that kept it from running.
+    expect(job.contextUsage.tokens).toBe(400000);
+    expect(children).toHaveLength(2);
+    expect(job.events.some((e) => e.kind === 'info' && /auto-compact threshold/.test(e.text))).toBe(false);
+  });
+
+  it('so does a close, which leaves no session to compact', async () => {
+    sendDevMessage(job.id, 'Go');
+    await endTurn();
+    await closeDevSession(job.id);
+    answer(children[1], report('400k'));
+    // The probe's number landing is the last a closed session hears of its turn.
+    await vi.waitFor(() => expect(job.contextUsage?.tokens).toBe(400000));
+    expect(children).toHaveLength(2);
+    expect(job.status).toBe('closed');
+  });
+
+  it('and so does switching it off meanwhile', async () => {
+    sendDevMessage(job.id, 'Go');
+    await endTurn();
+    setDevSessionAutoCompact(job.id, false);
+    answer(children[1], report('400k'));
+    await settled();
+    expect(job.contextUsage.tokens).toBe(400000);
+    expect(children).toHaveLength(2);
+  });
+});
+
 describe('maintenance drain at the operator entry points', () => {
   beforeAll(async () => {
     state.stored = [
