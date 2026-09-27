@@ -1496,6 +1496,7 @@ describe('spawnWorkerSession', () => {
       await vi.waitFor(() => expect(job.events.some((e) => e.kind === 'result')).toBe(true));
       expect(job.awaitingAnswer).toBe(true);
       expect(job.askText).toBe('Which plan?\nOptions: A | B'); // what the /attention inbox shows
+      expect(publicJob(job).questionSeq).toBe(job.events.findLast((e) => e.kind === 'ask').seq);
       expect(children[0].ended).toBe(false);
       // Now it reads the message, which is that question's answer.
       children[0].emitLines(init, replay('go with option B'));

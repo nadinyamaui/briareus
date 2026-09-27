@@ -30,6 +30,9 @@
     try {
       const data = await api('/api/operations/attention');
       if (mine !== latest || busy) return;
+      // A notification opens the inbox on the one task it spoke of.
+      const task = new URLSearchParams(location.search).get('task');
+      if (task) data.items = data.items.filter((i) => (i.taskId || i.sessionId || i.id) === task);
       // Before the unchanged check: a success after a failed poll has to
       // replace that poll's error even when the items are the same.
       status(
