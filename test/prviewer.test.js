@@ -256,23 +256,61 @@ describe('in-app pull request content', () => {
 describe('merging from the in-app viewer', () => {
   const sha = 'a'.repeat(40);
   const answer = (status, body) => ({ ok: status < 300, status, json: async () => body });
+  // The pull read before the merge, then the merge itself.
+  const github = (merge, pull = answer(200, raw)) =>
+    githubRest.mockImplementation(async (_cfg, verb) => (verb === 'GET' ? pull : merge));
 
   it('merges exactly the head the viewer showed, with the chosen method', async () => {
-    githubRest.mockResolvedValue(answer(200, { merged: true, sha: 'b'.repeat(40), message: 'Merged' }));
-    await expect(mergePullRequest(project, 42, { method: 'rebase', headSha: sha })).resolves.toEqual({
+    github(answer(200, { merged: true, sha: 'b'.repeat(40), message: 'Merged' }));
+    await expect(
+      mergePullRequest(project, 42, { method: 'rebase', headSha: sha, baseRef: 'main' }),
+    ).resolves.toEqual({
       merged: true,
       sha: 'b'.repeat(40),
       message: 'Merged',
     });
+    expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'GET', '/repos/owner/repo/pulls/42');
     expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'PUT', '/repos/owner/repo/pulls/42/merge', {
       merge_method: 'rebase',
       sha,
     });
   });
 
+  it('squashes when no method is given', async () => {
+    github(answer(200, { merged: true, sha: 'b'.repeat(40), message: 'Merged' }));
+    await mergePullRequest(project, 42, { headSha: sha, baseRef: 'main' });
+    expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'PUT', '/repos/owner/repo/pulls/42/merge', {
+      merge_method: 'squash',
+      sha,
+    });
+  });
+
+  it('refuses with 409 when the pull request was retargeted to another base branch', async () => {
+    github(answer(200, { merged: true }), answer(200, { ...raw, base: { sha: 'def', ref: 'release' } }));
+    await expect(mergePullRequest(project, 42, { headSha: sha, baseRef: 'main' })).rejects.toMatchObject({
+      status: 409,
+      message: 'This pull request now merges into release, not main. Refresh to load its latest revision.',
+    });
+    expect(githubRest).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'PUT',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('does not merge when the pull request cannot be read first', async () => {
+    github(answer(200, { merged: true }), answer(500, {}));
+    await expect(mergePullRequest(project, 42, { headSha: sha, baseRef: 'main' })).rejects.toMatchObject({
+      status: 502,
+    });
+    expect(githubRest).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
-    [{ method: 'octopus', headSha: sha }, 400],
-    [{ method: 'squash', headSha: '' }, 400],
+    [{ method: 'octopus', headSha: sha, baseRef: 'main' }, 400],
+    [{ method: 'squash', headSha: '', baseRef: 'main' }, 400],
+    [{ method: 'squash', headSha: sha }, 400],
   ])('rejects %o before calling GitHub', async (options, status) => {
     await expect(mergePullRequest(project, 42, options)).rejects.toMatchObject({ status });
     expect(githubRest).not.toHaveBeenCalled();
@@ -280,7 +318,9 @@ describe('merging from the in-app viewer', () => {
 
   it('reports a missing token as 503', async () => {
     cfg.githubToken = '';
-    await expect(mergePullRequest(project, 42, { headSha: sha })).rejects.toMatchObject({ status: 503 });
+    await expect(mergePullRequest(project, 42, { headSha: sha, baseRef: 'main' })).rejects.toMatchObject({
+      status: 503,
+    });
   });
 
   it.each([
@@ -290,8 +330,8 @@ describe('merging from the in-app viewer', () => {
     [401, 502],
     [500, 502],
   ])('passes GitHub %s through as %s with its reason', async (githubStatus, status) => {
-    githubRest.mockResolvedValue(answer(githubStatus, { message: 'Head branch was modified' }));
-    await expect(mergePullRequest(project, 42, { headSha: sha })).rejects.toMatchObject({
+    github(answer(githubStatus, { message: 'Head branch was modified' }));
+    await expect(mergePullRequest(project, 42, { headSha: sha, baseRef: 'main' })).rejects.toMatchObject({
       status,
       message: 'GitHub refused the merge: Head branch was modified',
     });

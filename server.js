@@ -786,11 +786,13 @@ dashboard.register('get', '/api/pr/view', async (req, res) => {
 dashboard.register('post', '/api/pr/merge', async (req, res) => {
   try {
     const { repo, prNumber } = findingsParams(req.body || {});
-    const { method, headSha } = req.body || {};
+    const { method, headSha, baseRef } = req.body || {};
     res.json(
       await mergePullRequest({ repo }, prNumber, {
-        method: String(method || ''),
+        // A request without a method gets mergePullRequest's squash default.
+        ...(method ? { method: String(method) } : {}),
         headSha: String(headSha || ''),
+        baseRef: String(baseRef || ''),
       }),
     );
   } catch (e) {

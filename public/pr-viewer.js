@@ -11,7 +11,7 @@ window.createPrViewer = ({ api, esc, md, onMerged, onMergeFailed }) => {
         <a class="btn" id="pr-viewer-github" target="_blank" rel="noopener">Open in GitHub ↗</a>
         <button class="btn" data-close aria-label="Close pull request">✕</button>
       </div></div>
-      <h2><span id="pr-viewer-title">Pull request</span><span id="pr-viewer-checks" class="prv-title-checks" hidden></span></h2>
+      <h2><span id="pr-viewer-title">Pull request</span><span id="pr-viewer-checks" class="prv-title-checks" role="img" hidden></span></h2>
       <div id="pr-viewer-meta" class="prv-meta"></div>
       <div id="pr-viewer-merge" class="prv-merge" hidden></div>
     </header>
@@ -74,11 +74,27 @@ window.createPrViewer = ({ api, esc, md, onMerged, onMergeFailed }) => {
   // What the merge box last drew, so background loads that change none of
   // its inputs leave its focus and open dropdown alone.
   let mergeKey = '';
+  // Where focus goes when a rebuild takes the focused control away, in order.
+  const MERGE_FOCUS = [
+    '#pr-viewer-merge [data-merge-confirm]:not([disabled])',
+    '#pr-viewer-merge [data-refresh]',
+    '#pr-viewer-merge [data-merge-cancel]:not([disabled])',
+    '[data-merge]:not([hidden])',
+    '.prv-toolbar [data-refresh]:not([disabled])',
+  ];
 
   function mergeBox() {
     const pr = state.pr;
     const box = dialog.querySelector('#pr-viewer-merge');
     const button = dialog.querySelector('[data-merge]');
+    // Rebuilding the box drops focus inside it to <body>, where Escape reaches
+    // the dashboard's global handlers: keep it in the dialog.
+    const focused = box.contains(document.activeElement);
+    const keepFocus = () =>
+      focused &&
+      MERGE_FOCUS.map((s) => dialog.querySelector(s))
+        .find(Boolean)
+        ?.focus();
     const open = pr?.state === 'open' && pr.mergeMethods?.length > 0;
     button.hidden = !open || !!state.merge;
     box.hidden = !open || !state.merge;
@@ -87,7 +103,8 @@ window.createPrViewer = ({ api, esc, md, onMerged, onMergeFailed }) => {
       b.disabled = !!state.merge?.busy;
     if (box.hidden) {
       mergeKey = '';
-      return (box.innerHTML = '');
+      box.innerHTML = '';
+      return keepFocus();
     }
     const m = state.merge;
     const rollup = checksRollup();
@@ -97,20 +114,31 @@ window.createPrViewer = ({ api, esc, md, onMerged, onMergeFailed }) => {
     if (pr.mergeable === null) warnings.push('GitHub is still checking whether this branch can merge.');
     const checksWarning = rollup && rollup.tone !== 'added';
     if (checksWarning) warnings.push(`${rollup.label}.`);
-    // unstable only says checks are failing, which the rollup already told.
-    if (!(checksWarning && pr.mergeableState === 'unstable') && MERGE_STATE_WARNINGS[pr.mergeableState])
+    // unstable only says checks are failing, which a ✗ rollup already told.
+    if (
+      !(rollup?.tone === 'removed' && pr.mergeableState === 'unstable') &&
+      MERGE_STATE_WARNINGS[pr.mergeableState]
+    )
       warnings.push(MERGE_STATE_WARNINGS[pr.mergeableState]);
     // The method is left out: only the dropdown itself changes it.
-    const key = JSON.stringify([pr.headSha, pr.mergeable, m.busy, m.error, warnings]);
+    const key = JSON.stringify([pr.headSha, pr.mergeable, m.busy, m.error, m.stale, warnings]);
     if (key === mergeKey) return;
     mergeKey = key;
     box.innerHTML = `${warnings.map((w) => `<p class="prv-merge-warning">${esc(w)}</p>`).join('')}
       <select id="prv-merge-method" aria-label="Merge method"${m.busy ? ' disabled' : ''}>${pr.mergeMethods
         .map((k) => `<option value="${k}"${k === m.method ? ' selected' : ''}>${METHOD_LABELS[k]}</option>`)
         .join('')}</select>
-      <button class="btn prv-merge-btn" data-merge-confirm${m.busy || pr.mergeable === false ? ' disabled' : ''}>${m.busy ? 'Merging…' : `Confirm merge of ${esc(pr.headSha.slice(0, 7))}`}</button>
+      ${
+        // After a 409 (the head moved or the PR was retargeted) confirming the
+        // same revision again can only fail the same way.
+        m.stale
+          ? '<button class="btn" data-refresh>⟳ Refresh</button>'
+          : // aria-disabled while merging, so the focused button can keep focus.
+            `<button class="btn prv-merge-btn" data-merge-confirm${m.busy ? ' aria-disabled="true"' : pr.mergeable === false ? ' disabled' : ''}>${m.busy ? 'Merging…' : `Confirm merge of ${esc(pr.headSha.slice(0, 7))}`}</button>`
+      }
       <button class="btn" data-merge-cancel${m.busy ? ' disabled' : ''}>Cancel</button>
       ${m.error ? `<p class="prv-merge-warning" role="alert">${esc(m.error)}</p>` : ''}`;
+    keepFocus();
   }
 
   function header() {
@@ -452,6 +480,7 @@ window.createPrViewer = ({ api, esc, md, onMerged, onMergeFailed }) => {
           pr: current.number,
           method: m.method,
           headSha: current.pr.headSha,
+          baseRef: current.pr.baseRef,
         }),
       });
       onMerged?.(current.repo, current.number);
@@ -463,6 +492,7 @@ window.createPrViewer = ({ api, esc, md, onMerged, onMergeFailed }) => {
       if (state !== current) return onMergeFailed?.(current.repo, current.number, error.message);
       m.busy = false;
       m.error = error.message;
+      m.stale = error.status === 409;
       mergeBox();
     }
   }

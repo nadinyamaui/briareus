@@ -78,7 +78,8 @@
   color: var(--color-canvas);
   font-weight: 600;
 }
-.prv-merge-btn:disabled {
+.prv-merge-btn:disabled,
+.prv-merge-btn[aria-disabled='true'] {
   opacity: 0.55;
   cursor: not-allowed;
 }
