@@ -1,5 +1,6 @@
 // @ts-check
 import express from 'express';
+import { operationsRoutes } from './lib/operations-routes.js';
 import { dashboardRoutes } from './lib/dashboard-routes.js';
 import { createRemoteMcpAuth } from './lib/remote-mcp-auth.js';
 import { remoteMcpRoutes } from './lib/remote-mcp.js';
@@ -26,6 +27,7 @@ import {
   publicJob,
   bus,
   listDevSessions,
+  devSessionRecords,
   createDevSession,
   sendDevMessage,
   cancelDevTurn,
@@ -380,6 +382,7 @@ app.get('/', devPage);
 app.get('/dashboard', devPage);
 app.get('/office', devPage);
 app.get('/findings', devPage);
+app.get('/attention', pageHandler(PUBLIC, 'operations.html'));
 app.get('/sessions/:id', devPage);
 app.get('/projects/:owner/:name', devPage);
 app.get('/projects/:owner/:name/dashboard', devPage);
@@ -551,6 +554,7 @@ function agentSession(req, res) {
 
 const sshService = createSshService({ getJob });
 app.use(sshRoutes({ service: sshService, agentSession, getProject }));
+app.use(operationsRoutes({ listSessions: devSessionRecords, ssh: sshService }));
 
 app.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);

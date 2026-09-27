@@ -295,6 +295,35 @@ describe('restart reconciliation for loop jobs', () => {
         repo: 'acme/shop',
         qaParentId: 'restart-qa-parent',
       },
+      // Children whose loop was switched off (or re-armed) while they ran.
+      {
+        id: 'restart-untracked-parent',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        turns: 1,
+        reviewLoop: null,
+        qaLoop: null,
+      },
+      ...[
+        ['restart-untracked-review', 'loopParentId'],
+        ['restart-untracked-fix', 'loopFixParentId'],
+        ['restart-untracked-qa', 'qaParentId'],
+      ].map(([id, key]) => ({
+        id,
+        kind: 'devchat',
+        status: 'running',
+        repo: 'acme/shop',
+        [key]: 'restart-untracked-parent',
+      })),
+      // Interrupted before this boot: not this restart's to mark.
+      {
+        id: 'restart-old-review',
+        kind: 'devchat',
+        status: 'interrupted',
+        repo: 'acme/shop',
+        loopParentId: 'restart-untracked-parent',
+      },
     ];
     await initJobs();
   });
@@ -332,6 +361,17 @@ describe('restart reconciliation for loop jobs', () => {
       kind: 'interrupted',
       reason: 'Server restarted while the job was active',
     });
+    // Each parent took its child's failure, so the inbox lists it there only.
+    for (const id of ['restart-review', 'restart-fix', 'restart-qa'])
+      expect(getJob(id).failureUnreported).toBeUndefined();
+  });
+
+  it('marks interrupted loop children their parent no longer tracked, for the inbox to list', () => {
+    for (const id of ['restart-untracked-review', 'restart-untracked-fix', 'restart-untracked-qa']) {
+      expect(getJob(id).status).toBe('interrupted');
+      expect(getJob(id).failureUnreported).toBe(true);
+    }
+    expect(getJob('restart-old-review').failureUnreported).toBeUndefined();
   });
 });
 
@@ -1440,6 +1480,7 @@ describe('spawnWorkerSession', () => {
       children[0].emitLines(said('<ask-user>\nWhich plan?\n- A\n- B\n</ask-user>'), result('Asked.'));
       await vi.waitFor(() => expect(job.events.some((e) => e.kind === 'result')).toBe(true));
       expect(job.awaitingAnswer).toBe(true);
+      expect(job.askText).toBe('Which plan?\nOptions: A | B'); // what the /attention inbox shows
       expect(children[0].ended).toBe(false);
       // Now it reads the message, which is that question's answer.
       children[0].emitLines(init, replay('go with option B'));
@@ -1450,6 +1491,73 @@ describe('spawnWorkerSession', () => {
       children[0].emit('close', 0);
       await done;
       expect(job.awaitingAnswer).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps every question a turn asks for the inbox, and starts over once they are answered', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    try {
+      let done = settled(job);
+      sendDevMessage(job.id, 'Set up the database');
+      children[0].emitLines(
+        init,
+        replay('Set up the database'),
+        said('<ask-user>\nWhich DB?\n- MySQL\n- Postgres\n</ask-user>'),
+      );
+      await vi.waitFor(() => expect(job.awaitingAnswer).toBe(true));
+      const askedAt = job.askedAt;
+      await new Promise((r) => setTimeout(r, 5));
+      children[0].emitLines(said('<ask-user>\nKeep the migration?\n</ask-user>'), result('Asked.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(job.awaitingAnswer).toBe(true);
+      expect(job.askText).toBe('Which DB?\nOptions: MySQL | Postgres\n\nKeep the migration?');
+      // Still the same question: the inbox keeps its draft and "sent" note.
+      expect(job.askedAt).toBe(askedAt);
+      // The answer covers both; the next question is shown on its own.
+      done = settled(job);
+      sendDevMessage(job.id, 'Postgres, and keep it');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      children[1].emitLines(
+        init,
+        replay('Postgres, and keep it'),
+        said('<ask-user>\nSeed it too?\n</ask-user>'),
+        result('Asked.'),
+      );
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+      expect(job.awaitingAnswer).toBe(true);
+      expect(job.askText).toBe('Seed it too?');
+      expect(job.askedAt > askedAt).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('marks a cut in the questions the inbox shows rather than dropping the rest unseen', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    const { children, settled, restore } = fakeClaude();
+    try {
+      const done = settled(job);
+      sendDevMessage(job.id, 'Plan the release');
+      const options = Array.from({ length: 10 }, (_, k) => `- ${String(k).repeat(60)}`).join('\n');
+      const blocks = ['a', 'b', 'c', 'd']
+        .map((q) => `<ask-user>\n${q.repeat(600)}\n${options}\n</ask-user>`)
+        .join('\n');
+      children[0].emitLines(init, replay('Plan the release'), said(blocks), result('Asked.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(job.askText.length).toBeLessThanOrEqual(2000);
+      expect(job.askText.startsWith(`${'a'.repeat(499)}…\nOptions: `)).toBe(true);
+      expect(job.askText.endsWith('\n… (more in the conversation)')).toBe(true);
     } finally {
       restore();
     }
@@ -2286,7 +2394,7 @@ describe('deliverWorkerNotices', () => {
         orchestrator: true,
         pendingWorkerNotices: [{ workerId: 'not-w1', kind: 'ask', text: 'answered already' }],
       }),
-      row('not-w1', { parentId: 'not-orch', awaitingAnswer: false }),
+      row('not-w1', { parentId: 'not-orch', awaitingAnswer: false, noticeUnheard: true }),
       row('not-plain', {}),
     ];
     await initJobs();
@@ -2307,6 +2415,8 @@ describe('deliverWorkerNotices', () => {
     const user = orch.events.filter((e) => e.kind === 'user');
     expect(user).toHaveLength(1);
     expect(user[0].text).toContain('Worker not-w1 finished.');
+    // Taken as a turn: the worker's items are the orchestrator's again.
+    expect(getJob('not-w1').noticeUnheard).toBe(false);
   });
 
   it('an orchestrator standing on its own question holds the buffer', () => {
@@ -2371,6 +2481,8 @@ describe('the unattended-turn breaker and the delivery holds', () => {
     expect(info.some((t) => t.includes('update from brk-w1'))).toBe(true);
     expect(orch.pendingWorkerNotices).toHaveLength(0);
     expect(orch.unattendedSaid).toBe(true);
+    // No turn acts on a line, so the inbox lists the worker's item instead.
+    expect(getJob('brk-w1').noticeUnheard).toBe(true);
   });
 
   it('a genuine user message re-arms the breaker; an injected one would not', () => {
@@ -2537,6 +2649,7 @@ describe('the worker budget', () => {
     expect(info.some((t) => t.includes('update from bud-w2'))).toBe(true);
     expect(orch.pendingWorkerNotices).toHaveLength(0);
     expect(orch.budgetSaid).toBe(true);
+    expect(getJob('bud-w2').noticeUnheard).toBe(true);
   });
 });
 
