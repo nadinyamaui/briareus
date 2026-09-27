@@ -390,7 +390,7 @@ app.get('/', devPage);
 app.get('/dashboard', devPage);
 app.get('/office', devPage);
 app.get('/findings', devPage);
-app.get('/attention', pageHandler(PUBLIC, 'operations.html'));
+app.get(['/attention', '/maintenance', '/recovery/:id'], pageHandler(PUBLIC, 'operations.html'));
 app.get('/sessions/:id', devPage);
 app.get('/projects/:owner/:name', devPage);
 app.get('/projects/:owner/:name/dashboard', devPage);
@@ -562,7 +562,9 @@ function agentSession(req, res) {
 
 const sshService = createSshService({ getJob });
 app.use(sshRoutes({ service: sshService, agentSession, getProject }));
-app.use(operationsRoutes({ listSessions: devSessionRecords, ssh: sshService }));
+app.use(
+  operationsRoutes({ listSessions: devSessionRecords, ssh: sshService, getJob, sendMessage: sendDevMessage }),
+);
 
 app.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);

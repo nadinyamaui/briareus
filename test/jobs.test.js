@@ -7,6 +7,7 @@ import { BINARIES } from '../lib/providers.js';
 import * as providerTools from '../lib/providers.js';
 import { compactCodexThread } from '../lib/codex-session.js';
 import { recordTurnUsage } from '../lib/usage.js';
+import { setDraining } from '../lib/recovery.js';
 vi.mock('../lib/codex-session.js', async (original) => ({
   ...(await original()),
   compactCodexThread: vi.fn(),
@@ -218,6 +219,8 @@ import {
   replyToReviewFinding,
   saveReviewFindingsDrafts,
   retryLoopRound,
+  reopenDevSession,
+  startPullRequestPreview,
   workspaceStartBranch,
   workspaceBranchPlan,
   workspaceCheckoutPlan,
@@ -8176,5 +8179,166 @@ describe('manual Codex context compaction', () => {
     job.status = 'idle';
     job.contextUsage = { categories: [] };
     await expect(compactDevSession(job.id)).rejects.toThrow('No Codex context');
+  });
+});
+
+describe('maintenance drain at the operator entry points', () => {
+  beforeAll(async () => {
+    state.stored = [
+      {
+        id: 'drain-idle',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+        turns: 1,
+        reviewLoop: { rounds: 1, done: true },
+      },
+      {
+        id: 'drain-interrupted',
+        kind: 'devchat',
+        status: 'interrupted',
+        repo: 'acme/rt',
+        orchestrator: true,
+        providerId: 99,
+        turns: 1,
+        reviewLoop: {
+          rounds: 1,
+          lastSha: 'sha-drain',
+          failure: { round: 1, reason: 'boom', at: '2026-09-05' },
+        },
+      },
+      {
+        id: 'drain-preview',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+        preview: true,
+        startedOnPr: 77,
+        chatStarted: false,
+      },
+      {
+        id: 'drain-running',
+        kind: 'devchat',
+        status: 'running',
+        repo: 'acme/shop',
+        providerId: 1,
+        turns: 1,
+      },
+      {
+        id: 'drain-orch',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+        orchestrator: true,
+      },
+      {
+        id: 'drain-held',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+        turns: 1,
+        branch: 'feat/held',
+        reviewLoop: {
+          rounds: 1,
+          triage: { round: 1, prNumber: 77, findings: [{ key: 'k1', severity: 'high', title: 'A thing' }] },
+        },
+      },
+      {
+        id: 'drain-review',
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/shop',
+        providerId: 1,
+        turns: 1,
+        reviewBranch: 'task/review',
+        prStatus: { number: 78, state: 'open' },
+        reviewTriage: {
+          prNumber: 78,
+          round: 1,
+          branch: 'task/review',
+          standalone: true,
+          mine: true,
+          findings: [{ key: 'r1', severity: 'high', title: 'B thing' }],
+        },
+      },
+    ];
+    await initJobs();
+    getJob('drain-idle').status = 'idle';
+    getJob('drain-preview').status = 'idle';
+    getJob('drain-orch').status = 'idle';
+    getJob('drain-held').status = 'idle';
+    setDraining(true);
+  });
+  afterAll(() => setDraining(false));
+
+  it('refuses arming the loops and compaction, but lets a loop be switched off', async () => {
+    expect(() => setReviewLoop('drain-idle', true)).toThrow(/Maintenance/);
+    expect(() => setQaLoop('drain-idle', true)).toThrow(/Maintenance/);
+    await expect(compactDevSession('drain-idle')).rejects.toThrow(/Maintenance/);
+    expect(setReviewLoop('drain-idle', false).reviewLoop).toBeFalsy();
+  });
+
+  it('refuses a retry before it touches the loop or the transcript', async () => {
+    const job = getJob('drain-interrupted');
+    const events = job.events.length;
+    await expect(retryLoopRound('drain-interrupted')).rejects.toThrow(/Maintenance/);
+    expect(job.reviewLoop).toMatchObject({ lastSha: 'sha-drain', failure: { round: 1 } });
+    expect(job.reviewLoop.retryPending).toBeFalsy();
+    expect(job.events).toHaveLength(events);
+    expect(job.status).toBe('interrupted');
+  });
+
+  it('reopens an open session as the no-op it is, and refuses a settled one', () => {
+    expect(reopenDevSession('drain-idle').id).toBe('drain-idle');
+    expect(() => reopenDevSession('drain-interrupted')).toThrow(/Maintenance/);
+    expect(getJob('drain-interrupted').status).toBe('interrupted');
+  });
+
+  it('records whether the restart caught a session mid-turn or idle', () => {
+    expect(getJob('drain-running')).toMatchObject({ status: 'interrupted', interruptedFrom: 'running' });
+    expect(getJob('drain-idle').interruptedFrom).toBe('idle');
+  });
+
+  it('refuses an orchestrator spawning a worker', () => {
+    expect(() => spawnWorkerSession(getJob('drain-orch'), { title: 'W', prompt: 'x' })).toThrow(
+      /Maintenance/,
+    );
+  });
+
+  it('refuses a triage that starts a fix before it records any verdict', async () => {
+    recordTriage.mockClear();
+    await expect(
+      triageLoopFindings('drain-held', { verdicts: [{ key: 'k1', decision: 'fix' }] }),
+    ).rejects.toThrow(/Maintenance/);
+    expect(recordTriage).not.toHaveBeenCalled();
+    expect(getJob('drain-held').reviewLoop.triage).toMatchObject({ round: 1 });
+  });
+
+  it('refuses a standalone review triage that starts a fix before it posts the verdicts', async () => {
+    recordTriage.mockClear();
+    await expect(
+      triageStandaloneReviewFindings('drain-review', { verdicts: [{ key: 'r1', decision: 'fix' }] }),
+    ).rejects.toThrow(/Maintenance/);
+    expect(recordTriage).not.toHaveBeenCalled();
+    expect(getJob('drain-review').reviewTriage).toMatchObject({ prNumber: 78, mine: true });
+  });
+
+  it('refuses a message that would start a turn on a settled session, whoever sends it', () => {
+    const job = getJob('drain-idle');
+    const events = job.events.length;
+    expect(() => sendDevMessage('drain-idle', 'one more thing')).toThrow(/Maintenance/);
+    expect(job.events).toHaveLength(events);
+    expect(job.status).toBe('idle');
+  });
+
+  it('refuses a PR preview before it closes the one already there', async () => {
+    await expect(
+      startPullRequestPreview({ provider: 1, repo: 'acme/shop', branch: 'feat/x', prNumber: 77 }),
+    ).rejects.toThrow(/Maintenance/);
+    expect(getJob('drain-preview')).toMatchObject({ status: 'idle', preview: true });
   });
 });
