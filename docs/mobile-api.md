@@ -116,25 +116,103 @@ response fields and unknown event kinds. Optional fields may be absent or null.
 
 ### Main operations
 
-| Name                                           | Arguments                                                                | Result                                                           |
-| ---------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------- |
-| `projects`                                     | `{}`                                                                     | `{ "projects": [{ "repo": "owner/repo", "label": "Project" }] }` |
-| `sessions`                                     | `{ "repo": "owner/repo" }`                                               | `{ "sessions": [...] }`, only that permitted project             |
-| `session`                                      | `{ "sessionId": "...", "since": 0 }`                                     | `{ "session": {...}, "events": [...] }`                          |
-| `start_session`                                | `{ "repo": "owner/repo", "prompt": "..." }`                              | `{ "session": {...} }`                                           |
-| `message`                                      | `{ "sessionId": "...", "text": "..." }`                                  | `{ "session": {...} }`; may queue while running                  |
-| `rename`                                       | `{ "sessionId": "...", "title": "..." }`                                 | `{ "session": {...} }`                                           |
-| `cancel`, `close`, `reopen`, `serve`, `delete` | `{ "sessionId": "..." }`                                                 | Operation-specific result; refresh session/list after success    |
-| `pulls`, `branches`, `usage`                   | `{ "repo": "owner/repo" }`                                               | Project dashboard result                                         |
-| `pull`, `findings`                             | `{ "repo": "owner/repo", "pr": 123 }`                                    | PR details or findings                                           |
-| `review`, `qa`                                 | `{ "repo": "owner/repo", "prNumber": 123, "branch": "feature/example" }` | Started session                                                  |
+| Name                                           | Arguments                                                                                     | Result                                                           |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `projects`                                     | `{}`                                                                                          | `{ "projects": [{ "repo": "owner/repo", "label": "Project" }] }` |
+| `sessions`                                     | `{ "repo": "owner/repo" }`                                                                    | `{ "sessions": [...] }`, only that permitted project             |
+| `session`                                      | `{ "sessionId": "...", "since": 0 }`                                                          | `{ "session": {...}, "events": [...] }`                          |
+| `runtimes`                                     | `{ "repo": "owner/repo" }`                                                                    | Providers, models and efforts to start on; see below             |
+| `start_session`                                | `{ "repo": "owner/repo", "prompt": "...", "providerId": 2, "model": "...", "effort": "..." }` | `{ "session": {...} }`                                           |
+| `message`                                      | `{ "sessionId": "...", "text": "..." }`                                                       | `{ "session": {...} }`; may queue while running                  |
+| `rename`                                       | `{ "sessionId": "...", "title": "..." }`                                                      | `{ "session": {...} }`                                           |
+| `cancel`, `close`, `reopen`, `serve`, `delete` | `{ "sessionId": "..." }`                                                                      | Operation-specific result; refresh session/list after success    |
+| `branches`                                     | `{ "repo": "owner/repo" }`                                                                    | `{ "defaultBranch": "main", "branches": ["main", ...] }`         |
+| `pulls`, `usage`                               | `{ "repo": "owner/repo" }`                                                                    | Project dashboard result                                         |
+| `pull`, `findings`                             | `{ "repo": "owner/repo", "pr": 123 }`                                                         | PR details or findings                                           |
+| `pull_files`                                   | `{ "repo": "owner/repo", "pr": 123, "page": 1, "headSha": "...", "baseSha": "..." }`          | One page of the PR's changed files; see below                    |
+| `review`, `qa`                                 | `{ "repo": "owner/repo", "prNumber": 123, "branch": "feature/example" }`                      | Started session                                                  |
 
 Additional operations cover findings drafts, triage, replies, queued messages,
 review/QA loops and the configured dashboard actions. Session operations infer
-the project from `sessionId`; a caller cannot override it. Starts use the
-project's configured review runtime or the action's configured step runtime,
-as applicable. Configure those in the web Settings first. Provider/model
-overrides are not accepted from the phone.
+the project from `sessionId`; a caller cannot override it.
+
+`branches` lists the branches that already exist on GitHub: `defaultBranch` is
+the repository's default branch (null if it could not be read) and `branches`
+starts with it, followed by the rest alphabetically. The list is cached for a
+short while. Pass one of
+them as `start_session`'s `branch` to work on it; without `branch` the session
+cuts a fresh branch from the default one. This operation does not create or
+change branches.
+
+#### Choosing a provider, model and effort
+
+`runtimes` is read-only and returns what a session can be started on:
+
+```json
+{
+  "default": { "providerId": 2, "model": "opus", "effort": "high" },
+  "providers": [
+    {
+      "id": 2,
+      "label": "Claude",
+      "models": [{ "id": "opus", "label": "opus", "efforts": ["low", "high"], "defaultEffort": "high" }],
+      "defaultModel": "opus"
+    }
+  ]
+}
+```
+
+`providers` lists the active providers only. Several logins to the same service
+appear as one entry; starting on its `id` lets the server pick the login with
+the most headroom. `efforts` belong to each model and may differ between models
+of one provider. `default` is the project's configured review runtime, which is
+what `start_session` uses when nothing is picked; it is `null` when the project
+has none, and then `start_session` needs a `providerId`. The result has no
+account data: no logins, API keys, endpoints or usage.
+
+`start_session` takes an optional `providerId` (an `id` from `runtimes`), `model`
+(a model `id`) and `effort`. A `model` or `effort` without `providerId` is
+rejected, and so is a provider that is unknown or inactive (400). A model the
+provider does not offer falls back to its `defaultModel`, and an effort the
+model does not offer falls back to that model's `defaultEffort`, so read the
+started session's `provider`/`model` rather than assuming the request was used
+as sent. Without any of the three, the session starts on the project's
+configured review runtime, as before. `review`, `qa` and the dashboard actions
+always use the project's configured review runtime or the action's configured
+step runtime, and reject these fields. Configure those in the web Settings.
+
+#### Pull request files
+
+`pull_files` is read-only and returns 100 files per page:
+
+```json
+{
+  "pr": { "number": 123, "headSha": "...", "baseSha": "...", "changedFiles": 150, "...": "..." },
+  "files": [
+    {
+      "filename": "src/app.js",
+      "previousFilename": null,
+      "status": "modified",
+      "additions": 3,
+      "deletions": 1,
+      "patch": "@@ -1,3 +1,5 @@ ...",
+      "url": "https://github.com/owner/repo/blob/..."
+    }
+  ],
+  "nextPage": 2,
+  "truncated": false
+}
+```
+
+`page` defaults to 1 and goes up to 30. `nextPage` is null on the last page.
+GitHub lists at most 3,000 files, and `truncated` is true when the pull request
+has more. `patch` is null for binary files and for diffs GitHub does not return
+(for example, very large ones). `previousFilename` is set for a renamed file.
+
+When reading page 2 or later, send the `headSha` and `baseSha` from page 1's
+`pr`. If the pull request was pushed to or rebased in the meantime (or changes
+while a page is being read), the operation answers **409**. Reload from page 1
+rather than mixing files from two revisions.
 
 ### Requests to try
 
@@ -183,7 +261,7 @@ the session list/transcript before offering a retry.
 
 V1 uses polling, not an SSE/WebSocket connection. It does not provide APNs push
 notifications, file upload/download, voice transcription, workspace previews,
-provider management or all web-only composer modes. URLs embedded in results
+provider management (listing runtimes aside) or all web-only composer modes. URLs embedded in results
 (such as preview or attachment links) keep their existing browser protection;
 the device token does not authorize them. These features can be added as
 separate mobile endpoints when the iOS app needs them.

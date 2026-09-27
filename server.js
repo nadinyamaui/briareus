@@ -131,7 +131,7 @@ import {
 } from './lib/memories.js';
 import { initTemplates, globalTemplates, saveGlobalTemplates, templateCatalog } from './lib/templates.js';
 import { projectPulls, pullOverview } from './lib/prboard.js';
-import { pullRequestView } from './lib/prviewer.js';
+import { pullRequestView, pullRequestViewOptions } from './lib/prviewer.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload } from './lib/uploads.js';
@@ -770,14 +770,7 @@ function findingsParams(body) {
 dashboard.register('get', '/api/pr/view', async (req, res) => {
   try {
     const { repo, prNumber } = findingsParams(req.query);
-    res.json(
-      await pullRequestView({ repo }, prNumber, {
-        section: String(req.query.section || 'description'),
-        page: Number(req.query.page || 1),
-        headSha: String(req.query.headSha || ''),
-        baseSha: String(req.query.baseSha || ''),
-      }),
-    );
+    res.json(await pullRequestView({ repo }, prNumber, pullRequestViewOptions(req.query)));
   } catch (e) {
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
   }
