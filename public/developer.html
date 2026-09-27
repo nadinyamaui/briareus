@@ -10,6 +10,8 @@
     />
     <title>Developer</title>
     <link rel="stylesheet" href="/app.css" />
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
+    <meta name="theme-color" content="#262624" />
   </head>
   <body>
     <!-- Tap-anywhere-to-close backdrop for the two drawers; phone widths only. -->
@@ -180,6 +182,8 @@
           >
             🔗 Link PR
           </button>
+          <a id="btn-task-history" class="btn">Task history</a>
+          <a id="btn-preview-feedback" class="btn hidden">Comment on preview</a>
           <!-- ▶ Run, split when the project has run profiles: the button serves
            the profile the session served last (the default to begin with), ▾
            opens #serve-pop to pick another. -->

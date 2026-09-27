@@ -1,4 +1,6 @@
 (() => {
+  // Express also serves /attention/ here (non-strict routing).
+  if (location.pathname.replace(/\/+$/, '') !== '/attention') return;
   const { api, esc, content, status } = window.BriareusOperations;
   const ssh = window.BriareusSshRequest;
   // `items` is what the cards on screen were drawn from, so it only changes
@@ -28,6 +30,9 @@
     try {
       const data = await api('/api/operations/attention');
       if (mine !== latest || busy) return;
+      // A notification opens the inbox on the one task it spoke of.
+      const task = new URLSearchParams(location.search).get('task');
+      if (task) data.items = data.items.filter((i) => (i.taskId || i.sessionId || i.id) === task);
       // Before the unchanged check: a success after a failed poll has to
       // replace that poll's error even when the items are the same.
       status(
@@ -69,7 +74,7 @@
               ? '<p class="mt-3 text-muted">Answer sent; the agent reads it when its turn takes it in.</p>'
               : '<label class="mt-3 block">Answer<textarea class="mt-1 w-full rounded border border-line bg-canvas p-2" rows="3"></textarea></label><button class="btn" data-action="answer">Send answer</button>'
         }
-        <a class="ml-3 inline-block py-3 underline" href="${esc(i.href)}">${i.kind === 'findings' ? 'Decide findings' : 'Open conversation'}</a>
+        <a class="ml-3 inline-block py-3 underline" href="${esc(i.href)}">${i.kind === 'findings' ? 'Decide findings' : i.kind === 'recovery' ? 'Inspect recovery' : 'Open conversation'}</a>
         <p class="text-danger" role="status"></p></article>`,
         )
         .join('');

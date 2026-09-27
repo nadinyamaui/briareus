@@ -12,6 +12,7 @@ const state = vi.hoisted(() => ({
   git: {},
   duOut: '2048\t/pool/x\n',
   sessions: [],
+  registryComplete: true,
   removed: [],
 }));
 
@@ -19,6 +20,7 @@ vi.mock('../lib/config.js', () => ({ getConfig: () => ({ workspaceDir: state.roo
 vi.mock('../lib/jobs.js', () => ({
   DEV_OPEN: ['queued', 'preparing', 'running', 'idle'],
   listDevSessions: () => state.sessions,
+  sessionRegistryComplete: () => state.registryComplete,
 }));
 
 vi.mock('fs', () => {
@@ -93,6 +95,7 @@ beforeEach(() => {
   state.files = {};
   state.git = {};
   state.sessions = [];
+  state.registryComplete = true;
   state.removed = [];
 });
 
@@ -224,6 +227,68 @@ describe('actions', () => {
     expect(state.removed).toEqual([idle]);
     expect(state.files[claimed]).toBeDefined();
     expect(state.files[path.join(state.root, 'notes')]).toBeDefined();
+  });
+
+  it('keeps a slot an interrupted or failed session left work in', () => {
+    const kept = slot('acme__app');
+    const failed = slot('acme__app__2');
+    const child = slot('acme__app__3');
+    const unprepared = slot('acme__app__4');
+    const neverStarted = slot('acme__app__5');
+    const idleAtRestart = slot('acme__app__6');
+    state.sessions = [
+      {
+        id: 's1',
+        status: 'interrupted',
+        interruptedFrom: 'running',
+        workDir: kept,
+        branch: 'feat/x',
+        chatStarted: true,
+      },
+      { id: 's2', status: 'failed', workDir: failed, branch: 'feat/y', chatStarted: true },
+      { id: 's3', status: 'failed', workDir: child, branch: 'feat/x', chatStarted: true, loopParentId: 's1' },
+      { id: 's4', status: 'failed', workDir: unprepared, branch: null },
+      // Failed in its first preparation: the branch was set, no agent ever ran.
+      { id: 's5', status: 'failed', workDir: neverStarted, branch: 'feat/z', chatStarted: false },
+      // Idle when the restart came: no turn was cut short, so nothing is held.
+      {
+        id: 's6',
+        status: 'interrupted',
+        interruptedFrom: 'idle',
+        workDir: idleAtRestart,
+        branch: 'feat/w',
+        chatStarted: true,
+      },
+    ];
+
+    expect(pruneUnusedWorkspaces().removed.sort()).toEqual([
+      'acme__app__3',
+      'acme__app__4',
+      'acme__app__5',
+      'acme__app__6',
+    ]);
+    expect(state.removed.sort()).toEqual([child, unprepared, neverStarted, idleAtRestart].sort());
+    expect(() => cleanWorkspace('acme__app')).toThrow(expect.objectContaining({ status: 409 }));
+  });
+
+  it('prunes only slots owned by a known session while the registry is incomplete', () => {
+    // A failed (or truncated) restore: the sessions are still stored, just not
+    // loaded, so a slot the registry cannot account for may hold their work.
+    state.registryComplete = false;
+    const known = slot('acme__app');
+    const unknown = slot('acme__app__2');
+    const unmarked = slot('acme__app__3');
+    state.files[path.join(known, '.git', 'briareus-owner')] = { content: 's1' };
+    state.files[path.join(unknown, '.git', 'briareus-owner')] = { content: 's9' };
+    state.sessions = [{ id: 's1', status: 'closed', workDir: known }];
+
+    expect(pruneUnusedWorkspaces()).toEqual({ removed: ['acme__app'], errors: [] });
+    expect(state.removed).toEqual([known]);
+    expect(state.files[unknown]).toBeDefined();
+    expect(state.files[unmarked]).toBeDefined();
+
+    state.registryComplete = true;
+    expect(pruneUnusedWorkspaces().removed.sort()).toEqual(['acme__app__2', 'acme__app__3']);
   });
 
   it('prunes at startup and again on the configured interval', () => {

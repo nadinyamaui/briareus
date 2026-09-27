@@ -1,5 +1,15 @@
 // @ts-check
 import express from 'express';
+import { createNotificationService } from './lib/notifications.js';
+import { notificationRoutes } from './lib/notification-routes.js';
+import { attentionItems } from './lib/attention.js';
+import { createDeploymentService } from './lib/deployments.js';
+import { deploymentRoutes } from './lib/deployment-routes.js';
+import { taskHistoryRoutes } from './lib/task-history-routes.js';
+import { estimateCosts } from './lib/prices.js';
+import { previewFeedbackRoutes } from './lib/preview-feedback.js';
+import { initMemorySelection } from './lib/memory-selection.js';
+import { memoryMaintenanceRoutes } from './lib/memory-maintenance-routes.js';
 import { operationsRoutes } from './lib/operations-routes.js';
 import { dashboardRoutes } from './lib/dashboard-routes.js';
 import { createRemoteMcpAuth } from './lib/remote-mcp-auth.js';
@@ -13,9 +23,10 @@ import fs from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
 import { getConfig, ROOT } from './lib/config.js';
+import { maintenanceState } from './lib/recovery.js';
 import { workerTranscript } from './lib/worker-transcript.js';
 import { assetCacheHeaders, pageHandler } from './lib/assets.js';
-import { initDb, dbHealthy } from './lib/db.js';
+import { initDb, dbHealthy, loadTaskSessions, loadJobTurnUsage } from './lib/db.js';
 import {
   initJobs,
   setAgentApiBase,
@@ -142,7 +153,7 @@ import { projectPulls, pullOverview } from './lib/prboard.js';
 import { mergePullRequest, pullRequestView, pullRequestViewOptions } from './lib/prviewer.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
-import { storeUpload } from './lib/uploads.js';
+import { storeUpload, getUpload } from './lib/uploads.js';
 import { transcribe, transcribeAvailable } from './lib/transcribe.js';
 import { projectUsage, overallUsage, jobUsageEstimates, estimateEventCosts } from './lib/usage.js';
 import {
@@ -390,7 +401,19 @@ app.get('/', devPage);
 app.get('/dashboard', devPage);
 app.get('/office', devPage);
 app.get('/findings', devPage);
-app.get('/attention', pageHandler(PUBLIC, 'operations.html'));
+app.get(
+  [
+    '/attention',
+    '/maintenance',
+    '/recovery/:id',
+    '/memory-health',
+    '/preview-feedback/:id',
+    '/tasks/:id',
+    '/deployments',
+    '/notifications',
+  ],
+  pageHandler(PUBLIC, 'operations.html'),
+);
 app.get('/sessions/:id', devPage);
 app.get('/projects/:owner/:name', devPage);
 app.get('/projects/:owner/:name/dashboard', devPage);
@@ -562,7 +585,30 @@ function agentSession(req, res) {
 
 const sshService = createSshService({ getJob });
 app.use(sshRoutes({ service: sshService, agentSession, getProject }));
-app.use(operationsRoutes({ listSessions: devSessionRecords, ssh: sshService }));
+app.use(
+  operationsRoutes({ listSessions: devSessionRecords, ssh: sshService, getJob, sendMessage: sendDevMessage }),
+);
+
+app.use(memoryMaintenanceRoutes({ listMemories, updateMemory }));
+app.use(previewFeedbackRoutes({ getJob, getUpload, sendMessage: sendDevMessage }));
+app.use(
+  taskHistoryRoutes({
+    loadSnapshots: loadTaskSessions,
+    listSessions: listDevSessions,
+    loadUsage: loadJobTurnUsage,
+    estimateCosts,
+  }),
+);
+
+app.use(
+  deploymentRoutes({
+    service: createDeploymentService(),
+    getProject,
+    readyForSelfDeploy: () => maintenanceState(listDevSessions(), sshService.runningCount()).ready,
+  }),
+);
+const notificationService = createNotificationService();
+app.use(notificationRoutes({ service: notificationService, getProject }));
 
 app.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
@@ -2032,7 +2078,9 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await remoteMcpAuth.init();
     await mobileAuth.init();
     await initSavedPrompts();
+    await initMemorySelection();
     await initMemories();
+    await notificationService.init();
     await initProviders();
     // Warm the balancer's quota cache so the first session started after boot
     // already lands on the account with the most headroom.
@@ -2058,6 +2106,11 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   checkProviderAuth();
   setInterval(checkProviderAuth, AUTH_RECHECK_MS).unref();
   await initJobs();
+  setInterval(() => {
+    notificationService
+      .tick(attentionItems(devSessionRecords(), sshService.pending()))
+      .catch((e) => console.error('Notification delivery failed:', e.message));
+  }, 15000).unref();
   // Clone slots are caches, not session records. Drop every unclaimed slot at
   // boot and once a day so a project's peak concurrency does not permanently
   // consume disk; the pruner sees the live session registry and skips claims.
