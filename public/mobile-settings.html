@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mobile devices · Settings</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <main class="mx-auto w-full max-w-3xl overflow-y-auto p-6">
+      <a href="/settings/projects" class="text-sm text-muted hover:text-ink">← Settings</a>
+      <h1 class="mt-5 text-2xl font-semibold">Mobile devices</h1>
+      <p class="mt-2 text-sm text-muted">
+        Create a separate token for each device. Sign in to Briareus with your password to manage devices.
+        Tokens only work with the mobile API and the projects you select.
+      </p>
+      <p id="notice" role="status" class="mt-4 text-sm"></p>
+      <section class="mt-6 rounded-xl border border-line p-5">
+        <h2 class="text-lg font-semibold">Connect a device</h2>
+        <form id="device-form" class="mt-4 grid gap-4">
+          <label class="grid gap-2 text-sm"
+            >Device name
+            <input
+              id="label"
+              value="My iPhone"
+              maxlength="100"
+              required
+              class="rounded border border-line bg-field p-2 text-ink"
+            />
+          </label>
+          <fieldset>
+            <legend class="mb-2 text-sm">Permitted projects</legend>
+            <div id="projects" class="grid gap-2"></div>
+          </fieldset>
+          <label class="grid gap-2 text-sm"
+            >Permissions
+            <select id="permission" class="rounded border border-line bg-field p-2 text-ink">
+              <option value="read">Read only</option>
+              <option value="manage">Manage projects and sessions</option>
+            </select>
+          </label>
+          <p class="text-sm text-muted">
+            Manage allows starting paid agents, sending messages, changing GitHub findings and deleting
+            sessions.
+          </p>
+          <label class="grid gap-2 text-sm"
+            >Expires after (days)
+            <input
+              id="days"
+              type="number"
+              min="1"
+              max="365"
+              value="90"
+              required
+              class="rounded border border-line bg-field p-2 text-ink"
+            />
+          </label>
+          <button id="create" class="btn w-fit" type="submit" disabled>Create device token</button>
+        </form>
+        <div id="credentials" class="mt-5 hidden rounded border border-line bg-sunken p-4">
+          <p class="text-sm">Copy the token into your mobile app now. It is shown only once.</p>
+          <label class="mt-3 grid gap-1 text-sm"
+            >API address
+            <input id="api-url" readonly class="rounded border border-line bg-field p-2 font-mono text-xs" />
+          </label>
+          <label class="mt-3 grid gap-1 text-sm"
+            >Device token
+            <input
+              id="token"
+              type="password"
+              readonly
+              autocomplete="off"
+              class="rounded border border-line bg-field p-2 font-mono text-xs"
+            />
+          </label>
+          <button id="copy-token" type="button" class="btn mt-3">Copy token</button>
+          <button id="hide-token" type="button" class="btn mt-3">Done</button>
+        </div>
+      </section>
+      <section class="mt-5 rounded-xl border border-line p-5">
+        <h2 class="text-lg font-semibold">Your devices</h2>
+        <div id="devices" class="mt-3 grid gap-3"></div>
+      </section>
+      <p class="mt-5 mb-8 text-sm text-muted">
+        Use your public HTTPS address in the app. If Cloudflare Access protects this site, configure an
+        exception only for /api/mobile/v1/*; keep Settings and the dashboard protected. The mobile API always
+        requires a device token. To replace an expired or lost token, create a new one and revoke the old
+        device.
+      </p>
+    </main>
+    <script src="/mobile-settings.js"></script>
+  </body>
+</html>

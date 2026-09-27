@@ -29,6 +29,14 @@ it.** The boot log says so on every start; please believe it.
 
 ## Credentials this app holds
 
+The native mobile API at `/api/mobile/v1` uses separate, owner-issued bearer
+tokens with project permissions and expiry. A Cloudflare Access exception may
+cover only `/api/mobile/v1` and its subpaths; `/api/mobile-devices` and
+`/settings/mobile` remain browser-only. Device tokens are stored as hashes,
+can be revoked in Settings, and stop working when `AUTH_SECRET` changes. Mobile
+authentication fails closed when dashboard login is disabled. See the
+[mobile integration guide](docs/mobile-api.md) for the deployment checks.
+
 - `GITHUB_TOKEN`: a classic PAT with `repo`, or fine-grained with Pull
   requests read/write and Contents read. It can push to and comment on every
   repository in its scope. Scope it to the repositories you actually run

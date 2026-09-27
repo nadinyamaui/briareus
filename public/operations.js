@@ -1,9 +1,5 @@
 (() => {
-  const esc = (value) =>
-    String(value ?? '').replace(
-      /[&<>"']/g,
-      (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
-    );
+  const { esc } = window.BriareusSshRequest;
   async function api(url, body, method = 'POST') {
     const response = await fetch(
       url,
@@ -15,7 +11,9 @@
       location.href = '/login?next=' + encodeURIComponent(location.pathname);
       throw new Error('Sign in to continue');
     }
-    const data = await response.json();
+    // An error page that is not JSON (a proxy's 502 during a restart) still
+    // reports the failed request, not a parse error.
+    const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
     return data;
   }
