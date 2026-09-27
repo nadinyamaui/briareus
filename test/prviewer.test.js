@@ -4,7 +4,7 @@ const cfg = vi.hoisted(() => ({ githubToken: 'token' }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
 vi.mock('../lib/github.js', () => ({ githubRest: vi.fn(), githubGraphql: vi.fn() }));
 import { githubRest } from '../lib/github.js';
-import { pullRequestView } from '../lib/prviewer.js';
+import { mergePullRequest, pullRequestView } from '../lib/prviewer.js';
 
 const project = { repo: 'owner/repo' };
 const raw = {
@@ -30,6 +30,7 @@ const file = {
   patch: '@@ -1 +1 @@\n-old\n+new',
   blob_url: 'https://github.com/owner/repo/blob/abc/new.js',
 };
+const repoRaw = { allow_squash_merge: true, allow_merge_commit: false, allow_rebase_merge: true };
 const ok = (data) => ({ ok: true, json: async () => structuredClone(data) });
 let respond;
 beforeEach(() => {
@@ -41,6 +42,8 @@ beforeEach(() => {
   };
   githubRest.mockImplementation(async (_cfg, method, path) => {
     expect(method).toBe('GET');
+    // The repository's merge settings ride along with every section.
+    if (path === '/repos/owner/repo') return ok(repoRaw);
     return respond(path);
   });
 });
@@ -54,8 +57,10 @@ describe('in-app pull request content', () => {
       headRef: 'fork:feature',
       headSha: 'abc',
       state: 'open',
+      mergeable: null,
+      mergeMethods: ['squash', 'rebase'],
     });
-    expect(githubRest).toHaveBeenCalledTimes(1);
+    expect(githubRest).toHaveBeenCalledTimes(2);
     expect(githubRest).toHaveBeenCalledWith(
       expect.anything(),
       'GET',
@@ -126,7 +131,9 @@ describe('in-app pull request content', () => {
       await expect(pullRequestView(project, 42, { section: 'files', ...revision })).rejects.toMatchObject({
         status: 409,
       });
-      expect(githubRest).toHaveBeenCalledTimes(1);
+      expect(githubRest.mock.calls.map((call) => call[2])).not.toContainEqual(
+        expect.stringContaining('/files'),
+      );
     },
   );
 
@@ -221,4 +228,49 @@ describe('in-app pull request content', () => {
       expect(githubRest).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('merging from the in-app viewer', () => {
+  const sha = 'a'.repeat(40);
+  const answer = (status, body) => ({ ok: status < 300, status, json: async () => body });
+
+  it('merges exactly the head the viewer showed, with the chosen method', async () => {
+    githubRest.mockResolvedValue(answer(200, { merged: true, sha: 'b'.repeat(40), message: 'Merged' }));
+    await expect(mergePullRequest(project, 42, { method: 'rebase', headSha: sha })).resolves.toEqual({
+      merged: true,
+      sha: 'b'.repeat(40),
+      message: 'Merged',
+    });
+    expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'PUT', '/repos/owner/repo/pulls/42/merge', {
+      merge_method: 'rebase',
+      sha,
+    });
+  });
+
+  it.each([
+    [{ method: 'octopus', headSha: sha }, 400],
+    [{ method: 'squash', headSha: '' }, 400],
+  ])('rejects %o before calling GitHub', async (options, status) => {
+    await expect(mergePullRequest(project, 42, options)).rejects.toMatchObject({ status });
+    expect(githubRest).not.toHaveBeenCalled();
+  });
+
+  it('reports a missing token as 503', async () => {
+    cfg.githubToken = '';
+    await expect(mergePullRequest(project, 42, { headSha: sha })).rejects.toMatchObject({ status: 503 });
+  });
+
+  it.each([
+    [405, 405],
+    [409, 409],
+    [422, 422],
+    [401, 502],
+    [500, 502],
+  ])('passes GitHub %s through as %s with its reason', async (githubStatus, status) => {
+    githubRest.mockResolvedValue(answer(githubStatus, { message: 'Head branch was modified' }));
+    await expect(mergePullRequest(project, 42, { headSha: sha })).rejects.toMatchObject({
+      status,
+      message: 'GitHub refused the merge: Head branch was modified',
+    });
+  });
 });

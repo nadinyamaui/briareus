@@ -131,7 +131,7 @@ import {
 } from './lib/memories.js';
 import { initTemplates, globalTemplates, saveGlobalTemplates, templateCatalog } from './lib/templates.js';
 import { projectPulls, pullOverview } from './lib/prboard.js';
-import { pullRequestView } from './lib/prviewer.js';
+import { mergePullRequest, pullRequestView } from './lib/prviewer.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload } from './lib/uploads.js';
@@ -776,6 +776,21 @@ dashboard.register('get', '/api/pr/view', async (req, res) => {
         page: Number(req.query.page || 1),
         headSha: String(req.query.headSha || ''),
         baseSha: String(req.query.baseSha || ''),
+      }),
+    );
+  } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
+
+dashboard.register('post', '/api/pr/merge', async (req, res) => {
+  try {
+    const { repo, prNumber } = findingsParams(req.body || {});
+    const { method, headSha } = req.body || {};
+    res.json(
+      await mergePullRequest({ repo }, prNumber, {
+        method: String(method || ''),
+        headSha: String(headSha || ''),
       }),
     );
   } catch (e) {

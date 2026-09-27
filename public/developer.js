@@ -200,7 +200,16 @@
     toastTimer = setTimeout(() => t.classList.add('hidden'), 4000);
   }
 
-  const prViewer = window.createPrViewer({ api, esc, md });
+  const prViewer = window.createPrViewer({
+    api,
+    esc,
+    md,
+    // A merge from the viewer should show on the board now, not at the next
+    // minute's poll; the session's PR panel follows on its own poll.
+    onMerged: (repo) => {
+      if (currentProject === repo) loadBoard(repo, true);
+    },
+  });
   document.addEventListener(
     'click',
     (event) => {

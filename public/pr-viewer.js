@@ -1,5 +1,5 @@
 // A read-only GitHub-style viewer, shared by board cards and session PR panels.
-window.createPrViewer = ({ api, esc, md }) => {
+window.createPrViewer = ({ api, esc, md, onMerged }) => {
   const dialog = document.createElement('dialog');
   dialog.className = 'pr-viewer';
   dialog.setAttribute('aria-labelledby', 'pr-viewer-title');
@@ -7,11 +7,13 @@ window.createPrViewer = ({ api, esc, md }) => {
     <header class="prv-header">
       <div class="prv-toolbar"><span id="pr-viewer-repo"></span><div>
         <button class="btn" data-refresh>⟳ Refresh</button>
+        <button class="btn prv-merge-btn" data-merge hidden>Merge</button>
         <a class="btn" id="pr-viewer-github" target="_blank" rel="noopener">Open in GitHub ↗</a>
         <button class="btn" data-close aria-label="Close pull request">✕</button>
       </div></div>
-      <h2 id="pr-viewer-title">Pull request</h2>
+      <h2><span id="pr-viewer-title">Pull request</span><span id="pr-viewer-checks" class="prv-title-checks" hidden></span></h2>
       <div id="pr-viewer-meta" class="prv-meta"></div>
+      <div id="pr-viewer-merge" class="prv-merge" hidden></div>
     </header>
     <div class="prv-tabs" role="tablist" aria-label="Pull request sections">
       <button role="tab" id="prv-tab-description" data-tab="description" aria-controls="prv-content">Description</button>
@@ -28,12 +30,66 @@ window.createPrViewer = ({ api, esc, md }) => {
     safeUrl(url) ? `<a href="${safeUrl(url)}" target="_blank" rel="noopener">${text} ↗</a>` : '';
   const notice = (text) => `<p class="prv-notice" role="status">${esc(text)}</p>`;
 
+  // One icon for every check on the head commit, the way GitHub marks a PR:
+  // any failure is ✗, anything still running is ●, otherwise ✓.
+  function checksRollup() {
+    const checks = state.checks?.checks;
+    if (!checks?.length) return null;
+    const failed = checks.filter((c) => c.failed).length;
+    const pending = checks.filter((c) => c.status !== 'completed').length;
+    if (failed) return { tone: 'removed', icon: '✗', label: `${failed} of ${checks.length} checks failed` };
+    if (pending)
+      return { tone: 'pending', icon: '●', label: `${pending} of ${checks.length} checks still running` };
+    return { tone: 'added', icon: '✓', label: `All ${checks.length} checks passed` };
+  }
+
+  const METHOD_LABELS = {
+    squash: 'Squash and merge',
+    merge: 'Create a merge commit',
+    rebase: 'Rebase and merge',
+  };
+
+  function mergeBox() {
+    const pr = state.pr;
+    const box = dialog.querySelector('#pr-viewer-merge');
+    const button = dialog.querySelector('[data-merge]');
+    const open = pr?.state === 'open' && pr.mergeMethods?.length > 0;
+    button.hidden = !open || !!state.merge;
+    box.hidden = !open || !state.merge;
+    if (box.hidden) return (box.innerHTML = '');
+    const m = state.merge;
+    const rollup = checksRollup();
+    const warning =
+      pr.mergeable === false
+        ? 'This branch has conflicts that must be resolved before it can merge.'
+        : rollup?.tone === 'removed'
+          ? `${rollup.label}.`
+          : rollup?.tone === 'pending'
+            ? `${rollup.label}.`
+            : '';
+    box.innerHTML = `${warning ? `<p class="prv-merge-warning">${esc(warning)}</p>` : ''}
+      <select id="prv-merge-method" aria-label="Merge method"${m.busy ? ' disabled' : ''}>${pr.mergeMethods
+        .map((k) => `<option value="${k}"${k === m.method ? ' selected' : ''}>${METHOD_LABELS[k]}</option>`)
+        .join('')}</select>
+      <button class="btn prv-merge-btn" data-merge-confirm${m.busy || pr.mergeable === false ? ' disabled' : ''}>${m.busy ? 'Merging…' : `Confirm merge of ${esc(pr.headSha.slice(0, 7))}`}</button>
+      <button class="btn" data-merge-cancel${m.busy ? ' disabled' : ''}>Cancel</button>
+      ${m.error ? `<p class="prv-merge-warning" role="alert">${esc(m.error)}</p>` : ''}`;
+  }
+
   function header() {
     const pr = state.pr;
     dialog.querySelector('#pr-viewer-repo').textContent = state.repo;
     dialog.querySelector('#pr-viewer-title').textContent = pr
       ? `${pr.title} #${pr.number}`
       : `Pull request #${state.number}`;
+    const rollup = checksRollup();
+    const badge = dialog.querySelector('#pr-viewer-checks');
+    badge.hidden = !rollup;
+    badge.className = `prv-title-checks prv-${rollup?.tone || 'neutral'}`;
+    badge.textContent = rollup?.icon || '';
+    badge.title = rollup?.label || '';
+    badge.setAttribute('aria-label', rollup?.label || '');
+    mergeBox();
     dialog.querySelector('#pr-viewer-github').href = `https://github.com/${state.repo}/pull/${state.number}`;
     dialog.querySelector('#pr-viewer-meta').innerHTML = pr
       ? `
@@ -272,7 +328,8 @@ window.createPrViewer = ({ api, esc, md }) => {
     if (more && filesViewOpen()) {
       paintFilesFooter(current.files);
       content.setAttribute('aria-busy', 'true');
-    } else render();
+    } else if (current.tab !== section) header();
+    else render();
     const params = new URLSearchParams({ repo: current.repo, pr: current.number, section, page });
     if (current.pr) {
       params.set('headSha', current.pr.headSha);
@@ -309,6 +366,37 @@ window.createPrViewer = ({ api, esc, md }) => {
     state = { repo, number, tab, pr: null, split: false, filter: '', expanded: {}, full: {} };
     if (!dialog.open) dialog.showModal();
     load(tab);
+    // The title's checks icon needs the checks whichever tab opened first.
+    if (tab !== 'checks') load('checks');
+  }
+
+  async function merge() {
+    const current = state;
+    const m = current.merge;
+    if (!current.pr || m.busy) return;
+    m.busy = true;
+    m.error = '';
+    mergeBox();
+    try {
+      await api('/api/pr/merge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo: current.repo,
+          pr: current.number,
+          method: m.method,
+          headSha: current.pr.headSha,
+        }),
+      });
+      if (state !== current) return;
+      onMerged?.(current.repo, current.number);
+      open(current.repo, current.number, current.tab);
+    } catch (error) {
+      if (state !== current) return;
+      m.busy = false;
+      m.error = error.message;
+      mergeBox();
+    }
   }
 
   dialog.addEventListener('close', () => {
@@ -335,6 +423,19 @@ window.createPrViewer = ({ api, esc, md }) => {
     if (!target || !state) return;
     if (target.hasAttribute('data-close')) return dialog.close();
     if (target.hasAttribute('data-refresh')) return open(state.repo, state.number, state.tab);
+    if (target.hasAttribute('data-merge')) {
+      state.merge = { method: state.pr.mergeMethods[0], busy: false, error: '' };
+      mergeBox();
+      // The Merge button just hid; keep focus inside the dialog even when a
+      // conflict leaves the confirm button disabled.
+      const confirm = dialog.querySelector('[data-merge-confirm]');
+      return (confirm?.disabled ? dialog.querySelector('[data-merge-cancel]') : confirm)?.focus();
+    }
+    if (target.hasAttribute('data-merge-cancel')) {
+      state.merge = null;
+      return mergeBox();
+    }
+    if (target.hasAttribute('data-merge-confirm')) return merge();
     if (target.dataset.tab) {
       state.tab = target.dataset.tab;
       content.scrollTop = 0;
@@ -372,6 +473,9 @@ window.createPrViewer = ({ api, esc, md }) => {
       state.filter = event.target.value;
       filterFiles();
     }
+  });
+  dialog.addEventListener('change', (event) => {
+    if (event.target.id === 'prv-merge-method' && state?.merge) state.merge.method = event.target.value;
   });
   content.addEventListener('change', (event) => {
     if (event.target.id === 'prv-split') {
