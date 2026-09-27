@@ -48,7 +48,7 @@ vi.mock('../lib/config.js', () => ({
     opencodeBin: '',
     githubToken: 'tok',
     workspaceDir: '/tmp/nowhere',
-    dev: { maxSessions: 3, timeoutMin: 60 },
+    dev: { maxSessions: 3, timeoutMin: 60, autoCompactTokens: 350000 },
     reviewLoop: { maxRounds: 3, lowFindingsUntilRound: 1 },
   }),
 }));
@@ -201,6 +201,7 @@ import {
   setReviewLoop,
   setQaLoop,
   renameDevSession,
+  setDevSessionAutoCompact,
   linkPrToSession,
   attachPrForBranch,
   spawnWorkerSession,
@@ -8180,7 +8181,281 @@ describe('manual Codex context compaction', () => {
     await expect(compactDevSession(job.id)).rejects.toThrow('idle');
     job.status = 'idle';
     job.contextUsage = { categories: [] };
-    await expect(compactDevSession(job.id)).rejects.toThrow('No Codex context');
+    await expect(compactDevSession(job.id)).rejects.toThrow('No Codex or Claude context');
+  });
+});
+
+describe('auto-compaction after a turn', () => {
+  let homeSpy;
+  let bin;
+  let children;
+  beforeEach(async () => {
+    homeSpy = vi.spyOn(providerTools, 'ensureCodexHome').mockReturnValue('/tmp/test-codex-auto-compact');
+    state.stored = [
+      {
+        id: 'auto-compact',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 2,
+        model: 'own-model',
+        workDir: '/tmp/workspace',
+        turns: 1,
+        chats: { 2: { sessionId: 'thread-1', started: true } },
+        contextTokens: 400000,
+        contextUsage: {
+          source: 'codex',
+          providerId: 2,
+          sessionId: 'thread-1',
+          model: 'own-model',
+          tokens: 400000,
+        },
+      },
+    ];
+    state.otherProviders = [{ id: 2, binary: 'codex', label: 'Codex entry', active: true }];
+    await initJobs();
+    getJob('auto-compact').status = 'idle';
+    getProviderForJob.mockReturnValue(state.otherProviders[0]);
+    captureProviderAuth.mockResolvedValue(undefined);
+    bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    children = [];
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      children.push(child);
+      return child;
+    });
+  });
+  afterEach(() => {
+    homeSpy.mockRestore();
+    bin.mockRestore();
+    spawn.mockReset();
+    getProviderForJob.mockReset();
+    captureProviderAuth.mockReset();
+    compactCodexThread.mockReset();
+  });
+
+  const idle = (job) =>
+    new Promise((resolve) => {
+      const onJob = (session) => {
+        if (session.id !== job.id || session.status !== 'idle') return;
+        bus.off('job', onJob);
+        resolve();
+      };
+      bus.on('job', onJob);
+    });
+
+  it('is a per-session switch, off until turned on', () => {
+    const job = getJob('auto-compact');
+    expect(publicJob(job)).toMatchObject({ autoCompactAt: 350000 });
+    expect(publicJob(job).autoCompact).toBeFalsy();
+    expect(setDevSessionAutoCompact(job.id, true).autoCompact).toBe(true);
+    expect(() => setDevSessionAutoCompact(job.id, 'yes')).toThrow('true or false');
+    expect(() => setDevSessionAutoCompact('missing', true)).toThrow('not found');
+    getProviderForJob.mockReturnValue({ id: 3, binary: 'grok' });
+    job.contextUsage = null;
+    expect(publicJob(job).autoCompactAt).toBeNull();
+  });
+
+  it('compacts past the threshold before the queued message runs, which waits instead of failing', async () => {
+    const job = getJob('auto-compact');
+    setDevSessionAutoCompact(job.id, true);
+    let finish;
+    compactCodexThread.mockImplementationOnce(
+      (opts) =>
+        new Promise((resolve) => {
+          finish = () => {
+            opts.onUsage({ tokens: 30000 });
+            resolve();
+          };
+        }),
+    );
+    sendDevMessage(job.id, 'First');
+    children[0].emit('close', 0);
+    await vi.waitFor(() => expect(compactCodexThread).toHaveBeenCalledTimes(1));
+    expect(compactCodexThread).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: 'thread-1' }));
+    expect(publicJob(job)).toMatchObject({ status: 'running', compacting: true });
+    expect(sendDevMessage(job.id, 'Second').queued.map((q) => q.text)).toEqual(['Second']);
+    expect(children).toHaveLength(1);
+    finish();
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(job.contextTokens).toBe(30000);
+    expect(job.contextUsage.compactedAt).toBeTruthy();
+    const done = idle(job);
+    children[1].emit('close', 0);
+    await done;
+    // The second turn ended under the threshold, so no second compaction.
+    expect(compactCodexThread).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a session that did not opt in, or is under the threshold, alone', async () => {
+    const job = getJob('auto-compact');
+    let done = idle(job);
+    sendDevMessage(job.id, 'Not opted in');
+    children[0].emit('close', 0);
+    await done;
+    setDevSessionAutoCompact(job.id, true);
+    job.contextUsage.tokens = 349999;
+    done = idle(job);
+    sendDevMessage(job.id, 'Under');
+    children[1].emit('close', 0);
+    await done;
+    expect(compactCodexThread).not.toHaveBeenCalled();
+  });
+
+  it('a failed compaction is reported and the session still settles', async () => {
+    const job = getJob('auto-compact');
+    setDevSessionAutoCompact(job.id, true);
+    compactCodexThread.mockRejectedValueOnce(new Error('No quota'));
+    const done = idle(job);
+    sendDevMessage(job.id, 'Go');
+    children[0].emit('close', 0);
+    await done;
+    expect(
+      job.events.some((e) => e.kind === 'info' && /compaction did not complete: No quota/.test(e.text)),
+    ).toBe(true);
+    expect(publicJob(job).compacting).toBe(false);
+  });
+});
+
+describe('auto-compaction while the context probe is out', () => {
+  let bin;
+  let children;
+  let job;
+  let sessions = 0;
+  // What `claude -p /context` prints for a thread of that size.
+  const report = (tokens) =>
+    JSON.stringify({
+      result: `**Tokens:** ${tokens} / 1m\n\n### Estimated usage by category\n\n| Messages | ${tokens} | 40.0% |\n`,
+    });
+  beforeEach(async () => {
+    // A session of its own per test: who is compacting, and which probe is
+    // out, are kept per session id for as long as the module lives.
+    const id = `auto-compact-claude-${++sessions}`;
+    state.stored = [
+      {
+        id,
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+        model: 'claude-fable-5-1',
+        workDir: '/tmp/workspace',
+        turns: 1,
+        chats: { 1: { sessionId: 'sid-1', started: true } },
+        contextTokens: 400000,
+        autoCompact: true,
+      },
+    ];
+    await initJobs();
+    job = getJob(id);
+    job.status = 'idle';
+    getProviderForJob.mockReturnValue(state.provider);
+    captureProviderAuth.mockResolvedValue(undefined);
+    bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    children = [];
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, args, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, args, ...rest);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin.resume();
+      child.args = args;
+      children.push(child);
+      return child;
+    });
+  });
+  afterEach(() => {
+    bin.mockRestore();
+    spawn.mockReset();
+    getProviderForJob.mockReset();
+    captureProviderAuth.mockReset();
+  });
+
+  const settled = () => vi.waitFor(() => expect(job.status).toBe('idle'));
+  // The turn's CLI exits, which leaves the /context probe it fired as the only
+  // thing the session is waiting on.
+  const endTurn = async () => {
+    children[0].emit('close', 0);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(children[1].args).toContain('/context');
+  };
+  const answer = (child, body) => {
+    child.stdout.end(body);
+    setImmediate(() => child.emit('close', 0));
+  };
+
+  it('compacts a claude thread on the number its probe reports, and books what the summary cost', async () => {
+    sendDevMessage(job.id, 'Go');
+    await endTurn();
+    answer(children[1], report('400k'));
+    await vi.waitFor(() => expect(children).toHaveLength(3));
+    expect(children[2].args.slice(0, 4)).toEqual(['-p', '/compact', '--resume', 'sid-1']);
+    expect(publicJob(job)).toMatchObject({ status: 'running', compacting: true });
+    answer(
+      children[2],
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: '',
+        total_cost_usd: 0.5,
+      }),
+    );
+    // The compacted thread is measured again, and that number is the one left.
+    await vi.waitFor(() => expect(children).toHaveLength(4));
+    expect(children[3].args).toContain('/context');
+    answer(children[3], report('30k'));
+    await settled();
+    expect(job.contextUsage).toMatchObject({ tokens: 30000, sessionId: 'sid-1' });
+    expect(job.contextUsage.compactedAt).toBeTruthy();
+    expect(job.costUsd).toBe(0.5);
+    expect(recordTurnUsage).toHaveBeenLastCalledWith(
+      job,
+      expect.objectContaining({ costUsd: 0.5 }),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(publicJob(job).compacting).toBe(false);
+  });
+
+  it('a Stop pressed while the probe is out calls the compaction off', async () => {
+    sendDevMessage(job.id, 'Go');
+    await endTurn();
+    cancelDevTurn(job.id);
+    answer(children[1], report('400k'));
+    await settled();
+    // Past the threshold all the same: it is the Stop that kept it from running.
+    expect(job.contextUsage.tokens).toBe(400000);
+    expect(children).toHaveLength(2);
+    expect(job.events.some((e) => e.kind === 'info' && /auto-compact threshold/.test(e.text))).toBe(false);
+  });
+
+  it('so does a close, which leaves no session to compact', async () => {
+    sendDevMessage(job.id, 'Go');
+    await endTurn();
+    await closeDevSession(job.id);
+    answer(children[1], report('400k'));
+    // The probe's number landing is the last a closed session hears of its turn.
+    await vi.waitFor(() => expect(job.contextUsage?.tokens).toBe(400000));
+    expect(children).toHaveLength(2);
+    expect(job.status).toBe('closed');
+  });
+
+  it('and so does switching it off meanwhile', async () => {
+    sendDevMessage(job.id, 'Go');
+    await endTurn();
+    setDevSessionAutoCompact(job.id, false);
+    answer(children[1], report('400k'));
+    await settled();
+    expect(job.contextUsage.tokens).toBe(400000);
+    expect(children).toHaveLength(2);
   });
 });
 

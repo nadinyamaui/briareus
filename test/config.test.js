@@ -345,16 +345,30 @@ describe('the database pool', () => {
 });
 
 describe('developer sessions', () => {
-  it('caps at three sessions and an hour by default', async () => {
+  it('caps at three sessions and an hour, and auto-compacts past 350k, by default', async () => {
     const { getConfig } = await loadConfig(complete());
 
-    expect(getConfig().dev).toEqual({ maxSessions: 3, timeoutMin: 60 });
+    expect(getConfig().dev).toEqual({ maxSessions: 3, timeoutMin: 60, autoCompactTokens: 350000 });
   });
 
   it('takes the caps that were given', async () => {
-    const { getConfig } = await loadConfig(complete({ DEV_MAX_SESSIONS: '8', DEV_TIMEOUT_MIN: '15' }));
+    const { getConfig } = await loadConfig(
+      complete({ DEV_MAX_SESSIONS: '8', DEV_TIMEOUT_MIN: '15', DEV_AUTO_COMPACT_TOKENS: '200000' }),
+    );
 
-    expect(getConfig().dev).toEqual({ maxSessions: 8, timeoutMin: 15 });
+    expect(getConfig().dev).toEqual({ maxSessions: 8, timeoutMin: 15, autoCompactTokens: 200000 });
+  });
+
+  it('reads an auto-compact threshold left empty as the default, not as off', async () => {
+    const { getConfig } = await loadConfig(complete({ DEV_AUTO_COMPACT_TOKENS: '' }));
+
+    expect(getConfig().dev.autoCompactTokens).toBe(350000);
+  });
+
+  it('switches auto-compaction off on 0', async () => {
+    const { getConfig } = await loadConfig(complete({ DEV_AUTO_COMPACT_TOKENS: '0' }));
+
+    expect(getConfig().dev.autoCompactTokens).toBe(0);
   });
 
   it('leaves the other two CLIs to be looked up the usual way', async () => {

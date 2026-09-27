@@ -1772,16 +1772,21 @@
       if (cu.reasoningOutputTokens != null)
         rows.push(row('Thread reasoning output', fmtTokens(cu.reasoningOutputTokens)));
       if (cu.at) rows.push(row('Context updated', esc(new Date(cu.at).toLocaleTimeString())));
-      if (cu.compactedAt)
-        rows.push(row('Last manual compact', esc(new Date(cu.compactedAt).toLocaleTimeString())));
     }
+    if (cu.compactedAt) rows.push(row('Last compact', esc(new Date(cu.compactedAt).toLocaleTimeString())));
     const compact =
       s.canCompact || s.compacting
-        ? `<button class="compact-context rounded border border-line px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50" ${s.compacting ? 'disabled' : ''} title="Summarize this Codex thread to free context; this uses the provider and may incur usage.">${s.compacting ? 'Compacting…' : 'Compact'}</button>`
+        ? `<button class="compact-context rounded border border-line px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50" ${s.compacting ? 'disabled' : ''} title="Summarize this conversation to free context; this uses the provider and may incur usage.">${s.compacting ? 'Compacting…' : 'Compact'}</button>`
         : '';
-    if (!ctx && !rows.length && !compact) return '';
+    // Per session: past the threshold, the turn that crossed it is followed by
+    // a compaction before anything queued runs.
+    const autoAt = s.autoCompactAt ? `${Math.round(s.autoCompactAt / 1000)}k` : '';
+    const auto = autoAt
+      ? `<label class="flex cursor-pointer items-center gap-1" title="After a turn leaves the context above ${autoAt} tokens, summarize the conversation automatically; this uses the provider and may incur usage."><input type="checkbox" class="auto-compact accent-accent" ${s.autoCompact ? 'checked' : ''}>Auto-compact ${autoAt}</label>`
+      : '';
+    if (!ctx && !rows.length && !compact && !auto) return '';
     return `<div class="${hasPr ? 'border-t border-line pt-2.5' : ''}">
-        <div class="mb-1 flex items-center justify-between text-[12px] tracking-wide text-muted"><span>Context usage</span>${compact}</div>
+        <div class="mb-1 flex items-center justify-between gap-2 text-[12px] tracking-wide text-muted"><span class="flex-1">Context usage</span>${auto}${compact}</div>
         ${ctx}
         <div class="${ctx ? 'mt-1.5 border-t border-line pt-1.5 ' : ''}flex flex-col gap-0.5">${rows.join('')}</div>
       </div>`;
@@ -1891,6 +1896,26 @@
   }
 
   $('pr-panel').addEventListener('click', async (e) => {
+    const auto = e.target.closest('.auto-compact');
+    if (auto) {
+      const s = panelSubject;
+      if (!s?.id) return;
+      auto.disabled = true;
+      try {
+        await api(`/api/dev/sessions/${encodeURIComponent(s.id)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ autoCompact: auto.checked }),
+        });
+        toast(auto.checked ? 'Auto-compact on for this session' : 'Auto-compact off for this session');
+      } catch (err) {
+        auto.checked = !auto.checked;
+        toast(err.message, true);
+      }
+      auto.disabled = false;
+      await loadSessions();
+      return;
+    }
     const compact = e.target.closest('.compact-context');
     if (compact) {
       const s = panelSubject;
@@ -1899,7 +1924,7 @@
       compact.textContent = 'Compacting…';
       try {
         await api(`/api/dev/sessions/${encodeURIComponent(s.id)}/compact`, { method: 'POST' });
-        toast('Codex context compacted');
+        toast('Context compacted');
       } catch (err) {
         toast(err.message, true);
       }

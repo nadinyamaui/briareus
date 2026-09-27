@@ -48,6 +48,7 @@ import {
   setReviewLoop,
   setQaLoop,
   renameDevSession,
+  setDevSessionAutoCompact,
   linkPrToSession,
   dropQueuedMessage,
   startDevServe,
@@ -1891,10 +1892,14 @@ app.post('/api/dev/sessions/:id/compact', async (req, res) => {
 });
 
 // Session metadata edits do not wake the agent: they only change how this
-// conversation is filed in the dashboard.
+// conversation is filed in the dashboard, or what happens after its turns.
 dashboard.register('patch', '/api/dev/sessions/:id', (req, res) => {
   try {
-    res.json({ session: renameDevSession(req.params.id, req.body?.title) });
+    const body = req.body || {};
+    if ('autoCompact' in body && !('title' in body)) {
+      return res.json({ session: setDevSessionAutoCompact(req.params.id, body.autoCompact) });
+    }
+    res.json({ session: renameDevSession(req.params.id, body.title) });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
