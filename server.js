@@ -13,7 +13,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
 import { getConfig, ROOT } from './lib/config.js';
-import { ACTIVE, assertAcceptingWork } from './lib/recovery.js';
+import { assertAcceptingMessage } from './lib/recovery.js';
 import { workerTranscript } from './lib/worker-transcript.js';
 import { assetCacheHeaders, pageHandler } from './lib/assets.js';
 import { initDb, dbHealthy } from './lib/db.js';
@@ -693,6 +693,8 @@ app.post('/api/agent/sessions/:id/message', (req, res) => {
     // the user steering a worker directly goes through /api/dev, never here.
     if (!DEV_OPEN.includes(worker.status)) assertWorkerSlot(orchestrator);
     assertWorkerBudget(orchestrator);
+    // A drain refuses the same sends the dashboard's message route does.
+    assertAcceptingMessage(worker);
     sendDevMessage(worker.id, String((req.body || {}).text || ''));
     res.json({ session: workerSummary(worker) });
   } catch (e) {
@@ -1803,13 +1805,7 @@ app.get('/api/dev/sessions/:id/events', (req, res) => {
 // the session could not accept at all.
 dashboard.register('post', '/api/dev/sessions/:id/message', (req, res) => {
   try {
-    // Draining refuses only a message that would start a turn on a settled
-    // session: an answer to a question, or a word to a turn under way, is how
-    // the work already in flight gets to finish. Only an open session's question
-    // counts: an interrupted one still flagged as asking would reopen first.
-    const job = getJob(req.params.id);
-    if (!job || !(ACTIVE.includes(job.status) || (job.status === 'idle' && job.awaitingAnswer)))
-      assertAcceptingWork();
+    assertAcceptingMessage(getJob(req.params.id));
     const { text, attachments, zeusRoles } = req.body || {};
     res.json({ session: sendDevMessage(req.params.id, text, attachments, zeusRoles) });
   } catch (e) {

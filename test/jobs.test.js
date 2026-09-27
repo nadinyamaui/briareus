@@ -8207,10 +8207,41 @@ describe('maintenance drain at the operator entry points', () => {
         startedOnPr: 77,
         chatStarted: false,
       },
+      {
+        id: 'drain-running',
+        kind: 'devchat',
+        status: 'running',
+        repo: 'acme/shop',
+        providerId: 1,
+        turns: 1,
+      },
+      {
+        id: 'drain-orch',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+        orchestrator: true,
+      },
+      {
+        id: 'drain-held',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+        turns: 1,
+        branch: 'feat/held',
+        reviewLoop: {
+          rounds: 1,
+          triage: { round: 1, prNumber: 77, findings: [{ key: 'k1', severity: 'high', title: 'A thing' }] },
+        },
+      },
     ];
     await initJobs();
     getJob('drain-idle').status = 'idle';
     getJob('drain-preview').status = 'idle';
+    getJob('drain-orch').status = 'idle';
+    getJob('drain-held').status = 'idle';
     setDraining(true);
   });
   afterAll(() => setDraining(false));
@@ -8236,6 +8267,26 @@ describe('maintenance drain at the operator entry points', () => {
     expect(reopenDevSession('drain-idle').id).toBe('drain-idle');
     expect(() => reopenDevSession('drain-interrupted')).toThrow(/Maintenance/);
     expect(getJob('drain-interrupted').status).toBe('interrupted');
+  });
+
+  it('records whether the restart caught a session mid-turn or idle', () => {
+    expect(getJob('drain-running')).toMatchObject({ status: 'interrupted', interruptedFrom: 'running' });
+    expect(getJob('drain-idle').interruptedFrom).toBe('idle');
+  });
+
+  it('refuses an orchestrator spawning a worker', () => {
+    expect(() => spawnWorkerSession(getJob('drain-orch'), { title: 'W', prompt: 'x' })).toThrow(
+      /Maintenance/,
+    );
+  });
+
+  it('refuses a triage that starts a fix before it records any verdict', async () => {
+    recordTriage.mockClear();
+    await expect(
+      triageLoopFindings('drain-held', { verdicts: [{ key: 'k1', decision: 'fix' }] }),
+    ).rejects.toThrow(/Maintenance/);
+    expect(recordTriage).not.toHaveBeenCalled();
+    expect(getJob('drain-held').reviewLoop.triage).toMatchObject({ round: 1 });
   });
 
   it('refuses a PR preview before it closes the one already there', async () => {

@@ -769,18 +769,22 @@ session in its own clone slot preserves commits and working files and
 refreshes the origin refs before running setup; a clean branch that is only
 behind origin is fast-forwarded, and otherwise the next turn is told the branch
 differs from origin. A new agent turn inspects what
-already happened before continuing. A slot another session has used since, or
+already happened before continuing. A slot another session has used since (each
+session records itself in the slot's `.git/briareus-owner`, so this holds after
+that session is deleted), or
 one whose checkout is off the session's branch or unreadable, is never reset in
 its place: the first gets a different clone, the others fail the reopen until
 someone inspects them. The clone pool does not hand out, and the daily workspace
-cleanup does not delete, a slot an interrupted or failed session left work in
-(except loop review, fix and QA children, which their parent retries, and
-sessions whose agent never started).
+cleanup does not delete, a slot a failed session, or one a restart interrupted
+mid-turn, left work in (except loop review, fix and QA children, which their
+parent retries, and sessions whose agent never started). A session that was
+idle at the restart reserves nothing and reopens like a closed one.
 
 `/maintenance` drains work: new top-level sessions, messages that would start
 a turn on a settled session, reopening, compaction, arming the review or QA
-loop, review retries and ▶ Run previews are refused, while answers to questions, messages to running
-turns and automatic child work still go through. The ready state
+loop, review retries, triage that marks findings to fix, orchestrator worker
+spawns and sends, and ▶ Run previews are refused, while answers to questions, messages to running
+turns and the loops' automatic reviews, fixes and QA runs still go through. The ready state
 also waits for running SSH commands. Resume accepting work cancels draining.
 This is an in-process gate, reset on restart; it does not deploy or restart the
 server. Wait for ready before the normal deployment procedure.

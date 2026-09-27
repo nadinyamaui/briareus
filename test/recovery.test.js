@@ -4,11 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
+  assertAcceptingMessage,
   assertAcceptingWork,
+  claimSlot,
   holdsRecoverableWork,
   inspectRecovery,
   maintenanceState,
   setDraining,
+  slotOwner,
   slotTakenOver,
 } from '../lib/recovery.js';
 afterEach(() => setDraining(false));
@@ -113,9 +116,38 @@ describe('recovery', () => {
     expect(report.canResume).toBe(false);
     expect(report.reason).toBe('Another session owns this workspace');
   });
+  it('refuses a slot whose owner marker names a session that is gone', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'recovery-'));
+    try {
+      execFileSync('git', ['-C', dir, 'init', '-b', 'x'], { stdio: 'pipe' });
+      const job = { id: 'a', kind: 'devchat', status: 'closed', branch: 'x', workDir: dir };
+      // A slot from before the marker falls back to the surviving records.
+      expect(slotOwner(dir)).toBe(null);
+      expect(slotTakenOver(job, [])).toBe(false);
+      claimSlot(dir, 'a');
+      expect(slotTakenOver(job, [])).toBe(false);
+      // A preview took the slot and was deleted: no record, only the marker.
+      claimSlot(dir, 'preview');
+      expect(slotOwner(dir)).toBe('preview');
+      expect(slotTakenOver(job, [])).toBe(true);
+      expect((await inspectRecovery(job)).reason).toBe('Another session owns this workspace');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
   it('reserves only slots that hold work someone can recover', () => {
-    const s = { status: 'interrupted', workDir: '/pool/x', branch: 'x', chatStarted: true };
+    const s = {
+      status: 'interrupted',
+      interruptedFrom: 'running',
+      workDir: '/pool/x',
+      branch: 'x',
+      chatStarted: true,
+    };
     expect(holdsRecoverableWork(s)).toBe(true);
+    // Idle at the restart: no unfinished turn, so it reopens like a closed one.
+    expect(holdsRecoverableWork({ ...s, interruptedFrom: 'idle' })).toBe(false);
+    expect(holdsRecoverableWork({ ...s, interruptedFrom: undefined })).toBe(false);
+    expect(holdsRecoverableWork({ ...s, status: 'failed', interruptedFrom: undefined })).toBe(true);
     // The branch is set before the first fetch and setup, so a first
     // preparation that failed leaves one with no agent work behind it.
     expect(holdsRecoverableWork({ ...s, chatStarted: false })).toBe(false);
@@ -128,6 +160,18 @@ describe('recovery', () => {
     expect(holdsRecoverableWork({ ...s, loopFixParentId: 'p' })).toBe(false);
     expect(holdsRecoverableWork({ ...s, qaParentId: 'p' })).toBe(false);
     expect(holdsRecoverableWork({ ...s, loopParentId: 'p', failureUnreported: true })).toBe(true);
+  });
+  it('refuses only messages that would start a turn on a settled session while draining', () => {
+    setDraining(true);
+    expect(() => assertAcceptingMessage({ status: 'running' })).not.toThrow();
+    expect(() => assertAcceptingMessage({ status: 'idle', awaitingAnswer: true })).not.toThrow();
+    expect(() => assertAcceptingMessage({ status: 'idle' })).toThrow('Maintenance');
+    expect(() => assertAcceptingMessage({ status: 'closed' })).toThrow('Maintenance');
+    expect(() => assertAcceptingMessage({ status: 'interrupted', awaitingAnswer: true })).toThrow(
+      'Maintenance',
+    );
+    setDraining(false);
+    expect(() => assertAcceptingMessage({ status: 'closed' })).not.toThrow();
   });
   it('drains active turns, queues, loops and SSH commands', () => {
     setDraining(true);
