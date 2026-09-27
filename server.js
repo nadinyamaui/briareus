@@ -19,6 +19,7 @@ import { createMobileAuth } from './lib/mobile-auth.js';
 import { mobileApiRoutes, mobileSettingsRoutes } from './lib/mobile-api.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
+import { sessionWebhookRoutes } from './lib/webhook-routes.js';
 import fs from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
@@ -59,6 +60,9 @@ import {
   workerSummary,
   assertWorkerSlot,
   assertWorkerBudget,
+  sessionWebhookState,
+  setSessionWebhook,
+  rotateSessionWebhook,
   orchestratorBudgetStatus,
   triageLoopFindings,
   triageReviewFindings,
@@ -171,7 +175,7 @@ import {
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
 import { securityHeaders, sameOriginWrites } from './lib/security.js';
 import { listWorkspaces, resetSetup, cleanWorkspace, startWorkspacePruner } from './lib/workspaces.js';
-import { githubWebhookUrl } from './lib/webhooksecrets.js';
+import { githubWebhookUrl, sessionWebhookKey, sessionWebhookUrl } from './lib/webhooksecrets.js';
 import { childEnv } from './lib/childenv.js';
 
 // Before anything else: .env has to be complete. Every setting without a
@@ -1891,6 +1895,18 @@ app.post('/api/dev/sessions/:id/compact', async (req, res) => {
   }
 });
 
+// Where an outside system posts to wake this session, the key it signs with,
+// and the caps its turns run under (lib/webhook-routes.js).
+app.use(
+  sessionWebhookRoutes({
+    state: sessionWebhookState,
+    update: setSessionWebhook,
+    rotate: rotateSessionWebhook,
+    url: sessionWebhookUrl,
+    key: sessionWebhookKey,
+  }),
+);
+
 // Session metadata edits do not wake the agent: they only change how this
 // conversation is filed in the dashboard, or what happens after its turns.
 dashboard.register('patch', '/api/dev/sessions/:id', (req, res) => {
@@ -2154,8 +2170,8 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
       `  webhooks: ${
         githubWebhookUrl()
           ? `github → ${githubWebhookUrl()}`
-          : 'off, PUBLIC_BASE_URL is not a public https hostname, so session panels sync on the timer alone'
-      }`,
+          : 'github off, PUBLIC_BASE_URL is not a public https hostname, so session panels sync on the timer alone'
+      }; sessions → ${getConfig().publicBaseUrl}/webhooks/session/<id>`,
     );
   });
 })();

@@ -36,6 +36,16 @@ describe('operator attention', () => {
     expect(items.map((i) => i.id)).toEqual(['a:review-stalled', 'a:qa-verdict']);
     expect(items[1].summary).toContain('sheet 404');
   });
+  it('lists a webhook that stopped taking deliveries, until the session is closed', () => {
+    const paused = { kind: 'turns', reason: '10 automatic turns ran since your last message', at: 'x' };
+    const items = attentionItems([
+      { id: 'a', status: 'idle', webhook: { armed: true }, webhookPaused: paused },
+      { id: 'b', status: 'idle', webhook: { armed: true }, webhookPaused: null },
+      { id: 'c', status: 'closed', webhook: { armed: true }, webhookPaused: paused },
+    ]);
+    expect(items.map((i) => i.id)).toEqual(['a:webhook-paused']);
+    expect(items[0]).toMatchObject({ summary: paused.reason, href: '/sessions/a', at: 'x' });
+  });
   it('reports a failed loop child only on its parent', () => {
     const items = attentionItems([
       { id: 'p', status: 'idle', reviewLoop: { failure: { reason: 'quota' } } },

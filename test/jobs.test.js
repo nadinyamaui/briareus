@@ -208,6 +208,12 @@ import {
   workerSessionsFor,
   workerSummary,
   deliverWorkerNotices,
+  deliverToSession,
+  flushDeliveries,
+  setSessionWebhook,
+  rotateSessionWebhook,
+  sessionWebhookState,
+  flushJobs,
   sendDevMessage,
   orchestratorSpend,
   sessionUsage,
@@ -2473,6 +2479,7 @@ describe('the unattended-turn breaker and the delivery holds', () => {
         pendingWorkerNotices: [notice('brk-w1')],
       }),
       row('brk-reset', { orchestrator: true, unattendedTurns: 7, unattendedSaid: true }),
+      row('brk-hook', { orchestrator: true, unattendedTurns: 7, unattendedSaid: true }),
       row('brk-stop', {
         orchestrator: true,
         turnCanceled: true,
@@ -2486,7 +2493,8 @@ describe('the unattended-turn breaker and the delivery holds', () => {
       row('brk-closed', { parentId: 'brk-gone' }), // stays closed
     ];
     await initJobs();
-    for (const id of ['brk-orch', 'brk-reset', 'brk-stop', 'brk-gone', 'brk-w1']) getJob(id).status = 'idle';
+    for (const id of ['brk-orch', 'brk-reset', 'brk-hook', 'brk-stop', 'brk-gone', 'brk-w1'])
+      getJob(id).status = 'idle';
   });
 
   it('past the cap, updates arrive as lines the user reads, not injected turns', () => {
@@ -2509,6 +2517,14 @@ describe('the unattended-turn breaker and the delivery holds', () => {
     expect(orch.unattendedSaid).toBe(false);
   });
 
+  it('a webhook delivery is no sign of the user either: the breaker stays tripped', () => {
+    sendDevMessage('brk-hook', 'CI failed', undefined, undefined, { unattended: true });
+    const orch = getJob('brk-hook');
+    expect(orch.unattendedTurns).toBe(7);
+    expect(orch.unattendedSaid).toBe(true);
+    expect(orch.events.some((e) => e.kind === 'user' && e.text === 'CI failed')).toBe(true);
+  });
+
   it('■ Stop holds delivery: the next turn is the user’s, not an injected one', () => {
     const orch = getJob('brk-stop');
     deliverWorkerNotices(orch);
@@ -2521,6 +2537,554 @@ describe('the unattended-turn breaker and the delivery holds', () => {
     deliverWorkerNotices(orch); // brk-closed is closed, brk-deleted never existed
     expect(orch.pendingWorkerNotices).toHaveLength(0);
     expect(orch.events.filter((e) => e.kind === 'user')).toHaveLength(0);
+  });
+});
+
+describe('webhook deliveries', () => {
+  const row = (id, extra) => ({
+    id,
+    kind: 'devchat',
+    status: 'closed',
+    repo: 'acme/hook',
+    providerId: 1,
+    turns: 1,
+    createdAt: '2026-08-29T00:00:00.000Z',
+    meta: {},
+    // A conversation the provider can resume, so a turn's prompt is the
+    // message alone and not the briefing in front of it.
+    chats: { 1: { sessionId: 'resume-id', started: true } },
+    ...extra,
+  });
+  const armed = (extra) => ({ armed: true, epoch: 0, perHour: 30, maxTurns: 10, budgetUsd: 0, ...extra });
+  const IDLE = [
+    'hk-off',
+    'hk-free',
+    'hk-busy',
+    'hk-ask',
+    'hk-stop',
+    'hk-rate',
+    'hk-turns',
+    'hk-budget',
+    'hk-orch',
+    'hk-dup',
+    'hk-full',
+    'hk-zeus',
+    'hk-fail',
+    'hk-spend',
+    'hk-close',
+    'hk-brief',
+    'hk-live',
+    'hk-rotate',
+    'hk-public',
+    'hk-guard',
+    'hk-drain',
+  ];
+
+  beforeAll(async () => {
+    state.stored = [
+      ...IDLE.filter((id) => !['hk-off', 'hk-orch', 'hk-zeus', 'hk-brief'].includes(id)).map((id) =>
+        row(id, { webhook: armed() }),
+      ),
+      row('hk-off', {}),
+      row('hk-orch', { orchestrator: true, costUsd: 5, webhook: armed() }),
+      row('hk-zeus', {
+        orchestrator: true,
+        zeus: true,
+        zeusProposalPrompt: 'the shared prompt',
+        webhook: armed(),
+      }),
+      row('hk-brief', { chats: undefined, webhook: armed() }),
+      row('hk-closed', { webhook: armed() }),
+      row('hk-noslot', { webhook: armed() }),
+      row('hk-failed', { status: 'failed', webhook: armed() }),
+      row('hk-worker', { parentId: 'hk-orch' }),
+      row('hk-review', { autoClose: true, reviewBranch: 'feature' }),
+      row('hk-loopfix', { loopFixParentId: 'hk-free' }),
+      row('hk-analyst', { readOnly: true }),
+    ];
+    await initJobs();
+    for (const id of IDLE) getJob(id).status = 'idle';
+    getJob('hk-ask').awaitingAnswer = true;
+    getJob('hk-stop').turnCanceled = true;
+  });
+
+  // A provider CLI that answers when the test says so: every turn is one
+  // child, and what it was told is what it read from its stdin.
+  let cli;
+  function fakeCli(binary = 'codex') {
+    getProviderForJob.mockReturnValue({ ...state.provider, binary });
+    captureProviderAuth.mockResolvedValue(undefined);
+    const bin = vi.spyOn(BINARIES[binary], 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    const children = [];
+    const prompts = [];
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin.on('data', (chunk) => prompts.push(chunk.toString()));
+      children.push(child);
+      return child;
+    });
+    cli = {
+      children,
+      prompts,
+      // The turn ends, and the test goes on once the session has settled.
+      async finish(job, code = 0, turn = children.length - 1) {
+        const settled = new Promise((resolve) => {
+          const onJob = (session) => {
+            if (session.id !== job.id || session.status !== 'idle') return;
+            bus.off('job', onJob);
+            resolve();
+          };
+          bus.on('job', onJob);
+        });
+        children[turn].emit('close', code);
+        await settled;
+      },
+      restore() {
+        bin.mockRestore();
+        spawn.mockReset();
+        getProviderForJob.mockReset();
+        captureProviderAuth.mockReset();
+      },
+    };
+    return cli;
+  }
+  afterEach(() => {
+    if (cli) cli.restore();
+    cli = null;
+    setDraining(false);
+    state.claimsServer = false;
+    state.capacity = 3;
+  });
+
+  const users = (job) => job.events.filter((e) => e.kind === 'user');
+  const infos = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
+  const refused = (fn) => {
+    try {
+      fn();
+    } catch (e) {
+      return { status: e.status, message: e.message, retryAfter: e.retryAfter };
+    }
+    return null;
+  };
+
+  it('is refused by a session nobody armed, and by one that does not exist', () => {
+    expect(refused(() => deliverToSession('hk-off', { text: 'hi' }))).toMatchObject({
+      status: 409,
+      message: expect.stringMatching(/webhook is off/),
+    });
+    expect(refused(() => deliverToSession('hk-nowhere', { text: 'hi' }))).toMatchObject({ status: 404 });
+    expect(users(getJob('hk-off'))).toHaveLength(0);
+    expect(getJob('hk-off').pendingDeliveries).toBeUndefined();
+  });
+
+  it('starts a turn of its own on a session that is free, told as information from outside', async () => {
+    const { prompts } = fakeCli();
+    const job = getJob('hk-free');
+    const outcome = deliverToSession('hk-free', { text: 'The nightly build failed', source: 'ci', id: 'a1' });
+    expect(outcome).toEqual({ status: 'running', held: 0 });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toMatch(/^Webhook delivery, not from the operator\. /);
+    expect(prompts[0]).toMatch(
+      /--- delivery, from ci, received \S+ \[[0-9a-f]{12}\] ---\nThe nightly build failed\n/,
+    );
+    const [bubble] = users(job);
+    expect(bubble.via).toBe('webhook');
+    expect(bubble.text).toBe(prompts[0]);
+    expect(job.unattendedTurn).toBe(true);
+    expect(job.unattendedTurns).toBe(1);
+    await cli.finish(job);
+    // A turn somebody asked for is theirs again.
+    sendDevMessage('hk-free', 'thanks');
+    expect(job.unattendedTurn).toBe(false);
+    expect(job.unattendedTurns).toBe(0);
+    expect(users(job)[1].via).toBeUndefined();
+    await cli.finish(job);
+  });
+
+  it('waits behind a turn under way, and everything held goes as one turn when it ends', async () => {
+    const { prompts } = fakeCli();
+    const job = getJob('hk-busy');
+    sendDevMessage('hk-busy', 'Refactor the importer');
+    expect(deliverToSession('hk-busy', { text: 'first', source: 'a' })).toEqual({ status: 'held', held: 1 });
+    expect(deliverToSession('hk-busy', { text: 'second', source: 'b' })).toEqual({ status: 'held', held: 2 });
+    // Held is not queued: the composer's queue is for what the user typed.
+    expect(prompts).toHaveLength(1);
+    expect(publicJob(job).queued).toBeUndefined();
+    expect(publicJob(job).heldDeliveries).toBe(2);
+    expect(users(job)).toHaveLength(1);
+    await cli.finish(job, 0, 0);
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    expect(prompts[1]).toMatch(/^Webhook deliveries \(2\), not from the operator\. /);
+    expect(prompts[1]).toMatch(/delivery 1 of 2, from a, [^\n]+\nfirst\n/);
+    expect(prompts[1]).toMatch(/delivery 2 of 2, from b, [^\n]+\nsecond\n/);
+    expect(users(job)).toHaveLength(2);
+    expect(job.pendingDeliveries).toHaveLength(0);
+    expect(publicJob(job).heldDeliveries).toBeUndefined();
+    // One turn for the two of them.
+    expect(job.unattendedTurns).toBe(1);
+    await cli.finish(job, 0, 1);
+  });
+
+  it('never joins a claude turn still taking messages: what the user types does, a delivery waits', async () => {
+    fakeCli('claude');
+    const job = getJob('hk-live');
+    const writes = [];
+    sendDevMessage('hk-live', 'Start the agents');
+    cli.children[0].stdin.on('data', (chunk) => writes.push(chunk.toString()));
+    expect(publicJob(job).liveInput).toBe(true);
+    expect(deliverToSession('hk-live', { text: 'outside words' })).toEqual({ status: 'held', held: 1 });
+    sendDevMessage('hk-live', 'And check the logs');
+    expect(writes.join('')).toContain('And check the logs');
+    expect(writes.join('')).not.toContain('outside words');
+    expect(users(job).map((e) => e.text)).toEqual(['Start the agents', 'And check the logs']);
+    expect(job.unattendedTurn).toBe(false);
+    job.pendingDeliveries = [];
+    await cli.finish(job);
+  });
+
+  it('answers no question: it waits for the operator’s answer, which goes first', async () => {
+    const { prompts } = fakeCli();
+    const job = getJob('hk-ask');
+    expect(deliverToSession('hk-ask', { text: 'Yes, proceed', source: 'whatsapp' })).toEqual({
+      status: 'held',
+      held: 1,
+    });
+    expect(deliverToSession('hk-ask', { text: 'Do it now' })).toEqual({ status: 'held', held: 2 });
+    expect(job.awaitingAnswer).toBe(true);
+    expect(prompts).toHaveLength(0);
+    expect(users(job)).toHaveLength(0);
+    // Said once, however many wait.
+    expect(infos(job).filter((t) => t.includes('A webhook delivery is waiting'))).toEqual([
+      expect.stringMatching(/waiting for your answer, which a delivery is not/),
+    ]);
+    // Nothing else delivers it while the question stands.
+    expect(flushDeliveries(job)).toBe(false);
+    expect(job.awaitingAnswer).toBe(true);
+
+    sendDevMessage('hk-ask', 'No. Leave the branch alone.');
+    expect(job.awaitingAnswer).toBe(false);
+    expect(prompts).toEqual(['No. Leave the branch alone.']);
+    await cli.finish(job, 0, 0);
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    expect(prompts[1]).toContain('Yes, proceed');
+    expect(prompts[1]).toMatch(/^Webhook deliveries \(2\), not from the operator\. /);
+    await cli.finish(job, 0, 1);
+  });
+
+  it('waits after ■ Stop: the next turn is the operator’s', () => {
+    fakeCli();
+    const job = getJob('hk-stop');
+    expect(deliverToSession('hk-stop', { text: 'hi' })).toEqual({ status: 'held', held: 1 });
+    expect(cli.prompts).toHaveLength(0);
+    expect(infos(job).some((t) => t.includes('you stopped the last turn'))).toBe(true);
+  });
+
+  it('a delivery already taken is not taken twice', async () => {
+    fakeCli();
+    const job = getJob('hk-dup');
+    expect(deliverToSession('hk-dup', { text: 'client 4411 has no service', id: 'wamid-1' }).status).toBe(
+      'running',
+    );
+    expect(deliverToSession('hk-dup', { text: 'client 4411 has no service', id: 'wamid-1' })).toEqual({
+      status: 'duplicate',
+    });
+    expect(cli.prompts).toHaveLength(1);
+    expect(job.pendingDeliveries).toHaveLength(0);
+    // Deliveries nobody named are each their own.
+    expect(deliverToSession('hk-dup', { text: 'same words' }).status).toBe('held');
+    expect(deliverToSession('hk-dup', { text: 'same words' }).status).toBe('held');
+    expect(job.pendingDeliveries).toHaveLength(2);
+    job.pendingDeliveries = [];
+    await cli.finish(job);
+  });
+
+  it('takes so many an hour and no more, and says when to come back', async () => {
+    fakeCli();
+    const job = getJob('hk-rate');
+    setSessionWebhook('hk-rate', { perHour: 2 });
+    expect(deliverToSession('hk-rate', { text: 'one' }).status).toBe('running');
+    expect(deliverToSession('hk-rate', { text: 'two' }).status).toBe('held');
+    const third = refused(() => deliverToSession('hk-rate', { text: 'three' }));
+    expect(third).toMatchObject({ status: 429, message: expect.stringMatching(/2 deliveries an hour/) });
+    expect(third.retryAfter).toBeGreaterThan(3500);
+    expect(job.pendingDeliveries).toHaveLength(1);
+    job.pendingDeliveries = [];
+    await cli.finish(job);
+  });
+
+  it('pauses after so many turns in a row with no word from the operator, on any session', async () => {
+    fakeCli();
+    const job = getJob('hk-turns');
+    setSessionWebhook('hk-turns', { maxTurns: 1 });
+    expect(deliverToSession('hk-turns', { text: 'one' }).status).toBe('running');
+    await cli.finish(job);
+    for (const text of ['two', 'three']) {
+      expect(refused(() => deliverToSession('hk-turns', { text }))).toMatchObject({
+        status: 429,
+        message: expect.stringMatching(/1 automatic turns ran since your last message/),
+      });
+    }
+    expect(job.webhookPaused).toMatchObject({ kind: 'turns' });
+    expect(infos(job).filter((t) => t.startsWith('Webhook paused.'))).toHaveLength(1);
+    expect(cli.prompts).toHaveLength(1);
+    // A word from the operator is what lifts it.
+    sendDevMessage('hk-turns', 'carry on');
+    expect(job.webhookPaused).toBe(null);
+    expect(job.unattendedTurns).toBe(0);
+    await cli.finish(job);
+    expect(deliverToSession('hk-turns', { text: 'four' }).status).toBe('running');
+    await cli.finish(job);
+  });
+
+  it('stops at what its turns may spend in a day, until that frees up or the cap moves', async () => {
+    fakeCli();
+    const job = getJob('hk-budget');
+    setSessionWebhook('hk-budget', { budgetUsd: 2 });
+    job.webhook.spent = { [new Date().toISOString().slice(0, 13)]: 2.5 };
+    expect(refused(() => deliverToSession('hk-budget', { text: 'one' }))).toMatchObject({
+      status: 429,
+      retryAfter: 3600,
+      message: expect.stringMatching(/spent \$2\.50 of the \$2\.00/),
+    });
+    expect(job.webhookPaused).toMatchObject({ kind: 'budget' });
+    expect(sessionWebhookState('hk-budget')).toMatchObject({ spentUsd: 2.5, paused: expect.any(String) });
+    setSessionWebhook('hk-budget', { budgetUsd: 5 });
+    expect(job.webhookPaused).toBe(null);
+    expect(deliverToSession('hk-budget', { text: 'two' }).status).toBe('running');
+    await cli.finish(job);
+  });
+
+  it('does not cross an orchestration’s own budget', () => {
+    fakeCli();
+    state.projects = [{ repo: 'acme/hook', label: 'Hook', localDir: '', workerBudgetUsd: 1 }];
+    const job = getJob('hk-orch');
+    expect(orchestratorSpend(job)).toBeGreaterThan(1);
+    expect(refused(() => deliverToSession('hk-orch', { text: 'OLT down' }))).toMatchObject({
+      status: 429,
+      message: expect.stringMatching(/spent \$5\.00 of its \$1\.00 budget/),
+    });
+    expect(users(job)).toHaveLength(0);
+    expect(cli.prompts).toHaveLength(0);
+  });
+
+  it('counts what its turn spent, and nothing of a turn somebody asked for', async () => {
+    fakeCli();
+    const job = getJob('hk-spend');
+    deliverToSession('hk-spend', { text: 'one' });
+    job.costUsd = (job.costUsd || 0) + 0.75;
+    await cli.finish(job);
+    expect(sessionWebhookState('hk-spend').spentUsd).toBe(0.75);
+    sendDevMessage('hk-spend', 'mine');
+    job.costUsd += 3;
+    await cli.finish(job);
+    expect(sessionWebhookState('hk-spend').spentUsd).toBe(0.75);
+  });
+
+  it('holds only so much for a session that is not reading', () => {
+    fakeCli();
+    const job = getJob('hk-full');
+    job.awaitingAnswer = true;
+    setSessionWebhook('hk-full', { perHour: 600 });
+    for (let i = 0; i < 30; i++) deliverToSession('hk-full', { text: `delivery ${i}` });
+    expect(refused(() => deliverToSession('hk-full', { text: 'one too many' }))).toMatchObject({
+      status: 429,
+      retryAfter: 60,
+    });
+    job.pendingDeliveries = [{ text: 'x'.repeat(50000), source: '', at: 'now', id: null }];
+    expect(refused(() => deliverToSession('hk-full', { text: 'y'.repeat(15000) }))).toMatchObject({
+      status: 429,
+    });
+    expect(deliverToSession('hk-full', { text: 'y'.repeat(5000) }).status).toBe('held');
+  });
+
+  it('is no new brief to a Zeus session', async () => {
+    fakeCli();
+    const job = getJob('hk-zeus');
+    expect(deliverToSession('hk-zeus', { text: 'CI failed' }).status).toBe('running');
+    expect(job.zeusProposalPrompt).toBe('the shared prompt');
+    await cli.finish(job);
+  });
+
+  it('a turn it started that fails pauses the webhook until the operator has looked', async () => {
+    fakeCli();
+    const job = getJob('hk-fail');
+    deliverToSession('hk-fail', { text: 'one' });
+    await cli.finish(job, 1);
+    expect(job.webhookPaused).toMatchObject({ kind: 'failed' });
+    expect(refused(() => deliverToSession('hk-fail', { text: 'two' }))).toMatchObject({
+      status: 429,
+      message: expect.stringMatching(/A turn started by a webhook delivery failed/),
+    });
+    expect(cli.prompts).toHaveLength(1);
+    sendDevMessage('hk-fail', 'what happened?');
+    expect(job.webhookPaused).toBe(null);
+    await cli.finish(job);
+    expect(deliverToSession('hk-fail', { text: 'three' }).status).toBe('running');
+    await cli.finish(job);
+  });
+
+  it('wakes a closed session, and holds nothing for one that cannot be woken', () => {
+    const woken = getJob('hk-closed');
+    expect(deliverToSession('hk-closed', { text: 'wake up' }).status).toBe('running');
+    expect(woken.status).not.toBe('closed');
+    expect(users(woken)).toHaveLength(1);
+
+    state.claimsServer = true;
+    state.capacity = 0;
+    const stuck = getJob('hk-noslot');
+    expect(refused(() => deliverToSession('hk-noslot', { text: 'wake up', id: 'n1' }))).toMatchObject({
+      status: 409,
+      message: expect.stringMatching(/holding a database server/),
+    });
+    expect(stuck.status).toBe('closed');
+    expect(stuck.pendingDeliveries).toHaveLength(0);
+    expect(users(stuck)).toHaveLength(0);
+    expect(stuck.unattendedTurns || 0).toBe(0);
+    // Refused, so its sender's retry is no duplicate.
+    expect(stuck.webhook.seen || []).toEqual([]);
+  });
+
+  it('is refused while the dashboard drains for a restart, and by a session that failed', () => {
+    fakeCli();
+    setDraining(true);
+    expect(refused(() => deliverToSession('hk-drain', { text: 'hi' }))).toMatchObject({ status: 409 });
+    expect(getJob('hk-drain').pendingDeliveries).toHaveLength(0);
+    setDraining(false);
+    expect(refused(() => deliverToSession('hk-failed', { text: 'hi' }))).toMatchObject({
+      status: 409,
+      message: expect.stringMatching(/failed and takes no deliveries/),
+    });
+  });
+
+  it('what is held goes with a close, and the transcript says so', async () => {
+    fakeCli();
+    const job = getJob('hk-close');
+    job.awaitingAnswer = true;
+    deliverToSession('hk-close', { text: 'one' });
+    deliverToSession('hk-close', { text: 'two' });
+    await closeDevSession('hk-close');
+    expect(job.pendingDeliveries).toHaveLength(0);
+    expect(infos(job)).toContain(
+      '2 webhook deliveries that were waiting for this session are dropped with this close.',
+    );
+  });
+
+  it('can only be armed on a session somebody talks to', () => {
+    for (const [id, why] of [
+      ['hk-worker', /arm the orchestrator instead/],
+      ['hk-review', /ends by itself/],
+      ['hk-loopfix', /review loop’s own session/],
+      ['hk-analyst', /read-only analyst/],
+    ]) {
+      expect(() => setSessionWebhook(id, { armed: true })).toThrow(why);
+      expect(sessionWebhookState(id)).toMatchObject({ armed: false, unfit: expect.stringMatching(why) });
+      expect(getJob(id).webhook).toBeUndefined();
+    }
+    expect(() => setSessionWebhook('hk-nowhere', { armed: true })).toThrow('Session not found');
+    expect(() => setSessionWebhook('hk-off', { perHour: 0 })).toThrow(/perHour/);
+    expect(sessionWebhookState('hk-off')).toMatchObject({ armed: false, unfit: null, held: 0, paused: null });
+  });
+
+  it('arming and turning off are said in the transcript; turning off drops what was held', () => {
+    fakeCli();
+    const job = getJob('hk-off');
+    expect(setSessionWebhook('hk-off', { armed: true, maxTurns: 25 })).toMatchObject({
+      armed: true,
+      maxTurns: 25,
+    });
+    expect(infos(job).at(-1)).toMatch(/^Webhook armed\. .*at most 30 an hour and 25 turns in a row\.$/);
+    job.awaitingAnswer = true;
+    deliverToSession('hk-off', { text: 'held' });
+    expect(setSessionWebhook('hk-off', { armed: false })).toMatchObject({ armed: false, held: 0 });
+    expect(infos(job).slice(-2)).toEqual([
+      'Webhook turned off. Deliveries are refused until it is armed.',
+      '1 webhook delivery that was waiting for this session is dropped with the webhook being turned off.',
+    ]);
+    expect(refused(() => deliverToSession('hk-off', { text: 'hi' }))).toMatchObject({ status: 409 });
+    job.awaitingAnswer = false;
+  });
+
+  it('rotating raises the epoch the key is derived from, and nothing else', () => {
+    const job = getJob('hk-rotate');
+    job.webhook = { ...job.webhook, perHour: 77, seen: ['a'] };
+    expect(rotateSessionWebhook('hk-rotate')).toMatchObject({ armed: true, epoch: 1, perHour: 77 });
+    expect(rotateSessionWebhook('hk-rotate')).toMatchObject({ epoch: 2 });
+    expect(job.webhook.seen).toEqual(['a']);
+    expect(infos(job).at(-1)).toMatch(/^Webhook key rotated\./);
+  });
+
+  it('the pages get the settings and a count; the row keeps the deliveries and the bookkeeping', async () => {
+    fakeCli();
+    const job = getJob('hk-public');
+    job.awaitingAnswer = true;
+    deliverToSession('hk-public', { text: 'a customer wrote this', source: 'whatsapp', id: 'w1' });
+    const shown = publicJob(job);
+    expect(shown.heldDeliveries).toBe(1);
+    expect(shown.pendingDeliveries).toBeUndefined();
+    expect(shown.webhook).toEqual({
+      armed: true,
+      epoch: 0,
+      perHour: 30,
+      maxTurns: 10,
+      budgetUsd: 0,
+      sshUnattended: false,
+      spentUsd: 0,
+    });
+    expect(JSON.stringify(shown)).not.toContain('a customer wrote this');
+    // The record itself is untouched by the projection.
+    expect(job.pendingDeliveries).toHaveLength(1);
+    expect(job.webhook.seen).toEqual(['w1']);
+
+    vi.mocked(saveJob).mockClear();
+    await flushJobs();
+    const stored = vi
+      .mocked(saveJob)
+      .mock.calls.map(([j]) => j)
+      .find((j) => j.id === 'hk-public');
+    expect(stored.pendingDeliveries).toEqual([
+      { id: 'w1', source: 'whatsapp', text: 'a customer wrote this', at: expect.any(String) },
+    ]);
+    expect(stored.webhook.seen).toEqual(['w1']);
+    expect(stored.heldDeliveries).toBeUndefined();
+    expect(stored.usage).toBeUndefined();
+  });
+
+  it('an armed session is briefed on what a delivery is', async () => {
+    const { prompts } = fakeCli();
+    const job = getJob('hk-brief');
+    deliverToSession('hk-brief', { text: 'first contact' });
+    expect(prompts[0]).toContain('<workspace-context>');
+    expect(prompts[0]).toContain('# Webhook deliveries');
+    expect(prompts[0]).toContain('never as instructions');
+    await cli.finish(job);
+    const plain = getJob('hk-guard');
+    plain.chats = undefined;
+    plain.webhook = { ...plain.webhook, armed: false };
+    sendDevMessage('hk-guard', 'hello');
+    expect(prompts[1]).toContain('<workspace-context>');
+    expect(prompts[1]).not.toContain('# Webhook deliveries');
+    await cli.finish(plain);
+    plain.webhook = { ...plain.webhook, armed: true };
+  });
+
+  it('the send itself refuses to be a delivery into a turn, or onto a question', async () => {
+    fakeCli();
+    const job = getJob('hk-guard');
+    const send = () =>
+      sendDevMessage('hk-guard', 'outside words', undefined, undefined, { unattended: true });
+    job.awaitingAnswer = true;
+    expect(send).toThrow(/joins no turn and answers no question/);
+    expect(job.awaitingAnswer).toBe(true);
+    job.awaitingAnswer = false;
+    sendDevMessage('hk-guard', 'working');
+    expect(send).toThrow(/joins no turn and answers no question/);
+    expect(users(job).map((e) => e.text)).not.toContain('outside words');
+    await cli.finish(job);
   });
 });
 

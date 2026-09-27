@@ -200,6 +200,22 @@
     toastTimer = setTimeout(() => t.classList.add('hidden'), 4000);
   }
 
+  // Copy to the clipboard and say so on the button pressed: ✓ for a moment,
+  // then its own label back.
+  function copyText(text, btn) {
+    if (btn && !btn.dataset.label) btn.dataset.label = btn.textContent;
+    return navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        if (!btn) return;
+        btn.textContent = '✓';
+        setTimeout(() => {
+          btn.textContent = btn.dataset.label;
+        }, 1200);
+      })
+      .catch(() => toast('Could not copy to clipboard', true));
+  }
+
   const prViewer = window.createPrViewer({
     api,
     esc,
@@ -300,7 +316,9 @@
     // Keep focus inside the dialog while it is open: its controls, when the
     // question carries some, then the two buttons.
     if (e.key === 'Tab') {
-      const stops = [...$('modal-panel').querySelectorAll('select, button')].filter((el) => !el.disabled);
+      const stops = [...$('modal-panel').querySelectorAll('select, input, button')].filter(
+        (el) => !el.disabled,
+      );
       const next =
         stops[(stops.indexOf(document.activeElement) + (e.shiftKey ? stops.length - 1 : 1)) % stops.length];
       e.preventDefault();
@@ -1599,6 +1617,7 @@
     $('serve-group').classList.toggle('hidden', !open || !!s.orchestrator);
     paintServeButton(s);
     $('btn-task-history').href = `/tasks/${encodeURIComponent(s.id)}`;
+    paintWebhookButton(s);
     $('btn-preview-feedback').classList.toggle('hidden', !s.serveLinks?.length);
     $('btn-preview-feedback').href = `/preview-feedback/${encodeURIComponent(s.id)}`;
     $('btn-cancel-turn').classList.toggle('hidden', s.status !== 'running');
@@ -2463,6 +2482,12 @@
       case 'user': {
         div.className =
           'group relative mt-[18px] mb-3.5 overflow-hidden rounded-xl border border-line bg-raise px-3.5 py-2.5';
+        if (e.via === 'webhook') {
+          const tag = document.createElement('div');
+          tag.className = 'mb-1 text-[12px] text-muted';
+          tag.textContent = '⚡ Webhook delivery, not typed by you';
+          div.appendChild(tag);
+        }
         const body = document.createElement('div');
         body.className = 'break-words whitespace-pre-wrap';
         body.textContent = e.text;
@@ -2485,17 +2510,7 @@
         btn.textContent = '⧉';
         btn.className =
           'absolute top-1.5 right-1.5 rounded-md border border-line bg-field px-1.5 py-0.5 text-[12px] text-muted opacity-0 transition-opacity group-hover:opacity-100 hover:text-ink';
-        btn.addEventListener('click', () => {
-          navigator.clipboard
-            .writeText(e.text || '')
-            .then(() => {
-              btn.textContent = '✓';
-              setTimeout(() => {
-                btn.textContent = '⧉';
-              }, 1200);
-            })
-            .catch(() => toast('Could not copy to clipboard', true));
-        });
+        btn.addEventListener('click', () => copyText(e.text || '', btn));
         div.appendChild(btn);
         break;
       }
@@ -3399,6 +3414,169 @@
       renderSidebar();
       updateHead();
       toast(`Linked PR #${session.prStatus.number}`);
+    } catch (e) {
+      toast(e.message, true);
+    }
+  });
+
+  // ⚡ Webhook: whether another system may wake this session with a message,
+  // what it needs to do so, and the caps the turns it starts run under
+  // (lib/webhooks.js, lib/jobs.js). Everything is fetched when asked for: the
+  // key is never carried in the session list the dashboard polls.
+  function webhookRequest(id, path = '', method = 'GET', body) {
+    return api(`/api/dev/sessions/${encodeURIComponent(id)}/webhook${path}`, {
+      method,
+      ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}),
+    });
+  }
+
+  function webhookCurl(hook) {
+    const q = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
+    return `curl -X POST ${q(hook.url)} -H ${q(`Authorization: Bearer ${hook.key}`)} -H 'Content-Type: application/json' -d '{"text":"The nightly build failed, have a look","source":"ci","id":"nightly-4711"}'`;
+  }
+
+  // The button says what the webhook is doing without the dialog being opened:
+  // off, armed, holding deliveries, or paused and waiting on a word from here.
+  function paintWebhookButton(s) {
+    const btn = $('btn-webhook');
+    const held = s.heldDeliveries || 0;
+    btn.textContent = !s.webhook?.armed
+      ? '⚡ Webhook'
+      : s.webhookPaused
+        ? '⚡ Webhook paused'
+        : held
+          ? `⚡ Webhook · ${held} waiting`
+          : '⚡ Webhook on';
+    btn.classList.toggle('text-warn', !!s.webhook?.armed && !!s.webhookPaused);
+    btn.title = s.webhookPaused
+      ? s.webhookPaused.reason
+      : 'Whether another system may wake this session with a message, and what it needs to do so';
+  }
+
+  function webhookForm(hook) {
+    const input = 'rounded border border-line bg-field px-1.5 py-1 text-[12px] text-ink';
+    const copy = (label, name, value) => `
+      <div class="flex flex-col gap-1">
+        <span class="text-[12px] text-muted">${label}</span>
+        <div class="flex gap-1.5">
+          <input readonly value="${esc(value)}" data-webhook-value="${name}" class="min-w-0 flex-1 font-mono ${input}" />
+          <button type="button" class="btn px-2 py-0.5 text-[12px]" data-webhook="copy-${name}">Copy</button>
+        </div>
+      </div>`;
+    const cap = (label, name, value, min, max, step) => `
+      <label class="flex min-w-0 flex-1 flex-col gap-1">
+        <span class="text-[12px] text-muted">${label}</span>
+        <input type="number" name="${name}" value="${esc(value)}" min="${min}" max="${max}" step="${step}" class="min-w-0 ${input}" />
+      </label>`;
+    const notes = [
+      hook.paused,
+      hook.held
+        ? `${hook.held} ${hook.held === 1 ? 'delivery is' : 'deliveries are'} waiting for the session to be free.`
+        : '',
+      hook.armed && hook.spentUsd
+        ? `Turns started by deliveries spent $${hook.spentUsd.toFixed(2)} in the last 24 hours.`
+        : '',
+    ].filter(Boolean);
+    return `<div class="flex flex-col gap-3">
+      ${hook.armed ? copy('URL', 'url', hook.url) + copy('Key', 'key', hook.key) : ''}
+      ${notes.map((n) => `<p class="m-0 text-[12px] text-warn">${esc(n)}</p>`).join('')}
+      <div class="flex items-end gap-2">
+        ${cap('Deliveries an hour', 'perHour', hook.perHour, 1, 600, 1)}
+        ${cap('Turns in a row', 'maxTurns', hook.maxTurns, 1, 1000, 1)}
+        ${cap('$ in 24 hours, 0 for no cap', 'budgetUsd', hook.budgetUsd, 0, 10000, 0.01)}
+      </div>
+      <label class="flex items-start gap-2 text-[12px] text-muted">
+        <input type="checkbox" name="sshUnattended" class="mt-0.5" ${hook.sshUnattended ? 'checked' : ''} />
+        <span>Let SSH servers in allow mode run commands without approval in turns a delivery started. Off, they ask first.</span>
+      </label>
+      ${
+        hook.armed
+          ? `<div class="flex flex-wrap gap-1.5">
+        <button type="button" class="btn px-2 py-0.5 text-[12px]" data-webhook="copy-curl">Copy curl example</button>
+        <button type="button" class="btn px-2 py-0.5 text-[12px]" data-webhook="rotate">Rotate key</button>
+        <button type="button" class="btn border-danger px-2 py-0.5 text-[12px] text-danger" data-webhook="off">Turn off</button>
+      </div>`
+          : ''
+      }
+    </div>`;
+  }
+
+  function webhookSettings(form) {
+    const field = (name) => form.querySelector(`[name="${name}"]`);
+    return {
+      perHour: field('perHour').valueAsNumber,
+      maxTurns: field('maxTurns').valueAsNumber,
+      budgetUsd: field('budgetUsd').valueAsNumber,
+      sshUnattended: field('sshUnattended').checked,
+    };
+  }
+
+  async function openWebhook(s, hook) {
+    const pending = openConfirm({
+      title: hook.armed ? 'Session webhook' : 'Arm this session’s webhook',
+      body: hook.armed
+        ? 'A POST to the URL reaches this session as information from outside, never as your word: it answers no question the agent asked, waits for a turn under way to end, and wakes the session if it is closed. Send the key as a bearer token, or sign with it (see the README). Anyone holding the key can have this session read what they write.'
+        : 'Once armed, any system you give the key to can wake this session with a message: a support platform, an alert, a CI. What it sends reaches the agent as information from outside, never as your word, and the turns it starts run under the caps below.',
+      icon: '⚡',
+      confirmLabel: hook.armed ? 'Save' : 'Arm webhook',
+      form: webhookForm(hook),
+    });
+    const form = $('modal-form');
+    form.onclick = async (e) => {
+      const btn = e.target.closest('[data-webhook]');
+      if (!btn) return;
+      const what = btn.dataset.webhook;
+      if (what === 'copy-url') return copyText(hook.url, btn);
+      if (what === 'copy-key') return copyText(hook.key, btn);
+      if (what === 'copy-curl') return copyText(webhookCurl(hook), btn);
+      // Rotating cuts off every sender holding the key, so it takes a second
+      // press: the first one says what the second will do.
+      if (what === 'rotate' && !btn.dataset.sure) {
+        btn.dataset.sure = '1';
+        btn.textContent = 'Rotate: every sender needs the new key';
+        setTimeout(() => {
+          delete btn.dataset.sure;
+          btn.textContent = 'Rotate key';
+        }, 4000);
+        return;
+      }
+      try {
+        if (what === 'rotate') {
+          hook = await webhookRequest(s.id, '/rotate', 'POST');
+          form.querySelector('[data-webhook-value="key"]').value = hook.key;
+          delete btn.dataset.sure;
+          btn.textContent = 'Rotate key';
+          toast('Key rotated: the old one is refused from now on');
+        }
+        if (what === 'off') {
+          await webhookRequest(s.id, '', 'PUT', { armed: false });
+          closeConfirm(false);
+          toast('Webhook turned off');
+        }
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+    const save = await pending;
+    form.onclick = null;
+    if (!save) return;
+    try {
+      const next = await webhookRequest(s.id, '', 'PUT', { armed: true, ...webhookSettings(form) });
+      // Just armed: now there is a URL and a key to hand over.
+      if (!hook.armed) return openWebhook(s, next);
+      toast('Webhook settings saved');
+    } catch (err) {
+      toast(err.message, true);
+    }
+  }
+
+  $('btn-webhook').addEventListener('click', async () => {
+    const s = currentSession();
+    if (!s) return;
+    try {
+      const hook = await webhookRequest(s.id);
+      if (hook.unfit && !hook.armed) return toast(hook.unfit, true);
+      await openWebhook(s, hook);
     } catch (e) {
       toast(e.message, true);
     }
