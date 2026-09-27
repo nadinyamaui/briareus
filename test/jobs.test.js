@@ -804,6 +804,17 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(createDevSession({ ...base, orchestrator: true }).workerRuntime).toBeNull();
     expect(createDevSession({ ...base }).workerRuntime).toBeNull();
   });
+
+  // What the mobile API's start_session relies on: it passes a picked runtime
+  // on as sent (lib/dashboard-routes.js).
+  it('falls to the provider’s defaults for a model or effort it does not offer, or none at all', () => {
+    const picked = createDevSession({ ...base, model: 'claude-fable-5-1', effort: 'low' });
+    expect(picked).toMatchObject({ model: 'claude-fable-5-1', effort: 'low' });
+    const loose = createDevSession({ ...base, model: 'gone-model', effort: 'extreme' });
+    expect(loose).toMatchObject({ model: 'claude-fable-5-1', effort: 'high' });
+    const bare = createDevSession({ ...base, model: undefined, effort: undefined });
+    expect(bare).toMatchObject({ model: 'claude-fable-5-1', effort: 'high' });
+  });
 });
 
 describe('spawnWorkerSession', () => {
