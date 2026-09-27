@@ -48,7 +48,7 @@ vi.mock('../lib/config.js', () => ({
     opencodeBin: '',
     githubToken: 'tok',
     workspaceDir: '/tmp/nowhere',
-    dev: { maxSessions: 3, timeoutMin: 60 },
+    dev: { maxSessions: 3, timeoutMin: 60, autoCompactTokens: 350000 },
     reviewLoop: { maxRounds: 3, lowFindingsUntilRound: 1 },
   }),
 }));
@@ -201,6 +201,7 @@ import {
   setReviewLoop,
   setQaLoop,
   renameDevSession,
+  setDevSessionAutoCompact,
   linkPrToSession,
   attachPrForBranch,
   spawnWorkerSession,
@@ -8180,7 +8181,144 @@ describe('manual Codex context compaction', () => {
     await expect(compactDevSession(job.id)).rejects.toThrow('idle');
     job.status = 'idle';
     job.contextUsage = { categories: [] };
-    await expect(compactDevSession(job.id)).rejects.toThrow('No Codex context');
+    await expect(compactDevSession(job.id)).rejects.toThrow('No Codex or Claude context');
+  });
+});
+
+describe('auto-compaction after a turn', () => {
+  let homeSpy;
+  let bin;
+  let children;
+  beforeEach(async () => {
+    homeSpy = vi.spyOn(providerTools, 'ensureCodexHome').mockReturnValue('/tmp/test-codex-auto-compact');
+    state.stored = [
+      {
+        id: 'auto-compact',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 2,
+        model: 'own-model',
+        workDir: '/tmp/workspace',
+        turns: 1,
+        chats: { 2: { sessionId: 'thread-1', started: true } },
+        contextTokens: 400000,
+        contextUsage: {
+          source: 'codex',
+          providerId: 2,
+          sessionId: 'thread-1',
+          model: 'own-model',
+          tokens: 400000,
+        },
+      },
+    ];
+    state.otherProviders = [{ id: 2, binary: 'codex', label: 'Codex entry', active: true }];
+    await initJobs();
+    getJob('auto-compact').status = 'idle';
+    getProviderForJob.mockReturnValue(state.otherProviders[0]);
+    captureProviderAuth.mockResolvedValue(undefined);
+    bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    children = [];
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      children.push(child);
+      return child;
+    });
+  });
+  afterEach(() => {
+    homeSpy.mockRestore();
+    bin.mockRestore();
+    spawn.mockReset();
+    getProviderForJob.mockReset();
+    captureProviderAuth.mockReset();
+    compactCodexThread.mockReset();
+  });
+
+  const idle = (job) =>
+    new Promise((resolve) => {
+      const onJob = (session) => {
+        if (session.id !== job.id || session.status !== 'idle') return;
+        bus.off('job', onJob);
+        resolve();
+      };
+      bus.on('job', onJob);
+    });
+
+  it('is a per-session switch, off until turned on', () => {
+    const job = getJob('auto-compact');
+    expect(publicJob(job)).toMatchObject({ autoCompactAt: 350000 });
+    expect(publicJob(job).autoCompact).toBeFalsy();
+    expect(setDevSessionAutoCompact(job.id, true).autoCompact).toBe(true);
+    expect(() => setDevSessionAutoCompact(job.id, 'yes')).toThrow('true or false');
+    expect(() => setDevSessionAutoCompact('missing', true)).toThrow('not found');
+    getProviderForJob.mockReturnValue({ id: 3, binary: 'grok' });
+    job.contextUsage = null;
+    expect(publicJob(job).autoCompactAt).toBeNull();
+  });
+
+  it('compacts past the threshold before the queued message runs, which waits instead of failing', async () => {
+    const job = getJob('auto-compact');
+    setDevSessionAutoCompact(job.id, true);
+    let finish;
+    compactCodexThread.mockImplementationOnce(
+      (opts) =>
+        new Promise((resolve) => {
+          finish = () => {
+            opts.onUsage({ tokens: 30000 });
+            resolve();
+          };
+        }),
+    );
+    sendDevMessage(job.id, 'First');
+    children[0].emit('close', 0);
+    await vi.waitFor(() => expect(compactCodexThread).toHaveBeenCalledTimes(1));
+    expect(compactCodexThread).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: 'thread-1' }));
+    expect(publicJob(job)).toMatchObject({ status: 'running', compacting: true });
+    expect(sendDevMessage(job.id, 'Second').queued.map((q) => q.text)).toEqual(['Second']);
+    expect(children).toHaveLength(1);
+    finish();
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(job.contextTokens).toBe(30000);
+    expect(job.contextUsage.compactedAt).toBeTruthy();
+    const done = idle(job);
+    children[1].emit('close', 0);
+    await done;
+    // The second turn ended under the threshold, so no second compaction.
+    expect(compactCodexThread).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a session that did not opt in, or is under the threshold, alone', async () => {
+    const job = getJob('auto-compact');
+    let done = idle(job);
+    sendDevMessage(job.id, 'Not opted in');
+    children[0].emit('close', 0);
+    await done;
+    setDevSessionAutoCompact(job.id, true);
+    job.contextUsage.tokens = 349999;
+    done = idle(job);
+    sendDevMessage(job.id, 'Under');
+    children[1].emit('close', 0);
+    await done;
+    expect(compactCodexThread).not.toHaveBeenCalled();
+  });
+
+  it('a failed compaction is reported and the session still settles', async () => {
+    const job = getJob('auto-compact');
+    setDevSessionAutoCompact(job.id, true);
+    compactCodexThread.mockRejectedValueOnce(new Error('No quota'));
+    const done = idle(job);
+    sendDevMessage(job.id, 'Go');
+    children[0].emit('close', 0);
+    await done;
+    expect(
+      job.events.some((e) => e.kind === 'info' && /compaction did not complete: No quota/.test(e.text)),
+    ).toBe(true);
+    expect(publicJob(job).compacting).toBe(false);
   });
 });
 
