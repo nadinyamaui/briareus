@@ -89,8 +89,15 @@ import {
   providerDefaultModel,
   providerDefaultEffort,
   providerGroups,
+  runtimeCatalog,
 } from './lib/providerstore.js';
-import { providerUsage, zaiHost, rememberProviderAuth, forgetProviderUsage } from './lib/balancer.js';
+import {
+  providerUsage,
+  zaiHost,
+  rememberProviderAuth,
+  cachedProviderAuth,
+  forgetProviderUsage,
+} from './lib/balancer.js';
 import {
   initProjects,
   listProjects,
@@ -100,6 +107,7 @@ import {
   updateProject,
   removeProject,
   PROJECT_DEFAULTS,
+  reviewerRuntime,
 } from './lib/projects.js';
 import { projectRunProfiles } from './lib/runprofiles.js';
 import {
@@ -1341,6 +1349,16 @@ app.get('/api/dev/providers', async (req, res) => {
     }),
   );
   res.set('Cache-Control', 'no-store').json({ providers });
+});
+
+// The mobile API's runtimes operation: what /api/dev/providers offers, without
+// the accounts behind each entry, plus the project's own default (see
+// runtimeCatalog). Availability goes on the login probes already made rather
+// than probing on every poll.
+dashboard.register('get', '/api/dev/runtimes', (req, res) => {
+  const project = getProject(req.query.repo || '');
+  if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
+  res.json(runtimeCatalog(reviewerRuntime(project), getConfig(), (p) => cachedProviderAuth(p.id)));
 });
 
 // The branches of one project, for the composer's branch picker: the default

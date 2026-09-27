@@ -155,6 +155,7 @@ change branches.
     {
       "id": 2,
       "label": "Claude",
+      "available": true,
       "models": [{ "id": "opus", "label": "opus", "efforts": ["low", "high"], "defaultEffort": "high" }],
       "defaultModel": "opus"
     }
@@ -165,10 +166,15 @@ change branches.
 `providers` lists the active providers only. Several logins to the same service
 appear as one entry; starting on its `id` lets the server pick the login with
 the most headroom. `efforts` belong to each model and may differ between models
-of one provider. `default` is the project's configured review runtime, which is
-what `start_session` uses when nothing is picked; it is `null` when the project
-has none, and then `start_session` needs a `providerId`. The result has no
-account data: no logins, API keys, endpoints or usage.
+of one provider. `available` is false when the provider's CLI is not installed
+on the server or every one of its logins was last found signed out; a session
+started on it fails, so grey it out. `default` is the project's configured
+review runtime, which is what `start_session` uses when nothing is picked. Its
+`providerId` is the entry that runtime starts on, even when the configured
+login itself is switched off. It is `null` when the project has none (or none
+of its provider's logins is active), and then `start_session` needs a
+`providerId`. The result has no account data: no logins, API keys, endpoints
+or usage.
 
 `start_session` takes an optional `providerId` (an `id` from `runtimes`), `model`
 (a model `id`) and `effort`. A `model` or `effort` without `providerId` is

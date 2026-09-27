@@ -122,9 +122,7 @@ it('propagates existing dashboard validation failures', async () => {
 
 it('registers shared browser handlers and removes the internal MCP mount and API', () => {
   const source = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
-  // projects and runtimes are answered by the registry itself.
-  const answered = ['dashboard_projects', 'dashboard_runtimes'];
-  for (const tool of dashboardTools(listActions()).filter((t) => !answered.includes(t.name))) {
+  for (const tool of dashboardTools(listActions()).filter((t) => t.name !== 'dashboard_projects')) {
     expect(source).toContain(`dashboard.register('${tool.method.toLowerCase()}', '${tool.path}',`);
   }
   const jobs = readFileSync(new URL('../lib/jobs.js', import.meta.url), 'utf8');

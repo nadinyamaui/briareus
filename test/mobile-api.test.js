@@ -6,7 +6,8 @@ import { mobileApiRoutes, mobileSettingsRoutes } from '../lib/mobile-api.js';
 import { dashboardRoutes } from '../lib/dashboard-routes.js';
 import { dashboardTools } from '../lib/dashboard-tools.js';
 import { sameOriginWrites } from '../lib/security.js';
-import { initProviders, PROVIDER_DEFAULTS } from '../lib/providerstore.js';
+import { initProviders, PROVIDER_DEFAULTS, runtimeCatalog } from '../lib/providerstore.js';
+import { reviewerRuntime } from '../lib/projects.js';
 import { pullRequestView, pullRequestViewOptions } from '../lib/prviewer.js';
 
 // The providers the runtimes and start_session checks resolve against, and the
@@ -25,10 +26,14 @@ vi.mock('../lib/github.js', async (importOriginal) => ({
 vi.mock('../lib/providers.js', () => {
   const binary = (name, models, efforts, defaultModel, defaultEffort) => ({
     label: `${name} label`,
+    // Every CLI is installed except grok's.
+    bin: () => (name === 'grok' ? null : { source: 'path' }),
     models: () => models,
     efforts,
-    defaultModel: () => defaultModel,
-    defaultEffort: () => defaultEffort,
+    // Read the config as the real claude binary does, so a caller that
+    // forgets to pass one fails here too.
+    defaultModel: (cfg) => cfg.defaultModel || defaultModel,
+    defaultEffort: (cfg) => cfg.defaultEffort || defaultEffort,
   });
   const BINARIES = {
     claude: binary('claude', ['opus', 'sonnet'], ['low', 'high'], 'opus', 'high'),
@@ -382,7 +387,18 @@ it('rechecks a token revoked while a slow request body is arriving', async () =>
   expect(handler).not.toHaveBeenCalled();
 });
 
+// The handler as server.js mounts it, reading login state from `signedOut`
+// where server.js reads the balancer's last probes.
+function mountRuntimes(signedOut = new Set()) {
+  dashboard.register('get', '/api/dev/runtimes', (req, res) =>
+    res.json(
+      runtimeCatalog(reviewerRuntime(project), undefined, (p) => (signedOut.has(p.id) ? false : null)),
+    ),
+  );
+}
+
 it('lists active runtimes and the project default without any account data', async () => {
+  mountRuntimes();
   Object.assign(project, { reviewProviderId: 3, reviewModel: 'retired', reviewEffort: 'low' });
   const result = await call('runtimes', { repo });
   expect(result.status).toBe(200);
@@ -395,6 +411,7 @@ it('lists active runtimes and the project default without any account data', asy
       {
         id: 2,
         label: 'claude label',
+        available: true,
         models: [
           { id: 'opus', label: 'opus', efforts: ['low', 'high'], defaultEffort: 'high' },
           { id: 'sonnet', label: 'sonnet', efforts: ['low', 'high'], defaultEffort: 'high' },
@@ -404,6 +421,7 @@ it('lists active runtimes and the project default without any account data', asy
       {
         id: 4,
         label: 'Gateway',
+        available: true,
         models: [
           { id: 'gpt-x', label: 'gpt-x', efforts: ['low', 'medium', 'high'], defaultEffort: 'high' },
           { id: 'gpt-y', label: 'gpt-y', efforts: ['low', 'medium', 'high'], defaultEffort: 'high' },
@@ -426,31 +444,58 @@ it('lists active runtimes and the project default without any account data', asy
   expect(handler).not.toHaveBeenCalled();
 });
 
-it('starts a session on a picked runtime, falling back to the provider defaults', async () => {
+it('defaults to the active entry of a review login that was switched off', async () => {
+  fake.providers[1].active = false;
+  await initProviders();
+  mountRuntimes();
+  Object.assign(project, { reviewProviderId: 3, reviewModel: 'sonnet', reviewEffort: 'low' });
+  const catalog = await (await call('runtimes', { repo })).json();
+  expect(catalog.default).toEqual({ providerId: 2, model: 'sonnet', effort: 'low' });
+  // With the whole group switched off there is nothing to start on.
+  fake.providers[0].active = false;
+  await initProviders();
+  expect((await (await call('runtimes', { repo })).json()).default).toBeNull();
+});
+
+it('flags a runtime whose CLI is missing or whose logins are all signed out', async () => {
+  fake.providers.push({ ...PROVIDER_DEFAULTS, id: 6, label: 'Grok', binary: 'grok', sortOrder: 5 });
+  await initProviders();
+  const signedOut = new Set([2]);
+  mountRuntimes(signedOut);
+  const available = async () =>
+    Object.fromEntries(
+      (await (await call('runtimes', { repo })).json()).providers.map((p) => [p.label, p.available]),
+    );
+  // One login of two signed out keeps the entry usable; an unprobed one counts.
+  expect(await available()).toEqual({ 'claude label': true, Gateway: true, Grok: false });
+  signedOut.add(3);
+  expect(await available()).toEqual({ 'claude label': false, Gateway: true, Grok: false });
+});
+
+it('passes a picked runtime on for the session start to resolve', async () => {
   const start = async (runtime) =>
     (await (await call('start_session', { repo, prompt: 'Make a change', ...runtime })).json()).body;
   const picked = await start({ providerId: 4, model: 'gpt-y', effort: 'medium' });
   expect(picked).toMatchObject({ provider: 4, model: 'gpt-y', effort: 'medium' });
   expect(picked).not.toHaveProperty('providerId');
-  expect(await start({ providerId: 4, model: 'gpt-y', effort: 'max' })).toMatchObject({
-    provider: 4,
-    model: 'gpt-y',
-    effort: 'high',
-  });
+  // createDevSession checks the provider and resolves the model and effort
+  // against the login it balances onto (test/jobs.test.js), so they go on as
+  // sent, not resolved a second time here.
   expect(await start({ providerId: 2, model: 'retired', effort: 'extreme' })).toMatchObject({
     provider: 2,
-    model: 'opus',
-    effort: 'high',
+    model: 'retired',
+    effort: 'extreme',
   });
-  expect(await start({ providerId: 3 })).toMatchObject({ provider: 3, model: 'opus', effort: 'high' });
+  const bare = await start({ providerId: 3 });
+  expect(bare).toMatchObject({ provider: 3 });
+  expect(bare.model).toBeUndefined();
+  expect(bare.effort).toBeUndefined();
   // Nothing picked: the project's configured review runtime, as before.
   expect(await start({})).toMatchObject({ provider: 2, model: 'configured-model', effort: '' });
 });
 
-it('rejects a runtime that is inactive, unknown, incomplete or on the review and QA starts', async () => {
+it('rejects a runtime that is incomplete or on the review and QA starts', async () => {
   for (const [name, body] of [
-    ['start_session', { repo, prompt: 'x', providerId: 5 }],
-    ['start_session', { repo, prompt: 'x', providerId: 99, model: 'opus' }],
     ['start_session', { repo, prompt: 'x', model: 'opus' }],
     ['start_session', { repo, prompt: 'x', effort: 'high' }],
     ['start_session', { repo, prompt: 'x', providerId: '2' }],
@@ -539,5 +584,8 @@ it('pages through a pull request’s files within the permitted projects', async
     [{ repo, pr: 7, page: 31 }, 400],
   ])
     expect((await call('pull_files', body)).status).toBe(status);
+  // The cap is in the schema clients generate from, not only in the handler.
+  const files = dashboardTools([]).find((t) => t.name === 'dashboard_pull_files');
+  expect(files.inputSchema.properties.page).toEqual({ type: 'integer', minimum: 1, maximum: 30 });
   expect(fake.github.mock.calls.length).toBe(reads);
 });
