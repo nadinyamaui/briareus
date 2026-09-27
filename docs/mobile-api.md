@@ -116,21 +116,22 @@ response fields and unknown event kinds. Optional fields may be absent or null.
 
 ### Main operations
 
-| Name                                           | Arguments                                                                                     | Result                                                           |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `projects`                                     | `{}`                                                                                          | `{ "projects": [{ "repo": "owner/repo", "label": "Project" }] }` |
-| `sessions`                                     | `{ "repo": "owner/repo" }`                                                                    | `{ "sessions": [...] }`, only that permitted project             |
-| `session`                                      | `{ "sessionId": "...", "since": 0 }`                                                          | `{ "session": {...}, "events": [...] }`                          |
-| `runtimes`                                     | `{ "repo": "owner/repo" }`                                                                    | Providers, models and efforts to start on; see below             |
-| `start_session`                                | `{ "repo": "owner/repo", "prompt": "...", "providerId": 2, "model": "...", "effort": "..." }` | `{ "session": {...} }`                                           |
-| `message`                                      | `{ "sessionId": "...", "text": "..." }`                                                       | `{ "session": {...} }`; may queue while running                  |
-| `rename`                                       | `{ "sessionId": "...", "title": "..." }`                                                      | `{ "session": {...} }`                                           |
-| `cancel`, `close`, `reopen`, `serve`, `delete` | `{ "sessionId": "..." }`                                                                      | Operation-specific result; refresh session/list after success    |
-| `branches`                                     | `{ "repo": "owner/repo" }`                                                                    | `{ "defaultBranch": "main", "branches": ["main", ...] }`         |
-| `pulls`, `usage`                               | `{ "repo": "owner/repo" }`                                                                    | Project dashboard result                                         |
-| `pull`, `findings`                             | `{ "repo": "owner/repo", "pr": 123 }`                                                         | PR details or findings                                           |
-| `pull_files`                                   | `{ "repo": "owner/repo", "pr": 123, "page": 1, "headSha": "...", "baseSha": "..." }`          | One page of the PR's changed files; see below                    |
-| `review`, `qa`                                 | `{ "repo": "owner/repo", "prNumber": 123, "branch": "feature/example" }`                      | Started session                                                  |
+| Name                                           | Arguments                                                                                      | Result                                                           |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `projects`                                     | `{}`                                                                                           | `{ "projects": [{ "repo": "owner/repo", "label": "Project" }] }` |
+| `sessions`                                     | `{ "repo": "owner/repo" }`                                                                     | `{ "sessions": [...] }`, only that permitted project             |
+| `session`                                      | `{ "sessionId": "...", "since": 0 }`                                                           | `{ "session": {...}, "events": [...] }`                          |
+| `runtimes`                                     | `{ "repo": "owner/repo" }`                                                                     | Providers, models and efforts to start on; see below             |
+| `start_session`                                | `{ "repo": "owner/repo", "prompt": "...", "providerId": 2, "model": "...", "effort": "..." }`  | `{ "session": {...} }`                                           |
+| `message`                                      | `{ "sessionId": "...", "text": "..." }`                                                        | `{ "session": {...} }`; may queue while running                  |
+| `rename`                                       | `{ "sessionId": "...", "title": "..." }`                                                       | `{ "session": {...} }`                                           |
+| `cancel`, `close`, `reopen`, `serve`, `delete` | `{ "sessionId": "..." }`                                                                       | Operation-specific result; refresh session/list after success    |
+| `branches`                                     | `{ "repo": "owner/repo" }`                                                                     | `{ "defaultBranch": "main", "branches": ["main", ...] }`         |
+| `pulls`, `usage`                               | `{ "repo": "owner/repo" }`                                                                     | Project dashboard result                                         |
+| `pull`, `findings`                             | `{ "repo": "owner/repo", "pr": 123 }`                                                          | PR details or findings                                           |
+| `pull_files`                                   | `{ "repo": "owner/repo", "pr": 123, "page": 1, "headSha": "...", "baseSha": "..." }`           | One page of the PR's changed files; see below                    |
+| `merge_pull`                                   | `{ "repo": "owner/repo", "pr": 123, "headSha": "...", "baseRef": "main", "method": "squash" }` | `{ "merged": true, "sha": "...", "message": "..." }`; see below  |
+| `review`, `qa`                                 | `{ "repo": "owner/repo", "prNumber": 123, "branch": "feature/example" }`                       | Started session                                                  |
 
 Additional operations cover findings drafts, triage, replies, queued messages,
 review/QA loops and the configured dashboard actions. Session operations infer
@@ -219,6 +220,19 @@ When reading page 2 or later, send the `headSha` and `baseSha` from page 1's
 `pr`. If the pull request was pushed to or rebased in the meantime (or changes
 while a page is being read), the operation answers **409**. Reload from page 1
 rather than mixing files from two revisions.
+
+#### Merging a pull request
+
+`merge_pull` requires **Manage** and merges on GitHub with the server's token.
+Send the `headSha` and `baseRef` from the `pr` that `pull_files` returned, so
+what is merged is what was read: a push since then makes GitHub refuse the
+merge, and a pull request retargeted to another base answers **409**. Reload
+and confirm again rather than retrying. `method` is `squash` (the default),
+`merge` or `rebase`; the first, unpinned `pull_files` page lists the
+repository's allowed ones in `pr.mergeMethods`, with `pr.mergeable` (null while
+GitHub is still computing it, false on conflicts) and `pr.mergeableState`.
+GitHub's own refusal (conflicts, branch protection, failing required checks)
+is passed on as 403, 405, 409 or 422 with its reason in `error`.
 
 ### Requests to try
 

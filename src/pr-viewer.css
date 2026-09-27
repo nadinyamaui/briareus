@@ -59,6 +59,59 @@
   margin: 14px 0 10px;
   overflow-wrap: anywhere;
 }
+.prv-title-checks {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1em;
+  height: 1.1em;
+  margin-left: 10px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  font-size: 17px;
+  line-height: 1;
+  vertical-align: 0.1em;
+}
+.prv-merge-btn {
+  border-color: var(--color-ok);
+  background: var(--color-ok);
+  color: var(--color-canvas);
+  font-weight: 600;
+}
+/* Scoped like `.pr-viewer button:disabled` so it outranks that rule's wait cursor. */
+.pr-viewer .prv-merge-btn:disabled,
+.pr-viewer .prv-merge-btn[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.prv-merge {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-canvas);
+  font-size: 13px;
+}
+.prv-merge select {
+  background: var(--color-raise);
+  border: 1px solid var(--color-line);
+  border-radius: 7px;
+  padding: 5px 8px;
+  color: var(--color-ink);
+}
+/* The warnings wrap onto their own rows of the merge box, like its error. */
+.prv-merge-warnings {
+  display: contents;
+}
+.prv-merge-warning {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--color-warn);
+}
 .prv-meta {
   color: var(--color-muted);
   font-size: 13px;

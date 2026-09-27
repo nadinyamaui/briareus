@@ -1,5 +1,6 @@
-// A read-only GitHub-style viewer, shared by board cards and session PR panels.
-window.createPrViewer = ({ api, esc, md }) => {
+// A GitHub-style pull request viewer that can also merge the revision it shows,
+// shared by board cards and session PR panels.
+window.createPrViewer = ({ api, esc, md, onMerged, onMergeFailed }) => {
   const dialog = document.createElement('dialog');
   dialog.className = 'pr-viewer';
   dialog.setAttribute('aria-labelledby', 'pr-viewer-title');
@@ -7,11 +8,20 @@ window.createPrViewer = ({ api, esc, md }) => {
     <header class="prv-header">
       <div class="prv-toolbar"><span id="pr-viewer-repo"></span><div>
         <button class="btn" data-refresh>⟳ Refresh</button>
+        <button class="btn prv-merge-btn" data-merge hidden>Merge</button>
         <a class="btn" id="pr-viewer-github" target="_blank" rel="noopener">Open in GitHub ↗</a>
         <button class="btn" data-close aria-label="Close pull request">✕</button>
       </div></div>
-      <h2 id="pr-viewer-title">Pull request</h2>
+      <h2><span id="pr-viewer-title">Pull request</span><span id="pr-viewer-checks" class="prv-title-checks" role="img" hidden></span></h2>
       <div id="pr-viewer-meta" class="prv-meta"></div>
+      <div id="pr-viewer-merge" class="prv-merge" hidden>
+        <div id="prv-merge-warnings" class="prv-merge-warnings"></div>
+        <select id="prv-merge-method" aria-label="Merge method"></select>
+        <button class="btn prv-merge-btn" data-merge-confirm></button>
+        <button class="btn" data-refresh hidden>⟳ Refresh</button>
+        <button class="btn" data-merge-cancel>Cancel</button>
+        <p id="prv-merge-error" class="prv-merge-warning" role="alert" hidden></p>
+      </div>
     </header>
     <div class="prv-tabs" role="tablist" aria-label="Pull request sections">
       <button role="tab" id="prv-tab-description" data-tab="description" aria-controls="prv-content">Description</button>
@@ -27,6 +37,113 @@ window.createPrViewer = ({ api, esc, md }) => {
   const link = (url, text) =>
     safeUrl(url) ? `<a href="${safeUrl(url)}" target="_blank" rel="noopener">${text} ↗</a>` : '';
   const notice = (text) => `<p class="prv-notice" role="status">${esc(text)}</p>`;
+  const STALE = 'This pull request changed. Refresh to load its latest revision.';
+
+  // One icon for every check on the head commit, the way GitHub marks a PR:
+  // any completed check that didn't pass (cancelled and stale included) is ✗,
+  // anything still running is ●, checks that couldn't all be loaded are ?,
+  // otherwise ✓. Until the checks have loaded, CI status is unknown too.
+  const PASSED = ['success', 'neutral', 'skipped'];
+  const checkFailed = (c) => c.status === 'completed' && !PASSED.includes(c.conclusion);
+  function checksRollup() {
+    const data = state.checks;
+    if (state.pr && !data?.checks) {
+      if (data?.stale)
+        return {
+          tone: 'neutral',
+          icon: '?',
+          label:
+            'This pull request changed since it loaded. Refresh to see the checks on its latest revision',
+        };
+      if (data?.error)
+        return { tone: 'neutral', icon: '?', label: 'Checks could not be loaded, so CI status is unknown' };
+      return { tone: 'neutral', icon: '…', label: 'Checks are still loading' };
+    }
+    if (!data?.checks || (!data.checks.length && !data.warnings.length)) return null;
+    const checks = data.checks;
+    const failed = checks.filter(checkFailed).length;
+    const pending = checks.filter((c) => c.status !== 'completed').length;
+    if (failed)
+      return { tone: 'removed', icon: '✗', label: `${failed} of ${checks.length} checks did not pass` };
+    if (pending)
+      return { tone: 'pending', icon: '●', label: `${pending} of ${checks.length} checks still running` };
+    if (data.warnings.length)
+      return {
+        tone: 'neutral',
+        icon: '?',
+        label: 'Not every check could be loaded, so CI status is unknown',
+      };
+    return { tone: 'added', icon: '✓', label: `All ${checks.length} checks passed` };
+  }
+
+  const METHOD_LABELS = {
+    squash: 'Squash and merge',
+    merge: 'Create a merge commit',
+    rebase: 'Rebase and merge',
+  };
+  // GitHub's mergeable_state values worth a word before the confirm; dirty
+  // is the conflict case, which `mergeable === false` already covers.
+  const MERGE_STATE_WARNINGS = {
+    blocked: 'GitHub reports this pull request as blocked: a required review or check is missing.',
+    behind: 'This branch is behind its base branch and may need updating before it can merge.',
+    unstable: 'GitHub reports some checks on this branch as not passing.',
+  };
+  // The box's controls are built once with the dialog and only updated here,
+  // so background loads never take focus or an open dropdown away from them.
+  function mergeBox() {
+    const pr = state.pr;
+    const box = dialog.querySelector('#pr-viewer-merge');
+    const button = dialog.querySelector('[data-merge]');
+    const hadFocus = box.contains(document.activeElement);
+    const open = pr?.state === 'open' && pr.mergeMethods?.length > 0;
+    button.hidden = !open || !!state.merge;
+    box.hidden = !open || !state.merge;
+    // No closing or refreshing while a merge is in flight: its outcome would be lost.
+    const toolbarRefresh = dialog.querySelector('.prv-toolbar [data-refresh]');
+    for (const b of [toolbarRefresh, dialog.querySelector('[data-close]')]) b.disabled = !!state.merge?.busy;
+    if (box.hidden) {
+      // Focus left in the hidden box would fall to <body>, where Escape
+      // reaches the dashboard's global handlers: keep it in the dialog.
+      if (hadFocus) (button.hidden ? toolbarRefresh : button).focus();
+      return;
+    }
+    const m = state.merge;
+    const rollup = checksRollup();
+    const warnings = [];
+    if (pr.mergeable === false)
+      warnings.push('This branch has conflicts that must be resolved before it can merge.');
+    if (pr.mergeable === null) warnings.push('GitHub is still checking whether this branch can merge.');
+    const checksWarning = rollup && rollup.tone !== 'added';
+    if (checksWarning) warnings.push(`${rollup.label}.`);
+    // unstable only says checks are failing, which a ✗ rollup already told.
+    if (
+      !(rollup?.tone === 'removed' && pr.mergeableState === 'unstable') &&
+      MERGE_STATE_WARNINGS[pr.mergeableState]
+    )
+      warnings.push(MERGE_STATE_WARNINGS[pr.mergeableState]);
+    box.querySelector('#prv-merge-warnings').innerHTML = warnings
+      .map((w) => `<p class="prv-merge-warning">${esc(w)}</p>`)
+      .join('');
+    box.querySelector('#prv-merge-method').disabled = !!m.busy;
+    const confirm = box.querySelector('[data-merge-confirm]');
+    const confirmFocused = document.activeElement === confirm;
+    // After a 409 (the head moved or the PR was retargeted) confirming the
+    // same revision again can only fail the same way.
+    confirm.hidden = !!m.stale;
+    box.querySelector('[data-refresh]').hidden = !m.stale;
+    // aria-disabled while merging, so the focused button can keep focus.
+    if (m.busy) confirm.setAttribute('aria-disabled', 'true');
+    else confirm.removeAttribute('aria-disabled');
+    confirm.disabled = !m.busy && pr.mergeable === false;
+    confirm.textContent = m.busy ? 'Merging…' : `Confirm merge of ${pr.headSha.slice(0, 7)}`;
+    box.querySelector('[data-merge-cancel]').disabled = !!m.busy;
+    const error = box.querySelector('#prv-merge-error');
+    error.hidden = !m.error;
+    error.textContent = m.error || '';
+    // Confirm is the one control that can hide or disable under focus.
+    if (confirmFocused && (confirm.hidden || confirm.disabled))
+      box.querySelector(confirm.hidden ? '[data-refresh]' : '[data-merge-cancel]').focus();
+  }
 
   function header() {
     const pr = state.pr;
@@ -34,6 +151,14 @@ window.createPrViewer = ({ api, esc, md }) => {
     dialog.querySelector('#pr-viewer-title').textContent = pr
       ? `${pr.title} #${pr.number}`
       : `Pull request #${state.number}`;
+    const rollup = checksRollup();
+    const badge = dialog.querySelector('#pr-viewer-checks');
+    badge.hidden = !rollup;
+    badge.className = `prv-title-checks prv-${rollup?.tone || 'neutral'}`;
+    badge.textContent = rollup?.icon || '';
+    badge.title = rollup?.label || '';
+    badge.setAttribute('aria-label', rollup?.label || '');
+    mergeBox();
     dialog.querySelector('#pr-viewer-github').href = `https://github.com/${state.repo}/pull/${state.number}`;
     dialog.querySelector('#pr-viewer-meta').innerHTML = pr
       ? `
@@ -239,14 +364,16 @@ window.createPrViewer = ({ api, esc, md }) => {
     } else if (state.tab === 'files') renderFiles();
     else {
       const checks = data.checks;
-      const passed = checks.filter((c) => c.conclusion === 'success').length;
+      // Counted the way the title's rollup counts them, so the two agree.
+      const passed = checks.filter((c) => c.status === 'completed' && PASSED.includes(c.conclusion)).length;
       content.innerHTML = `${data.warnings.map(notice).join('')}
         <div class="prv-check-summary">${checks.length ? `${passed} of ${checks.length} checks passed` : data.warnings.length ? 'Checks are unavailable.' : 'No checks have been reported for this commit.'}<span>Commit ${esc(state.pr.headSha.slice(0, 7))}</span></div>
         <div class="prv-checks">${checks
           .map((c) => {
             const pending = c.status !== 'completed';
             const good = c.conclusion === 'success';
-            const failed = c.failed === true;
+            // The rollup's rule, so a ✗ in the title always has a ✗ row here.
+            const failed = checkFailed(c);
             const tone = pending ? 'pending' : good ? 'added' : failed ? 'removed' : 'neutral';
             const status = pending ? c.status : c.conclusion || 'unknown';
             const elapsed =
@@ -272,15 +399,30 @@ window.createPrViewer = ({ api, esc, md }) => {
     if (more && filesViewOpen()) {
       paintFilesFooter(current.files);
       content.setAttribute('aria-busy', 'true');
-    } else render();
+    } else if (current.tab !== section) header();
+    else render();
     const params = new URLSearchParams({ repo: current.repo, pr: current.number, section, page });
-    if (current.pr) {
+    // Checks and mergeability belong to the head, so only the diff pins the
+    // base: the base branch moving on is routine and must not fail the rest.
+    const pinned = !!current.pr;
+    if (pinned) {
       params.set('headSha', current.pr.headSha);
-      params.set('baseSha', current.pr.baseSha);
+      if (section === 'files') params.set('baseSha', current.pr.baseSha);
     }
+    let first = false;
     try {
       const data = await api(`/api/pr/view?${params}`);
       if (state !== current) return;
+      // A tab clicked before the first read resolved was sent unpinned. If
+      // another read set the PR meanwhile, a newer revision must not mix in.
+      if (
+        !pinned &&
+        current.pr &&
+        (data.pr.headSha !== current.pr.headSha ||
+          (section === 'files' && data.pr.baseSha !== current.pr.baseSha))
+      )
+        throw new Error(STALE);
+      first = !current.pr;
       current.pr ||= data.pr;
       current[section] = { ...data, ...(previous ? { files: [...previous.files, ...data.files] } : {}) };
     } catch (error) {
@@ -288,12 +430,12 @@ window.createPrViewer = ({ api, esc, md }) => {
       current[section] = {
         ...previous,
         error: error.message,
-        stale: error.message === 'This pull request changed. Refresh to load its latest revision.',
+        stale: error.message === STALE,
       };
     }
     if (state !== current) return;
-    if (state.tab !== section) return header();
-    if (more && previous?.files && filesViewOpen()) {
+    if (state.tab !== section) header();
+    else if (more && previous?.files && filesViewOpen()) {
       const next = current.files;
       if (!next.error && next.files.length > previous.files.length)
         appendFileEntries(previous.files.length, next.files.slice(previous.files.length));
@@ -302,6 +444,34 @@ window.createPrViewer = ({ api, esc, md }) => {
       content.setAttribute('aria-busy', 'false');
       header();
     } else render();
+    if (!first) return;
+    // The title's checks icon needs the checks whichever tab loaded the PR
+    // first (on open or on Try again). Load them now, pinned to its head.
+    if (!current.checks) load('checks');
+    if (current.pr.state === 'open' && current.pr.mergeable === null) recheckMergeable(current);
+  }
+
+  // GitHub computes mergeability lazily, so the first read after a push
+  // often has mergeable null. Read it once more, pinned to the same head
+  // (not the base: a base that moved on is what mergeability is about).
+  async function recheckMergeable(current) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    if (state !== current || current.pr.mergeable !== null) return;
+    const params = new URLSearchParams({
+      repo: current.repo,
+      pr: current.number,
+      section: 'description',
+      headSha: current.pr.headSha,
+    });
+    try {
+      const { pr } = await api(`/api/pr/view?${params}`);
+      if (state !== current) return;
+      current.pr.mergeable = pr.mergeable;
+      current.pr.mergeableState = pr.mergeableState;
+      header();
+    } catch {
+      // A moved head or a failed read leaves the "still checking" warning up.
+    }
   }
 
   function open(repo, number, tab = 'description') {
@@ -311,6 +481,43 @@ window.createPrViewer = ({ api, esc, md }) => {
     load(tab);
   }
 
+  async function merge() {
+    const current = state;
+    const m = current.merge;
+    if (!current.pr || m.busy) return;
+    m.busy = true;
+    m.error = '';
+    mergeBox();
+    try {
+      await api('/api/pr/merge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo: current.repo,
+          pr: current.number,
+          method: m.method,
+          headSha: current.pr.headSha,
+          baseRef: current.pr.baseRef,
+        }),
+      });
+      onMerged?.(current.repo, current.number);
+      if (state !== current) return;
+      open(current.repo, current.number, current.tab);
+    } catch (error) {
+      // Chromium lets a second Escape close the dialog mid-merge anyway;
+      // GitHub's reason must still reach the user.
+      if (state !== current) return onMergeFailed?.(current.repo, current.number, error.message);
+      m.busy = false;
+      m.error = error.message;
+      m.stale = error.status === 409;
+      mergeBox();
+    }
+  }
+
+  const merging = () => !!state?.merge?.busy;
+  dialog.addEventListener('cancel', (event) => {
+    if (merging()) event.preventDefault();
+  });
   dialog.addEventListener('close', () => {
     state = null;
     if (opener?.isConnected) opener.focus();
@@ -333,8 +540,24 @@ window.createPrViewer = ({ api, esc, md }) => {
   dialog.addEventListener('click', (event) => {
     const target = event.target.closest('button');
     if (!target || !state) return;
-    if (target.hasAttribute('data-close')) return dialog.close();
-    if (target.hasAttribute('data-refresh')) return open(state.repo, state.number, state.tab);
+    if (target.hasAttribute('data-close')) return merging() || dialog.close();
+    if (target.hasAttribute('data-refresh')) return merging() || open(state.repo, state.number, state.tab);
+    if (target.hasAttribute('data-merge')) {
+      state.merge = { method: state.pr.mergeMethods[0], busy: false, error: '' };
+      dialog.querySelector('#prv-merge-method').innerHTML = state.pr.mergeMethods
+        .map((k) => `<option value="${k}">${METHOD_LABELS[k]}</option>`)
+        .join('');
+      mergeBox();
+      // The Merge button just hid; keep focus inside the dialog even when a
+      // conflict leaves the confirm button disabled.
+      const confirm = dialog.querySelector('[data-merge-confirm]');
+      return (confirm?.disabled ? dialog.querySelector('[data-merge-cancel]') : confirm)?.focus();
+    }
+    if (target.hasAttribute('data-merge-cancel')) {
+      state.merge = null;
+      return mergeBox();
+    }
+    if (target.hasAttribute('data-merge-confirm')) return merge();
     if (target.dataset.tab) {
       state.tab = target.dataset.tab;
       content.scrollTop = 0;
@@ -372,6 +595,9 @@ window.createPrViewer = ({ api, esc, md }) => {
       state.filter = event.target.value;
       filterFiles();
     }
+  });
+  dialog.addEventListener('change', (event) => {
+    if (event.target.id === 'prv-merge-method' && state?.merge) state.merge.method = event.target.value;
   });
   content.addEventListener('change', (event) => {
     if (event.target.id === 'prv-split') {

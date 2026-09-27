@@ -154,7 +154,7 @@ import {
 } from './lib/memories.js';
 import { initTemplates, globalTemplates, saveGlobalTemplates, templateCatalog } from './lib/templates.js';
 import { projectPulls, pullOverview } from './lib/prboard.js';
-import { pullRequestView, pullRequestViewOptions } from './lib/prviewer.js';
+import { mergePullRequest, pullRequestView, pullRequestViewOptions } from './lib/prviewer.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload, getUpload } from './lib/uploads.js';
@@ -829,6 +829,23 @@ dashboard.register('get', '/api/pr/view', async (req, res) => {
   try {
     const { repo, prNumber } = findingsParams(req.query);
     res.json(await pullRequestView({ repo }, prNumber, pullRequestViewOptions(req.query)));
+  } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
+
+dashboard.register('post', '/api/pr/merge', async (req, res) => {
+  try {
+    const { repo, prNumber } = findingsParams(req.body || {});
+    const { method, headSha, baseRef } = req.body || {};
+    res.json(
+      await mergePullRequest({ repo }, prNumber, {
+        // A request without a method gets mergePullRequest's squash default.
+        ...(method ? { method: String(method) } : {}),
+        headSha: String(headSha || ''),
+        baseRef: String(baseRef || ''),
+      }),
+    );
   } catch (e) {
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
   }

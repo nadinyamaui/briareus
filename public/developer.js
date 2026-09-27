@@ -216,7 +216,18 @@
       .catch(() => toast('Could not copy to clipboard', true));
   }
 
-  const prViewer = window.createPrViewer({ api, esc, md });
+  const prViewer = window.createPrViewer({
+    api,
+    esc,
+    md,
+    // A merge from the viewer should show on the board now, not at the next
+    // minute's poll; the session's PR panel follows on its own poll.
+    onMerged: (repo) => {
+      if (currentProject === repo) loadBoard(repo, true);
+    },
+    // Only when the dialog closed mid-merge; otherwise it shows the failure itself.
+    onMergeFailed: (repo, number, message) => toast(`Merging ${repo}#${number} failed: ${message}`, true),
+  });
   document.addEventListener(
     'click',
     (event) => {
@@ -392,7 +403,7 @@
       throw new Error('Signed out');
     }
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error(body.error || `HTTP ${res.status}`), { status: res.status });
     return body;
   }
 

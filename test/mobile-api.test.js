@@ -8,7 +8,7 @@ import { dashboardTools } from '../lib/dashboard-tools.js';
 import { sameOriginWrites } from '../lib/security.js';
 import { initProviders, PROVIDER_DEFAULTS, runtimeCatalog } from '../lib/providerstore.js';
 import { reviewerRuntime } from '../lib/projects.js';
-import { pullRequestView, pullRequestViewOptions } from '../lib/prviewer.js';
+import { mergePullRequest, pullRequestView, pullRequestViewOptions } from '../lib/prviewer.js';
 
 // The providers the runtimes and start_session checks resolve against, and the
 // GitHub the pull_files reads reach: both stand in for the database and the
@@ -588,4 +588,58 @@ it('pages through a pull request’s files within the permitted projects', async
   const files = dashboardTools([]).find((t) => t.name === 'dashboard_pull_files');
   expect(files.inputSchema.properties.page).toEqual({ type: 'integer', minimum: 1, maximum: 30 });
   expect(fake.github.mock.calls.length).toBe(reads);
+});
+
+it('merges a pull request for a managing device only, pinned to the commit it read', async () => {
+  // The shared handler as server.js mounts it.
+  dashboard.register('post', '/api/pr/merge', async (req, res) => {
+    try {
+      const { method, headSha, baseRef } = req.body;
+      res.json(
+        await mergePullRequest({ repo: req.body.repo }, Number(req.body.pr), {
+          ...(method ? { method } : {}),
+          headSha,
+          baseRef,
+        }),
+      );
+    } catch (e) {
+      res.status(e.status || 502).json({ error: e.message });
+    }
+  });
+  const sent = [];
+  fake.github = vi.fn(async (_cfg, method, path, body) => {
+    sent.push([method, path, body]);
+    return method === 'GET'
+      ? { ok: true, status: 200, json: async () => ({ base: { ref: 'main' } }) }
+      : { ok: true, status: 200, json: async () => ({ merged: true, sha: 'merge-sha', message: 'Merged' }) };
+  });
+  const headSha = 'a'.repeat(40);
+  const merged = await call('merge_pull', { repo, pr: 7, headSha, baseRef: 'main', method: 'rebase' });
+  expect(merged.status).toBe(200);
+  expect(await merged.json()).toEqual({ merged: true, sha: 'merge-sha', message: 'Merged' });
+  expect(sent.at(-1)).toEqual([
+    'PUT',
+    '/repos/owner/project/pulls/7/merge',
+    { merge_method: 'rebase', sha: headSha },
+  ]);
+  // Squash unless a method is named; a retargeted pull request is a conflict.
+  await call('merge_pull', { repo, pr: 7, headSha, baseRef: 'main' });
+  expect(sent.at(-1)[2].merge_method).toBe('squash');
+  expect((await call('merge_pull', { repo, pr: 7, headSha, baseRef: 'release' })).status).toBe(409);
+  const writes = sent.filter(([method]) => method === 'PUT').length;
+  const read = await auth.create({ ...input, permission: 'read' }, secret);
+  expect(
+    (await call('merge_pull', { repo, pr: 7, headSha, baseRef: 'main' }, { token: read.token })).status,
+  ).toBe(403);
+  for (const [body, status] of [
+    [{ repo: 'other/project', pr: 7, headSha, baseRef: 'main' }, 403],
+    [{ repo, pr: 7, baseRef: 'main' }, 400],
+    [{ repo, pr: 7, headSha }, 400],
+    [{ repo, pr: 7, headSha: 'short', baseRef: 'main' }, 400],
+    [{ repo, pr: 7, headSha, baseRef: 'main', method: 'fast-forward' }, 400],
+  ])
+    expect((await call('merge_pull', body)).status).toBe(status);
+  expect(sent.filter(([method]) => method === 'PUT').length).toBe(writes);
+  const tool = dashboardTools([]).find((t) => t.name === 'dashboard_merge_pull');
+  expect(tool.annotations.readOnlyHint).toBe(false);
 });
