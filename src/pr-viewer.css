@@ -78,8 +78,9 @@
   color: var(--color-canvas);
   font-weight: 600;
 }
-.prv-merge-btn:disabled,
-.prv-merge-btn[aria-disabled='true'] {
+/* Scoped like `.pr-viewer button:disabled` so it outranks that rule's wait cursor. */
+.pr-viewer .prv-merge-btn:disabled,
+.pr-viewer .prv-merge-btn[aria-disabled='true'] {
   opacity: 0.55;
   cursor: not-allowed;
 }
@@ -101,6 +102,10 @@
   border-radius: 7px;
   padding: 5px 8px;
   color: var(--color-ink);
+}
+/* The warnings wrap onto their own rows of the merge box, like its error. */
+.prv-merge-warnings {
+  display: contents;
 }
 .prv-merge-warning {
   flex-basis: 100%;
