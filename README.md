@@ -764,10 +764,14 @@ projection, refreshed every seven seconds, and does not dismiss unresolved work.
 Interrupted/failed inbox cards open a recovery report: expected and actual
 branch, HEAD, working-file changes and the pending phase. Resume checks that
 report again and refuses missing, recycled or busy workspaces. Reopening a
-session in its own clone slot preserves commits and working files before
-running setup; a new agent turn inspects what already happened before
-continuing. The clone pool does not hand an interrupted or failed session's
-slot to another session.
+session in its own clone slot preserves commits and working files and
+refreshes the origin refs before running setup; a new agent turn inspects what
+already happened before continuing. A slot another session has used since, or
+one whose checkout is off the session's branch, is never reset in its place:
+the first gets a different clone, the second fails the reopen until someone
+inspects it. The clone pool does not hand out, and the daily workspace cleanup
+does not delete, a slot an interrupted or failed session left work in (loop
+review, fix and QA children excepted: their parent retries them).
 
 `/maintenance` drains work: new top-level sessions, messages that would start
 a turn on a settled session, compaction, arming the review or QA loop and
