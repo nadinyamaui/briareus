@@ -1,5 +1,7 @@
 // @ts-check
 import express from 'express';
+import { taskHistoryRoutes } from './lib/task-history-routes.js';
+import { estimateCosts } from './lib/prices.js';
 import { previewFeedbackRoutes } from './lib/preview-feedback.js';
 import { initMemorySelection } from './lib/memory-selection.js';
 import { memoryMaintenanceRoutes } from './lib/memory-maintenance-routes.js';
@@ -18,7 +20,7 @@ import { execFile, spawn } from 'child_process';
 import { getConfig, ROOT } from './lib/config.js';
 import { workerTranscript } from './lib/worker-transcript.js';
 import { assetCacheHeaders, pageHandler } from './lib/assets.js';
-import { initDb, dbHealthy } from './lib/db.js';
+import { initDb, dbHealthy, loadTaskSessions, loadJobTurnUsage } from './lib/db.js';
 import {
   initJobs,
   setAgentApiBase,
@@ -394,7 +396,7 @@ app.get('/dashboard', devPage);
 app.get('/office', devPage);
 app.get('/findings', devPage);
 app.get(
-  ['/attention', '/maintenance', '/recovery/:id', '/memory-health', '/preview-feedback/:id'],
+  ['/attention', '/maintenance', '/recovery/:id', '/memory-health', '/preview-feedback/:id', '/tasks/:id'],
   pageHandler(PUBLIC, 'operations.html'),
 );
 app.get('/sessions/:id', devPage);
@@ -574,6 +576,14 @@ app.use(
 
 app.use(memoryMaintenanceRoutes({ listMemories, updateMemory }));
 app.use(previewFeedbackRoutes({ getJob, getUpload, sendMessage: sendDevMessage }));
+app.use(
+  taskHistoryRoutes({
+    loadSnapshots: loadTaskSessions,
+    listSessions: listDevSessions,
+    loadUsage: loadJobTurnUsage,
+    estimateCosts,
+  }),
+);
 
 app.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
