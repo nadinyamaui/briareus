@@ -56,6 +56,7 @@ vi.mock('../lib/providers.js', () => {
 });
 
 let auth, server, url, saved, save, load, clock, loginOn, secret, dashboard, handler, device, project;
+let transcribe, transcribeOn;
 const repo = 'owner/project';
 const input = { label: 'iPhone', repos: [repo], permission: 'manage', days: 90 };
 const prefix = '/api/mobile/v1';
@@ -104,7 +105,9 @@ beforeEach(async () => {
       })[id],
   });
   const options = { auth, loginEnabled: () => loginOn, ownerSecret: () => secret };
-  app.use(mobileApiRoutes({ ...options, dashboard }));
+  transcribeOn = true;
+  transcribe = vi.fn(async () => 'hola mundo');
+  app.use(mobileApiRoutes({ ...options, dashboard, transcribe, transcribeAvailable: () => transcribeOn }));
   app.use(sameOriginWrites);
   app.use(express.json());
   app.use(
@@ -351,6 +354,59 @@ it('preserves operation error statuses and hides internal server errors', async 
     throw new Error('database password must not leak');
   });
   const failed = await call('sessions', { repo });
+  expect(failed.status).toBe(500);
+  expect(await failed.json()).toEqual({ error: 'Mobile API unavailable' });
+});
+
+function voiceNote(body, { token = device.token, type = 'audio/mp4', lang = 'es-ES' } = {}) {
+  return fetch(`${url}${prefix}/transcribe?lang=${lang}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': type },
+    body,
+  });
+}
+
+it('transcribes a voice note for a managing device and says whether the server can', async () => {
+  expect(await (await request(`${prefix}/`)).json()).toMatchObject({ transcribe: true });
+  const result = await voiceNote(Buffer.from('recording'));
+  expect(result.status).toBe(200);
+  expect(await result.json()).toEqual({ text: 'hola mundo' });
+  const [audio, options] = transcribe.mock.calls[0];
+  expect(Buffer.from(audio).toString()).toBe('recording');
+  expect(options).toMatchObject({ type: 'audio/mp4', language: 'es-ES' });
+  expect(options.signal.aborted).toBe(false);
+
+  transcribeOn = false;
+  expect(await (await request(`${prefix}/`)).json()).toMatchObject({ transcribe: false });
+  const spec = await (await request(`${prefix}/openapi.json`)).json();
+  expect(spec.paths['/transcribe'].post.operationId).toBe('transcribe');
+});
+
+it('refuses a voice note that is empty, unauthorized or from a read-only device', async () => {
+  expect((await voiceNote(Buffer.alloc(0))).status).toBe(400);
+  expect((await voiceNote(Buffer.from('x'), { token: '' })).status).toBe(401);
+  const reader = await auth.create({ ...input, label: 'Reader', permission: 'read' }, secret);
+  const refused = await voiceNote(Buffer.from('x'), { token: reader.token });
+  expect(refused.status).toBe(403);
+  expect((await voiceNote(Buffer.alloc(26 * 1024 * 1024))).status).toBe(413);
+  const browser = await fetch(`${url}${prefix}/transcribe`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${device.token}`, 'Content-Type': 'audio/mp4', Origin: url },
+    body: Buffer.from('x'),
+  });
+  expect(browser.status).toBe(403);
+  expect(transcribe).not.toHaveBeenCalled();
+});
+
+it('passes on why a voice note could not be transcribed and hides other failures', async () => {
+  transcribe.mockRejectedValueOnce(
+    Object.assign(new Error('OpenAI answered 400 to the transcription: bad audio'), { status: 502 }),
+  );
+  const refused = await voiceNote(Buffer.from('x'));
+  expect(refused.status).toBe(502);
+  expect((await refused.json()).error).toContain('bad audio');
+  transcribe.mockRejectedValueOnce(new Error('internal path must not leak'));
+  const failed = await voiceNote(Buffer.from('x'));
   expect(failed.status).toBe(500);
   expect(await failed.json()).toEqual({ error: 'Mobile API unavailable' });
 });
