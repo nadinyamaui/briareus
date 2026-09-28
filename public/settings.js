@@ -1094,8 +1094,18 @@
   const MOVE =
     'cursor-pointer rounded border border-line bg-field px-1.5 text-[12px] leading-5 text-muted hover:text-ink disabled:cursor-default disabled:opacity-40 disabled:hover:text-muted';
 
-  function renderList() {
-    const selected = (type, row) => currentType === type && current && row.id === current.id && !isNew;
+  const selected = (type, row) => currentType === type && current && row.id === current.id && !isNew;
+
+  // The blank row standing for an entry that is not saved yet.
+  function newRow() {
+    const el = document.createElement('div');
+    el.className = `${ROW} bg-raise`;
+    el.innerHTML = `<div class="flex items-center gap-[7px] truncate text-[14px]"><span class="dot"></span>${TYPES[currentType].newTitle}</div>`;
+    return el;
+  }
+
+  // On its own for a reorder, which changes nothing in the other lists.
+  function renderProjectList() {
     // Projects are the one list whose order means something elsewhere (the
     // dashboard's sidebar, the composer's default), so their rows drag, and
     // carry ↑/↓ for touch screens and keyboards, where dragging does not.
@@ -1116,6 +1126,11 @@
       </div>`,
       )
       .join('');
+    if (isNew && currentType === 'project') $('project-list').appendChild(newRow());
+  }
+
+  function renderList() {
+    renderProjectList();
     $('provider-list').innerHTML =
       items.provider
         .map(
@@ -1199,12 +1214,7 @@
         <div class="flex items-center gap-[7px] truncate text-[14px]"><span class="dot idle"></span>Pool health</div>
         <div class="flex items-center gap-2 text-[12px] text-muted"><span class="truncate">clone slots on disk</span></div>
       </div>`;
-    if (isNew) {
-      const el = document.createElement('div');
-      el.className = `${ROW} bg-raise`;
-      el.innerHTML = `<div class="flex items-center gap-[7px] truncate text-[14px]"><span class="dot"></span>${TYPES[currentType].newTitle}</div>`;
-      TYPES[currentType].listEl().appendChild(el);
-    }
+    if (isNew && currentType !== 'project') TYPES[currentType].listEl().appendChild(newRow());
     syncCapacity();
   }
 
@@ -1232,6 +1242,13 @@
   let orderSaves = Promise.resolve();
   let orderPending = 0;
 
+  // Anything that reads or changes the project list on the server waits for
+  // the queued moves first, or it would answer with (or delete under) an
+  // order the next move no longer starts from.
+  async function orderSettled() {
+    while (orderPending) await orderSaves;
+  }
+
   function showProjectOrder(projects) {
     items.project = projects;
     // The rows were replaced; the open entry is the same project under a new
@@ -1243,7 +1260,7 @@
   function saveProjectOrder(ids) {
     const byId = new Map(items.project.map((p) => [p.id, p]));
     showProjectOrder(ids.map((id) => byId.get(id)).filter(Boolean));
-    renderList();
+    renderProjectList();
     orderPending++;
     orderSaves = orderSaves.then(async () => {
       let projects;
@@ -1267,7 +1284,7 @@
       // (and the keyboard focus on them) alone.
       const same = projects.map((p) => p.id).join() === items.project.map((p) => p.id).join();
       showProjectOrder(projects);
-      if (!same) renderList();
+      if (!same) renderProjectList();
     });
   }
 
@@ -1278,7 +1295,7 @@
     if (from < 0 || to < 0 || to >= ids.length) return;
     ids.splice(to, 0, ids.splice(from, 1)[0]);
     saveProjectOrder(ids);
-    // renderList rebuilt the buttons; keep the keyboard on the row, on the
+    // renderProjectList rebuilt the buttons; keep the keyboard on the row, on the
     // other arrow once this one has hit the end, so ↑↑↑ works.
     const row = $('project-list').querySelector(`[data-id="${id}"]`);
     const btn = row?.querySelector(`[data-move="${delta}"]`);
@@ -1322,16 +1339,26 @@
     if (dragId == null || !row) return;
     e.preventDefault();
     const target = Number(row.dataset.id);
-    if (target === dragId) return;
-    const ids = items.project.map((p) => p.id).filter((id) => id !== dragId);
-    ids.splice(ids.indexOf(target) + (dropAfter(e, row) ? 1 : 0), 0, dragId);
-    if (ids.join() !== items.project.map((p) => p.id).join()) saveProjectOrder(ids);
+    const moved = dragId;
+    // The drag ends here: the re-render below detaches the dragged row, and
+    // dragend on a detached row never reaches this list.
+    endDrag();
+    const ids = items.project.map((p) => p.id).filter((id) => id !== moved);
+    if (target !== moved) ids.splice(ids.indexOf(target) + (dropAfter(e, row) ? 1 : 0), 0, moved);
+    if (target !== moved && ids.join() !== items.project.map((p) => p.id).join()) saveProjectOrder(ids);
+    // Dropped where it was: nothing to save, only the marks come off.
+    else renderProjectList();
   });
+  // A drag let go anywhere else: nothing moved, only the marks come off.
   projectList.addEventListener('dragend', () => {
+    if (dragId == null) return;
+    endDrag();
+    renderProjectList();
+  });
+  function endDrag() {
     dragId = null;
     marked = null;
-    renderList();
-  });
+  }
 
   // Sidebar sections stay collapsed across visits.
   for (const sec of document.querySelectorAll('#sidebar details')) {
@@ -1723,6 +1750,7 @@
     });
     if (!ok) return;
     try {
+      await orderSettled();
       await api(`${t.api}/${current.id}`, { method: 'DELETE' });
       dirty = false;
       await load();
@@ -1735,6 +1763,7 @@
   });
 
   async function load() {
+    await orderSettled();
     const [proj, prov, db, dev, tpl, saved, mem, ssh] = await Promise.all([
       api('/api/projects'),
       api('/api/providers'),
