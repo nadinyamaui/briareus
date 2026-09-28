@@ -1016,14 +1016,22 @@ describe('the codex parser', () => {
     ]);
   });
 
-  it('accumulates usage across model calls: consumption, never context size', () => {
+  it('subtracts the preceding lifetime total from a resumed Codex turn', () => {
     const { turn, events } = feedAll([
-      { type: 'turn.completed', usage: { input_tokens: 100, output_tokens: 10 } },
-      { type: 'turn.completed', usage: { input_tokens: 200, output_tokens: 20 } },
+      { type: 'turn.completed', usage: { input_tokens: 100, cached_input_tokens: 80, output_tokens: 10 } },
+      { type: 'turn.completed', usage: { input_tokens: 200, cached_input_tokens: 170, output_tokens: 20 } },
     ]);
-    expect(turn.inputTokens).toBe(300);
-    expect(turn.outputTokens).toBe(30);
+    expect(turn.inputTokens).toBe(200);
+    expect(turn.cachedInputTokens).toBe(170);
+    expect(turn.outputTokens).toBe(20);
     expect(events.every((e) => e.kind === 'result' && e.tokens === null)).toBe(true);
+    const resumed = newTurn();
+    resumed.codexBaseline = { inputTokens: 200, cachedInputTokens: 170, outputTokens: 20 };
+    parserFor('codex', resumed).feed({
+      type: 'turn.completed',
+      usage: { input_tokens: 250, cached_input_tokens: 215, output_tokens: 24 },
+    });
+    expect(resumed).toMatchObject({ inputTokens: 50, cachedInputTokens: 45, outputTokens: 4 });
   });
 
   it('a failed turn is an error result with the message', () => {

@@ -61,6 +61,8 @@ describe('turnUsageRecord', () => {
       activity: null,
       inputTokens: 100,
       outputTokens: 20,
+      cachedInputTokens: null,
+      usageIsDelta: true,
       costUsd: null,
       durationMs: 2500,
       at: 123,
@@ -928,6 +930,21 @@ describe('session cost estimates', () => {
       events[1],
     ]);
     expect(events[0].costUsd).toBeNull();
+  });
+
+  it('repairs the token counts in an old Codex result footer', () => {
+    const event = { kind: 'result', t: new Date(1000).toISOString(), inputTokens: 150, outputTokens: 12 };
+    const row = {
+      at: 1005,
+      provider: 'codex',
+      inputTokens: 50,
+      outputTokens: 2,
+      costUsd: 0.1,
+      costEstimated: true,
+    };
+    expect(estimateEventCosts([event], [row])).toEqual([
+      { ...event, inputTokens: 50, outputTokens: 2, costUsd: 0.1, costEstimated: true },
+    ]);
   });
 
   it('does not use a later turn ledger row for a ledger-less failure', () => {
