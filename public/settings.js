@@ -1226,22 +1226,49 @@
 
   // ---------- project order ----------
 
-  async function saveProjectOrder(ids) {
-    try {
-      const { projects } = await api('/api/projects/order', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids }),
-      });
-      items.project = projects;
-    } catch (e) {
-      toast(e.message, true);
-    }
+  // The new order shows at once and the saves go out one after another, so
+  // each move starts from the one before it even while that one is in flight.
+  // The server's answer is only taken once nothing else is queued behind it.
+  let orderSaves = Promise.resolve();
+  let orderPending = 0;
+
+  function showProjectOrder(projects) {
+    items.project = projects;
     // The rows were replaced; the open entry is the same project under a new
     // object, and a save goes by its id either way.
     if (currentType === 'project' && current)
       current = items.project.find((p) => p.id === current.id) || current;
+  }
+
+  function saveProjectOrder(ids) {
+    const byId = new Map(items.project.map((p) => [p.id, p]));
+    showProjectOrder(ids.map((id) => byId.get(id)).filter(Boolean));
     renderList();
+    orderPending++;
+    orderSaves = orderSaves.then(async () => {
+      let projects;
+      try {
+        ({ projects } = await api('/api/projects/order', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids }),
+        }));
+      } catch (e) {
+        toast(e.message, true);
+        // A 409 means the list changed elsewhere: start the next move from
+        // the server's list, not from this one, which would be refused again.
+        projects = await api('/api/projects').then(
+          (r) => r.projects,
+          () => null,
+        );
+      }
+      if (--orderPending || !projects) return;
+      // The same order as on screen: swap the objects, and leave the rows
+      // (and the keyboard focus on them) alone.
+      const same = projects.map((p) => p.id).join() === items.project.map((p) => p.id).join();
+      showProjectOrder(projects);
+      if (!same) renderList();
+    });
   }
 
   function moveProject(id, delta) {
@@ -1250,18 +1277,29 @@
     const to = from + delta;
     if (from < 0 || to < 0 || to >= ids.length) return;
     ids.splice(to, 0, ids.splice(from, 1)[0]);
-    saveProjectOrder(ids).then(() => {
-      // renderList rebuilt the buttons; keep the keyboard on the row, on the
-      // other arrow once this one has hit the end, so ↑↑↑ works.
-      const row = $('project-list').querySelector(`[data-id="${id}"]`);
-      const btn = row?.querySelector(`[data-move="${delta}"]`);
-      (btn && !btn.disabled ? btn : row?.querySelector(`[data-move="${-delta}"]`))?.focus();
-    });
+    saveProjectOrder(ids);
+    // renderList rebuilt the buttons; keep the keyboard on the row, on the
+    // other arrow once this one has hit the end, so ↑↑↑ works.
+    const row = $('project-list').querySelector(`[data-id="${id}"]`);
+    const btn = row?.querySelector(`[data-move="${delta}"]`);
+    (btn && !btn.disabled ? btn : row?.querySelector(`[data-move="${-delta}"]`))?.focus();
   }
 
   // Dragging a row over another puts it before or after that row, by which
   // half the pointer is in; nothing is saved until the drop.
+  const DROP_BEFORE = 'shadow-[inset_0_2px_0_var(--color-accent)]';
+  const DROP_AFTER = 'shadow-[inset_0_-2px_0_var(--color-accent)]';
+  const dropAfter = (e, row) => e.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2;
   let dragId = null;
+  // The one row carrying the drop line, and which one; dragover fires
+  // continuously, so the DOM is only touched when that changes.
+  let marked = null;
+  function markRow(row, cls) {
+    if (marked?.row === row && marked.cls === cls) return;
+    if (marked) marked.row.classList.remove(marked.cls);
+    marked = cls ? { row, cls } : null;
+    if (cls) row.classList.add(cls);
+  }
   const projectList = $('project-list');
   projectList.addEventListener('dragstart', (e) => {
     const row = e.target.closest('.sess[data-id]');
@@ -1276,32 +1314,22 @@
     if (dragId == null || !row) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    const after = e.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2;
-    for (const r of projectList.querySelectorAll('.sess')) {
-      r.classList.remove(
-        'shadow-[inset_0_2px_0_var(--color-accent)]',
-        'shadow-[inset_0_-2px_0_var(--color-accent)]',
-      );
-    }
-    if (Number(row.dataset.id) !== dragId) {
-      row.classList.add(
-        after ? 'shadow-[inset_0_-2px_0_var(--color-accent)]' : 'shadow-[inset_0_2px_0_var(--color-accent)]',
-      );
-    }
+    if (Number(row.dataset.id) === dragId) markRow(null, null);
+    else markRow(row, dropAfter(e, row) ? DROP_AFTER : DROP_BEFORE);
   });
   projectList.addEventListener('drop', (e) => {
     const row = e.target.closest('.sess[data-id]');
     if (dragId == null || !row) return;
     e.preventDefault();
     const target = Number(row.dataset.id);
-    const after = e.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2;
-    const ids = items.project.map((p) => p.id).filter((id) => id !== dragId);
     if (target === dragId) return;
-    ids.splice(ids.indexOf(target) + (after ? 1 : 0), 0, dragId);
+    const ids = items.project.map((p) => p.id).filter((id) => id !== dragId);
+    ids.splice(ids.indexOf(target) + (dropAfter(e, row) ? 1 : 0), 0, dragId);
     if (ids.join() !== items.project.map((p) => p.id).join()) saveProjectOrder(ids);
   });
   projectList.addEventListener('dragend', () => {
     dragId = null;
+    marked = null;
     renderList();
   });
 

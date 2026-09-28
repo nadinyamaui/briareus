@@ -566,12 +566,27 @@ describe('reordering', () => {
     expect(state.ordered).toEqual([[2, 3, 1]]);
   });
 
+  it('keeps the new order in the cache when reading it back fails', async () => {
+    state.loadError = new Error('gone away');
+
+    const list = await reorderProjects([2, 3, 1]);
+
+    expect(list.map((p) => [p.id, p.sortOrder])).toEqual([
+      [2, 1],
+      [3, 2],
+      [1, 3],
+    ]);
+    expect(listProjects().map((p) => p.id)).toEqual([2, 3, 1]);
+  });
+
   it.each([
     ['leaves a project out', [3, 1]],
     ['names one twice', [1, 1, 2, 3]],
     ['repeats one in place of another', [1, 1, 2]],
     ['names a project that is not there', [1, 2, 4]],
     ['is not a list', 'nope'],
+    ['names projects by values that are not ids', [true, ' 2 ', 3]],
+    ['names a project by a fraction', [1, 2, 3.5]],
     ['is missing', undefined],
   ])('refuses a list that %s, with 409, and saves nothing', async (_, ids) => {
     await expect(reorderProjects(ids)).rejects.toMatchObject({ status: 409 });
