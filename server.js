@@ -122,6 +122,7 @@ import {
   createProject,
   updateProject,
   removeProject,
+  reorderProjects,
   PROJECT_DEFAULTS,
   reviewerRuntime,
 } from './lib/projects.js';
@@ -453,6 +454,15 @@ app.post('/api/projects', async (req, res) => {
     res.status(201).json({ project: await createProject(req.body || {}) });
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
+  }
+});
+
+// Before /:id, which would otherwise take "order" for an id.
+app.put('/api/projects/order', async (req, res) => {
+  try {
+    res.json({ projects: await reorderProjects((req.body || {}).ids) });
+  } catch (e) {
+    res.status(e.status === 503 || e.status === 409 ? e.status : 400).json({ error: e.message });
   }
 });
 

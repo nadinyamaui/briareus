@@ -1091,14 +1091,34 @@
 
   const ROW = 'sess flex cursor-pointer flex-col gap-0.5 rounded-lg px-2 py-[7px] hover:bg-raise';
   const BADGE = 'rounded border border-line px-[5px] text-[11px] text-muted';
+  const MOVE =
+    'cursor-pointer rounded border border-line bg-field px-1.5 text-[12px] leading-5 text-muted hover:text-ink disabled:cursor-default disabled:opacity-40 disabled:hover:text-muted';
 
-  function renderList() {
-    const selected = (type, row) => currentType === type && current && row.id === current.id && !isNew;
+  const selected = (type, row) => currentType === type && current && row.id === current.id && !isNew;
+
+  // The blank row standing for an entry that is not saved yet.
+  function newRow() {
+    const el = document.createElement('div');
+    el.className = `${ROW} bg-raise`;
+    el.innerHTML = `<div class="flex items-center gap-[7px] truncate text-[14px]"><span class="dot"></span>${TYPES[currentType].newTitle}</div>`;
+    return el;
+  }
+
+  // On its own for a reorder, which changes nothing in the other lists.
+  function renderProjectList() {
+    // Projects are the one list whose order means something elsewhere (the
+    // dashboard's sidebar, the composer's default), so their rows drag, and
+    // carry ↑/↓ for touch screens and keyboards, where dragging does not.
+    const last = items.project.length - 1;
     $('project-list').innerHTML = items.project
       .map(
-        (p) => `
-      <div class="${ROW}${selected('project', p) ? ' bg-raise' : ''}" data-type="project" data-id="${p.id}">
-        <div class="flex items-center gap-[7px] truncate text-[14px]"><span class="dot ${p.enabled ? 'idle' : ''}"></span>${esc(p.label)}</div>
+        (p, i) => `
+      <div class="${ROW} group relative${selected('project', p) ? ' bg-raise' : ''}" data-type="project" data-id="${p.id}" draggable="true">
+        <div class="absolute top-1 right-1 flex gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100">
+          <button type="button" class="${MOVE}" data-move="-1" title="Move up" aria-label="Move ${esc(p.label)} up"${i === 0 ? ' disabled' : ''}>↑</button>
+          <button type="button" class="${MOVE}" data-move="1" title="Move down" aria-label="Move ${esc(p.label)} down"${i === last ? ' disabled' : ''}>↓</button>
+        </div>
+        <div class="flex items-center gap-[7px] truncate pr-12 text-[14px]"><span class="dot ${p.enabled ? 'idle' : ''}"></span>${esc(p.label)}</div>
         <div class="flex items-center gap-2 text-[12px] text-muted">
           <span class="truncate">${esc(p.repo)}</span>
           ${p.dbPoolEnabled ? `<span class="${BADGE}">db</span>` : ''}
@@ -1106,6 +1126,11 @@
       </div>`,
       )
       .join('');
+    if (isNew && currentType === 'project') $('project-list').appendChild(newRow());
+  }
+
+  function renderList() {
+    renderProjectList();
     $('provider-list').innerHTML =
       items.provider
         .map(
@@ -1189,24 +1214,151 @@
         <div class="flex items-center gap-[7px] truncate text-[14px]"><span class="dot idle"></span>Pool health</div>
         <div class="flex items-center gap-2 text-[12px] text-muted"><span class="truncate">clone slots on disk</span></div>
       </div>`;
-    if (isNew) {
-      const el = document.createElement('div');
-      el.className = `${ROW} bg-raise`;
-      el.innerHTML = `<div class="flex items-center gap-[7px] truncate text-[14px]"><span class="dot"></span>${TYPES[currentType].newTitle}</div>`;
-      TYPES[currentType].listEl().appendChild(el);
-    }
+    if (isNew && currentType !== 'project') TYPES[currentType].listEl().appendChild(newRow());
     syncCapacity();
   }
 
   document.getElementById('sidebar').addEventListener('click', (e) => {
     const item = e.target.closest('.sess');
     if (!item || !item.dataset.id) return;
+    const move = e.target.closest('[data-move]');
+    if (move) {
+      // A move is not a pick: the open entry, and anything unsaved in it, stays.
+      if (!move.disabled) moveProject(Number(item.dataset.id), Number(move.dataset.move));
+      return;
+    }
     // Also for the entry that is already open: the tap says "show me this",
     // and showForm's own close never runs when select() finds nothing to do.
     closeDrawerOnMobile();
     if (item.dataset.type === 'workspaces') showWorkspaces();
     else select(item.dataset.type, Number(item.dataset.id));
   });
+
+  // ---------- project order ----------
+
+  // The new order shows at once and the saves go out one after another, so
+  // each move starts from the one before it even while that one is in flight.
+  // The server's answer is only taken once nothing else is queued behind it.
+  let orderSaves = Promise.resolve();
+  let orderPending = 0;
+
+  // Anything that reads or changes the project list on the server waits for
+  // the queued moves first, or it would answer with (or delete under) an
+  // order the next move no longer starts from.
+  async function orderSettled() {
+    while (orderPending) await orderSaves;
+  }
+
+  function showProjectOrder(projects) {
+    items.project = projects;
+    // The rows were replaced; the open entry is the same project under a new
+    // object, and a save goes by its id either way.
+    if (currentType === 'project' && current)
+      current = items.project.find((p) => p.id === current.id) || current;
+  }
+
+  function saveProjectOrder(ids) {
+    const byId = new Map(items.project.map((p) => [p.id, p]));
+    showProjectOrder(ids.map((id) => byId.get(id)).filter(Boolean));
+    renderProjectList();
+    orderPending++;
+    orderSaves = orderSaves.then(async () => {
+      let projects;
+      try {
+        ({ projects } = await api('/api/projects/order', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids }),
+        }));
+      } catch (e) {
+        toast(e.message, true);
+        // A 409 means the list changed elsewhere: start the next move from
+        // the server's list, not from this one, which would be refused again.
+        projects = await api('/api/projects').then(
+          (r) => r.projects,
+          () => null,
+        );
+      }
+      if (--orderPending || !projects) return;
+      // The same order as on screen: swap the objects, and leave the rows
+      // (and the keyboard focus on them) alone.
+      const same = projects.map((p) => p.id).join() === items.project.map((p) => p.id).join();
+      showProjectOrder(projects);
+      if (!same) renderProjectList();
+    });
+  }
+
+  function moveProject(id, delta) {
+    const ids = items.project.map((p) => p.id);
+    const from = ids.indexOf(id);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= ids.length) return;
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    saveProjectOrder(ids);
+    // renderProjectList rebuilt the buttons; keep the keyboard on the row, on the
+    // other arrow once this one has hit the end, so ↑↑↑ works.
+    const row = $('project-list').querySelector(`[data-id="${id}"]`);
+    const btn = row?.querySelector(`[data-move="${delta}"]`);
+    (btn && !btn.disabled ? btn : row?.querySelector(`[data-move="${-delta}"]`))?.focus();
+  }
+
+  // Dragging a row over another puts it before or after that row, by which
+  // half the pointer is in; nothing is saved until the drop.
+  const DROP_BEFORE = 'shadow-[inset_0_2px_0_var(--color-accent)]';
+  const DROP_AFTER = 'shadow-[inset_0_-2px_0_var(--color-accent)]';
+  const dropAfter = (e, row) => e.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2;
+  let dragId = null;
+  // The one row carrying the drop line, and which one; dragover fires
+  // continuously, so the DOM is only touched when that changes.
+  let marked = null;
+  function markRow(row, cls) {
+    if (marked?.row === row && marked.cls === cls) return;
+    if (marked) marked.row.classList.remove(marked.cls);
+    marked = cls ? { row, cls } : null;
+    if (cls) row.classList.add(cls);
+  }
+  const projectList = $('project-list');
+  projectList.addEventListener('dragstart', (e) => {
+    const row = e.target.closest('.sess[data-id]');
+    if (!row) return;
+    dragId = Number(row.dataset.id);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', row.dataset.id);
+    row.classList.add('opacity-50');
+  });
+  projectList.addEventListener('dragover', (e) => {
+    const row = e.target.closest('.sess[data-id]');
+    if (dragId == null || !row) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (Number(row.dataset.id) === dragId) markRow(null, null);
+    else markRow(row, dropAfter(e, row) ? DROP_AFTER : DROP_BEFORE);
+  });
+  projectList.addEventListener('drop', (e) => {
+    const row = e.target.closest('.sess[data-id]');
+    if (dragId == null || !row) return;
+    e.preventDefault();
+    const target = Number(row.dataset.id);
+    const moved = dragId;
+    // The drag ends here: the re-render below detaches the dragged row, and
+    // dragend on a detached row never reaches this list.
+    endDrag();
+    const ids = items.project.map((p) => p.id).filter((id) => id !== moved);
+    if (target !== moved) ids.splice(ids.indexOf(target) + (dropAfter(e, row) ? 1 : 0), 0, moved);
+    if (target !== moved && ids.join() !== items.project.map((p) => p.id).join()) saveProjectOrder(ids);
+    // Dropped where it was: nothing to save, only the marks come off.
+    else renderProjectList();
+  });
+  // A drag let go anywhere else: nothing moved, only the marks come off.
+  projectList.addEventListener('dragend', () => {
+    if (dragId == null) return;
+    endDrag();
+    renderProjectList();
+  });
+  function endDrag() {
+    dragId = null;
+    marked = null;
+  }
 
   // Sidebar sections stay collapsed across visits.
   for (const sec of document.querySelectorAll('#sidebar details')) {
@@ -1598,6 +1750,7 @@
     });
     if (!ok) return;
     try {
+      await orderSettled();
       await api(`${t.api}/${current.id}`, { method: 'DELETE' });
       dirty = false;
       await load();
@@ -1610,6 +1763,7 @@
   });
 
   async function load() {
+    await orderSettled();
     const [proj, prov, db, dev, tpl, saved, mem, ssh] = await Promise.all([
       api('/api/projects'),
       api('/api/providers'),

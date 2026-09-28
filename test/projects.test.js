@@ -3,7 +3,16 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // normalizeProject is not exported; createProject and updateProject are the
 // doors to it, so the validation is tested through those, with the DB layer
 // mocked to hand back whatever it was asked to save.
-const state = vi.hoisted(() => ({ rows: [], saved: [], deleted: [], nextId: 1, loadError: null }));
+const state = vi.hoisted(() => ({
+  rows: [],
+  saved: [],
+  deleted: [],
+  ordered: [],
+  nextId: 1,
+  loadError: null,
+  // Runs inside a save, standing in for another request that lands meanwhile.
+  during: null,
+}));
 
 vi.mock('../lib/db.js', () => ({
   loadProjectRows: async () => {
@@ -11,7 +20,9 @@ vi.mock('../lib/db.js', () => ({
     return state.rows;
   },
   saveProject: async (p) => {
-    const saved = { ...p, id: p.id ?? state.nextId++ };
+    await state.during?.();
+    // An update that names no position keeps the row's, as the real one does.
+    const saved = { ...state.rows.find((r) => r.id === p.id), ...p, id: p.id ?? state.nextId++ };
     state.saved.push(saved);
     state.rows = [...state.rows.filter((r) => r.id !== saved.id), saved];
     return saved;
@@ -22,6 +33,13 @@ vi.mock('../lib/db.js', () => ({
     return true;
   },
   getProjectRow: async (id) => state.rows.find((r) => r.id === Number(id)) || null,
+  saveProjectOrder: async (ids) => {
+    await state.during?.();
+    state.ordered.push(ids);
+    state.rows = state.rows
+      .map((r) => ({ ...r, sortOrder: ids.indexOf(r.id) + 1 }))
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+  },
 }));
 
 vi.mock('../lib/templates.js', () => ({ normalize: (t) => t || {} }));
@@ -34,6 +52,7 @@ const {
   createProject,
   updateProject,
   removeProject,
+  reorderProjects,
   stepRuntime,
   reviewerRuntime,
   render,
@@ -50,7 +69,9 @@ async function seed(rows = []) {
   state.rows = rows;
   state.saved = [];
   state.deleted = [];
+  state.ordered = [];
   state.loadError = null;
+  state.during = null;
   state.nextId = Math.max(0, ...rows.map((r) => r.id || 0)) + 1;
   await initProjects();
   state.saved = [];
@@ -528,6 +549,86 @@ describe('the order', () => {
   });
 });
 
+describe('reordering', () => {
+  beforeEach(() =>
+    seed([
+      project({ id: 1, repo: 'a/one', sortOrder: 1 }),
+      project({ id: 2, repo: 'a/two', sortOrder: 2 }),
+      project({ id: 3, repo: 'a/three', sortOrder: 3 }),
+    ]),
+  );
+
+  it('stores the order it is given and hands back the reloaded list', async () => {
+    const list = await reorderProjects([3, 1, 2]);
+
+    expect(state.ordered).toEqual([[3, 1, 2]]);
+    expect(list.map((p) => p.repo)).toEqual(['a/three', 'a/one', 'a/two']);
+    expect(listProjects().map((p) => p.id)).toEqual([3, 1, 2]);
+  });
+
+  it('takes ids as strings too, the way a form might send them', async () => {
+    await reorderProjects(['2', '3', '1']);
+
+    expect(state.ordered).toEqual([[2, 3, 1]]);
+  });
+
+  it('keeps the new order in the cache when reading it back fails', async () => {
+    state.loadError = new Error('gone away');
+
+    const list = await reorderProjects([2, 3, 1]);
+
+    expect(list.map((p) => [p.id, p.sortOrder])).toEqual([
+      [2, 1],
+      [3, 2],
+      [1, 3],
+    ]);
+    expect(listProjects().map((p) => p.id)).toEqual([2, 3, 1]);
+  });
+
+  it('skips a project removed during the save, rather than caching a bare entry', async () => {
+    state.during = async () => {
+      state.during = null;
+      await removeProject(3);
+      state.loadError = new Error('gone away');
+    };
+
+    await reorderProjects([3, 2, 1]);
+
+    expect(listProjects().map((p) => [p.id, p.sortOrder])).toEqual([
+      [2, 1],
+      [1, 2],
+    ]);
+    expect(getProject('a/one').id).toBe(1);
+  });
+
+  it('keeps a project created during the save, after the listed ones', async () => {
+    state.during = async () => {
+      state.during = null;
+      await createProject({ repo: 'a/four' });
+      state.loadError = new Error('gone away');
+    };
+
+    await reorderProjects([3, 2, 1]);
+
+    expect(listProjects().map((p) => p.id)).toEqual([3, 2, 1, 4]);
+  });
+
+  it.each([
+    ['leaves a project out', [3, 1]],
+    ['names one twice', [1, 1, 2, 3]],
+    ['repeats one in place of another', [1, 1, 2]],
+    ['names a project that is not there', [1, 2, 4]],
+    ['is not a list', 'nope'],
+    ['names projects by values that are not ids', [true, ' 2 ', 3]],
+    ['names a project by a fraction', [1, 2, 3.5]],
+    ['is missing', undefined],
+  ])('refuses a list that %s, with 409, and saves nothing', async (_, ids) => {
+    await expect(reorderProjects(ids)).rejects.toMatchObject({ status: 409 });
+
+    expect(state.ordered).toEqual([]);
+  });
+});
+
 describe('updating a project', () => {
   beforeEach(() => seed([project({ id: 1, repo: 'a/b', label: 'one', setupCommands: ['npm ci'] })]));
 
@@ -535,6 +636,28 @@ describe('updating a project', () => {
     const saved = await updateProject(1, { label: 'renamed' });
 
     expect(saved).toMatchObject({ id: 1, repo: 'a/b', label: 'renamed', setupCommands: ['npm ci'] });
+  });
+
+  it('keeps a position a reorder wrote while the edit was in flight', async () => {
+    await seed([
+      project({ id: 1, repo: 'a/b', sortOrder: 1 }),
+      project({ id: 2, repo: 'c/d', sortOrder: 2 }),
+    ]);
+    state.during = async () => {
+      state.during = null;
+      await reorderProjects([2, 1]);
+    };
+
+    await updateProject(1, { label: 'renamed' });
+
+    expect(listProjects().map((p) => [p.id, p.sortOrder])).toEqual([
+      [2, 1],
+      [1, 2],
+    ]);
+  });
+
+  it('saves a position the edit names', async () => {
+    expect((await updateProject(1, { sortOrder: 7 })).sortOrder).toBe(7);
   });
 
   it('refuses an id that is not there', async () => {
