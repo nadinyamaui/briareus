@@ -3,7 +3,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // normalizeProject is not exported; createProject and updateProject are the
 // doors to it, so the validation is tested through those, with the DB layer
 // mocked to hand back whatever it was asked to save.
-const state = vi.hoisted(() => ({ rows: [], saved: [], deleted: [], nextId: 1, loadError: null }));
+const state = vi.hoisted(() => ({
+  rows: [],
+  saved: [],
+  deleted: [],
+  ordered: [],
+  nextId: 1,
+  loadError: null,
+}));
 
 vi.mock('../lib/db.js', () => ({
   loadProjectRows: async () => {
@@ -22,6 +29,12 @@ vi.mock('../lib/db.js', () => ({
     return true;
   },
   getProjectRow: async (id) => state.rows.find((r) => r.id === Number(id)) || null,
+  saveProjectOrder: async (ids) => {
+    state.ordered.push(ids);
+    state.rows = state.rows
+      .map((r) => ({ ...r, sortOrder: ids.indexOf(r.id) + 1 }))
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+  },
 }));
 
 vi.mock('../lib/templates.js', () => ({ normalize: (t) => t || {} }));
@@ -34,6 +47,7 @@ const {
   createProject,
   updateProject,
   removeProject,
+  reorderProjects,
   stepRuntime,
   reviewerRuntime,
   render,
@@ -50,6 +64,7 @@ async function seed(rows = []) {
   state.rows = rows;
   state.saved = [];
   state.deleted = [];
+  state.ordered = [];
   state.loadError = null;
   state.nextId = Math.max(0, ...rows.map((r) => r.id || 0)) + 1;
   await initProjects();
@@ -525,6 +540,43 @@ describe('the order', () => {
 
   it('reads an unparseable position as the front', async () => {
     expect((await createProject({ ...base, sortOrder: 'x' })).sortOrder).toBe(0);
+  });
+});
+
+describe('reordering', () => {
+  beforeEach(() =>
+    seed([
+      project({ id: 1, repo: 'a/one', sortOrder: 1 }),
+      project({ id: 2, repo: 'a/two', sortOrder: 2 }),
+      project({ id: 3, repo: 'a/three', sortOrder: 3 }),
+    ]),
+  );
+
+  it('stores the order it is given and hands back the reloaded list', async () => {
+    const list = await reorderProjects([3, 1, 2]);
+
+    expect(state.ordered).toEqual([[3, 1, 2]]);
+    expect(list.map((p) => p.repo)).toEqual(['a/three', 'a/one', 'a/two']);
+    expect(listProjects().map((p) => p.id)).toEqual([3, 1, 2]);
+  });
+
+  it('takes ids as strings too, the way a form might send them', async () => {
+    await reorderProjects(['2', '3', '1']);
+
+    expect(state.ordered).toEqual([[2, 3, 1]]);
+  });
+
+  it.each([
+    ['leaves a project out', [3, 1]],
+    ['names one twice', [1, 1, 2, 3]],
+    ['repeats one in place of another', [1, 1, 2]],
+    ['names a project that is not there', [1, 2, 4]],
+    ['is not a list', 'nope'],
+    ['is missing', undefined],
+  ])('refuses a list that %s, with 409, and saves nothing', async (_, ids) => {
+    await expect(reorderProjects(ids)).rejects.toMatchObject({ status: 409 });
+
+    expect(state.ordered).toEqual([]);
   });
 });
 

@@ -1091,14 +1091,24 @@
 
   const ROW = 'sess flex cursor-pointer flex-col gap-0.5 rounded-lg px-2 py-[7px] hover:bg-raise';
   const BADGE = 'rounded border border-line px-[5px] text-[11px] text-muted';
+  const MOVE =
+    'cursor-pointer rounded border border-line bg-field px-1.5 text-[12px] leading-5 text-muted hover:text-ink disabled:cursor-default disabled:opacity-40 disabled:hover:text-muted';
 
   function renderList() {
     const selected = (type, row) => currentType === type && current && row.id === current.id && !isNew;
+    // Projects are the one list whose order means something elsewhere (the
+    // dashboard's sidebar, the composer's default), so their rows drag, and
+    // carry ↑/↓ for touch screens and keyboards, where dragging does not.
+    const last = items.project.length - 1;
     $('project-list').innerHTML = items.project
       .map(
-        (p) => `
-      <div class="${ROW}${selected('project', p) ? ' bg-raise' : ''}" data-type="project" data-id="${p.id}">
-        <div class="flex items-center gap-[7px] truncate text-[14px]"><span class="dot ${p.enabled ? 'idle' : ''}"></span>${esc(p.label)}</div>
+        (p, i) => `
+      <div class="${ROW} group relative${selected('project', p) ? ' bg-raise' : ''}" data-type="project" data-id="${p.id}" draggable="true">
+        <div class="absolute top-1 right-1 flex gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100">
+          <button type="button" class="${MOVE}" data-move="-1" title="Move up" aria-label="Move ${esc(p.label)} up"${i === 0 ? ' disabled' : ''}>↑</button>
+          <button type="button" class="${MOVE}" data-move="1" title="Move down" aria-label="Move ${esc(p.label)} down"${i === last ? ' disabled' : ''}>↓</button>
+        </div>
+        <div class="flex items-center gap-[7px] truncate pr-12 text-[14px]"><span class="dot ${p.enabled ? 'idle' : ''}"></span>${esc(p.label)}</div>
         <div class="flex items-center gap-2 text-[12px] text-muted">
           <span class="truncate">${esc(p.repo)}</span>
           ${p.dbPoolEnabled ? `<span class="${BADGE}">db</span>` : ''}
@@ -1201,11 +1211,98 @@
   document.getElementById('sidebar').addEventListener('click', (e) => {
     const item = e.target.closest('.sess');
     if (!item || !item.dataset.id) return;
+    const move = e.target.closest('[data-move]');
+    if (move) {
+      // A move is not a pick: the open entry, and anything unsaved in it, stays.
+      if (!move.disabled) moveProject(Number(item.dataset.id), Number(move.dataset.move));
+      return;
+    }
     // Also for the entry that is already open: the tap says "show me this",
     // and showForm's own close never runs when select() finds nothing to do.
     closeDrawerOnMobile();
     if (item.dataset.type === 'workspaces') showWorkspaces();
     else select(item.dataset.type, Number(item.dataset.id));
+  });
+
+  // ---------- project order ----------
+
+  async function saveProjectOrder(ids) {
+    try {
+      const { projects } = await api('/api/projects/order', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+      items.project = projects;
+    } catch (e) {
+      toast(e.message, true);
+    }
+    // The rows were replaced; the open entry is the same project under a new
+    // object, and a save goes by its id either way.
+    if (currentType === 'project' && current)
+      current = items.project.find((p) => p.id === current.id) || current;
+    renderList();
+  }
+
+  function moveProject(id, delta) {
+    const ids = items.project.map((p) => p.id);
+    const from = ids.indexOf(id);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= ids.length) return;
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    saveProjectOrder(ids).then(() => {
+      // renderList rebuilt the buttons; keep the keyboard on the row, on the
+      // other arrow once this one has hit the end, so ↑↑↑ works.
+      const row = $('project-list').querySelector(`[data-id="${id}"]`);
+      const btn = row?.querySelector(`[data-move="${delta}"]`);
+      (btn && !btn.disabled ? btn : row?.querySelector(`[data-move="${-delta}"]`))?.focus();
+    });
+  }
+
+  // Dragging a row over another puts it before or after that row, by which
+  // half the pointer is in; nothing is saved until the drop.
+  let dragId = null;
+  const projectList = $('project-list');
+  projectList.addEventListener('dragstart', (e) => {
+    const row = e.target.closest('.sess[data-id]');
+    if (!row) return;
+    dragId = Number(row.dataset.id);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', row.dataset.id);
+    row.classList.add('opacity-50');
+  });
+  projectList.addEventListener('dragover', (e) => {
+    const row = e.target.closest('.sess[data-id]');
+    if (dragId == null || !row) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const after = e.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2;
+    for (const r of projectList.querySelectorAll('.sess')) {
+      r.classList.remove(
+        'shadow-[inset_0_2px_0_var(--color-accent)]',
+        'shadow-[inset_0_-2px_0_var(--color-accent)]',
+      );
+    }
+    if (Number(row.dataset.id) !== dragId) {
+      row.classList.add(
+        after ? 'shadow-[inset_0_-2px_0_var(--color-accent)]' : 'shadow-[inset_0_2px_0_var(--color-accent)]',
+      );
+    }
+  });
+  projectList.addEventListener('drop', (e) => {
+    const row = e.target.closest('.sess[data-id]');
+    if (dragId == null || !row) return;
+    e.preventDefault();
+    const target = Number(row.dataset.id);
+    const after = e.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2;
+    const ids = items.project.map((p) => p.id).filter((id) => id !== dragId);
+    if (target === dragId) return;
+    ids.splice(ids.indexOf(target) + (after ? 1 : 0), 0, dragId);
+    if (ids.join() !== items.project.map((p) => p.id).join()) saveProjectOrder(ids);
+  });
+  projectList.addEventListener('dragend', () => {
+    dragId = null;
+    renderList();
   });
 
   // Sidebar sections stay collapsed across visits.
