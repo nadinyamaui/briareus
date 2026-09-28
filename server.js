@@ -1457,8 +1457,8 @@ app.post('/api/dev/uploads', express.raw({ type: () => true, limit: '25mb' }), (
 
 // Voice notes: the composer asks once whether the server can transcribe, and
 // posts each recording as the raw body, typed with what the browser recorded
-// (the type is what names the file for OpenAI) and the picked language in the
-// query. The answer is the text only; the recording is not kept.
+// (the type is what names the file for OpenAI); OpenAI tells the language
+// itself. The answer is the text only; the recording is not kept.
 app.get('/api/dev/transcribe', (req, res) => {
   res.json({ available: transcribeAvailable() });
 });
@@ -1476,7 +1476,6 @@ app.post('/api/dev/transcribe', express.raw({ type: () => true, limit: '25mb' })
   try {
     const text = await transcribe(req.body, {
       type: String(req.headers['content-type'] || ''),
-      language: String(req.query.lang || ''),
       signal: gone.signal,
     });
     res.json({ text });

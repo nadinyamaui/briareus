@@ -2741,8 +2741,6 @@
   // http from another host has no button.
 
   const voiceBtn = $('btn-voice');
-  const voiceLangEl = $('voice-lang');
-  const VOICE_LANG_KEY = 'dev.voiceLang';
   // Past this a voice note stops by itself and is transcribed: a forgotten
   // microphone would otherwise record until the upload limit refused it all.
   const VOICE_MAX_MS = 5 * 60 * 1000;
@@ -2760,22 +2758,7 @@
   let voice = null;
 
   if (navigator.mediaDevices?.getUserMedia && window.MediaRecorder && window.isSecureContext) {
-    const langs = [
-      ...new Set(
-        [
-          localStorage.getItem(VOICE_LANG_KEY),
-          ...(navigator.languages || [navigator.language]),
-          'es-ES',
-          'en-US',
-        ].filter(Boolean),
-      ),
-    ];
-    voiceLangEl.innerHTML = langs.map((l) => `<option value="${esc(l)}">${esc(l)}</option>`).join('');
-    voiceLangEl.value = langs[0];
     voiceBtn.classList.remove('hidden');
-    // The picker stays up beside the button: the language is read when the
-    // note is transcribed, so it can be set before speaking or while recording.
-    voiceLangEl.classList.remove('hidden');
     renderVoice();
     // Shown either way: a button that vanished would not say which setting
     // brings it back, and a press does.
@@ -2792,7 +2775,7 @@
       ? 'Stop and transcribe the voice note'
       : state === 'transcribing'
         ? `Transcribing the voice note…${voice.next ? ' a new one starts once it lands' : ''}`
-        : `Voice note: speak, and OpenAI writes it into the message box (${voiceLangEl.value})`;
+        : 'Voice note: speak, and OpenAI writes it into the message box';
     voiceBtn.classList.toggle('animate-pulse', on || state === 'transcribing');
     voiceBtn.classList.toggle('border-danger', on);
     voiceBtn.classList.toggle('text-danger', on);
@@ -2891,11 +2874,11 @@
 
   async function transcribeVoice(note) {
     const blob = new Blob(note.chunks, { type: note.recorder.mimeType });
-    const lang = voiceLangEl.value;
     note.upload = new AbortController();
     let text;
     try {
-      ({ text } = await api(`/api/dev/transcribe?lang=${encodeURIComponent(lang)}`, {
+      // No language: OpenAI tells which one was spoken.
+      ({ text } = await api('/api/dev/transcribe', {
         method: 'POST',
         signal: note.upload.signal,
         // The type is what the server names the file after, for OpenAI to
@@ -2912,9 +2895,6 @@
     // Dropped meanwhile: the box now belongs to another chat.
     if (voice !== note) return;
     if (text) {
-      // Kept once the language gave text back, so every later voice note
-      // starts in it.
-      localStorage.setItem(VOICE_LANG_KEY, lang);
       // At the end, whatever was typed while recording: that went in before
       // the note finished.
       const value = inputEl.value;
@@ -2979,10 +2959,6 @@
     }
     // A clicked button keeps the focus, and Enter would then press ⏹ rather
     // than send the message.
-    if (!isMobile()) inputEl.focus();
-  });
-  voiceLangEl.addEventListener('change', () => {
-    renderVoice();
     if (!isMobile()) inputEl.focus();
   });
 
