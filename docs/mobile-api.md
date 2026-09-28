@@ -279,8 +279,34 @@ Read requests may be retried. Do not automatically retry writes after a timeout:
 the action may already have succeeded, and v1 has no idempotency keys. Refresh
 the session list/transcript before offering a retry.
 
+### Voice notes
+
+`GET /api/mobile/v1/` answers `transcribe: true` when the server has
+`OPENAI_TRANSCRIBE_API_KEY` and `OPENAI_TRANSCRIBE_MODEL` set; offer voice notes
+only then. Servers from before this endpoint leave the field out.
+
+`POST /api/mobile/v1/transcribe` requires **Manage**. The body is the recording
+itself, up to 25 MB, with the `Content-Type` of what was recorded (`audio/mp4`
+for an iPhone's AAC; `audio/webm`, `audio/ogg`, `audio/mpeg` and `audio/wav` are
+taken too). `?lang=` is the spoken language as a BCP 47 tag such as `es-ES`;
+without it the language is detected. The answer is `{ "text": "…" }`, to put in
+the message box for the user to correct before sending. The recording is sent to
+OpenAI and not kept. Allow two minutes for the answer, and close the request
+when the user drops the note so it is not transcribed for nothing.
+
+```sh
+curl --fail-with-body 'https://briareus.example.com/api/mobile/v1/transcribe?lang=es-ES' \
+  -H "Authorization: Bearer $BRIAREUS_DEVICE_TOKEN" \
+  -H 'Content-Type: audio/mp4' --data-binary @voice-note.m4a
+```
+
+A server that cannot transcribe answers 503, a recording in a format it does not
+take 415, and OpenAI's own refusal 502 with its reason in `error`.
+
+### What v1 leaves out
+
 V1 uses polling, not an SSE/WebSocket connection. It does not provide APNs push
-notifications, file upload/download, voice transcription, workspace previews,
+notifications, file upload/download, workspace previews,
 provider management (listing runtimes aside) or all web-only composer modes. URLs embedded in results
 (such as preview or attachment links) keep their existing browser protection;
 the device token does not authorize them. These features can be added as

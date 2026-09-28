@@ -221,7 +221,7 @@ const mobileOptions = {
   loginEnabled: authEnabled,
   ownerSecret: () => getConfig().auth.secret,
 };
-app.use(mobileApiRoutes({ ...mobileOptions, dashboard }));
+app.use(mobileApiRoutes({ ...mobileOptions, dashboard, transcribe, transcribeAvailable }));
 // Every remaining write keeps the dashboard’s same-origin and login gates.
 app.use(sameOriginWrites);
 app.use(express.json({ limit: '1mb' }));
