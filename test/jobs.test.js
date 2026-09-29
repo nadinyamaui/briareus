@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
+import { AsyncResource } from 'async_hooks';
 import { PassThrough } from 'stream';
 import fs from 'fs';
-import { spawn } from 'child_process';
+import os from 'os';
+import path from 'path';
+import { spawn, spawnSync } from 'child_process';
 import { BINARIES } from '../lib/providers.js';
 import * as providerTools from '../lib/providers.js';
 import { compactCodexThread } from '../lib/codex-session.js';
@@ -38,6 +41,17 @@ vi.mock('child_process', async (importOriginal) => {
   const actual = await importOriginal();
   return { ...actual, spawn: vi.fn(actual.spawn) };
 });
+
+// A real child's events and output come back under the async context it was
+// spawned in, which is how a webhook turn tells its own lines apart. A fake's
+// are emitted from the test, so they are put back under that context.
+function spawnedScope(...emitters) {
+  const scope = new AsyncResource('fake-child');
+  for (const emitter of emitters) {
+    const emit = emitter.emit.bind(emitter);
+    emitter.emit = (...args) => scope.runInAsyncScope(emit, null, ...args);
+  }
+}
 
 vi.mock('../lib/config.js', () => ({
   getConfig: () => ({
@@ -1178,6 +1192,7 @@ describe('spawnWorkerSession', () => {
       child.stderr = new PassThrough();
       child.writes = [];
       child.ended = false;
+      spawnedScope(child, child.stdout, child.stderr);
       child.stdin.on('data', (chunk) => {
         for (const line of chunk.toString().split('\n').filter(Boolean)) {
           child.writes.push(JSON.parse(line).message.content);
@@ -2645,6 +2660,7 @@ describe('webhook deliveries', () => {
     'hk-keep',
     'hk-open',
     'hk-queued',
+    'hk-spot',
   ];
 
   beforeAll(async () => {
@@ -2691,6 +2707,7 @@ describe('webhook deliveries', () => {
       child.stdin = new PassThrough();
       child.stdout = new PassThrough();
       child.stderr = new PassThrough();
+      spawnedScope(child, child.stdout, child.stderr);
       child.stdin.on('data', (chunk) => prompts.push(chunk.toString()));
       children.push(child);
       return child;
@@ -2899,20 +2916,58 @@ describe('webhook deliveries', () => {
     expect(turn.some(([from, to]) => paused.seq >= from && paused.seq <= to)).toBe(false);
   });
 
-  it('marks the row while a delivery’s turn is open, for a restart to close', async () => {
+  it('marks the row with the lines a delivery’s turn has taken, for a restart to close', async () => {
     fakeCli();
     const job = getJob('hk-open');
     deliverToSession('hk-open', { text: 'one' });
     const bubble = users(job).at(-1).seq;
-    expect(job.webhookTurnOpen).toBe(bubble);
+    expect(job.webhookTurnOpen[0][0]).toBe(bubble);
     expect(publicJob(job).webhookTurnOpen).toBeUndefined();
+    // Said from outside the turn, with no tag: not one of its lines.
+    rotateSessionWebhook('hk-open');
+    const rotated = job.events.at(-1);
+    cli.children[0].stderr.write('warming up');
+    await vi.waitFor(() => expect(job.events.at(-1).text).toBe('warming up'));
+    const said = job.events.at(-1);
+    expect(job.webhookTurnOpen).toEqual([
+      [bubble, rotated.seq - 1],
+      [said.seq, said.seq],
+    ]);
     saveJob.mockClear();
     await flushJobs();
-    expect(saveJob).toHaveBeenCalledWith(expect.objectContaining({ id: 'hk-open', webhookTurnOpen: bubble }));
+    expect(saveJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'hk-open', webhookTurnOpen: job.webhookTurnOpen }),
+    );
     await cli.finish(job);
     expect(job.webhookTurnOpen).toBeUndefined();
     expect(job.webhookTurns).toHaveLength(1);
-    expect(job.webhookTurns[0][0][0]).toBe(bubble);
+    const [turn] = job.webhookTurns;
+    expect(turn[0]).toEqual([bubble, rotated.seq - 1]);
+    expect(turn.some(([from, to]) => rotated.seq >= from && rotated.seq <= to)).toBe(false);
+    expect(turn.at(-1)[0]).toBe(said.seq);
+  });
+
+  it('starts the turn at the delivery’s bubble when a PR link in it pushes a branch line after it', async () => {
+    fakeCli();
+    const job = getJob('hk-spot');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hk-spot-'));
+    spawnSync('git', ['init', '-q', '-b', 'renamed', dir]);
+    job.workDir = dir;
+    job.branch = 'dev-hk-spot';
+    try {
+      deliverToSession('hk-spot', { text: 'see https://github.com/acme/hook/pull/99' });
+      const bubble = users(job).at(-1);
+      const moved = job.events.find((e) => e.text?.startsWith('Working tree is now on branch renamed'));
+      expect(moved.seq).toBe(bubble.seq + 1);
+      expect(job.webhookTurnOpen[0][0]).toBe(bubble.seq);
+      await cli.finish(job);
+      const [turn] = job.webhookTurns;
+      expect(turn[0][0]).toBe(bubble.seq);
+      expect(turn.some(([from, to]) => moved.seq >= from && moved.seq <= to)).toBe(false);
+    } finally {
+      job.workDir = null;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('records the turn of a delivery that went into the queue behind other messages', async () => {
@@ -2931,7 +2986,7 @@ describe('webhook deliveries', () => {
     await vi.waitFor(() => expect(cli.children).toHaveLength(3));
     const bubble = users(job).at(-1);
     expect(bubble).toMatchObject({ text: 'from outside', via: 'webhook' });
-    expect(job.webhookTurnOpen).toBe(bubble.seq);
+    expect(job.webhookTurnOpen[0][0]).toBe(bubble.seq);
     await cli.finish(job);
     expect(job.webhookTurns).toEqual([[[bubble.seq, expect.any(Number)]]]);
     const [[[, end]]] = job.webhookTurns;
@@ -9076,18 +9131,35 @@ describe('manual Codex context compaction', () => {
     expect(job.hiddenLines).toBe(0);
   });
 
-  it('records a webhook turn a restart cut off, from its bubble to the last line stored', async () => {
+  it('records a webhook turn a restart cut off, with the lines it had taken up to the last one stored', async () => {
     state.stored[0].webhookTurns = [[[1, 2]]];
-    state.stored[0].webhookTurnOpen = 6;
+    state.stored[0].webhookTurnOpen = [
+      [3, 4],
+      [6, 12],
+    ];
     jobEventMaxSeqs.mockResolvedValueOnce(new Map([['compact-session', 9]]));
     await initJobs();
     const job = getJob('compact-session');
-    expect(job.webhookTurns).toEqual([[[1, 2]], [[6, 9]]]);
+    // Line 5 was said from outside the turn: it stays out.
+    expect(job.webhookTurns).toEqual([
+      [[1, 2]],
+      [
+        [3, 4],
+        [6, 9],
+      ],
+    ]);
     expect(job.webhookTurnOpen).toBeUndefined();
+
+    // A row from before the turn's lines were kept holds only its bubble.
+    state.stored[0].webhookTurns = undefined;
+    state.stored[0].webhookTurnOpen = 6;
+    jobEventMaxSeqs.mockResolvedValueOnce(new Map([['compact-session', 9]]));
+    await initJobs();
+    expect(getJob('compact-session').webhookTurns).toEqual([[[6, 9]]]);
 
     // A bubble that never reached the log leaves nothing to record.
     state.stored[0].webhookTurns = undefined;
-    state.stored[0].webhookTurnOpen = 12;
+    state.stored[0].webhookTurnOpen = [[12, 12]];
     jobEventMaxSeqs.mockResolvedValueOnce(new Map([['compact-session', 9]]));
     await initJobs();
     expect(getJob('compact-session').webhookTurns).toBeUndefined();
@@ -9332,6 +9404,7 @@ describe('auto-compaction after a turn', () => {
       child.stdin = new PassThrough();
       child.stdout = new PassThrough();
       child.stderr = new PassThrough();
+      spawnedScope(child, child.stdout, child.stderr);
       children.push(child);
       return child;
     });
@@ -9446,6 +9519,28 @@ describe('auto-compaction after a turn', () => {
     expect(job.hiddenRanges).toEqual([[bubble, due.seq - 1]]);
     expect(job.webhookTurns).toEqual([]);
     expect(visibleEvents(job, job.events).some((e) => e.seq === due.seq)).toBe(true);
+  });
+
+  it('settles the delivery’s turn on the row before its auto-compaction, and records it after', async () => {
+    const job = getJob('auto-compact');
+    setDevSessionAutoCompact(job.id, true);
+    job.webhookTurns = [];
+    let finish;
+    compactCodexThread.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+    const done = idle(job);
+    sendDevMessage(job.id, 'CI failed', undefined, undefined, { unattended: true });
+    const bubble = job.events.findLast((e) => e.kind === 'user').seq;
+    children.at(-1).emit('close', 0);
+    await vi.waitFor(() => expect(compactCodexThread).toHaveBeenCalledTimes(1));
+    // A restart now records the turn without the compaction's own lines.
+    const due = job.events.findLast((e) => e.kind === 'info' && /auto-compact threshold/.test(e.text));
+    expect(due.seq).toBeGreaterThan(bubble);
+    expect(job.webhookTurnOpen).toEqual([[bubble, due.seq - 1]]);
+    expect(job.webhookTurns).toEqual([]);
+    finish();
+    await done;
+    expect(job.webhookTurns).toEqual([[[bubble, due.seq - 1]]]);
+    expect(job.webhookTurnOpen).toBeUndefined();
   });
 });
 

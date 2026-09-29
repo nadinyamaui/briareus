@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
+import { AsyncResource } from 'async_hooks';
 import { PassThrough } from 'stream';
 import fs from 'fs';
 import os from 'os';
@@ -38,6 +39,13 @@ vi.mock('child_process', async (importOriginal) => {
       proc.command = command;
       proc.env = opts.env;
       proc.kill = vi.fn();
+      // Its events come back under the context it was spawned in, as a real
+      // child's do: that is how a webhook turn tells its own lines apart.
+      const scope = new AsyncResource('fake-child');
+      for (const emitter of [proc, proc.stdout, proc.stderr]) {
+        const emit = emitter.emit.bind(emitter);
+        emitter.emit = (...args) => scope.runInAsyncScope(emit, null, ...args);
+      }
       state.procs.push(proc);
       return proc;
     }),
@@ -513,7 +521,7 @@ describe('▶ Run during a webhook turn', () => {
     const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
     try {
       sendDevMessage(job.id, 'from outside', undefined, undefined, { unattended: true });
-      const bubble = job.webhookTurnOpen;
+      const [[bubble]] = job.webhookTurnOpen;
       await vi.waitFor(() => expect(state.procs.some((p) => p.command === '/mock/agent')).toBe(true));
       await startDevServe(job.id);
       const serving = job.events.findLast((e) => e.text?.startsWith('Serving the workspace'));
