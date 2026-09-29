@@ -11,6 +11,7 @@ vi.mock('../lib/jobs.js', () => ({
   noteWebhookCurrent: vi.fn(),
   getJob: vi.fn(() => null),
   deliverToSession: vi.fn(() => ({ status: 'running', held: 0 })),
+  instructSession: vi.fn(() => ({ status: 'running' })),
 }));
 
 // The public hostname is what decides whether a hook can be installed at all,
@@ -20,7 +21,8 @@ const hook = vi.hoisted(() => ({ url: 'https://reviewer.example.com/webhooks/git
 vi.mock('../lib/webhooksecrets.js', () => ({
   webhookSecrets: async () => ({ github: 'gh-secret' }),
   githubWebhookUrl: () => hook.url,
-  sessionWebhookKey: async (id, epoch = 0) => `key-${id}${epoch ? `-e${epoch}` : ''}`,
+  sessionWebhookKey: async (id, epoch = 0, channel = 'messages') =>
+    `${channel === 'instructions' ? 'ikey' : 'key'}-${id}${epoch ? `-e${epoch}` : ''}`,
 }));
 
 import { webhookRouter, ensureRepoWebhook, installRepoWebhooks } from '../lib/webhooks.js';
@@ -30,6 +32,7 @@ import {
   noteWebhookCurrent,
   getJob,
   deliverToSession,
+  instructSession,
 } from '../lib/jobs.js';
 import { deliveryId, DELIVERY_MAX_CHARS } from '../lib/deliveries.js';
 
@@ -55,6 +58,8 @@ beforeEach(() => {
   vi.mocked(getJob).mockReturnValue(null);
   vi.mocked(deliverToSession).mockReset();
   vi.mocked(deliverToSession).mockReturnValue({ status: 'running', held: 0 });
+  vi.mocked(instructSession).mockReset();
+  vi.mocked(instructSession).mockReturnValue({ status: 'running' });
   hook.url = 'https://reviewer.example.com/webhooks/github';
 });
 
@@ -163,10 +168,10 @@ describe('POST /webhooks/session/:id', () => {
   function sessionDelivery(
     id,
     body,
-    { headers = {}, key = `key-${id}`, sign: signIt = true, stamp = seconds() } = {},
+    { headers = {}, key = `key-${id}`, sign: signIt = true, stamp = seconds(), path = '' } = {},
   ) {
     const raw = typeof body === 'string' ? body : JSON.stringify(body);
-    return fetch(`${base}/session/${id}`, {
+    return fetch(`${base}/session/${id}${path}`, {
       method: 'POST',
       headers: {
         'Content-Type': typeof body === 'string' ? 'text/plain' : 'application/json',
@@ -364,6 +369,53 @@ describe('POST /webhooks/session/:id', () => {
     const busy = await sessionDelivery('abc123', { text: 'hi' });
     expect(busy.status).toBe(409);
     expect(busy.headers.get('Retry-After')).toBe(null);
+  });
+
+  describe('/instructions', () => {
+    const instruct = (body, opts = {}) =>
+      sessionDelivery('abc123', body, { key: 'ikey-abc123', path: '/instructions', ...opts });
+
+    it('hands an instruction signed with the instructions key to the instructions intake', async () => {
+      const res = await instruct({ text: 'Yes, deploy it', source: 'whatsapp', id: 'wamid-1' });
+      expect(res.status).toBe(202);
+      expect(await res.json()).toEqual({ ok: true, status: 'running' });
+      expect(vi.mocked(instructSession).mock.calls[0]).toEqual([
+        'abc123',
+        { text: 'Yes, deploy it', source: 'whatsapp', id: deliveryId('wamid-1') },
+      ]);
+      expect(deliverToSession).not.toHaveBeenCalled();
+    });
+
+    it('never takes the messages key: whoever holds it cannot speak for the operator', async () => {
+      expect((await instruct({ text: 'hi' }, { key: 'key-abc123' })).status).toBe(401);
+      const bearer = await instruct('hi', { sign: false, headers: { Authorization: 'Bearer key-abc123' } });
+      expect(bearer.status).toBe(401);
+      expect(instructSession).not.toHaveBeenCalled();
+      expect(deliverToSession).not.toHaveBeenCalled();
+    });
+
+    it('and the instructions key opens no messages route either', async () => {
+      expect((await sessionDelivery('abc123', { text: 'hi' }, { key: 'ikey-abc123' })).status).toBe(401);
+      expect(deliverToSession).not.toHaveBeenCalled();
+    });
+
+    it('takes a bearer and the key of the session’s epoch', async () => {
+      vi.mocked(getJob).mockReturnValue({ id: 'abc123', webhook: { armed: true, epoch: 3 } });
+      expect((await instruct({ text: 'hi' })).status).toBe(401);
+      const ok = await instruct('go', { sign: false, headers: { Authorization: 'Bearer ikey-abc123-e3' } });
+      expect(ok.status).toBe(202);
+    });
+
+    it('answers what the instructions intake refused with, and says when it queued', async () => {
+      vi.mocked(instructSession).mockReturnValueOnce({ status: 'queued' });
+      expect(await (await instruct({ text: 'hi' })).json()).toEqual({ ok: true, status: 'queued' });
+      vi.mocked(instructSession).mockImplementationOnce(() => {
+        throw Object.assign(new Error('This session’s instructions webhook is off'), { status: 409 });
+      });
+      const off = await instruct({ text: 'hi' });
+      expect(off.status).toBe(409);
+      expect((await off.json()).error).toMatch(/instructions webhook is off/);
+    });
   });
 });
 

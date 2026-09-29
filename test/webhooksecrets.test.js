@@ -148,9 +148,26 @@ describe('session webhooks', () => {
     expect(await sessionWebhookKey('abc124')).not.toBe(first);
   });
 
+  it('gives the instructions webhook a key of its own, which no messages key can be', async () => {
+    state.stored = { github: 'g'.repeat(64), sessions: 's'.repeat(64) };
+    const { sessionWebhookKey } = await freshModule();
+    const messages = await sessionWebhookKey('abc123', 0);
+    const instructions = await sessionWebhookKey('abc123', 0, 'instructions');
+    expect(instructions).toMatch(/^[0-9a-f]{64}$/);
+    expect(instructions).not.toBe(messages);
+    expect(await sessionWebhookKey('abc123', 0, 'messages')).toBe(messages);
+    expect(await sessionWebhookKey('abc123', 1, 'instructions')).not.toBe(instructions);
+    expect(await sessionWebhookKey('abc123', 1, 'instructions')).not.toBe(
+      await sessionWebhookKey('abc123', 1),
+    );
+  });
+
   it('hangs the URL off the configured origin, reachable from the internet or not', async () => {
     const mod = await freshModule();
     expect(mod.sessionWebhookUrl('abc123')).toBe('https://reviewer.example.com/webhooks/session/abc123');
+    expect(mod.sessionWebhookUrl('abc123', 'instructions')).toBe(
+      'https://reviewer.example.com/webhooks/session/abc123/instructions',
+    );
     state.publicBaseUrl = 'http://127.0.0.1:4301';
     expect(mod.sessionWebhookUrl('abc123')).toBe('http://127.0.0.1:4301/webhooks/session/abc123');
   });
