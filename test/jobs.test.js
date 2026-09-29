@@ -2643,6 +2643,8 @@ describe('webhook deliveries', () => {
     'hk-guard',
     'hk-drain',
     'hk-keep',
+    'hk-open',
+    'hk-queued',
   ];
 
   beforeAll(async () => {
@@ -2895,6 +2897,46 @@ describe('webhook deliveries', () => {
     const [turn] = job.webhookTurns;
     expect(turn[0]).toEqual([bubble, paused.seq - 1]);
     expect(turn.some(([from, to]) => paused.seq >= from && paused.seq <= to)).toBe(false);
+  });
+
+  it('marks the row while a delivery’s turn is open, for a restart to close', async () => {
+    fakeCli();
+    const job = getJob('hk-open');
+    deliverToSession('hk-open', { text: 'one' });
+    const bubble = users(job).at(-1).seq;
+    expect(job.webhookTurnOpen).toBe(bubble);
+    expect(publicJob(job).webhookTurnOpen).toBeUndefined();
+    saveJob.mockClear();
+    await flushJobs();
+    expect(saveJob).toHaveBeenCalledWith(expect.objectContaining({ id: 'hk-open', webhookTurnOpen: bubble }));
+    await cli.finish(job);
+    expect(job.webhookTurnOpen).toBeUndefined();
+    expect(job.webhookTurns).toHaveLength(1);
+    expect(job.webhookTurns[0][0][0]).toBe(bubble);
+  });
+
+  it('records the turn of a delivery that went into the queue behind other messages', async () => {
+    fakeCli();
+    const job = getJob('hk-queued');
+    // A turn that fails leaves what was queued behind it waiting on an idle session.
+    sendDevMessage('hk-queued', 'first');
+    sendDevMessage('hk-queued', 'second');
+    await cli.finish(job, 1);
+    expect(publicJob(job).queued).toHaveLength(1);
+    sendDevMessage('hk-queued', 'from outside', undefined, undefined, { unattended: true });
+    // 'second' goes first; the delivery waits, its bubble pushed only when its turn starts.
+    expect(publicJob(job).queued.map((q) => q.text)).toEqual(['from outside']);
+    await vi.waitFor(() => expect(cli.children).toHaveLength(2));
+    cli.children[1].emit('close', 0);
+    await vi.waitFor(() => expect(cli.children).toHaveLength(3));
+    const bubble = users(job).at(-1);
+    expect(bubble).toMatchObject({ text: 'from outside', via: 'webhook' });
+    expect(job.webhookTurnOpen).toBe(bubble.seq);
+    await cli.finish(job);
+    expect(job.webhookTurns).toEqual([[[bubble.seq, expect.any(Number)]]]);
+    const [[[, end]]] = job.webhookTurns;
+    expect(users(job).filter((e) => e.seq >= bubble.seq && e.seq <= end)).toEqual([bubble]);
+    expect(job.webhookTurnOpen).toBeUndefined();
   });
 
   it('pauses after so many turns in a row with no word from the operator, on any session', async () => {
@@ -9032,6 +9074,75 @@ describe('manual Codex context compaction', () => {
     const job = getJob('compact-session');
     expect(job.hiddenRanges).toEqual([]);
     expect(job.hiddenLines).toBe(0);
+  });
+
+  it('records a webhook turn a restart cut off, from its bubble to the last line stored', async () => {
+    state.stored[0].webhookTurns = [[[1, 2]]];
+    state.stored[0].webhookTurnOpen = 6;
+    jobEventMaxSeqs.mockResolvedValueOnce(new Map([['compact-session', 9]]));
+    await initJobs();
+    const job = getJob('compact-session');
+    expect(job.webhookTurns).toEqual([[[1, 2]], [[6, 9]]]);
+    expect(job.webhookTurnOpen).toBeUndefined();
+
+    // A bubble that never reached the log leaves nothing to record.
+    state.stored[0].webhookTurns = undefined;
+    state.stored[0].webhookTurnOpen = 12;
+    jobEventMaxSeqs.mockResolvedValueOnce(new Map([['compact-session', 9]]));
+    await initJobs();
+    expect(getJob('compact-session').webhookTurns).toBeUndefined();
+    expect(getJob('compact-session').webhookTurnOpen).toBeUndefined();
+  });
+
+  it('hides webhook turns with only a status change between them as one range', async () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex' });
+    compactCodexThread.mockResolvedValueOnce(undefined);
+    const job = getJob('compact-session');
+    const ev = (seq, kind, extra = {}) => ({ seq, t: '2026-09-29T00:00:00Z', kind, ...extra });
+    job.events = [
+      ev(1, 'user', { text: 'd1', via: 'webhook' }),
+      ev(2, 'result', {}),
+      ev(3, 'status', { status: 'idle' }),
+      ev(4, 'user', { text: 'd2', via: 'webhook' }),
+      ev(5, 'result', {}),
+      ev(6, 'status', { status: 'idle' }),
+      ev(7, 'info', { text: 'Webhook paused. Daily budget reached.' }),
+      ev(8, 'user', { text: 'd3', via: 'webhook' }),
+      ev(9, 'result', {}),
+    ];
+    job.seq = 9;
+    job.webhookTurns = [[[1, 2]], [[4, 5]], [[8, 9]]];
+    try {
+      const result = await compactDevSession('compact-session');
+      // A line on screen between two turns keeps them apart.
+      expect(job.hiddenRanges).toEqual([
+        [1, 5],
+        [8, 9],
+      ]);
+      expect(result.hiddenLines).toBe(6);
+      expect(
+        visibleEvents(job, job.events)
+          .map((e) => e.seq)
+          .slice(0, 2),
+      ).toEqual([6, 7]);
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
+  it('refuses a Clear when a turn starts while it reads the log', async () => {
+    const job = getJob('compact-session');
+    const ev = (seq, kind, extra = {}) => ({ seq, t: '2026-09-29T00:00:00Z', kind, ...extra });
+    job.events = [ev(1, 'user', { text: 'a' }), ev(2, 'result', {})];
+    job.seq = 2;
+    let release;
+    loadJobEvents.mockImplementationOnce(() => new Promise((resolve) => (release = () => resolve([]))));
+    const pending = clearDevTranscript(job.id);
+    job.status = 'running';
+    release();
+    await expect(pending).rejects.toThrow('idle');
+    expect(job.hiddenRanges).toBeUndefined();
+    expect(job.events.some((e) => e.hidden)).toBe(false);
   });
 
   it('hides nothing when the compaction fails', async () => {

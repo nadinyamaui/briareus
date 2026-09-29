@@ -32,6 +32,7 @@ vi.mock('child_process', async (importOriginal) => {
       const proc = new EventEmitter();
       proc.pid = 990000 + state.procs.length;
       proc.exitCode = null;
+      proc.stdin = new PassThrough();
       proc.stdout = new PassThrough();
       proc.stderr = new PassThrough();
       proc.command = command;
@@ -144,7 +145,9 @@ vi.mock('../lib/usage.js', () => ({
 import { spawn } from 'child_process';
 import { ensureProfileDatabase, profileDbElsewhere, dropSessionDatabase } from '../lib/dbpool.js';
 import { publicAppUrl } from '../lib/tunnel.js';
-import { bus, initJobs, getJob, startDevServe, closeDevSession } from '../lib/jobs.js';
+import { getProviderForJob, captureProviderAuth } from '../lib/providerstore.js';
+import { BINARIES } from '../lib/providers.js';
+import { bus, initJobs, getJob, startDevServe, closeDevSession, sendDevMessage } from '../lib/jobs.js';
 
 const PROFILES = [
   'profile: projects',
@@ -497,5 +500,37 @@ describe('▶ Run: the links it answers with', () => {
     expect(unhandled).not.toHaveBeenCalled();
     process.off('unhandledRejection', unhandled);
     error.mockRestore();
+  });
+});
+
+describe('▶ Run during a webhook turn', () => {
+  it('keeps what ▶ Run says out of the turn the delivery records', async () => {
+    const job = session();
+    job.providerId = 1;
+    job.chats = { 1: { sessionId: 'resume-id', started: true } };
+    getProviderForJob.mockReturnValue({ id: 1, label: 'Codex', binary: 'codex', active: true });
+    captureProviderAuth.mockResolvedValue(undefined);
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    try {
+      sendDevMessage(job.id, 'from outside', undefined, undefined, { unattended: true });
+      const bubble = job.webhookTurnOpen;
+      await vi.waitFor(() => expect(state.procs.some((p) => p.command === '/mock/agent')).toBe(true));
+      await startDevServe(job.id);
+      const serving = job.events.findLast((e) => e.text?.startsWith('Serving the workspace'));
+      expect(serving.seq).toBeGreaterThan(bubble);
+
+      const settled = new Promise((resolve) => {
+        const onJob = (s) => s.id === job.id && s.status === 'idle' && (bus.off('job', onJob), resolve());
+        bus.on('job', onJob);
+      });
+      state.procs.find((p) => p.command === '/mock/agent').emit('close', 0);
+      await settled;
+      const [turn] = job.webhookTurns;
+      expect(turn[0][0]).toBe(bubble);
+      expect(turn.some(([from, to]) => serving.seq >= from && serving.seq <= to)).toBe(false);
+    } finally {
+      bin.mockRestore();
+      getProviderForJob.mockReturnValue(null);
+    }
   });
 });

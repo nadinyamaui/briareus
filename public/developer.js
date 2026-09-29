@@ -1811,7 +1811,9 @@
       s.kind === 'devchat' && !['queued', 'preparing', 'running'].includes(s.status) && !s.compacting
         ? `<button class="clear-transcript rounded border border-line px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50" title="Hide the transcript so far from this chat. Nothing is deleted and the agent's context is unchanged.">Clear</button>`
         : '';
-    if (!ctx && !rows.length && !compact && !auto && !clear) return '';
+    // Clear rides along with the rest and never makes the panel on its own: a
+    // session with no usage yet has nothing worth clearing either.
+    if (!ctx && !rows.length && !compact && !auto) return '';
     return `<div class="${hasPr ? 'border-t border-line pt-2.5' : ''}">
         <div class="mb-1 flex items-center justify-between gap-2 text-[12px] tracking-wide text-muted"><span class="flex-1">Context usage</span>${auto}${compact}${clear}</div>
         ${ctx}
