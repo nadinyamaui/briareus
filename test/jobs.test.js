@@ -8825,6 +8825,79 @@ describe('manual Codex context compaction', () => {
     }
   });
 
+  it('keeps a stream-json turn open across the results it pushes mid-turn, and past a reopen', async () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex' });
+    compactCodexThread.mockResolvedValueOnce(undefined);
+    const job = getJob('compact-session');
+    job.webhook = { armed: true, epoch: 1 };
+    const ev = (seq, kind, extra = {}) => ({ seq, t: '2026-09-29T00:00:00Z', kind, ...extra });
+    job.events = [
+      // A result per message answered, the live one's reply after the first.
+      ev(1, 'user', { text: 'd1', via: 'webhook' }),
+      ev(2, 'text', { text: 'working' }),
+      ev(3, 'user', { text: 'mine', live: true }),
+      ev(4, 'result', {}),
+      ev(5, 'text', { text: 'and yours' }),
+      ev(6, 'result', {}),
+      ev(7, 'info', { text: 'Webhook paused. Daily budget reached.' }),
+      ev(8, 'status', { status: 'idle' }),
+      // A delivery reopening an interrupted session goes through preparing.
+      ev(9, 'user', { text: 'd2', via: 'webhook' }),
+      ev(10, 'info', { text: 'Previous workspace slot is busy' }),
+      ev(11, 'status', { status: 'preparing' }),
+      ev(12, 'status', { status: 'running' }),
+      ev(13, 'text', { text: 'handled' }),
+      ev(14, 'result', {}),
+      ev(15, 'status', { status: 'idle' }),
+    ];
+    job.seq = 15;
+    try {
+      const result = await compactDevSession('compact-session');
+      expect(job.hiddenRanges).toEqual([
+        [1, 6],
+        [9, 14],
+      ]);
+      expect(result.hiddenLines).toBe(10);
+      expect(
+        visibleEvents(job, job.events)
+          .map((e) => e.seq)
+          .slice(0, 3),
+      ).toEqual([7, 8, 15]);
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
+  it('counts only the webhook turns that were still on screen', async () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex' });
+    compactCodexThread.mockResolvedValueOnce(undefined);
+    const job = getJob('compact-session');
+    job.webhook = { armed: true, epoch: 1 };
+    const ev = (seq, kind, extra = {}) => ({ seq, t: '2026-09-29T00:00:00Z', kind, ...extra });
+    job.events = [
+      ev(1, 'user', { text: 'd1', via: 'webhook' }),
+      ev(2, 'result', {}),
+      ev(3, 'user', { text: 'd2', via: 'webhook' }),
+      ev(4, 'result', {}),
+    ];
+    job.seq = 4;
+    try {
+      await clearDevTranscript(job.id);
+      const top = job.seq;
+      job.events.push(ev(top + 1, 'user', { text: 'd3', via: 'webhook' }), ev(top + 2, 'result', {}));
+      job.seq = top + 2;
+      await compactDevSession('compact-session');
+      expect(job.hiddenRanges).toEqual([
+        [1, 4],
+        [top + 1, top + 2],
+      ]);
+      const notice = visibleEvents(job, job.events).find((e) => e.hidden && /webhook/.test(e.text));
+      expect(notice.text).toMatch(/^1 webhook turn \(2 lines\) hidden/);
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
   it('keeps a webhook turn whose question still stands, and hides it once answered', async () => {
     const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex' });
     compactCodexThread.mockResolvedValueOnce(undefined);
@@ -8890,7 +8963,12 @@ describe('manual Codex context compaction', () => {
       [15, 20],
     ];
     state.stored[0].webhookTurnsScanned = 20;
+    state.stored[0].hiddenLines = 15;
     jobEventMaxSeqs.mockResolvedValueOnce(new Map([['compact-session', 10]]));
+    // What is stored: lines 1-10, a status among them.
+    loadJobEvents.mockResolvedValueOnce(
+      Array.from({ length: 10 }, (_, i) => ({ seq: i + 1, kind: i === 8 ? 'status' : 'text' })),
+    );
     await initJobs();
     const job = getJob('compact-session');
     expect(job.seq).toBe(10);
@@ -8899,6 +8977,18 @@ describe('manual Codex context compaction', () => {
       [8, 10],
     ]);
     expect(job.webhookTurnsScanned).toBe(10);
+    // Recounted from the log: 1-4 and 8, 10 (9 is a status).
+    expect(job.hiddenLines).toBe(6);
+  });
+
+  it('counts nothing hidden once a crash clamp drops every range', async () => {
+    state.stored[0].hiddenRanges = [[15, 20]];
+    state.stored[0].hiddenLines = 6;
+    jobEventMaxSeqs.mockResolvedValueOnce(new Map([['compact-session', 10]]));
+    await initJobs();
+    const job = getJob('compact-session');
+    expect(job.hiddenRanges).toEqual([]);
+    expect(job.hiddenLines).toBe(0);
   });
 
   it('hides nothing when the compaction fails', async () => {

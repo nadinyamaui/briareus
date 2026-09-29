@@ -2421,8 +2421,10 @@
 
   // The transcript from the top, and the stream from where it ends. Also what
   // a Clear, a compaction that hid webhook turns, or the hidden-lines bar
-  // re-runs, so the stream is restarted with it rather than raced.
-  async function loadTranscript(id) {
+  // re-runs, so the stream is restarted with it rather than raced. From the
+  // bar (`fromBar`), the view stays on the bar and the lines it toggled rather
+  // than jumping to the bottom.
+  async function loadTranscript(id, fromBar = false) {
     // A double click on the bar, or one racing the stream's `hidden` line,
     // starts a second load; whichever was started last is the one drawn, and
     // it is labelled from what it asked for.
@@ -2434,25 +2436,29 @@
       closeStream();
       messagesEl.innerHTML = '';
       const hidden = data.session?.hiddenLines || 0;
+      let bar = null;
       if (hidden) {
-        const bar = document.createElement('button');
+        bar = document.createElement('button');
         bar.className = 'hidden-lines my-2 w-full text-center text-xs text-muted hover:text-ink';
         bar.textContent = all
           ? `Showing ${hidden} hidden line${hidden === 1 ? '' : 's'} · Hide them`
           : `${hidden} earlier line${hidden === 1 ? '' : 's'} hidden · Show`;
         bar.addEventListener('click', () => {
           showHidden = !all;
-          loadTranscript(id);
+          loadTranscript(id, true);
         });
         messagesEl.appendChild(bar);
       }
       for (const e of data.events) renderEvent(e);
       refreshAskCards();
-      scrollBottom(true);
+      if (fromBar && bar) bar.scrollIntoView({ block: 'start' });
+      else scrollBottom(true);
       stream(id);
     } catch (e) {
       if (current !== id || load !== transcriptLoads) return;
-      messagesEl.innerHTML = '';
+      // A re-run failing leaves the chat that is drawn, and the stream still
+      // feeding it, as they were; only a first load has nothing to keep.
+      if (!es) messagesEl.innerHTML = '';
       toast(e.message, true);
     }
   }
