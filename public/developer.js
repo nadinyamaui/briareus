@@ -1808,7 +1808,7 @@
     // Takes the transcript off the screen only: the agent's context and the
     // stored log stay as they are, and the bar over the chat shows it again.
     const clear =
-      s.kind === 'devchat' && !['queued', 'preparing', 'running'].includes(s.status) && !s.compacting
+      s.kind === 'devchat' && !WORKING_STATES.has(s.status) && !s.compacting
         ? `<button class="clear-transcript rounded border border-line px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50" title="Hide the transcript so far from this chat. Nothing is deleted and the agent's context is unchanged.">Clear</button>`
         : '';
     // Clear rides along with the rest and never makes the panel on its own: a
