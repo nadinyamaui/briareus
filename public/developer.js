@@ -1950,6 +1950,9 @@
       const s = panelSubject;
       if (!s?.id || clear.disabled) return;
       clear.disabled = true;
+      // A Clear clicked here means to hide: the reload its `hidden` line starts
+      // draws the filtered transcript even if Show was on.
+      if (s.id === current) showHidden = false;
       try {
         const { hidden } = await api(`/api/dev/sessions/${encodeURIComponent(s.id)}/clear`, {
           method: 'POST',
@@ -2425,8 +2428,9 @@
   // a Clear, a compaction that hid webhook turns, or the hidden-lines bar
   // re-runs, so the stream is restarted with it rather than raced. From the
   // bar (`fromBar`), the view stays on the bar and the lines it toggled rather
-  // than jumping to the bottom.
-  async function loadTranscript(id, fromBar = false) {
+  // than jumping to the bottom; on a `hidden` line (`keepScroll`), it stays
+  // where the reader was, unless that was the bottom.
+  async function loadTranscript(id, { fromBar = false, keepScroll = false } = {}) {
     // A double click on the bar, or one racing the stream's `hidden` line,
     // starts a second load; whichever was started last is the one drawn, and
     // it is labelled from what it asked for.
@@ -2436,6 +2440,7 @@
       const data = await api(`/api/dev/sessions/${id}${all ? '?all=1' : ''}`);
       if (current !== id || load !== transcriptLoads) return; // switched, or loaded again, meanwhile
       closeStream();
+      const keepAt = keepScroll && !nearBottom() ? scrollEl.scrollTop : null;
       messagesEl.innerHTML = '';
       const hidden = data.session?.hiddenLines || 0;
       let bar = null;
@@ -2447,7 +2452,7 @@
           : `${hidden} earlier line${hidden === 1 ? '' : 's'} hidden · Show`;
         bar.addEventListener('click', () => {
           showHidden = !all;
-          loadTranscript(id, true);
+          loadTranscript(id, { fromBar: true });
         });
         messagesEl.appendChild(bar);
       }
@@ -2458,6 +2463,7 @@
       updateSpinner(data.session?.status);
       refreshAskCards();
       if (fromBar && bar) bar.scrollIntoView({ block: 'start' });
+      else if (keepAt !== null) scrollEl.scrollTop = keepAt;
       else scrollBottom(true);
       stream(id);
     } catch (e) {
@@ -2474,10 +2480,10 @@
     es.onmessage = (m) => {
       try {
         const e = JSON.parse(m.data);
-        // Lines just left the transcript: load it again without them.
+        // Lines just left the transcript: load it again, as the reader chose
+        // to see it (with Show on, only the bar's count changes).
         if (e.kind === 'info' && e.hidden && e.seq > lastSeq) {
-          showHidden = false;
-          loadTranscript(id);
+          loadTranscript(id, { keepScroll: true });
           return;
         }
         renderEvent(e);
@@ -2705,9 +2711,12 @@
     }
   }
 
+  function nearBottom() {
+    return scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 160;
+  }
+
   function scrollBottom(force) {
-    const nearBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 160;
-    if (force || nearBottom) scrollEl.scrollTop = scrollEl.scrollHeight;
+    if (force || nearBottom()) scrollEl.scrollTop = scrollEl.scrollHeight;
   }
 
   // ---------- attachments ----------

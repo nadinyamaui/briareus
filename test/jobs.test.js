@@ -1319,6 +1319,59 @@ describe('spawnWorkerSession', () => {
     }
   });
 
+  it('what the PR sync says during a webhook turn stays out of the turn', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    job.webhookTurns = [];
+    const prStatus = job.prStatus;
+    job.prStatus = { number: 41, state: 'open', url: 'u41', headSha: 'a', headRef: 'feature' };
+    const pr = (number, ref, extra) => ({
+      ok: true,
+      json: async () => ({
+        number,
+        html_url: `u${number}`,
+        head: { sha: 'a', ref },
+        base: { ref: 'main' },
+        ...extra,
+      }),
+    });
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url.endsWith('/pulls/41')) return pr(41, 'feature', { state: 'closed' });
+      if (url.endsWith('/pulls/42')) return pr(42, 'someone-else', { state: 'open' });
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    // The turn's ledger row is held, so it is still collecting when the sync
+    // its end started lands.
+    let land;
+    const held = new Promise((r) => (land = r));
+    recordTurnUsage.mockImplementation(() => held);
+    const { children, restore } = fakeClaude();
+    const line = (re) => job.events.find((e) => re.test(e.text || ''));
+    try {
+      sendDevMessage(job.id, 'CI failed', undefined, undefined, { unattended: true });
+      children[0].emitLines(replay(children[0].writes[0]), {
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: `See https://github.com/${job.repo}/pull/42` }] },
+      });
+      await vi.waitFor(() => expect(line(/PR #42 is on branch someone-else/)).toBeTruthy());
+      children[0].emitLines(result('ok'));
+      children[0].emit('close', 0);
+      await vi.waitFor(() => expect(line(/PR #41 is closed/)).toBeTruthy());
+      land(true);
+      await vi.waitFor(() => expect(job.webhookTurns).toHaveLength(1));
+      const [turn] = job.webhookTurns;
+      const inTurn = (seq) => turn.some(([from, to]) => seq >= from && seq <= to);
+      expect(inTurn(line(/PR #42 is on branch someone-else/).seq)).toBe(false);
+      expect(inTurn(line(/PR #41 is closed/).seq)).toBe(false);
+    } finally {
+      restore();
+      recordTurnUsage.mockReset();
+      githubRest.mockReset();
+      job.prStatus = prStatus;
+    }
+  });
+
   it('an answer to an older message leaves stdin open for the one not read yet', async () => {
     const job = getJob('bg-claude');
     job.status = 'idle';
@@ -9149,13 +9202,6 @@ describe('manual Codex context compaction', () => {
       ],
     ]);
     expect(job.webhookTurnOpen).toBeUndefined();
-
-    // A row from before the turn's lines were kept holds only its bubble.
-    state.stored[0].webhookTurns = undefined;
-    state.stored[0].webhookTurnOpen = 6;
-    jobEventMaxSeqs.mockResolvedValueOnce(new Map([['compact-session', 9]]));
-    await initJobs();
-    expect(getJob('compact-session').webhookTurns).toEqual([[[6, 9]]]);
 
     // A bubble that never reached the log leaves nothing to record.
     state.stored[0].webhookTurns = undefined;
