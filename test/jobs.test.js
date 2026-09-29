@@ -1277,6 +1277,33 @@ describe('spawnWorkerSession', () => {
     }
   });
 
+  it('a failed webhook turn leaves the message it never answered, and the notice, on screen', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    job.webhookTurns = [];
+    const { children, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'CI failed', undefined, undefined, { unattended: true });
+      const bubble = job.events.findLast((e) => e.kind === 'user').seq;
+      children[0].emitLines(replay(children[0].writes[0]));
+      sendDevMessage(job.id, 'Also check the logs');
+      const mine = job.events.findLast((e) => e.kind === 'user').seq;
+      children[0].emit('close', 1);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      const notice = job.events.find((e) => /never answered 1 message/.test(e.text || ''));
+      expect(notice.seq).toBeGreaterThan(mine);
+      expect(job.webhookTurns).toHaveLength(1);
+      const [turn] = job.webhookTurns;
+      expect(turn[0]).toEqual([bubble, mine - 1]);
+      const inTurn = (seq) => turn.some(([from, to]) => seq >= from && seq <= to);
+      expect(inTurn(mine)).toBe(false);
+      expect(inTurn(notice.seq)).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
   it('an answer to an older message leaves stdin open for the one not read yet', async () => {
     const job = getJob('bg-claude');
     job.status = 'idle';
@@ -2615,6 +2642,7 @@ describe('webhook deliveries', () => {
     'hk-public',
     'hk-guard',
     'hk-drain',
+    'hk-keep',
   ];
 
   beforeAll(async () => {
@@ -2852,6 +2880,21 @@ describe('webhook deliveries', () => {
     expect(job.pendingDeliveries).toHaveLength(1);
     job.pendingDeliveries = [];
     await cli.finish(job);
+  });
+
+  it('leaves a pause said while a delivery ran out of the turn it records', async () => {
+    fakeCli();
+    const job = getJob('hk-keep');
+    setSessionWebhook('hk-keep', { maxTurns: 1 });
+    expect(deliverToSession('hk-keep', { text: 'one' }).status).toBe('running');
+    const bubble = users(job).at(-1).seq;
+    expect(refused(() => deliverToSession('hk-keep', { text: 'two' }))).toMatchObject({ status: 429 });
+    const paused = job.events.findLast((e) => e.text?.startsWith('Webhook paused.'));
+    expect(paused.seq).toBeGreaterThan(bubble);
+    await cli.finish(job);
+    const [turn] = job.webhookTurns;
+    expect(turn[0]).toEqual([bubble, paused.seq - 1]);
+    expect(turn.some(([from, to]) => paused.seq >= from && paused.seq <= to)).toBe(false);
   });
 
   it('pauses after so many turns in a row with no word from the operator, on any session', async () => {
@@ -9086,6 +9129,44 @@ describe('manual Codex context compaction', () => {
     expect(third.hidden).toBe(1);
     expect(third.session.hiddenLines).toBe(3);
     expect(job.hiddenRanges).toEqual([[1, 4]]);
+  });
+
+  it('reads the log from the end of the last Clear, and drops the webhook turns it covered', async () => {
+    const job = getJob('compact-session');
+    const ev = (seq, kind, extra = {}) => ({ seq, t: '2026-09-29T00:00:00Z', kind, ...extra });
+    job.events = [
+      ev(1, 'user', { text: 'd1', via: 'webhook' }),
+      ev(2, 'result', {}),
+      ev(3, 'user', { text: 'mine' }),
+      ev(4, 'result', {}),
+    ];
+    job.seq = 4;
+    job.webhookTurns = [[[1, 2]]];
+    loadJobEvents.mockClear();
+    expect((await clearDevTranscript(job.id)).hidden).toBe(4);
+    expect(loadJobEvents).toHaveBeenLastCalledWith(job.id, 0);
+    expect(job.webhookTurns).toEqual([]);
+
+    // The next one starts past the range the first one left.
+    job.events.push(ev(6, 'user', { text: 'd2', via: 'webhook' }), ev(7, 'result', {}));
+    job.seq = 7;
+    job.webhookTurns.push([[6, 7]]);
+    loadJobEvents.mockClear();
+    expect((await clearDevTranscript(job.id)).hidden).toBe(2);
+    expect(loadJobEvents).toHaveBeenCalledTimes(1);
+    expect(loadJobEvents).toHaveBeenLastCalledWith(job.id, 4);
+    expect(job.webhookTurns).toEqual([]);
+
+    // A question whose asking message a Clear already covered: only then is
+    // the whole log read, to find it, and nothing more goes.
+    job.events.push(ev(9, 'ask', {}));
+    job.seq = 9;
+    job.awaitingAnswer = true;
+    job.questionSeq = 9;
+    loadJobEvents.mockClear();
+    expect((await clearDevTranscript(job.id)).hidden).toBe(0);
+    expect(loadJobEvents).toHaveBeenLastCalledWith(job.id, 0);
+    expect(job.hiddenRanges).toEqual([[1, 7]]);
   });
 
   it('rejects missing sessions, busy sessions and non-Codex context', async () => {
