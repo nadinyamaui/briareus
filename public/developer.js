@@ -24,6 +24,7 @@
   let currentProject = null; // repo whose dashboard is open, if any
   let es = null; // EventSource for the open session
   let lastSeq = 0;
+  let showHidden = false; // whether the open chat shows the lines a Clear or a compaction hid
   let prepBox = null; // open <details> the prep log lines append into
   let toolBox = null; // open <details> the current run of tool calls appends into
 
@@ -1803,9 +1804,15 @@
     const auto = autoAt
       ? `<label class="flex cursor-pointer items-center gap-1" title="After a turn leaves the context above ${autoAt} tokens, summarize the conversation automatically; this uses the provider and may incur usage."><input type="checkbox" class="auto-compact accent-accent" ${s.autoCompact ? 'checked' : ''}>Auto-compact ${autoAt}</label>`
       : '';
-    if (!ctx && !rows.length && !compact && !auto) return '';
+    // Takes the transcript off the screen only: the agent's context and the
+    // stored log stay as they are, and the bar over the chat shows it again.
+    const clear =
+      s.kind === 'devchat' && !['queued', 'preparing', 'running'].includes(s.status) && !s.compacting
+        ? `<button class="clear-transcript rounded border border-line px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50" title="Hide the transcript so far from this chat. Nothing is deleted and the agent's context is unchanged.">Clear</button>`
+        : '';
+    if (!ctx && !rows.length && !compact && !auto && !clear) return '';
     return `<div class="${hasPr ? 'border-t border-line pt-2.5' : ''}">
-        <div class="mb-1 flex items-center justify-between gap-2 text-[12px] tracking-wide text-muted"><span class="flex-1">Context usage</span>${auto}${compact}</div>
+        <div class="mb-1 flex items-center justify-between gap-2 text-[12px] tracking-wide text-muted"><span class="flex-1">Context usage</span>${auto}${compact}${clear}</div>
         ${ctx}
         <div class="${ctx ? 'mt-1.5 border-t border-line pt-1.5 ' : ''}flex flex-col gap-0.5">${rows.join('')}</div>
       </div>`;
@@ -1932,6 +1939,20 @@
         toast(err.message, true);
       }
       auto.disabled = false;
+      await loadSessions();
+      return;
+    }
+    const clear = e.target.closest('.clear-transcript');
+    if (clear) {
+      const s = panelSubject;
+      if (!s?.id || clear.disabled) return;
+      clear.disabled = true;
+      try {
+        await api(`/api/dev/sessions/${encodeURIComponent(s.id)}/clear`, { method: 'POST' });
+        toast('Transcript cleared');
+      } catch (err) {
+        toast(err.message, true);
+      }
       await loadSessions();
       return;
     }
@@ -2389,10 +2410,32 @@
     $('btn-loop').classList.add('hidden');
     $('btn-qa-loop').classList.add('hidden');
     updateHead();
+    showHidden = false;
+    await loadTranscript(id);
+  }
+
+  // The transcript from the top, and the stream from where it ends. Also what
+  // a Clear, a compaction that hid webhook turns, or the hidden-lines bar
+  // re-runs, so the stream is restarted with it rather than raced.
+  async function loadTranscript(id) {
     try {
-      const data = await api(`/api/dev/sessions/${id}`);
+      const data = await api(`/api/dev/sessions/${id}${showHidden ? '?all=1' : ''}`);
       if (current !== id) return; // switched again while loading
+      closeStream();
       messagesEl.innerHTML = '';
+      const hidden = data.session?.hiddenLines || 0;
+      if (hidden) {
+        const bar = document.createElement('button');
+        bar.className = 'hidden-lines my-2 w-full text-center text-xs text-muted hover:text-ink';
+        bar.textContent = showHidden
+          ? `Showing ${hidden} hidden line${hidden === 1 ? '' : 's'} · Hide them`
+          : `${hidden} earlier line${hidden === 1 ? '' : 's'} hidden · Show`;
+        bar.addEventListener('click', () => {
+          showHidden = !showHidden;
+          loadTranscript(id);
+        });
+        messagesEl.appendChild(bar);
+      }
       for (const e of data.events) renderEvent(e);
       refreshAskCards();
       scrollBottom(true);
@@ -2409,6 +2452,12 @@
     es.onmessage = (m) => {
       try {
         const e = JSON.parse(m.data);
+        // Lines just left the transcript: load it again without them.
+        if (e.kind === 'info' && e.hidden && e.seq > lastSeq) {
+          showHidden = false;
+          loadTranscript(id);
+          return;
+        }
         renderEvent(e);
         scrollBottom();
         if (e.kind === 'status') {
@@ -2457,6 +2506,17 @@
       const div = document.createElement('div');
       div.className = 'ev-log';
       div.innerHTML = `▶ ${e.links.some((l) => l.tenant) ? 'Tenants' : 'Serving'}: ${serveLinksHtml(e.links)}`;
+      messagesEl.appendChild(div);
+      return;
+    }
+
+    // What a Clear or a compaction took off the transcript is said where the
+    // lines were, not folded into a prep block.
+    if (e.kind === 'info' && e.hidden) {
+      prepBox = null;
+      const div = document.createElement('div');
+      div.className = 'ev-log';
+      div.textContent = e.text || '';
       messagesEl.appendChild(div);
       return;
     }

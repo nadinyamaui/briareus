@@ -44,6 +44,8 @@ import {
   sendDevMessage,
   cancelDevTurn,
   compactDevSession,
+  clearDevTranscript,
+  visibleEvents,
   closeDevSession,
   reopenDevSession,
   setReviewLoop,
@@ -1822,7 +1824,10 @@ dashboard.register('get', '/api/dev/sessions/:id', async (req, res) => {
   // A session from before the last restart has its log in the database, not in
   // memory; jobEventsFor reads back whichever applies.
   const estimates = await currentJobUsageEstimates();
-  const events = await jobEventsFor(job, since);
+  // Lines hidden with ✕ Clear or after a compaction stay out unless asked
+  // for (`?all=1`).
+  const all = await jobEventsFor(job, since);
+  const events = req.query.all === '1' ? all : visibleEvents(job, all);
   res.json({
     session: publicJob(job, estimates),
     events: estimateEventCosts(events, estimates?.get(job.id)?.rows),
@@ -1841,7 +1846,7 @@ app.get('/api/dev/sessions/:id/events', (req, res) => {
   // instead of replaying (and duplicating) everything since page load.
   const send = (event) => res.write(`id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`);
   const since = Number(req.headers['last-event-id'] ?? req.query.since ?? 0);
-  for (const e of jobEventsSince(job, since)) send(e);
+  for (const e of visibleEvents(job, jobEventsSince(job, since))) send(e);
   let sendQueue = Promise.resolve();
   const onEvent = (jobId, event) => {
     if (jobId !== job.id) return;
@@ -1899,6 +1904,16 @@ dashboard.register('post', '/api/dev/sessions/:id/message', (req, res) => {
 app.post('/api/dev/sessions/:id/compact', async (req, res) => {
   try {
     res.json({ session: await compactDevSession(req.params.id) });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Hides the transcript so far from the dashboard; the stored log keeps it.
+// Dashboard only, like compact.
+app.post('/api/dev/sessions/:id/clear', async (req, res) => {
+  try {
+    res.json({ session: await clearDevTranscript(req.params.id) });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
