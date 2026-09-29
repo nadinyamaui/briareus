@@ -245,6 +245,31 @@ beforeEach(() => {
   state.group = null;
 });
 
+// A worker spawned for real goes on to prepare a workspace that is not there,
+// fails on its own time, and tells its orchestrator, which takes the notice as
+// a turn. On a loaded machine that lands blocks later, where the turn runs
+// through whatever fake CLI is installed then and throws its prompt count off
+// (the webhook deliveries). So the block that spawned workers waits until
+// every one has failed, its notice has reached the orchestrator, and the
+// orchestrator has settled.
+async function settleWorkers(orchestratorIds) {
+  const busy = (job) => ['preparing', 'running'].includes(job.status);
+  await vi.waitFor(
+    () => {
+      for (const orch of orchestratorIds.map(getJob)) {
+        for (const worker of workerSessionsFor(orch)) {
+          if (worker.status === 'closed') continue;
+          expect(busy(worker), `${worker.id} still starting`).toBe(false);
+          const told = orch.events.some((e) => e.text?.includes(`Worker ${worker.id} `));
+          expect(told, `${orch.id} not told about ${worker.id}`).toBe(true);
+        }
+        expect(busy(orch), `${orch.id} still on a turn`).toBe(false);
+      }
+    },
+    { timeout: 30_000 },
+  );
+}
+
 describe('jobEventsSince', () => {
   const job = { events: [{ seq: 1 }, { seq: 2 }, { seq: 3 }] };
 
@@ -888,6 +913,7 @@ describe('spawnWorkerSession', () => {
     getJob('zeus-a').status = 'idle';
     getJob('zeus-roles').status = 'idle';
   });
+  afterAll(() => settleWorkers(['orch-a', 'orch-c', 'orch-gone', 'zeus-a', 'zeus-roles']));
 
   it('a resumed Zeus saves complete model choices before queuing its brief', () => {
     const job = getJob('zeus-resume');
@@ -2310,6 +2336,7 @@ describe('spawnWorkerSession: tooling fixes', () => {
     await initJobs();
     getJob('tool-orch').status = 'idle';
   });
+  afterAll(() => settleWorkers(['tool-orch']));
 
   beforeEach(() => {
     state.projects = [
