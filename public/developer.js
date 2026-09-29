@@ -2450,6 +2450,10 @@
         messagesEl.appendChild(bar);
       }
       for (const e of data.events) renderEvent(e);
+      // The status line that started a turn still running can be among the
+      // hidden ones (a compaction inside that turn), so the spinner follows
+      // the session, not the last status drawn.
+      updateSpinner(data.session?.status);
       refreshAskCards();
       if (fromBar && bar) bar.scrollIntoView({ block: 'start' });
       else scrollBottom(true);
