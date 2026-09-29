@@ -2714,6 +2714,7 @@ describe('webhook deliveries', () => {
     'hk-open',
     'hk-queued',
     'hk-spot',
+    'hk-branch',
   ];
 
   beforeAll(async () => {
@@ -3016,6 +3017,27 @@ describe('webhook deliveries', () => {
       await cli.finish(job);
       const [turn] = job.webhookTurns;
       expect(turn[0][0]).toBe(bubble.seq);
+      expect(turn.some(([from, to]) => moved.seq >= from && moved.seq <= to)).toBe(false);
+    } finally {
+      job.workDir = null;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the branch line a webhook turn’s end re-reads out of the turn', async () => {
+    fakeCli();
+    const job = getJob('hk-branch');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hk-branch-'));
+    spawnSync('git', ['init', '-q', '-b', 'renamed', dir]);
+    job.branch = 'dev-hk-branch';
+    try {
+      deliverToSession('hk-branch', { text: 'rename the branch' });
+      // The agent renames the branch mid-turn; the turn's end re-reads HEAD.
+      job.workDir = dir;
+      await cli.finish(job);
+      const moved = job.events.find((e) => e.text?.startsWith('Working tree is now on branch renamed'));
+      expect(moved).toBeTruthy();
+      const [turn] = job.webhookTurns;
       expect(turn.some(([from, to]) => moved.seq >= from && moved.seq <= to)).toBe(false);
     } finally {
       job.workDir = null;
