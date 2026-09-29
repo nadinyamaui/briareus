@@ -1825,9 +1825,9 @@ dashboard.register('get', '/api/dev/sessions/:id', async (req, res) => {
   // memory; jobEventsFor reads back whichever applies.
   const estimates = await currentJobUsageEstimates();
   // Lines hidden with ✕ Clear or after a compaction stay out unless asked
-  // for (`?all=1`).
+  // for: `?all=1` from the pages, `all: true` from the dashboard_session tool.
   const all = await jobEventsFor(job, since);
-  const events = req.query.all === '1' ? all : visibleEvents(job, all);
+  const events = req.query.all === '1' || req.query.all === true ? all : visibleEvents(job, all);
   res.json({
     session: publicJob(job, estimates),
     events: estimateEventCosts(events, estimates?.get(job.id)?.rows),
@@ -1913,7 +1913,7 @@ app.post('/api/dev/sessions/:id/compact', async (req, res) => {
 // Dashboard only, like compact.
 app.post('/api/dev/sessions/:id/clear', async (req, res) => {
   try {
-    res.json({ session: await clearDevTranscript(req.params.id) });
+    res.json(await clearDevTranscript(req.params.id));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

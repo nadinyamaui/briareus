@@ -25,6 +25,7 @@
   let es = null; // EventSource for the open session
   let lastSeq = 0;
   let showHidden = false; // whether the open chat shows the lines a Clear or a compaction hid
+  let transcriptLoads = 0; // numbers loadTranscript calls, so only the latest one draws
   let prepBox = null; // open <details> the prep log lines append into
   let toolBox = null; // open <details> the current run of tool calls appends into
 
@@ -1948,8 +1949,12 @@
       if (!s?.id || clear.disabled) return;
       clear.disabled = true;
       try {
-        await api(`/api/dev/sessions/${encodeURIComponent(s.id)}/clear`, { method: 'POST' });
-        toast('Transcript cleared');
+        const { hidden } = await api(`/api/dev/sessions/${encodeURIComponent(s.id)}/clear`, {
+          method: 'POST',
+        });
+        toast(
+          hidden ? `Transcript cleared: ${hidden} line${hidden === 1 ? '' : 's'} hidden` : 'Nothing to clear',
+        );
       } catch (err) {
         toast(err.message, true);
       }
@@ -2418,20 +2423,25 @@
   // a Clear, a compaction that hid webhook turns, or the hidden-lines bar
   // re-runs, so the stream is restarted with it rather than raced.
   async function loadTranscript(id) {
+    // A double click on the bar, or one racing the stream's `hidden` line,
+    // starts a second load; whichever was started last is the one drawn, and
+    // it is labelled from what it asked for.
+    const load = ++transcriptLoads;
+    const all = showHidden;
     try {
-      const data = await api(`/api/dev/sessions/${id}${showHidden ? '?all=1' : ''}`);
-      if (current !== id) return; // switched again while loading
+      const data = await api(`/api/dev/sessions/${id}${all ? '?all=1' : ''}`);
+      if (current !== id || load !== transcriptLoads) return; // switched, or loaded again, meanwhile
       closeStream();
       messagesEl.innerHTML = '';
       const hidden = data.session?.hiddenLines || 0;
       if (hidden) {
         const bar = document.createElement('button');
         bar.className = 'hidden-lines my-2 w-full text-center text-xs text-muted hover:text-ink';
-        bar.textContent = showHidden
+        bar.textContent = all
           ? `Showing ${hidden} hidden line${hidden === 1 ? '' : 's'} · Hide them`
           : `${hidden} earlier line${hidden === 1 ? '' : 's'} hidden · Show`;
         bar.addEventListener('click', () => {
-          showHidden = !showHidden;
+          showHidden = !all;
           loadTranscript(id);
         });
         messagesEl.appendChild(bar);
@@ -2441,7 +2451,7 @@
       scrollBottom(true);
       stream(id);
     } catch (e) {
-      if (current !== id) return;
+      if (current !== id || load !== transcriptLoads) return;
       messagesEl.innerHTML = '';
       toast(e.message, true);
     }

@@ -154,7 +154,7 @@ vi.mock('../lib/usage.js', () => ({
   recordTurnUsage: vi.fn(),
 }));
 
-import { deleteJob, saveJob } from '../lib/db.js';
+import { deleteJob, jobEventMaxSeqs, loadJobEvents, saveJob } from '../lib/db.js';
 import { dropSessionDatabase } from '../lib/dbpool.js';
 import {
   latestReviewFindings,
@@ -8744,6 +8744,7 @@ describe('manual Codex context compaction', () => {
     const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex' });
     compactCodexThread.mockResolvedValueOnce(undefined);
     const job = getJob('compact-session');
+    job.webhook = { armed: true, epoch: 1 };
     const ev = (seq, kind, extra = {}) => ({ seq, t: '2026-09-29T00:00:00Z', kind, ...extra });
     job.events = [
       ev(1, 'user', { text: 'hello' }),
@@ -8759,10 +8760,10 @@ describe('manual Codex context compaction', () => {
     job.seq = 9;
     try {
       const result = await compactDevSession('compact-session');
-      // The last turn runs to the line the compaction started from.
+      // The last turn ends at its result, not at the compaction's own lines.
       expect(job.hiddenRanges).toEqual([
         [3, 5],
-        [8, 10],
+        [8, 9],
       ]);
       expect(result.hiddenLines).toBe(5);
       expect(result.hiddenRanges).toBeUndefined();
@@ -8780,13 +8781,124 @@ describe('manual Codex context compaction', () => {
       const again = await compactDevSession('compact-session');
       expect(job.hiddenRanges).toEqual([
         [3, 5],
-        [8, 10],
-        [top + 1, top + 3],
+        [8, 9],
+        [top + 1, top + 2],
       ]);
       expect(again.hiddenLines).toBe(7);
     } finally {
       bin.mockRestore();
     }
+  });
+
+  it("ends a webhook turn at its own end, keeping the notices after it and the user's message handed into it", async () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex' });
+    compactCodexThread.mockResolvedValueOnce(undefined);
+    const job = getJob('compact-session');
+    job.webhook = { armed: true, epoch: 1 };
+    const ev = (seq, kind, extra = {}) => ({ seq, t: '2026-09-29T00:00:00Z', kind, ...extra });
+    job.events = [
+      ev(1, 'user', { text: 'd1', via: 'webhook' }),
+      ev(2, 'text', { text: 'working' }),
+      ev(3, 'user', { text: 'mine', live: true }),
+      ev(4, 'text', { text: 'and yours' }),
+      ev(5, 'result', {}),
+      ev(6, 'result', {}),
+      ev(7, 'info', { text: 'Webhook paused. Daily budget reached.' }),
+      ev(8, 'status', { status: 'idle' }),
+      ev(9, 'user', { text: 'd2', via: 'webhook' }),
+      ev(10, 'stderr', { text: 'boom' }),
+      ev(11, 'status', { status: 'idle', error: 'boom' }),
+      ev(12, 'info', { text: 'A webhook delivery is waiting.' }),
+    ];
+    job.seq = 12;
+    try {
+      const result = await compactDevSession('compact-session');
+      expect(job.hiddenRanges).toEqual([
+        [1, 6],
+        [9, 10],
+      ]);
+      expect(result.hiddenLines).toBe(8);
+      const shown = visibleEvents(job, job.events).map((e) => e.seq);
+      expect(shown.slice(0, 4)).toEqual([7, 8, 11, 12]);
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
+  it('keeps a webhook turn whose question still stands, and hides it once answered', async () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex' });
+    compactCodexThread.mockResolvedValueOnce(undefined);
+    const job = getJob('compact-session');
+    job.webhook = { armed: true, epoch: 1 };
+    const ev = (seq, kind, extra = {}) => ({ seq, t: '2026-09-29T00:00:00Z', kind, ...extra });
+    job.events = [
+      ev(1, 'user', { text: 'd1', via: 'webhook' }),
+      ev(2, 'ask', { question: 'old?' }),
+      ev(3, 'result', {}),
+      ev(4, 'user', { text: 'answered' }),
+      ev(5, 'result', {}),
+      ev(6, 'user', { text: 'd2', via: 'webhook' }),
+      ev(7, 'ask', { question: 'now?' }),
+      ev(8, 'result', {}),
+    ];
+    job.seq = 8;
+    job.awaitingAnswer = true;
+    job.questionSeq = 7;
+    try {
+      await compactDevSession('compact-session');
+      expect(job.hiddenRanges).toEqual([[1, 3]]);
+      expect(job.webhookTurnsScanned).toBe(5);
+      expect(visibleEvents(job, job.events).some((e) => e.seq === 7)).toBe(true);
+
+      // Answered, the next compaction reads that turn again and hides it.
+      job.awaitingAnswer = false;
+      const top = job.seq;
+      job.events.push(ev(top + 1, 'user', { text: 'yes' }), ev(top + 2, 'result', {}));
+      job.seq = top + 2;
+      compactCodexThread.mockResolvedValueOnce(undefined);
+      await compactDevSession('compact-session');
+      expect(job.hiddenRanges).toEqual([
+        [1, 3],
+        [6, 8],
+      ]);
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
+  it('reads no log for a session without a webhook', async () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex' });
+    compactCodexThread.mockResolvedValueOnce(undefined);
+    const job = getJob('compact-session');
+    delete job.webhook;
+    job.events = [{ seq: 1, t: '2026-09-29T00:00:00Z', kind: 'user', text: 'hi' }];
+    job.seq = 1;
+    loadJobEvents.mockClear();
+    try {
+      await compactDevSession('compact-session');
+      expect(loadJobEvents).not.toHaveBeenCalled();
+      expect(job.hiddenRanges).toBeUndefined();
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
+  it('clamps hidden ranges a crash left past the last stored line', async () => {
+    state.stored[0].hiddenRanges = [
+      [1, 4],
+      [8, 12],
+      [15, 20],
+    ];
+    state.stored[0].webhookTurnsScanned = 20;
+    jobEventMaxSeqs.mockResolvedValueOnce(new Map([['compact-session', 10]]));
+    await initJobs();
+    const job = getJob('compact-session');
+    expect(job.seq).toBe(10);
+    expect(job.hiddenRanges).toEqual([
+      [1, 4],
+      [8, 10],
+    ]);
+    expect(job.webhookTurnsScanned).toBe(10);
   });
 
   it('hides nothing when the compaction fails', async () => {
@@ -8816,7 +8928,8 @@ describe('manual Codex context compaction', () => {
 
     const cleared = await clearDevTranscript(job.id);
     expect(job.hiddenRanges).toEqual([[1, 3]]);
-    expect(cleared.hiddenLines).toBe(3);
+    expect(cleared.hidden).toBe(3);
+    expect(cleared.session.hiddenLines).toBe(3);
     expect(visibleEvents(job, job.events).map((e) => e.text)).toEqual([
       'Transcript cleared: 3 earlier lines hidden.',
     ]);
@@ -8829,6 +8942,36 @@ describe('manual Codex context compaction', () => {
     await clearDevTranscript(job.id);
     expect(job.hiddenRanges).toEqual([[1, 4]]);
     expect(visibleEvents(job, job.events).map((e) => e.seq)).toEqual([5, 6, 7, 8]);
+  });
+
+  it('keeps an asking turn from the message that started it, not one handed in mid-turn', async () => {
+    const job = getJob('compact-session');
+    const ev = (seq, kind, extra = {}) => ({ seq, t: '2026-09-29T00:00:00Z', kind, ...extra });
+    job.events = [
+      ev(1, 'user', { text: 'old' }),
+      ev(2, 'result', {}),
+      ev(3, 'user', { text: 'start' }),
+      ev(4, 'text', { text: 'working' }),
+      ev(5, 'user', { text: 'also this', live: true }),
+      ev(6, 'ask', {}),
+    ];
+    job.seq = 6;
+    job.awaitingAnswer = true;
+    job.questionSeq = 6;
+    const cleared = await clearDevTranscript(job.id);
+    expect(job.hiddenRanges).toEqual([[1, 2]]);
+    expect(cleared.hidden).toBe(2);
+  });
+
+  it('says it hid nothing when the question stands in the first turn', async () => {
+    const job = getJob('compact-session');
+    const ev = (seq, kind, extra = {}) => ({ seq, t: '2026-09-29T00:00:00Z', kind, ...extra });
+    job.events = [ev(1, 'user', { text: 'start' }), ev(2, 'ask', {})];
+    job.seq = 2;
+    job.awaitingAnswer = true;
+    job.questionSeq = 2;
+    expect((await clearDevTranscript(job.id)).hidden).toBe(0);
+    expect(job.hiddenRanges).toBeUndefined();
   });
 
   it('rejects missing sessions, busy sessions and non-Codex context', async () => {
