@@ -20,6 +20,7 @@ import { mobileApiRoutes, mobileSettingsRoutes } from './lib/mobile-api.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
 import { sessionWebhookRoutes } from './lib/webhook-routes.js';
+import { sessionTranscriptRoutes } from './lib/transcript-routes.js';
 import fs from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
@@ -1817,75 +1818,24 @@ dashboard.register('post', '/api/dev/sessions', (req, res) => {
   }
 });
 
-dashboard.register('get', '/api/dev/sessions/:id', async (req, res) => {
-  const job = getJob(req.params.id);
-  if (!job || job.kind !== 'devchat') return res.status(404).json({ error: 'Session not found' });
-  const since = Number(req.query.since || 0);
-  // A session from before the last restart has its log in the database, not in
-  // memory; jobEventsFor reads back whichever applies.
-  const estimates = await currentJobUsageEstimates();
-  // Lines hidden with ✕ Clear or after a compaction stay out unless asked
-  // for: `?all=1` from the pages, `all: true` from the dashboard_session tool.
-  const all = await jobEventsFor(job, since);
-  const events = req.query.all === '1' || req.query.all === true ? all : visibleEvents(job, all);
-  res.json({
-    session: publicJob(job, estimates),
-    events: estimateEventCosts(events, estimates?.get(job.id)?.rows),
-  });
+// The transcript a page opens with, the stream that follows it, and ✕ Clear
+// (lib/transcript-routes.js).
+const transcript = sessionTranscriptRoutes({
+  getJob,
+  publicJob,
+  jobEventsFor,
+  jobEventsSince,
+  visibleEvents,
+  clearDevTranscript,
+  currentEstimates: currentJobUsageEstimates,
+  jobUsageEstimates,
+  estimateEventCosts,
+  bus,
 });
 
-app.get('/api/dev/sessions/:id/events', (req, res) => {
-  const job = getJob(req.params.id);
-  if (!job || job.kind !== 'devchat') return res.status(404).json({ error: 'Session not found' });
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-  });
-  // id: lets EventSource resume via Last-Event-ID after a dropped connection
-  // instead of replaying (and duplicating) everything since page load.
-  const send = (event) => res.write(`id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`);
-  const since = Number(req.headers['last-event-id'] ?? req.query.since ?? 0);
-  for (const e of visibleEvents(job, jobEventsSince(job, since))) send(e);
-  let sendQueue = Promise.resolve();
-  const onEvent = (jobId, event) => {
-    if (jobId !== job.id) return;
-    // Keep numbered events in order while a just-completed result is matched
-    // to the ledger row that now carries its catalog estimate.
-    sendQueue = sendQueue
-      .then(async () => {
-        if (event.kind !== 'result' || event.costUsd != null) {
-          send(event);
-          return;
-        }
-        try {
-          const estimates = await jobUsageEstimates([job.id]);
-          send(estimateEventCosts([event], estimates.get(job.id)?.rows)[0]);
-        } catch (e) {
-          console.error(`live session cost unavailable for ${job.id}: ${e.message}`);
-          send(event);
-        }
-      })
-      .catch(() => {});
-  };
-  bus.on('event', onEvent);
-  // The session record itself, pushed on every change the server makes to it:
-  // a PR sync, a context probe, the live token counters during a turn. No `id:`
-  // on these: the Last-Event-ID cursor belongs to the numbered event log, and a
-  // record push is a snapshot, worthless to replay. The right panel redraws
-  // from them instead of waiting for the next sessions poll.
-  const onJob = (record) => {
-    if (record.id !== job.id) return;
-    res.write(`event: session\ndata: ${JSON.stringify(record)}\n\n`);
-  };
-  bus.on('job', onJob);
-  const ping = setInterval(() => res.write(': ping\n\n'), 25000);
-  req.on('close', () => {
-    clearInterval(ping);
-    bus.off('event', onEvent);
-    bus.off('job', onJob);
-  });
-});
+dashboard.register('get', '/api/dev/sessions/:id', transcript.read);
+
+app.get('/api/dev/sessions/:id/events', transcript.stream);
 
 // A message mid-turn goes into a claude turn still reading its input, or is
 // queued rather than refused otherwise, and one to a session that
@@ -1911,13 +1861,7 @@ app.post('/api/dev/sessions/:id/compact', async (req, res) => {
 
 // Hides the transcript so far from the dashboard; the stored log keeps it.
 // Dashboard only, like compact.
-app.post('/api/dev/sessions/:id/clear', async (req, res) => {
-  try {
-    res.json(await clearDevTranscript(req.params.id));
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
+app.post('/api/dev/sessions/:id/clear', transcript.clear);
 
 // Where an outside system posts to wake this session, the key it signs with,
 // and the caps its turns run under (lib/webhook-routes.js).
