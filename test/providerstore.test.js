@@ -41,7 +41,10 @@ vi.mock('../lib/db.js', () => ({
   getProviderRow: async (id) => state.rows.find((r) => r.id === Number(id)) || null,
 }));
 
-vi.mock('../lib/providers.js', () => {
+vi.mock('../lib/providers.js', async (importOriginal) => {
+  // The default-model fall-through is shared with providers.js's own callers,
+  // so the real one runs against these fake binaries.
+  const { resolveDefaultModel } = await importOriginal();
   const binary = (name, models, efforts, defaultModel, defaultEffort) => ({
     label: `${name} label`,
     models: () => models,
@@ -73,6 +76,7 @@ vi.mock('../lib/providers.js', () => {
     // The real one reads the entry's cached catalog; here one slug is sold at
     // two sizes and the rest are not, which is all this module branches on.
     codexWideVariants: (slugs) => slugs.flatMap((s) => (s === 'gpt-a' ? [s, 'gpt-a (872k)'] : [s])),
+    resolveDefaultModel,
   };
 });
 

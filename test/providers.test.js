@@ -78,6 +78,12 @@ describe('getBinary / BINARIES', () => {
     ]);
     expect(BINARIES.codex.defaultModels({}, { models: [] })).toEqual(['gpt-6.1-sol', 'gpt-6-sol']);
   });
+
+  it('keeps the newest default for a row with only an OpenAI API key', () => {
+    const keyOnly = { baseUrl: '', apiKey: 'sk-k', models: [] };
+
+    expect(BINARIES.codex.defaultModels({}, keyOnly)).toEqual(['gpt-6.1-sol', 'gpt-6-sol']);
+  });
 });
 
 describe('ensureCodexHome for a custom endpoint', () => {
@@ -116,6 +122,16 @@ describe('ensureCodexHome for a custom endpoint', () => {
     expect(configModel({ models: ['gpt-5.5', 'gpt-6-sol'], defaultModel: 'gone' })).toBe('gpt-6-sol');
     expect(configModel({ models: [], defaultModel: 'gpt-6.1-sol' })).toBe('gpt-6.1-sol');
     expect(configModel({ models: ['gpt-5.5', 'gpt-6-sol'] }, 'gpt-5.5')).toBe('gpt-5.5');
+  });
+
+  it('writes the model the picker defaults to, wide twins and stored defaults included', () => {
+    // The picker compares the raw list, so a wide twin does not offer its slug.
+    expect(configModel({ models: ['gpt-5.5', 'gpt-6-sol (872k)'] })).toBe('gpt-5.5');
+    expect(configModel({ models: ['gpt-6-sol (872k)', 'gpt-5.5'], defaultModel: 'gpt-6-sol (872k)' })).toBe(
+      'gpt-6-sol',
+    );
+    // With no list, a stored default counts only when the catalog offers it.
+    expect(configModel({ models: [], defaultModel: 'my-proxy-model' })).toBe('gpt-6-sol');
   });
 });
 

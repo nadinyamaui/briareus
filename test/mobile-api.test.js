@@ -23,7 +23,8 @@ vi.mock('../lib/github.js', async (importOriginal) => ({
   ...(await importOriginal()),
   githubRest: (...args) => fake.github(...args),
 }));
-vi.mock('../lib/providers.js', () => {
+vi.mock('../lib/providers.js', async (importOriginal) => {
+  const { resolveDefaultModel } = await importOriginal();
   const binary = (name, models, efforts, defaultModel, defaultEffort) => ({
     label: `${name} label`,
     // Every CLI is installed except grok's.
@@ -52,6 +53,7 @@ vi.mock('../lib/providers.js', () => {
     readCodexAuth: () => null,
     readGrokAuth: () => null,
     codexWideVariants: (slugs) => slugs,
+    resolveDefaultModel,
   };
 });
 
