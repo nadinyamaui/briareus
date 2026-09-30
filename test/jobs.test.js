@@ -9695,10 +9695,20 @@ describe('auto-compaction after a turn', () => {
     expect(() => setDevSessionCompactInstructions(job.id, 5)).toThrow('must be text');
     expect(() => setDevSessionCompactInstructions(job.id, 'x'.repeat(4001))).toThrow('4000 characters');
     expect(() => setDevSessionCompactInstructions('missing', 'x')).toThrow('not found');
+    // The CLI that compaction would run on decides, not the session's own:
+    // here a codex step measured the context of a claude session.
+    getProviderForJob.mockReturnValue({ id: 1, binary: 'claude' });
+    expect(publicJob(job).compactTakesInstructions).toBe(false);
+    // And a claude step's thread in a codex session takes them.
+    state.otherProviders.push({ id: 5, binary: 'claude', label: 'Claude step', active: true });
+    getProviderForJob.mockReturnValue(state.otherProviders[0]);
+    job.contextUsage = { ...job.contextUsage, source: 'claude', providerId: 5, sessionId: 'claude-1' };
+    expect(publicJob(job)).toMatchObject({ compactTakesInstructions: true, autoCompactAt: 250000 });
+    // Nothing to compact yet: the session's own provider decides.
+    job.contextUsage = null;
+    job.chats = {};
     getProviderForJob.mockReturnValue({ id: 1, binary: 'claude' });
     expect(publicJob(job).compactTakesInstructions).toBe(true);
-    getProviderForJob.mockReturnValue({ id: 2, binary: 'codex' });
-    expect(publicJob(job).compactTakesInstructions).toBe(false);
   });
 
   it('compacts past the threshold before the queued message runs, which waits instead of failing', async () => {

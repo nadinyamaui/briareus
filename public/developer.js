@@ -1811,9 +1811,10 @@
       ? `<label class="flex cursor-pointer items-center gap-1 whitespace-nowrap" title="After a turn leaves the context above ${autoAt} tokens, summarize the conversation automatically; this uses the provider and may incur usage."><input type="checkbox" class="auto-compact accent-accent" ${s.autoCompact ? 'checked' : ''}>Auto-compact ${autoAt}</label>`
       : '';
     // What every compaction of this session must keep; claude only, see
-    // compactTakesInstructions. Accented while some are set.
+    // compactTakesInstructions. Accented while some are set. Shown while a
+    // turn runs too, and whenever some are set, so they can always be cleared.
     const keep =
-      s.compactTakesInstructions && (compact || auto)
+      s.compactTakesInstructions || s.compactInstructions
         ? `<button class="compact-instructions rounded border border-line px-2 py-0.5 text-[12px] ${s.compactInstructions ? 'text-accent' : 'text-muted'} hover:text-ink" title="${esc(s.compactInstructions ? `Compaction instructions: ${s.compactInstructions}` : 'Tell compaction what the summary must keep')}">Instructions</button>`
         : '';
     // Takes the transcript off the screen only: the agent's context and the
@@ -1960,26 +1961,33 @@
     if (keep) {
       const s = panelSubject;
       if (!s?.id) return;
-      const text = await openPrompt({
-        title: 'Compaction instructions',
-        body: 'Every compaction of this session, by the Compact button or Auto-compact, is told to follow these when it summarizes the conversation. Leave the box empty to remove them.',
-        label: 'Instructions',
-        placeholder:
-          'e.g. Keep the open review findings and the exact test commands; drop the exploration of lib/usage.js',
-        value: s.compactInstructions || '',
-        confirmLabel: 'Save',
-        allowEmpty: true,
-      });
-      if (text == null) return;
-      try {
-        await api(`/api/dev/sessions/${encodeURIComponent(s.id)}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ compactInstructions: text }),
+      // A refused save (over 4000 characters, say) opens the box again with
+      // what was typed, rather than losing it to a toast.
+      let value = s.compactInstructions || '';
+      for (;;) {
+        const text = await openPrompt({
+          title: 'Compaction instructions',
+          body: 'Every compaction of this session, by the Compact button or Auto-compact, is told to follow these when it summarizes the conversation. Leave the box empty to remove them.',
+          label: 'Instructions',
+          placeholder:
+            'e.g. Keep the open review findings and the exact test commands; drop the exploration of lib/usage.js',
+          value,
+          confirmLabel: 'Save',
+          allowEmpty: true,
         });
-        toast(text ? 'Compaction instructions saved' : 'Compaction instructions removed');
-      } catch (err) {
-        toast(err.message, true);
+        if (text == null) break;
+        try {
+          await api(`/api/dev/sessions/${encodeURIComponent(s.id)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ compactInstructions: text }),
+          });
+          toast(text ? 'Compaction instructions saved' : 'Compaction instructions removed');
+          break;
+        } catch (err) {
+          toast(err.message, true);
+          value = text;
+        }
       }
       await loadSessions();
       return;

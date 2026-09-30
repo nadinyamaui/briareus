@@ -1881,10 +1881,17 @@ app.use(
 dashboard.register('patch', '/api/dev/sessions/:id', (req, res) => {
   try {
     const body = req.body || {};
-    if ('autoCompact' in body && !('title' in body)) {
+    // One edit per request: a body mixing them would otherwise have all but
+    // one quietly dropped, and applying each would leave half of it saved
+    // when a later one is refused.
+    const fields = ['title', 'autoCompact', 'compactInstructions'].filter((f) => f in body);
+    if (fields.length > 1) {
+      return res.status(400).json({ error: `Send one of ${fields.join(', ')} per request` });
+    }
+    if ('autoCompact' in body) {
       return res.json({ session: setDevSessionAutoCompact(req.params.id, body.autoCompact) });
     }
-    if ('compactInstructions' in body && !('title' in body)) {
+    if ('compactInstructions' in body) {
       return res.json({
         session: setDevSessionCompactInstructions(req.params.id, body.compactInstructions),
       });
