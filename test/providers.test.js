@@ -24,6 +24,7 @@ import {
   codexEffortsForModel,
   testProviderEndpoint,
   probeChatEndpoint,
+  ensureCodexHome,
 } from '../lib/providers.js';
 
 // providers.js imports no project module, so nothing is mocked here: the
@@ -60,10 +61,61 @@ describe('getBinary / BINARIES', () => {
       expect(BINARIES.codex.models({}, null, home)).not.toContain('gpt-5.6-sol');
       expect(BINARIES.codex.defaultModel()).toBe('gpt-6.1-sol');
       expect(BINARIES.codex.defaultModels()).toEqual(['gpt-6.1-sol', 'gpt-6-sol']);
+      expect(Object.isFrozen(BINARIES.codex.defaultModels())).toBe(true);
       expect(BINARIES.codex.efforts).toContain('max');
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  it('starts a custom endpoint that lists no models on the oldest default', () => {
+    const endpoint = { baseUrl: 'https://proxy.example/v1', apiKey: 'k', models: [] };
+
+    expect(BINARIES.codex.defaultModels({}, endpoint)).toEqual(['gpt-6-sol']);
+    expect(BINARIES.codex.defaultModels({}, { ...endpoint, models: ['gpt-6.1-sol'] })).toEqual([
+      'gpt-6.1-sol',
+      'gpt-6-sol',
+    ]);
+    expect(BINARIES.codex.defaultModels({}, { models: [] })).toEqual(['gpt-6.1-sol', 'gpt-6-sol']);
+  });
+});
+
+describe('ensureCodexHome for a custom endpoint', () => {
+  let home;
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (home) fs.rmSync(home, { recursive: true, force: true });
+    home = null;
+  });
+
+  function configModel(provider, turnModel) {
+    home = home || fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-home-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const dir = ensureCodexHome(
+      { id: 7, label: 'Proxy', baseUrl: 'https://proxy.example/v1', apiKey: 'k', efforts: [], ...provider },
+      turnModel,
+    );
+    const toml = fs.readFileSync(path.join(dir, 'config.toml'), 'utf8');
+    const model = /^model = "(.*)"$/m.exec(toml)[1];
+    expect(/^review_model = "(.*)"$/m.exec(toml)[1]).toBe(model);
+    return model;
+  }
+
+  it('falls back through the defaults the row lists, as the picker does', () => {
+    expect(configModel({ models: ['gpt-5.5', 'gpt-6-sol'] })).toBe('gpt-6-sol');
+    expect(configModel({ models: ['gpt-5.5', 'gpt-6.1-sol', 'gpt-6-sol'] })).toBe('gpt-6.1-sol');
+    expect(configModel({ models: ['gpt-5.5', 'gpt-5.4'] })).toBe('gpt-5.5');
+  });
+
+  it('uses the oldest default when the row lists no models', () => {
+    expect(configModel({ models: [] })).toBe('gpt-6-sol');
+  });
+
+  it('keeps a stored default the row offers, and the turn pick over both', () => {
+    expect(configModel({ models: ['gpt-5.5', 'gpt-6-sol'], defaultModel: 'gpt-5.5' })).toBe('gpt-5.5');
+    expect(configModel({ models: ['gpt-5.5', 'gpt-6-sol'], defaultModel: 'gone' })).toBe('gpt-6-sol');
+    expect(configModel({ models: [], defaultModel: 'gpt-6.1-sol' })).toBe('gpt-6.1-sol');
+    expect(configModel({ models: ['gpt-5.5', 'gpt-6-sol'] }, 'gpt-5.5')).toBe('gpt-5.5');
   });
 });
 
