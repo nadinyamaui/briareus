@@ -8,7 +8,8 @@
 // Which thread a row belongs to comes from the session's log: the turn's
 // "Starting …" line (a native code review, or a turn that did not resume,
 // opens a fresh thread), the "Codex session started: thread <id>" line the CLI
-// printed, and "Compacting Codex context…". Rows logged before those lines
+// printed, and "Compacting <provider> context…" (the provider's label, which
+// can be renamed, so any label counts). Rows logged before those lines
 // existed fall back to the counters alone, where a drop means a new thread and
 // a new thread that starts above the old total cannot be told apart.
 //
@@ -26,10 +27,16 @@
 //    task_sessions record (up to the nearest session still there, which is
 //    where the estimate ended up), and the difference between the old and
 //    new rows' estimates comes off, both priced at today's catalog and the
-//    default cache share, since the one used then is not kept. A session
-//    deleted before task_sessions existed has no record, and its parent keeps
-//    the figure it was given. The absorbed token counts came from the CLI's
-//    own thread totals, not from these rows, and are left alone.
+//    cache share calibrated from the ledger's priced rows (the same aggregate
+//    the estimate was priced with; this backfill touches none of those rows).
+//    A deleted row cannot show whether its estimate was really paid over (a
+//    session deleted while not restored in memory, or whose estimate could
+//    not be read, paid nothing), so a parent is corrected only when its
+//    absorbed estimate covers the old estimate of every row attributed to it;
+//    any other keeps the figure it has, as does the parent of a session
+//    deleted before task_sessions existed, which has no record. The absorbed
+//    token counts came from the CLI's own thread totals, not from these rows,
+//    and are left alone.
 
 import { loadCatalog, withEstimates } from '../lib/prices.js';
 
@@ -46,7 +53,7 @@ const THREAD = /^Codex session started: thread (\S+)/;
 
 /** @param {string} text */
 function marker(text) {
-  if (/^Compacting Codex context/.test(text)) return 'compact';
+  if (/^Compacting .+ context/.test(text)) return 'compact';
   if (/^Starting .+ code review \(/.test(text)) return 'fresh';
   // The model can carry parentheses of its own ("gpt-5 (872k)").
   if (/^Starting .+ \(.+, effort [^)]*\)/.test(text))
@@ -203,14 +210,18 @@ export function codexResultRewrites(rows, deltas, events) {
 /**
  * What to take off each living parent's absorbedEstimatedCostUsd: the old
  * rows' estimate minus the new rows', over the rows of deleted sessions that
- * folded into it.
+ * folded into it. A parent whose absorbed estimate is below the old estimate
+ * of its rows never received all of them, and is left alone: what it holds
+ * may be other children's.
  * @param {LegacyRow[]} rows
  * @param {Map<number, Usage>} deltas
  * @param {Map<string, string>} owners deleted session id -> the session holding its estimate
+ * @param {Map<string, number>} held each parent's absorbedEstimatedCostUsd
  * @param {object} catalog
+ * @param {object[]} [calibration] the ledger aggregate the estimates were priced with
  * @returns {Map<string, number>}
  */
-export function absorbedCorrections(rows, deltas, owners, catalog) {
+export function absorbedCorrections(rows, deltas, owners, held, catalog, calibration = []) {
   const mine = rows.filter((row) => owners.has(row.jobId) && row.costUsd == null && deltas.has(row.id));
   /** @param {LegacyRow} row @param {{ inputTokens: number | null, outputTokens: number | null }} usage */
   const priced = (row, { inputTokens, outputTokens }) => ({
@@ -223,21 +234,32 @@ export function absorbedCorrections(rows, deltas, owners, catalog) {
   const before = withEstimates(
     mine.map((row) => priced(row, row)),
     catalog,
-    [],
+    calibration,
   );
   const after = withEstimates(
     mine.map((row) => priced(row, /** @type {Usage} */ (deltas.get(row.id)))),
     catalog,
-    [],
+    calibration,
   );
-  /** @type {Map<string, number>} */
-  const out = new Map();
+  /** @type {Map<string, { old: number, less: number }>} */
+  const sums = new Map();
   mine.forEach((row, i) => {
     if (!before[i].costEstimated || !after[i].costEstimated) return;
     const owner = /** @type {string} */ (owners.get(row.jobId));
-    out.set(owner, (out.get(owner) || 0) + before[i].costUsd - after[i].costUsd);
+    const sum = sums.get(owner) || { old: 0, less: 0 };
+    sum.old += before[i].costUsd;
+    sum.less += before[i].costUsd - after[i].costUsd;
+    sums.set(owner, sum);
   });
-  for (const [owner, less] of out) if (!(less > 0)) out.delete(owner);
+  /** @type {Map<string, number>} */
+  const out = new Map();
+  for (const [owner, { old, less }] of sums) {
+    const has = held.get(owner);
+    // A cent (or 1%) of slack: the figure was stored to four places, and the
+    // calibration has moved a little with every priced turn since.
+    if (!(less > 0) || has == null || has < old - Math.max(0.01, old * 0.01)) continue;
+    out.set(owner, less);
+  }
   return out;
 }
 
@@ -284,7 +306,7 @@ export async function up({ context: p }) {
   const [logged] = await p.query(
     `SELECT \`job_id\`, \`at\`, \`data\` FROM \`job_events\`
       WHERE \`job_id\` IN (?) AND \`kind\` = 'info'
-        AND (\`data\` LIKE '%"text":"Starting %' OR \`data\` LIKE '%"text":"Compacting Codex%'
+        AND (\`data\` LIKE '%"text":"Starting %' OR \`data\` LIKE '%"text":"Compacting %'
           OR \`data\` LIKE '%"text":"Codex session started%')
       ORDER BY \`job_id\`, \`seq\``,
     [ids],
@@ -439,7 +461,41 @@ async function absorbedByParents(p, rows, deltas, ids) {
     if (at && living.has(at)) owners.set(id, at);
   }
   if (!owners.size) return new Map();
-  return absorbedCorrections(rows, deltas, owners, await loadCatalog());
+  const [parents] = await p.query(
+    `SELECT \`id\`, JSON_UNQUOTE(JSON_EXTRACT(\`meta\`, '$.absorbedEstimatedCostUsd')) AS \`absorbed\`
+       FROM \`jobs\` WHERE \`id\` IN (?) AND JSON_VALID(\`meta\`)`,
+    [[...new Set(owners.values())]],
+  );
+  /** @type {Map<string, number>} */
+  const held = new Map();
+  for (const job of /** @type {any[]} */ (parents)) {
+    const absorbed = num(job.absorbed);
+    if (absorbed != null) held.set(job.id, absorbed);
+  }
+  if (!held.size) return new Map();
+  // lib/db.js's loadTurnUsageCalibration, which priced the estimates at
+  // deletion; copied rather than imported, as a migration runs on its own pool.
+  const [calibration] = await p.query(
+    `SELECT \`provider\`, \`model\`, SUM(\`input_tokens\`) AS \`input_tokens\`,
+            SUM(\`output_tokens\`) AS \`output_tokens\`, SUM(\`cost_usd\`) AS \`cost_usd\`
+       FROM \`turn_usage\`
+      WHERE \`cost_usd\` > 0 AND \`input_tokens\` > 0
+      GROUP BY \`provider\`, \`model\``,
+  );
+  return absorbedCorrections(
+    rows,
+    deltas,
+    owners,
+    held,
+    await loadCatalog(),
+    /** @type {any[]} */ (calibration).map((row) => ({
+      provider: row.provider,
+      model: row.model,
+      inputTokens: Number(row.input_tokens),
+      outputTokens: row.output_tokens == null ? null : Number(row.output_tokens),
+      costUsd: Number(row.cost_usd),
+    })),
+  );
 }
 
 // The rows' lifetime counters are not kept, so this cannot be undone; and

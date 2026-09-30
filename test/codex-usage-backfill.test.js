@@ -50,6 +50,12 @@ describe('codexUsageDeltas', () => {
     expect(inputs(codexUsageDeltas(rows, log))).toEqual([100000, 40000, 50000]);
   });
 
+  it('spots a compaction under whatever label the provider was given', () => {
+    const rows = [row(1, 10, 100000), row(2, 20, 40000), row(3, 30, 190000)];
+    const log = [line(5, START), line(15, 'Compacting Codex (work) context…'), line(25, RESUME)];
+    expect(inputs(codexUsageDeltas(rows, log))).toEqual([100000, 40000, 50000]);
+  });
+
   it('follows the thread the CLI named when a session goes back to an earlier one', () => {
     const rows = [row(1, 10, 100), row(2, 20, 300), row(3, 30, 160)];
     const log = [
@@ -135,21 +141,69 @@ describe('absorbedCorrections', () => {
       [2, { inputTokens: 2e6, outputTokens: 1e5, cachedInputTokens: null }],
       [3, { inputTokens: 4e6, outputTokens: 0, cachedInputTokens: null }],
     ]);
-    const out = absorbedCorrections(rows, deltas, new Map([['w', 'orch']]), CATALOG);
+    // The old rows came to $1.48 + $1 of output; the orchestrator holds that.
+    const out = absorbedCorrections(
+      rows,
+      deltas,
+      new Map([['w', 'orch']]),
+      new Map([['orch', 2.48]]),
+      CATALOG,
+    );
     expect([...out.keys()]).toEqual(['orch']);
     expect(out.get('orch')).toBeCloseTo(0.37);
+  });
+
+  it('leaves a parent alone whose absorbed estimate never covered the deleted session’s rows', () => {
+    // $2.48 of old estimate, but only $1.00 absorbed: that is another child's.
+    const rows = [legacy(1, 'w', 1e6, 0), legacy(2, 'w', 3e6, 1e5)];
+    const deltas = new Map([
+      [1, { inputTokens: 1e6, outputTokens: 0, cachedInputTokens: null }],
+      [2, { inputTokens: 2e6, outputTokens: 1e5, cachedInputTokens: null }],
+    ]);
+    const owners = new Map([['w', 'orch']]);
+    expect(absorbedCorrections(rows, deltas, owners, new Map([['orch', 1]]), CATALOG).size).toBe(0);
+    expect(absorbedCorrections(rows, deltas, owners, new Map(), CATALOG).size).toBe(0);
+  });
+
+  it('prices both sides at the ledger’s calibrated cache share', () => {
+    // Priced rows that cost $0.19 per million input: a 90% cache share, so a
+    // million inflated input tokens are worth $0.19, not the default $0.37.
+    const calibration = [
+      { provider: 'codex', model: 'gpt-5', inputTokens: 1e8, outputTokens: 0, costUsd: 19 },
+    ];
+    const rows = [legacy(1, 'w', 3e6, 0)];
+    const deltas = new Map([[1, { inputTokens: 2e6, outputTokens: 0, cachedInputTokens: null }]]);
+    const out = absorbedCorrections(
+      rows,
+      deltas,
+      new Map([['w', 'orch']]),
+      new Map([['orch', 1]]),
+      CATALOG,
+      calibration,
+    );
+    expect(out.get('orch')).toBeCloseTo(0.19);
   });
 
   it('corrects nothing the catalog cannot price', () => {
     const rows = [{ ...legacy(1, 'w', 3e6, 0), model: 'private-model' }];
     const deltas = new Map([[1, { inputTokens: 1e6, outputTokens: 0, cachedInputTokens: null }]]);
-    expect(absorbedCorrections(rows, deltas, new Map([['w', 'orch']]), CATALOG).size).toBe(0);
+    expect(
+      absorbedCorrections(rows, deltas, new Map([['w', 'orch']]), new Map([['orch', 5]]), CATALOG).size,
+    ).toBe(0);
   });
 });
 
 describe('backfill migration', () => {
   // Answers the reads and records what the transaction wrote.
-  function fakePool({ rows = [], events = [], results = [], jobs = [], present, tasks = [] } = {}) {
+  function fakePool({
+    rows = [],
+    events = [],
+    results = [],
+    jobs = [],
+    present,
+    tasks = [],
+    calibration = [],
+  } = {}) {
     const queries = [];
     const updates = [];
     const tx = [];
@@ -180,12 +234,13 @@ describe('backfill migration', () => {
       },
       async query(sql, params) {
         queries.push(sql);
-        if (/FROM `turn_usage`/.test(sql)) return [rows];
+        if (/FROM `turn_usage`/.test(sql)) return [/GROUP BY/.test(sql) ? calibration : rows];
         if (/FROM `job_events`/.test(sql)) return [/'result'/.test(sql) ? results : events];
         if (/^SELECT `id` FROM `jobs`/.test(sql)) {
           const alive = present ?? jobs.map((j) => j.id);
           return [params[0].filter((id) => alive.includes(id)).map((id) => ({ id }))];
         }
+        if (/absorbedEstimatedCostUsd/.test(sql)) return [jobs.filter((j) => params[0].includes(j.id))];
         if (/FROM `jobs`/.test(sql)) return [jobs];
         if (/FROM `task_sessions`/.test(sql))
           return [
@@ -255,7 +310,7 @@ describe('backfill migration', () => {
       results: [
         { job_id: 'w', seq: '7', at: '21', data: JSON.stringify({ inputTokens: 3000000, outputTokens: 0 }) },
       ],
-      jobs: [{ id: 'orch' }],
+      jobs: [{ id: 'orch', absorbed: '2.0000' }],
       // The worker's parent is gone too; its estimate went on up to the orchestrator.
       tasks: [
         { id: 'w', meta: { id: 'w', parentId: 'fix' } },
@@ -276,6 +331,37 @@ describe('backfill migration', () => {
     expect(parent.params[0]).toBeCloseTo(0.37);
     expect(parent.params[1]).toBe('orch');
     expect(pool.updates).toHaveLength(3);
+  });
+
+  it('leaves the parent’s absorbed estimate alone when it never held the deleted worker’s', async () => {
+    const pool = fakePool({
+      rows: [
+        {
+          id: '1',
+          job_id: 'w',
+          account_id: null,
+          model: 'gpt-5',
+          at: '10',
+          input_tokens: '1000000',
+          output_tokens: '0',
+        },
+        {
+          id: '2',
+          job_id: 'w',
+          account_id: null,
+          model: 'gpt-5',
+          at: '20',
+          input_tokens: '3000000',
+          output_tokens: '0',
+        },
+      ],
+      // The worker's rows came to $1.48, but the orchestrator holds $0.50 from another child.
+      jobs: [{ id: 'orch', absorbed: '0.5000' }],
+      tasks: [{ id: 'w', meta: { id: 'w', parentId: 'orch' } }],
+    });
+    await up({ context: pool });
+    expect(pool.updates).toHaveLength(1);
+    expect(pool.updates[0].sql).toMatch(/UPDATE `turn_usage`/);
   });
 
   it('refuses to roll back, so a re-run cannot subtract from rows that are already deltas', async () => {
