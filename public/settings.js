@@ -990,10 +990,7 @@
           apiKey: $('p-apiKey').value,
           id: currentType === 'provider' && current && !isNew ? current.id : undefined,
           defaultModel: $('p-defaultModel').value.trim(),
-          models: $('p-models')
-            .value.split('\n')
-            .map((s) => s.trim())
-            .filter(Boolean),
+          models: $('p-models').value,
         }),
       });
       if (probedModel) {

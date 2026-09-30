@@ -21,6 +21,7 @@ import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
 import { sessionWebhookRoutes } from './lib/webhook-routes.js';
 import { sessionTranscriptRoutes } from './lib/transcript-routes.js';
+import { providerTestRoutes } from './lib/provider-test-routes.js';
 import fs from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
@@ -89,10 +90,7 @@ import {
   refreshCodexModelCache,
   claudeLoginStart,
   claudeLoginFinish,
-  testProviderEndpoint,
-  probeChatEndpoint,
   verifyCustomEndpoint,
-  codexEndpointDefaultModel,
 } from './lib/providers.js';
 import {
   initProviders,
@@ -1033,12 +1031,13 @@ async function providerAuthUsage(p, cfg, fresh = false) {
   if (p.binary === 'claude') {
     if (p.apiKey) {
       // Verified with a live call to the endpoint (Anthropic's or the custom
-      // base URL) rather than assumed from the key's presence.
+      // base URL) rather than assumed from the key's presence, as the model
+      // the picker and new sessions default to.
       auth = await verifyCustomEndpoint({
         binary: 'claude',
         baseUrl: p.baseUrl,
         apiKey: p.apiKey,
-        model: p.defaultModel || p.models[0] || null,
+        model: providerDefaultModel(p, cfg),
       });
       usage = await zaiKeyUsage();
     } else {
@@ -1105,39 +1104,7 @@ app.get('/api/providers/:id/status', async (req, res) => {
   });
 });
 
-// The Test button: probe an endpoint + token exactly as the form holds them
-// (no save needed) by listing the endpoint's models. The list comes back so
-// the page can drop it into the Models field. A gateway with no model list
-// route is probed with a minimal chat call instead, as the model the saved row
-// would default to: on codex the one the picker and the status banner resolve
-// (codexEndpointDefaultModel), elsewhere the form's default or first model.
-app.post('/api/providers/test', async (req, res) => {
-  try {
-    const { binary, baseUrl, apiKey } = req.body || {};
-    const defaultModel = String(req.body?.defaultModel || '').trim();
-    const models = (Array.isArray(req.body?.models) ? req.body.models : [])
-      .map((m) => String(m).trim())
-      .filter(Boolean);
-    try {
-      return res.json({ models: await testProviderEndpoint({ binary, baseUrl, apiKey }) });
-    } catch (e) {
-      if (!e.routeMissing) throw e;
-      // Resolved only now: on a list-less codex form it reads the models cache.
-      // The cache is the saved row's own, looked up here rather than trusting
-      // the posted id with a path; a form not saved yet has none of its own.
-      const saved = binary === 'codex' ? getProvider(req.body?.id) : null;
-      const model =
-        binary === 'codex'
-          ? codexEndpointDefaultModel({ id: saved?.id, baseUrl, apiKey, defaultModel, models })
-          : defaultModel || models[0] || '';
-      if (!model) throw e;
-      await probeChatEndpoint({ binary, baseUrl, apiKey, model });
-      res.json({ models: [], probedModel: model });
-    }
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
+app.use(providerTestRoutes({ getProvider, getConfig }));
 
 // A login is registered against the row: it lands in the entry's own derived
 // config dir and is mirrored into the database once it arrives (the same
