@@ -74,6 +74,19 @@ describe('codexUsageDeltas', () => {
     expect(inputs(codexUsageDeltas(rows, []))).toEqual([100, 50, 70, 20]);
   });
 
+  it('keeps a thread that ran on both sides of the account column one chain', () => {
+    // Rows from before 2026_09_23 name no account; the same thread's later
+    // rows name the provider.
+    const rows = [row(1, 10, 300000, 0, null), row(2, 20, 350000, 0, 5), row(3, 30, 400000, 0, 5)];
+    expect(inputs(codexUsageDeltas(rows, [line(5, START), line(15, RESUME), line(25, RESUME)]))).toEqual([
+      300000, 50000, 50000,
+    ]);
+    expect(inputs(codexUsageDeltas(rows, []))).toEqual([300000, 50000, 50000]);
+    const named = [line(5, START), line(6, 'Codex session started: thread A')];
+    named.push(line(15, RESUME), line(16, 'Codex session started: thread A'));
+    expect(inputs(codexUsageDeltas(rows.slice(0, 2), named))).toEqual([300000, 50000]);
+  });
+
   it('decides a thread reset once, from input, and then books every counter whole', () => {
     // No marker says a new thread began: input falling below the old total
     // does, and output and cache must not be reduced by the old thread's.
@@ -203,6 +216,7 @@ describe('backfill migration', () => {
     present,
     tasks = [],
     calibration = [],
+    flagged = true,
   } = {}) {
     const queries = [];
     const updates = [];
@@ -234,6 +248,7 @@ describe('backfill migration', () => {
       },
       async query(sql, params) {
         queries.push(sql);
+        if (/information_schema/.test(sql)) return [flagged ? [{ COLUMN_NAME: 'usage_is_delta' }] : []];
         if (/FROM `turn_usage`/.test(sql)) return [/GROUP BY/.test(sql) ? calibration : rows];
         if (/FROM `job_events`/.test(sql)) return [/'result'/.test(sql) ? results : events];
         if (/^SELECT `id` FROM `jobs`/.test(sql)) {
@@ -253,8 +268,16 @@ describe('backfill migration', () => {
     };
   }
 
-  it('does nothing past the first read when no legacy row is left', async () => {
+  it('converts nothing when no legacy row is left, and drops the flag', async () => {
     const pool = fakePool();
+    await up({ context: pool });
+    expect(pool.queries).toHaveLength(3);
+    expect(pool.queries.at(-1)).toBe('ALTER TABLE turn_usage DROP COLUMN usage_is_delta');
+    expect(pool.tx).toEqual([]);
+  });
+
+  it('does nothing at all once the flag is gone', async () => {
+    const pool = fakePool({ flagged: false });
     await up({ context: pool });
     expect(pool.queries).toHaveLength(1);
     expect(pool.tx).toEqual([]);
@@ -282,6 +305,19 @@ describe('backfill migration', () => {
     expect(pool.updates).toHaveLength(1);
     expect(pool.updates[0].sql).toMatch(/UPDATE `turn_usage`/);
     expect(pool.updates[0].params).toEqual([1, 100, 2, 50, 1, 10, 2, 2, 1, 80, 2, 40, [1, 2]]);
+    // Only footers that carry counts are read, and the flag goes last.
+    expect(pool.queries.find((q) => /'result'/.test(q))).toMatch(/REGEXP '"inputTokens":\[0-9\]'/);
+    expect(pool.queries.at(-1)).toBe('ALTER TABLE turn_usage DROP COLUMN usage_is_delta');
+  });
+
+  it('reads no footers when no row’s counts changed', async () => {
+    const pool = fakePool({
+      rows: [{ id: '1', job_id: 's', account_id: '5', at: '10', input_tokens: '100', output_tokens: '10' }],
+      events: [{ job_id: 's', at: '5', data: JSON.stringify({ text: START }) }],
+    });
+    await up({ context: pool });
+    expect(pool.queries.some((q) => /'result'/.test(q))).toBe(false);
+    expect(pool.updates).toHaveLength(1);
   });
 
   it('rewrites the old footers, and takes the inflated estimate off the parent of a deleted worker', async () => {

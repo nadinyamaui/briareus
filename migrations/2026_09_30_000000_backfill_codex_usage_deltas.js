@@ -3,7 +3,7 @@
 // every read can take the ledger as it is. Those turn rows hold the CLI's
 // lifetime thread counters, so each one becomes its thread's total minus the
 // thread's previous row; a compaction row was always written as a delta and
-// only moves that total on.
+// only moves that total on. Then usage_is_delta, which only this read, goes.
 //
 // Which thread a row belongs to comes from the session's log: the turn's
 // "Starting …" line (a native code review, or a turn that did not resume,
@@ -11,7 +11,9 @@
 // printed, and "Compacting <provider> context…" (the provider's label, which
 // can be renamed, so any label counts). Rows logged before those lines
 // existed fall back to the counters alone, where a drop means a new thread and
-// a new thread that starts above the old total cannot be told apart.
+// a new thread that starts above the old total cannot be told apart. Rows
+// from before 2026_09_23 name no account; they are taken as the session's
+// first one, so a thread that ran on both sides of it stays one chain.
 //
 // The cached share of each row is the session's own measured share (its last
 // Codex context reading), where it has one; otherwise it stays NULL and the
@@ -39,6 +41,7 @@
 //    and are left alone.
 
 import { loadCatalog, withEstimates } from '../lib/prices.js';
+import { codexTurnUsage } from '../lib/providers.js';
 
 /**
  * @typedef {{ id: number, jobId: string, accountId: number | null, at: number,
@@ -59,24 +62,6 @@ function marker(text) {
   if (/^Starting .+ \(.+, effort [^)]*\)/.test(text))
     return /, resuming session/.test(text) ? 'resume' : 'fresh';
   return null;
-}
-
-/**
- * One row's own usage from its thread's counters and the thread's last total.
- * Whether the thread started again is decided once, from input (from output
- * when input was not recorded): then every counter is the row's in full,
- * otherwise every counter is reduced, so one never reads a reset another does
- * not.
- * @param {{ inputTokens: number | null, outputTokens: number | null }} row
- * @param {{ inputTokens: number | null, outputTokens: number | null } | undefined} prior
- */
-function delta(row, prior) {
-  const by = row.inputTokens != null && prior?.inputTokens != null ? 'inputTokens' : 'outputTokens';
-  const reset = prior?.[by] == null || row[by] == null || row[by] < prior[by];
-  /** @param {'inputTokens' | 'outputTokens'} key */
-  const own = (key) =>
-    row[key] == null ? null : reset || prior?.[key] == null ? row[key] : Math.max(0, row[key] - prior[key]);
-  return { inputTokens: own('inputTokens'), outputTokens: own('outputTokens') };
 }
 
 /**
@@ -111,6 +96,12 @@ export function codexUsageDeltas(rows, log, shares = new Map()) {
   const totals = new Map();
   /** @type {Map<string, string>} */
   const current = new Map();
+  // Rows written before 2026_09_23 carry no account, and the rest of the
+  // same thread does: those count as the session's first account.
+  /** @type {Map<string, number>} */
+  const accounts = new Map();
+  for (const row of rows)
+    if (row.accountId != null && !accounts.has(row.jobId)) accounts.set(row.jobId, row.accountId);
   /** @type {Map<number, Usage>} */
   const out = new Map();
   for (const row of rows) {
@@ -127,7 +118,7 @@ export function codexUsageDeltas(rows, log, shares = new Map()) {
         cursor.thread = null;
       }
     }
-    const owner = `${row.jobId}\n${row.accountId ?? ''}`;
+    const owner = `${row.jobId}\n${row.accountId ?? accounts.get(row.jobId) ?? ''}`;
     let usage;
     if (cursor.marker === 'compact') {
       usage = { inputTokens: row.inputTokens, outputTokens: row.outputTokens };
@@ -139,13 +130,17 @@ export function codexUsageDeltas(rows, log, shares = new Map()) {
           outputTokens: add(prior.outputTokens, row.outputTokens),
         });
     } else {
+      // A thread id is the CLI's own, unique whichever account ran it.
       const chain = cursor.thread
-        ? `${owner}\n${cursor.thread}`
+        ? `${row.jobId}\n${cursor.thread}`
         : cursor.marker === 'fresh'
           ? `${owner}\n#${row.id}`
           : (current.get(owner) ?? owner);
       const prior = totals.get(chain);
-      usage = delta(row, prior);
+      // The live parser's rule, so history is rewritten the way turns are
+      // booked now.
+      const own = codexTurnUsage(row, prior);
+      usage = { inputTokens: own.inputTokens, outputTokens: own.outputTokens };
       totals.set(chain, { inputTokens: row.inputTokens, outputTokens: row.outputTokens });
       current.set(owner, chain);
       // A fresh thread's later turns carry no marker of their own when the
@@ -287,6 +282,21 @@ function num(v) {
 
 /** @param {{ context: import('mysql2/promise').Pool }} ctx */
 export async function up({ context: p }) {
+  // The flag only tells this backfill which rows came before 2026_09_28, and
+  // nothing writes or reads it after, so it goes once they are converted. A
+  // run that stopped after the drop has nothing left to convert; one that
+  // stopped before it set each converted row to 1, and finds none of them.
+  const [columns] = await p.query(
+    'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?',
+    ['turn_usage', 'usage_is_delta'],
+  );
+  if (!(/** @type {any[]} */ (columns).length)) return;
+  await backfill(p);
+  await p.query('ALTER TABLE turn_usage DROP COLUMN usage_is_delta');
+}
+
+/** @param {import('mysql2/promise').Pool} p */
+async function backfill(p) {
   const [found] = await p.query(
     "SELECT `id`, `job_id`, `account_id`, `model`, `at`, `input_tokens`, `output_tokens`, `cost_usd` FROM `turn_usage` WHERE `provider` = 'codex' AND `usage_is_delta` = 0 ORDER BY `id`",
   );
@@ -340,10 +350,25 @@ export async function up({ context: p }) {
   }
   const deltas = codexUsageDeltas(rows, log, shares);
 
-  const [results] = await p.query(
-    "SELECT `job_id`, `seq`, `at`, `data` FROM `job_events` WHERE `job_id` IN (?) AND `kind` = 'result'",
-    [ids],
-  );
+  // Only footers that can match: those of sessions with a row whose counts
+  // changed, and that carry counts at all.
+  const changed = [
+    ...new Set(
+      rows
+        .filter((row) => {
+          const usage = deltas.get(row.id);
+          return usage?.inputTokens !== row.inputTokens || usage?.outputTokens !== row.outputTokens;
+        })
+        .map((row) => row.jobId),
+    ),
+  ];
+  const [results] = changed.length
+    ? await p.query(
+        `SELECT \`job_id\`, \`seq\`, \`at\`, \`data\` FROM \`job_events\`
+          WHERE \`job_id\` IN (?) AND \`kind\` = 'result' AND \`data\` REGEXP '"inputTokens":[0-9]'`,
+        [changed],
+      )
+    : [[]];
   const footers = [];
   for (const e of /** @type {any[]} */ (results)) {
     try {

@@ -62,7 +62,6 @@ describe('turnUsageRecord', () => {
       inputTokens: 100,
       outputTokens: 20,
       cachedInputTokens: null,
-      usageIsDelta: true,
       costUsd: null,
       durationMs: 2500,
       at: 123,

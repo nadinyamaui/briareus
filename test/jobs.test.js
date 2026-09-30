@@ -9837,7 +9837,7 @@ describe('Codex turn usage', () => {
 
   // The thread's rollout as the CLI leaves it: the lifetime totals ride on
   // the last token_count line.
-  const writeRollout = (total) => {
+  const writeRollout = (total, thread = 'thread-1') => {
     const dir = path.join(home, '.codex-provider-2', 'sessions', '2026', '09', '30');
     fs.mkdirSync(dir, { recursive: true });
     const line = {
@@ -9849,7 +9849,7 @@ describe('Codex turn usage', () => {
       },
     };
     fs.writeFileSync(
-      path.join(dir, 'rollout-2026-09-30T00-00-00-thread-1.jsonl'),
+      path.join(dir, `rollout-2026-09-30T00-00-00-${thread}.jsonl`),
       `${JSON.stringify(line)}\n`,
     );
   };
@@ -9874,10 +9874,12 @@ describe('Codex turn usage', () => {
 
   it('books a resumed turn as what it added to the thread, reading the rollout once', async () => {
     const job = getJob('codex-usage');
+    // The last reading on the record is another chat's (a step's, say).
+    job.contextUsage.sessionId = 'thread-0';
     writeRollout({ input_tokens: 600000, cached_input_tokens: 540000, output_tokens: 25000 });
     const readdir = vi.spyOn(fs, 'readdirSync');
     try {
-      // Measured from the rollout's totals, not the older ones on the record.
+      // Measured from the rollout's totals, not the other thread's on the record.
       expect(
         await turn(job, 'Next', { input_tokens: 650000, cached_input_tokens: 585000, output_tokens: 26000 }),
       ).toMatchObject({ inputTokens: 50000, cachedInputTokens: 45000, outputTokens: 1000 });
@@ -9893,8 +9895,77 @@ describe('Codex turn usage', () => {
     }
   });
 
+  it('measures a resumed turn from the thread’s reading on the record, without reading the rollout first', async () => {
+    const job = getJob('codex-usage');
+    // No rollout on disk: only the probe that closes the turn looks for one.
+    const readdir = vi.spyOn(fs, 'readdirSync');
+    try {
+      const settled = new Promise((resolve) => {
+        const onJob = (session) => {
+          if (session.id !== job.id || session.status !== 'idle') return;
+          bus.off('job', onJob);
+          resolve();
+        };
+        bus.on('job', onJob);
+      });
+      sendDevMessage(job.id, 'Next');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(walks(readdir)).toBe(0);
+      const child = children.at(-1);
+      const usage = { input_tokens: 650000, cached_input_tokens: 585000, output_tokens: 26000 };
+      child.stdout.end(`${JSON.stringify({ type: 'turn.completed', usage })}\n`);
+      setImmediate(() => child.emit('close', 0));
+      await settled;
+      expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+        inputTokens: 150000,
+        cachedInputTokens: 135000,
+        outputTokens: 6000,
+      });
+    } finally {
+      readdir.mockRestore();
+    }
+  });
+
+  it('books nothing for a resumed turn whose thread total could not be read', async () => {
+    const job = getJob('codex-usage');
+    job.contextUsage.sessionId = 'thread-0';
+    // No rollout to read: the 2M are the thread's lifetime, not this turn.
+    expect(
+      await turn(job, 'Next', { input_tokens: 2000000, cached_input_tokens: 1800000, output_tokens: 50000 }),
+    ).toMatchObject({ inputTokens: null, cachedInputTokens: null, outputTokens: null });
+  });
+
+  it('counts an unfinished turn that landed on another thread from zero', async () => {
+    const job = getJob('codex-usage');
+    const settled = new Promise((resolve) => {
+      const onJob = (session) => {
+        if (session.id !== job.id || session.status !== 'idle') return;
+        bus.off('job', onJob);
+        resolve();
+      };
+      bus.on('job', onJob);
+    });
+    sendDevMessage(job.id, 'Next');
+    // The resume opened thread-2, which used 800k before the stream failed;
+    // thread-1 was at 500k.
+    writeRollout({ input_tokens: 800000, cached_input_tokens: 700000, output_tokens: 30000 }, 'thread-2');
+    const child = children.at(-1);
+    child.stdout.end(
+      `${JSON.stringify({ type: 'thread.started', thread_id: 'thread-2' })}\n${JSON.stringify({ type: 'turn.failed', error: { message: 'stream lost' } })}\n`,
+    );
+    setImmediate(() => child.emit('close', 1));
+    await settled;
+    expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+      inputTokens: 800000,
+      cachedInputTokens: 700000,
+      outputTokens: 30000,
+    });
+  });
+
   it('books a turn that never completed from the rollout, so the next turn’s baseline does not swallow it', async () => {
     const job = getJob('codex-usage');
+    // Where the previous turn's probe left the thread.
+    Object.assign(job.contextUsage, { inputTokens: 600000, cachedInputTokens: 540000, outputTokens: 25000 });
     writeRollout({ input_tokens: 600000, cached_input_tokens: 540000, output_tokens: 25000 });
     const settled = new Promise((resolve) => {
       const onJob = (session) => {

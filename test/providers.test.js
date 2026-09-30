@@ -1046,6 +1046,43 @@ describe('the codex parser', () => {
     expect(reset).toMatchObject({ inputTokens: 300000, cachedInputTokens: 310000, outputTokens: 25000 });
   });
 
+  it('drops the baseline when the resume landed on another thread, and keeps it on its own', () => {
+    // The old thread was at 500k; the new one's first turn used 800k.
+    const usage = { input_tokens: 800000, cached_input_tokens: 700000, output_tokens: 30000 };
+    const baseline = {
+      sessionId: 'thread-1',
+      inputTokens: 500000,
+      cachedInputTokens: 450000,
+      outputTokens: 20000,
+    };
+    const moved = newTurn();
+    moved.codexBaseline = { ...baseline };
+    const movedParser = parserFor('codex', moved);
+    movedParser.feed({ type: 'thread.started', thread_id: 'thread-2' });
+    movedParser.feed({ type: 'turn.completed', usage });
+    expect(moved).toMatchObject({ inputTokens: 800000, cachedInputTokens: 700000, outputTokens: 30000 });
+    const same = newTurn();
+    same.codexBaseline = { ...baseline };
+    const sameParser = parserFor('codex', same);
+    sameParser.feed({ type: 'thread.started', thread_id: 'thread-1' });
+    sameParser.feed({ type: 'turn.completed', usage });
+    expect(same).toMatchObject({ inputTokens: 300000, cachedInputTokens: 250000, outputTokens: 10000 });
+  });
+
+  it('books nothing for a resumed turn whose earlier total is unknown', () => {
+    const blind = newTurn();
+    blind.codexBaseline = { sessionId: 'thread-1', unknown: true };
+    const parser = parserFor('codex', blind);
+    parser.feed({ type: 'thread.started', thread_id: 'thread-1' });
+    const events = parser.feed({
+      type: 'turn.completed',
+      usage: { input_tokens: 2000000, cached_input_tokens: 1800000, output_tokens: 50000 },
+    });
+    expect(blind).toMatchObject({ inputTokens: null, outputTokens: null });
+    expect(blind.cachedInputTokens).toBeUndefined();
+    expect(events[0]).toMatchObject({ kind: 'result', inputTokens: null, outputTokens: null });
+  });
+
   it('a failed turn is an error result with the message', () => {
     const { events } = feedAll([{ type: 'turn.failed', error: { message: 'quota' } }]);
     expect(events[0]).toMatchObject({ kind: 'result', isError: true, text: 'quota' });

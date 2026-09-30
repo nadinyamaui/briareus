@@ -1,5 +1,6 @@
 // Keep Codex's cached input separately from total input, and distinguish new
-// per-turn rows from older rows written with the CLI's lifetime counters.
+// per-turn rows from older rows written with the CLI's lifetime counters
+// (2026_09_30 converts those, then drops the flag).
 /** @param {{ context: import('mysql2/promise').Pool }} ctx */
 export async function up({ context: p }) {
   const [rows] = await p.query(
