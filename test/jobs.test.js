@@ -250,6 +250,7 @@ import {
   workspaceBranchPlan,
   workspaceCheckoutPlan,
   workspaceGitProbeOptions,
+  codexTurnResumes,
 } from '../lib/jobs.js';
 
 beforeEach(() => {
@@ -9769,6 +9770,140 @@ describe('auto-compaction after a turn', () => {
     await done;
     expect(job.webhookTurns).toEqual([[[bubble, due.seq - 1]]]);
     expect(job.webhookTurnOpen).toBeUndefined();
+  });
+});
+
+describe('Codex turn usage', () => {
+  let home;
+  let homeSpy;
+  let bin;
+  let children;
+  beforeEach(async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-turn-usage-'));
+    homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    state.stored = [
+      {
+        id: 'codex-usage',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 2,
+        model: 'own-model',
+        workDir: '/tmp/workspace',
+        turns: 1,
+        chats: { 2: { sessionId: 'thread-1', started: true } },
+        contextUsage: {
+          source: 'codex',
+          providerId: 2,
+          sessionId: 'thread-1',
+          model: 'own-model',
+          tokens: 40000,
+          inputTokens: 500000,
+          outputTokens: 20000,
+          cachedInputTokens: 450000,
+        },
+      },
+    ];
+    state.otherProviders = [{ id: 2, binary: 'codex', label: 'Codex entry', active: true }];
+    await initJobs();
+    getJob('codex-usage').status = 'idle';
+    getProviderForJob.mockReturnValue(state.otherProviders[0]);
+    captureProviderAuth.mockResolvedValue(undefined);
+    recordTurnUsage.mockClear();
+    bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    children = [];
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      spawnedScope(child, child.stdout, child.stderr);
+      children.push(child);
+      return child;
+    });
+  });
+  afterEach(() => {
+    homeSpy.mockRestore();
+    bin.mockRestore();
+    spawn.mockReset();
+    getProviderForJob.mockReset();
+    captureProviderAuth.mockReset();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  // The thread's rollout as the CLI leaves it: the lifetime totals ride on
+  // the last token_count line.
+  const writeRollout = (total) => {
+    const dir = path.join(home, '.codex-provider-2', 'sessions', '2026', '09', '30');
+    fs.mkdirSync(dir, { recursive: true });
+    const line = {
+      timestamp: '2026-09-30T00:00:00Z',
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: { total_token_usage: total, last_token_usage: { total_tokens: 40000 } },
+      },
+    };
+    fs.writeFileSync(
+      path.join(dir, 'rollout-2026-09-30T00-00-00-thread-1.jsonl'),
+      `${JSON.stringify(line)}\n`,
+    );
+  };
+  // One turn: the CLI reports the thread's lifetime totals, then exits.
+  const turn = async (job, text, usage) => {
+    const settled = new Promise((resolve) => {
+      const onJob = (session) => {
+        if (session.id !== job.id || session.status !== 'idle') return;
+        bus.off('job', onJob);
+        resolve();
+      };
+      bus.on('job', onJob);
+    });
+    sendDevMessage(job.id, text);
+    const child = children.at(-1);
+    child.stdout.end(`${JSON.stringify({ type: 'turn.completed', usage })}\n`);
+    setImmediate(() => child.emit('close', 0));
+    await settled;
+    return recordTurnUsage.mock.lastCall[1];
+  };
+  const walks = (spy) => spy.mock.calls.filter(([dir]) => String(dir).includes('.codex-provider-2')).length;
+
+  it('books a resumed turn as what it added to the thread, reading the rollout once', async () => {
+    const job = getJob('codex-usage');
+    writeRollout({ input_tokens: 600000, cached_input_tokens: 540000, output_tokens: 25000 });
+    const readdir = vi.spyOn(fs, 'readdirSync');
+    try {
+      // Measured from the rollout's totals, not the older ones on the record.
+      expect(
+        await turn(job, 'Next', { input_tokens: 650000, cached_input_tokens: 585000, output_tokens: 26000 }),
+      ).toMatchObject({ inputTokens: 50000, cachedInputTokens: 45000, outputTokens: 1000 });
+      const found = walks(readdir);
+      expect(found).toBeGreaterThan(0);
+      expect(
+        await turn(job, 'Again', { input_tokens: 700000, cached_input_tokens: 630000, output_tokens: 27000 }),
+      ).toMatchObject({ inputTokens: 100000, cachedInputTokens: 90000, outputTokens: 2000 });
+      // The second turn found the rollout where the first one left it.
+      expect(walks(readdir)).toBe(found);
+    } finally {
+      readdir.mockRestore();
+    }
+  });
+
+  it('books a turn that does not resume the thread whole', async () => {
+    const job = getJob('codex-usage');
+    job.chats[2].started = false;
+    expect(
+      await turn(job, 'Fresh', { input_tokens: 800000, cached_input_tokens: 700000, output_tokens: 30000 }),
+    ).toMatchObject({ inputTokens: 800000, cachedInputTokens: 700000, outputTokens: 30000 });
+  });
+
+  it('takes no baseline for a native review, which opens a thread of its own', () => {
+    expect(codexTurnResumes('codex', { resume: true, native: false, sessionId: 't' })).toBe(true);
+    expect(codexTurnResumes('codex', { resume: true, native: true, sessionId: 't' })).toBe(false);
+    expect(codexTurnResumes('codex', { resume: false, native: false, sessionId: 't' })).toBe(false);
+    expect(codexTurnResumes('claude', { resume: true, native: false, sessionId: 't' })).toBe(false);
   });
 });
 

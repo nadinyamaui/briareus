@@ -947,6 +947,12 @@ describe('session cost estimates', () => {
     ]);
   });
 
+  it('repairs an old Codex footer the catalog cannot price, and leaves it unpriced', () => {
+    const event = { kind: 'result', t: new Date(1000).toISOString(), inputTokens: 150, outputTokens: 12 };
+    const row = { at: 1005, provider: 'codex', inputTokens: 50, outputTokens: 2, costUsd: null };
+    expect(estimateEventCosts([event], [row])).toEqual([{ ...event, inputTokens: 50, outputTokens: 2 }]);
+  });
+
   it('does not use a later turn ledger row for a ledger-less failure', () => {
     const events = [
       { seq: 1, t: new Date(1000).toISOString(), kind: 'result', isError: true, costUsd: null },
