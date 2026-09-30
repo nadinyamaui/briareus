@@ -96,6 +96,9 @@ export function codexUsageDeltas(rows, log, shares = new Map()) {
   const totals = new Map();
   /** @type {Map<string, string>} */
   const current = new Map();
+  // The chains keyed by a thread id the CLI printed.
+  /** @type {Set<string>} */
+  const named = new Set();
   // Rows written before 2026_09_23 carry no account, and the rest of the
   // same thread does: those count as the session's first account.
   /** @type {Map<string, number>} */
@@ -136,6 +139,15 @@ export function codexUsageDeltas(rows, log, shares = new Map()) {
         : cursor.marker === 'fresh'
           ? `${owner}\n#${row.id}`
           : (current.get(owner) ?? owner);
+      // A resume that names its thread for the first time goes on from the
+      // chain the session was last on, when that one had no id of its own
+      // (its rows were logged before the thread line, or the CLI printed
+      // "thread ?"): it is the same thread, now named. One named otherwise
+      // is another thread, which counts from zero as the live parser's does.
+      const was = current.get(owner);
+      const from = was && !named.has(was) ? totals.get(was) : undefined;
+      if (cursor.thread && cursor.marker === 'resume' && !totals.has(chain) && from) totals.set(chain, from);
+      if (cursor.thread) named.add(chain);
       const prior = totals.get(chain);
       // The live parser's rule, so history is rewritten the way turns are
       // booked now.
@@ -507,12 +519,23 @@ async function absorbedByParents(p, rows, deltas, ids) {
       WHERE \`cost_usd\` > 0 AND \`input_tokens\` > 0
       GROUP BY \`provider\`, \`model\``,
   );
+  // A catalog that could not be fetched, with no copy on disk, prices nothing,
+  // so no parent can be corrected. The run still goes ahead (migrations run at
+  // boot, and a throw would keep an install with no network from starting),
+  // and says which figures it left.
+  const catalog = await loadCatalog();
+  if (!Object.keys(catalog).length) {
+    console.warn(
+      `Codex usage backfill: no price catalog could be loaded, so the absorbed estimates of ${held.size} session(s) were left inflated: ${[...held.keys()].join(', ')}`,
+    );
+    return new Map();
+  }
   return absorbedCorrections(
     rows,
     deltas,
     owners,
     held,
-    await loadCatalog(),
+    catalog,
     /** @type {any[]} */ (calibration).map((row) => ({
       provider: row.provider,
       model: row.model,

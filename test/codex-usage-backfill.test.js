@@ -10,6 +10,7 @@ vi.mock('../lib/prices.js', async (importOriginal) => ({
 
 const { absorbedCorrections, codexResultRewrites, codexUsageDeltas, down, up } =
   await import('../migrations/2026_09_30_000000_backfill_codex_usage_deltas.js');
+const { loadCatalog } = await import('../lib/prices.js');
 
 // A legacy row: the thread's lifetime counters when the turn ended.
 const row = (id, at, inputTokens, outputTokens = 0, accountId = 5) => ({
@@ -67,6 +68,27 @@ describe('codexUsageDeltas', () => {
       line(26, 'Codex session started: thread A'),
     ];
     expect(inputs(codexUsageDeltas(rows, log))).toEqual([100, 300, 60]);
+  });
+
+  it('goes on from an unnamed chain when a resume first names its thread', () => {
+    // The first row was logged before the thread line existed.
+    const rows = [row(1, 10, 100000, 1000), row(2, 20, 150000, 1500)];
+    const log = [line(15, RESUME), line(16, 'Codex session started: thread T1')];
+    expect([...codexUsageDeltas(rows, log).values()]).toEqual([
+      { inputTokens: 100000, outputTokens: 1000, cachedInputTokens: null },
+      { inputTokens: 50000, outputTokens: 500, cachedInputTokens: null },
+    ]);
+    // The first turn's CLI printed no id.
+    const unnamed = [line(5, START), line(6, 'Codex session started: thread ?')];
+    unnamed.push(line(15, RESUME), line(16, 'Codex session started: thread T1'));
+    expect(inputs(codexUsageDeltas(rows, unnamed))).toEqual([100000, 50000]);
+  });
+
+  it('counts a resume that lands on a thread other than the named one from zero', () => {
+    const rows = [row(1, 10, 100000), row(2, 20, 150000)];
+    const log = [line(5, START), line(6, 'Codex session started: thread A')];
+    log.push(line(15, RESUME), line(16, 'Codex session started: thread B'));
+    expect(inputs(codexUsageDeltas(rows, log))).toEqual([100000, 150000]);
   });
 
   it('falls back to the counters alone for rows logged before the markers, per account', () => {
@@ -398,6 +420,36 @@ describe('backfill migration', () => {
     await up({ context: pool });
     expect(pool.updates).toHaveLength(1);
     expect(pool.updates[0].sql).toMatch(/UPDATE `turn_usage`/);
+  });
+
+  it('says which absorbed estimates it left when no price catalog could be loaded', async () => {
+    const worker = (id, at, input) => ({
+      id,
+      job_id: 'w',
+      account_id: null,
+      model: 'gpt-5',
+      at,
+      input_tokens: input,
+      output_tokens: '0',
+    });
+    const pool = fakePool({
+      rows: [worker('1', '10', '1000000'), worker('2', '20', '3000000')],
+      jobs: [{ id: 'orch', absorbed: '2.0000' }],
+      tasks: [{ id: 'w', meta: { id: 'w', parentId: 'orch' } }],
+    });
+    // Offline, with no copy on disk: the catalog comes back empty.
+    loadCatalog.mockResolvedValueOnce({});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await up({ context: pool });
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/no price catalog could be loaded.*: orch$/));
+    } finally {
+      warn.mockRestore();
+    }
+    // The ledger is still converted; the parent keeps its figure.
+    expect(pool.updates).toHaveLength(1);
+    expect(pool.updates[0].sql).toMatch(/UPDATE `turn_usage`/);
+    expect(pool.tx).toEqual(['begin', 'commit', 'release']);
   });
 
   it('refuses to roll back, so a re-run cannot subtract from rows that are already deltas', async () => {

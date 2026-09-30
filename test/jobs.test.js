@@ -9935,6 +9935,24 @@ describe('Codex turn usage', () => {
     ).toMatchObject({ inputTokens: null, cachedInputTokens: null, outputTokens: null });
   });
 
+  it('reads the rollout for a resumed turn whose reading on the record holds no totals', async () => {
+    const job = getJob('codex-usage');
+    // What a compaction that got no usage back leaves behind.
+    job.contextUsage = { source: 'codex', providerId: 2, sessionId: 'thread-1', model: 'own-model' };
+    writeRollout({ input_tokens: 600000, cached_input_tokens: 540000, output_tokens: 25000 });
+    expect(
+      await turn(job, 'Next', { input_tokens: 650000, cached_input_tokens: 585000, output_tokens: 26000 }),
+    ).toMatchObject({ inputTokens: 50000, cachedInputTokens: 45000, outputTokens: 1000 });
+  });
+
+  it('books nothing for a resumed turn whose reading holds no totals and whose rollout cannot be read', async () => {
+    const job = getJob('codex-usage');
+    job.contextUsage = { source: 'codex', providerId: 2, sessionId: 'thread-1', model: 'own-model' };
+    expect(
+      await turn(job, 'Next', { input_tokens: 2000000, cached_input_tokens: 1800000, output_tokens: 50000 }),
+    ).toMatchObject({ inputTokens: null, cachedInputTokens: null, outputTokens: null });
+  });
+
   it('counts an unfinished turn that landed on another thread from zero', async () => {
     const job = getJob('codex-usage');
     const settled = new Promise((resolve) => {
@@ -9979,14 +9997,23 @@ describe('Codex turn usage', () => {
     // The model calls it made before the stream failed are in the rollout.
     writeRollout({ input_tokens: 900000, cached_input_tokens: 810000, output_tokens: 31000 });
     const child = children.at(-1);
-    child.stdout.end(`${JSON.stringify({ type: 'turn.failed', error: { message: 'stream lost' } })}\n`);
-    setImmediate(() => child.emit('close', 1));
-    await settled;
+    const opened = vi.spyOn(fs, 'openSync');
+    try {
+      child.stdout.end(`${JSON.stringify({ type: 'turn.failed', error: { message: 'stream lost' } })}\n`);
+      setImmediate(() => child.emit('close', 1));
+      await settled;
+      // Read once at close: the probe takes the booking's reading.
+      expect(opened.mock.calls.filter(([file]) => String(file).includes('rollout-'))).toHaveLength(1);
+    } finally {
+      opened.mockRestore();
+    }
     expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
       inputTokens: 300000,
       cachedInputTokens: 270000,
       outputTokens: 6000,
     });
+    // And the thread totals, as the probe would have set them.
+    expect(job).toMatchObject({ inputTokens: 900000, outputTokens: 31000 });
     expect(
       await turn(job, 'Again', { input_tokens: 950000, cached_input_tokens: 855000, output_tokens: 32000 }),
     ).toMatchObject({ inputTokens: 50000, cachedInputTokens: 45000, outputTokens: 1000 });

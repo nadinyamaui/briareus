@@ -1,3 +1,4 @@
+// @ts-check
 // Keep Codex's cached input separately from total input, and distinguish new
 // per-turn rows from older rows written with the CLI's lifetime counters
 // (2026_09_30 converts those, then drops the flag).
