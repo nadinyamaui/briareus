@@ -1034,6 +1034,18 @@ describe('the codex parser', () => {
     expect(resumed).toMatchObject({ inputTokens: 50, cachedInputTokens: 45, outputTokens: 4 });
   });
 
+  it('books every counter whole when input shows the thread started again', () => {
+    // A resume that landed on a fresh thread: output and cache sit above the
+    // old thread's smaller totals, but must not be reduced by them.
+    const reset = newTurn();
+    reset.codexBaseline = { inputTokens: 500000, cachedInputTokens: 300000, outputTokens: 20000 };
+    parserFor('codex', reset).feed({
+      type: 'turn.completed',
+      usage: { input_tokens: 300000, cached_input_tokens: 310000, output_tokens: 25000 },
+    });
+    expect(reset).toMatchObject({ inputTokens: 300000, cachedInputTokens: 310000, outputTokens: 25000 });
+  });
+
   it('a failed turn is an error result with the message', () => {
     const { events } = feedAll([{ type: 'turn.failed', error: { message: 'quota' } }]);
     expect(events[0]).toMatchObject({ kind: 'result', isError: true, text: 'quota' });

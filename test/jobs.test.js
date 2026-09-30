@@ -9056,6 +9056,7 @@ describe('manual Codex context compaction', () => {
           tokens: 40000,
           inputTokens: 1000,
           outputTokens: 200,
+          cachedInputTokens: 800,
         },
       },
     ];
@@ -9072,7 +9073,7 @@ describe('manual Codex context compaction', () => {
       (opts) =>
         new Promise((resolve) => {
           finish = () => {
-            opts.onUsage({ tokens: 5000, inputTokens: 1300, outputTokens: 240 });
+            opts.onUsage({ tokens: 5000, inputTokens: 1300, outputTokens: 240, cachedInputTokens: 1050 });
             resolve();
           };
         }),
@@ -9107,7 +9108,8 @@ describe('manual Codex context compaction', () => {
       expect(result.contextUsage.compactedAt).toBeTruthy();
       expect(recordTurnUsage).toHaveBeenLastCalledWith(
         getJob('compact-session'),
-        expect.objectContaining({ inputTokens: 300, outputTokens: 40 }),
+        // The re-read thread is mostly cache, measured rather than assumed.
+        expect.objectContaining({ inputTokens: 300, outputTokens: 40, cachedInputTokens: 250 }),
         expect.objectContaining({ id: 2 }),
         'review-model (872k)',
       );
@@ -9889,6 +9891,34 @@ describe('Codex turn usage', () => {
     } finally {
       readdir.mockRestore();
     }
+  });
+
+  it('books a turn that never completed from the rollout, so the next turn’s baseline does not swallow it', async () => {
+    const job = getJob('codex-usage');
+    writeRollout({ input_tokens: 600000, cached_input_tokens: 540000, output_tokens: 25000 });
+    const settled = new Promise((resolve) => {
+      const onJob = (session) => {
+        if (session.id !== job.id || session.status !== 'idle') return;
+        bus.off('job', onJob);
+        resolve();
+      };
+      bus.on('job', onJob);
+    });
+    sendDevMessage(job.id, 'Long one');
+    // The model calls it made before the stream failed are in the rollout.
+    writeRollout({ input_tokens: 900000, cached_input_tokens: 810000, output_tokens: 31000 });
+    const child = children.at(-1);
+    child.stdout.end(`${JSON.stringify({ type: 'turn.failed', error: { message: 'stream lost' } })}\n`);
+    setImmediate(() => child.emit('close', 1));
+    await settled;
+    expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+      inputTokens: 300000,
+      cachedInputTokens: 270000,
+      outputTokens: 6000,
+    });
+    expect(
+      await turn(job, 'Again', { input_tokens: 950000, cached_input_tokens: 855000, output_tokens: 32000 }),
+    ).toMatchObject({ inputTokens: 50000, cachedInputTokens: 45000, outputTokens: 1000 });
   });
 
   it('books a turn that does not resume the thread whole', async () => {

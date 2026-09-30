@@ -82,7 +82,11 @@ describe('migrator', () => {
     const pool = fakePool();
     expect(await rollbackLastBatch(pool)).toEqual([]);
     await createMigrator(pool).umzug.up();
-    await expect(rollbackLastBatch(pool)).rejects.toThrow(/baseline migration cannot be rolled back/);
+    // One batch holds every migration, so the Codex usage backfill, which
+    // cannot be undone either, is the first to refuse.
+    await expect(rollbackLastBatch(pool)).rejects.toThrow(/Codex usage backfill cannot be rolled back/);
+    const baseline = await import('../migrations/2026_08_27_000000_baseline.js');
+    await expect(baseline.down()).rejects.toThrow(/baseline migration cannot be rolled back/);
   });
 
   it('holds the migration lock around the whole run and releases it even when a step fails', async () => {

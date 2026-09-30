@@ -932,9 +932,11 @@ describe('session cost estimates', () => {
     expect(events[0].costUsd).toBeNull();
   });
 
-  it('repairs the token counts in an old Codex result footer', () => {
+  it('keeps the tokens a Codex footer reported, whichever ledger row it pairs with', () => {
+    // The legacy footers are rewritten once by the backfill, so a pairing that
+    // lands on another turn's row (or a compaction's) moves an estimate only.
     const event = { kind: 'result', t: new Date(1000).toISOString(), inputTokens: 150, outputTokens: 12 };
-    const row = {
+    const priced = {
       at: 1005,
       provider: 'codex',
       inputTokens: 50,
@@ -942,15 +944,9 @@ describe('session cost estimates', () => {
       costUsd: 0.1,
       costEstimated: true,
     };
-    expect(estimateEventCosts([event], [row])).toEqual([
-      { ...event, inputTokens: 50, outputTokens: 2, costUsd: 0.1, costEstimated: true },
-    ]);
-  });
-
-  it('repairs an old Codex footer the catalog cannot price, and leaves it unpriced', () => {
-    const event = { kind: 'result', t: new Date(1000).toISOString(), inputTokens: 150, outputTokens: 12 };
-    const row = { at: 1005, provider: 'codex', inputTokens: 50, outputTokens: 2, costUsd: null };
-    expect(estimateEventCosts([event], [row])).toEqual([{ ...event, inputTokens: 50, outputTokens: 2 }]);
+    const compaction = { at: 1005, provider: 'codex', inputTokens: null, outputTokens: null, costUsd: null };
+    expect(estimateEventCosts([event], [priced])).toEqual([{ ...event, costUsd: 0.1, costEstimated: true }]);
+    expect(estimateEventCosts([event], [compaction])).toEqual([event]);
   });
 
   it('does not use a later turn ledger row for a ledger-less failure', () => {
