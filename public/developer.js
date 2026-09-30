@@ -24,6 +24,9 @@
   let currentProject = null; // repo whose dashboard is open, if any
   let es = null; // EventSource for the open session
   let lastSeq = 0;
+  let showHidden = false; // whether the open chat, as drawn, shows the lines a Clear or a compaction hid
+  let transcriptLoads = 0; // numbers loadTranscript calls, so only the latest one draws
+  let transcriptLoading = false; // whether the latest of them has yet to draw or fail
   let prepBox = null; // open <details> the prep log lines append into
   let toolBox = null; // open <details> the current run of tool calls appends into
 
@@ -1803,9 +1806,17 @@
     const auto = autoAt
       ? `<label class="flex cursor-pointer items-center gap-1" title="After a turn leaves the context above ${autoAt} tokens, summarize the conversation automatically; this uses the provider and may incur usage."><input type="checkbox" class="auto-compact accent-accent" ${s.autoCompact ? 'checked' : ''}>Auto-compact ${autoAt}</label>`
       : '';
+    // Takes the transcript off the screen only: the agent's context and the
+    // stored log stay as they are, and the bar over the chat shows it again.
+    const clear =
+      s.kind === 'devchat' && !WORKING_STATES.has(s.status) && !s.compacting
+        ? `<button class="clear-transcript rounded border border-line px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50" title="Hide the transcript so far from this chat. Nothing is deleted and the agent's context is unchanged.">Clear</button>`
+        : '';
+    // Clear rides along with the rest and never makes the panel on its own: a
+    // session with no usage yet has nothing worth clearing either.
     if (!ctx && !rows.length && !compact && !auto) return '';
     return `<div class="${hasPr ? 'border-t border-line pt-2.5' : ''}">
-        <div class="mb-1 flex items-center justify-between gap-2 text-[12px] tracking-wide text-muted"><span class="flex-1">Context usage</span>${auto}${compact}</div>
+        <div class="mb-1 flex items-center justify-between gap-2 text-[12px] tracking-wide text-muted"><span class="flex-1">Context usage</span>${auto}${compact}${clear}</div>
         ${ctx}
         <div class="${ctx ? 'mt-1.5 border-t border-line pt-1.5 ' : ''}flex flex-col gap-0.5">${rows.join('')}</div>
       </div>`;
@@ -1932,6 +1943,28 @@
         toast(err.message, true);
       }
       auto.disabled = false;
+      await loadSessions();
+      return;
+    }
+    const clear = e.target.closest('.clear-transcript');
+    if (clear) {
+      const s = panelSubject;
+      if (!s?.id || clear.disabled) return;
+      clear.disabled = true;
+      try {
+        const { hidden } = await api(`/api/dev/sessions/${encodeURIComponent(s.id)}/clear`, {
+          method: 'POST',
+        });
+        toast(
+          hidden ? `Transcript cleared: ${hidden} line${hidden === 1 ? '' : 's'} hidden` : 'Nothing to clear',
+        );
+        // A Clear clicked here means to hide. With Show on, its `hidden` line
+        // only relabels the bar, so the filtered transcript is loaded here,
+        // once the lines are hidden.
+        if (hidden && s.id === current && showHidden) loadTranscript(s.id, { all: false, keepScroll: true });
+      } catch (err) {
+        toast(err.message, true);
+      }
       await loadSessions();
       return;
     }
@@ -2389,19 +2422,96 @@
     $('btn-loop').classList.add('hidden');
     $('btn-qa-loop').classList.add('hidden');
     updateHead();
+    showHidden = false;
+    await loadTranscript(id);
+  }
+
+  // The transcript from the top, and the stream from where it ends. Also what
+  // a Clear, a compaction that hid webhook turns, or the hidden-lines bar
+  // re-runs, so the stream is restarted with it rather than raced. `all` asks
+  // for the hidden lines too, and becomes showHidden only once it is drawn, so
+  // a load that fails leaves the flag saying what is on screen. From the bar
+  // (`fromBar`), the view stays on the bar and the lines it toggled rather
+  // than jumping to the bottom; on a `hidden` line (`keepScroll`), it stays
+  // on the lines the reader was on, unless that was the bottom.
+  async function loadTranscript(id, { all = showHidden, fromBar = false, keepScroll = false } = {}) {
+    // A double click on the bar, or one racing the stream's `hidden` line,
+    // starts a second load; whichever was started last is the one drawn, and
+    // it is labelled from what it asked for.
+    const load = ++transcriptLoads;
+    transcriptLoading = true;
     try {
-      const data = await api(`/api/dev/sessions/${id}`);
-      if (current !== id) return; // switched again while loading
+      const data = await api(`/api/dev/sessions/${id}${all ? '?all=1' : ''}`);
+      if (current !== id || load !== transcriptLoads) return; // switched, or loaded again, meanwhile
+      transcriptLoading = false;
+      closeStream();
+      const anchor = keepScroll && !nearBottom() ? viewAnchor() : null;
       messagesEl.innerHTML = '';
+      showHidden = all;
+      const bar = hiddenBar(id, data.session?.hiddenLines || 0);
       for (const e of data.events) renderEvent(e);
+      // The status line that started a turn still running can be among the
+      // hidden ones (a compaction inside that turn), so the spinner follows
+      // the session, not the last status drawn.
+      updateSpinner(data.session?.status);
       refreshAskCards();
-      scrollBottom(true);
+      if (fromBar && bar) bar.scrollIntoView({ block: 'start' });
+      else if (anchor) restoreAnchor(anchor);
+      else scrollBottom(true);
       stream(id);
     } catch (e) {
-      if (current !== id) return;
-      messagesEl.innerHTML = '';
+      if (current !== id || load !== transcriptLoads) return;
+      transcriptLoading = false;
+      // A re-run failing leaves the chat that is drawn, and the stream still
+      // feeding it, as they were; only a first load has nothing to keep.
+      if (!es) messagesEl.innerHTML = '';
       toast(e.message, true);
     }
+  }
+
+  // The bar at the top of the chat that offers the hidden lines back, or
+  // takes them away again: labelled anew when it is already there. None when
+  // nothing is hidden.
+  function hiddenBar(id, hidden) {
+    let bar = messagesEl.querySelector(':scope > .hidden-lines');
+    if (!hidden) {
+      bar?.remove();
+      return null;
+    }
+    if (!bar) {
+      bar = document.createElement('button');
+      bar.className = 'hidden-lines my-2 w-full text-center text-xs text-muted hover:text-ink';
+      bar.addEventListener('click', () => loadTranscript(id, { all: !showHidden, fromBar: true }));
+      messagesEl.prepend(bar);
+    }
+    bar.textContent = showHidden
+      ? `Showing ${hidden} hidden line${hidden === 1 ? '' : 's'} · Hide them`
+      : `${hidden} earlier line${hidden === 1 ? '' : 's'} hidden · Show`;
+    return bar;
+  }
+
+  // The first line in view, by its seq (see renderEvent), and how far below
+  // the top of the view it sits: what a redraw that drops lines above it puts
+  // back in place, where a raw scrollTop would land further down.
+  function viewAnchor() {
+    const top = scrollEl.getBoundingClientRect().top;
+    for (const el of messagesEl.children) {
+      const box = el.getBoundingClientRect();
+      if (el.dataset.seq && box.bottom > top) return { seq: Number(el.dataset.seq), offset: box.top - top };
+    }
+    return null;
+  }
+
+  // Back onto the anchored line, or the first one after it when it was hidden;
+  // to the bottom when nothing comes after it. At once, not with the chat's
+  // smooth scroll: the reader stays where they were rather than watching the
+  // view travel back there.
+  function restoreAnchor({ seq, offset }) {
+    const el = [...messagesEl.children].find((c) => c.dataset.seq && Number(c.dataset.seq) >= seq);
+    if (!el) return scrollBottom(true);
+    const top =
+      scrollEl.scrollTop + el.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top - offset;
+    scrollEl.scrollTo({ top, behavior: 'instant' });
   }
 
   function stream(id) {
@@ -2409,6 +2519,14 @@
     es.onmessage = (m) => {
       try {
         const e = JSON.parse(m.data);
+        // Lines just left the transcript: load it again without them. With
+        // Show on they stay, so only the notice is drawn, and the bar's count
+        // follows the session push. A load still under way skips it: if it
+        // read the log before this line, its own stream replays the line.
+        if (e.kind === 'info' && e.hidden && e.seq > lastSeq && !showHidden) {
+          if (!transcriptLoading) loadTranscript(id, { keepScroll: true });
+          return;
+        }
         renderEvent(e);
         scrollBottom();
         if (e.kind === 'status') {
@@ -2432,6 +2550,7 @@
         // sessions poll recalculates it, including any turn just completed.
         if (i === -1) sessions.unshift(s);
         else sessions[i] = preserveEstimatedUsage(s, sessions[i]);
+        if (showHidden) hiddenBar(s.id, s.hiddenLines || 0);
         renderSidebar();
         updateHead();
       } catch {
@@ -2442,7 +2561,17 @@
 
   const PREP_KINDS = new Set(['cmd', 'git', 'setup']);
 
+  // Each line's element carries its seq, what viewAnchor keeps the reader's
+  // place by. A line folded into a block already drawn (prep, tool steps)
+  // leaves the block with the seq of its first.
   function renderEvent(e) {
+    const last = messagesEl.lastElementChild;
+    drawEvent(e);
+    const el = messagesEl.lastElementChild;
+    if (el && el !== last && el !== spinner && !el.dataset.seq) el.dataset.seq = e.seq;
+  }
+
+  function drawEvent(e) {
     if (e.seq <= lastSeq) return;
     lastSeq = e.seq;
     if (e.kind === 'status') {
@@ -2457,6 +2586,17 @@
       const div = document.createElement('div');
       div.className = 'ev-log';
       div.innerHTML = `▶ ${e.links.some((l) => l.tenant) ? 'Tenants' : 'Serving'}: ${serveLinksHtml(e.links)}`;
+      messagesEl.appendChild(div);
+      return;
+    }
+
+    // What a Clear or a compaction took off the transcript is said where the
+    // lines were, not folded into a prep block.
+    if (e.kind === 'info' && e.hidden) {
+      prepBox = null;
+      const div = document.createElement('div');
+      div.className = 'ev-log';
+      div.textContent = e.text || '';
       messagesEl.appendChild(div);
       return;
     }
@@ -2626,9 +2766,12 @@
     }
   }
 
+  function nearBottom() {
+    return scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 160;
+  }
+
   function scrollBottom(force) {
-    const nearBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 160;
-    if (force || nearBottom) scrollEl.scrollTop = scrollEl.scrollHeight;
+    if (force || nearBottom()) scrollEl.scrollTop = scrollEl.scrollHeight;
   }
 
   // ---------- attachments ----------
