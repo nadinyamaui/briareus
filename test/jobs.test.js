@@ -251,6 +251,7 @@ import {
   workspaceBranchPlan,
   workspaceCheckoutPlan,
   workspaceGitProbeOptions,
+  codexTurnResumes,
 } from '../lib/jobs.js';
 
 beforeEach(() => {
@@ -9056,6 +9057,7 @@ describe('manual Codex context compaction', () => {
           tokens: 40000,
           inputTokens: 1000,
           outputTokens: 200,
+          cachedInputTokens: 800,
         },
       },
     ];
@@ -9072,7 +9074,7 @@ describe('manual Codex context compaction', () => {
       (opts) =>
         new Promise((resolve) => {
           finish = () => {
-            opts.onUsage({ tokens: 5000, inputTokens: 1300, outputTokens: 240 });
+            opts.onUsage({ tokens: 5000, inputTokens: 1300, outputTokens: 240, cachedInputTokens: 1050 });
             resolve();
           };
         }),
@@ -9107,7 +9109,8 @@ describe('manual Codex context compaction', () => {
       expect(result.contextUsage.compactedAt).toBeTruthy();
       expect(recordTurnUsage).toHaveBeenLastCalledWith(
         getJob('compact-session'),
-        expect.objectContaining({ inputTokens: 300, outputTokens: 40 }),
+        // The re-read thread is mostly cache, measured rather than assumed.
+        expect.objectContaining({ inputTokens: 300, outputTokens: 40, cachedInputTokens: 250 }),
         expect.objectContaining({ id: 2 }),
         'review-model (872k)',
       );
@@ -9829,6 +9832,266 @@ describe('auto-compaction after a turn', () => {
     await done;
     expect(job.webhookTurns).toEqual([[[bubble, due.seq - 1]]]);
     expect(job.webhookTurnOpen).toBeUndefined();
+  });
+});
+
+describe('Codex turn usage', () => {
+  let home;
+  let homeSpy;
+  let bin;
+  let children;
+  beforeEach(async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-turn-usage-'));
+    homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    state.stored = [
+      {
+        id: 'codex-usage',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 2,
+        model: 'own-model',
+        workDir: '/tmp/workspace',
+        turns: 1,
+        chats: { 2: { sessionId: 'thread-1', started: true } },
+        contextUsage: {
+          source: 'codex',
+          providerId: 2,
+          sessionId: 'thread-1',
+          model: 'own-model',
+          tokens: 40000,
+          inputTokens: 500000,
+          outputTokens: 20000,
+          cachedInputTokens: 450000,
+        },
+      },
+    ];
+    state.otherProviders = [{ id: 2, binary: 'codex', label: 'Codex entry', active: true }];
+    await initJobs();
+    getJob('codex-usage').status = 'idle';
+    getProviderForJob.mockReturnValue(state.otherProviders[0]);
+    captureProviderAuth.mockResolvedValue(undefined);
+    recordTurnUsage.mockClear();
+    bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    children = [];
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      spawnedScope(child, child.stdout, child.stderr);
+      children.push(child);
+      return child;
+    });
+  });
+  afterEach(() => {
+    homeSpy.mockRestore();
+    bin.mockRestore();
+    spawn.mockReset();
+    getProviderForJob.mockReset();
+    captureProviderAuth.mockReset();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  // The thread's rollout as the CLI leaves it: the lifetime totals ride on
+  // the last token_count line.
+  const writeRollout = (total, thread = 'thread-1') => {
+    const dir = path.join(home, '.codex-provider-2', 'sessions', '2026', '09', '30');
+    fs.mkdirSync(dir, { recursive: true });
+    const line = {
+      timestamp: '2026-09-30T00:00:00Z',
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: { total_token_usage: total, last_token_usage: { total_tokens: 40000 } },
+      },
+    };
+    fs.writeFileSync(
+      path.join(dir, `rollout-2026-09-30T00-00-00-${thread}.jsonl`),
+      `${JSON.stringify(line)}\n`,
+    );
+  };
+  // One turn: the CLI reports the thread's lifetime totals, then exits.
+  const turn = async (job, text, usage) => {
+    const settled = new Promise((resolve) => {
+      const onJob = (session) => {
+        if (session.id !== job.id || session.status !== 'idle') return;
+        bus.off('job', onJob);
+        resolve();
+      };
+      bus.on('job', onJob);
+    });
+    sendDevMessage(job.id, text);
+    const child = children.at(-1);
+    child.stdout.end(`${JSON.stringify({ type: 'turn.completed', usage })}\n`);
+    setImmediate(() => child.emit('close', 0));
+    await settled;
+    return recordTurnUsage.mock.lastCall[1];
+  };
+  const walks = (spy) => spy.mock.calls.filter(([dir]) => String(dir).includes('.codex-provider-2')).length;
+
+  it('books a resumed turn as what it added to the thread, reading the rollout once', async () => {
+    const job = getJob('codex-usage');
+    // The last reading on the record is another chat's (a step's, say).
+    job.contextUsage.sessionId = 'thread-0';
+    writeRollout({ input_tokens: 600000, cached_input_tokens: 540000, output_tokens: 25000 });
+    const readdir = vi.spyOn(fs, 'readdirSync');
+    try {
+      // Measured from the rollout's totals, not the other thread's on the record.
+      expect(
+        await turn(job, 'Next', { input_tokens: 650000, cached_input_tokens: 585000, output_tokens: 26000 }),
+      ).toMatchObject({ inputTokens: 50000, cachedInputTokens: 45000, outputTokens: 1000 });
+      const found = walks(readdir);
+      expect(found).toBeGreaterThan(0);
+      expect(
+        await turn(job, 'Again', { input_tokens: 700000, cached_input_tokens: 630000, output_tokens: 27000 }),
+      ).toMatchObject({ inputTokens: 100000, cachedInputTokens: 90000, outputTokens: 2000 });
+      // The second turn found the rollout where the first one left it.
+      expect(walks(readdir)).toBe(found);
+    } finally {
+      readdir.mockRestore();
+    }
+  });
+
+  it('measures a resumed turn from the thread’s reading on the record, without reading the rollout first', async () => {
+    const job = getJob('codex-usage');
+    // No rollout on disk: only the probe that closes the turn looks for one.
+    const readdir = vi.spyOn(fs, 'readdirSync');
+    try {
+      const settled = new Promise((resolve) => {
+        const onJob = (session) => {
+          if (session.id !== job.id || session.status !== 'idle') return;
+          bus.off('job', onJob);
+          resolve();
+        };
+        bus.on('job', onJob);
+      });
+      sendDevMessage(job.id, 'Next');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(walks(readdir)).toBe(0);
+      const child = children.at(-1);
+      const usage = { input_tokens: 650000, cached_input_tokens: 585000, output_tokens: 26000 };
+      child.stdout.end(`${JSON.stringify({ type: 'turn.completed', usage })}\n`);
+      setImmediate(() => child.emit('close', 0));
+      await settled;
+      expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+        inputTokens: 150000,
+        cachedInputTokens: 135000,
+        outputTokens: 6000,
+      });
+    } finally {
+      readdir.mockRestore();
+    }
+  });
+
+  it('books nothing for a resumed turn whose thread total could not be read', async () => {
+    const job = getJob('codex-usage');
+    job.contextUsage.sessionId = 'thread-0';
+    // No rollout to read: the 2M are the thread's lifetime, not this turn.
+    expect(
+      await turn(job, 'Next', { input_tokens: 2000000, cached_input_tokens: 1800000, output_tokens: 50000 }),
+    ).toMatchObject({ inputTokens: null, cachedInputTokens: null, outputTokens: null });
+  });
+
+  it('reads the rollout for a resumed turn whose reading on the record holds no totals', async () => {
+    const job = getJob('codex-usage');
+    // What a compaction that got no usage back leaves behind.
+    job.contextUsage = { source: 'codex', providerId: 2, sessionId: 'thread-1', model: 'own-model' };
+    writeRollout({ input_tokens: 600000, cached_input_tokens: 540000, output_tokens: 25000 });
+    expect(
+      await turn(job, 'Next', { input_tokens: 650000, cached_input_tokens: 585000, output_tokens: 26000 }),
+    ).toMatchObject({ inputTokens: 50000, cachedInputTokens: 45000, outputTokens: 1000 });
+  });
+
+  it('books nothing for a resumed turn whose reading holds no totals and whose rollout cannot be read', async () => {
+    const job = getJob('codex-usage');
+    job.contextUsage = { source: 'codex', providerId: 2, sessionId: 'thread-1', model: 'own-model' };
+    expect(
+      await turn(job, 'Next', { input_tokens: 2000000, cached_input_tokens: 1800000, output_tokens: 50000 }),
+    ).toMatchObject({ inputTokens: null, cachedInputTokens: null, outputTokens: null });
+  });
+
+  it('counts an unfinished turn that landed on another thread from zero', async () => {
+    const job = getJob('codex-usage');
+    const settled = new Promise((resolve) => {
+      const onJob = (session) => {
+        if (session.id !== job.id || session.status !== 'idle') return;
+        bus.off('job', onJob);
+        resolve();
+      };
+      bus.on('job', onJob);
+    });
+    sendDevMessage(job.id, 'Next');
+    // The resume opened thread-2, which used 800k before the stream failed;
+    // thread-1 was at 500k.
+    writeRollout({ input_tokens: 800000, cached_input_tokens: 700000, output_tokens: 30000 }, 'thread-2');
+    const child = children.at(-1);
+    child.stdout.end(
+      `${JSON.stringify({ type: 'thread.started', thread_id: 'thread-2' })}\n${JSON.stringify({ type: 'turn.failed', error: { message: 'stream lost' } })}\n`,
+    );
+    setImmediate(() => child.emit('close', 1));
+    await settled;
+    expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+      inputTokens: 800000,
+      cachedInputTokens: 700000,
+      outputTokens: 30000,
+    });
+  });
+
+  it('books a turn that never completed from the rollout, so the next turn’s baseline does not swallow it', async () => {
+    const job = getJob('codex-usage');
+    // Where the previous turn's probe left the thread.
+    Object.assign(job.contextUsage, { inputTokens: 600000, cachedInputTokens: 540000, outputTokens: 25000 });
+    writeRollout({ input_tokens: 600000, cached_input_tokens: 540000, output_tokens: 25000 });
+    const settled = new Promise((resolve) => {
+      const onJob = (session) => {
+        if (session.id !== job.id || session.status !== 'idle') return;
+        bus.off('job', onJob);
+        resolve();
+      };
+      bus.on('job', onJob);
+    });
+    sendDevMessage(job.id, 'Long one');
+    // The model calls it made before the stream failed are in the rollout.
+    writeRollout({ input_tokens: 900000, cached_input_tokens: 810000, output_tokens: 31000 });
+    const child = children.at(-1);
+    const opened = vi.spyOn(fs, 'openSync');
+    try {
+      child.stdout.end(`${JSON.stringify({ type: 'turn.failed', error: { message: 'stream lost' } })}\n`);
+      setImmediate(() => child.emit('close', 1));
+      await settled;
+      // Read once at close: the probe takes the booking's reading.
+      expect(opened.mock.calls.filter(([file]) => String(file).includes('rollout-'))).toHaveLength(1);
+    } finally {
+      opened.mockRestore();
+    }
+    expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+      inputTokens: 300000,
+      cachedInputTokens: 270000,
+      outputTokens: 6000,
+    });
+    // And the thread totals, as the probe would have set them.
+    expect(job).toMatchObject({ inputTokens: 900000, outputTokens: 31000 });
+    expect(
+      await turn(job, 'Again', { input_tokens: 950000, cached_input_tokens: 855000, output_tokens: 32000 }),
+    ).toMatchObject({ inputTokens: 50000, cachedInputTokens: 45000, outputTokens: 1000 });
+  });
+
+  it('books a turn that does not resume the thread whole', async () => {
+    const job = getJob('codex-usage');
+    job.chats[2].started = false;
+    expect(
+      await turn(job, 'Fresh', { input_tokens: 800000, cached_input_tokens: 700000, output_tokens: 30000 }),
+    ).toMatchObject({ inputTokens: 800000, cachedInputTokens: 700000, outputTokens: 30000 });
+  });
+
+  it('takes no baseline for a native review, which opens a thread of its own', () => {
+    expect(codexTurnResumes('codex', { resume: true, native: false, sessionId: 't' })).toBe(true);
+    expect(codexTurnResumes('codex', { resume: true, native: true, sessionId: 't' })).toBe(false);
+    expect(codexTurnResumes('codex', { resume: false, native: false, sessionId: 't' })).toBe(false);
+    expect(codexTurnResumes('claude', { resume: true, native: false, sessionId: 't' })).toBe(false);
   });
 });
 

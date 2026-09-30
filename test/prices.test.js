@@ -109,6 +109,19 @@ describe('withEstimates', () => {
     // 10M at 0.7*0.4 + 0.3*4 = $1.48/M, plus 1M of output at $20.
     expect(codex.costUsd).toBeCloseTo(14.8 + 20, 6);
   });
+  it('uses measured cache reads when the CLI reports them', () => {
+    const rows = [
+      {
+        provider: 'codex',
+        model: 'gpt-5.6-sol',
+        inputTokens: 10e6,
+        cachedInputTokens: 9e6,
+        outputTokens: 1e6,
+        costUsd: null,
+      },
+    ];
+    expect(withEstimates(rows, CATALOG)[0].costUsd).toBeCloseTo(1 * 4 + 9 * 0.4 + 20, 6);
+  });
   it('leaves a turn the catalog cannot price alone', () => {
     const rows = [{ provider: 'codex', model: 'private-model', inputTokens: 100, costUsd: null }];
     expect(withEstimates(rows, CATALOG)[0]).toBe(rows[0]);
