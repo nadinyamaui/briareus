@@ -27,6 +27,7 @@ import {
   ensureCodexHome,
   probeProviderAuth,
   codexEndpointDefaultModel,
+  verifyCustomEndpoint,
 } from '../lib/providers.js';
 
 // providers.js imports no project module, so nothing is mocked here: the
@@ -164,7 +165,17 @@ describe('a custom codex endpoint that lists no models', () => {
 });
 
 describe('the model the settings Test button probes', () => {
+  let home;
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (home) fs.rmSync(home, { recursive: true, force: true });
+    home = null;
+  });
+
   it('is the one the saved row resolves to', () => {
+    // The developer's own ~/.codex must not decide the list-less case.
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-test-button-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
     const form = { baseUrl: 'https://proxy.example/v1', apiKey: 'k' };
 
     expect(codexEndpointDefaultModel({ ...form, defaultModel: '', models: ['gpt-5.5', 'gpt-6-sol'] })).toBe(
@@ -174,6 +185,46 @@ describe('the model the settings Test button probes', () => {
       'my-proxy-model',
     );
     expect(codexEndpointDefaultModel({ ...form, defaultModel: '', models: [] })).toBe('gpt-6-sol');
+  });
+
+  it('reads no row dir for a form that was never saved', () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-test-button-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const stray = path.join(home, '.codex-provider-undefined');
+    fs.mkdirSync(stray);
+    fs.writeFileSync(
+      path.join(stray, 'models_cache.json'),
+      JSON.stringify({ models: [{ slug: 'stray-model' }] }),
+    );
+
+    expect(
+      codexEndpointDefaultModel({
+        baseUrl: 'https://proxy.example/v1',
+        apiKey: 'k',
+        defaultModel: '',
+        models: [],
+      }),
+    ).toBe('gpt-6-sol');
+  });
+});
+
+describe('verifyCustomEndpoint with a lazy model', () => {
+  it('refuses to cache it without a modelKey', async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    try {
+      await expect(
+        verifyCustomEndpoint({
+          binary: 'codex',
+          baseUrl: 'https://proxy.example/v1',
+          apiKey: 'k',
+          model: () => 'm',
+        }),
+      ).rejects.toThrow(/modelKey/);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

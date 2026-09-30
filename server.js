@@ -1118,14 +1118,19 @@ app.post('/api/providers/test', async (req, res) => {
     const models = (Array.isArray(req.body?.models) ? req.body.models : [])
       .map((m) => String(m).trim())
       .filter(Boolean);
-    const model =
-      binary === 'codex'
-        ? codexEndpointDefaultModel({ id: req.body?.id, baseUrl, apiKey, defaultModel, models })
-        : defaultModel || models[0] || '';
     try {
       return res.json({ models: await testProviderEndpoint({ binary, baseUrl, apiKey }) });
     } catch (e) {
-      if (!e.routeMissing || !model) throw e;
+      if (!e.routeMissing) throw e;
+      // Resolved only now: on a list-less codex form it reads the models cache.
+      // The cache is the saved row's own, looked up here rather than trusting
+      // the posted id with a path; a form not saved yet has none of its own.
+      const saved = binary === 'codex' ? getProvider(req.body?.id) : null;
+      const model =
+        binary === 'codex'
+          ? codexEndpointDefaultModel({ id: saved?.id, baseUrl, apiKey, defaultModel, models })
+          : defaultModel || models[0] || '';
+      if (!model) throw e;
       await probeChatEndpoint({ binary, baseUrl, apiKey, model });
       res.json({ models: [], probedModel: model });
     }
