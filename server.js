@@ -92,6 +92,7 @@ import {
   testProviderEndpoint,
   probeChatEndpoint,
   verifyCustomEndpoint,
+  codexEndpointDefaultModel,
 } from './lib/providers.js';
 import {
   initProviders,
@@ -1107,10 +1108,20 @@ app.get('/api/providers/:id/status', async (req, res) => {
 // The Test button: probe an endpoint + token exactly as the form holds them
 // (no save needed) by listing the endpoint's models. The list comes back so
 // the page can drop it into the Models field. A gateway with no model list
-// route is probed with a minimal chat call as the form's model instead.
+// route is probed with a minimal chat call instead, as the model the saved row
+// would default to: on codex the one the picker and the status banner resolve
+// (codexEndpointDefaultModel), elsewhere the form's default or first model.
 app.post('/api/providers/test', async (req, res) => {
   try {
-    const { binary, baseUrl, apiKey, model } = req.body || {};
+    const { binary, baseUrl, apiKey } = req.body || {};
+    const defaultModel = String(req.body?.defaultModel || '').trim();
+    const models = (Array.isArray(req.body?.models) ? req.body.models : [])
+      .map((m) => String(m).trim())
+      .filter(Boolean);
+    const model =
+      binary === 'codex'
+        ? codexEndpointDefaultModel({ id: req.body?.id, baseUrl, apiKey, defaultModel, models })
+        : defaultModel || models[0] || '';
     try {
       return res.json({ models: await testProviderEndpoint({ binary, baseUrl, apiKey }) });
     } catch (e) {

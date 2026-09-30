@@ -26,6 +26,7 @@ import {
   probeChatEndpoint,
   ensureCodexHome,
   probeProviderAuth,
+  codexEndpointDefaultModel,
 } from '../lib/providers.js';
 
 // providers.js imports no project module, so nothing is mocked here: the
@@ -131,8 +132,48 @@ describe('ensureCodexHome for a custom endpoint', () => {
     expect(configModel({ models: ['gpt-6-sol (872k)', 'gpt-5.5'], defaultModel: 'gpt-6-sol (872k)' })).toBe(
       'gpt-6-sol',
     );
-    // With no list, a stored default counts only when the catalog offers it.
-    expect(configModel({ models: [], defaultModel: 'my-proxy-model' })).toBe('gpt-6-sol');
+    // With no list, the stored default is all the operator said about the
+    // endpoint, so it counts even though the catalog does not offer it.
+    expect(configModel({ models: [], defaultModel: 'my-proxy-model' })).toBe('my-proxy-model');
+  });
+});
+
+describe('a custom codex endpoint that lists no models', () => {
+  let home;
+  afterEach(() => {
+    if (home) fs.rmSync(home, { recursive: true, force: true });
+    home = null;
+  });
+
+  it('offers its stored default in the picker, ahead of the catalog', () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-picker-'));
+    const endpoint = { id: 7, baseUrl: 'https://proxy.example/v1', apiKey: 'k', models: [] };
+    const models = BINARIES.codex.models({}, { ...endpoint, defaultModel: 'my-proxy-model' }, home);
+
+    expect(models[0]).toBe('my-proxy-model');
+    expect(models.slice(1)).toEqual(BINARIES.codex.models({}, endpoint, home));
+    // One the catalog already offers is not listed twice.
+    expect(BINARIES.codex.models({}, { ...endpoint, defaultModel: 'gpt-6-sol' }, home)).toEqual(
+      BINARIES.codex.models({}, endpoint, home),
+    );
+    // A login row's picker is its catalog alone.
+    expect(
+      BINARIES.codex.models({}, { id: 8, models: [], defaultModel: 'my-proxy-model' }, home),
+    ).not.toContain('my-proxy-model');
+  });
+});
+
+describe('the model the settings Test button probes', () => {
+  it('is the one the saved row resolves to', () => {
+    const form = { baseUrl: 'https://proxy.example/v1', apiKey: 'k' };
+
+    expect(codexEndpointDefaultModel({ ...form, defaultModel: '', models: ['gpt-5.5', 'gpt-6-sol'] })).toBe(
+      'gpt-6-sol',
+    );
+    expect(codexEndpointDefaultModel({ ...form, defaultModel: 'my-proxy-model', models: [] })).toBe(
+      'my-proxy-model',
+    );
+    expect(codexEndpointDefaultModel({ ...form, defaultModel: '', models: [] })).toBe('gpt-6-sol');
   });
 });
 
@@ -182,9 +223,31 @@ describe('the auth probe for a custom codex endpoint', () => {
   it('sends the model the picker defaults to', async () => {
     expect(await probedModel({ models: ['gpt-5.5', 'gpt-6-sol'] })).toBe('gpt-6-sol');
     expect(await probedModel({ models: [] })).toBe('gpt-6-sol');
-    expect(await probedModel({ models: [], defaultModel: 'my-proxy-model' })).toBe('gpt-6-sol');
+    expect(await probedModel({ models: [], defaultModel: 'my-proxy-model' })).toBe('my-proxy-model');
     // The picker compares the raw list, so a wide twin does not offer its slug.
     expect(await probedModel({ models: ['gpt-5.5', 'gpt-6-sol (872k)'] })).toBe('gpt-5.5');
+  });
+
+  it('reads no models cache when its cached verdict answers', async () => {
+    const provider = { models: [] };
+    await probedModel(provider);
+    const reads = vi.spyOn(fs, 'readFileSync');
+    const calls = [];
+    vi.stubGlobal('fetch', async (url) => calls.push(url));
+
+    const auth = await probeProviderAuth({
+      id: 7,
+      binary: 'codex',
+      label: 'Proxy',
+      baseUrl: 'https://proxy.example/v1',
+      apiKey: `k-${row}`,
+      efforts: [],
+      ...provider,
+    });
+
+    expect(auth.loggedIn).toBe(true);
+    expect(calls).toEqual([]);
+    expect(reads.mock.calls.filter(([file]) => String(file).endsWith('models_cache.json'))).toEqual([]);
   });
 });
 
