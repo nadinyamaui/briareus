@@ -51,13 +51,14 @@ describe('getBinary / BINARIES', () => {
   it('offers the GPT-6 family when no Codex model cache exists', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-fallback-'));
     try {
-      expect(BINARIES.codex.models({}, null, home).slice(0, 3)).toEqual([
+      expect(BINARIES.codex.models({}, null, home).slice(0, 4)).toEqual([
         'gpt-6-astra',
+        'gpt-6.1-sol',
         'gpt-6-sol',
         'gpt-6-luna',
       ]);
       expect(BINARIES.codex.models({}, null, home)).not.toContain('gpt-5.6-sol');
-      expect(BINARIES.codex.defaultModel()).toBe('gpt-6-sol');
+      expect(BINARIES.codex.defaultModel()).toBe('gpt-6.1-sol');
       expect(BINARIES.codex.efforts).toContain('max');
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
@@ -221,6 +222,7 @@ describe('the wide-window twin of a codex model', () => {
     try {
       expect(codexWideVariants(['gpt-5.6-sol', 'gpt-5.6-terra'], { id: 9 }, home)).toEqual([
         'gpt-6-astra',
+        'gpt-6.1-sol',
         'gpt-6-sol',
         'gpt-6-luna',
         'gpt-5.5',
@@ -277,6 +279,7 @@ describe('Codex model reasoning efforts', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-efforts-fallback-'));
     try {
       expect(codexEffortsForModel('gpt-6-sol', null, home)).toContain('max');
+      expect(codexEffortsForModel('gpt-6.1-sol', null, home)).toContain('max');
       expect(codexEffortsForModel('gpt-5.5', null, home)).not.toContain('max');
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
