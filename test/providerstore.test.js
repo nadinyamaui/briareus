@@ -77,6 +77,7 @@ vi.mock('../lib/providers.js', () => {
 });
 
 const store = await import('../lib/providerstore.js');
+const { BINARIES } = await import('../lib/providers.js');
 const {
   initProviders,
   listProviders,
@@ -463,6 +464,20 @@ describe('resolving a row against its binary', () => {
     const p = row({ binary: 'claude', models: ['only-this'] });
 
     expect(providerDefaultModel(p, cfg)).toBe('only-this');
+  });
+
+  it("falls back through the binary's older defaults before the first model", () => {
+    const codex = BINARIES.codex;
+    codex.defaultModels = () => ['gpt-new', 'gpt-b'];
+    try {
+      expect(providerDefaultModel(row({ binary: 'codex', models: ['gpt-a', 'gpt-b'] }), cfg)).toBe('gpt-b');
+      expect(providerDefaultModel(row({ binary: 'codex', models: ['gpt-a', 'gpt-new', 'gpt-b'] }), cfg)).toBe(
+        'gpt-new',
+      );
+      expect(providerDefaultModel(row({ binary: 'codex', models: ['gpt-a', 'gpt-c'] }), cfg)).toBe('gpt-a');
+    } finally {
+      delete codex.defaultModels;
+    }
   });
 
   it('uses the row default effort when it is one of the offered ones', () => {
