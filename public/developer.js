@@ -2622,10 +2622,13 @@
       case 'user': {
         div.className =
           'group relative mt-[18px] mb-3.5 overflow-hidden rounded-xl border border-line bg-raise px-3.5 py-2.5';
-        if (e.via === 'webhook') {
+        if (e.via === 'webhook' || e.via === 'instruction') {
           const tag = document.createElement('div');
           tag.className = 'mb-1 text-[12px] text-muted';
-          tag.textContent = '⚡ Webhook delivery, not typed by you';
+          tag.textContent =
+            e.via === 'webhook'
+              ? '⚡ Webhook delivery, not typed by you'
+              : '⚡ Your instruction, sent through the instructions webhook';
           div.appendChild(tag);
         }
         const body = document.createElement('div');
@@ -3549,9 +3552,20 @@
     });
   }
 
-  function webhookCurl(hook) {
+  function webhookCurl(hook, instructions = false) {
     const q = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
-    return `curl -X POST ${q(hook.url)} -H ${q(`Authorization: Bearer ${hook.key}`)} -H 'Content-Type: application/json' -d '{"text":"The nightly build failed, have a look","source":"ci","id":"nightly-4711"}'`;
+    const [url, key, body] = instructions
+      ? [
+          hook.instructionsUrl,
+          hook.instructionsKey,
+          '{"text":"Yes, go ahead and deploy","source":"whatsapp","id":"wamid-4711"}',
+        ]
+      : [
+          hook.url,
+          hook.key,
+          '{"text":"The nightly build failed, have a look","source":"ci","id":"nightly-4711"}',
+        ];
+    return `curl -X POST ${q(url)} -H ${q(`Authorization: Bearer ${key}`)} -H 'Content-Type: application/json' -d '${body}'`;
   }
 
   // The button says what the webhook is doing without the dialog being opened:
@@ -3598,6 +3612,12 @@
     ].filter(Boolean);
     return `<div class="flex flex-col gap-3">
       ${hook.armed ? copy('URL', 'url', hook.url) + copy('Key', 'key', hook.key) : ''}
+      ${
+        hook.armed && hook.instructions
+          ? copy('Instructions URL', 'instructionsUrl', hook.instructionsUrl) +
+            copy('Instructions key', 'instructionsKey', hook.instructionsKey)
+          : ''
+      }
       ${notes.map((n) => `<p class="m-0 text-[12px] text-warn">${esc(n)}</p>`).join('')}
       <div class="flex items-end gap-2">
         ${cap('Deliveries an hour', 'perHour', hook.perHour, 1, 600, 1)}
@@ -3606,12 +3626,17 @@
       </div>
       <label class="flex items-start gap-2 text-[12px] text-muted">
         <input type="checkbox" name="sshUnattended" class="mt-0.5" ${hook.sshUnattended ? 'checked' : ''} />
-        <span>Let SSH servers in allow mode run commands without approval in turns a delivery started. Off, they ask first.</span>
+        <span>Let SSH servers in allow mode run commands without approval in turns a delivery or an instruction started. Off, they ask first.</span>
+      </label>
+      <label class="flex items-start gap-2 text-[12px] text-muted">
+        <input type="checkbox" name="instructions" class="mt-0.5" ${hook.instructions ? 'checked' : ''} />
+        <span>Take instructions too: a second URL, with a key of its own, whose messages reach the agent as your word. They answer its questions and queue like a message typed here. Give that key only to a sender that forwards nothing but your own messages.</span>
       </label>
       ${
         hook.armed
           ? `<div class="flex flex-wrap gap-1.5">
         <button type="button" class="btn px-2 py-0.5 text-[12px]" data-webhook="copy-curl">Copy curl example</button>
+        ${hook.instructions ? '<button type="button" class="btn px-2 py-0.5 text-[12px]" data-webhook="copy-instructions-curl">Copy instructions curl</button>' : ''}
         <button type="button" class="btn px-2 py-0.5 text-[12px]" data-webhook="rotate">Rotate key</button>
         <button type="button" class="btn border-danger px-2 py-0.5 text-[12px] text-danger" data-webhook="off">Turn off</button>
       </div>`
@@ -3627,6 +3652,7 @@
       maxTurns: field('maxTurns').valueAsNumber,
       budgetUsd: field('budgetUsd').valueAsNumber,
       sshUnattended: field('sshUnattended').checked,
+      instructions: field('instructions').checked,
     };
   }
 
@@ -3634,7 +3660,11 @@
     const pending = openConfirm({
       title: hook.armed ? 'Session webhook' : 'Arm this session’s webhook',
       body: hook.armed
-        ? 'A POST to the URL reaches this session as information from outside, never as your word: it answers no question the agent asked, waits for a turn under way to end, and wakes the session if it is closed. Send the key as a bearer token, or sign with it (see the README). Anyone holding the key can have this session read what they write.'
+        ? `A POST to the URL reaches this session as information from outside, never as your word: it answers no question the agent asked, waits for a turn under way to end, and wakes the session if it is closed. Send the key as a bearer token, or sign with it (see the README). Anyone holding the key can have this session read what they write.${
+            hook.instructions
+              ? ' A POST to the instructions URL, with the instructions key, is your word instead: anyone holding that key speaks for you.'
+              : ''
+          }`
         : 'Once armed, any system you give the key to can wake this session with a message: a support platform, an alert, a CI. What it sends reaches the agent as information from outside, never as your word, and the turns it starts run under the caps below.',
       icon: '⚡',
       confirmLabel: hook.armed ? 'Save' : 'Arm webhook',
@@ -3648,6 +3678,9 @@
       if (what === 'copy-url') return copyText(hook.url, btn);
       if (what === 'copy-key') return copyText(hook.key, btn);
       if (what === 'copy-curl') return copyText(webhookCurl(hook), btn);
+      if (what === 'copy-instructionsUrl') return copyText(hook.instructionsUrl, btn);
+      if (what === 'copy-instructionsKey') return copyText(hook.instructionsKey, btn);
+      if (what === 'copy-instructions-curl') return copyText(webhookCurl(hook, true), btn);
       // Rotating cuts off every sender holding the key, so it takes a second
       // press: the first one says what the second will do.
       if (what === 'rotate' && !btn.dataset.sure) {
@@ -3663,6 +3696,8 @@
         if (what === 'rotate') {
           hook = await webhookRequest(s.id, '/rotate', 'POST');
           form.querySelector('[data-webhook-value="key"]').value = hook.key;
+          const instructionsKey = form.querySelector('[data-webhook-value="instructionsKey"]');
+          if (instructionsKey) instructionsKey.value = hook.instructionsKey || '';
           delete btn.dataset.sure;
           btn.textContent = 'Rotate key';
           toast('Key rotated: the old one is refused from now on');
@@ -3681,8 +3716,9 @@
     if (!save) return;
     try {
       const next = await webhookRequest(s.id, '', 'PUT', { armed: true, ...webhookSettings(form) });
-      // Just armed: now there is a URL and a key to hand over.
-      if (!hook.armed) return openWebhook(s, next);
+      // Just armed, or instructions just turned on: now there is a URL and a
+      // key to hand over.
+      if (!hook.armed || (next.instructions && !hook.instructions)) return openWebhook(s, next);
       toast('Webhook settings saved');
     } catch (err) {
       toast(err.message, true);

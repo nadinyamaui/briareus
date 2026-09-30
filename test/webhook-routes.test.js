@@ -22,7 +22,10 @@ const state = (id) => {
 
 beforeEach(async () => {
   hook = { ...WEBHOOK_DEFAULTS };
-  key = vi.fn(async (id, epoch) => `key-${id}-e${epoch}`);
+  key = vi.fn(
+    async (id, epoch, channel = 'messages') =>
+      `${channel === 'instructions' ? 'ikey' : 'key'}-${id}-e${epoch}`,
+  );
   const app = express();
   app.use(express.json());
   app.use(sameOriginWrites);
@@ -44,7 +47,8 @@ beforeEach(async () => {
         hook = { ...hook, epoch: hook.epoch + 1 };
         return state(id);
       },
-      url: (id) => `https://reviewer.example.com/webhooks/session/${id}`,
+      url: (id, channel) =>
+        `https://reviewer.example.com/webhooks/session/${id}${channel === 'instructions' ? '/instructions' : ''}`,
       key,
     }),
   );
@@ -99,6 +103,25 @@ describe('a session’s webhook in the dashboard', () => {
       key: 'key-abc123-e0',
     });
     expect((await (await request('abc123/webhook')).json()).key).toBe('key-abc123-e0');
+  });
+
+  it('hands over the instructions key only once instructions are on as well', async () => {
+    const armed = await (await request('abc123/webhook', { method: 'PUT', body: { armed: true } })).json();
+    expect(armed).toMatchObject({
+      instructions: false,
+      instructionsUrl: 'https://reviewer.example.com/webhooks/session/abc123/instructions',
+      instructionsKey: null,
+    });
+    const on = await (
+      await request('abc123/webhook', { method: 'PUT', body: { armed: true, instructions: true } })
+    ).json();
+    expect(on).toMatchObject({ instructions: true, key: 'key-abc123-e0', instructionsKey: 'ikey-abc123-e0' });
+    // Rotating ends both keys.
+    const rotated = await (await request('abc123/webhook/rotate', { method: 'POST' })).json();
+    expect(rotated).toMatchObject({ key: 'key-abc123-e1', instructionsKey: 'ikey-abc123-e1' });
+    // Disarmed, neither key is handed out, whatever the instructions setting.
+    const off = await (await request('abc123/webhook', { method: 'PUT', body: { armed: false } })).json();
+    expect(off).toMatchObject({ instructions: true, key: null, instructionsKey: null });
   });
 
   it('rotating hands over the key of the next epoch', async () => {
