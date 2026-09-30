@@ -9704,6 +9704,23 @@ describe('auto-compaction after a turn', () => {
     getProviderForJob.mockReturnValue(state.otherProviders[0]);
     job.contextUsage = { ...job.contextUsage, source: 'claude', providerId: 5, sessionId: 'claude-1' };
     expect(publicJob(job)).toMatchObject({ compactTakesInstructions: true, autoCompactAt: 250000 });
+    // A grok step measured it last: nothing can compact that thread, so a
+    // claude session advertises neither instructions nor auto-compaction.
+    state.otherProviders.push({ id: 6, binary: 'grok', label: 'Grok step', active: true });
+    getProviderForJob.mockReturnValue({ id: 1, binary: 'claude' });
+    job.contextUsage = { ...job.contextUsage, source: 'grok', providerId: 6, sessionId: 'grok-1' };
+    expect(publicJob(job)).toMatchObject({
+      canCompact: false,
+      compactTakesInstructions: false,
+      autoCompactAt: null,
+    });
+    // Nor does a report that does not say whose thread it measured.
+    job.contextUsage = { source: 'claude', used: 1000 };
+    expect(publicJob(job)).toMatchObject({
+      canCompact: false,
+      compactTakesInstructions: false,
+      autoCompactAt: null,
+    });
     // Nothing to compact yet: the session's own provider decides.
     job.contextUsage = null;
     job.chats = {};

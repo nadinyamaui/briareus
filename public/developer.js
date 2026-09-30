@@ -1824,8 +1824,9 @@
         ? `<button class="clear-transcript rounded border border-line px-2 py-0.5 text-[12px] text-muted hover:text-ink disabled:opacity-50" title="Hide the transcript so far from this chat. Nothing is deleted and the agent's context is unchanged.">Clear</button>`
         : '';
     // Clear rides along with the rest and never makes the panel on its own: a
-    // session with no usage yet has nothing worth clearing either.
-    if (!ctx && !rows.length && !compact && !auto) return '';
+    // session with no usage yet has nothing worth clearing either. Instructions
+    // does, so they can be set before the first turn.
+    if (!ctx && !rows.length && !compact && !auto && !keep) return '';
     return `<div class="${hasPr ? 'border-t border-line pt-2.5' : ''}">
         <div class="mb-1 flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-[12px] tracking-wide text-muted"><span class="flex-1 whitespace-nowrap">Context usage</span>${auto}${keep}${compact}${clear}</div>
         ${ctx}
@@ -1975,7 +1976,9 @@
           confirmLabel: 'Save',
           allowEmpty: true,
         });
-        if (text == null) break;
+        // Saving what is already set, an empty box over none included, is no
+        // edit, and no toast should say otherwise.
+        if (text == null || text === (s.compactInstructions || '')) break;
         try {
           await api(`/api/dev/sessions/${encodeURIComponent(s.id)}`, {
             method: 'PATCH',
