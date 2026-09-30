@@ -53,6 +53,7 @@ import {
   setQaLoop,
   renameDevSession,
   setDevSessionAutoCompact,
+  setDevSessionCompactInstructions,
   linkPrToSession,
   dropQueuedMessage,
   startDevServe,
@@ -1882,6 +1883,11 @@ dashboard.register('patch', '/api/dev/sessions/:id', (req, res) => {
     const body = req.body || {};
     if ('autoCompact' in body && !('title' in body)) {
       return res.json({ session: setDevSessionAutoCompact(req.params.id, body.autoCompact) });
+    }
+    if ('compactInstructions' in body && !('title' in body)) {
+      return res.json({
+        session: setDevSessionCompactInstructions(req.params.id, body.compactInstructions),
+      });
     }
     res.json({ session: renameDevSession(req.params.id, body.title) });
   } catch (e) {

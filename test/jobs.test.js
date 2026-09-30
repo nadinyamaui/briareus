@@ -62,7 +62,7 @@ vi.mock('../lib/config.js', () => ({
     opencodeBin: '',
     githubToken: 'tok',
     workspaceDir: '/tmp/nowhere',
-    dev: { maxSessions: 3, timeoutMin: 60, autoCompactTokens: 350000 },
+    dev: { maxSessions: 3, timeoutMin: 60, autoCompactTokens: 250000 },
     reviewLoop: { maxRounds: 3, lowFindingsUntilRound: 1 },
   }),
 }));
@@ -218,6 +218,7 @@ import {
   setQaLoop,
   renameDevSession,
   setDevSessionAutoCompact,
+  setDevSessionCompactInstructions,
   linkPrToSession,
   attachPrForBranch,
   spawnWorkerSession,
@@ -9115,6 +9116,22 @@ describe('manual Codex context compaction', () => {
     }
   });
 
+  it("says the session's instructions went unused, since codex takes none", async () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex' });
+    compactCodexThread.mockResolvedValueOnce(undefined);
+    const job = getJob('compact-session');
+    job.compactInstructions = 'Keep the findings';
+    try {
+      await compactDevSession('compact-session');
+      expect(job.events.map((e) => e.text)).toContain(
+        'Codex compaction takes no instructions; the ones set for this session were not used.',
+      );
+      expect(compactCodexThread.mock.lastCall[0]).not.toHaveProperty('instructions');
+    } finally {
+      bin.mockRestore();
+    }
+  });
+
   it('returns to idle after a CLI failure and does not claim success', async () => {
     const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex' });
     compactCodexThread.mockRejectedValueOnce(new Error('No quota'));
@@ -9658,7 +9675,7 @@ describe('auto-compaction after a turn', () => {
 
   it('is a per-session switch, off until turned on', () => {
     const job = getJob('auto-compact');
-    expect(publicJob(job)).toMatchObject({ autoCompactAt: 350000 });
+    expect(publicJob(job)).toMatchObject({ autoCompactAt: 250000 });
     expect(publicJob(job).autoCompact).toBeFalsy();
     expect(setDevSessionAutoCompact(job.id, true).autoCompact).toBe(true);
     expect(() => setDevSessionAutoCompact(job.id, 'yes')).toThrow('true or false');
@@ -9666,6 +9683,22 @@ describe('auto-compaction after a turn', () => {
     getProviderForJob.mockReturnValue({ id: 3, binary: 'grok' });
     job.contextUsage = null;
     expect(publicJob(job).autoCompactAt).toBeNull();
+  });
+
+  it('keeps compaction instructions per session, trimmed, and clears them on empty', () => {
+    const job = getJob('auto-compact');
+    expect(publicJob(job).compactInstructions).toBeUndefined();
+    expect(setDevSessionCompactInstructions(job.id, '  Keep the findings \n').compactInstructions).toBe(
+      'Keep the findings',
+    );
+    expect(setDevSessionCompactInstructions(job.id, '   ').compactInstructions).toBeUndefined();
+    expect(() => setDevSessionCompactInstructions(job.id, 5)).toThrow('must be text');
+    expect(() => setDevSessionCompactInstructions(job.id, 'x'.repeat(4001))).toThrow('4000 characters');
+    expect(() => setDevSessionCompactInstructions('missing', 'x')).toThrow('not found');
+    getProviderForJob.mockReturnValue({ id: 1, binary: 'claude' });
+    expect(publicJob(job).compactTakesInstructions).toBe(true);
+    getProviderForJob.mockReturnValue({ id: 2, binary: 'codex' });
+    expect(publicJob(job).compactTakesInstructions).toBe(false);
   });
 
   it('compacts past the threshold before the queued message runs, which waits instead of failing', async () => {
@@ -9706,7 +9739,7 @@ describe('auto-compaction after a turn', () => {
     children[0].emit('close', 0);
     await done;
     setDevSessionAutoCompact(job.id, true);
-    job.contextUsage.tokens = 349999;
+    job.contextUsage.tokens = 249999;
     done = idle(job);
     sendDevMessage(job.id, 'Under');
     children[1].emit('close', 0);
@@ -9840,6 +9873,24 @@ describe('auto-compaction while the context probe is out', () => {
     child.stdout.end(body);
     setImmediate(() => child.emit('close', 0));
   };
+
+  it("hands the session's compaction instructions to /compact", async () => {
+    job.compactInstructions = 'Keep the open findings.\nDrop the exploration.';
+    sendDevMessage(job.id, 'Go');
+    await endTurn();
+    answer(children[1], report('400k'));
+    await vi.waitFor(() => expect(children).toHaveLength(3));
+    expect(children[2].args.slice(0, 4)).toEqual([
+      '-p',
+      '/compact Keep the open findings.\nDrop the exploration.',
+      '--resume',
+      'sid-1',
+    ]);
+    answer(children[2], JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '' }));
+    await vi.waitFor(() => expect(children).toHaveLength(4));
+    answer(children[3], report('30k'));
+    await settled();
+  });
 
   it('compacts a claude thread on the number its probe reports, and books what the summary cost', async () => {
     sendDevMessage(job.id, 'Go');

@@ -335,6 +335,7 @@
   // Used both for actions that need prose and the small session metadata edits
   // that should not be sent to the agent as a chat message.
   let askResolve = null;
+  let askAllowEmpty = false; // whether an empty box is a valid answer
   function openPrompt({
     title,
     body = '',
@@ -343,8 +344,10 @@
     confirmLabel = 'Start',
     value = '',
     rows = 6,
+    allowEmpty = false,
   }) {
     closeAsk(null); // a second question supersedes an unanswered one
+    askAllowEmpty = allowEmpty;
     $('ask-title').textContent = title;
     $('ask-body').textContent = body;
     $('ask-body').classList.toggle('hidden', !body);
@@ -377,7 +380,8 @@
   $('ask-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const text = $('ask-input').value.trim();
-    if (!text) return $('ask-input').focus(); // an empty answer is not an answer
+    // An empty answer is not an answer, unless emptying the box is the point.
+    if (!text && !askAllowEmpty) return $('ask-input').focus();
     closeAsk(text);
   });
   $('ask-cancel').addEventListener('click', () => closeAsk(null));
@@ -1804,8 +1808,14 @@
     // a compaction before anything queued runs.
     const autoAt = s.autoCompactAt ? `${Math.round(s.autoCompactAt / 1000)}k` : '';
     const auto = autoAt
-      ? `<label class="flex cursor-pointer items-center gap-1" title="After a turn leaves the context above ${autoAt} tokens, summarize the conversation automatically; this uses the provider and may incur usage."><input type="checkbox" class="auto-compact accent-accent" ${s.autoCompact ? 'checked' : ''}>Auto-compact ${autoAt}</label>`
+      ? `<label class="flex cursor-pointer items-center gap-1 whitespace-nowrap" title="After a turn leaves the context above ${autoAt} tokens, summarize the conversation automatically; this uses the provider and may incur usage."><input type="checkbox" class="auto-compact accent-accent" ${s.autoCompact ? 'checked' : ''}>Auto-compact ${autoAt}</label>`
       : '';
+    // What every compaction of this session must keep; claude only, see
+    // compactTakesInstructions. Accented while some are set.
+    const keep =
+      s.compactTakesInstructions && (compact || auto)
+        ? `<button class="compact-instructions rounded border border-line px-2 py-0.5 text-[12px] ${s.compactInstructions ? 'text-accent' : 'text-muted'} hover:text-ink" title="${esc(s.compactInstructions ? `Compaction instructions: ${s.compactInstructions}` : 'Tell compaction what the summary must keep')}">Instructions</button>`
+        : '';
     // Takes the transcript off the screen only: the agent's context and the
     // stored log stay as they are, and the bar over the chat shows it again.
     const clear =
@@ -1816,7 +1826,7 @@
     // session with no usage yet has nothing worth clearing either.
     if (!ctx && !rows.length && !compact && !auto) return '';
     return `<div class="${hasPr ? 'border-t border-line pt-2.5' : ''}">
-        <div class="mb-1 flex items-center justify-between gap-2 text-[12px] tracking-wide text-muted"><span class="flex-1">Context usage</span>${auto}${compact}${clear}</div>
+        <div class="mb-1 flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-[12px] tracking-wide text-muted"><span class="flex-1 whitespace-nowrap">Context usage</span>${auto}${keep}${compact}${clear}</div>
         ${ctx}
         <div class="${ctx ? 'mt-1.5 border-t border-line pt-1.5 ' : ''}flex flex-col gap-0.5">${rows.join('')}</div>
       </div>`;
@@ -1943,6 +1953,34 @@
         toast(err.message, true);
       }
       auto.disabled = false;
+      await loadSessions();
+      return;
+    }
+    const keep = e.target.closest('.compact-instructions');
+    if (keep) {
+      const s = panelSubject;
+      if (!s?.id) return;
+      const text = await openPrompt({
+        title: 'Compaction instructions',
+        body: 'Every compaction of this session, by the Compact button or Auto-compact, is told to follow these when it summarizes the conversation. Leave the box empty to remove them.',
+        label: 'Instructions',
+        placeholder:
+          'e.g. Keep the open review findings and the exact test commands; drop the exploration of lib/usage.js',
+        value: s.compactInstructions || '',
+        confirmLabel: 'Save',
+        allowEmpty: true,
+      });
+      if (text == null) return;
+      try {
+        await api(`/api/dev/sessions/${encodeURIComponent(s.id)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ compactInstructions: text }),
+        });
+        toast(text ? 'Compaction instructions saved' : 'Compaction instructions removed');
+      } catch (err) {
+        toast(err.message, true);
+      }
       await loadSessions();
       return;
     }
