@@ -25,6 +25,7 @@ import {
   testProviderEndpoint,
   probeChatEndpoint,
   ensureCodexHome,
+  probeProviderAuth,
 } from '../lib/providers.js';
 
 // providers.js imports no project module, so nothing is mocked here: the
@@ -132,6 +133,58 @@ describe('ensureCodexHome for a custom endpoint', () => {
     );
     // With no list, a stored default counts only when the catalog offers it.
     expect(configModel({ models: [], defaultModel: 'my-proxy-model' })).toBe('gpt-6-sol');
+  });
+});
+
+describe('the auth probe for a custom codex endpoint', () => {
+  let home;
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    if (home) fs.rmSync(home, { recursive: true, force: true });
+    home = null;
+  });
+
+  // The endpoint publishes no model list, so the probe falls back to a chat
+  // call: the model in that call is the one under test. Each row gets its own
+  // key, since a verdict is cached per endpoint, model and key.
+  let row = 0;
+  async function probedModel(provider) {
+    home = home || fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-probe-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const calls = [];
+    vi.stubGlobal('fetch', async (url, opts) => {
+      calls.push({ url, opts });
+      if (url.endsWith('/models')) return { ok: false, status: 404, text: async () => 'Not Found' };
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ id: 'resp_1', object: 'response' }),
+      };
+    });
+    const auth = await probeProviderAuth({
+      id: 7,
+      binary: 'codex',
+      label: 'Proxy',
+      baseUrl: 'https://proxy.example/v1',
+      apiKey: `k-${++row}`,
+      efforts: [],
+      ...provider,
+    });
+    expect(auth.loggedIn).toBe(true);
+    expect(calls.map((c) => c.url)).toEqual([
+      'https://proxy.example/v1/models',
+      'https://proxy.example/v1/responses',
+    ]);
+    return JSON.parse(calls[1].opts.body).model;
+  }
+
+  it('sends the model the picker defaults to', async () => {
+    expect(await probedModel({ models: ['gpt-5.5', 'gpt-6-sol'] })).toBe('gpt-6-sol');
+    expect(await probedModel({ models: [] })).toBe('gpt-6-sol');
+    expect(await probedModel({ models: [], defaultModel: 'my-proxy-model' })).toBe('gpt-6-sol');
+    // The picker compares the raw list, so a wide twin does not offer its slug.
+    expect(await probedModel({ models: ['gpt-5.5', 'gpt-6-sol (872k)'] })).toBe('gpt-5.5');
   });
 });
 
