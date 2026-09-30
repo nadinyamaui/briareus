@@ -1016,14 +1016,71 @@ describe('the codex parser', () => {
     ]);
   });
 
-  it('accumulates usage across model calls: consumption, never context size', () => {
+  it('subtracts the preceding lifetime total from a resumed Codex turn', () => {
     const { turn, events } = feedAll([
-      { type: 'turn.completed', usage: { input_tokens: 100, output_tokens: 10 } },
-      { type: 'turn.completed', usage: { input_tokens: 200, output_tokens: 20 } },
+      { type: 'turn.completed', usage: { input_tokens: 100, cached_input_tokens: 80, output_tokens: 10 } },
+      { type: 'turn.completed', usage: { input_tokens: 200, cached_input_tokens: 170, output_tokens: 20 } },
     ]);
-    expect(turn.inputTokens).toBe(300);
-    expect(turn.outputTokens).toBe(30);
+    expect(turn.inputTokens).toBe(200);
+    expect(turn.cachedInputTokens).toBe(170);
+    expect(turn.outputTokens).toBe(20);
     expect(events.every((e) => e.kind === 'result' && e.tokens === null)).toBe(true);
+    const resumed = newTurn();
+    resumed.codexBaseline = { inputTokens: 200, cachedInputTokens: 170, outputTokens: 20 };
+    parserFor('codex', resumed).feed({
+      type: 'turn.completed',
+      usage: { input_tokens: 250, cached_input_tokens: 215, output_tokens: 24 },
+    });
+    expect(resumed).toMatchObject({ inputTokens: 50, cachedInputTokens: 45, outputTokens: 4 });
+  });
+
+  it('books every counter whole when input shows the thread started again', () => {
+    // A resume that landed on a fresh thread: output and cache sit above the
+    // old thread's smaller totals, but must not be reduced by them.
+    const reset = newTurn();
+    reset.codexBaseline = { inputTokens: 500000, cachedInputTokens: 300000, outputTokens: 20000 };
+    parserFor('codex', reset).feed({
+      type: 'turn.completed',
+      usage: { input_tokens: 300000, cached_input_tokens: 310000, output_tokens: 25000 },
+    });
+    expect(reset).toMatchObject({ inputTokens: 300000, cachedInputTokens: 310000, outputTokens: 25000 });
+  });
+
+  it('drops the baseline when the resume landed on another thread, and keeps it on its own', () => {
+    // The old thread was at 500k; the new one's first turn used 800k.
+    const usage = { input_tokens: 800000, cached_input_tokens: 700000, output_tokens: 30000 };
+    const baseline = {
+      sessionId: 'thread-1',
+      inputTokens: 500000,
+      cachedInputTokens: 450000,
+      outputTokens: 20000,
+    };
+    const moved = newTurn();
+    moved.codexBaseline = { ...baseline };
+    const movedParser = parserFor('codex', moved);
+    movedParser.feed({ type: 'thread.started', thread_id: 'thread-2' });
+    movedParser.feed({ type: 'turn.completed', usage });
+    expect(moved).toMatchObject({ inputTokens: 800000, cachedInputTokens: 700000, outputTokens: 30000 });
+    const same = newTurn();
+    same.codexBaseline = { ...baseline };
+    const sameParser = parserFor('codex', same);
+    sameParser.feed({ type: 'thread.started', thread_id: 'thread-1' });
+    sameParser.feed({ type: 'turn.completed', usage });
+    expect(same).toMatchObject({ inputTokens: 300000, cachedInputTokens: 250000, outputTokens: 10000 });
+  });
+
+  it('books nothing for a resumed turn whose earlier total is unknown', () => {
+    const blind = newTurn();
+    blind.codexBaseline = { sessionId: 'thread-1', unknown: true };
+    const parser = parserFor('codex', blind);
+    parser.feed({ type: 'thread.started', thread_id: 'thread-1' });
+    const events = parser.feed({
+      type: 'turn.completed',
+      usage: { input_tokens: 2000000, cached_input_tokens: 1800000, output_tokens: 50000 },
+    });
+    expect(blind).toMatchObject({ inputTokens: null, outputTokens: null });
+    expect(blind.cachedInputTokens).toBeUndefined();
+    expect(events[0]).toMatchObject({ kind: 'result', inputTokens: null, outputTokens: null });
   });
 
   it('a failed turn is an error result with the message', () => {
