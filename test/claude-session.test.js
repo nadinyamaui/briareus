@@ -56,6 +56,13 @@ describe('Claude headless compaction', () => {
     ]);
   });
 
+  it('passes instructions as the argument of /compact', async () => {
+    const { promise, calls, finish } = run({ instructions: 'Keep the review findings' });
+    finish({ type: 'result', subtype: 'success', is_error: false, result: '' });
+    await promise;
+    expect(calls[0].args.slice(0, 2)).toEqual(['-p', '/compact Keep the review findings']);
+  });
+
   it('rejects a result the CLI marked as an error', async () => {
     const { promise, finish } = run();
     finish({ type: 'result', subtype: 'success', is_error: true, result: 'Not enough messages to compact.' });
