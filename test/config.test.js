@@ -345,10 +345,10 @@ describe('the database pool', () => {
 });
 
 describe('developer sessions', () => {
-  it('caps at three sessions and an hour, and auto-compacts past 350k, by default', async () => {
+  it('caps at three sessions and an hour, and auto-compacts past 250k, by default', async () => {
     const { getConfig } = await loadConfig(complete());
 
-    expect(getConfig().dev).toEqual({ maxSessions: 3, timeoutMin: 60, autoCompactTokens: 350000 });
+    expect(getConfig().dev).toEqual({ maxSessions: 3, timeoutMin: 60, autoCompactTokens: 250000 });
   });
 
   it('takes the caps that were given', async () => {
@@ -362,7 +362,7 @@ describe('developer sessions', () => {
   it('reads an auto-compact threshold left empty as the default, not as off', async () => {
     const { getConfig } = await loadConfig(complete({ DEV_AUTO_COMPACT_TOKENS: '' }));
 
-    expect(getConfig().dev.autoCompactTokens).toBe(350000);
+    expect(getConfig().dev.autoCompactTokens).toBe(250000);
   });
 
   it('switches auto-compaction off on 0', async () => {

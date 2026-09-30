@@ -22,6 +22,7 @@ import { sshRoutes } from './lib/ssh-routes.js';
 import { sessionWebhookRoutes } from './lib/webhook-routes.js';
 import { sessionTranscriptRoutes } from './lib/transcript-routes.js';
 import { providerTestRoutes } from './lib/provider-test-routes.js';
+import { sessionEditRoute } from './lib/session-edit-route.js';
 import fs from 'fs';
 import path from 'path';
 import { execFile, spawn } from 'child_process';
@@ -54,6 +55,7 @@ import {
   setQaLoop,
   renameDevSession,
   setDevSessionAutoCompact,
+  setDevSessionCompactInstructions,
   linkPrToSession,
   dropQueuedMessage,
   startDevServe,
@@ -1858,19 +1860,13 @@ app.use(
   }),
 );
 
-// Session metadata edits do not wake the agent: they only change how this
-// conversation is filed in the dashboard, or what happens after its turns.
-dashboard.register('patch', '/api/dev/sessions/:id', (req, res) => {
-  try {
-    const body = req.body || {};
-    if ('autoCompact' in body && !('title' in body)) {
-      return res.json({ session: setDevSessionAutoCompact(req.params.id, body.autoCompact) });
-    }
-    res.json({ session: renameDevSession(req.params.id, body.title) });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
+// Session metadata edits (lib/session-edit-route.js).
+const editSession = sessionEditRoute({
+  renameDevSession,
+  setDevSessionAutoCompact,
+  setDevSessionCompactInstructions,
 });
+dashboard.register('patch', '/api/dev/sessions/:id', editSession);
 
 // Manual recovery for a PR that automatic branch/URL discovery missed. The
 // jobs layer reads GitHub and verifies the branch before storing the link.
