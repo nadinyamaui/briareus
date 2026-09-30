@@ -21,6 +21,7 @@ import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
 import { sessionWebhookRoutes } from './lib/webhook-routes.js';
 import { sessionTranscriptRoutes } from './lib/transcript-routes.js';
+import { providerTestRoutes } from './lib/provider-test-routes.js';
 import { sessionEditRoute } from './lib/session-edit-route.js';
 import fs from 'fs';
 import path from 'path';
@@ -91,8 +92,6 @@ import {
   refreshCodexModelCache,
   claudeLoginStart,
   claudeLoginFinish,
-  testProviderEndpoint,
-  probeChatEndpoint,
   verifyCustomEndpoint,
 } from './lib/providers.js';
 import {
@@ -1034,12 +1033,13 @@ async function providerAuthUsage(p, cfg, fresh = false) {
   if (p.binary === 'claude') {
     if (p.apiKey) {
       // Verified with a live call to the endpoint (Anthropic's or the custom
-      // base URL) rather than assumed from the key's presence.
+      // base URL) rather than assumed from the key's presence, as the model
+      // the picker and new sessions default to.
       auth = await verifyCustomEndpoint({
         binary: 'claude',
         baseUrl: p.baseUrl,
         apiKey: p.apiKey,
-        model: p.defaultModel || p.models[0] || null,
+        model: providerDefaultModel(p, cfg),
       });
       usage = await zaiKeyUsage();
     } else {
@@ -1106,24 +1106,7 @@ app.get('/api/providers/:id/status', async (req, res) => {
   });
 });
 
-// The Test button: probe an endpoint + token exactly as the form holds them
-// (no save needed) by listing the endpoint's models. The list comes back so
-// the page can drop it into the Models field. A gateway with no model list
-// route is probed with a minimal chat call as the form's model instead.
-app.post('/api/providers/test', async (req, res) => {
-  try {
-    const { binary, baseUrl, apiKey, model } = req.body || {};
-    try {
-      return res.json({ models: await testProviderEndpoint({ binary, baseUrl, apiKey }) });
-    } catch (e) {
-      if (!e.routeMissing || !model) throw e;
-      await probeChatEndpoint({ binary, baseUrl, apiKey, model });
-      res.json({ models: [], probedModel: model });
-    }
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
+app.use(providerTestRoutes({ getProvider, getConfig }));
 
 // A login is registered against the row: it lands in the entry's own derived
 // config dir and is mirrored into the database once it arrives (the same

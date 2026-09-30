@@ -972,8 +972,9 @@
   // The Test button probes the endpoint + token as the form holds them (no
   // save needed) and drops the endpoint's own model list into the Models
   // field (still unsaved, so a bad list is one Escape away from discarded).
-  // The form's model rides along so a gateway with no model list route can
-  // still be verified with a minimal chat call.
+  // The form's default and models ride along so a gateway with no model list
+  // route can still be verified with a minimal chat call, as the model the
+  // server resolves for the saved row (the one its status banner probes).
   $('p-test-btn').addEventListener('click', async () => {
     const out = $('p-test-result');
     $('p-test-btn').disabled = true;
@@ -987,13 +988,9 @@
           binary: $('p-binary').value,
           baseUrl: $('p-baseUrl').value.trim(),
           apiKey: $('p-apiKey').value,
-          model:
-            $('p-defaultModel').value.trim() ||
-            $('p-models')
-              .value.split('\n')
-              .map((s) => s.trim())
-              .filter(Boolean)[0] ||
-            '',
+          id: currentType === 'provider' && current && !isNew ? current.id : undefined,
+          defaultModel: $('p-defaultModel').value.trim(),
+          models: $('p-models').value,
         }),
       });
       if (probedModel) {

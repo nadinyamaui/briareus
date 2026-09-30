@@ -24,6 +24,10 @@ import {
   codexEffortsForModel,
   testProviderEndpoint,
   probeChatEndpoint,
+  ensureCodexHome,
+  probeProviderAuth,
+  codexEndpointDefaultModel,
+  verifyCustomEndpoint,
 } from '../lib/providers.js';
 
 // providers.js imports no project module, so nothing is mocked here: the
@@ -51,17 +55,250 @@ describe('getBinary / BINARIES', () => {
   it('offers the GPT-6 family when no Codex model cache exists', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-fallback-'));
     try {
-      expect(BINARIES.codex.models({}, null, home).slice(0, 3)).toEqual([
+      expect(BINARIES.codex.models({}, null, home).slice(0, 4)).toEqual([
+        'gpt-6.1-sol',
         'gpt-6-astra',
         'gpt-6-sol',
         'gpt-6-luna',
       ]);
       expect(BINARIES.codex.models({}, null, home)).not.toContain('gpt-5.6-sol');
-      expect(BINARIES.codex.defaultModel()).toBe('gpt-6-sol');
+      expect(BINARIES.codex.defaultModel()).toBe('gpt-6.1-sol');
+      expect(BINARIES.codex.defaultModels()).toEqual(['gpt-6.1-sol', 'gpt-6-sol']);
+      expect(Object.isFrozen(BINARIES.codex.defaultModels())).toBe(true);
       expect(BINARIES.codex.efforts).toContain('max');
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  it('starts a custom endpoint that lists no models on the oldest default', () => {
+    const endpoint = { baseUrl: 'https://proxy.example/v1', apiKey: 'k', models: [] };
+
+    expect(BINARIES.codex.defaultModels({}, endpoint)).toEqual(['gpt-6-sol']);
+    expect(BINARIES.codex.defaultModels({}, { ...endpoint, models: ['gpt-6.1-sol'] })).toEqual([
+      'gpt-6.1-sol',
+      'gpt-6-sol',
+    ]);
+    expect(BINARIES.codex.defaultModels({}, { models: [] })).toEqual(['gpt-6.1-sol', 'gpt-6-sol']);
+  });
+
+  it('keeps the newest default for a row with only an OpenAI API key', () => {
+    const keyOnly = { baseUrl: '', apiKey: 'sk-k', models: [] };
+
+    expect(BINARIES.codex.defaultModels({}, keyOnly)).toEqual(['gpt-6.1-sol', 'gpt-6-sol']);
+  });
+});
+
+describe('ensureCodexHome for a custom endpoint', () => {
+  let home;
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (home) fs.rmSync(home, { recursive: true, force: true });
+    home = null;
+  });
+
+  function configModel(provider, turnModel) {
+    home = home || fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-home-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const dir = ensureCodexHome(
+      { id: 7, label: 'Proxy', baseUrl: 'https://proxy.example/v1', apiKey: 'k', efforts: [], ...provider },
+      turnModel,
+    );
+    const toml = fs.readFileSync(path.join(dir, 'config.toml'), 'utf8');
+    const model = /^model = "(.*)"$/m.exec(toml)[1];
+    expect(/^review_model = "(.*)"$/m.exec(toml)[1]).toBe(model);
+    return model;
+  }
+
+  it('falls back through the defaults the row lists, as the picker does', () => {
+    expect(configModel({ models: ['gpt-5.5', 'gpt-6-sol'] })).toBe('gpt-6-sol');
+    expect(configModel({ models: ['gpt-5.5', 'gpt-6.1-sol', 'gpt-6-sol'] })).toBe('gpt-6.1-sol');
+    expect(configModel({ models: ['gpt-5.5', 'gpt-5.4'] })).toBe('gpt-5.5');
+  });
+
+  it('uses the oldest default when the row lists no models', () => {
+    expect(configModel({ models: [] })).toBe('gpt-6-sol');
+  });
+
+  it('keeps a stored default the row offers, and the turn pick over both', () => {
+    expect(configModel({ models: ['gpt-5.5', 'gpt-6-sol'], defaultModel: 'gpt-5.5' })).toBe('gpt-5.5');
+    expect(configModel({ models: ['gpt-5.5', 'gpt-6-sol'], defaultModel: 'gone' })).toBe('gpt-6-sol');
+    expect(configModel({ models: [], defaultModel: 'gpt-6.1-sol' })).toBe('gpt-6.1-sol');
+    expect(configModel({ models: ['gpt-5.5', 'gpt-6-sol'] }, 'gpt-5.5')).toBe('gpt-5.5');
+  });
+
+  it('writes the model the picker defaults to, wide twins and stored defaults included', () => {
+    // The picker compares the raw list, so a wide twin does not offer its slug.
+    expect(configModel({ models: ['gpt-5.5', 'gpt-6-sol (872k)'] })).toBe('gpt-5.5');
+    expect(configModel({ models: ['gpt-6-sol (872k)', 'gpt-5.5'], defaultModel: 'gpt-6-sol (872k)' })).toBe(
+      'gpt-6-sol',
+    );
+    // With no list, the stored default is all the operator said about the
+    // endpoint, so it counts even though the catalog does not offer it.
+    expect(configModel({ models: [], defaultModel: 'my-proxy-model' })).toBe('my-proxy-model');
+  });
+});
+
+describe('a custom codex endpoint that lists no models', () => {
+  let home;
+  afterEach(() => {
+    if (home) fs.rmSync(home, { recursive: true, force: true });
+    home = null;
+  });
+
+  it('offers its stored default in the picker, ahead of the catalog', () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-picker-'));
+    const endpoint = { id: 7, baseUrl: 'https://proxy.example/v1', apiKey: 'k', models: [] };
+    const models = BINARIES.codex.models({}, { ...endpoint, defaultModel: 'my-proxy-model' }, home);
+
+    expect(models[0]).toBe('my-proxy-model');
+    expect(models.slice(1)).toEqual(BINARIES.codex.models({}, endpoint, home));
+    // One the catalog already offers is not listed twice.
+    expect(BINARIES.codex.models({}, { ...endpoint, defaultModel: 'gpt-6-sol' }, home)).toEqual(
+      BINARIES.codex.models({}, endpoint, home),
+    );
+    // A login row's picker is its catalog alone.
+    expect(
+      BINARIES.codex.models({}, { id: 8, models: [], defaultModel: 'my-proxy-model' }, home),
+    ).not.toContain('my-proxy-model');
+  });
+});
+
+describe('the model the settings Test button probes', () => {
+  let home;
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (home) fs.rmSync(home, { recursive: true, force: true });
+    home = null;
+  });
+
+  it('is the one the saved row resolves to', () => {
+    // The developer's own ~/.codex must not decide the list-less case.
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-test-button-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const form = { baseUrl: 'https://proxy.example/v1', apiKey: 'k' };
+
+    expect(codexEndpointDefaultModel({ ...form, defaultModel: '', models: ['gpt-5.5', 'gpt-6-sol'] })).toBe(
+      'gpt-6-sol',
+    );
+    expect(codexEndpointDefaultModel({ ...form, defaultModel: 'my-proxy-model', models: [] })).toBe(
+      'my-proxy-model',
+    );
+    expect(codexEndpointDefaultModel({ ...form, defaultModel: '', models: [] })).toBe('gpt-6-sol');
+  });
+
+  it('reads no row dir for a form that was never saved', () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-test-button-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const stray = path.join(home, '.codex-provider-undefined');
+    fs.mkdirSync(stray);
+    fs.writeFileSync(
+      path.join(stray, 'models_cache.json'),
+      JSON.stringify({ models: [{ slug: 'stray-model' }] }),
+    );
+
+    expect(
+      codexEndpointDefaultModel({
+        baseUrl: 'https://proxy.example/v1',
+        apiKey: 'k',
+        defaultModel: '',
+        models: [],
+      }),
+    ).toBe('gpt-6-sol');
+  });
+});
+
+describe('verifyCustomEndpoint with a lazy model', () => {
+  it('refuses to cache it without a modelKey', async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    try {
+      await expect(
+        verifyCustomEndpoint({
+          binary: 'codex',
+          baseUrl: 'https://proxy.example/v1',
+          apiKey: 'k',
+          model: () => 'm',
+        }),
+      ).rejects.toThrow(/modelKey/);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('the auth probe for a custom codex endpoint', () => {
+  let home;
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    if (home) fs.rmSync(home, { recursive: true, force: true });
+    home = null;
+  });
+
+  // The endpoint publishes no model list, so the probe falls back to a chat
+  // call: the model in that call is the one under test. Each row gets its own
+  // key, since a verdict is cached per endpoint, model and key.
+  let row = 0;
+  async function probedModel(provider) {
+    home = home || fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-probe-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const calls = [];
+    vi.stubGlobal('fetch', async (url, opts) => {
+      calls.push({ url, opts });
+      if (url.endsWith('/models')) return { ok: false, status: 404, text: async () => 'Not Found' };
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ id: 'resp_1', object: 'response' }),
+      };
+    });
+    const auth = await probeProviderAuth({
+      id: 7,
+      binary: 'codex',
+      label: 'Proxy',
+      baseUrl: 'https://proxy.example/v1',
+      apiKey: `k-${++row}`,
+      efforts: [],
+      ...provider,
+    });
+    expect(auth.loggedIn).toBe(true);
+    expect(calls.map((c) => c.url)).toEqual([
+      'https://proxy.example/v1/models',
+      'https://proxy.example/v1/responses',
+    ]);
+    return JSON.parse(calls[1].opts.body).model;
+  }
+
+  it('sends the model the picker defaults to', async () => {
+    expect(await probedModel({ models: ['gpt-5.5', 'gpt-6-sol'] })).toBe('gpt-6-sol');
+    expect(await probedModel({ models: [] })).toBe('gpt-6-sol');
+    expect(await probedModel({ models: [], defaultModel: 'my-proxy-model' })).toBe('my-proxy-model');
+    // The picker compares the raw list, so a wide twin does not offer its slug.
+    expect(await probedModel({ models: ['gpt-5.5', 'gpt-6-sol (872k)'] })).toBe('gpt-5.5');
+  });
+
+  it('reads no models cache when its cached verdict answers', async () => {
+    const provider = { models: [] };
+    await probedModel(provider);
+    const reads = vi.spyOn(fs, 'readFileSync');
+    const calls = [];
+    vi.stubGlobal('fetch', async (url) => calls.push(url));
+
+    const auth = await probeProviderAuth({
+      id: 7,
+      binary: 'codex',
+      label: 'Proxy',
+      baseUrl: 'https://proxy.example/v1',
+      apiKey: `k-${row}`,
+      efforts: [],
+      ...provider,
+    });
+
+    expect(auth.loggedIn).toBe(true);
+    expect(calls).toEqual([]);
+    expect(reads.mock.calls.filter(([file]) => String(file).endsWith('models_cache.json'))).toEqual([]);
   });
 });
 
@@ -220,6 +457,7 @@ describe('the wide-window twin of a codex model', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-filtered-fallback-'));
     try {
       expect(codexWideVariants(['gpt-5.6-sol', 'gpt-5.6-terra'], { id: 9 }, home)).toEqual([
+        'gpt-6.1-sol',
         'gpt-6-astra',
         'gpt-6-sol',
         'gpt-6-luna',
@@ -277,6 +515,7 @@ describe('Codex model reasoning efforts', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-efforts-fallback-'));
     try {
       expect(codexEffortsForModel('gpt-6-sol', null, home)).toContain('max');
+      expect(codexEffortsForModel('gpt-6.1-sol', null, home)).toContain('max');
       expect(codexEffortsForModel('gpt-5.5', null, home)).not.toContain('max');
     } finally {
       fs.rmSync(home, { recursive: true, force: true });

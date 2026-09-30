@@ -41,7 +41,10 @@ vi.mock('../lib/db.js', () => ({
   getProviderRow: async (id) => state.rows.find((r) => r.id === Number(id)) || null,
 }));
 
-vi.mock('../lib/providers.js', () => {
+vi.mock('../lib/providers.js', async (importOriginal) => {
+  // The default-model fall-through is shared with providers.js's own callers,
+  // so the real one runs against these fake binaries.
+  const { resolveDefaultModel } = await importOriginal();
   const binary = (name, models, efforts, defaultModel, defaultEffort) => ({
     label: `${name} label`,
     models: () => models,
@@ -73,10 +76,12 @@ vi.mock('../lib/providers.js', () => {
     // The real one reads the entry's cached catalog; here one slug is sold at
     // two sizes and the rest are not, which is all this module branches on.
     codexWideVariants: (slugs) => slugs.flatMap((s) => (s === 'gpt-a' ? [s, 'gpt-a (872k)'] : [s])),
+    resolveDefaultModel,
   };
 });
 
 const store = await import('../lib/providerstore.js');
+const { BINARIES } = await import('../lib/providers.js');
 const {
   initProviders,
   listProviders,
@@ -463,6 +468,20 @@ describe('resolving a row against its binary', () => {
     const p = row({ binary: 'claude', models: ['only-this'] });
 
     expect(providerDefaultModel(p, cfg)).toBe('only-this');
+  });
+
+  it("falls back through the binary's older defaults before the first model", () => {
+    const codex = BINARIES.codex;
+    codex.defaultModels = () => ['gpt-new', 'gpt-b'];
+    try {
+      expect(providerDefaultModel(row({ binary: 'codex', models: ['gpt-a', 'gpt-b'] }), cfg)).toBe('gpt-b');
+      expect(providerDefaultModel(row({ binary: 'codex', models: ['gpt-a', 'gpt-new', 'gpt-b'] }), cfg)).toBe(
+        'gpt-new',
+      );
+      expect(providerDefaultModel(row({ binary: 'codex', models: ['gpt-a', 'gpt-c'] }), cfg)).toBe('gpt-a');
+    } finally {
+      delete codex.defaultModels;
+    }
   });
 
   it('uses the row default effort when it is one of the offered ones', () => {
