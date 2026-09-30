@@ -209,6 +209,7 @@ import {
   workerSummary,
   deliverWorkerNotices,
   deliverToSession,
+  instructSession,
   flushDeliveries,
   setSessionWebhook,
   rotateSessionWebhook,
@@ -243,6 +244,31 @@ beforeEach(() => {
   state.otherProviders = [];
   state.group = null;
 });
+
+// A worker spawned for real goes on to prepare a workspace that is not there,
+// fails on its own time, and tells its orchestrator, which takes the notice as
+// a turn. On a loaded machine that lands blocks later, where the turn runs
+// through whatever fake CLI is installed then and throws its prompt count off
+// (the webhook deliveries). So the block that spawned workers waits until
+// every one has failed, its notice has reached the orchestrator, and the
+// orchestrator has settled.
+async function settleWorkers(orchestratorIds) {
+  const busy = (job) => ['preparing', 'running'].includes(job.status);
+  await vi.waitFor(
+    () => {
+      for (const orch of orchestratorIds.map(getJob)) {
+        for (const worker of workerSessionsFor(orch)) {
+          if (worker.status === 'closed') continue;
+          expect(busy(worker), `${worker.id} still starting`).toBe(false);
+          const told = orch.events.some((e) => e.text?.includes(`Worker ${worker.id} `));
+          expect(told, `${orch.id} not told about ${worker.id}`).toBe(true);
+        }
+        expect(busy(orch), `${orch.id} still on a turn`).toBe(false);
+      }
+    },
+    { timeout: 30_000 },
+  );
+}
 
 describe('jobEventsSince', () => {
   const job = { events: [{ seq: 1 }, { seq: 2 }, { seq: 3 }] };
@@ -887,6 +913,7 @@ describe('spawnWorkerSession', () => {
     getJob('zeus-a').status = 'idle';
     getJob('zeus-roles').status = 'idle';
   });
+  afterAll(() => settleWorkers(['orch-a', 'orch-c', 'orch-gone', 'zeus-a', 'zeus-roles']));
 
   it('a resumed Zeus saves complete model choices before queuing its brief', () => {
     const job = getJob('zeus-resume');
@@ -2309,6 +2336,7 @@ describe('spawnWorkerSession: tooling fixes', () => {
     await initJobs();
     getJob('tool-orch').status = 'idle';
   });
+  afterAll(() => settleWorkers(['tool-orch']));
 
   beforeEach(() => {
     state.projects = [
@@ -2578,6 +2606,13 @@ describe('webhook deliveries', () => {
     'hk-public',
     'hk-guard',
     'hk-drain',
+    'in-off',
+    'in-free',
+    'in-ask',
+    'in-busy',
+    'in-turns',
+    'in-budget',
+    'in-dup',
   ];
 
   beforeAll(async () => {
@@ -3033,6 +3068,7 @@ describe('webhook deliveries', () => {
       maxTurns: 10,
       budgetUsd: 0,
       sshUnattended: false,
+      instructions: false,
       spentUsd: 0,
     });
     expect(JSON.stringify(shown)).not.toContain('a customer wrote this');
@@ -3085,6 +3121,130 @@ describe('webhook deliveries', () => {
     expect(send).toThrow(/joins no turn and answers no question/);
     expect(users(job).map((e) => e.text)).not.toContain('outside words');
     await cli.finish(job);
+  });
+  describe('instructions', () => {
+    const instructed = (id, extra = {}) => {
+      const job = getJob(id);
+      job.webhook = { ...job.webhook, instructions: true, ...extra };
+      return job;
+    };
+
+    it('are refused until the instructions webhook is on, which the transcript says', () => {
+      const job = getJob('in-off');
+      expect(refused(() => instructSession('in-off', { text: 'go' }))).toMatchObject({
+        status: 409,
+        message: expect.stringMatching(/instructions webhook is off/),
+      });
+      expect(users(job)).toHaveLength(0);
+      setSessionWebhook('in-off', { instructions: true });
+      expect(infos(job).filter((t) => t.startsWith('Instructions webhook on.'))).toHaveLength(1);
+      setSessionWebhook('in-off', { instructions: false });
+      expect(infos(job)).toContain('Instructions webhook turned off. Instructions are refused.');
+      expect(refused(() => instructSession('in-off', { text: 'go' }))).toMatchObject({ status: 409 });
+      // Disarmed, the instructions webhook is off with the rest of it.
+      job.webhook = { ...job.webhook, armed: false, instructions: true };
+      expect(refused(() => instructSession('in-off', { text: 'go' }))).toMatchObject({ status: 409 });
+      expect(refused(() => instructSession('in-nowhere', { text: 'go' }))).toMatchObject({ status: 404 });
+    });
+
+    it('start a turn as the operator’s word, which nobody is watching from the dashboard', async () => {
+      const { prompts } = fakeCli();
+      const job = instructed('in-free');
+      job.unattendedTurns = 3;
+      expect(instructSession('in-free', { text: 'Deploy it', source: 'whatsapp', id: 'w1' })).toEqual({
+        status: 'running',
+      });
+      expect(prompts).toEqual([
+        "Operator instruction, sent through this session's instructions webhook from whatsapp:\n\nDeploy it",
+      ]);
+      const [bubble] = users(job);
+      expect(bubble.via).toBe('instruction');
+      // The operator's word re-arms the breaker, but SSH still asks.
+      expect(job.unattendedTurns).toBe(0);
+      expect(job.unattendedTurn).toBe(true);
+      job.costUsd = (job.costUsd || 0) + 0.4;
+      await cli.finish(job);
+      expect(sessionWebhookState('in-free').spentUsd).toBe(0.4);
+    });
+
+    it('answer the question the agent stands on, and what was held goes after', async () => {
+      const { prompts } = fakeCli();
+      const job = instructed('in-ask');
+      job.awaitingAnswer = true;
+      expect(deliverToSession('in-ask', { text: 'Yes, proceed', source: 'customer' }).status).toBe('held');
+      expect(instructSession('in-ask', { text: 'No, wait for Monday' }).status).toBe('running');
+      expect(job.awaitingAnswer).toBe(false);
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain('No, wait for Monday');
+      await cli.finish(job, 0, 0);
+      await vi.waitFor(() => expect(prompts).toHaveLength(2));
+      expect(prompts[1]).toMatch(/^Webhook delivery, not from the operator\. /);
+      await cli.finish(job, 0, 1);
+    });
+
+    it('queue behind a turn under way, like a message typed here, and count what their turn spent', async () => {
+      const { prompts } = fakeCli();
+      const job = instructed('in-busy');
+      sendDevMessage('in-busy', 'Refactor the importer');
+      expect(instructSession('in-busy', { text: 'Also bump the version' })).toEqual({ status: 'queued' });
+      expect(prompts).toHaveLength(1);
+      expect(publicJob(job).queued).toHaveLength(1);
+      job.costUsd = (job.costUsd || 0) + 2;
+      cli.children[0].emit('close', 0);
+      await vi.waitFor(() => expect(prompts).toHaveLength(2));
+      expect(prompts[1]).toContain('Also bump the version');
+      job.costUsd += 0.3;
+      await cli.finish(job, 0, 1);
+      expect(sessionWebhookState('in-busy').spentUsd).toBe(0.3);
+    });
+
+    it('lift the pause the turns in a row put on deliveries', async () => {
+      fakeCli();
+      const job = instructed('in-turns', { maxTurns: 1 });
+      expect(deliverToSession('in-turns', { text: 'one' }).status).toBe('running');
+      await cli.finish(job);
+      expect(refused(() => deliverToSession('in-turns', { text: 'two' }))).toMatchObject({ status: 429 });
+      expect(job.webhookPaused).toMatchObject({ kind: 'turns' });
+      expect(instructSession('in-turns', { text: 'carry on' }).status).toBe('running');
+      expect(job.webhookPaused).toBe(null);
+      await cli.finish(job);
+      expect(deliverToSession('in-turns', { text: 'three' }).status).toBe('running');
+      await cli.finish(job);
+    });
+
+    it('stop at what the webhook’s turns may spend', () => {
+      fakeCli();
+      const job = instructed('in-budget', { budgetUsd: 1 });
+      job.webhook.spent = { [new Date().toISOString().slice(0, 13)]: 1.5 };
+      expect(refused(() => instructSession('in-budget', { text: 'go' }))).toMatchObject({
+        status: 429,
+        retryAfter: 3600,
+      });
+      expect(job.webhookPaused).toMatchObject({ kind: 'budget' });
+      expect(users(job)).toHaveLength(0);
+    });
+
+    it('take a retry once', async () => {
+      const { prompts } = fakeCli();
+      const job = instructed('in-dup');
+      expect(instructSession('in-dup', { text: 'go', id: 'w9' }).status).toBe('running');
+      expect(instructSession('in-dup', { text: 'go', id: 'w9' })).toEqual({ status: 'duplicate' });
+      // One id namespace with the deliveries: a sender cannot replay one as the other.
+      expect(deliverToSession('in-dup', { text: 'go', id: 'w9' })).toEqual({ status: 'duplicate' });
+      expect(prompts).toHaveLength(1);
+      await cli.finish(job);
+    });
+
+    it('are part of the briefing only while on', async () => {
+      const { prompts } = fakeCli();
+      const job = getJob('hk-brief');
+      job.chats = undefined;
+      job.webhook = { ...job.webhook, instructions: true };
+      sendDevMessage('hk-brief', 'hello');
+      expect(prompts[0]).toContain('opens with "Operator instruction"');
+      await cli.finish(job);
+      job.webhook = { ...job.webhook, instructions: false };
+    });
   });
 });
 

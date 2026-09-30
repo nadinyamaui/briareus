@@ -88,6 +88,11 @@
                 the session's key) or <code>Authorization: Bearer</code> with that key
               </td>
             </tr>
+            <tr>
+              <td><code>POST /webhooks/session/:id/instructions</code></td>
+              <td>a bridge relaying only your own messages</td>
+              <td>the same two ways, with the session's <em>instructions</em> key</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -153,6 +158,19 @@
         bad key (whether the session exists or not), <code>404</code> for a deleted session,
         <code>409</code> when the webhook is off or the session cannot be woken now, <code>413</code> for a
         message too long and <code>429</code> at a cap.
+      </p>
+      <p>
+        <strong>Instructions are the second route, and they are your word.</strong> Tick
+        <strong>Take instructions too</strong> in the dialog and the session gets
+        <code>/webhooks/session/:id/instructions</code>, with a key of its own: the key to the first route
+        never opens it, nor the other way round, and <strong>Rotate key</strong> ends both. What it delivers
+        goes to the agent the way a message typed in the dashboard does: it answers the question the agent
+        stands on, queues behind a turn under way and lifts the pause the turns in a row put on deliveries. It
+        is for a bridge that decides by who wrote a message where it goes, a WhatsApp relay say: your own
+        number to <code>/instructions</code>, everybody else to the first route. The hourly and spend caps
+        hold for both, and a turn an instruction started still asks before an SSH command in allow mode
+        (nobody is at the dashboard to see it). The answer is <code>202</code> with <code>running</code> or
+        <code>queued</code>, and <code>409</code> while instructions are off.
       </p>
 
       <h2 id="workspaces">The workspace pool</h2>

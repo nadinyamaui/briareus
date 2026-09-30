@@ -485,10 +485,11 @@ machine with its git and GitHub credentials:
 With a public https hostname, the PR state an open session mirrors is delivered
 instead of polled for:
 
-| Route                        | Sender                | Authenticated by                                                                                        |
-| ---------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------- |
-| `POST /webhooks/github`      | GitHub                | `X-Hub-Signature-256`, HMAC-SHA256 over the raw body                                                    |
-| `POST /webhooks/session/:id` | anything you point it | `X-Briareus-Signature-256` (HMAC-SHA256 over the time sent and the raw body) or `Authorization: Bearer` |
+| Route                                     | Sender                                | Authenticated by                                                                                        |
+| ----------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `POST /webhooks/github`                   | GitHub                                | `X-Hub-Signature-256`, HMAC-SHA256 over the raw body                                                    |
+| `POST /webhooks/session/:id`              | anything you point it                 | `X-Briareus-Signature-256` (HMAC-SHA256 over the time sent and the raw body) or `Authorization: Bearer` |
+| `POST /webhooks/session/:id/instructions` | a bridge relaying only your own words | The same, with the session's instructions key                                                           |
 
 The secret is generated on first boot and kept in the `app_settings` table;
 there is nothing to paste anywhere. The app installs its own repository hook on
@@ -572,6 +573,22 @@ curl -X POST "$URL" -H "X-Briareus-Timestamp: $TS" -H "X-Briareus-Signature-256:
 | `409`  | The webhook is off, the session failed, or it cannot be woken now (a drain for a restart, no free slot)      |
 | `413`  | The message is longer than 20,000 characters                                                                 |
 | `429`  | A cap was reached, or 30 deliveries are already waiting; `Retry-After` says when, where there is a when      |
+
+**Instructions: the second route, and your word.** Tick **Take instructions too** in the dialog and the session
+also takes `POST /webhooks/session/:id/instructions`, with a key of its own: the messages key never opens it, nor
+the other way round, and **Rotate key** ends both. It is for a bridge that decides by who wrote a message where it
+goes (a WhatsApp relay sending your own number's messages there and everybody else's to the first route), so what
+it delivers reaches the agent the way a message typed in the dashboard does:
+
+- It answers the question the agent stands on, and queues behind a turn under way instead of waiting to be a turn
+  of its own.
+- It is the word from you that lifts the turns-in-a-row pause.
+- The hourly and spend caps hold for it as for deliveries, and a retry with the same `id` is taken once.
+- A server in **allow** mode under SSH still asks for approval in a turn an instruction started, since nobody is at
+  the dashboard to see it, unless the session's webhook is set to let it run.
+
+The request is the same as a delivery's; the answer is `202` with `"running"` or `"queued"`, `200` for a
+duplicate, and `409` while instructions are off.
 
 A delivery that was taken is kept on the session's record, which is written within half a second and on shutdown,
 so one held for a session a restart interrupted is delivered afterwards. Only a crash inside that half second loses
