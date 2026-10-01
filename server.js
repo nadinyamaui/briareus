@@ -155,6 +155,7 @@ import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload, getUpload } from './lib/uploads.js';
 import { transcribe, transcribeAvailable } from './lib/transcribe.js';
+import { previewAccess } from './lib/tunnel.js';
 import { projectUsage, overallUsage, jobUsageEstimates, estimateEventCosts } from './lib/usage.js';
 import { agentOnly, apiEnabled } from './lib/auth.js';
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
@@ -215,6 +216,7 @@ app.use(
     reviewerRuntime,
     stepRuntime,
     transcribeAvailable,
+    previewAccess,
   }),
 );
 app.use(express.json({ limit: '1mb' }));

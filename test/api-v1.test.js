@@ -17,10 +17,11 @@ const jobs = {
   review: { id: 'review', repo, kind: 'review' },
 };
 
-let auth, server, url, clock, apiOn, bus, sessions, project, handler, tokens, savesFail;
+let auth, server, url, clock, apiOn, bus, sessions, project, handler, tokens, savesFail, previewAccess;
 beforeEach(async () => {
   let saved = [];
   savesFail = false;
+  previewAccess = null;
   // What the database driver raises: an error with a code and no HTTP status.
   const down = () =>
     Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3306'), { code: 'ECONNREFUSED' });
@@ -89,6 +90,7 @@ beforeEach(async () => {
           : null,
       stepRuntime: (p, step) => (p.stepRuntimes && p.stepRuntimes[step]) || null,
       transcribeAvailable: () => true,
+      previewAccess: () => previewAccess,
       recheckMs: 20,
     }),
   );
@@ -222,6 +224,41 @@ describe('who gets in', () => {
     for (const route of ['/agent/memories', '/api/agent/memories', '/mobile-devices', '/login'])
       expect((await request(route, { token: tokens.admin })).status).toBe(404);
     expect(handler).not.toHaveBeenCalled();
+  });
+});
+
+describe('the preview service token', () => {
+  const ACCESS = { clientId: 'briareus.access', clientSecret: 'svc-secret', hostSuffix: 'example.com' };
+
+  it('hands a manage token the service token and the hosts to send it to', async () => {
+    previewAccess = ACCESS;
+
+    const response = await request('/preview/access');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(ACCESS);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('answers 404 when the server has no tunnel or no service token', async () => {
+    const response = await request('/preview/access');
+
+    expect(response.status).toBe(404);
+    expect((await response.json()).error).toMatch(/No Cloudflare Access service token is configured/);
+  });
+
+  it('refuses a read token, and lets an admin one through', async () => {
+    previewAccess = ACCESS;
+
+    const refused = await request('/preview/access', { token: tokens.read });
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).not.toContain('svc-secret');
+    expect((await request('/preview/access', { token: tokens.admin })).status).toBe(200);
+  });
+
+  it('is in the OpenAPI document as a manage route', async () => {
+    const op = (await json('/openapi.json', { token: tokens.read })).paths['/preview/access'].get;
+
+    expect(op).toMatchObject({ operationId: 'previewAccess', 'x-briareus-access': 'manage' });
   });
 });
 
@@ -598,6 +635,7 @@ describe('the contract', () => {
       'client.get',
       'events.stream',
       'openapi.get',
+      'preview.access',
       'projects.list',
       'sessions.list',
       'token.revoke',
