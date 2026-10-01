@@ -1,7 +1,7 @@
 # Client API v1
 
-`/api/v1` is the one HTTP API a Briareus client talks to: a web app in its own
-repository, a desktop app, the iOS app. It is the only API the server has, and
+`/api/v1` is the one HTTP API a Briareus client talks to: Briareus Windows and
+Briareus iOS, each in a repository of its own. It is the only API the server has, and
 the server has no UI of its own: the routes the removed dashboard called with
 its login cookie (`/api/dev/*`,
 `/api/projects`, …) and the earlier mobile API (`/api/mobile/v1`) are retired,

@@ -9,11 +9,13 @@ own, so parallel sessions never share a working tree or a database. You
 describe what to build; the agent edits, runs the app and its tests, and can
 push a feature branch / open a PR when asked.
 
-> **There is no web UI here.** The built-in dashboard and everything else that
-> ran in a browser have been removed; the clients (a desktop app, a web app, the
-> iOS app) live in repositories of their own and talk to this server through
-> [`/api/v1`](#client-api). Where this README names a chip, a button or a
-> screen, it is describing what a client offers on top of the API.
+> **Briareus is now a core app: you need a client to use it.** The built-in
+> dashboard and everything else that ran in a browser have been removed, so
+> opening the server in a browser shows nothing. The clients, **Briareus
+> Windows** and **Briareus iOS**, live in repositories of their own and talk to
+> this server through [`/api/v1`](#client-api) with a token from
+> `npm run create-token`. Where this README names a chip, a button or a screen,
+> it is describing what a client offers on top of the API.
 
 > **This app runs shell commands as you.** A session edits files, runs the
 > project's setup and run commands, and pushes to GitHub with the credentials
@@ -403,6 +405,9 @@ npm run create-token -- --label Desktop    # sets AUTH_SECRET and prints an admi
 npm start                                  # http://localhost:4300/api/v1
 ```
 
+Then point a client at the server and give it that token: the server has no
+pages of its own, so a client is the only way to start and follow sessions.
+
 `--port 4301` (or `PORT` in `.env`) moves the server; `--port` wins so a test
 instance can run alongside the real one.
 
@@ -683,7 +688,7 @@ commands, which run on every session against the claimed server.
 ## Client API
 
 `/api/v1` is the server's one API, for clients that live outside this
-repository: a web app, a desktop app, the iOS app. It puts a bearer token in
+repository: Briareus Windows and Briareus iOS. It puts a bearer token in
 front of every handler, so it covers sessions, transcripts, pull requests
 (files, commits, checks, comments, reviews), findings, settings and two event
 streams. `npm run create-token -- --label Desktop` issues the first token, an
