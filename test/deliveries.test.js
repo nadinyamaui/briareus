@@ -6,8 +6,6 @@ import {
   INSTRUCTIONS_PROTOCOL,
   normalizeWebhookSettings,
   publicWebhook,
-  spentLastDay,
-  addSpend,
   deliveryId,
   readDelivery,
   deliveryMessage,
@@ -146,18 +144,17 @@ describe('instructionMessage', () => {
 
 describe('webhook settings', () => {
   it('start off, with caps already in place', () => {
-    expect(WEBHOOK_DEFAULTS).toMatchObject({ armed: false, perHour: 30, maxTurns: 10, budgetUsd: 0 });
+    expect(WEBHOOK_DEFAULTS).toMatchObject({ armed: false, perHour: 30, maxTurns: 10 });
     expect(WEBHOOK_DEFAULTS.sshUnattended).toBe(false);
     expect(WEBHOOK_DEFAULTS.instructions).toBe(false);
     expect(Object.isFrozen(WEBHOOK_DEFAULTS)).toBe(true);
   });
 
   it('take what the operator sets and keep the rest, the bookkeeping included', () => {
-    const existing = { ...WEBHOOK_DEFAULTS, epoch: 3, seen: ['a'], spent: { '2026-09-27T17': 1 } };
-    const next = normalizeWebhookSettings({ armed: true, perHour: 120, budgetUsd: 12.345 }, existing);
-    expect(next).toMatchObject({ armed: true, perHour: 120, maxTurns: 10, budgetUsd: 12.35, epoch: 3 });
+    const existing = { ...WEBHOOK_DEFAULTS, epoch: 3, seen: ['a'] };
+    const next = normalizeWebhookSettings({ armed: true, perHour: 120 }, existing);
+    expect(next).toMatchObject({ armed: true, perHour: 120, maxTurns: 10, epoch: 3 });
     expect(next.seen).toEqual(['a']);
-    expect(next.spent).toEqual({ '2026-09-27T17': 1 });
   });
 
   it('turn the instructions webhook on and off apart from arming', () => {
@@ -182,57 +179,21 @@ describe('webhook settings', () => {
     [{ perHour: 1.5 }, /perHour/],
     [{ perHour: NaN }, /perHour/],
     [{ maxTurns: 1001 }, /maxTurns must be a whole number from 1 to 1000/],
-    [{ budgetUsd: -1 }, /budgetUsd must be a number from 0 to 10000/],
-    [{ budgetUsd: '5' }, /budgetUsd/],
-    [{ budgetUsd: Infinity }, /budgetUsd/],
   ])('refuse %o', (input, error) => {
     expect(() => normalizeWebhookSettings(input)).toThrow(error);
   });
 
-  it('show the dashboard the settings and the spend, and none of the bookkeeping', () => {
-    const at = Date.parse('2026-09-27T17:30:00Z');
-    const hook = { ...WEBHOOK_DEFAULTS, armed: true, seen: ['a', 'b'], spent: { '2026-09-27T16': 1.25 } };
-    expect(publicWebhook(hook, at)).toEqual({
+  it('show the dashboard the settings, and none of the bookkeeping', () => {
+    const hook = { ...WEBHOOK_DEFAULTS, armed: true, seen: ['a', 'b'] };
+    expect(publicWebhook(hook)).toEqual({
       armed: true,
       epoch: 0,
       perHour: 30,
       maxTurns: 10,
-      budgetUsd: 0,
       sshUnattended: false,
       instructions: false,
-      spentUsd: 1.25,
     });
     expect(publicWebhook(null)).toBe(null);
-  });
-});
-
-describe('what deliveries spent', () => {
-  const at = Date.parse('2026-09-27T17:30:00Z');
-
-  it('adds up by the hour and is read over the last twenty-four', () => {
-    const hook = {};
-    addSpend(hook, 0.5, at);
-    addSpend(hook, 0.25, at + 60_000);
-    addSpend(hook, 1, at + 2 * 3600_000);
-    expect(hook.spent).toEqual({ '2026-09-27T17': 0.75, '2026-09-27T19': 1 });
-    expect(spentLastDay(hook, at + 2 * 3600_000)).toBe(1.75);
-  });
-
-  it('lets go of an hour once it is a day old', () => {
-    const hook = { spent: { '2026-09-26T17': 5, '2026-09-26T18': 2 } };
-    expect(spentLastDay(hook, at)).toBe(2);
-    addSpend(hook, 1, at);
-    expect(hook.spent).toEqual({ '2026-09-26T18': 2, '2026-09-27T17': 1 });
-  });
-
-  it('counts nothing for a turn that reported no cost', () => {
-    const hook = {};
-    addSpend(hook, 0, at);
-    addSpend(hook, NaN, at);
-    addSpend(hook, -1, at);
-    expect(hook.spent).toBeUndefined();
-    expect(spentLastDay(hook, at)).toBe(0);
-    expect(spentLastDay(null, at)).toBe(0);
   });
 });
 

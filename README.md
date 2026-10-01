@@ -545,10 +545,8 @@ cannot be given by anybody else.
 | ------------------ | ------- | ----------------------------------------------------------------------------- |
 | Deliveries an hour | 30      | `429` with `Retry-After`                                                      |
 | Turns in a row     | 10      | The webhook pauses until you say anything in the session (or save the dialog) |
-| $ in 24 hours      | none    | The webhook pauses until the spend frees up or the cap is raised              |
 
-An orchestrator's project budget is a cap as well, and a turn that a delivery started and that failed pauses the
-webhook until you have looked. A pause is said once in the transcript and listed in **/attention**, so it reaches
+A turn that a delivery started and that failed pauses the webhook until you have looked. A pause is said once in the transcript and listed in **/attention**, so it reaches
 your phone with the other items.
 
 **Sending.** JSON `{"text": "…", "source": "ci", "id": "run-4711"}`, plain text, or any other JSON (handed over as
@@ -586,7 +584,7 @@ it delivers reaches the agent the way a message typed in the dashboard does:
 - It answers the question the agent stands on, and queues behind a turn under way instead of waiting to be a turn
   of its own.
 - It is the word from you that lifts the turns-in-a-row pause.
-- The hourly and spend caps hold for it as for deliveries, and a retry with the same `id` is taken once.
+- The hourly cap holds for it as for deliveries, and a retry with the same `id` is taken once.
 - A server in **allow** mode under SSH still asks for approval in a turn an instruction started, since nobody is at
   the dashboard to see it, unless the session's webhook is set to let it run.
 

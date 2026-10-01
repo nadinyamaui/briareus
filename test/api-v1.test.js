@@ -59,7 +59,7 @@ beforeEach(async () => {
       body: Buffer.isBuffer(req.body) ? { bytes: req.body.length } : req.body,
       authorization: req.headers.authorization ?? null,
       repos: res.locals.apiRepos,
-      actor: req.apiActor,
+      actor: res.locals.apiActor,
     }),
   );
   const handlers = express.Router();
@@ -502,8 +502,6 @@ describe('the contract', () => {
       for (const [, method, route] of source.matchAll(
         /\b(?:api|app|router)\.(get|post|put|patch|delete)\(\s*['`]([^'`]+)['`]/g,
       ))
-        registered.set(`${method.toUpperCase()} ${route}`, file);
-      for (const [, method, route] of source.matchAll(/dashboard\.register\(\s*'(\w+)',\s*['`]([^'`]+)['`]/g))
         registered.set(`${method.toUpperCase()} ${route}`, file);
     }
     return registered;
