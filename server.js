@@ -52,6 +52,7 @@ import {
   startDevServe,
   startPullRequestPreview,
   flushJobs,
+  stopAllDevServes,
   spawnWorkerSession,
   workerSessionsFor,
   workerSummary,
@@ -2017,6 +2018,7 @@ let stopping = false;
 // so pm2 restarts a clean process.
 process.on('uncaughtException', (e) => {
   console.error('Uncaught exception:', e);
+  stopAllDevServes();
   const giveUp = setTimeout(() => process.exit(1), 3000);
   flushJobs()
     .catch(() => {})
@@ -2029,6 +2031,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
     if (stopping) process.exit(1); // a second Ctrl-C means "now"
     stopping = true;
+    stopAllDevServes();
     flushJobs()
       .catch((e) => console.error('Could not write the last sessions on shutdown:', e.message))
       .finally(() => process.exit(0));
