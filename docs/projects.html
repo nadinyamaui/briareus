@@ -85,6 +85,27 @@
             See <a href="sessions.html#local">Local mode</a>.
           </p>
         </div>
+        <div class="f" id="auto-update">
+          <div class="f-name">
+            Update the local checkout when a pull request merges <span class="f-meta">checkbox</span>
+          </div>
+          <p>
+            When GitHub reports a pull request merged, the local checkout pulls it: a fast-forward of the
+            branch the pull request merged into, followed by the <b>update commands</b>, one shell command per
+            line, run in the checkout in order with this project's PHP (<code>composer install</code>,
+            <code>php artisan migrate --force</code>, <code>php artisan horizon:terminate</code>). The first
+            failing command stops the rest.
+          </p>
+          <p>
+            The checkout is the developer's own tree, so it is only touched when it is on that branch and has
+            no uncommitted changes; otherwise the update is recorded as skipped, with the reason. It waits for
+            a Local-mode session working in the checkout to close, and merges landing meanwhile become one
+            more update, not a queue. <span class="kbd">Update now</span> runs the same steps by hand on
+            whatever branch is checked out, and the last run's result and output are shown beside it. It needs
+            the repository webhook (installed at boot when <code>PUBLIC_BASE_URL</code> is set); a push
+            straight to the branch, with no pull request, does not trigger it.
+          </p>
+        </div>
         <div class="f" id="self">
           <div class="f-name">
             This project is the dashboard itself <span class="f-meta">Orchestrator section</span>

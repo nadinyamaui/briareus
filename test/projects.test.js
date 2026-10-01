@@ -393,6 +393,22 @@ describe('the worker runtime', () => {
   });
 });
 
+describe('the local checkout auto-update', () => {
+  it('keeps the update commands one per line and needs a checkout to be on', async () => {
+    const saved = await createProject({
+      ...base,
+      localDir: '/src/shop',
+      autoUpdate: 'on',
+      updateCommands: 'composer install\n\n  php artisan horizon:terminate  ',
+    });
+    expect(saved.autoUpdate).toBe(true);
+    expect(saved.updateCommands).toEqual(['composer install', 'php artisan horizon:terminate']);
+    await expect(createProject({ repo: 'acme/other', autoUpdate: true })).rejects.toThrow(
+      /needs a local checkout/,
+    );
+  });
+});
+
 describe('the project that is the dashboard itself', () => {
   it('is off unless ticked, and stored as a plain boolean', async () => {
     expect((await createProject(base)).isSelf).toBe(false);
