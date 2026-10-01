@@ -8,8 +8,11 @@ own, so parallel sessions never share a working tree or a database. You
 describe what to build; the agent edits, runs the app and its tests, and can
 push a feature branch / open a PR when asked.
 
-Served at `/`; projects and the database pool are managed at
-`/settings/projects`.
+> **The built-in dashboard is retired.** The server is now driven through
+> [`/api/v1`](#client-api) by a client of its own (a desktop app, a web app, the
+> iOS app); the routes the pages below called are gone, so the pages still load
+> and no longer work. What this README says about the dashboard's screens
+> describes what a client offers through the API, not something served here.
 
 📖 **[Documentation](https://nadinyamaui.github.io/briareus/)**: installing it,
 creating a project field by field, registering database servers and providers,
@@ -702,10 +705,11 @@ commands, which run on every session against the claimed server.
 
 ## Control Briareus from ChatGPT web
 
-Open **Settings → ChatGPT connection** (`/settings/mcp`). Configure the public
-HTTPS origin of this installation, enable the connection, and create an OAuth
-client for the projects ChatGPT may manage. Copy the MCP URL, client ID and
-one-time client secret into ChatGPT’s connection form with **OAuth** selected.
+Set the connection up through the [client API](#client-api) with an admin
+token: `PUT /api/v1/settings/mcp` takes the public HTTPS origin of this
+installation and switches the connection on, and `POST /api/v1/settings/mcp/clients`
+creates an OAuth client for the projects ChatGPT may manage. Copy the MCP URL,
+client ID and one-time client secret into ChatGPT’s connection form with **OAuth** selected.
 Use the exact redirect URI shown by ChatGPT; the default is its stable
 `https://chatgpt.com/connector_platform_oauth_redirect` callback.
 
@@ -765,34 +769,25 @@ ChatGPT can apply its confirmation flow. Connecting does not itself start agents
 
 ## Client API
 
-`/api/v1` is the one API for clients that live outside this repository: a web
-app, the iOS app, a desktop app. It puts a bearer token in front of the same
-handlers the dashboard's pages use, so it covers sessions, transcripts, pull
-requests (files, commits, checks, comments, reviews), findings, settings and
-two event streams. **Settings → Devices and clients** issues the tokens: read
-or manage on chosen projects, or admin for everything the dashboard can do.
+`/api/v1` is the server's one API, for clients that live outside this
+repository: a web app, a desktop app, the iOS app. It puts a bearer token in
+front of every handler, so it covers sessions, transcripts, pull requests
+(files, commits, checks, comments, reviews), findings, settings and two event
+streams. `npm run create-token -- --label Desktop` issues the first token, an
+admin one; restart the server to load it. An admin token then issues the rest:
+read or manage on chosen projects, or admin for everything.
+
+The routes the built-in dashboard called with its login cookie, and the earlier
+`/api/mobile/v1`, are retired: they answer 410 to a signed-in browser and 401
+to anything else. The dashboard's pages are still served and no longer work.
 
 See the [client API guide](docs/api-v1.md) for tokens, permissions, the event
 streams and the Cloudflare Access exception, and the
 [reference](docs/api-v1-reference.md) for every route's fields and answer.
 `GET /api/v1/openapi.json` is the same catalog as an OpenAPI document. All
 three come from `lib/api-v1-catalog.js`; after changing a route there, run
-`npm run build:api-docs`. Everything the dashboard's pages can do has a route:
-`npm test` fails when a handler is added without one.
-
-## Native mobile API
-
-For a separately developed iPhone app, **Settings → Devices and clients** issues
-revocable device tokens scoped to selected projects, with read-only or manage
-permissions and an expiry. The native API lives under `/api/mobile/v1` and
-reuses the dashboard operations for projects, conversations, messages, pull
-requests and findings. Password login must be enabled; mobile tokens never
-authorize browser settings or internal agent APIs.
-
-See the [mobile integration guide](docs/mobile-api.md) for setup, the narrow
-Cloudflare Access exception, the authenticated OpenAPI document, request
-examples and incremental conversation polling. This prepares the backend;
-it does not include an iOS app or change the live Cloudflare configuration.
+`npm run build:api-docs`. `npm test` fails when a handler is added without a
+route, since nothing else can reach it.
 
 ## Deploying
 

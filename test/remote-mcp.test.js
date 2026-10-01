@@ -44,8 +44,6 @@ beforeEach(async () => {
       auth,
       loginEnabled: () => loginOn,
       signedIn: (req) => req.headers.cookie === 'owner=yes',
-      getProject: (repo) => (repo === 'owner/project' ? { repo } : null),
-      listProjects: () => [{ repo: 'owner/project', label: 'Project' }],
     }),
   );
   server = app.listen(0, '127.0.0.1');
@@ -248,10 +246,6 @@ it('disables remote access if password login is turned off, and refuses arbitrar
   loginOn = false;
   expect((await request('/mcp')).status).toBe(503);
   expect((await request(`/oauth/authorize?${new URLSearchParams(query())}`)).status).toBe(403);
-  expect(
-    (await request('/api/mcp/clients', { method: 'POST', body: { label: 'x', repos: ['owner/project'] } }))
-      .status,
-  ).toBe(403);
   expect(() =>
     auth.createClient({ label: 'x', repos: ['owner/project'], redirectUri: 'https://evil.example/' }),
   ).toThrow();
@@ -259,19 +253,16 @@ it('disables remote access if password login is turned off, and refuses arbitrar
   await expect(auth.configure({ enabled: true, baseUrl: 'https://secret@example.com' })).rejects.toThrow();
 });
 
-it('protects connection management from bearer tokens and returns secrets only on creation', async () => {
+it('keeps the consent page from bearer tokens and shows secrets only on creation', async () => {
   const tokens = await token();
-  const response = await request('/api/mcp', { headers: { Authorization: `Bearer ${tokens.access_token}` } });
+  const consent = `/oauth/authorize?${new URLSearchParams(query())}`;
+  const response = await request(consent, { headers: { Authorization: `Bearer ${tokens.access_token}` } });
   expect(response.status).toBe(403);
-  expect((await request('/api/mcp', { cookie: '' })).status).toBe(403);
-  const view = await (await request('/api/mcp')).json();
+  expect((await request(consent, { cookie: '' })).status).toBe(403);
+  const view = auth.view();
   expect(view.clients[0].connected).toBe(true);
   expect(JSON.stringify(view)).not.toContain(client.clientSecret);
   expect(view.clients[0].secretHash).toBeUndefined();
-  expect(
-    (await request('/api/mcp/clients', { method: 'POST', body: { label: 'wrong', repos: ['other/repo'] } }))
-      .status,
-  ).toBe(400);
 });
 
 it('rejects untrusted origins and malformed JSON without reaching a dashboard action', async () => {

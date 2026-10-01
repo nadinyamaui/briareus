@@ -15,6 +15,7 @@ import {
   signOut,
   signedIn,
   requireAuth,
+  agentOnly,
   loginBlocked,
   loginFailed,
   loginSucceeded,
@@ -242,6 +243,18 @@ describe('requireAuth', () => {
     expect(run({ path: '/api/agent/memories', headers: {} }).next).toBe(true);
     expect(run({ path: '/api/agent/memories/some-name', headers: {} }).next).toBe(true);
     expect(run({ path: '/api/agentless', headers: {} }).next).toBe(false);
+  });
+
+  it('hands only an agent’s own routes to the handlers, signed in or not', () => {
+    const handlers = vi.fn();
+    const door = agentOnly(handlers);
+    const next = vi.fn();
+    door({ path: '/api/agent/memories' }, {}, next);
+    expect(handlers).toHaveBeenCalledTimes(1);
+    for (const path of ['/api/projects', '/api/dev/sessions', '/api/agentless', '/api/v1/api/agent/x', '/'])
+      door({ path }, {}, next);
+    expect(handlers).toHaveBeenCalledTimes(1);
+    expect(next).toHaveBeenCalledTimes(5);
   });
 
   it('answers an unauthenticated API call with 401 JSON', () => {

@@ -16,7 +16,6 @@ import { createRemoteMcpAuth } from './lib/remote-mcp-auth.js';
 import { remoteMcpRoutes } from './lib/remote-mcp.js';
 import { remoteMcpSettingsRoutes } from './lib/remote-mcp-settings.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
-import { mobileApiRoutes, mobileSettingsRoutes } from './lib/mobile-api.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
@@ -170,6 +169,7 @@ import { transcribe, transcribeAvailable } from './lib/transcribe.js';
 import { projectUsage, overallUsage, jobUsageEstimates, estimateEventCosts } from './lib/usage.js';
 import {
   requireAuth,
+  agentOnly,
   authEnabled,
   signedIn,
   signIn,
@@ -207,11 +207,13 @@ const app = express();
 // Secure flag on the session cookie) reflect the browser's real scheme.
 app.set('trust proxy', 'loopback');
 
-// The API handlers live on a router of their own rather than on the app, so
-// the same handlers answer two doors: the dashboard's pages, behind the
-// cookie login further down, and /api/v1, behind a client's bearer token
-// (lib/api-v1.js). Neither door's gate is on this router; each is mounted in
-// front of it.
+// The API handlers live on a router of their own rather than on the app,
+// because nothing reaches them by their own paths any more. /api/v1 hands a
+// client's request to them once its bearer token has been judged
+// (lib/api-v1.js), the ChatGPT connection calls the ones it was given
+// (lib/dashboard-routes.js), and an agent reaches its own under /api/agent/.
+// The cookie login used to open all of them to the built-in pages. That door
+// is retired, so the pages still load and can no longer do anything.
 const api = express.Router();
 
 // On every response, including the webhooks': the headers that keep the
@@ -229,25 +231,14 @@ app.use('/webhooks', webhookRouter());
 const dashboard = dashboardRoutes({ app: api, getProject, getJob, listActions });
 const remoteMcpAuth = createRemoteMcpAuth();
 app.use(remoteMcpRoutes({ auth: remoteMcpAuth, dashboard, loginEnabled: authEnabled }));
+// The client API: owner-issued tokens (`npm run create-token` for the first,
+// an admin token for the rest), in front of the handlers below.
 const mobileAuth = createMobileAuth();
-const mobileOptions = {
-  auth: mobileAuth,
-  loginEnabled: authEnabled,
-  ownerSecret: () => getConfig().auth.secret,
-};
-app.use(
-  mobileApiRoutes({
-    ...mobileOptions,
-    dashboard,
-    transcribe,
-    transcribeAvailable,
-    allRepos: () => listProjects().map((p) => p.repo),
-  }),
-);
-// The client API: the same device tokens, in front of the handlers below.
 app.use(
   apiV1Routes({
-    ...mobileOptions,
+    auth: mobileAuth,
+    loginEnabled: authEnabled,
+    ownerSecret: () => getConfig().auth.secret,
     mcpAuth: remoteMcpAuth,
     handlers: api,
     getJob,
@@ -260,27 +251,19 @@ app.use(
     transcribeAvailable,
   }),
 );
-// Every remaining write keeps the dashboard’s same-origin and login gates.
+// Every remaining write keeps the same-origin and login gates.
 app.use(sameOriginWrites);
 app.use(express.json({ limit: '1mb' }));
 
-// Everything below the login gate. Mounted before the static files so pages,
-// videos and APIs are all behind it; see lib/auth.js for what stays public.
+// Everything below the login gate. Mounted before the static files so the
+// pages and the videos are behind it; see lib/auth.js for what stays public.
 app.use(requireAuth);
-app.use(mobileSettingsRoutes({ ...mobileOptions, signedIn, getProject, listProjects }));
-app.use(
-  remoteMcpSettingsRoutes({
-    auth: remoteMcpAuth,
-    loginEnabled: authEnabled,
-    signedIn,
-    getProject,
-    listProjects,
-  }),
-);
-// Routes are added to it for the rest of this file; it is mounted here, behind
-// the login gate and ahead of the pages, because nothing under /api/ or
-// /videos is a page.
-app.use(api);
+// The ChatGPT connection's consent page: the one thing the owner still signs
+// in here for.
+app.use(remoteMcpSettingsRoutes({ auth: remoteMcpAuth, loginEnabled: authEnabled, signedIn }));
+// Routes are added to the handlers for the rest of this file. Of all of them,
+// only an agent's own are answered at their own path.
+app.use(agentOnly(api));
 
 // The sign-in page itself, and the two calls it makes.
 app.get('/login', (req, res) => {
@@ -316,6 +299,12 @@ app.post('/api/logout', (req, res) => {
 // with no login configured.
 app.get('/api/auth/state', (req, res) => res.json({ enabled: authEnabled() }));
 
+// What the built-in pages used to call. Said in JSON, and with where to go,
+// because the caller is a script that would otherwise be handed a 404 page.
+app.use('/api', (req, res) =>
+  res.status(410).json({ error: 'This route is retired. Call /api/v1 with a token: see docs/api-v1.md' }),
+);
+
 // For the uptime monitor: no auth (a monitor has no cookie, so the path is on
 // the public list) and nothing sensitive in the answer. 200 means the app AND
 // its database answer; 503 when MySQL does not, so a paused database shows up
@@ -341,8 +330,13 @@ app.use('/vendor/three', express.static(path.join(ROOT, 'node_modules', 'three',
 // The scenario videos a test run records. The run copies each .webm here and
 // links this route from the PR's test sheet, so the evidence outlives the
 // session workspace it was recorded in.
+// Mounted twice: on the app for the links themselves, which a person opens
+// from the pull request and signs in for, and on the handlers for a client
+// fetching one through /api/v1.
 fs.mkdirSync(getConfig().testVideosDir, { recursive: true });
-api.use('/videos', express.static(getConfig().testVideosDir));
+const videos = express.static(getConfig().testVideosDir);
+app.use('/videos', videos);
+api.use('/videos', videos);
 
 // The spawned CLI does not share the desktop app's login, so surface its auth
 // state in the UI instead of letting sessions fail cryptically. Every claude
@@ -1715,68 +1709,6 @@ dashboard.register('get', '/api/dev/sessions', async (req, res) => {
   res.json({ sessions: repos ? sessions.filter((s) => repos.includes(s.repo)) : sessions });
 });
 
-// ---- the office ----
-//
-// 🏝 The office draws every project as a table on the beach and every open
-// session as somebody at one, so it needs all of them at once: the per-session
-// stream further down speaks for one conversation, which is the wrong shape.
-// What it does not need is the conversation itself, so only the handful of
-// record fields a building is drawn from go out.
-function officeCard(session) {
-  return {
-    id: session.id,
-    title: session.title || '',
-    repo: session.repo || '',
-    provider: session.provider || '',
-    status: session.status,
-    awaitingAnswer: session.awaitingAnswer === true,
-    review: session.review === true,
-    qa: session.qa === true,
-    local: session.local === true,
-    // Names only, and under a name of their own: `subagents` on the record is
-    // a list of objects the right panel reads, and the office wants the crew
-    // standing beside a character, not what each of them was asked.
-    crew: (session.subagents || []).map((a) => a.name || 'agent'),
-    // Who answers to whom: an orchestrator stands apart from its workers, and
-    // the island draws the order it gives when one of them starts a turn.
-    orchestrator: session.orchestrator === true,
-    parentId: session.parentId || null,
-    // The line in the bubble over the character's head: the tool a running
-    // turn is on, or the opening of the agent's latest message otherwise.
-    lastTool: session.lastTool || null,
-    lastText: session.lastText || null,
-  };
-}
-
-api.get('/api/dev/office/events', (req, res) => {
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-  });
-  // A running turn pushes its record every couple of seconds to move the token
-  // counters, and no counter moves a building. Sending only what changed since
-  // the last line for that session turns a busy turn from ~30 messages a
-  // minute into one per status change.
-  const sent = new Map();
-  const send = (session) => {
-    const wire = JSON.stringify(officeCard(session));
-    if (sent.get(session.id) === wire) return;
-    sent.set(session.id, wire);
-    res.write(`data: ${wire}\n\n`);
-  };
-  for (const session of listDevSessions()) send(session);
-  const onJob = (record) => {
-    if (record.kind === 'devchat') send(record);
-  };
-  bus.on('job', onJob);
-  const ping = setInterval(() => res.write(': ping\n\n'), 25000);
-  req.on('close', () => {
-    clearInterval(ping);
-    bus.off('job', onJob);
-  });
-});
-
 // What the browser is allowed to file a session's spend under. Everything
 // else names its activity server-side: a board errand passes its own action id
 // and the rest is derived from what the session is (lib/jobs.js). This list is
@@ -2152,7 +2084,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     const projects = activeProjects();
     console.log(`Briareus running at http://localhost:${port}`);
     console.log(
-      `  projects: ${projects.length ? projects.map((p) => p.repo).join(', ') : 'none, add one at /settings/projects'}`,
+      `  projects: ${projects.length ? projects.map((p) => p.repo).join(', ') : 'none, add one with POST /api/v1/settings/projects'}`,
     );
     console.log(`  database: mysql://${cfg.db.user}@${cfg.db.host}:${cfg.db.port}/${cfg.db.database}`);
     console.log(
@@ -2164,7 +2096,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     console.log(
       `  login: ${
         authEnabled()
-          ? 'on, every request needs the password'
+          ? 'on, /api/v1 takes tokens (`npm run create-token` issues the first)'
           : 'OFF, anything that reaches this port is trusted; run `npm run set-password` before exposing it'
       }`,
     );
