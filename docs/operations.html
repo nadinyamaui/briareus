@@ -141,12 +141,10 @@
         for approval in a turn a delivery started, unless the session's webhook is set to let it run.
       </p>
       <p>
-        Each armed session has three caps: deliveries an hour (30), turns in a row with no word from you (10)
-        and, when you set one, dollars in 24 hours. Past the first the sender gets <code>429</code> and a
-        <code>Retry-After</code>; past the others the webhook pauses, says so once in the transcript and is
-        listed in <strong>/attention</strong>, until you say anything in the session or the spend frees up. An
-        orchestrator's project budget is a cap as well, and so is a turn that a delivery started and that
-        failed.
+        Each armed session has two caps: deliveries an hour (30) and turns in a row with no word from you
+        (10). Past the first the sender gets <code>429</code> and a <code>Retry-After</code>; past the second
+        the webhook pauses, says so once in the transcript and is listed in <strong>/attention</strong>, until
+        you say anything in the session. A turn that a delivery started and that failed pauses it as well.
       </p>
       <p>
         Send JSON <code>{"text": "…", "source": "ci", "id": "run-4711"}</code>, plain text, or any other JSON
@@ -167,9 +165,9 @@
         goes to the agent the way a message typed in the dashboard does: it answers the question the agent
         stands on, queues behind a turn under way and lifts the pause the turns in a row put on deliveries. It
         is for a bridge that decides by who wrote a message where it goes, a WhatsApp relay say: your own
-        number to <code>/instructions</code>, everybody else to the first route. The hourly and spend caps
-        hold for both, and a turn an instruction started still asks before an SSH command in allow mode
-        (nobody is at the dashboard to see it). The answer is <code>202</code> with <code>running</code> or
+        number to <code>/instructions</code>, everybody else to the first route. The hourly cap holds for
+        both, and a turn an instruction started still asks before an SSH command in allow mode (nobody is at
+        the dashboard to see it). The answer is <code>202</code> with <code>running</code> or
         <code>queued</code>, and <code>409</code> while instructions are off.
       </p>
 

@@ -304,12 +304,12 @@
           <em>the dashboard itself</em> (<a href="projects.html#self">Projects</a>), every orchestrator gets a
           <code>fix_tooling</code> tool beside <code>spawn_worker</code>: it starts a worker on that project,
           review loop armed, with the orchestrator's report as its brief. The fix is a worker in every other
-          respect: it counts among the open workers and against the budget, it opens a pull request, and the
-          orchestrator merges it (squash) once the loop approves and the checks are green, then says so. The
-          running dashboard keeps its current code until you redeploy it. In the sidebar the worker is drawn
-          under its orchestrator badged <em>🩹 tooling</em>, and again at the top of the dashboard project's
-          own list, where its branch lives. With no project flagged, the briefing asks the orchestrator to
-          report such flaws to you in a line instead.
+          respect: it counts among the open workers, it opens a pull request, and the orchestrator merges it
+          (squash) once the loop approves and the checks are green, then says so. The running dashboard keeps
+          its current code until you redeploy it. In the sidebar the worker is drawn under its orchestrator
+          badged <em>🩹 tooling</em>, and again at the top of the dashboard project's own list, where its
+          branch lives. With no project flagged, the briefing asks the orchestrator to report such flaws to
+          you in a line instead.
         </li>
       </ul>
       <p>

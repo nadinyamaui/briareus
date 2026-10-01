@@ -85,7 +85,6 @@
         workerProviderId: 'number',
         workerModel: 'text',
         workerEffort: 'text',
-        workerBudgetUsd: 'number',
         isSelf: 'bool',
       },
       title: (p) => p.label,
