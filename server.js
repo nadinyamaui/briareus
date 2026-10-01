@@ -62,11 +62,9 @@ import {
   workerSessionsFor,
   workerSummary,
   assertWorkerSlot,
-  assertWorkerBudget,
   sessionWebhookState,
   setSessionWebhook,
   rotateSessionWebhook,
-  orchestratorBudgetStatus,
   triageLoopFindings,
   triageReviewFindings,
   saveReviewFindingsDrafts,
@@ -744,10 +742,7 @@ api.post('/api/agent/sessions', (req, res) => {
 api.get('/api/agent/sessions', (req, res) => {
   const orchestrator = orchestratorSession(req, res);
   if (!orchestrator) return;
-  res.json({
-    sessions: workerSessionsFor(orchestrator).map(workerSummary),
-    budget: orchestratorBudgetStatus(orchestrator),
-  });
+  res.json({ sessions: workerSessionsFor(orchestrator).map(workerSummary) });
 });
 
 api.get('/api/agent/sessions/:id', async (req, res) => {
@@ -767,10 +762,7 @@ api.post('/api/agent/sessions/:id/message', (req, res) => {
   try {
     // A message to a closed worker reopens it, which is a spawn in
     // everything but name: the open-worker cap applies to it the same way.
-    // And every send runs a worker turn, so the budget gates them all —
-    // the user steering a worker directly goes through /api/dev, never here.
     if (!DEV_OPEN.includes(worker.status)) assertWorkerSlot(orchestrator);
-    assertWorkerBudget(orchestrator);
     sendDevMessage(worker.id, String((req.body || {}).text || ''));
     res.json({ session: workerSummary(worker) });
   } catch (e) {
@@ -781,8 +773,7 @@ api.post('/api/agent/sessions/:id/message', (req, res) => {
 // The orchestrator's verdicts on the review round its worker's loop is
 // holding (lib/jobs.js, holdForTriage): what it marks fix starts the fix
 // session, the rest is recorded on the pull request. Nothing here spends a
-// worker turn by itself, so neither the slot nor the budget gate applies; the
-// fix session it may start is loop spend like every other round's.
+// worker turn by itself, so the slot gate does not apply.
 api.post('/api/agent/sessions/:id/triage', async (req, res) => {
   const orchestrator = orchestratorSession(req, res);
   if (!orchestrator) return;

@@ -92,14 +92,13 @@ describe('a session’s webhook in the dashboard', () => {
   it('arms it with the operator’s caps and hands over the key', async () => {
     const res = await request('abc123/webhook', {
       method: 'PUT',
-      body: { armed: true, perHour: 120, maxTurns: 50, budgetUsd: 20, sshUnattended: false },
+      body: { armed: true, perHour: 120, maxTurns: 50, sshUnattended: false },
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
       armed: true,
       perHour: 120,
       maxTurns: 50,
-      budgetUsd: 20,
       key: 'key-abc123-e0',
     });
     expect((await (await request('abc123/webhook')).json()).key).toBe('key-abc123-e0');

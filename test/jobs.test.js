@@ -233,7 +233,6 @@ import {
   sessionWebhookState,
   flushJobs,
   sendDevMessage,
-  orchestratorSpend,
   sessionUsage,
   childSessionsOf,
   triageLoopFindings,
@@ -2717,7 +2716,7 @@ describe('webhook deliveries', () => {
     chats: { 1: { sessionId: 'resume-id', started: true } },
     ...extra,
   });
-  const armed = (extra) => ({ armed: true, epoch: 0, perHour: 30, maxTurns: 10, budgetUsd: 0, ...extra });
+  const armed = (extra) => ({ armed: true, epoch: 0, perHour: 30, maxTurns: 10, ...extra });
   const IDLE = [
     'hk-off',
     'hk-free',
@@ -2726,13 +2725,11 @@ describe('webhook deliveries', () => {
     'hk-stop',
     'hk-rate',
     'hk-turns',
-    'hk-budget',
     'hk-orch',
     'hk-dup',
     'hk-full',
     'hk-zeus',
     'hk-fail',
-    'hk-spend',
     'hk-close',
     'hk-brief',
     'hk-live',
@@ -2750,7 +2747,6 @@ describe('webhook deliveries', () => {
     'in-ask',
     'in-busy',
     'in-turns',
-    'in-budget',
     'in-dup',
   ];
 
@@ -3130,50 +3126,6 @@ describe('webhook deliveries', () => {
     await cli.finish(job);
   });
 
-  it('stops at what its turns may spend in a day, until that frees up or the cap moves', async () => {
-    fakeCli();
-    const job = getJob('hk-budget');
-    setSessionWebhook('hk-budget', { budgetUsd: 2 });
-    job.webhook.spent = { [new Date().toISOString().slice(0, 13)]: 2.5 };
-    expect(refused(() => deliverToSession('hk-budget', { text: 'one' }))).toMatchObject({
-      status: 429,
-      retryAfter: 3600,
-      message: expect.stringMatching(/spent \$2\.50 of the \$2\.00/),
-    });
-    expect(job.webhookPaused).toMatchObject({ kind: 'budget' });
-    expect(sessionWebhookState('hk-budget')).toMatchObject({ spentUsd: 2.5, paused: expect.any(String) });
-    setSessionWebhook('hk-budget', { budgetUsd: 5 });
-    expect(job.webhookPaused).toBe(null);
-    expect(deliverToSession('hk-budget', { text: 'two' }).status).toBe('running');
-    await cli.finish(job);
-  });
-
-  it('does not cross an orchestration’s own budget', () => {
-    fakeCli();
-    state.projects = [{ repo: 'acme/hook', label: 'Hook', localDir: '', workerBudgetUsd: 1 }];
-    const job = getJob('hk-orch');
-    expect(orchestratorSpend(job)).toBeGreaterThan(1);
-    expect(refused(() => deliverToSession('hk-orch', { text: 'OLT down' }))).toMatchObject({
-      status: 429,
-      message: expect.stringMatching(/spent \$5\.00 of its \$1\.00 budget/),
-    });
-    expect(users(job)).toHaveLength(0);
-    expect(cli.prompts).toHaveLength(0);
-  });
-
-  it('counts what its turn spent, and nothing of a turn somebody asked for', async () => {
-    fakeCli();
-    const job = getJob('hk-spend');
-    deliverToSession('hk-spend', { text: 'one' });
-    job.costUsd = (job.costUsd || 0) + 0.75;
-    await cli.finish(job);
-    expect(sessionWebhookState('hk-spend').spentUsd).toBe(0.75);
-    sendDevMessage('hk-spend', 'mine');
-    job.costUsd += 3;
-    await cli.finish(job);
-    expect(sessionWebhookState('hk-spend').spentUsd).toBe(0.75);
-  });
-
   it('holds only so much for a session that is not reading', () => {
     fakeCli();
     const job = getJob('hk-full');
@@ -3320,10 +3272,8 @@ describe('webhook deliveries', () => {
       epoch: 0,
       perHour: 30,
       maxTurns: 10,
-      budgetUsd: 0,
       sshUnattended: false,
       instructions: false,
-      spentUsd: 0,
     });
     expect(JSON.stringify(shown)).not.toContain('a customer wrote this');
     // The record itself is untouched by the projection.
@@ -3416,9 +3366,7 @@ describe('webhook deliveries', () => {
       // The operator's word re-arms the breaker, but SSH still asks.
       expect(job.unattendedTurns).toBe(0);
       expect(job.unattendedTurn).toBe(true);
-      job.costUsd = (job.costUsd || 0) + 0.4;
       await cli.finish(job);
-      expect(sessionWebhookState('in-free').spentUsd).toBe(0.4);
     });
 
     it('answer the question the agent stands on, and what was held goes after', async () => {
@@ -3436,20 +3384,17 @@ describe('webhook deliveries', () => {
       await cli.finish(job, 0, 1);
     });
 
-    it('queue behind a turn under way, like a message typed here, and count what their turn spent', async () => {
+    it('queue behind a turn under way, like a message typed here', async () => {
       const { prompts } = fakeCli();
       const job = instructed('in-busy');
       sendDevMessage('in-busy', 'Refactor the importer');
       expect(instructSession('in-busy', { text: 'Also bump the version' })).toEqual({ status: 'queued' });
       expect(prompts).toHaveLength(1);
       expect(publicJob(job).queued).toHaveLength(1);
-      job.costUsd = (job.costUsd || 0) + 2;
       cli.children[0].emit('close', 0);
       await vi.waitFor(() => expect(prompts).toHaveLength(2));
       expect(prompts[1]).toContain('Also bump the version');
-      job.costUsd += 0.3;
       await cli.finish(job, 0, 1);
-      expect(sessionWebhookState('in-busy').spentUsd).toBe(0.3);
     });
 
     it('lift the pause the turns in a row put on deliveries', async () => {
@@ -3464,18 +3409,6 @@ describe('webhook deliveries', () => {
       await cli.finish(job);
       expect(deliverToSession('in-turns', { text: 'three' }).status).toBe('running');
       await cli.finish(job);
-    });
-
-    it('stop at what the webhook’s turns may spend', () => {
-      fakeCli();
-      const job = instructed('in-budget', { budgetUsd: 1 });
-      job.webhook.spent = { [new Date().toISOString().slice(0, 13)]: 1.5 };
-      expect(refused(() => instructSession('in-budget', { text: 'go' }))).toMatchObject({
-        status: 429,
-        retryAfter: 3600,
-      });
-      expect(job.webhookPaused).toMatchObject({ kind: 'budget' });
-      expect(users(job)).toHaveLength(0);
     });
 
     it('take a retry once', async () => {
@@ -3502,7 +3435,7 @@ describe('webhook deliveries', () => {
   });
 });
 
-describe('the worker budget', () => {
+describe('what an orchestration spent', () => {
   const row = (id, extra) => ({
     id,
     kind: 'devchat',
@@ -3531,11 +3464,7 @@ describe('the worker budget', () => {
         outputTokens: 50,
         durationMs: 30_000,
       }),
-      row('bud-poor', {
-        orchestrator: true,
-        costUsd: 0.5,
-        pendingWorkerNotices: [{ workerId: 'bud-w2', kind: 'settled', text: 'update from bud-w2' }],
-      }),
+      row('bud-poor', { orchestrator: true, costUsd: 0.5 }),
       row('bud-w2', { parentId: 'bud-poor' }),
       // What a worker's review loop spends on its behalf: the review of its
       // push and the fix session that implements the findings.
@@ -3555,9 +3484,9 @@ describe('the worker budget', () => {
     for (const id of ['bud-orch', 'bud-w1', 'bud-poor', 'bud-w2']) getJob(id).status = 'idle';
   });
 
-  it('orchestratorSpend sums the supervisor, every worker and its loops, unpriced turns as zero', () => {
-    expect(orchestratorSpend(getJob('bud-orch'))).toBe(8.5);
-    expect(orchestratorSpend(getJob('bud-poor'))).toBe(0.5);
+  it('sums the supervisor, every worker and its loops, unpriced turns as zero', () => {
+    expect(sessionUsage(getJob('bud-orch')).costUsd).toBe(8.5);
+    expect(sessionUsage(getJob('bud-poor')).costUsd).toBe(0.5);
   });
 
   it('the children index files each session under the one it ran for', () => {
@@ -3625,26 +3554,6 @@ describe('the worker budget', () => {
       estimatedTurns: 3,
       unpricedTurns: 1,
     });
-  });
-
-  it('spawn refuses once the orchestration spent its budget', () => {
-    state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '', workerBudgetUsd: 6 }];
-    expect(() => spawnWorkerSession(getJob('bud-orch'), { title: 'x', prompt: 'x' })).toThrow(
-      /spent \$8\.50 of its \$6\.00 budget/,
-    );
-  });
-
-  it('past the budget, updates arrive as lines rather than injected turns', () => {
-    state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '', workerBudgetUsd: 0.25 }];
-    const orch = getJob('bud-poor');
-    deliverWorkerNotices(orch);
-    expect(orch.events.filter((e) => e.kind === 'user')).toHaveLength(0);
-    const info = orch.events.filter((e) => e.kind === 'info').map((e) => e.text);
-    expect(info.some((t) => t.includes('$0.50 of its $0.25 budget'))).toBe(true);
-    expect(info.some((t) => t.includes('update from bud-w2'))).toBe(true);
-    expect(orch.pendingWorkerNotices).toHaveLength(0);
-    expect(orch.budgetSaid).toBe(true);
-    expect(getJob('bud-w2').noticeUnheard).toBe(true);
   });
 });
 
@@ -4297,17 +4206,17 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
   });
 
   it('a deleted worker hands its orchestrator everything it had absorbed and still had under it', async () => {
-    // bud-w1 (from the budget suite above) already carries a live review, fix
+    // bud-w1 (from the spend suite above) already carries a live review, fix
     // and QA run; deleting the worker moves that whole subtree's spend up in
     // one fold, so the orchestrator's number does not move.
     const orch = getJob('bud-orch');
     const before = sessionUsage(orch);
-    getJob('bud-w1').status = 'closed'; // the budget suite flipped it to idle
+    getJob('bud-w1').status = 'closed'; // the spend suite flipped it to idle
     await deleteJobById('bud-w1');
     expect(getJob('bud-w1')).toBeNull();
     expect(orch.absorbedSessions).toBe(4);
     expect(sessionUsage(orch)).toEqual(before);
-    expect(orchestratorSpend(orch)).toBe(8.5);
+    expect(sessionUsage(orch).costUsd).toBe(8.5);
   });
 });
 
