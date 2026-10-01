@@ -206,6 +206,37 @@
                 Leave empty to keep Local mode off for this project.</em
               >
             </label>
+            <!-- Auto-update: a merged pull request pulls the local checkout and
+             runs the update commands there (lib/local-update.js). -->
+            <label class="field check">
+              <input id="f-autoUpdate" type="checkbox" />
+              <span>Update the local checkout when a pull request merges</span>
+            </label>
+            <label class="field">
+              <span>Update commands</span>
+              <textarea
+                id="f-updateCommands"
+                rows="4"
+                spellcheck="false"
+                placeholder="composer install --no-interaction&#10;php artisan migrate --force&#10;php artisan horizon:terminate"
+              ></textarea>
+              <em
+                >One shell command per line, run in the local checkout in order once it has fast-forwarded to
+                the merged branch, with this project's PHP. The first failure stops the rest. The checkout is
+                only touched when it is on the branch the pull request merged into and has no uncommitted
+                changes, and waits for a Local-mode session working in it to close.</em
+              >
+            </label>
+            <div id="f-update-field" class="field">
+              <div class="flex items-center gap-2">
+                <button type="button" id="f-update-btn" class="btn whitespace-nowrap">Update now</button>
+                <span id="f-update-status" class="min-w-0 text-xs text-muted"></span>
+              </div>
+              <pre
+                id="f-update-output"
+                class="mt-2 hidden max-h-[240px] overflow-auto text-[11px] leading-[1.4] whitespace-pre-wrap text-muted"
+              ></pre>
+            </div>
           </details>
 
           <details class="fset" open>

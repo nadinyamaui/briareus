@@ -65,6 +65,8 @@
         setupCommands: 'list',
         phpBinDir: 'text',
         localDir: 'text',
+        autoUpdate: 'bool',
+        updateCommands: 'list',
         dbPoolEnabled: 'bool',
         dbPoolDatabase: 'text',
         dbRestoreSql: 'text',
@@ -413,6 +415,7 @@
       writeTemplateFields('f-tpl-', row.promptTemplates || {});
       syncDbFields();
       syncStepFields();
+      loadUpdateStatus(row);
     }
     if (type === 'provider') {
       // The mode is not a stored column: a row with a token (or endpoint) is
@@ -1038,6 +1041,76 @@
       out.classList.add('text-danger');
     } finally {
       $('d-test-btn').disabled = false;
+    }
+  });
+
+  // ---------- local checkout auto-update ----------
+
+  // How the project's local checkout last updated itself, polled while an
+  // update is waiting or running. Only a saved project with a checkout has one.
+  let updateSeq = 0;
+  let updateTimer = null;
+  const UPDATE_STATES = {
+    waiting: 'Waiting for the session in the checkout to close',
+    running: 'Updating…',
+    updated: 'Updated',
+    skipped: 'Skipped',
+    failed: 'Failed',
+    interrupted: 'Interrupted',
+  };
+  function renderUpdateStatus(s) {
+    const out = $('f-update-status');
+    const pre = $('f-update-output');
+    out.classList.remove('text-danger', 'text-ok');
+    if (!s) {
+      out.textContent = 'Not updated yet.';
+      pre.classList.add('hidden');
+      return;
+    }
+    const by = s.trigger && s.trigger.kind === 'merge' ? `#${s.trigger.prNumber} merged` : 'by hand';
+    const when = s.finishedAt || s.startedAt;
+    const moved = s.from && s.to && s.from !== s.to ? ` · ${s.from.slice(0, 7)} → ${s.to.slice(0, 7)}` : '';
+    out.textContent = [
+      `${UPDATE_STATES[s.state] || s.state} (${by}, ${fmtAgo(when)})${moved}`,
+      s.reason || '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    if (s.state === 'updated') out.classList.add('text-ok');
+    if (s.state === 'failed' || s.state === 'interrupted') out.classList.add('text-danger');
+    pre.textContent = s.output || '';
+    pre.classList.toggle('hidden', !s.output);
+  }
+  async function loadUpdateStatus(row) {
+    const seq = ++updateSeq;
+    clearTimeout(updateTimer);
+    const has = !!(row && row.id && row.localDir);
+    $('f-update-field').classList.toggle('hidden', !has);
+    if (!has) return;
+    try {
+      const { status } = await api(`/api/projects/${row.id}/update`);
+      if (seq !== updateSeq) return;
+      renderUpdateStatus(status);
+      if (status && (status.state === 'waiting' || status.state === 'running')) {
+        // Only while the same project is still the one on screen.
+        updateTimer = setTimeout(() => {
+          if (currentType === 'project' && current && current.id === row.id) loadUpdateStatus(row);
+        }, 2000);
+      }
+    } catch (e) {
+      if (seq === updateSeq) $('f-update-status').textContent = e.message;
+    }
+  }
+  $('f-update-btn').addEventListener('click', async () => {
+    if (!current || isNew) return;
+    $('f-update-btn').disabled = true;
+    try {
+      await api(`/api/projects/${current.id}/update`, { method: 'POST' });
+      await loadUpdateStatus(current);
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      $('f-update-btn').disabled = false;
     }
   });
 

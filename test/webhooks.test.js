@@ -14,6 +14,9 @@ vi.mock('../lib/jobs.js', () => ({
   instructSession: vi.fn(() => ({ status: 'running' })),
 }));
 
+const updater = vi.hoisted(() => ({ onMerged: vi.fn() }));
+vi.mock('../lib/local-update.js', () => ({ localUpdater: () => updater }));
+
 // The public hostname is what decides whether a hook can be installed at all,
 // so it is driven from state rather than pinned.
 const hook = vi.hoisted(() => ({ url: 'https://reviewer.example.com/webhooks/github' }));
@@ -133,6 +136,29 @@ describe('POST /webhooks/github', () => {
     expect(res.status).toBe(202);
     await settle();
     expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feature/x');
+  });
+
+  it('updates the local checkout when a pull request merges, and only then', async () => {
+    updater.onMerged.mockClear();
+    const pr = { number: 9, merged: true, head: { ref: 'feature/x' }, base: { ref: 'main' } };
+    await githubDelivery('pull_request', {
+      repository: { full_name: 'acme/shop' },
+      action: 'closed',
+      pull_request: pr,
+    });
+    await githubDelivery('pull_request', {
+      repository: { full_name: 'acme/shop' },
+      action: 'closed',
+      pull_request: { ...pr, merged: false },
+    });
+    await githubDelivery('pull_request', {
+      repository: { full_name: 'acme/shop' },
+      action: 'edited',
+      pull_request: pr,
+    });
+    await settle();
+    expect(updater.onMerged).toHaveBeenCalledTimes(1);
+    expect(updater.onMerged).toHaveBeenCalledWith('acme/shop', { base: 'main', prNumber: 9 });
   });
 
   it('an issue_comment syncs by pull request number, not branch', async () => {

@@ -177,6 +177,7 @@ import {
   loginSucceeded,
 } from './lib/auth.js';
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
+import { localUpdater } from './lib/local-update.js';
 import { securityHeaders, sameOriginWrites } from './lib/security.js';
 import { listWorkspaces, resetSetup, cleanWorkspace, startWorkspacePruner } from './lib/workspaces.js';
 import { githubWebhookUrl, sessionWebhookKey, sessionWebhookUrl } from './lib/webhooksecrets.js';
@@ -494,6 +495,26 @@ api.delete('/api/projects/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
+  }
+});
+
+// The local checkout's auto-update (lib/local-update.js): how its last run
+// went, and Settings' "Update now".
+const projectRepo = (id) => (listProjects().find((p) => p.id === Number(id)) || {}).repo;
+
+api.get('/api/projects/:id/update', async (req, res) => {
+  const repo = projectRepo(req.params.id);
+  if (!repo) return res.status(404).json({ error: 'Project not found' });
+  res.json({ status: await localUpdater().status(repo) });
+});
+
+api.post('/api/projects/:id/update', async (req, res) => {
+  const repo = projectRepo(req.params.id);
+  if (!repo) return res.status(404).json({ error: 'Project not found' });
+  try {
+    res.status(202).json({ status: await localUpdater().runNow(repo) });
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message });
   }
 });
 
