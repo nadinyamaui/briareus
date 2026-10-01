@@ -3,16 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Mobile devices · Settings</title>
+    <title>Devices and clients · Settings</title>
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
     <main class="mx-auto w-full max-w-3xl overflow-y-auto p-6">
       <a href="/settings/projects" class="text-sm text-muted hover:text-ink">← Settings</a>
-      <h1 class="mt-5 text-2xl font-semibold">Mobile devices</h1>
+      <h1 class="mt-5 text-2xl font-semibold">Devices and clients</h1>
       <p class="mt-2 text-sm text-muted">
-        Create a separate token for each device. Sign in to Briareus with your password to manage devices.
-        Tokens only work with the mobile API and the projects you select.
+        Create a separate token for each device or client app. Sign in to Briareus with your password to
+        manage them. Tokens only work with the client and mobile APIs, and a read or manage token only with
+        the projects you select.
       </p>
       <p id="notice" role="status" class="mt-4 text-sm"></p>
       <section class="mt-6 rounded-xl border border-line p-5">
@@ -37,11 +38,14 @@
             <select id="permission" class="rounded border border-line bg-field p-2 text-ink">
               <option value="read">Read only</option>
               <option value="manage">Manage projects and sessions</option>
+              <option value="admin">Admin: every project and all settings</option>
             </select>
           </label>
           <p class="text-sm text-muted">
             Manage allows starting paid agents, sending messages, changing GitHub findings and deleting
-            sessions.
+            sessions. Admin is everything the dashboard can do, on every project: provider keys, database
+            servers, SSH approvals and deployments included. Give it only to a client that replaces the
+            dashboard.
           </p>
           <label class="grid gap-2 text-sm"
             >Expires after (days)
@@ -58,9 +62,17 @@
           <button id="create" class="btn w-fit" type="submit" disabled>Create device token</button>
         </form>
         <div id="credentials" class="mt-5 hidden rounded border border-line bg-sunken p-4">
-          <p class="text-sm">Copy the token into your mobile app now. It is shown only once.</p>
+          <p class="text-sm">Copy the token into your app now. It is shown only once.</p>
           <label class="mt-3 grid gap-1 text-sm"
-            >API address
+            >Client API address
+            <input
+              id="api-v1-url"
+              readonly
+              class="rounded border border-line bg-field p-2 font-mono text-xs"
+            />
+          </label>
+          <label class="mt-3 grid gap-1 text-sm"
+            >Mobile API address (the iPhone app)
             <input id="api-url" readonly class="rounded border border-line bg-field p-2 font-mono text-xs" />
           </label>
           <label class="mt-3 grid gap-1 text-sm"
@@ -83,8 +95,8 @@
       </section>
       <p class="mt-5 mb-8 text-sm text-muted">
         Use your public HTTPS address in the app. If Cloudflare Access protects this site, configure an
-        exception only for /api/mobile/v1/*; keep Settings and the dashboard protected. The mobile API always
-        requires a device token. To replace an expired or lost token, create a new one and revoke the old
+        exception only for /api/v1/* and /api/mobile/v1/*; keep Settings and the dashboard protected. Both
+        APIs always require a token. To replace an expired or lost token, create a new one and revoke the old
         device.
       </p>
     </main>

@@ -29,6 +29,16 @@ it.** The boot log says so on every start; please believe it.
 
 ## Credentials this app holds
 
+The client API at `/api/v1` takes the same owner-issued bearer tokens as the
+mobile API below, and adds an `admin` permission: a token with it can do
+everything the dashboard can, on every project, including reading and changing
+provider keys, database servers and SSH settings. Treat an admin token like the
+dashboard password, and issue one only to a client that replaces the dashboard.
+Read and manage tokens are held to the projects they were given. The API
+refuses requests that carry an `Origin` header and enables no CORS, so a token
+is never usable from a browser page. A Cloudflare Access exception may cover
+only `/api/v1` and its subpaths. See the [client API guide](docs/api-v1.md).
+
 The native mobile API at `/api/mobile/v1` uses separate, owner-issued bearer
 tokens with project permissions and expiry. A Cloudflare Access exception may
 cover only `/api/mobile/v1` and its subpaths; `/api/mobile-devices` and
