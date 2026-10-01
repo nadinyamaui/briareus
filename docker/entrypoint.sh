@@ -7,9 +7,9 @@
 # written into the file, on every boot, before the server starts.
 #
 # The file lives on the state volume rather than in the image: `npm run
-# set-password` writes the login into it, and that must survive the container
-# being replaced. Keys this script does not manage, those two and anything
-# hand-added, are carried across the rewrite untouched.
+# create-token` writes the API's signing secret into it, and that must survive
+# the container being replaced. Keys this script does not manage, that one and
+# anything hand-added, are carried across the rewrite untouched.
 set -e
 
 STATE_ENV=/app/state/.env
@@ -21,7 +21,6 @@ APP_ENV=/app/.env
 MANAGED='PORT BIND_HOST PUBLIC_BASE_URL GITHUB_TOKEN WORKSPACE_DIR TEST_VIDEOS_DIR
 CLAUDE_MODEL CLAUDE_EFFORT CLAUDE_BIN CODEX_BIN GROK_BIN OPENCODE_BIN
 DB_HOST DB_PORT DB_DATABASE DB_USERNAME DB_PASSWORD
-AUTH_USERNAME AUTH_SESSION_DAYS
 DB_POOL_ENABLED DB_POOL_WAIT_TIMEOUT_MIN DB_POOL_POLL_SECONDS
 DEV_MAX_SESSIONS DEV_TIMEOUT_MIN'
 # R2_* is deliberately NOT written to the file: every shell command a session
@@ -49,7 +48,7 @@ else
         done
         if [ -f "$STATE_ENV" ]; then
             echo
-            echo '# Kept from the previous boot, written by set-password or by hand.'
+            echo '# Kept from the previous boot, written by create-token or by hand.'
             awk -v managed="$(echo $MANAGED)" '
                 BEGIN { split(managed, a, " "); for (i in a) skip[a[i]] = 1 }
                 /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }

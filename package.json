@@ -4,7 +4,7 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "Chat sessions with coding agents (claude / codex / grok / opencode), each in its own workspace clone with its own MySQL instance.",
+  "description": "The Briareus core: chat sessions with coding agents (claude / codex / grok / opencode), each in its own workspace clone with its own MySQL instance, served to clients over one API (/api/v1).",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nadinyamaui/briareus.git"
@@ -17,16 +17,11 @@
     "start": "node server.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "set-password": "node scripts/set-password.js",
     "create-token": "node scripts/create-token.js",
     "migrate": "node scripts/migrate.js up",
     "migrate:rollback": "node scripts/migrate.js rollback",
     "migrate:status": "node scripts/migrate.js status",
     "make:migration": "node scripts/migrate.js make",
-    "build:css": "tailwindcss -i src/app.css -o public/app.css --minify",
-    "watch:css": "tailwindcss -i src/app.css -o public/app.css --watch",
-    "build:docs-css": "tailwindcss -i src/docs.css -o docs/docs.css --minify",
-    "watch:docs-css": "tailwindcss -i src/docs.css -o docs/docs.css --watch",
     "build:api-docs": "node scripts/api-docs.js",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -43,20 +38,16 @@
     "express": "^5.2.1",
     "mysql2": "^3.24.5",
     "opencode-ai": "^1.18.33",
-    "umzug": "^3.8.3",
-    "web-push": "^3.6.7"
+    "umzug": "^3.8.3"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@tailwindcss/cli": "^4.3.3",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.3",
     "@vitest/coverage-v8": "^5.0.2",
     "eslint": "^10.11.0",
     "globals": "^17.12.0",
-    "happy-dom": "^20.14.5",
     "prettier": "^3.9.9",
-    "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vitest": "^5.0.2"
   }

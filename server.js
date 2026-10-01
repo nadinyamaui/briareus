@@ -1,8 +1,5 @@
 // @ts-check
 import express from 'express';
-import { createNotificationService } from './lib/notifications.js';
-import { notificationRoutes } from './lib/notification-routes.js';
-import { attentionItems } from './lib/attention.js';
 import { createDeploymentService } from './lib/deployments.js';
 import { deploymentRoutes } from './lib/deployment-routes.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
@@ -20,12 +17,10 @@ import { sessionTranscriptRoutes } from './lib/transcript-routes.js';
 import { providerTestRoutes } from './lib/provider-test-routes.js';
 import { sessionEditRoute } from './lib/session-edit-route.js';
 import fs from 'fs';
-import path from 'path';
 import { execFile, spawn } from 'child_process';
-import { getConfig, ROOT } from './lib/config.js';
+import { getConfig } from './lib/config.js';
 import { maintenanceState } from './lib/recovery.js';
 import { workerTranscript } from './lib/worker-transcript.js';
-import { assetCacheHeaders, pageHandler } from './lib/assets.js';
 import { initDb, dbHealthy, loadTaskSessions, loadJobTurnUsage } from './lib/db.js';
 import {
   initJobs,
@@ -161,20 +156,9 @@ import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload, getUpload } from './lib/uploads.js';
 import { transcribe, transcribeAvailable } from './lib/transcribe.js';
 import { projectUsage, overallUsage, jobUsageEstimates, estimateEventCosts } from './lib/usage.js';
-import {
-  requireAuth,
-  agentOnly,
-  authEnabled,
-  signedIn,
-  signIn,
-  signOut,
-  verifyCredentials,
-  loginBlocked,
-  loginFailed,
-  loginSucceeded,
-} from './lib/auth.js';
+import { agentOnly, apiEnabled } from './lib/auth.js';
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
-import { securityHeaders, sameOriginWrites } from './lib/security.js';
+import { securityHeaders } from './lib/security.js';
 import { listWorkspaces, resetSetup, cleanWorkspace, startWorkspacePruner } from './lib/workspaces.js';
 import { githubWebhookUrl, sessionWebhookKey, sessionWebhookUrl } from './lib/webhooksecrets.js';
 import { childEnv } from './lib/childenv.js';
@@ -191,41 +175,35 @@ try {
   process.exit(1);
 }
 
-// Where the frontend lives, and the three documents that serve it.
-const PUBLIC = path.join(ROOT, 'public');
-const loginPage = pageHandler(PUBLIC, 'login.html');
-
 const app = express();
 // The only proxy in front of this is a tunnel/reverse proxy on this machine, so
-// trust exactly that one hop: it is what makes `req.secure` (and with it the
-// Secure flag on the session cookie) reflect the browser's real scheme.
+// trust exactly that one hop: it is what makes `req.ip` the caller's address
+// rather than the proxy's.
 app.set('trust proxy', 'loopback');
 
 // The API handlers live on a router of their own rather than on the app,
 // because nothing reaches them by their own paths any more. /api/v1 hands a
 // client's request to them once its bearer token has been judged
 // (lib/api-v1.js), and an agent reaches its own under /api/agent/.
-// The cookie login used to open all of them to the built-in pages. That door
-// is retired, so the pages still load and can no longer do anything.
 const api = express.Router();
 
-// On every response, including the webhooks': the headers that keep the
-// dashboard from being framed, sniffed or scripted from another origin.
+// On every response, including the webhooks': nothing here is a page, and the
+// headers say so (lib/security.js).
 app.use(securityHeaders);
 
-// Webhooks come first, ahead of both the JSON body parser and the login gate:
-// GitHub signs the raw bytes (a re-serialized body verifies against nothing),
-// and GitHub cannot sign into a browser session. Each delivery authenticates
-// itself instead, with an HMAC over the raw body. See lib/webhooks.js.
+// Webhooks come first, ahead of the JSON body parser: GitHub signs the raw
+// bytes (a re-serialized body verifies against nothing). Each delivery
+// authenticates itself with an HMAC over the raw body. See lib/webhooks.js.
 app.use('/webhooks', webhookRouter());
 
-// The client API: owner-issued tokens (`npm run create-token` for the first,
-// an admin token for the rest), in front of the handlers below.
+// The client API, and the only one: owner-issued tokens (`npm run
+// create-token` for the first, an admin token for the rest), in front of the
+// handlers below.
 const mobileAuth = createMobileAuth();
 app.use(
   apiV1Routes({
     auth: mobileAuth,
-    loginEnabled: authEnabled,
+    apiEnabled,
     ownerSecret: () => getConfig().auth.secret,
     handlers: api,
     getJob,
@@ -238,50 +216,11 @@ app.use(
     transcribeAvailable,
   }),
 );
-// Every remaining write keeps the same-origin and login gates.
-app.use(sameOriginWrites);
 app.use(express.json({ limit: '1mb' }));
 
-// Everything below the login gate. Mounted before the static files so the
-// pages and the videos are behind it; see lib/auth.js for what stays public.
-app.use(requireAuth);
-// Routes are added to the handlers for the rest of this file. Of all of them,
-// only an agent's own are answered at their own path.
+// Of all the handlers added for the rest of this file, only an agent's own are
+// answered at their own path.
 app.use(agentOnly(api));
-
-// The sign-in page itself, and the two calls it makes.
-app.get('/login', (req, res) => {
-  if (!authEnabled() || signedIn(req)) return res.redirect('/');
-  return loginPage(req, res);
-});
-
-app.post('/api/login', (req, res) => {
-  if (!authEnabled()) return res.json({ ok: true });
-  const ip = req.ip || 'unknown';
-  const wait = loginBlocked(ip);
-  if (wait)
-    return res.status(429).json({ error: `Too many attempts, try again in ${Math.ceil(wait / 60)} min` });
-  const username = String((req.body || {}).username || '');
-  const password = String((req.body || {}).password || '');
-  if (!username || !password || !verifyCredentials(username, password)) {
-    loginFailed(ip);
-    // Deliberately vague, and deliberately slow to answer: which half was wrong
-    // is exactly what an attacker would like to be told.
-    return setTimeout(() => res.status(401).json({ error: 'Wrong username or password' }), 400);
-  }
-  loginSucceeded(ip);
-  signIn(req, res);
-  res.json({ ok: true });
-});
-
-app.post('/api/logout', (req, res) => {
-  signOut(req, res);
-  res.json({ ok: true });
-});
-
-// Whether the pages should offer a Sign out at all. Off on a local install
-// with no login configured.
-app.get('/api/auth/state', (req, res) => res.json({ enabled: authEnabled() }));
 
 // What the built-in pages used to call. Said in JSON, and with where to go,
 // because the caller is a script that would otherwise be handed a 404 page.
@@ -289,8 +228,7 @@ app.use('/api', (req, res) =>
   res.status(410).json({ error: 'This route is retired. Call /api/v1 with a token: see docs/api-v1.md' }),
 );
 
-// For the uptime monitor: no auth (a monitor has no cookie, so the path is on
-// the public list) and nothing sensitive in the answer. 200 means the app AND
+// For the uptime monitor: no auth, and nothing sensitive in the answer. 200 means the app AND
 // its database answer; 503 when MySQL does not, so a paused database shows up
 // on the monitor instead of as silently missing session history.
 app.get('/healthz', async (req, res) => {
@@ -298,20 +236,12 @@ app.get('/healthz', async (req, res) => {
   res.status(db ? 200 : 503).json({ ok: db, db, uptime: Math.floor(process.uptime()) });
 });
 
-// The pages above and below name their scripts with a hash of the script's own
-// bytes, so a changed file is a changed URL; see lib/assets.js for why the
-// browser cannot be left to work that out for itself.
-app.use(express.static(PUBLIC, { setHeaders: assetCacheHeaders(PUBLIC) }));
-// The scenario videos a test run records. The run copies each .webm here and
-// links this route from the PR's test sheet, so the evidence outlives the
-// session workspace it was recorded in.
-// Mounted twice: on the app for the links themselves, which a person opens
-// from the pull request and signs in for, and on the handlers for a client
-// fetching one through /api/v1.
+// The scenario videos a test run records. The run copies each .webm here, and
+// a client fetches one through /api/v1 with its token; the links a run leaves
+// on a pull request point there too, unless an R2 bucket serves them instead
+// (lib/prtasks.js).
 fs.mkdirSync(getConfig().testVideosDir, { recursive: true });
-const videos = express.static(getConfig().testVideosDir);
-app.use('/videos', videos);
-api.use('/videos', videos);
+api.use('/videos', express.static(getConfig().testVideosDir));
 
 // The spawned CLI does not share the desktop app's login, so surface its auth
 // state in the UI instead of letting sessions fail cryptically. Every claude
@@ -404,48 +334,6 @@ function checkProviderAuth() {
   checkClaudeAuth();
   checkLoginAuth();
 }
-
-// The developer chat is the whole app now. Both pages route in the browser, so
-// every view inside one has an address of its own and each of those addresses
-// serves the same document back: the page reads the path and opens what it
-// names. Keep these in step with the paths public/developer.js and
-// public/settings.js build, or a link will 404 before the page can read it.
-const devPage = pageHandler(PUBLIC, 'developer.html');
-const settingsPage = pageHandler(PUBLIC, 'settings.html');
-
-app.get('/', devPage);
-app.get('/dashboard', devPage);
-app.get('/findings', devPage);
-app.get(
-  [
-    '/attention',
-    '/maintenance',
-    '/recovery/:id',
-    '/memory-health',
-    '/preview-feedback/:id',
-    '/tasks/:id',
-    '/deployments',
-    '/notifications',
-  ],
-  pageHandler(PUBLIC, 'operations.html'),
-);
-app.get('/sessions/:id', devPage);
-app.get('/projects/:owner/:name', devPage);
-app.get('/projects/:owner/:name/dashboard', devPage);
-app.get('/projects/:owner/:name/issues', devPage);
-// A branch name may carry slashes of its own (feature/thing), so it is the
-// whole tail rather than one segment.
-app.get('/projects/:owner/:name/branches/*branch', devPage);
-
-app.get('/settings', (req, res) => res.redirect('/settings/projects'));
-for (const section of ['projects', 'providers', 'servers', 'ssh', 'saved-prompts', 'memory']) {
-  app.get(`/settings/${section}`, settingsPage);
-  app.get(`/settings/${section}/:id`, settingsPage);
-}
-// The prompts are a single shared row, so the section is the whole address.
-app.get('/settings/prompts', settingsPage);
-app.get('/settings/workspaces', settingsPage);
-app.get('/settings/mobile', pageHandler(PUBLIC, 'mobile-settings.html'));
 
 // ---- projects ----
 //
@@ -557,10 +445,10 @@ api.delete('/api/dev/prompts/:id', async (req, res) => {
 
 // ---- project memory ----
 //
-// Two doors to the same rows. The settings page edits the whole library by id;
-// the agent, through the memory tool during a turn, reaches its own
-// project's memories by name, authorized by the session's bearer token rather
-// than the browser cookie (see requireAuth), and never sees a repo parameter:
+// Two doors to the same rows. A client edits the whole library by id through
+// /api/v1; the agent, through the memory tool during a turn, reaches its own
+// project's memories by name, authorized by the session's bearer token (see
+// agentOnly in lib/auth.js), and never sees a repo parameter:
 // the session decides the project.
 
 api.get('/api/memories', (req, res) => {
@@ -630,8 +518,6 @@ api.use(
     readyForSelfDeploy: () => maintenanceState(listDevSessions(), sshService.runningCount()).ready,
   }),
 );
-const notificationService = createNotificationService();
-api.use(notificationRoutes({ service: notificationService, getProject }));
 
 api.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
@@ -1966,9 +1852,14 @@ api.delete('/api/dev/sessions/:id', async (req, res) => {
 });
 
 // Express 5 forwards a rejected async handler here instead of leaving the
-// request hanging, so the last resort has to answer in the shape the pages
-// parse; otherwise a throw nobody caught reaches the UI as a bare "HTTP 500"
+// request hanging, so the last resort has to answer in the shape every client
+// parses; otherwise a throw nobody caught reaches it as a bare "HTTP 500"
 // instead of what actually went wrong. Malformed request bodies land here too.
+// Anything else that reaches the end matched no route: a JSON 404, not
+// Express's HTML one.
+app.use((req, res) =>
+  res.status(404).json({ error: 'Not found. The API is at /api/v1: see docs/api-v1.md' }),
+);
 app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
   console.error(`${req.method} ${req.originalUrl} failed:`, err);
@@ -1996,7 +1887,6 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initSavedPrompts();
     await initMemorySelection();
     await initMemories();
-    await notificationService.init();
     await initProviders();
     // Warm the balancer's quota cache so the first session started after boot
     // already lands on the account with the most headroom.
@@ -2022,11 +1912,6 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   checkProviderAuth();
   setInterval(checkProviderAuth, AUTH_RECHECK_MS).unref();
   await initJobs();
-  setInterval(() => {
-    notificationService
-      .tick(attentionItems(devSessionRecords(), sshService.pending()))
-      .catch((e) => console.error('Notification delivery failed:', e.message));
-  }, 15000).unref();
   // Clone slots are caches, not session records. Drop every unclaimed slot at
   // boot and once a day so a project's peak concurrency does not permanently
   // consume disk; the pruner sees the live session registry and skips claims.
@@ -2055,10 +1940,10 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
       `  token: ${cfg.githubToken ? 'configured' : 'missing, set GITHUB_TOKEN in .env for PR sync and gh'}`,
     );
     console.log(
-      `  login: ${
-        authEnabled()
-          ? 'on, /api/v1 takes tokens (`npm run create-token` issues the first)'
-          : 'OFF, anything that reaches this port is trusted; run `npm run set-password` before exposing it'
+      `  api: ${
+        apiEnabled()
+          ? '/api/v1 takes tokens (`npm run create-token` issues one)'
+          : 'OFF until AUTH_SECRET is set; `npm run create-token` sets it and issues the first token'
       }`,
     );
     console.log(

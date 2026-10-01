@@ -7,8 +7,7 @@ changes under whoever is using it.
 ```bash
 cd /path/to/briareus
 git pull --ff-only
-npm ci                     # only when package-lock.json moved
-npm run build:css          # every pull: the stylesheet is not committed
+npm ci --omit=dev          # only when package-lock.json moved
 sudo systemctl restart briareus.service
 ```
 
@@ -16,13 +15,8 @@ sudo systemctl restart briareus.service
 machine; this repo ships no unit for the app itself, since the checkout path,
 the user it runs as and the tunnel in front of it are all yours to decide.
 
-`public/app.css` is Tailwind output and is not committed, so the pull carries
-the source and not the CSS: `npm run build:css` is what turns one into the
-other, and `node server.js` never does it for you. Tailwind is a dev
-dependency, so the install this checkout runs has to be a plain `npm ci` and
-not `--omit=dev` (and `NODE_ENV=production` in the shell would quietly make it
-one). The container deploy has no such step: the image builds the stylesheet
-in a stage of its own.
+There is nothing to build: `node server.js` runs the source as it is, and the
+server has no frontend to compile.
 
 # Pool databases in RAM
 
