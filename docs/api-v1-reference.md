@@ -275,7 +275,7 @@ Merge a pull request on GitHub, at the head and into the base it was read with. 
 | `baseRef` **required** | `string`                | The base branch the pull request was read with                      |
 | `method`               | `squash\|merge\|rebase` | How to merge; `squash` when absent                                  |
 
-**Returns** `{ merged: boolean, sha: string?, message: string }`
+**Returns** `{ merged: boolean, status: string, sha: string?, message: string }`. `status` is `merged`, `enqueued` or `pending`. A pull request in a GitHub stack merges through GitHub's asynchronous merge, which also lands every pull request below it; one GitHub has not finished within about ten seconds comes back `pending` and finishes on its own.
 
 ### `POST /pulls/{number}/serve`
 
