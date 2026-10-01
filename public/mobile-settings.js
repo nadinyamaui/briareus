@@ -15,6 +15,15 @@
     $('token').type = 'password';
     $('credentials').classList.add('hidden');
   }
+  // An admin token is not held to a project list, so the project boxes say
+  // nothing for it and a server with no project yet can still issue one.
+  let hasProjects = false;
+  function syncPermission() {
+    const admin = $('permission').value === 'admin';
+    for (const input of $('projects').querySelectorAll('input')) input.disabled = admin;
+    $('create').disabled = !admin && !hasProjects;
+  }
+  $('permission').addEventListener('change', syncPermission);
   async function load() {
     const state = await api('/api/mobile-devices');
     const selected = new Set(
@@ -32,16 +41,18 @@
       $('projects').append(label);
     }
     if (!state.projects.length) $('projects').textContent = 'Add a project in Settings first.';
-    $('create').disabled = !state.projects.length;
+    hasProjects = state.projects.length > 0;
+    syncPermission();
     $('devices').replaceChildren();
     for (const device of state.devices) {
       const row = document.createElement('div');
       row.className = 'rounded border border-line p-3';
       const title = document.createElement('p');
-      title.textContent = `${device.label} · ${device.permission === 'read' ? 'Read only' : 'Manage'}`;
+      const permission = { read: 'Read only', manage: 'Manage', admin: 'Admin' }[device.permission];
+      title.textContent = `${device.label} · ${permission}`;
       const details = document.createElement('p');
       details.className = 'mt-1 text-xs text-muted';
-      details.textContent = `${device.repos.join(', ')} · ${device.expiresAt <= Date.now() ? 'Expired' : 'Expires'} ${new Date(device.expiresAt).toLocaleString()}`;
+      details.textContent = `${device.permission === 'admin' ? 'Every project' : device.repos.join(', ')} · ${device.expiresAt <= Date.now() ? 'Expired' : 'Expires'} ${new Date(device.expiresAt).toLocaleString()}`;
       const revoke = document.createElement('button');
       revoke.type = 'button';
       revoke.className = 'btn mt-2';
@@ -78,14 +89,15 @@
           repos: Array.from($('projects').querySelectorAll('input:checked'), (input) => input.value),
         }),
       });
+      $('api-v1-url').value = `${location.origin}/api/v1`;
       $('api-url').value = `${location.origin}/api/mobile/v1`;
       $('token').value = token;
       $('credentials').classList.remove('hidden');
       await load();
-      notice('Device created. Copy its token into the mobile app.');
+      notice('Device created. Copy its token into the app.');
     } catch (e) {
       notice(e.message);
-      $('create').disabled = false;
+      syncPermission();
     }
   });
   $('copy-token').addEventListener('click', async () => {

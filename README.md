@@ -763,9 +763,26 @@ Starting work and enabling loops may incur agent costs; write actions may change
 GitHub or delete sessions. Tool annotations distinguish reads from writes so
 ChatGPT can apply its confirmation flow. Connecting does not itself start agents.
 
+## Client API
+
+`/api/v1` is the one API for clients that live outside this repository: a web
+app, the iOS app, a desktop app. It puts a bearer token in front of the same
+handlers the dashboard's pages use, so it covers sessions, transcripts, pull
+requests (files, commits, checks, comments, reviews), findings, settings and
+two event streams. **Settings → Devices and clients** issues the tokens: read
+or manage on chosen projects, or admin for everything the dashboard can do.
+
+See the [client API guide](docs/api-v1.md) for tokens, permissions, the event
+streams and the Cloudflare Access exception, and the
+[reference](docs/api-v1-reference.md) for every route's fields and answer.
+`GET /api/v1/openapi.json` is the same catalog as an OpenAPI document. All
+three come from `lib/api-v1-catalog.js`; after changing a route there, run
+`npm run build:api-docs`. Everything the dashboard's pages can do has a route:
+`npm test` fails when a handler is added without one.
+
 ## Native mobile API
 
-For a separately developed iPhone app, **Settings → Mobile devices** issues
+For a separately developed iPhone app, **Settings → Devices and clients** issues
 revocable device tokens scoped to selected projects, with read-only or manage
 permissions and an expiry. The native API lives under `/api/mobile/v1` and
 reuses the dashboard operations for projects, conversations, messages, pull

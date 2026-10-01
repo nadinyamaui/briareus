@@ -11,9 +11,11 @@ or accepting browser cookies. No iOS app is included.
    records use the existing `app_settings` table.
 2. Enable Briareus password login (`npm run set-password`, then restart) if it
    is not already enabled. The mobile API fails closed when login is disabled.
-3. Sign in to the web dashboard and open **Settings → Mobile devices**
-   (`/settings/mobile`). Create a token with a device name, permitted projects,
-   **Read only** or **Manage**, and an expiry of 1–365 days (90 by default).
+3. Sign in to the web dashboard and open **Settings → Devices and clients**
+   (`/settings/mobile`). Create a token with a
+   device name, permitted projects, **Read only** or **Manage**, and an expiry
+   of 1–365 days (90 by default). **Admin** is for a client that replaces the
+   dashboard through the [client API](api-v1.md); a phone does not need it.
 4. Enter the public HTTPS API address and the one-time token into the iPhone
    client, for example `https://briareus.example.com/api/mobile/v1`.
    The page shows its current origin; if opened on localhost, replace that with

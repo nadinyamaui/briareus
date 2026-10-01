@@ -4,7 +4,7 @@ const cfg = vi.hoisted(() => ({ githubToken: 'token' }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
 vi.mock('../lib/github.js', () => ({ githubRest: vi.fn(), githubGraphql: vi.fn() }));
 import { githubRest } from '../lib/github.js';
-import { mergePullRequest, pullRequestView } from '../lib/prviewer.js';
+import { commitView, mergePullRequest, pullRequestView } from '../lib/prviewer.js';
 
 const project = { repo: 'owner/repo' };
 const raw = {
@@ -251,6 +251,159 @@ describe('in-app pull request content', () => {
       expect(githubRest).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('the lists a pull request carries', () => {
+  const lists = {
+    '/pulls/42/commits': {
+      sha: 'c1',
+      commit: { message: 'Fix it\n\nBody', author: { name: 'Ada L', date: '2026-01-02T03:04:05Z' } },
+      author: { login: 'ada' },
+      html_url: 'https://github.com/owner/repo/commit/c1',
+    },
+    '/issues/42/comments': {
+      id: 7,
+      user: { login: 'bob' },
+      body: 'Looks good',
+      created_at: 'c',
+      updated_at: 'u',
+      html_url: 'comment-url',
+    },
+    '/pulls/42/reviews': {
+      id: 8,
+      user: { login: 'eve' },
+      state: 'CHANGES_REQUESTED',
+      body: 'Two things',
+      commit_id: 'c1',
+      submitted_at: 's',
+      html_url: 'review-url',
+    },
+    '/pulls/42/comments': {
+      id: 9,
+      pull_request_review_id: 8,
+      in_reply_to_id: 3,
+      user: { login: 'eve' },
+      body: 'Off by one',
+      path: 'src/a.js',
+      line: null,
+      original_line: 12,
+      side: 'RIGHT',
+      diff_hunk: '@@ -1 +1 @@',
+      commit_id: 'c1',
+      created_at: 'c',
+      updated_at: 'u',
+      html_url: 'inline-url',
+    },
+  };
+  beforeEach(() => {
+    respond = (path) => {
+      if (path.endsWith('/pulls/42')) return ok(raw);
+      const [route, query] = path.replace('/repos/owner/repo', '').split('?');
+      if (!lists[route]) throw new Error(`Unexpected URL: ${path}`);
+      return ok(query.endsWith('page=1') ? Array.from({ length: 100 }, () => lists[route]) : [lists[route]]);
+    };
+  });
+
+  it('reads commits, comments, reviews and inline comments from where GitHub keeps each', async () => {
+    const commits = await pullRequestView(project, 42, { section: 'commits' });
+    expect(commits.pr.headSha).toBe('abc');
+    expect(commits.commits[0]).toEqual({
+      sha: 'c1',
+      message: 'Fix it\n\nBody',
+      author: 'ada',
+      date: '2026-01-02T03:04:05Z',
+      url: 'https://github.com/owner/repo/commit/c1',
+    });
+    const comments = await pullRequestView(project, 42, { section: 'comments' });
+    expect(comments.comments[0]).toMatchObject({ id: 7, author: 'bob', body: 'Looks good' });
+    const reviews = await pullRequestView(project, 42, { section: 'reviews' });
+    expect(reviews.reviews[0]).toMatchObject({ author: 'eve', state: 'changes_requested', commitSha: 'c1' });
+    const inline = await pullRequestView(project, 42, { section: 'review-comments' });
+    expect(inline.reviewComments[0]).toMatchObject({
+      reviewId: 8,
+      inReplyTo: 3,
+      path: 'src/a.js',
+      line: null,
+      originalLine: 12,
+      diffHunk: '@@ -1 +1 @@',
+    });
+  });
+
+  it('offers the next page only after a full one, and refuses a page out of range', async () => {
+    expect((await pullRequestView(project, 42, { section: 'comments' })).nextPage).toBe(2);
+    const last = await pullRequestView(project, 42, { section: 'comments', page: 2 });
+    expect(last.comments).toHaveLength(1);
+    expect(last.nextPage).toBeNull();
+    await expect(pullRequestView(project, 42, { section: 'commits', page: 31 })).rejects.toMatchObject({
+      status: 400,
+    });
+    await expect(pullRequestView(project, 42, { section: 'timeline' })).rejects.toMatchObject({
+      status: 400,
+    });
+  });
+
+  it('names a commit author with no GitHub account by the name on the commit', async () => {
+    lists['/pulls/42/commits'] = { ...lists['/pulls/42/commits'], author: null };
+    const { commits } = await pullRequestView(project, 42, { section: 'commits', page: 2 });
+    expect(commits[0].author).toBe('Ada L');
+  });
+});
+
+describe('one commit', () => {
+  const commit = {
+    sha: 'c'.repeat(40),
+    commit: { message: 'Fix it', author: { name: 'Ada L', date: 'd' } },
+    author: { login: 'ada' },
+    html_url: 'commit-url',
+    parents: [{ sha: 'p1' }],
+    stats: { additions: 3, deletions: 2 },
+    files: [file],
+  };
+
+  it('reads the commit with the files it changed', async () => {
+    respond = (path) => {
+      expect(path).toBe(`/repos/owner/repo/commits/${commit.sha}`);
+      return ok(commit);
+    };
+    expect(await commitView(project, commit.sha)).toEqual({
+      commit: {
+        sha: commit.sha,
+        message: 'Fix it',
+        author: 'ada',
+        date: 'd',
+        url: 'commit-url',
+        parents: ['p1'],
+        additions: 3,
+        deletions: 2,
+      },
+      files: [
+        {
+          filename: 'new.js',
+          previousFilename: 'old.js',
+          status: 'renamed',
+          additions: 3,
+          deletions: 2,
+          patch: file.patch,
+          url: file.blob_url,
+        },
+      ],
+      truncated: false,
+    });
+  });
+
+  it('says so when GitHub’s 300-file limit may have cut the list', async () => {
+    respond = () => ok({ ...commit, files: Array.from({ length: 300 }, () => file) });
+    expect((await commitView(project, commit.sha)).truncated).toBe(true);
+  });
+
+  it('refuses anything that is not a SHA before asking GitHub, and reports an unknown one as 404', async () => {
+    for (const sha of ['', 'main', '../pulls/1', 'abc']) {
+      await expect(commitView(project, sha)).rejects.toMatchObject({ status: 400 });
+    }
+    expect(githubRest).not.toHaveBeenCalled();
+    respond = () => ({ ok: false, status: 422, json: async () => ({}) });
+    await expect(commitView(project, 'abc1234')).rejects.toMatchObject({ status: 404 });
+  });
 });
 
 describe('merging from the in-app viewer', () => {

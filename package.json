@@ -26,6 +26,7 @@
     "watch:css": "tailwindcss -i src/app.css -o public/app.css --watch",
     "build:docs-css": "tailwindcss -i src/docs.css -o docs/docs.css --minify",
     "watch:docs-css": "tailwindcss -i src/docs.css -o docs/docs.css --watch",
+    "build:api-docs": "node scripts/api-docs.js",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test:coverage": "vitest run --coverage",

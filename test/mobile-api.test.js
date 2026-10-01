@@ -109,7 +109,15 @@ beforeEach(async () => {
   const options = { auth, loginEnabled: () => loginOn, ownerSecret: () => secret };
   transcribeOn = true;
   transcribe = vi.fn(async () => 'hola mundo');
-  app.use(mobileApiRoutes({ ...options, dashboard, transcribe, transcribeAvailable: () => transcribeOn }));
+  app.use(
+    mobileApiRoutes({
+      ...options,
+      dashboard,
+      transcribe,
+      transcribeAvailable: () => transcribeOn,
+      allRepos: () => [repo],
+    }),
+  );
   app.use(sameOriginWrites);
   app.use(express.json());
   app.use(
@@ -326,12 +334,24 @@ it('serializes concurrent device changes and never reports a failed persistence 
   expect(() => auth.authenticate(`Bearer ${second.token}`, secret)).toThrow('Invalid');
 });
 
+it('gives an admin token every project without a project list of its own', async () => {
+  const admin = await auth.create({ ...input, permission: 'admin', repos: ['ignored/list'] }, secret);
+  expect(admin.device.repos).toEqual([]);
+  // No project has to exist yet for the operator's own token to be issued.
+  await expect(auth.create({ ...input, permission: 'admin', repos: [] }, secret)).resolves.toBeTruthy();
+  expect(await (await call('projects', {}, { token: admin.token })).json()).toEqual({
+    projects: [{ repo, label: 'Project' }],
+  });
+  expect((await call('message', { sessionId: 'mine', text: 'go' }, { token: admin.token })).status).toBe(200);
+  expect((await call('session', { sessionId: 'foreign' }, { token: admin.token })).status).toBe(404);
+});
+
 it('validates expiry and permissions and bounds request bodies with JSON errors', async () => {
   for (const overrides of [
     { days: 0 },
     { days: 366 },
     { days: 1.5 },
-    { permission: 'admin' },
+    { permission: 'owner' },
     { label: '' },
     { repos: [] },
   ]) {

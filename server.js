@@ -17,6 +17,7 @@ import { remoteMcpRoutes } from './lib/remote-mcp.js';
 import { remoteMcpSettingsRoutes } from './lib/remote-mcp-settings.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
 import { mobileApiRoutes, mobileSettingsRoutes } from './lib/mobile-api.js';
+import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
 import { sessionWebhookRoutes } from './lib/webhook-routes.js';
@@ -129,6 +130,7 @@ import {
   reorderProjects,
   PROJECT_DEFAULTS,
   reviewerRuntime,
+  stepRuntime,
 } from './lib/projects.js';
 import { projectRunProfiles } from './lib/runprofiles.js';
 import {
@@ -160,7 +162,7 @@ import {
 } from './lib/memories.js';
 import { initTemplates, globalTemplates, saveGlobalTemplates, templateCatalog } from './lib/templates.js';
 import { projectPulls, pullOverview } from './lib/prboard.js';
-import { mergePullRequest, pullRequestView, pullRequestViewOptions } from './lib/prviewer.js';
+import { commitView, mergePullRequest, pullRequestView, pullRequestViewOptions } from './lib/prviewer.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload, getUpload } from './lib/uploads.js';
@@ -205,6 +207,13 @@ const app = express();
 // Secure flag on the session cookie) reflect the browser's real scheme.
 app.set('trust proxy', 'loopback');
 
+// The API handlers live on a router of their own rather than on the app, so
+// the same handlers answer two doors: the dashboard's pages, behind the
+// cookie login further down, and /api/v1, behind a client's bearer token
+// (lib/api-v1.js). Neither door's gate is on this router; each is mounted in
+// front of it.
+const api = express.Router();
+
 // On every response, including the webhooks': the headers that keep the
 // dashboard from being framed, sniffed or scripted from another origin.
 app.use(securityHeaders);
@@ -217,7 +226,7 @@ app.use('/webhooks', webhookRouter());
 
 // The external MCP transport authenticates OAuth independently of browser
 // cookies. Its own Origin gate runs before the browser-only middleware below.
-const dashboard = dashboardRoutes({ app, getProject, getJob, listActions });
+const dashboard = dashboardRoutes({ app: api, getProject, getJob, listActions });
 const remoteMcpAuth = createRemoteMcpAuth();
 app.use(remoteMcpRoutes({ auth: remoteMcpAuth, dashboard, loginEnabled: authEnabled }));
 const mobileAuth = createMobileAuth();
@@ -226,7 +235,31 @@ const mobileOptions = {
   loginEnabled: authEnabled,
   ownerSecret: () => getConfig().auth.secret,
 };
-app.use(mobileApiRoutes({ ...mobileOptions, dashboard, transcribe, transcribeAvailable }));
+app.use(
+  mobileApiRoutes({
+    ...mobileOptions,
+    dashboard,
+    transcribe,
+    transcribeAvailable,
+    allRepos: () => listProjects().map((p) => p.repo),
+  }),
+);
+// The client API: the same device tokens, in front of the handlers below.
+app.use(
+  apiV1Routes({
+    ...mobileOptions,
+    mcpAuth: remoteMcpAuth,
+    handlers: api,
+    getJob,
+    getProject,
+    listProjects,
+    listSessions: listDevSessions,
+    bus,
+    reviewerRuntime,
+    stepRuntime,
+    transcribeAvailable,
+  }),
+);
 // Every remaining write keeps the dashboard’s same-origin and login gates.
 app.use(sameOriginWrites);
 app.use(express.json({ limit: '1mb' }));
@@ -244,6 +277,10 @@ app.use(
     listProjects,
   }),
 );
+// Routes are added to it for the rest of this file; it is mounted here, behind
+// the login gate and ahead of the pages, because nothing under /api/ or
+// /videos is a page.
+app.use(api);
 
 // The sign-in page itself, and the two calls it makes.
 app.get('/login', (req, res) => {
@@ -305,7 +342,7 @@ app.use('/vendor/three', express.static(path.join(ROOT, 'node_modules', 'three',
 // links this route from the PR's test sheet, so the evidence outlives the
 // session workspace it was recorded in.
 fs.mkdirSync(getConfig().testVideosDir, { recursive: true });
-app.use('/videos', express.static(getConfig().testVideosDir));
+api.use('/videos', express.static(getConfig().testVideosDir));
 
 // The spawned CLI does not share the desktop app's login, so surface its auth
 // state in the UI instead of letting sessions fail cryptically. Every claude
@@ -449,11 +486,11 @@ app.get('/settings/mobile', pageHandler(PUBLIC, 'mobile-settings.html'));
 // the runner needs to prepare and run it: setup steps, PHP version, its
 // session database, the checkout's .env and the ▶ Run commands.
 
-app.get('/api/projects', (req, res) => {
+api.get('/api/projects', (req, res) => {
   res.json({ projects: listProjects(), defaults: PROJECT_DEFAULTS });
 });
 
-app.post('/api/projects', async (req, res) => {
+api.post('/api/projects', async (req, res) => {
   try {
     res.status(201).json({ project: await createProject(req.body || {}) });
   } catch (e) {
@@ -462,7 +499,7 @@ app.post('/api/projects', async (req, res) => {
 });
 
 // Before /:id, which would otherwise take "order" for an id.
-app.put('/api/projects/order', async (req, res) => {
+api.put('/api/projects/order', async (req, res) => {
   try {
     res.json({ projects: await reorderProjects((req.body || {}).ids) });
   } catch (e) {
@@ -470,7 +507,7 @@ app.put('/api/projects/order', async (req, res) => {
   }
 });
 
-app.put('/api/projects/:id', async (req, res) => {
+api.put('/api/projects/:id', async (req, res) => {
   try {
     res.json({ project: await updateProject(Number(req.params.id), req.body || {}) });
   } catch (e) {
@@ -478,7 +515,7 @@ app.put('/api/projects/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/projects/:id', async (req, res) => {
+api.delete('/api/projects/:id', async (req, res) => {
   try {
     const removed = await removeProject(Number(req.params.id));
     if (!removed) return res.status(404).json({ error: 'Project not found' });
@@ -498,7 +535,7 @@ app.delete('/api/projects/:id', async (req, res) => {
 // `{{TOKEN}}`s each template may use and the built-in text an empty field falls
 // back on. Sending it means the client never carries a second copy of the
 // prompts.
-app.get('/api/templates', (req, res) => {
+api.get('/api/templates', (req, res) => {
   res.json({
     templates: [{ id: 1, values: globalTemplates() }],
     defaults: { values: {} },
@@ -506,7 +543,7 @@ app.get('/api/templates', (req, res) => {
   });
 });
 
-app.put('/api/templates/1', async (req, res) => {
+api.put('/api/templates/1', async (req, res) => {
   try {
     const values = await saveGlobalTemplates((req.body || {}).values || {});
     res.json({ templates: { id: 1, values } });
@@ -520,12 +557,12 @@ app.put('/api/templates/1', async (req, res) => {
 // The composer's kickoff library. With ?repo= it is what that project's
 // Prompts menu offers (its own first, then the shared ones); without, the
 // whole library the settings page edits.
-app.get('/api/dev/prompts', (req, res) => {
+api.get('/api/dev/prompts', (req, res) => {
   const repo = typeof req.query.repo === 'string' ? req.query.repo : null;
   res.json({ prompts: listSavedPrompts(repo) });
 });
 
-app.post('/api/dev/prompts', async (req, res) => {
+api.post('/api/dev/prompts', async (req, res) => {
   try {
     res.status(201).json({ prompt: await createSavedPrompt(req.body || {}) });
   } catch (e) {
@@ -533,7 +570,7 @@ app.post('/api/dev/prompts', async (req, res) => {
   }
 });
 
-app.put('/api/dev/prompts/:id', async (req, res) => {
+api.put('/api/dev/prompts/:id', async (req, res) => {
   try {
     res.json({ prompt: await updateSavedPrompt(Number(req.params.id), req.body || {}) });
   } catch (e) {
@@ -541,7 +578,7 @@ app.put('/api/dev/prompts/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/dev/prompts/:id', async (req, res) => {
+api.delete('/api/dev/prompts/:id', async (req, res) => {
   try {
     const removed = await removeSavedPrompt(Number(req.params.id));
     if (!removed) return res.status(404).json({ error: 'Saved prompt not found' });
@@ -559,12 +596,12 @@ app.delete('/api/dev/prompts/:id', async (req, res) => {
 // than the browser cookie (see requireAuth), and never sees a repo parameter:
 // the session decides the project.
 
-app.get('/api/memories', (req, res) => {
+api.get('/api/memories', (req, res) => {
   const repo = typeof req.query.repo === 'string' ? req.query.repo : null;
   res.json({ memories: listMemories(repo) });
 });
 
-app.post('/api/memories', async (req, res) => {
+api.post('/api/memories', async (req, res) => {
   try {
     res.status(201).json({ memory: await createMemory(req.body || {}) });
   } catch (e) {
@@ -572,7 +609,7 @@ app.post('/api/memories', async (req, res) => {
   }
 });
 
-app.put('/api/memories/:id', async (req, res) => {
+api.put('/api/memories/:id', async (req, res) => {
   try {
     // Edited by hand: the trail no longer points at a session.
     res.json({ memory: await updateMemory(Number(req.params.id), { ...(req.body || {}), jobId: null }) });
@@ -581,7 +618,7 @@ app.put('/api/memories/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/memories/:id', async (req, res) => {
+api.delete('/api/memories/:id', async (req, res) => {
   try {
     const removed = await removeMemory(Number(req.params.id));
     if (!removed) return res.status(404).json({ error: 'Memory not found' });
@@ -603,14 +640,14 @@ function agentSession(req, res) {
 }
 
 const sshService = createSshService({ getJob });
-app.use(sshRoutes({ service: sshService, agentSession, getProject }));
-app.use(
+api.use(sshRoutes({ service: sshService, agentSession, getProject }));
+api.use(
   operationsRoutes({ listSessions: devSessionRecords, ssh: sshService, getJob, sendMessage: sendDevMessage }),
 );
 
-app.use(memoryMaintenanceRoutes({ listMemories, updateMemory }));
-app.use(previewFeedbackRoutes({ getJob, getUpload, sendMessage: sendDevMessage }));
-app.use(
+api.use(memoryMaintenanceRoutes({ listMemories, updateMemory }));
+api.use(previewFeedbackRoutes({ getJob, getUpload, sendMessage: sendDevMessage }));
+api.use(
   taskHistoryRoutes({
     loadSnapshots: loadTaskSessions,
     listSessions: listDevSessions,
@@ -619,7 +656,7 @@ app.use(
   }),
 );
 
-app.use(
+api.use(
   deploymentRoutes({
     service: createDeploymentService(),
     getProject,
@@ -627,9 +664,9 @@ app.use(
   }),
 );
 const notificationService = createNotificationService();
-app.use(notificationRoutes({ service: notificationService, getProject }));
+api.use(notificationRoutes({ service: notificationService, getProject }));
 
-app.get('/api/agent/memories', (req, res) => {
+api.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
   if (!job) return;
   res.json({
@@ -642,7 +679,7 @@ app.get('/api/agent/memories', (req, res) => {
   });
 });
 
-app.get('/api/agent/memories/:name', (req, res) => {
+api.get('/api/agent/memories/:name', (req, res) => {
   const job = agentSession(req, res);
   if (!job) return;
   const memory = findMemory(job.repo, req.params.name);
@@ -650,7 +687,7 @@ app.get('/api/agent/memories/:name', (req, res) => {
   res.json({ memory });
 });
 
-app.post('/api/agent/memories', async (req, res) => {
+api.post('/api/agent/memories', async (req, res) => {
   const job = agentSession(req, res);
   if (!job) return;
   try {
@@ -661,7 +698,7 @@ app.post('/api/agent/memories', async (req, res) => {
   }
 });
 
-app.delete('/api/agent/memories/:name', async (req, res) => {
+api.delete('/api/agent/memories/:name', async (req, res) => {
   const job = agentSession(req, res);
   if (!job) return;
   try {
@@ -701,7 +738,7 @@ function workerOf(req, res, orchestrator) {
   return worker;
 }
 
-app.post('/api/agent/sessions', (req, res) => {
+api.post('/api/agent/sessions', (req, res) => {
   const orchestrator = orchestratorSession(req, res);
   if (!orchestrator) return;
   try {
@@ -733,7 +770,7 @@ app.post('/api/agent/sessions', (req, res) => {
   }
 });
 
-app.get('/api/agent/sessions', (req, res) => {
+api.get('/api/agent/sessions', (req, res) => {
   const orchestrator = orchestratorSession(req, res);
   if (!orchestrator) return;
   res.json({
@@ -742,7 +779,7 @@ app.get('/api/agent/sessions', (req, res) => {
   });
 });
 
-app.get('/api/agent/sessions/:id', async (req, res) => {
+api.get('/api/agent/sessions/:id', async (req, res) => {
   const orchestrator = orchestratorSession(req, res);
   if (!orchestrator) return;
   const worker = workerOf(req, res, orchestrator);
@@ -751,7 +788,7 @@ app.get('/api/agent/sessions/:id', async (req, res) => {
   res.json({ session: workerSummary(worker), events });
 });
 
-app.post('/api/agent/sessions/:id/message', (req, res) => {
+api.post('/api/agent/sessions/:id/message', (req, res) => {
   const orchestrator = orchestratorSession(req, res);
   if (!orchestrator) return;
   const worker = workerOf(req, res, orchestrator);
@@ -775,7 +812,7 @@ app.post('/api/agent/sessions/:id/message', (req, res) => {
 // session, the rest is recorded on the pull request. Nothing here spends a
 // worker turn by itself, so neither the slot nor the budget gate applies; the
 // fix session it may start is loop spend like every other round's.
-app.post('/api/agent/sessions/:id/triage', async (req, res) => {
+api.post('/api/agent/sessions/:id/triage', async (req, res) => {
   const orchestrator = orchestratorSession(req, res);
   if (!orchestrator) return;
   const worker = workerOf(req, res, orchestrator);
@@ -796,7 +833,7 @@ app.post('/api/agent/sessions/:id/triage', async (req, res) => {
 // the runtime that failed it. It re-runs a review and never replaces one, so
 // nothing here can approve a push; like triage, it spends no worker turn of
 // its own, and the review it starts is loop spend like every other round's.
-app.post('/api/agent/sessions/:id/retry-review', async (req, res) => {
+api.post('/api/agent/sessions/:id/retry-review', async (req, res) => {
   const orchestrator = orchestratorSession(req, res);
   if (!orchestrator) return;
   const worker = workerOf(req, res, orchestrator);
@@ -810,7 +847,7 @@ app.post('/api/agent/sessions/:id/retry-review', async (req, res) => {
   }
 });
 
-app.post('/api/agent/sessions/:id/close', async (req, res) => {
+api.post('/api/agent/sessions/:id/close', async (req, res) => {
   const orchestrator = orchestratorSession(req, res);
   if (!orchestrator) return;
   const worker = workerOf(req, res, orchestrator);
@@ -866,6 +903,18 @@ dashboard.register('post', '/api/pr/merge', async (req, res) => {
   }
 });
 
+// One commit of the project's repository, with the files it changed: what a
+// pull request's commit list links to.
+api.get('/api/pr/commit', async (req, res) => {
+  try {
+    const project = getProject(String(req.query.repo || ''));
+    if (!project) throw Object.assign(new Error(`Unknown project: ${req.query.repo || ''}`), { status: 404 });
+    res.json(await commitView({ repo: project.repo }, String(req.query.sha || '')));
+  } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
+
 dashboard.register('get', '/api/pr/findings', async (req, res) => {
   try {
     const { repo, prNumber } = findingsParams(req.query);
@@ -890,7 +939,7 @@ dashboard.register('post', '/api/pr/findings/decision', async (req, res) => {
 // The database servers sessions can claim: one session per server at a time,
 // each entry a host/port/username/password the operator adds in Settings.
 
-app.get('/api/dbservers', (req, res) => {
+api.get('/api/dbservers', (req, res) => {
   res.json({ servers: listDbServers(), defaults: DB_SERVER_DEFAULTS });
 });
 
@@ -898,7 +947,7 @@ app.get('/api/dbservers', (req, res) => {
 // can be verified before it is saved, and an existing one re-checked without a
 // session having to fail on it first. The pool size rides along: it is what
 // caps how many sessions may be open at once.
-app.post('/api/dbservers/test', async (req, res) => {
+api.post('/api/dbservers/test', async (req, res) => {
   try {
     const { id, host, port, username, password } = req.body || {};
     const probe = await probeDbServer({ host, port, username, password });
@@ -913,7 +962,7 @@ app.post('/api/dbservers/test', async (req, res) => {
   }
 });
 
-app.post('/api/dbservers', async (req, res) => {
+api.post('/api/dbservers', async (req, res) => {
   try {
     res.status(201).json({ server: await createDbServer(req.body || {}) });
   } catch (e) {
@@ -921,7 +970,7 @@ app.post('/api/dbservers', async (req, res) => {
   }
 });
 
-app.put('/api/dbservers/:id', async (req, res) => {
+api.put('/api/dbservers/:id', async (req, res) => {
   try {
     res.json({ server: await updateDbServer(Number(req.params.id), req.body || {}) });
   } catch (e) {
@@ -929,7 +978,7 @@ app.put('/api/dbservers/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/dbservers/:id', async (req, res) => {
+api.delete('/api/dbservers/:id', async (req, res) => {
   try {
     const removed = await removeDbServer(Number(req.params.id));
     if (!removed) return res.status(404).json({ error: 'Database server not found' });
@@ -945,15 +994,15 @@ app.delete('/api/dbservers/:id', async (req, res) => {
 // idle one by hand: forgetting its install fingerprints, or dropping its
 // dependency trees outright. lib/workspaces.js refuses both with a 409 while
 // a session holds the slot; the error handler below turns that into the reply.
-app.get('/api/workspaces', async (req, res) => {
+api.get('/api/workspaces', async (req, res) => {
   res.json({ workspaces: await listWorkspaces() });
 });
 
-app.post('/api/workspaces/:slot/reset-setup', (req, res) => {
+api.post('/api/workspaces/:slot/reset-setup', (req, res) => {
   res.json(resetSetup(req.params.slot));
 });
 
-app.post('/api/workspaces/:slot/clean', (req, res) => {
+api.post('/api/workspaces/:slot/clean', (req, res) => {
   res.json(cleanWorkspace(req.params.slot));
 });
 
@@ -982,11 +1031,11 @@ function publicProvider(p) {
   };
 }
 
-app.get('/api/providers', (req, res) => {
+api.get('/api/providers', (req, res) => {
   res.json({ providers: listProviders().map(publicProvider), defaults: PROVIDER_DEFAULTS });
 });
 
-app.post('/api/providers', async (req, res) => {
+api.post('/api/providers', async (req, res) => {
   try {
     const provider = await createProvider(req.body || {});
     checkProviderAuth();
@@ -996,7 +1045,7 @@ app.post('/api/providers', async (req, res) => {
   }
 });
 
-app.put('/api/providers/:id', async (req, res) => {
+api.put('/api/providers/:id', async (req, res) => {
   try {
     const provider = await updateProvider(Number(req.params.id), req.body || {});
     // An edited endpoint or key meters a different account: what was read for
@@ -1009,7 +1058,7 @@ app.put('/api/providers/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/providers/:id', async (req, res) => {
+api.delete('/api/providers/:id', async (req, res) => {
   try {
     const removed = await removeProvider(Number(req.params.id));
     if (!removed) return res.status(404).json({ error: 'Provider not found' });
@@ -1088,7 +1137,7 @@ async function providerAuthUsage(p, cfg, fresh = false) {
 
 // The Status section on the settings page: everything known about one entry's
 // connection: account, organization, plan, subscription usage, binary, dir.
-app.get('/api/providers/:id/status', async (req, res) => {
+api.get('/api/providers/:id/status', async (req, res) => {
   const p = getProvider(Number(req.params.id));
   if (!p) return res.status(404).json({ error: 'Provider not found' });
   const cfg = getConfig();
@@ -1106,7 +1155,7 @@ app.get('/api/providers/:id/status', async (req, res) => {
   });
 });
 
-app.use(providerTestRoutes({ getProvider, getConfig }));
+api.use(providerTestRoutes({ getProvider, getConfig }));
 
 // A login is registered against the row: it lands in the entry's own derived
 // config dir and is mirrored into the database once it arrives (the same
@@ -1153,7 +1202,7 @@ function watchLogin(providerId) {
 // service API key, handed to the CLI from the row.
 const cliLogins = new Map(); // binary -> the in-flight login child process
 
-app.post('/api/providers/:id/login', async (req, res) => {
+api.post('/api/providers/:id/login', async (req, res) => {
   const provider = getProvider(Number(req.params.id));
   if (!provider) return res.status(404).json({ error: 'Provider not found' });
   if (provider.binary !== 'codex' && provider.binary !== 'grok') {
@@ -1241,7 +1290,7 @@ app.post('/api/providers/:id/login', async (req, res) => {
 // pastes the code shown back into the page.
 const claudeLogins = new Map(); // provider id -> the in-flight flow's PKCE verifier
 
-app.post('/api/providers/:id/login/start', (req, res) => {
+api.post('/api/providers/:id/login/start', (req, res) => {
   const provider = getProvider(Number(req.params.id));
   if (!provider) return res.status(404).json({ error: 'Provider not found' });
   if (provider.binary !== 'claude') {
@@ -1254,7 +1303,7 @@ app.post('/api/providers/:id/login/start', (req, res) => {
   res.json({ url });
 });
 
-app.post('/api/providers/:id/login/finish', async (req, res) => {
+api.post('/api/providers/:id/login/finish', async (req, res) => {
   const provider = getProvider(Number(req.params.id));
   if (!provider) return res.status(404).json({ error: 'Provider not found' });
   const verifier = claudeLogins.get(provider.id);
@@ -1275,9 +1324,12 @@ app.post('/api/providers/:id/login/finish', async (req, res) => {
 // only, in the order the settings page put them in; the first is the default.
 // Served on its own so the branch picker can start loading without waiting on
 // the provider auth probes, which block on live gateway calls.
-app.get('/api/dev/projects', (req, res) => {
+api.get('/api/dev/projects', (req, res) => {
+  // A client token limited to some projects (lib/api-v1.js) is shown those.
+  const repos = res.locals.apiRepos;
+  const projects = repos ? activeProjects().filter((p) => repos.includes(p.repo)) : activeProjects();
   res.json({
-    projects: activeProjects().map((p) => ({
+    projects: projects.map((p) => ({
       repo: p.repo,
       label: p.label,
       hasLocal: !!p.localDir,
@@ -1321,7 +1373,7 @@ dashboard.register('get', '/api/dev/usage', async (req, res) => {
 // lib/usage.js's windows. Disabled projects are in the list on purpose: one
 // switched off mid-month still spent what it spent, and leaving it out would
 // make the per-project rows fail to add up to the headline totals.
-app.get('/api/dev/usage/all', async (req, res) => {
+api.get('/api/dev/usage/all', async (req, res) => {
   const filter = {};
   for (const key of [
     'project',
@@ -1369,7 +1421,7 @@ dashboard.register('get', '/api/dev/pull', async (req, res) => {
 // whichever member has the most headroom (lib/balancer.js). `accounts` lists
 // the members behind it, with each one's login and quota, so the picker can
 // show where the group stands and warn about one login without hiding the rest.
-app.get('/api/dev/providers', async (req, res) => {
+api.get('/api/dev/providers', async (req, res) => {
   const cfg = getConfig();
   const providers = await Promise.all(
     providerGroups().map(async (group) => {
@@ -1444,7 +1496,7 @@ dashboard.register('get', '/api/dev/branches', async (req, res) => {
 // (picked, pasted or dropped) and sends only the returned ids with the
 // message. The client always posts application/octet-stream, so the global
 // JSON parser never touches these bodies.
-app.post('/api/dev/uploads', express.raw({ type: () => true, limit: '25mb' }), (req, res) => {
+api.post('/api/dev/uploads', express.raw({ type: () => true, limit: '25mb' }), (req, res) => {
   try {
     if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'Empty file' });
     res.status(201).json({ file: storeUpload(String(req.query.name || ''), req.body) });
@@ -1457,11 +1509,11 @@ app.post('/api/dev/uploads', express.raw({ type: () => true, limit: '25mb' }), (
 // posts each recording as the raw body, typed with what the browser recorded
 // (the type is what names the file for OpenAI); OpenAI tells the language
 // itself. The answer is the text only; the recording is not kept.
-app.get('/api/dev/transcribe', (req, res) => {
+api.get('/api/dev/transcribe', (req, res) => {
   res.json({ available: transcribeAvailable() });
 });
 
-app.post('/api/dev/transcribe', express.raw({ type: () => true, limit: '25mb' }), async (req, res) => {
+api.post('/api/dev/transcribe', express.raw({ type: () => true, limit: '25mb' }), async (req, res) => {
   if (!Buffer.isBuffer(req.body) || !req.body.length)
     return res.status(400).json({ error: 'Empty recording' });
   // A note the composer dropped (another chat opened meanwhile) closes its
@@ -1657,7 +1709,10 @@ async function currentJobUsageEstimates() {
 dashboard.register('get', '/api/dev/sessions', async (req, res) => {
   const estimates = await currentJobUsageEstimates();
   const sessions = listDevSessions(estimates);
-  res.json({ sessions: req.mcpProject ? sessions.filter((s) => s.repo === req.mcpProject) : sessions });
+  // One project for a dashboard tool call, a client token's own projects for
+  // the client API (lib/api-v1.js), everything for the dashboard's pages.
+  const repos = req.mcpProject ? [req.mcpProject] : res.locals?.apiRepos;
+  res.json({ sessions: repos ? sessions.filter((s) => repos.includes(s.repo)) : sessions });
 });
 
 // ---- the office ----
@@ -1693,7 +1748,7 @@ function officeCard(session) {
   };
 }
 
-app.get('/api/dev/office/events', (req, res) => {
+api.get('/api/dev/office/events', (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -1820,7 +1875,7 @@ const transcript = sessionTranscriptRoutes({
 
 dashboard.register('get', '/api/dev/sessions/:id', transcript.read);
 
-app.get('/api/dev/sessions/:id/events', transcript.stream);
+api.get('/api/dev/sessions/:id/events', transcript.stream);
 
 // A message mid-turn goes into a claude turn still reading its input, or is
 // queued rather than refused otherwise, and one to a session that
@@ -1836,7 +1891,7 @@ dashboard.register('post', '/api/dev/sessions/:id/message', (req, res) => {
 });
 
 // Dashboard only: internal session tokens cannot compact other sessions.
-app.post('/api/dev/sessions/:id/compact', async (req, res) => {
+api.post('/api/dev/sessions/:id/compact', async (req, res) => {
   try {
     res.json({ session: await compactDevSession(req.params.id) });
   } catch (e) {
@@ -1846,11 +1901,11 @@ app.post('/api/dev/sessions/:id/compact', async (req, res) => {
 
 // Hides the transcript so far from the dashboard; the stored log keeps it.
 // Dashboard only, like compact.
-app.post('/api/dev/sessions/:id/clear', transcript.clear);
+api.post('/api/dev/sessions/:id/clear', transcript.clear);
 
 // Where an outside system posts to wake this session, the key it signs with,
 // and the caps its turns run under (lib/webhook-routes.js).
-app.use(
+api.use(
   sessionWebhookRoutes({
     state: sessionWebhookState,
     update: setSessionWebhook,
