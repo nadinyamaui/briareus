@@ -27,8 +27,9 @@ curl -s https://briareus.example.com/api/v1/ -H "Authorization: Bearer brm_..."
 Tokens are the same ones the [mobile API](mobile-api.md) uses, stored as hashes
 only. Revoking one in Settings, its expiry, or a changed `AUTH_SECRET` stops it
 at the next request, and ends its open event streams within 15 seconds. A
-client can revoke its own token with `DELETE /token`. Tokens are only ever
-created in the dashboard, behind the password: no token can mint another.
+client can revoke its own token with `DELETE /token`. The first token is
+created in the dashboard, behind the password; after that an admin token can
+issue and revoke others (see [Tokens and connections](#tokens-and-connections)).
 
 ## Permissions
 
@@ -61,164 +62,39 @@ needs; give the iPhone app `manage`.
   or the project.
 - Responses are the dashboard's own shapes and may grow: ignore fields and
   event kinds you do not know.
-- `GET /openapi.json` describes every route: its path, parameters, the fields a
-  body may carry, the permission it needs (`x-briareus-access`) and how it is
-  held to a project (`x-briareus-scope`). It does not yet describe response
-  bodies.
+- `GET /openapi.json` describes every route: its parameters and body with
+  their types, its answer, the permission it needs (`x-briareus-access`) and
+  how it is held to a project (`x-briareus-scope`).
 - A start (`POST /sessions`, `POST /actions`, `POST /pulls/{number}/serve`)
   that names no `provider` runs on the project's configured review runtime, or
   the errand's own step runtime. `GET /runtimes` lists what can be named.
 
 ## Routes
 
-All paths are relative to `/api/v1`. "Held to" is what a `read` or `manage`
-token must name; an `admin` token is not held to it.
+[The reference](api-v1-reference.md) lists every route with its fields, their
+types and what it answers. `GET /openapi.json` is the same catalog as an
+OpenAPI 3.1 document, with a schema for every request and response. Both are
+generated from `lib/api-v1-catalog.js`, which is also what the server routes
+from, so neither can describe a route the server does not have.
 
-| Method | Path            | Access | What it does                                              |
-| ------ | --------------- | ------ | --------------------------------------------------------- |
-| GET    | `/`             | read   | The token's own record, the API version, server abilities |
-| GET    | `/openapi.json` | read   | This API as an OpenAPI 3.1 document                       |
-| DELETE | `/token`        | read   | Revoke the token used for this request                    |
-| GET    | `/events`       | read   | Follow every session in scope; see [Events](#events)      |
+What is there, by area:
 
-### Projects and pull requests
+| Area                   | Paths                                                                                     | Needs         |
+| ---------------------- | ----------------------------------------------------------------------------------------- | ------------- |
+| The token              | `/`, `/openapi.json`, `/token`, `/events`                                                 | read          |
+| Projects               | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                               | read / manage |
+| Pull requests          | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits` | read / manage |
+| Sessions               | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops          | read / manage |
+| Composer               | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                       | read to admin |
+| Memory                 | `/memories`, `/memories/health`                                                           | read / admin  |
+| Operations             | `/attention`, `/maintenance`, `/deployments`, `/notifications`, `/ssh/requests`, `/tasks` | admin         |
+| Settings               | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `templates` | admin         |
+| Tokens and connections | `/settings/devices`, `/settings/mcp`                                                      | admin         |
 
-| Method | Path                                | Access | Held to | What it does                                                                                                     |
-| ------ | ----------------------------------- | ------ | ------- | ---------------------------------------------------------------------------------------------------------------- |
-| GET    | `/projects`                         | read   |         | List the projects this token can use                                                                             |
-| GET    | `/branches`                         | read   | `repo`  | List a project’s branches                                                                                        |
-| GET    | `/runtimes`                         | read   | `repo`  | List the providers, models and efforts a session can start on, and the project’s default                         |
-| GET    | `/usage`                            | read   | `repo`  | Read a project’s usage and costs this month                                                                      |
-| GET    | `/actions`                          | read   |         | List the pull request errands                                                                                    |
-| POST   | `/actions`                          | manage | `repo`  | Start an errand on a pull request; starts a paid session                                                         |
-| GET    | `/pulls`                            | read   | `repo`  | List a project’s pull requests and issues                                                                        |
-| GET    | `/pulls/{number}`                   | read   | `repo`  | Read a pull request’s overview: state, size, commit headlines, linked issues, review verdicts and checks summary |
-| GET    | `/pulls/{number}/description`       | read   | `repo`  | Read a pull request’s body, mergeability and allowed merge methods                                               |
-| GET    | `/pulls/{number}/files`             | read   | `repo`  | Read one page (100) of a pull request’s changed files with their patches                                         |
-| GET    | `/pulls/{number}/commits`           | read   | `repo`  | Read one page (100) of a pull request’s commits                                                                  |
-| GET    | `/pulls/{number}/checks`            | read   | `repo`  | Read every check run and commit status on a pull request’s head                                                  |
-| GET    | `/pulls/{number}/comments`          | read   | `repo`  | Read one page (100) of a pull request’s conversation comments                                                    |
-| GET    | `/pulls/{number}/reviews`           | read   | `repo`  | Read one page (100) of a pull request’s reviews                                                                  |
-| GET    | `/pulls/{number}/review-comments`   | read   | `repo`  | Read one page (100) of a pull request’s inline review comments                                                   |
-| GET    | `/pulls/{number}/findings`          | read   | `repo`  | Read the review findings declared on a pull request, with their verdicts                                         |
-| POST   | `/pulls/{number}/findings/decision` | manage | `repo`  | Record a verdict on a finding; may post to GitHub                                                                |
-| POST   | `/pulls/{number}/merge`             | manage | `repo`  | Merge a pull request on GitHub                                                                                   |
-| POST   | `/pulls/{number}/serve`             | manage | `repo`  | Prepare a workspace for a pull request and serve it with the project’s run commands                              |
-| GET    | `/commits/{sha}`                    | read   | `repo`  | Read one commit with the files it changed and their patches                                                      |
-
-### Sessions
-
-| Method | Path                              | Access | Held to | What it does                                                                                        |
-| ------ | --------------------------------- | ------ | ------- | --------------------------------------------------------------------------------------------------- |
-| GET    | `/sessions`                       | read   |         | List the sessions of this token’s projects                                                          |
-| POST   | `/sessions`                       | manage | `repo`  | Start a session; starts a paid agent                                                                |
-| GET    | `/sessions/{id}`                  | read   | session | Read a session and its transcript from an event offset                                              |
-| GET    | `/sessions/{id}/events`           | read   | session | Follow one session: its transcript lines, resumable with Last-Event-ID, and `session` record pushes |
-| PATCH  | `/sessions/{id}`                  | manage | session | Edit a session’s title or compaction settings, one per request                                      |
-| DELETE | `/sessions/{id}`                  | manage | session | Close a session and delete its record and transcript                                                |
-| POST   | `/sessions/{id}/messages`         | manage | session | Send a message to a session; may start a paid turn                                                  |
-| DELETE | `/sessions/{id}/queue/{index}`    | manage | session | Take back a queued message                                                                          |
-| POST   | `/sessions/{id}/cancel`           | manage | session | Stop the running turn                                                                               |
-| POST   | `/sessions/{id}/close`            | manage | session | Close a session, releasing its workspace and database server                                        |
-| POST   | `/sessions/{id}/reopen`           | manage | session | Reopen a closed session without messaging the agent                                                 |
-| POST   | `/sessions/{id}/serve`            | manage | session | Serve the session’s checkout with one of the project’s run profiles                                 |
-| POST   | `/sessions/{id}/compact`          | manage | session | Compact the session’s context                                                                       |
-| POST   | `/sessions/{id}/clear`            | manage | session | Hide the transcript so far; the stored log keeps it                                                 |
-| POST   | `/sessions/{id}/review-loop`      | manage | session | Arm or disarm automatic review rounds                                                               |
-| POST   | `/sessions/{id}/qa-loop`          | manage | session | Arm or disarm automatic QA                                                                          |
-| POST   | `/sessions/{id}/link-pr`          | manage | session | Attach a pull request to the session after verifying its branch                                     |
-| POST   | `/sessions/{id}/findings/triage`  | manage | session | Complete findings triage; may start paid agents and post to GitHub                                  |
-| POST   | `/sessions/{id}/findings/save`    | manage | session | Save findings drafts and post them to GitHub                                                        |
-| POST   | `/sessions/{id}/findings/reply`   | manage | session | Reply on a finding’s GitHub thread                                                                  |
-| POST   | `/sessions/{id}/findings/delete`  | manage | session | Delete a finding and its GitHub comment                                                             |
-| GET    | `/sessions/{id}/preview`          | read   | session | Read the links of a session’s running preview                                                       |
-| POST   | `/sessions/{id}/preview/feedback` | manage | session | Send feedback on a preview page as a message with an annotated screenshot                           |
-| GET    | `/sessions/{id}/webhook`          | admin  |         | Read a session’s webhook settings, URL and signing keys                                             |
-| PUT    | `/sessions/{id}/webhook`          | admin  |         | Change a session’s webhook settings                                                                 |
-| POST   | `/sessions/{id}/webhook/rotate`   | admin  |         | Replace a session’s webhook signing keys                                                            |
-| GET    | `/sessions/{id}/recovery`         | admin  |         | Inspect what an interrupted session left behind                                                     |
-| POST   | `/sessions/{id}/recovery`         | admin  |         | Resume an interrupted session from its recovery report                                              |
-| GET    | `/tasks/{id}`                     | admin  |         | Read a task’s history: every session filed under it and what it cost                                |
-
-### Composer
-
-| Method | Path            | Access | Held to | What it does                                                                          |
-| ------ | --------------- | ------ | ------- | ------------------------------------------------------------------------------------- |
-| GET    | `/prompts`      | read   | `repo`  | List the saved prompts a project offers; without `repo`, the whole library            |
-| POST   | `/prompts`      | admin  |         | Add a saved prompt                                                                    |
-| PUT    | `/prompts/{id}` | admin  |         | Change a saved prompt                                                                 |
-| DELETE | `/prompts/{id}` | admin  |         | Remove a saved prompt                                                                 |
-| POST   | `/uploads`      | manage |         | Upload one attachment; send the returned id with a message                            |
-| GET    | `/transcribe`   | read   |         | Whether this server can transcribe voice notes                                        |
-| POST   | `/transcribe`   | manage |         | Turn a recorded voice note into text                                                  |
-| GET    | `/providers`    | admin  |         | List the providers a session can start on, with every account’s login state and quota |
-
-### Memory
-
-| Method | Path                    | Access | Held to | What it does                                               |
-| ------ | ----------------------- | ------ | ------- | ---------------------------------------------------------- |
-| GET    | `/memories`             | read   | `repo`  | List a project’s memories; without `repo`, every project’s |
-| GET    | `/memories/health`      | admin  |         | Read the memory health report                              |
-| POST   | `/memories/merge`       | admin  |         | Merge two memories of one project                          |
-| POST   | `/memories/{id}/policy` | admin  |         | Mark a memory verified, archive it or restore it           |
-| POST   | `/memories`             | admin  |         | Add a memory                                               |
-| PUT    | `/memories/{id}`        | admin  |         | Change a memory                                            |
-| DELETE | `/memories/{id}`        | admin  |         | Remove a memory                                            |
-
-### Operations
-
-| Method | Path                          | Access | Held to | What it does                                                |
-| ------ | ----------------------------- | ------ | ------- | ----------------------------------------------------------- |
-| GET    | `/usage/all`                  | admin  |         | Read usage and costs across every project                   |
-| GET    | `/attention`                  | admin  |         | List what is waiting on the operator                        |
-| GET    | `/maintenance`                | admin  |         | Read whether the server is draining work                    |
-| POST   | `/maintenance`                | admin  |         | Start or stop draining work                                 |
-| GET    | `/ssh/requests`               | admin  |         | List the SSH commands waiting for approval                  |
-| POST   | `/ssh/requests/{id}/decision` | admin  |         | Approve or deny an SSH command                              |
-| GET    | `/deployments`                | admin  |         | Read a project’s deployment overview                        |
-| GET    | `/deployments/config`         | admin  |         | Read a project’s deployment settings                        |
-| POST   | `/deployments/config`         | admin  |         | Change a project’s deployment settings                      |
-| POST   | `/deployments/plan`           | admin  |         | Plan a deployment                                           |
-| POST   | `/deployments/dispatch`       | admin  |         | Run a planned deployment                                    |
-| POST   | `/deployments/acknowledge`    | admin  |         | Acknowledge the last deployment so another can be requested |
-| GET    | `/notifications`              | admin  |         | Read the push notification status                           |
-| POST   | `/notifications/config`       | admin  |         | Set the push contact address                                |
-| POST   | `/notifications/subscribe`    | admin  |         | Subscribe a browser to push notifications                   |
-| POST   | `/notifications/unsubscribe`  | admin  |         | Remove a push subscription                                  |
-| GET    | `/videos/{file}`              | admin  |         | Download a video a test run recorded                        |
-
-### Settings
-
-| Method | Path                                      | Access | Held to | What it does                                                         |
-| ------ | ----------------------------------------- | ------ | ------- | -------------------------------------------------------------------- |
-| GET    | `/settings/projects`                      | admin  |         | List projects, with the defaults a new one starts from               |
-| POST   | `/settings/projects`                      | admin  |         | Add a project                                                        |
-| PUT    | `/settings/projects/order`                | admin  |         | Reorder projects                                                     |
-| PUT    | `/settings/projects/{id}`                 | admin  |         | Change a project                                                     |
-| DELETE | `/settings/projects/{id}`                 | admin  |         | Remove a project                                                     |
-| GET    | `/settings/templates`                     | admin  |         | Read the prompt templates and their catalog                          |
-| PUT    | `/settings/templates`                     | admin  |         | Change the prompt templates                                          |
-| POST   | `/settings/providers/test`                | admin  |         | Probe a provider endpoint and key as a form holds them               |
-| GET    | `/settings/providers`                     | admin  |         | List providers, with the defaults a new one starts from              |
-| POST   | `/settings/providers`                     | admin  |         | Add a provider                                                       |
-| PUT    | `/settings/providers/{id}`                | admin  |         | Change a provider                                                    |
-| DELETE | `/settings/providers/{id}`                | admin  |         | Remove a provider                                                    |
-| GET    | `/settings/providers/{id}/status`         | admin  |         | Read one provider’s login state, account and quota                   |
-| POST   | `/settings/providers/{id}/login`          | admin  |         | Start a codex or grok device login; returns the URL to approve it at |
-| POST   | `/settings/providers/{id}/login/start`    | admin  |         | Start a claude login; returns the authorization URL                  |
-| POST   | `/settings/providers/{id}/login/finish`   | admin  |         | Finish a claude login with the code the authorization page showed    |
-| POST   | `/settings/db-servers/test`               | admin  |         | Probe a database server as a form holds it                           |
-| GET    | `/settings/db-servers`                    | admin  |         | List database servers, with the defaults a new one starts from       |
-| POST   | `/settings/db-servers`                    | admin  |         | Add a database server                                                |
-| PUT    | `/settings/db-servers/{id}`               | admin  |         | Change a database server                                             |
-| DELETE | `/settings/db-servers/{id}`               | admin  |         | Remove a database server                                             |
-| GET    | `/settings/workspaces`                    | admin  |         | List the workspace clone slots                                       |
-| POST   | `/settings/workspaces/{slot}/reset-setup` | admin  |         | Forget an idle slot’s install fingerprints                           |
-| POST   | `/settings/workspaces/{slot}/clean`       | admin  |         | Remove an idle slot’s dependency trees                               |
-| GET    | `/settings/ssh/servers`                   | admin  |         | List SSH servers, with the defaults a new one starts from            |
-| POST   | `/settings/ssh/servers`                   | admin  |         | Add a SSH server                                                     |
-| PUT    | `/settings/ssh/servers/{id}`              | admin  |         | Change a SSH server                                                  |
-| DELETE | `/settings/ssh/servers/{id}`              | admin  |         | Remove a SSH server                                                  |
+Everything the built-in dashboard can do has a route. The reference ends with a
+table from each of the dashboard's own routes to the one that replaces it, for
+porting a page. `npm test` fails if a handler is added for the dashboard
+without a route here.
 
 ## Pull request data
 
@@ -277,12 +153,31 @@ for `/api/mobile/v1`. Briareus still requires its token on every route. Do not
 exempt `/api/*`: the dashboard's own routes and the pages that issue tokens
 stay behind Access and the password.
 
+## Tokens and connections
+
+An admin token manages credentials as the dashboard's settings pages do:
+
+- `/settings/devices` lists, issues and revokes tokens. A token's secret is in
+  the answer that creates it and nowhere afterwards.
+- `/settings/mcp` configures the ChatGPT connection and its clients.
+- `/settings/mcp/consent` is the OAuth consent step, for a client that draws
+  the authorization page itself: read the request ChatGPT sent the owner's
+  browser with, show it, post the owner's answer, and send the browser to the
+  `redirect` that comes back.
+
+An admin token can issue other tokens, admin ones included. Revoking a leaked
+admin token is therefore not enough on its own: check the device list for
+tokens it issued.
+
 ## What is not in this API
 
-- Issuing, listing and revoking tokens, and the ChatGPT connection settings:
-  dashboard only, behind the password.
+- Signing in. The dashboard's password login (`/api/login`) is the built-in
+  pages' own; a client authenticates its users itself and calls with its token.
 - `/api/agent/*`: the calls an agent makes from inside its own session.
 - `/webhooks/*`: deliveries from GitHub and from systems that wake a session.
+- `/mcp` and `/oauth/token`: ChatGPT's own transport.
+- `/healthz` is public and outside the prefix: 200 when the server and its
+  database answer.
 
 The dashboard's own routes (`/api/dev/*`, `/api/projects`, …) still exist for
 the built-in pages and take only the login cookie. They are not a contract;

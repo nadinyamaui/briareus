@@ -4,7 +4,10 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { createMobileAuth } from '../lib/mobile-auth.js';
-import { API_V1_ROUTES, apiV1OpenApi, apiV1Routes } from '../lib/api-v1.js';
+import { createRemoteMcpAuth } from '../lib/remote-mcp-auth.js';
+import { apiV1Routes } from '../lib/api-v1.js';
+import { API_V1_ROUTES, FIELDS, NOT_IN_API, OBJECTS } from '../lib/api-v1-catalog.js';
+import { apiV1OpenApi, apiV1Reference, schemaOf } from '../lib/api-v1-docs.js';
 
 const repo = 'owner/project';
 const secret = 'owner-secret';
@@ -15,7 +18,7 @@ const jobs = {
   review: { id: 'review', repo, kind: 'review' },
 };
 
-let auth, server, url, clock, loginOn, bus, sessions, project, handler, tokens;
+let auth, mcpAuth, server, url, clock, loginOn, bus, sessions, project, handler, tokens;
 beforeEach(async () => {
   let saved = [];
   clock = Date.now();
@@ -28,6 +31,14 @@ beforeEach(async () => {
     now: () => clock,
   });
   await auth.init();
+  let mcpSaved = { enabled: false, baseUrl: '', clients: [], grants: [] };
+  mcpAuth = createRemoteMcpAuth({
+    load: async () => structuredClone(mcpSaved),
+    save: async (_name, value) => {
+      mcpSaved = structuredClone(value);
+    },
+  });
+  await mcpAuth.init();
   const create = async (permission) =>
     (await auth.create({ label: `${permission} client`, repos: [repo], permission, days: 30 }, secret)).token;
   tokens = { read: await create('read'), manage: await create('manage'), admin: await create('admin') };
@@ -36,7 +47,13 @@ beforeEach(async () => {
     { id: 'mine', repo, kind: 'devchat', status: 'idle' },
     { id: 'foreign', repo: 'other/project', kind: 'devchat', status: 'idle' },
   ];
-  project = { repo, reviewProviderId: 2, reviewModel: 'configured-model', reviewEffort: 'high' };
+  project = {
+    repo,
+    label: 'Project',
+    reviewProviderId: 2,
+    reviewModel: 'configured-model',
+    reviewEffort: 'high',
+  };
   // Stands in for every dashboard handler: it answers with what reached it.
   handler = vi.fn((req, res) =>
     res.json({
@@ -62,6 +79,8 @@ beforeEach(async () => {
   app.use(
     apiV1Routes({
       auth,
+      mcpAuth,
+      listProjects: () => [project, { repo: 'other/project', label: 'Other' }],
       loginEnabled: () => loginOn,
       ownerSecret: () => secret,
       handlers,
@@ -406,38 +425,210 @@ describe('the event streams', () => {
   });
 });
 
+describe('tokens and connections', () => {
+  const admin = (route, options = {}) => request(route, { token: tokens.admin, ...options });
+
+  it('lists the tokens issued without their secrets', async () => {
+    const { devices, projects } = await (await admin('/settings/devices')).json();
+    expect(devices.map((d) => d.permission).sort()).toEqual(['admin', 'manage', 'read']);
+    expect(JSON.stringify(devices)).not.toMatch(/brm_|Hash/);
+    expect(projects).toEqual([
+      { repo, label: 'Project' },
+      { repo: 'other/project', label: 'Other' },
+    ]);
+  });
+
+  it('issues a token that works, and revokes it', async () => {
+    const issued = await admin('/settings/devices', {
+      method: 'POST',
+      body: { label: 'Phone', permission: 'read', repos: [repo], days: 7 },
+    });
+    expect(issued.status).toBe(201);
+    const { device, token } = await issued.json();
+    expect(device).toMatchObject({ label: 'Phone', permission: 'read', repos: [repo] });
+    expect((await request('/sessions', { token })).status).toBe(200);
+    expect(await (await admin(`/settings/devices/${device.id}`, { method: 'DELETE' })).json()).toEqual({
+      ok: true,
+    });
+    expect((await request('/sessions', { token })).status).toBe(401);
+  });
+
+  it('refuses a token for a project that does not exist, or with no project and no admin', async () => {
+    for (const body of [
+      { label: 'x', permission: 'read', repos: ['no/such'], days: 7 },
+      { label: 'x', permission: 'manage', repos: [], days: 7 },
+      { label: 'x', permission: 'owner', repos: [repo], days: 7 },
+      { label: 'x', permission: 'read', repos: [repo], days: 0 },
+    ]) {
+      const response = await admin('/settings/devices', { method: 'POST', body });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBeTruthy();
+    }
+    expect(auth.list()).toHaveLength(3);
+  });
+
+  it('keeps token and connection management from anything below admin', async () => {
+    for (const route of ['/settings/devices', '/settings/mcp']) {
+      expect((await request(route)).status).toBe(403);
+      expect(
+        (await request(route, { method: route.endsWith('mcp') ? 'PUT' : 'POST', body: {} })).status,
+      ).toBe(403);
+    }
+    expect(auth.list()).toHaveLength(3);
+  });
+
+  it('configures the ChatGPT connection, creates one and takes its consent', async () => {
+    expect(await (await admin('/settings/mcp')).json()).toMatchObject({ enabled: false, clients: [] });
+    const bad = await admin('/settings/mcp', { method: 'PUT', body: { enabled: true, baseUrl: 'http://x' } });
+    expect(bad.status).toBe(400);
+    const set = await admin('/settings/mcp', {
+      method: 'PUT',
+      body: { enabled: true, baseUrl: 'https://briareus.example.com' },
+    });
+    expect(await set.json()).toMatchObject({ enabled: true, url: 'https://briareus.example.com/mcp' });
+    expect(
+      (await admin('/settings/mcp/clients', { method: 'POST', body: { label: 'c', repos: ['no/such'] } }))
+        .status,
+    ).toBe(400);
+    const created = await admin('/settings/mcp/clients', {
+      method: 'POST',
+      body: { label: 'GPT', repos: [repo] },
+    });
+    expect(created.status).toBe(201);
+    const { clientId, clientSecret } = await created.json();
+    expect(clientSecret).toBeTruthy();
+    const view = await (await admin('/settings/mcp')).json();
+    expect(view.clients).toMatchObject([{ id: clientId, label: 'GPT', repos: [repo], connected: false }]);
+    expect(JSON.stringify(view)).not.toContain(clientSecret);
+
+    const oauth = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: 'https://chatgpt.com/connector_platform_oauth_redirect',
+      resource: 'https://briareus.example.com/mcp',
+      response_type: 'code',
+      code_challenge: 'a'.repeat(43),
+      code_challenge_method: 'S256',
+      state: 'xyz',
+    });
+    const consent = await (await admin(`/settings/mcp/consent?${oauth}`)).json();
+    expect(consent).toMatchObject({ label: 'GPT', repos: [repo] });
+    expect((await admin('/settings/mcp/consent?client_id=nope')).status).toBe(400);
+    expect(
+      (await admin('/settings/mcp/consent', { method: 'POST', body: { nonce: consent.nonce } })).status,
+    ).toBe(400);
+    const approved = await admin('/settings/mcp/consent', {
+      method: 'POST',
+      body: { nonce: consent.nonce, allow: true },
+    });
+    const { redirect } = await approved.json();
+    expect(redirect).toMatch(
+      /^https:\/\/chatgpt\.com\/connector_platform_oauth_redirect\?state=xyz&iss=.*&code=/,
+    );
+    // The answer is good once.
+    expect(
+      (await admin('/settings/mcp/consent', { method: 'POST', body: { nonce: consent.nonce, allow: true } }))
+        .status,
+    ).toBe(400);
+
+    expect(await (await admin(`/settings/mcp/clients/${clientId}`, { method: 'DELETE' })).json()).toEqual({
+      ok: true,
+    });
+    expect((await (await admin('/settings/mcp')).json()).clients).toEqual([]);
+  });
+});
+
 describe('the contract', () => {
-  it('describes every route once in the OpenAPI document', () => {
+  const root = path.join(import.meta.dirname, '..');
+  // Every route the source registers, as `METHOD /path`.
+  function registeredRoutes() {
+    const files = ['server.js', ...fs.readdirSync(path.join(root, 'lib')).map((f) => `lib/${f}`)];
+    const registered = new Map();
+    for (const file of files.filter((f) => f.endsWith('.js'))) {
+      const source = fs.readFileSync(path.join(root, file), 'utf8');
+      for (const [, method, route] of source.matchAll(
+        /\b(?:api|app|router)\.(get|post|put|patch|delete)\(\s*['`]([^'`]+)['`]/g,
+      ))
+        registered.set(`${method.toUpperCase()} ${route}`, file);
+      for (const [, method, route] of source.matchAll(/dashboard\.register\(\s*'(\w+)',\s*['`]([^'`]+)['`]/g))
+        registered.set(`${method.toUpperCase()} ${route}`, file);
+    }
+    return registered;
+  }
+
+  it('describes every route once in the OpenAPI document, with typed fields and a typed answer', () => {
     const doc = apiV1OpenApi();
     const operations = Object.values(doc.paths).flatMap((methods) => Object.values(methods));
-    expect(operations).toHaveLength(API_V1_ROUTES.length + 4);
+    expect(operations).toHaveLength(API_V1_ROUTES.length);
     const ids = operations.map((op) => op.operationId);
     expect(new Set(ids).size).toBe(ids.length);
-    expect(doc.paths['/pulls/{number}/files'].get).toMatchObject({
+    const files = doc.paths['/pulls/{number}/files'].get;
+    expect(files).toMatchObject({
       operationId: 'pullsFiles',
       'x-briareus-access': 'read',
       'x-briareus-scope': 'repo',
     });
-    expect(doc.paths['/pulls/{number}/files'].get.parameters).toContainEqual({
+    expect(files.parameters).toContainEqual({
       name: 'repo',
       in: 'query',
       required: true,
+      description: FIELDS.repo[1],
       schema: { type: 'string' },
     });
-    expect(
-      doc.paths['/sessions'].post.requestBody.content['application/json'].schema.properties,
-    ).toHaveProperty('prompt');
+    expect(files.responses[200].content['application/json'].schema.properties).toMatchObject({
+      pr: { $ref: '#/components/schemas/PullRequest' },
+      files: { type: 'array', items: { $ref: '#/components/schemas/File' } },
+      nextPage: { type: ['integer', 'null'] },
+    });
+    const start = doc.paths['/sessions'].post;
+    expect(start.requestBody.content['application/json'].schema).toMatchObject({
+      required: ['repo'],
+      properties: { prompt: { type: 'string' }, provider: { type: 'integer' } },
+    });
+    expect(start.responses[201]).toBeTruthy();
+    expect(doc.paths['/settings/projects'].post.requestBody.content['application/json'].schema).toEqual({
+      $ref: '#/components/schemas/Project',
+    });
+    expect(Object.keys(doc.components.schemas)).toEqual(Object.keys(OBJECTS));
+    // Every reference in the document points at a schema that is there.
+    for (const [, name] of JSON.stringify(doc).matchAll(/#\/components\/schemas\/(\w+)/g))
+      expect(doc.components.schemas, name).toHaveProperty(name);
+  });
+
+  it('writes catalog types as JSON Schema', () => {
+    expect(schemaOf('string')).toEqual({ type: 'string' });
+    expect(schemaOf('integer?')).toEqual({ type: ['integer', 'null'] });
+    expect(schemaOf('string[]')).toEqual({ type: 'array', items: { type: 'string' } });
+    expect(schemaOf('fix|optional')).toEqual({ type: 'string', enum: ['fix', 'optional'] });
+    expect(schemaOf('Session[]')).toEqual({ type: 'array', items: { $ref: '#/components/schemas/Session' } });
+    expect(schemaOf('Session?')).toEqual({
+      anyOf: [{ $ref: '#/components/schemas/Session' }, { type: 'null' }],
+    });
   });
 
   it('serves the document to any token', async () => {
     expect((await json('/openapi.json', { token: tokens.read })).openapi).toBe('3.1.0');
   });
 
+  it('says what every route takes and answers', () => {
+    for (const entry of API_V1_ROUTES) {
+      expect(entry.summary, entry.id).toBeTruthy();
+      if (!entry.stream && !entry.binary)
+        expect(entry.returns, `${entry.id} has no answer described`).toBeTruthy();
+      const takes = [...(entry.query || []), ...(entry.body || [])];
+      for (const name of takes)
+        expect(entry.fields?.[name] || FIELDS[name], `${entry.id}: ${name} is not described`).toBeTruthy();
+      for (const name of entry.required || []) expect(takes, `${entry.id} requires ${name}`).toContain(name);
+      if (entry.bodyObject) expect(OBJECTS, entry.id).toHaveProperty(entry.bodyObject);
+      // A write that takes nothing is fine; a write that takes fields says which.
+      if (entry.raw) expect(entry.body, entry.id).toBeUndefined();
+    }
+  });
+
   it('declares a known permission and scope on every route, and scopes nothing below admin loosely', () => {
     for (const entry of API_V1_ROUTES) {
       expect(['read', 'manage', 'admin'], entry.id).toContain(entry.access);
       expect(['repo', 'session', 'any'], entry.id).toContain(entry.scope);
-      expect(entry.method === 'GET' || entry.access !== 'read', `${entry.id} writes with read access`).toBe(
+      expect(entry.method === 'GET' || entry.access !== 'read' || entry.id === 'token.revoke', entry.id).toBe(
         true,
       );
       if (entry.scope === 'session') expect(entry.path, entry.id).toContain(':id');
@@ -451,8 +642,12 @@ describe('the contract', () => {
         .sort(),
     ).toEqual([
       'actions.list',
+      'client.get',
+      'events.stream',
+      'openapi.get',
       'projects.list',
       'sessions.list',
+      'token.revoke',
       'transcribe.create',
       'transcribe.status',
       'uploads.create',
@@ -460,36 +655,79 @@ describe('the contract', () => {
   });
 
   // The catalog names handlers by path, so a handler that is renamed or
-  // removed would leave a route that answers 404. This reads the routes the
-  // source registers and fails on the first catalog entry with none behind it.
+  // removed would leave a route that answers 404.
   it('names only handlers that exist', () => {
-    const root = path.join(import.meta.dirname, '..');
-    const files = ['server.js', ...fs.readdirSync(path.join(root, 'lib')).map((f) => `lib/${f}`)];
-    const registered = new Set();
-    for (const file of files.filter((f) => f.endsWith('.js'))) {
-      const source = fs.readFileSync(path.join(root, file), 'utf8');
-      for (const [, method, route] of source.matchAll(
-        /\b(?:api|app|router)\.(get|post|put|patch|delete)\(\s*['`]([^'`]+)['`]/g,
-      ))
-        registered.add(`${method.toUpperCase()} ${route}`);
-      for (const [, method, route] of source.matchAll(/dashboard\.register\(\s*'(\w+)',\s*['`]([^'`]+)['`]/g))
-        registered.add(`${method.toUpperCase()} ${route}`);
-    }
-    const missing = API_V1_ROUTES.filter((e) => e.id !== 'videos.get')
+    const registered = registeredRoutes();
+    const missing = API_V1_ROUTES.filter((e) => e.to && e.id !== 'videos.get')
       .map((e) => `${e.method} ${e.to}`)
       .filter((key) => !registered.has(key));
     expect(missing).toEqual([]);
   });
 
-  it('documents every route in the client API guide', () => {
-    const guide = fs.readFileSync(path.join(import.meta.dirname, '..', 'docs', 'api-v1.md'), 'utf8');
-    const rows = new Set(
-      [...guide.matchAll(/^\| (GET|POST|PUT|PATCH|DELETE)\s*\| `([^`]+)`/gm)].map(([, m, p]) => `${m} ${p}`),
+  // The other direction, and the point of the API: whatever the dashboard's
+  // pages can call, a client can. A handler added for a page fails this until
+  // it is given a route in the catalog, or a line in NOT_IN_API saying why it
+  // has none.
+  it('leaves nothing the dashboard can do without a route', () => {
+    const covered = new Set(API_V1_ROUTES.filter((e) => e.to).map((e) => `${e.method} ${e.to}`));
+    // Not the dashboard's: what an agent calls from inside its session, what
+    // other systems deliver, the transports with their own contracts, and the
+    // pages themselves.
+    const elsewhere = (key, file) =>
+      / \/api\/agent\//.test(key) ||
+      ['lib/webhooks.js', 'lib/remote-mcp.js', 'lib/api-v1.js'].includes(file) ||
+      (file === 'lib/mobile-api.js' && !key.includes('/api/mobile-devices')) ||
+      !/ \/(api|oauth)\//.test(key);
+    const uncovered = [...registeredRoutes()]
+      .filter(([key, file]) => !covered.has(key) && !(key in NOT_IN_API) && !elsewhere(key, file))
+      .map(([key]) => key);
+    expect(uncovered).toEqual([]);
+    // And nothing is excused that no longer exists.
+    const registered = registeredRoutes();
+    expect(Object.keys(NOT_IN_API).filter((key) => !registered.has(key))).toEqual([]);
+  });
+
+  it('keeps every call the dashboard’s scripts make within reach', () => {
+    const reachable = [
+      ...API_V1_ROUTES.filter((e) => e.to).map((e) => e.to),
+      ...Object.keys(NOT_IN_API).map((key) => key.split(' ')[1]),
+    ].map((route) => new RegExp(`^${route.replace(/[:*]\w+/g, '[^/]+').replace(/\//g, '\\/')}(\\/|$)`));
+    const called = new Set();
+    for (const file of fs.readdirSync(path.join(root, 'public')).filter((f) => f.endsWith('.js'))) {
+      const source = fs.readFileSync(path.join(root, 'public', file), 'utf8');
+      for (const [, route] of source.matchAll(/['`](\/api\/[A-Za-z0-9/_-]*)/g))
+        called.add(route.replace(/\/$/, ''));
+    }
+    expect(called.size).toBeGreaterThan(40);
+    const unreachable = [...called].filter(
+      (route) => !reachable.some((pattern) => pattern.test(`${route}/x`) || pattern.test(route)),
     );
-    const undocumented = API_V1_ROUTES.map(
-      (e) => `${e.method} ${e.path.replace(/[:*](\w+)/g, '{$1}')}`,
-    ).filter((key) => !rows.has(key));
-    expect(undocumented).toEqual([]);
+    expect(unreachable).toEqual([]);
+  });
+
+  it('keeps the object lists in step with the settings they describe', async () => {
+    const { PROJECT_DEFAULTS } = await import('../lib/projects.js');
+    const { PROVIDER_DEFAULTS } = await import('../lib/providerstore.js');
+    const { DB_SERVER_DEFAULTS } = await import('../lib/dbservers.js');
+    const { SSH_DEFAULTS } = await import('../lib/ssh.js');
+    const { WEBHOOK_DEFAULTS } = await import('../lib/deliveries.js');
+    const fields = (name) => Object.keys(OBJECTS[name].fields);
+    for (const key of Object.keys(PROJECT_DEFAULTS)) expect(fields('Project'), key).toContain(key);
+    // The stored login is the one provider field that never leaves the server.
+    for (const key of Object.keys(PROVIDER_DEFAULTS).filter((k) => k !== 'authData'))
+      expect(fields('Provider'), key).toContain(key);
+    for (const key of Object.keys(DB_SERVER_DEFAULTS)) expect(fields('DbServer'), key).toContain(key);
+    for (const key of Object.keys(SSH_DEFAULTS)) expect(fields('SshServer'), key).toContain(key);
+    for (const key of Object.keys(WEBHOOK_DEFAULTS).filter((k) => k !== 'epoch'))
+      expect(fields('Webhook'), key).toContain(key);
+  });
+
+  it('has a reference on disk that is what the catalog would write', async () => {
+    const prettier = await import('prettier');
+    const file = path.join(root, 'docs', 'api-v1-reference.md');
+    const options = await prettier.resolveConfig(file);
+    const expected = await prettier.format(apiV1Reference(), { ...options, filepath: file });
+    expect(fs.readFileSync(file, 'utf8'), 'run `npm run build:api-docs`').toBe(expected);
   });
 
   it('gives every route a unique method and path', () => {

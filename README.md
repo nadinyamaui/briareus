@@ -772,9 +772,13 @@ requests (files, commits, checks, comments, reviews), findings, settings and
 two event streams. **Settings → Devices and clients** issues the tokens: read
 or manage on chosen projects, or admin for everything the dashboard can do.
 
-See the [client API guide](docs/api-v1.md) for the routes, the permissions, the
-event streams and the Cloudflare Access exception. `GET /api/v1/openapi.json`
-is the same catalog as an OpenAPI document.
+See the [client API guide](docs/api-v1.md) for tokens, permissions, the event
+streams and the Cloudflare Access exception, and the
+[reference](docs/api-v1-reference.md) for every route's fields and answer.
+`GET /api/v1/openapi.json` is the same catalog as an OpenAPI document. All
+three come from `lib/api-v1-catalog.js`; after changing a route there, run
+`npm run build:api-docs`. Everything the dashboard's pages can do has a route:
+`npm test` fails when a handler is added without one.
 
 ## Native mobile API
 

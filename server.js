@@ -248,9 +248,11 @@ app.use(
 app.use(
   apiV1Routes({
     ...mobileOptions,
+    mcpAuth: remoteMcpAuth,
     handlers: api,
     getJob,
     getProject,
+    listProjects,
     listSessions: listDevSessions,
     bus,
     reviewerRuntime,

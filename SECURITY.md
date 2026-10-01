@@ -34,7 +34,10 @@ mobile API below, and adds an `admin` permission: a token with it can do
 everything the dashboard can, on every project, including reading and changing
 provider keys, database servers and SSH settings. Treat an admin token like the
 dashboard password, and issue one only to a client that replaces the dashboard.
-Read and manage tokens are held to the projects they were given. The API
+An admin token can also issue and revoke tokens and ChatGPT connections, so
+after revoking a leaked one, check the device list for tokens it issued. Read
+and manage tokens are held to the projects they were given and cannot issue
+anything. The API
 refuses requests that carry an `Origin` header and enables no CORS, so a token
 is never usable from a browser page. A Cloudflare Access exception may cover
 only `/api/v1` and its subpaths. See the [client API guide](docs/api-v1.md).
