@@ -687,7 +687,8 @@ repository: a web app, a desktop app, the iOS app. It puts a bearer token in
 front of every handler, so it covers sessions, transcripts, pull requests
 (files, commits, checks, comments, reviews), findings, settings and two event
 streams. `npm run create-token -- --label Desktop` issues the first token, an
-admin one; restart the server to load it. An admin token then issues the rest:
+admin one; restart the server once if that run wrote `AUTH_SECRET`, and later
+tokens need no restart. An admin token then issues the rest:
 read or manage on chosen projects, or admin for everything.
 
 The routes the removed dashboard called with its login cookie, and the earlier

@@ -99,3 +99,46 @@ it('validates the name, the permission, the projects and the expiry', () => {
     expect(() => auth.create({ ...input, ...overrides }, secret)).toThrow();
   expect(() => auth.create(input, '')).toThrow('AUTH_SECRET');
 });
+
+// Two processes over one stored row: the server, and `npm run create-token`.
+function sharedRow() {
+  let row = [];
+  return {
+    load: async () => structuredClone(row),
+    save: async (_name, value) => {
+      row = structuredClone(value);
+    },
+  };
+}
+
+it('picks up tokens issued and revoked by another process when it refreshes', async () => {
+  const row = sharedRow();
+  const server = createMobileAuth(row);
+  const cli = createMobileAuth(row);
+  await server.init();
+  await cli.init();
+  const { device, token } = await cli.create(input, secret);
+  expect(() => server.authenticate(`Bearer ${token}`, secret)).toThrow('Invalid');
+  await server.refresh();
+  expect(server.authenticate(`Bearer ${token}`, secret).id).toBe(device.id);
+  await cli.revoke(device.id);
+  await server.refresh();
+  expect(() => server.authenticate(`Bearer ${token}`, secret)).toThrow('Invalid');
+});
+
+it('keeps the last good list when a refresh fails', async () => {
+  const row = sharedRow();
+  let down = false;
+  const server = createMobileAuth({
+    ...row,
+    load: async (...args) => {
+      if (down) throw new Error('DB down');
+      return row.load(...args);
+    },
+  });
+  await server.init();
+  const { token } = await server.create(input, secret);
+  down = true;
+  await expect(server.refresh()).rejects.toThrow('DB down');
+  expect(server.authenticate(`Bearer ${token}`, secret).label).toBe('Desktop');
+});

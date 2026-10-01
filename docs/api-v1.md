@@ -12,8 +12,7 @@ sit in page script, so CORS is off and a web client calls from its own server.
 
 ## Connect a client
 
-1. Create the first token on the server itself, then restart the server so it
-   loads it:
+1. Create the first token on the server itself:
 
    ```sh
    npm run create-token -- --label Desktop
@@ -22,10 +21,14 @@ sit in page script, so CORS is off and a web client calls from its own server.
    The first run also writes `AUTH_SECRET` into `.env`: every token is signed
    with it, and the API fails closed with 503 until it is set. Removing it and
    running the command again revokes every token at once.
+   The server reads `AUTH_SECRET` at boot, so restart it after that first run.
+   Later tokens need no restart: the running server picks them up within 15
+   seconds.
 
    That is an admin token good for 365 days. `--permission read|manage` with
    one `--repo owner/name` per project makes a narrower one, and `--days`
-   (1–365) sets the expiry.
+   (1–365) sets the expiry. `--list` shows the tokens there are and
+   `--revoke <id>` revokes one, also without a restart.
 
 2. Give the client the address `https://<your-host>/api/v1` and the token. The
    token is shown once.
@@ -172,7 +175,8 @@ them. A token's secret is in the answer that creates it and nowhere afterwards.
 An admin token can issue other tokens, admin ones included. Revoking a leaked
 admin token is therefore not enough on its own: check the device list for
 tokens it issued. With no admin token left, `npm run create-token` issues a new
-one.
+one, and `npm run create-token -- --list` / `--revoke <id>` do the same checking
+and revoking from the machine.
 
 ## What is not in this API
 
