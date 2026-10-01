@@ -329,15 +329,6 @@ app.get('/healthz', async (req, res) => {
 // bytes, so a changed file is a changed URL; see lib/assets.js for why the
 // browser cannot be left to work that out for itself.
 app.use(express.static(PUBLIC, { setHeaders: assetCacheHeaders(PUBLIC) }));
-// three.js, for the office. Served straight out of node_modules rather than
-// copied under public/: the package's own build is what the island module
-// imports, and its version moves with the lockfile like any other
-// dependency. The addons (the water, the bloom pass) live in the package's
-// examples tree and import the core as the bare `three`, which the page's
-// import map points back here. The addons route goes first: the build route
-// would otherwise swallow its prefix and answer 404.
-app.use('/vendor/three/addons', express.static(path.join(ROOT, 'node_modules', 'three', 'examples', 'jsm')));
-app.use('/vendor/three', express.static(path.join(ROOT, 'node_modules', 'three', 'build')));
 // The scenario videos a test run records. The run copies each .webm here and
 // links this route from the PR's test sheet, so the evidence outlives the
 // session workspace it was recorded in.
@@ -446,7 +437,6 @@ const settingsPage = pageHandler(PUBLIC, 'settings.html');
 
 app.get('/', devPage);
 app.get('/dashboard', devPage);
-app.get('/office', devPage);
 app.get('/findings', devPage);
 app.get(
   [
@@ -1713,68 +1703,6 @@ dashboard.register('get', '/api/dev/sessions', async (req, res) => {
   // the client API (lib/api-v1.js), everything for the dashboard's pages.
   const repos = req.mcpProject ? [req.mcpProject] : res.locals?.apiRepos;
   res.json({ sessions: repos ? sessions.filter((s) => repos.includes(s.repo)) : sessions });
-});
-
-// ---- the office ----
-//
-// 🏝 The office draws every project as a table on the beach and every open
-// session as somebody at one, so it needs all of them at once: the per-session
-// stream further down speaks for one conversation, which is the wrong shape.
-// What it does not need is the conversation itself, so only the handful of
-// record fields a building is drawn from go out.
-function officeCard(session) {
-  return {
-    id: session.id,
-    title: session.title || '',
-    repo: session.repo || '',
-    provider: session.provider || '',
-    status: session.status,
-    awaitingAnswer: session.awaitingAnswer === true,
-    review: session.review === true,
-    qa: session.qa === true,
-    local: session.local === true,
-    // Names only, and under a name of their own: `subagents` on the record is
-    // a list of objects the right panel reads, and the office wants the crew
-    // standing beside a character, not what each of them was asked.
-    crew: (session.subagents || []).map((a) => a.name || 'agent'),
-    // Who answers to whom: an orchestrator stands apart from its workers, and
-    // the island draws the order it gives when one of them starts a turn.
-    orchestrator: session.orchestrator === true,
-    parentId: session.parentId || null,
-    // The line in the bubble over the character's head: the tool a running
-    // turn is on, or the opening of the agent's latest message otherwise.
-    lastTool: session.lastTool || null,
-    lastText: session.lastText || null,
-  };
-}
-
-api.get('/api/dev/office/events', (req, res) => {
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-  });
-  // A running turn pushes its record every couple of seconds to move the token
-  // counters, and no counter moves a building. Sending only what changed since
-  // the last line for that session turns a busy turn from ~30 messages a
-  // minute into one per status change.
-  const sent = new Map();
-  const send = (session) => {
-    const wire = JSON.stringify(officeCard(session));
-    if (sent.get(session.id) === wire) return;
-    sent.set(session.id, wire);
-    res.write(`data: ${wire}\n\n`);
-  };
-  for (const session of listDevSessions()) send(session);
-  const onJob = (record) => {
-    if (record.kind === 'devchat') send(record);
-  };
-  bus.on('job', onJob);
-  const ping = setInterval(() => res.write(': ping\n\n'), 25000);
-  req.on('close', () => {
-    clearInterval(ping);
-    bus.off('job', onJob);
-  });
 });
 
 // What the browser is allowed to file a session's spend under. Everything

@@ -13,10 +13,6 @@ coverage/
 public/app.css
 docs/docs.css
 
-# Commercial marketplace asset used by licensed local installations only.
-# Its standard license does not permit redistribution of the source model.
-public/assets/overwater_resort_hut.glb
-
 # Where the container entrypoint writes its .env. A volume in compose, but a
 # real directory in any checkout somebody has run the image against.
 state/

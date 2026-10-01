@@ -21,7 +21,7 @@
       id="sidebar"
       class="drawer drawer-left flex max-w-[300px] shrink-0 flex-col border-r border-line bg-sidebar p-2.5"
     >
-      <!-- ＋ New session and the three view switches, one strip of equal-height
+      <!-- ＋ New session and the two view switches, one strip of equal-height
        controls. The icons are squares that never stretch and never shrink, and
        the label is the only thing that gives: below `lg` the drawer is 85vw and
        everything is thumb-sized, above it the row has 248px to fit in and each
@@ -42,16 +42,6 @@
           title="Dashboard: tokens, sessions and cost across every project"
         >
           📊
-        </button>
-        <!-- The city: one building per project, one figure per open session.
-         Beside 📊 because it answers the other half of the same question —
-         that one is what the work cost, this one is what is happening now. -->
-        <button
-          id="btn-office"
-          class="btn-icon hover:border-accent-dim"
-          title="Office: every project as a building, every open session as somebody working in it"
-        >
-          🏙
         </button>
         <!-- The review queue: standalone reviews and review-loop rounds
          waiting for a verdict, across every project. Nothing a review found
@@ -424,96 +414,6 @@
         <div id="findings-list" class="flex-1 overflow-y-auto px-3 py-3.5 lg:px-[18px]"></div>
       </div>
 
-      <!-- 🌊 The office: a three.js resort over the water, one bungalow on
-       stilts per enabled project, a café deck at the end of the boardwalk,
-       villas for the orchestrators, and a character per open session — at
-       its table while it works, at the café while it waits. renderOffice()
-       in developer.js feeds public/island3d.js, which draws into
-       #office-city; the /api/dev/office/events stream keeps it live. -->
-      <div id="office-view" class="hidden flex flex-1 flex-col overflow-hidden">
-        <header
-          class="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-canvas px-3 py-2.5 lg:flex-nowrap lg:gap-3 lg:px-[18px]"
-        >
-          <div class="min-w-0 flex-1">
-            <h1 class="m-0 truncate text-sm font-semibold">🌊 Office</h1>
-            <div id="office-sub" class="truncate text-xs text-muted"></div>
-          </div>
-          <!-- Where to look: the camera swings to the villa, the bungalows or
-           the café, or back out to the whole resort. Then the hour the resort
-           is lit for, said in words, so a reader who opens the office at dusk
-           is told that is why it is purple. -->
-          <div class="flex shrink-0 items-center gap-2">
-            <div class="flex overflow-hidden rounded border border-line text-[11px]">
-              <button
-                type="button"
-                class="office-focus px-2 py-0.5 text-muted hover:bg-raise hover:text-ink"
-                data-focus="island"
-              >
-                Resort
-              </button>
-              <button
-                type="button"
-                class="office-focus border-l border-line px-2 py-0.5 text-muted hover:bg-raise hover:text-ink"
-                data-focus="villa"
-              >
-                ⚓ Villa
-              </button>
-              <button
-                type="button"
-                class="office-focus border-l border-line px-2 py-0.5 text-muted hover:bg-raise hover:text-ink"
-                data-focus="beach"
-              >
-                Bungalows
-              </button>
-              <button
-                type="button"
-                class="office-focus border-l border-line px-2 py-0.5 text-muted hover:bg-raise hover:text-ink"
-                data-focus="cafe"
-              >
-                ☕ Café
-              </button>
-            </div>
-            <button
-              id="office-sound"
-              type="button"
-              class="rounded border border-line bg-raise px-1.5 py-0.5 text-[11px] text-muted hover:text-ink"
-              title="Turn beach ambience on"
-              aria-label="Turn beach ambience on"
-              aria-pressed="false"
-              disabled
-            >
-              🔇
-            </button>
-            <span
-              id="office-phase"
-              class="rounded border border-line bg-raise px-1.5 py-0.5 font-mono text-[10px] tracking-[0.16em] text-muted uppercase"
-            ></span>
-          </div>
-        </header>
-        <!-- The canvas fills #office-city; island3d.js appends it, and the
-         landmark labels, speech bubbles and hover tip that ride on top of it.
-         The hour is the scene's lighting rather than a CSS tint, so nothing
-         here carries it. -->
-        <div class="office-wrap">
-          <div id="office-city" class="office-city"></div>
-          <p id="office-empty" class="office-empty hidden">
-            No projects yet, so there is nothing to build. Add one in
-            <a class="text-accent hover:underline" href="/settings/projects">Settings → Projects</a> and it
-            gets a bungalow on the water here.
-          </p>
-        </div>
-        <!-- The ticker: what the city cannot show, which is what just changed.
-         Fed by the same stream that moves the resort; see officeLog() in
-         developer.js. -->
-        <div class="office-ticker">
-          <div class="office-ticker-head">
-            <span id="office-live" class="text-[11px] text-muted"></span>
-            <b>Activity</b>
-          </div>
-          <div id="office-ticker-body" class="office-ticker-body"></div>
-        </div>
-      </div>
-
       <div
         id="composer-wrap"
         class="px-3 pt-2 pb-[max(0.875rem,env(safe-area-inset-bottom))] lg:px-6 lg:pb-3.5"
@@ -739,11 +639,6 @@
       </form>
     </div>
 
-    <!-- The bare `three` the island's addons import, pointed at the vendored
-     build. developer.js itself is a plain script; only the island is a module. -->
-    <script type="importmap">
-      { "imports": { "three": "/vendor/three/three.module.js" } }
-    </script>
     <script src="/pr-viewer.js"></script>
     <script src="/developer.js"></script>
     <script src="/ssh-request.js"></script>
