@@ -96,7 +96,9 @@ function list() {
 async function revoke(id) {
   if (!auth.list().some((d) => d.id === id)) throw new Error(`No token with id ${id}: --list shows them.`);
   await auth.revoke(id);
-  console.log(`Revoked ${id}. The running server stops accepting it within 15 seconds.`);
+  console.log(
+    `Revoked ${id}. The running server refuses it within 15 seconds, and ends its open streams within 30.`,
+  );
 }
 
 try {

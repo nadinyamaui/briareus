@@ -2023,8 +2023,8 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   setInterval(checkProviderAuth, AUTH_RECHECK_MS).unref();
   await initJobs();
   // `npm run create-token` issues and revokes from a shell, straight into the
-  // database. Reloading on the same cadence the API rechecks open streams means
-  // a token revoked there stops within the same 15 seconds as one revoked here.
+  // database. A token revoked there stops new requests within 15 seconds; an
+  // open stream, which rechecks on its own 15-second tick, within 30.
   setInterval(() => {
     mobileAuth.refresh().catch((e) => console.error('Could not reload device tokens:', e.message));
   }, 15000).unref();
