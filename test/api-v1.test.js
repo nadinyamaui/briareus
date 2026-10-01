@@ -18,14 +18,19 @@ const jobs = {
   review: { id: 'review', repo, kind: 'review' },
 };
 
-let auth, mcpAuth, server, url, clock, loginOn, bus, sessions, project, handler, tokens;
+let auth, mcpAuth, server, url, clock, loginOn, bus, sessions, project, handler, tokens, savesFail;
 beforeEach(async () => {
   let saved = [];
+  savesFail = false;
+  // What the database driver raises: an error with a code and no HTTP status.
+  const down = () =>
+    Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3306'), { code: 'ECONNREFUSED' });
   clock = Date.now();
   loginOn = true;
   auth = createMobileAuth({
     load: async () => structuredClone(saved),
     save: async (_name, value) => {
+      if (savesFail) throw down();
       saved = structuredClone(value);
     },
     now: () => clock,
@@ -35,6 +40,7 @@ beforeEach(async () => {
   mcpAuth = createRemoteMcpAuth({
     load: async () => structuredClone(mcpSaved),
     save: async (_name, value) => {
+      if (savesFail) throw down();
       mcpSaved = structuredClone(value);
     },
   });
@@ -209,6 +215,18 @@ describe('who gets in', () => {
       });
       expect([permission, route, response.status]).toEqual([permission, route, status]);
     }
+  });
+
+  it('refuses a token whose permission it does not know, on every route', async () => {
+    vi.spyOn(auth, 'authenticate').mockReturnValue({
+      id: 'x',
+      label: 'odd',
+      repos: [repo],
+      permission: 'owner',
+    });
+    for (const route of ['/sessions', '/settings/providers', '/settings/devices'])
+      expect((await request(route)).status).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
   });
 
   it('reaches nothing that is not in the catalog', async () => {
@@ -467,6 +485,26 @@ describe('tokens and connections', () => {
     expect(auth.list()).toHaveLength(3);
   });
 
+  it('answers a store that cannot save as the server’s failure, without the driver’s words', async () => {
+    savesFail = true;
+    for (const [route, method, body] of [
+      ['/settings/devices', 'POST', { label: 'x', permission: 'read', repos: [repo], days: 7 }],
+      ['/settings/mcp', 'PUT', { enabled: true, baseUrl: 'https://briareus.example.com' }],
+      ['/settings/mcp/clients', 'POST', { label: 'GPT', repos: [repo] }],
+    ]) {
+      const response = await admin(route, { method, body });
+      expect([route, response.status]).toEqual([route, 500]);
+      expect(await response.json()).toEqual({ error: 'Server error' });
+    }
+    savesFail = false;
+    // What the caller got wrong is still theirs to read.
+    const bad = await admin('/settings/mcp', {
+      method: 'PUT',
+      body: { enabled: true, baseUrl: 'not a url' },
+    });
+    expect(bad.status).toBe(400);
+  });
+
   it('keeps token and connection management from anything below admin', async () => {
     for (const route of ['/settings/devices', '/settings/mcp']) {
       expect((await request(route)).status).toBe(403);
@@ -599,6 +637,7 @@ describe('the contract', () => {
     expect(schemaOf('integer?')).toEqual({ type: ['integer', 'null'] });
     expect(schemaOf('string[]')).toEqual({ type: 'array', items: { type: 'string' } });
     expect(schemaOf('fix|optional')).toEqual({ type: 'string', enum: ['fix', 'optional'] });
+    expect(schemaOf('fix|optional?')).toEqual({ type: ['string', 'null'], enum: ['fix', 'optional', null] });
     expect(schemaOf('Session[]')).toEqual({ type: 'array', items: { $ref: '#/components/schemas/Session' } });
     expect(schemaOf('Session?')).toEqual({
       anyOf: [{ $ref: '#/components/schemas/Session' }, { type: 'null' }],
