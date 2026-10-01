@@ -137,8 +137,8 @@ beforeEach(async () => {
       body: req.body,
       params: req.params,
       query: req.query,
-      repo: req.mcpProject,
-      actor: req.mcpActor,
+      repo: req.apiProject,
+      actor: req.apiActor,
     }),
   );
   for (const tool of dashboardTools([])) dashboard.register(tool.method, tool.path, handler);

@@ -5,7 +5,7 @@ import { listActions } from '../lib/actions.js';
 import { dashboardTools } from '../lib/dashboard-tools.js';
 
 let dashboard, handler, project;
-const principal = { id: 'connection', label: 'My ChatGPT', repos: ['owner/project'] };
+const principal = { id: 'device', actor: 'Mobile device My phone', repos: ['owner/project'] };
 beforeEach(() => {
   project = {
     repo: 'owner/project',
@@ -25,18 +25,17 @@ beforeEach(() => {
     listActions,
   });
   handler = vi.fn((req, res) =>
-    res.json({ body: req.body, params: req.params, repo: req.mcpProject, actor: req.mcpActor }),
+    res.json({ body: req.body, params: req.params, repo: req.apiProject, actor: req.apiActor }),
   );
   for (const tool of dashboardTools(listActions())) dashboard.register(tool.method, tool.path, handler);
 });
 const call = (name, args = {}) => dashboard.call(principal, `dashboard_${name}`, args);
 
-it('discovers all menu actions with write annotations and OAuth requirements', () => {
+it('discovers all menu actions with write annotations', () => {
   const tools = dashboard.tools();
   for (const action of listActions()) {
     const entry = tools.find((t) => t.name === `dashboard_${action.id.replaceAll('-', '_')}`);
     expect(entry.annotations.readOnlyHint).toBe(false);
-    expect(entry.securitySchemes).toEqual([{ type: 'oauth2', scopes: ['briareus:manage'] }]);
   }
   expect(new Set(tools.map((t) => t.name)).size).toBe(tools.length);
   expect(tools[0]).not.toHaveProperty('path');
@@ -103,11 +102,11 @@ it('rejects foreign projects, foreign sessions, unknown tools and malformed sche
   expect(handler).not.toHaveBeenCalled();
 });
 
-it('infers a session’s project and attributes writes to the external connection', async () => {
+it('infers a session’s project and attributes writes to the calling client', async () => {
   expect(await call('reply_finding', { sessionId: 'mine', key: 'finding', text: 'reply' })).toMatchObject({
     params: { id: 'mine' },
     body: { key: 'finding', text: 'reply', repo: project.repo },
-    actor: 'ChatGPT connection My ChatGPT',
+    actor: 'Mobile device My phone',
   });
   expect((await call('drop_message', { sessionId: 'mine', index: 0 })).params).toMatchObject({
     id: 'mine',

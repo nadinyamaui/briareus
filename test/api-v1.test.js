@@ -4,7 +4,6 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { createMobileAuth } from '../lib/mobile-auth.js';
-import { createRemoteMcpAuth } from '../lib/remote-mcp-auth.js';
 import { apiV1Routes } from '../lib/api-v1.js';
 import { API_V1_ROUTES, FIELDS, NOT_IN_API, OBJECTS } from '../lib/api-v1-catalog.js';
 import { apiV1OpenApi, apiV1Reference, schemaOf } from '../lib/api-v1-docs.js';
@@ -18,7 +17,7 @@ const jobs = {
   review: { id: 'review', repo, kind: 'review' },
 };
 
-let auth, mcpAuth, server, url, clock, loginOn, bus, sessions, project, handler, tokens, savesFail;
+let auth, server, url, clock, loginOn, bus, sessions, project, handler, tokens, savesFail;
 beforeEach(async () => {
   let saved = [];
   savesFail = false;
@@ -36,15 +35,6 @@ beforeEach(async () => {
     now: () => clock,
   });
   await auth.init();
-  let mcpSaved = { enabled: false, baseUrl: '', clients: [], grants: [] };
-  mcpAuth = createRemoteMcpAuth({
-    load: async () => structuredClone(mcpSaved),
-    save: async (_name, value) => {
-      if (savesFail) throw down();
-      mcpSaved = structuredClone(value);
-    },
-  });
-  await mcpAuth.init();
   const create = async (permission) =>
     (await auth.create({ label: `${permission} client`, repos: [repo], permission, days: 30 }, secret)).token;
   tokens = { read: await create('read'), manage: await create('manage'), admin: await create('admin') };
@@ -69,7 +59,7 @@ beforeEach(async () => {
       body: Buffer.isBuffer(req.body) ? { bytes: req.body.length } : req.body,
       authorization: req.headers.authorization ?? null,
       repos: res.locals.apiRepos,
-      actor: req.mcpActor,
+      actor: req.apiActor,
     }),
   );
   const handlers = express.Router();
@@ -85,7 +75,6 @@ beforeEach(async () => {
   app.use(
     apiV1Routes({
       auth,
-      mcpAuth,
       listProjects: () => [project, { repo: 'other/project', label: 'Other' }],
       loginEnabled: () => loginOn,
       ownerSecret: () => secret,
@@ -230,7 +219,7 @@ describe('who gets in', () => {
   });
 
   it('reaches nothing that is not in the catalog', async () => {
-    for (const route of ['/agent/memories', '/api/agent/memories', '/mobile-devices', '/mcp', '/login'])
+    for (const route of ['/agent/memories', '/api/agent/memories', '/mobile-devices', '/login'])
       expect((await request(route, { token: tokens.admin })).status).toBe(404);
     expect(handler).not.toHaveBeenCalled();
   });
@@ -487,91 +476,18 @@ describe('tokens and connections', () => {
 
   it('answers a store that cannot save as the server’s failure, without the driver’s words', async () => {
     savesFail = true;
-    for (const [route, method, body] of [
-      ['/settings/devices', 'POST', { label: 'x', permission: 'read', repos: [repo], days: 7 }],
-      ['/settings/mcp', 'PUT', { enabled: true, baseUrl: 'https://briareus.example.com' }],
-      ['/settings/mcp/clients', 'POST', { label: 'GPT', repos: [repo] }],
-    ]) {
-      const response = await admin(route, { method, body });
-      expect([route, response.status]).toEqual([route, 500]);
-      expect(await response.json()).toEqual({ error: 'Server error' });
-    }
-    savesFail = false;
-    // What the caller got wrong is still theirs to read.
-    const bad = await admin('/settings/mcp', {
-      method: 'PUT',
-      body: { enabled: true, baseUrl: 'not a url' },
+    const response = await admin('/settings/devices', {
+      method: 'POST',
+      body: { label: 'x', permission: 'read', repos: [repo], days: 7 },
     });
-    expect(bad.status).toBe(400);
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: 'Server error' });
   });
 
-  it('keeps token and connection management from anything below admin', async () => {
-    for (const route of ['/settings/devices', '/settings/mcp']) {
-      expect((await request(route)).status).toBe(403);
-      expect(
-        (await request(route, { method: route.endsWith('mcp') ? 'PUT' : 'POST', body: {} })).status,
-      ).toBe(403);
-    }
+  it('keeps token management from anything below admin', async () => {
+    expect((await request('/settings/devices')).status).toBe(403);
+    expect((await request('/settings/devices', { method: 'POST', body: {} })).status).toBe(403);
     expect(auth.list()).toHaveLength(3);
-  });
-
-  it('configures the ChatGPT connection, creates one and takes its consent', async () => {
-    expect(await (await admin('/settings/mcp')).json()).toMatchObject({ enabled: false, clients: [] });
-    const bad = await admin('/settings/mcp', { method: 'PUT', body: { enabled: true, baseUrl: 'http://x' } });
-    expect(bad.status).toBe(400);
-    const set = await admin('/settings/mcp', {
-      method: 'PUT',
-      body: { enabled: true, baseUrl: 'https://briareus.example.com' },
-    });
-    expect(await set.json()).toMatchObject({ enabled: true, url: 'https://briareus.example.com/mcp' });
-    expect(
-      (await admin('/settings/mcp/clients', { method: 'POST', body: { label: 'c', repos: ['no/such'] } }))
-        .status,
-    ).toBe(400);
-    const created = await admin('/settings/mcp/clients', {
-      method: 'POST',
-      body: { label: 'GPT', repos: [repo] },
-    });
-    expect(created.status).toBe(201);
-    const { clientId, clientSecret } = await created.json();
-    expect(clientSecret).toBeTruthy();
-    const view = await (await admin('/settings/mcp')).json();
-    expect(view.clients).toMatchObject([{ id: clientId, label: 'GPT', repos: [repo], connected: false }]);
-    expect(JSON.stringify(view)).not.toContain(clientSecret);
-
-    const oauth = new URLSearchParams({
-      client_id: clientId,
-      redirect_uri: 'https://chatgpt.com/connector_platform_oauth_redirect',
-      resource: 'https://briareus.example.com/mcp',
-      response_type: 'code',
-      code_challenge: 'a'.repeat(43),
-      code_challenge_method: 'S256',
-      state: 'xyz',
-    });
-    const consent = await (await admin(`/settings/mcp/consent?${oauth}`)).json();
-    expect(consent).toMatchObject({ label: 'GPT', repos: [repo] });
-    expect((await admin('/settings/mcp/consent?client_id=nope')).status).toBe(400);
-    expect(
-      (await admin('/settings/mcp/consent', { method: 'POST', body: { nonce: consent.nonce } })).status,
-    ).toBe(400);
-    const approved = await admin('/settings/mcp/consent', {
-      method: 'POST',
-      body: { nonce: consent.nonce, allow: true },
-    });
-    const { redirect } = await approved.json();
-    expect(redirect).toMatch(
-      /^https:\/\/chatgpt\.com\/connector_platform_oauth_redirect\?state=xyz&iss=.*&code=/,
-    );
-    // The answer is good once.
-    expect(
-      (await admin('/settings/mcp/consent', { method: 'POST', body: { nonce: consent.nonce, allow: true } }))
-        .status,
-    ).toBe(400);
-
-    expect(await (await admin(`/settings/mcp/clients/${clientId}`, { method: 'DELETE' })).json()).toEqual({
-      ok: true,
-    });
-    expect((await (await admin('/settings/mcp')).json()).clients).toEqual([]);
   });
 });
 
@@ -714,9 +630,9 @@ describe('the contract', () => {
     // pages themselves.
     const elsewhere = (key, file) =>
       / \/api\/agent\//.test(key) ||
-      ['lib/webhooks.js', 'lib/remote-mcp.js', 'lib/api-v1.js'].includes(file) ||
+      ['lib/webhooks.js', 'lib/api-v1.js'].includes(file) ||
       (file === 'lib/mobile-api.js' && !key.includes('/api/mobile-devices')) ||
-      !/ \/(api|oauth)\//.test(key);
+      !/ \/api\//.test(key);
     const uncovered = [...registeredRoutes()]
       .filter(([key, file]) => !covered.has(key) && !(key in NOT_IN_API) && !elsewhere(key, file))
       .map(([key]) => key);

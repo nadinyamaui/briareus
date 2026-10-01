@@ -335,14 +335,14 @@ not English message matching. Never interpret a proxy's HTML response as JSON.
 `lib/mobile-auth.js` handles device credentials, `lib/mobile-api.js` contains
 the dedicated native and browser management routers, and
 `lib/dashboard-routes.js` enforces the shared project boundary. Mobile tokens
-are separate from MCP OAuth and internal agent tokens. Owner management writes
-retain the existing same-origin check. Device records use the same single-server
-in-memory cache/persistence model as remote MCP settings; multiple independent
+are separate from internal agent tokens. Owner management writes
+retain the existing same-origin check. Device records use a single-server
+in-memory cache/persistence model; multiple independent
 Briareus processes must not share that database for token management.
 
 Run the auth/transport regression checks with:
 
 ```sh
 env -u PREVIEW_HOSTNAME -u PREVIEW_ACCESS_EMAILS \
-  npx vitest run test/mobile-api.test.js test/dashboard-mcp.test.js test/remote-mcp.test.js test/auth.test.js
+  npx vitest run test/mobile-api.test.js test/dashboard-routes.test.js test/auth.test.js
 ```

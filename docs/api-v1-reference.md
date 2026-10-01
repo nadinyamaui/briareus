@@ -1199,7 +1199,7 @@ Remove a server. Needs `admin`.
 
 **Returns** `{ ok: boolean }`
 
-## Tokens and connections
+## Tokens
 
 ### `GET /settings/devices`
 
@@ -1227,77 +1227,6 @@ Issue a token; its secret is in this answer and nowhere afterwards. Needs `admin
 Revoke a token. Needs `admin`.
 
 **Returns** `{ ok: boolean }`
-
-### `GET /settings/mcp`
-
-Read the ChatGPT connection settings and the connections created. Needs `admin`.
-
-**Returns** `McpSettings`. Also carries `projects`, the `{ repo, label }` a connection can be limited to.
-
-### `PUT /settings/mcp`
-
-Switch the ChatGPT connection on or off and set its public address. Needs `admin`.
-
-**Body**
-
-| Field                  | Type      |                                                        |
-| ---------------------- | --------- | ------------------------------------------------------ |
-| `enabled` **required** | `boolean` | Switched on or not                                     |
-| `baseUrl` **required** | `string`  | The public HTTPS origin ChatGPT reaches this server at |
-
-**Returns** `McpSettings`
-
-### `POST /settings/mcp/clients`
-
-Create a ChatGPT connection; its secret is in this answer and nowhere afterwards. Needs `admin`.
-
-**Body**
-
-| Field                | Type       |                                                      |
-| -------------------- | ---------- | ---------------------------------------------------- |
-| `label` **required** | `string`   | A name to show                                       |
-| `repos` **required** | `string[]` | Projects, as `owner/name`                            |
-| `redirectUri`        | `string`   | The OAuth redirect URL ChatGPT shows, copied exactly |
-
-**Returns** 201 `{ clientId: string, clientSecret: string }`
-
-### `DELETE /settings/mcp/clients/{id}`
-
-Revoke a ChatGPT connection. Needs `admin`.
-
-**Returns** `{ ok: boolean }`
-
-### `GET /settings/mcp/consent`
-
-Open an OAuth authorization request ChatGPT sent the owner’s browser with, for the owner to confirm. Needs `admin`.
-
-**Query**
-
-| Field                   | Type     |                                                      |
-| ----------------------- | -------- | ---------------------------------------------------- |
-| `client_id`             | `string` | The OAuth parameter of that name, as ChatGPT sent it |
-| `redirect_uri`          | `string` | The OAuth parameter of that name, as ChatGPT sent it |
-| `resource`              | `string` | The OAuth parameter of that name, as ChatGPT sent it |
-| `response_type`         | `string` | The OAuth parameter of that name, as ChatGPT sent it |
-| `code_challenge`        | `string` | The OAuth parameter of that name, as ChatGPT sent it |
-| `code_challenge_method` | `string` | The OAuth parameter of that name, as ChatGPT sent it |
-| `state`                 | `string` | The OAuth parameter of that name, as ChatGPT sent it |
-| `scope`                 | `string` | The OAuth parameter of that name, as ChatGPT sent it |
-
-**Returns** `{ nonce: string, label: string, repos: string[] }`
-
-### `POST /settings/mcp/consent`
-
-Answer an authorization request; returns where to send the browser back to. Needs `admin`.
-
-**Body**
-
-| Field                | Type      |                                                                   |
-| -------------------- | --------- | ----------------------------------------------------------------- |
-| `nonce` **required** | `string`  | The `nonce` the consent read returned; good for ten minutes, once |
-| `allow` **required** | `boolean` | Whether the owner approved                                        |
-
-**Returns** `{ redirect: string }`
 
 ## Objects
 
@@ -1728,17 +1657,6 @@ A session’s webhook: where an outside system posts to wake it, and the limits 
 | `held`            | `integer` | Deliveries waiting; not in a body                                                           |
 | `paused`          | `object?` | Why deliveries are paused; not in a body                                                    |
 
-### McpSettings
-
-The ChatGPT (remote MCP) connection.
-
-| Field     | Type       |                                                                                         |
-| --------- | ---------- | --------------------------------------------------------------------------------------- |
-| `enabled` | `boolean`  | Whether the connection is on                                                            |
-| `baseUrl` | `string`   | The public HTTPS origin ChatGPT reaches this server at                                  |
-| `url`     | `string`   | The MCP address to give ChatGPT                                                         |
-| `clients` | `object[]` | The connections created, each `{ id, label, repos, redirectUri, createdAt, connected }` |
-
 ## Coming from the dashboard’s routes
 
 The built-in dashboard calls its handlers by the paths on the left, with the login cookie. Each has the route on the right; a client ported from the dashboard’s pages swaps one for the other.
@@ -1861,9 +1779,3 @@ The built-in dashboard calls its handlers by the paths on the left, with the log
 | `GET /api/mobile-devices`                        | Answered by the gateway as `GET /settings/devices`                                                 |
 | `POST /api/mobile-devices`                       | Answered by the gateway as `POST /settings/devices`                                                |
 | `DELETE /api/mobile-devices/:id`                 | Answered by the gateway as `DELETE /settings/devices/{id}`                                         |
-| `GET /api/mcp`                                   | Answered by the gateway as `GET /settings/mcp`                                                     |
-| `PUT /api/mcp`                                   | Answered by the gateway as `PUT /settings/mcp`                                                     |
-| `POST /api/mcp/clients`                          | Answered by the gateway as `POST /settings/mcp/clients`                                            |
-| `DELETE /api/mcp/clients/:id`                    | Answered by the gateway as `DELETE /settings/mcp/clients/{id}`                                     |
-| `GET /oauth/authorize`                           | The consent page itself; its data is `GET /settings/mcp/consent`                                   |
-| `POST /oauth/authorize`                          | The consent page’s form; its action is `POST /settings/mcp/consent`                                |
