@@ -1454,7 +1454,6 @@
       // arrives, and never again over the reader's shoulder afterwards.
       if (current && revealedFor !== current) revealSession(current);
       renderSidebar();
-      if (officeOpen) renderOffice(); // the poll is what empties a chair a deleted session left
       paintFindingsBadge();
       if (findingsOpen) renderFindingsView();
       if (boardBranch) renderBoard(); // the open pull request's runs are these sessions
@@ -2375,7 +2374,7 @@
     const inProject = currentProject || sidebarRepo;
     current = null;
     navSeq++;
-    // Every other pane (board, dashboard, office, findings) opens through
+    // Every other pane (board, dashboard, findings) opens through
     // here and hides the composer, ⏹ with it, so dictation cannot outlive it.
     stopVoice();
     closeProjectView();
@@ -6248,326 +6247,6 @@
     }, 60000);
   }
 
-  // ---------- 🏝 the office ----------
-  //
-  // A resort over the water: one bungalow on stilts per enabled project, a
-  // café deck at the end of the boardwalk, villas for the orchestrators, and
-  // one character per open session. Everything a Claude Code hook
-  // would have to reconstruct from the outside — which project a session
-  // belongs to, whether its turn is running, which sub-agents it has in
-  // flight — the server already knows, so this reads its records and nothing
-  // has to be installed into ~/.claude to make it move.
-  //
-  // This side decides what is true: the projects, the crowd, what each
-  // session is doing and the line its bubble says. public/island3d.js draws
-  // it, in three.js, and is imported the first time the office opens so
-  // nobody who never opens it pays for a renderer.
-
-  let officeOpen = false;
-  let officeEs = null;
-  let office = null; // the scene, once island3d.js has loaded
-  let officeLoading = null;
-  let officeSound = false;
-  const officeCards = new Map(); // session id -> the live card off the office stream
-
-  // The hour the resort is lit for. The reference office this view borrows its
-  // lighting from runs a day cycle of its own; here it is the reader's clock,
-  // so an office opened at two in the morning does not look like one at noon.
-  // Named rather than numeric because the tint is faint on purpose and the
-  // header has to be able to say which of them it is.
-  function officePhase(hour) {
-    if (hour < 6) return 'night';
-    if (hour < 8) return 'dawn';
-    if (hour < 12) return 'morning';
-    if (hour < 17) return 'afternoon';
-    if (hour < 20) return 'evening';
-    if (hour < 22) return 'dusk';
-    return 'night';
-  }
-
-  // The sessions at the resort: the open ones, each with whatever the stream has
-  // said about it since the last poll laid over the polled record. The poll is
-  // what makes a deleted session disappear; the stream is what makes a status
-  // change show up in the same second it happened.
-  function officeCrowd() {
-    return sessions.filter(isOpenSession).map((s) => ({ ...s, ...(officeCards.get(s.id) || {}) }));
-  }
-
-  // The colour of a shirt and its bubble. Same vocabulary as the sidebar's
-  // dot, so the two views never disagree about what a session is doing. Only
-  // the open states are here: a failed session has already handed its
-  // workspace back, and the resort is about what is being worked on.
-  function officeMood(s) {
-    const state = sessionState(s);
-    if (state === 'waiting') return 'wait';
-    if (state === 'idle') return 'lit';
-    return 'busy';
-  }
-
-  // The line in the bubble over a character's head: the tool a running turn
-  // is on, the question a waiting one asked, the last thing an idle one said.
-  // Short, because it floats over a head and forty characters is what fits.
-  function officeLine(s) {
-    const clip = (t, n = 44) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
-    const state = sessionState(s);
-    if (state === 'waiting') return `? ${clip(s.lastText || 'waiting for an answer')}`;
-    if (state === 'running') {
-      return s.lastTool ? `⌨ ${clip(s.lastTool)}` : s.orchestrator ? '📣 giving orders' : '💭 thinking…';
-    }
-    if (state === 'queued') return '⏳ waiting for a slot';
-    if (state === 'preparing') return '📦 cloning the workspace';
-    return s.lastText ? `☕ ${clip(s.lastText)}` : '☕ waiting for instructions';
-  }
-
-  // The scene, loaded on first use. A failed import (an old server without
-  // the vendor route, a browser without WebGL) leaves the panel with a line
-  // saying so rather than a blank stage.
-  function loadOffice() {
-    if (office) return Promise.resolve(office);
-    if (officeLoading) return officeLoading;
-    officeLoading = import('/island3d.js')
-      .then((m) => {
-        office = m.createIsland($('office-city'), {
-          session: (id) => openSession(id),
-          project: (repo) => {
-            setSidebarRepo(repo);
-            openPullRequest(repo, null);
-          },
-          tip: (id) => {
-            const s = officeCrowd().find((c) => c.id === id);
-            if (!s) return '';
-            const badge = s.orchestrator ? '🧭 ' : s.review ? '⌕ ' : s.qa ? '🎬 ' : '';
-            const crew = s.crew || (s.subagents || []).map((a) => a.name || 'agent');
-            return `${badge}${s.title || s.id} · ${sessionState(s)}${crew.length ? ` · ${crew.length} sub-agents` : ''}`;
-          },
-          asset: () => {
-            if (officeOpen) renderOffice();
-          },
-        });
-        $('office-sound').disabled = false;
-        return office;
-      })
-      .catch((err) => {
-        officeLoading = null;
-        $('office-city').innerHTML =
-          `<p class="office-empty">The office could not start: ${esc(err.message || err)}.</p>`;
-        throw err;
-      });
-    return officeLoading;
-  }
-
-  function renderOffice() {
-    const phase = officePhase(new Date().getHours());
-    $('office-phase').textContent = phase;
-    const crowd = officeCrowd();
-    const busy = crowd.filter((s) => WORKING_STATES.has(s.status)).length;
-    const bosses = crowd.filter((s) => s.orchestrator).length;
-    $('office-sub').textContent =
-      `${projects.length} ${projects.length === 1 ? 'bungalow' : 'bungalows'} on the water · ` +
-      `${crowd.length} open ${crowd.length === 1 ? 'session' : 'sessions'}` +
-      (busy ? `, ${busy} working` : '') +
-      (bosses ? ` · ${bosses} ${bosses === 1 ? 'orchestrator' : 'orchestrators'} at the villa` : '');
-    if (!projects.length) {
-      // No scene at all: island3d.js would draw an empty boardwalk, and the
-      // reader wants to be told what to do, not shown the sea.
-      $('office-empty').classList.remove('hidden');
-      $('office-city').classList.add('hidden');
-      office?.stop();
-      return;
-    }
-    $('office-empty').classList.add('hidden');
-    $('office-city').classList.remove('hidden');
-    loadOffice()
-      .then((scene) => {
-        if (!officeOpen) return;
-        scene.layout({
-          projects,
-          phase,
-          crowd: crowd.map((s) => ({
-            id: s.id,
-            repo: s.repo,
-            status: s.status,
-            mood: officeMood(s),
-            crew: s.crew || (s.subagents || []).map((a) => a.name || 'agent'),
-            orchestrator: !!s.orchestrator,
-            parentId: s.parentId || null,
-            note: officeLine(s),
-          })),
-        });
-        scene.resize(); // the panel may have changed shape while the office was shut
-        scene.start();
-      })
-      .catch(() => {});
-  }
-
-  // Where to look: the header's four buttons swing the camera, and the resort
-  // eases there itself.
-  document.querySelectorAll('.office-focus').forEach((b) => {
-    b.addEventListener('click', () => office?.focus(b.dataset.focus));
-  });
-
-  function paintOfficeSound() {
-    const button = $('office-sound');
-    button.textContent = officeSound ? '🔊' : '🔇';
-    button.classList.toggle('border-accent', officeSound);
-    button.classList.toggle('text-accent', officeSound);
-    button.classList.toggle('text-muted', !officeSound);
-    button.setAttribute('aria-pressed', String(officeSound));
-    button.setAttribute('aria-label', `${officeSound ? 'Turn off' : 'Turn on'} beach ambience`);
-    button.title = `${officeSound ? 'Turn off' : 'Turn on'} beach ambience`;
-  }
-
-  $('office-sound').addEventListener('click', () => {
-    officeSound = !officeSound;
-    const supported = office?.sound(officeSound);
-    if (!supported) {
-      officeSound = false;
-    }
-    paintOfficeSound();
-    if (!supported) $('office-sound').title = 'Beach ambience is not supported by this browser';
-  });
-  paintOfficeSound();
-
-  // ---------- the ticker ----------
-  //
-  // The resort can only ever say what is true now: a session that finished
-  // its turn while you were watching its table just walks to the café, and a
-  // session that failed leaves no trace at all, because a failed session is no
-  // longer in the crowd. The strip under the stage is where those land — the
-  // stream's status changes, in the order they happened.
-
-  const OFFICE_LOG_MAX = 60;
-  const officeLog = []; // { text, tone }, oldest first
-
-  // What each state reads as when a session arrives in it. `tone` is the
-  // ticker's only emphasis: bright for work starting or a question that wants
-  // an answer, dim for the quiet end of things.
-  const OFFICE_NEWS = {
-    queued: { verb: 'is waiting for a slot', tone: 'dim' },
-    preparing: { verb: 'is cloning its workspace', tone: 'dim' },
-    running: { verb: 'started a turn', tone: 'bright' },
-    waiting: { verb: 'is asking a question', tone: 'bright' },
-    idle: { verb: 'finished a turn', tone: '' },
-    closed: { verb: 'left the resort', tone: 'dim' },
-    interrupted: { verb: 'was interrupted', tone: 'dim' },
-    failed: { verb: 'hit a wall', tone: 'bad' },
-  };
-
-  // The office card's state, derived the same way sessionState() derives a
-  // session's: the two views must never disagree about what waiting means.
-  const officeCardState = (c) => (c.awaitingAnswer && c.status === 'idle' ? 'waiting' : c.status);
-
-  const officeClock = () => new Date().toTimeString().slice(0, 5);
-
-  function officeSay(text, tone = '') {
-    officeLog.push({ text: `${officeClock()} ${text}`, tone });
-    if (officeLog.length > OFFICE_LOG_MAX) officeLog.shift();
-    if (officeOpen) renderOfficeTicker();
-  }
-
-  // A line per state change, and only for a session the ticker has already
-  // seen: the stream opens by replaying every session it knows, and none of
-  // those is news.
-  function officeNote(before, card) {
-    if (!before) return;
-    const state = officeCardState(card);
-    if (officeCardState(before) === state) return;
-    const news = OFFICE_NEWS[state];
-    if (!news) return;
-    officeSay(`${card.title || card.id} ${news.verb}`, news.tone);
-  }
-
-  function renderOfficeTicker() {
-    const body = $('office-ticker-body');
-    body.innerHTML =
-      officeLog.map((l) => `<div class="office-ticker-line ${l.tone}">▸ ${esc(l.text)}</div>`).join('') +
-      '<div class="office-ticker-cursor">▌</div>';
-    // Newest at the bottom, the way a terminal reads.
-    body.scrollTop = body.scrollHeight;
-  }
-
-  // The office's own stream: every session's record, not one's. It only carries
-  // what a character is drawn from, so a running turn's token counters never
-  // reach it and an open tab costs a message per status change.
-  function openOfficeStream() {
-    if (officeEs) return;
-    officeEs = new EventSource('/api/dev/office/events');
-    officeEs.onmessage = (m) => {
-      try {
-        const card = JSON.parse(m.data);
-        officeNote(officeCards.get(card.id), card);
-        officeCards.set(card.id, card);
-        if (officeOpen) renderOffice();
-      } catch {
-        /* a malformed line is one lost frame, not a broken view */
-      }
-    };
-    // EventSource reconnects on its own; the indicator is only there so a
-    // stalled stream is visible rather than looking like a quiet afternoon.
-    // A reconnect says so on the ticker too: the gap it leaves is a stretch of
-    // the day the strip simply did not see, and it should not read as quiet.
-    officeEs.onopen = () => ($('office-live').textContent = '● live');
-    officeEs.onerror = () => {
-      $('office-live').textContent = '○ reconnecting';
-      if (officeLog.at(-1)?.text.endsWith('stream lost, reconnecting')) return;
-      officeSay('stream lost, reconnecting', 'dim');
-    };
-  }
-
-  function closeOfficeStream() {
-    if (!officeEs) return;
-    officeEs.close();
-    officeEs = null;
-    $('office-live').textContent = '';
-  }
-
-  function paintOfficeButton() {
-    $('btn-office').classList.toggle('border-accent', officeOpen);
-    $('btn-office').classList.toggle('text-accent', officeOpen);
-  }
-
-  function closeOfficeView() {
-    if (!officeOpen) return;
-    officeOpen = false;
-    paintOfficeButton();
-    closeOfficeStream();
-    office?.stop(); // nothing to draw for while the panel is hidden
-    $('office-view').classList.add('hidden');
-    $('chat-scroll').classList.remove('hidden');
-    $('composer-wrap').classList.remove('hidden');
-  }
-
-  function openOffice() {
-    closeDrawersOnMobile();
-    if (officeOpen) return;
-    showWelcome(); // drops any open session or board, the way the dashboard does
-    officeOpen = true;
-    paintOfficeButton();
-    $('welcome').classList.add('hidden');
-    $('chat-scroll').classList.add('hidden');
-    $('composer-wrap').classList.add('hidden');
-    $('office-view').classList.remove('hidden');
-    syncPath();
-    renderOffice();
-    // The log outlives the view: shutting the office closes the stream, so
-    // nothing accrues while it is away, but reopening it should not look like
-    // the day started over.
-    renderOfficeTicker();
-    openOfficeStream();
-  }
-
-  $('btn-office').addEventListener('click', () => openOffice());
-
-  // The camera is fitted to the panel, so it has to be fitted again when the
-  // panel changes size — opening a drawer, rotating a phone, or just dragging
-  // the window. Debounced, because a drag fires this by the hundred.
-  let officeResize = null;
-  addEventListener('resize', () => {
-    if (!officeOpen) return;
-    clearTimeout(officeResize);
-    officeResize = setTimeout(() => office?.resize(), 150);
-  });
-
   // ---------- ⚑ findings: the review queue ----------
   //
   // Every review result waiting for a decision, across every project, on one
@@ -7326,7 +7005,6 @@
   function pathFor() {
     if (current) return `/sessions/${encodeURIComponent(current)}`;
     if (homeOpen) return '/dashboard';
-    if (officeOpen) return '/office';
     if (findingsOpen) return '/findings';
     if (!currentProject) return '/';
     const base = `/projects/${currentProject}`;
@@ -7363,8 +7041,6 @@
         openSession(parts[1]);
       } else if (parts[0] === 'dashboard') {
         openHome();
-      } else if (parts[0] === 'office') {
-        openOffice();
       } else if (parts[0] === 'findings') {
         openFindings();
       } else if (repo && projects.some((p) => p.repo === repo)) {
@@ -7392,7 +7068,6 @@
   // out of one of them already goes through here.
   function closeProjectView() {
     closeHomeView();
-    closeOfficeView();
     closeFindingsView();
     currentProject = null;
     board = null;

@@ -1857,7 +1857,6 @@ The built-in dashboard calls its handlers by the paths on the left, with the log
 | `POST /api/login`                                | The dashboard’s own cookie login; a client authenticates its users itself and calls with its token |
 | `POST /api/logout`                               | The dashboard’s own cookie login                                                                   |
 | `GET /api/auth/state`                            | Whether the cookie login is on; with a token, `GET /` answers instead                              |
-| `GET /api/dev/office/events`                     | Superseded by `GET /events`, which sends the whole session record                                  |
 | `GET /api/mobile-devices`                        | Answered by the gateway as `GET /settings/devices`                                                 |
 | `POST /api/mobile-devices`                       | Answered by the gateway as `POST /settings/devices`                                                |
 | `DELETE /api/mobile-devices/:id`                 | Answered by the gateway as `DELETE /settings/devices/{id}`                                         |
