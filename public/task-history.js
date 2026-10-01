@@ -11,7 +11,7 @@
       const cost =
         usage.costUsd == null
           ? 'Unpriced'
-          : `${usage.estimatedTurns ? '~' : ''}$${usage.costUsd.toFixed(2)}${usage.unpricedTurns ? ' + unpriced turns' : ''}`;
+          : `$${usage.costUsd.toFixed(2)}${usage.unpricedTurns ? ' + unpriced turns' : ''}`;
       status(root.title || root.id);
       const review = root.reviewDone
         ? 'Approved'

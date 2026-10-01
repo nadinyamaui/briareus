@@ -5,9 +5,9 @@ import { initProviders, PROVIDER_DEFAULTS, runtimeCatalog } from '../lib/provide
 import { reviewerRuntime } from '../lib/projects.js';
 import { mergePullRequest, pullRequestView, pullRequestViewOptions } from '../lib/prviewer.js';
 
-// The handlers the ChatGPT connection calls by name, run for real behind the
-// registry: test/dashboard-mcp.test.js covers the registry with a stand-in
-// handler, this covers what the handlers themselves answer through it.
+// The handlers called by name, run for real behind the registry:
+// test/dashboard-routes.test.js covers the registry with a stand-in handler,
+// this covers what the handlers themselves answer through it.
 //
 // The providers the runtimes and start_session checks resolve against, and the
 // GitHub the pull_files reads reach: both stand in for the database and the
@@ -58,7 +58,7 @@ vi.mock('../lib/providers.js', async (importOriginal) => {
 
 let dashboard, handler, project;
 const repo = 'owner/project';
-const principal = { id: 'connection', label: 'My ChatGPT', repos: [repo] };
+const principal = { id: 'client', label: 'Desktop', repos: [repo], actor: 'API client Desktop' };
 beforeEach(async () => {
   // Two logins to one service (one picker entry, named after the first), a
   // keyed custom endpoint, and a switched-off row.

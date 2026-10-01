@@ -12,9 +12,6 @@ import { initMemorySelection } from './lib/memory-selection.js';
 import { memoryMaintenanceRoutes } from './lib/memory-maintenance-routes.js';
 import { operationsRoutes } from './lib/operations-routes.js';
 import { dashboardRoutes } from './lib/dashboard-routes.js';
-import { createRemoteMcpAuth } from './lib/remote-mcp-auth.js';
-import { remoteMcpRoutes } from './lib/remote-mcp.js';
-import { remoteMcpSettingsRoutes } from './lib/remote-mcp-settings.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
@@ -210,8 +207,7 @@ app.set('trust proxy', 'loopback');
 // The API handlers live on a router of their own rather than on the app,
 // because nothing reaches them by their own paths any more. /api/v1 hands a
 // client's request to them once its bearer token has been judged
-// (lib/api-v1.js), the ChatGPT connection calls the ones it was given
-// (lib/dashboard-routes.js), and an agent reaches its own under /api/agent/.
+// (lib/api-v1.js), and an agent reaches its own under /api/agent/.
 // The cookie login used to open all of them to the built-in pages. That door
 // is retired, so the pages still load and can no longer do anything.
 const api = express.Router();
@@ -226,11 +222,7 @@ app.use(securityHeaders);
 // itself instead, with an HMAC over the raw body. See lib/webhooks.js.
 app.use('/webhooks', webhookRouter());
 
-// The external MCP transport authenticates OAuth independently of browser
-// cookies. Its own Origin gate runs before the browser-only middleware below.
 const dashboard = dashboardRoutes({ app: api, getProject, getJob, listActions });
-const remoteMcpAuth = createRemoteMcpAuth();
-app.use(remoteMcpRoutes({ auth: remoteMcpAuth, dashboard, loginEnabled: authEnabled }));
 // The client API: owner-issued tokens (`npm run create-token` for the first,
 // an admin token for the rest), in front of the handlers below.
 const mobileAuth = createMobileAuth();
@@ -239,7 +231,6 @@ app.use(
     auth: mobileAuth,
     loginEnabled: authEnabled,
     ownerSecret: () => getConfig().auth.secret,
-    mcpAuth: remoteMcpAuth,
     handlers: api,
     getJob,
     getProject,
@@ -258,9 +249,6 @@ app.use(express.json({ limit: '1mb' }));
 // Everything below the login gate. Mounted before the static files so the
 // pages and the videos are behind it; see lib/auth.js for what stays public.
 app.use(requireAuth);
-// The ChatGPT connection's consent page: the one thing the owner still signs
-// in here for.
-app.use(remoteMcpSettingsRoutes({ auth: remoteMcpAuth, loginEnabled: authEnabled, signedIn }));
 // Routes are added to the handlers for the rest of this file. Of all of them,
 // only an agent's own are answered at their own path.
 app.use(agentOnly(api));
@@ -461,7 +449,6 @@ for (const section of ['projects', 'providers', 'servers', 'ssh', 'saved-prompts
 // The prompts are a single shared row, so the section is the whole address.
 app.get('/settings/prompts', settingsPage);
 app.get('/settings/workspaces', settingsPage);
-app.get('/settings/mcp', pageHandler(PUBLIC, 'mcp-settings.html'));
 app.get('/settings/mobile', pageHandler(PUBLIC, 'mobile-settings.html'));
 
 // ---- projects ----
@@ -1359,17 +1346,7 @@ dashboard.register('get', '/api/dev/usage', async (req, res) => {
 // make the per-project rows fail to add up to the headline totals.
 api.get('/api/dev/usage/all', async (req, res) => {
   const filter = {};
-  for (const key of [
-    'project',
-    'model',
-    'provider',
-    'activity',
-    'account',
-    'session',
-    'pricing',
-    'from',
-    'to',
-  ]) {
+  for (const key of ['project', 'model', 'provider', 'activity', 'account', 'session', 'from', 'to']) {
     const value = req.query[key];
     if (value != null) filter[key] = Array.isArray(value) ? value.map(String) : String(value);
   }
@@ -1695,7 +1672,7 @@ dashboard.register('get', '/api/dev/sessions', async (req, res) => {
   const sessions = listDevSessions(estimates);
   // One project for a dashboard tool call, a client token's own projects for
   // the client API (lib/api-v1.js), everything for the dashboard's pages.
-  const repos = req.mcpProject ? [req.mcpProject] : res.locals?.apiRepos;
+  const repos = req.apiProject ? [req.apiProject] : res.locals?.apiRepos;
   res.json({ sessions: repos ? sessions.filter((s) => repos.includes(s.repo)) : sessions });
 });
 
@@ -1887,7 +1864,7 @@ dashboard.register('post', '/api/dev/sessions/:id/loop', (req, res) => {
 dashboard.register('post', '/api/dev/sessions/:id/triage', async (req, res) => {
   try {
     const { verdicts, note } = req.body || {};
-    res.json(await triageReviewFindings(req.params.id, { verdicts, note, by: req.mcpActor || 'the user' }));
+    res.json(await triageReviewFindings(req.params.id, { verdicts, note, by: req.apiActor || 'the user' }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1900,7 +1877,7 @@ dashboard.register('post', '/api/dev/sessions/:id/triage', async (req, res) => {
 dashboard.register('post', '/api/dev/sessions/:id/findings/reply', async (req, res) => {
   try {
     const { key, text } = req.body || {};
-    res.json(await replyToReviewFinding(req.params.id, key, text, { by: req.mcpActor || 'the user' }));
+    res.json(await replyToReviewFinding(req.params.id, key, text, { by: req.apiActor || 'the user' }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1913,7 +1890,7 @@ dashboard.register('post', '/api/dev/sessions/:id/findings/reply', async (req, r
 dashboard.register('post', '/api/dev/sessions/:id/findings/delete', async (req, res) => {
   try {
     const { key } = req.body || {};
-    res.json(await deleteReviewFinding(req.params.id, key, { by: req.mcpActor || 'the user' }));
+    res.json(await deleteReviewFinding(req.params.id, key, { by: req.apiActor || 'the user' }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1926,7 +1903,7 @@ dashboard.register('post', '/api/dev/sessions/:id/triage/save', async (req, res)
   try {
     const { verdicts, note } = req.body || {};
     res.json(
-      await saveReviewFindingsDrafts(req.params.id, { verdicts, note, by: req.mcpActor || 'the user' }),
+      await saveReviewFindingsDrafts(req.params.id, { verdicts, note, by: req.apiActor || 'the user' }),
     );
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -2020,7 +1997,6 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initProjects();
     await initDbServers();
     await sshService.init();
-    await remoteMcpAuth.init();
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();

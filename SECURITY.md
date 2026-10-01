@@ -35,7 +35,7 @@ issued on the machine with `npm run create-token`. A token with the `admin`
 permission can do everything, on every project, including reading and changing
 provider keys, database servers and SSH settings. Treat an admin token like a
 password to the machine, and issue one only to the client you run Briareus from.
-An admin token can also issue and revoke tokens and ChatGPT connections, so
+An admin token can also issue and revoke tokens, so
 after revoking a leaked one, check the device list for tokens it issued. Read
 and manage tokens are held to the projects they were given and cannot issue
 anything. The API
@@ -45,8 +45,8 @@ only `/api/v1` and its subpaths. See the [client API guide](docs/api-v1.md).
 
 Tokens are stored as hashes, can be revoked through the API, and stop working
 when `AUTH_SECRET` changes. The API fails closed when the password login is
-off. The password login itself opens no API: its cookie is for the ChatGPT
-consent page and the recorded test videos.
+off. The password login itself opens no API: its cookie is for the recorded
+test videos.
 
 - `GITHUB_TOKEN`: a classic PAT with `repo`, or fine-grained with Pull
   requests read/write and Contents read. It can push to and comment on every

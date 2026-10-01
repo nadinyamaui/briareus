@@ -88,17 +88,17 @@ from, so neither can describe a route the server does not have.
 
 What is there, by area:
 
-| Area                   | Paths                                                                                     | Needs         |
-| ---------------------- | ----------------------------------------------------------------------------------------- | ------------- |
-| The token              | `/`, `/openapi.json`, `/token`, `/events`                                                 | read          |
-| Projects               | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                               | read / manage |
-| Pull requests          | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits` | read / manage |
-| Sessions               | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops          | read / manage |
-| Composer               | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                       | read to admin |
-| Memory                 | `/memories`, `/memories/health`                                                           | read / admin  |
-| Operations             | `/attention`, `/maintenance`, `/deployments`, `/notifications`, `/ssh/requests`, `/tasks` | admin         |
-| Settings               | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `templates` | admin         |
-| Tokens and connections | `/settings/devices`, `/settings/mcp`                                                      | admin         |
+| Area          | Paths                                                                                     | Needs         |
+| ------------- | ----------------------------------------------------------------------------------------- | ------------- |
+| The token     | `/`, `/openapi.json`, `/token`, `/events`                                                 | read          |
+| Projects      | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                               | read / manage |
+| Pull requests | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits` | read / manage |
+| Sessions      | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops          | read / manage |
+| Composer      | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                       | read to admin |
+| Memory        | `/memories`, `/memories/health`                                                           | read / admin  |
+| Operations    | `/attention`, `/maintenance`, `/deployments`, `/notifications`, `/ssh/requests`, `/tasks` | admin         |
+| Settings      | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `templates` | admin         |
+| Tokens        | `/settings/devices`                                                                       | admin         |
 
 Everything the built-in dashboard could do has a route. The reference ends with
 a table from each of the dashboard's retired routes to the one that replaces
@@ -159,21 +159,12 @@ as `session` events, without an id.
 Add an Access application for **`/api/v1` and `/api/v1/*`** with a **Bypass →
 Everyone** policy: a native client cannot complete Access's browser sign-in.
 Briareus still requires its token on every route. Do not exempt `/api/*` or the
-whole hostname: the login, the consent page and the videos stay behind Access
-and the password.
+whole hostname: the login and the videos stay behind Access and the password.
 
-## Tokens and connections
+## Tokens
 
-An admin token manages credentials:
-
-- `/settings/devices` lists, issues and revokes tokens. A token's secret is in
-  the answer that creates it and nowhere afterwards.
-- `/settings/mcp` configures the ChatGPT connection and its clients.
-- `/settings/mcp/consent` is the OAuth consent step, for a client that draws
-  the authorization page itself: read the request ChatGPT sent the owner's
-  browser with, show it, post the owner's answer, and send the browser to the
-  `redirect` that comes back. The server's own consent page at
-  `/oauth/authorize`, behind the password login, still does the same.
+An admin token manages tokens: `/settings/devices` lists, issues and revokes
+them. A token's secret is in the answer that creates it and nowhere afterwards.
 
 An admin token can issue other tokens, admin ones included. Revoking a leaked
 admin token is therefore not enough on its own: check the device list for
@@ -183,11 +174,10 @@ one.
 ## What is not in this API
 
 - Signing in. The password login (`/api/login`) is the cookie in front of the
-  consent page and the recorded videos, and opens no API; a client
-  authenticates its users itself and calls with its token.
+  recorded videos, and opens no API; a client authenticates its users itself
+  and calls with its token.
 - `/api/agent/*`: the calls an agent makes from inside its own session.
 - `/webhooks/*`: deliveries from GitHub and from systems that wake a session.
-- `/mcp` and `/oauth/token`: ChatGPT's own transport.
 - `/healthz` is public and outside the prefix: 200 when the server and its
   database answer.
 
