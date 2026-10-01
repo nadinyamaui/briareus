@@ -965,6 +965,18 @@ Remove a project. Needs `admin`.
 
 **Returns** `{ ok: boolean }`
 
+### `GET /settings/projects/{id}/update`
+
+Read how the project’s local checkout last updated itself. Needs `admin`.
+
+**Returns** `{ status: object? }`. `status` is null before the first update. Otherwise `{ state, trigger, startedAt, finishedAt, branch, from, to, reason, steps, output }`, where `state` is waiting, running, updated, skipped, failed or interrupted.
+
+### `POST /settings/projects/{id}/update`
+
+Pull the project’s local checkout and run its update commands now. Needs `admin`.
+
+**Returns** 202 `{ status: object? }`. Answers once the update has started; read the status to follow it.
+
 ### `GET /settings/templates`
 
 Read the prompt templates: the overrides in force and the catalog of what can be overridden. Needs `admin`.
@@ -1454,41 +1466,43 @@ Something a Briareus review declared on a pull request.
 
 A project’s full settings. A body may carry any of these; what it leaves out keeps its value.
 
-| Field                       | Type       |                                              |
-| --------------------------- | ---------- | -------------------------------------------- |
-| `id`                        | `integer`  | Its id; not in `defaults` or a create body   |
-| `repo`                      | `string`   | `owner/name`                                 |
-| `label`                     | `string`   | Its display name                             |
-| `enabled`                   | `boolean`  | Whether sessions can start on it             |
-| `sortOrder`                 | `integer`  | Its place in the list                        |
-| `setupCommands`             | `string[]` | Run to prepare a checkout                    |
-| `phpBinDir`                 | `string`   |                                              |
-| `localDir`                  | `string`   | Its local checkout, if any                   |
-| `dbPoolEnabled`             | `boolean`  | Whether its sessions claim a database server |
-| `dbPoolDatabase`            | `string`   |                                              |
-| `dbRestoreSql`              | `string`   |                                              |
-| `dbExtensions`              | `string[]` |                                              |
-| `envTemplate`               | `string`   | The `.env` written into a checkout           |
-| `runCommands`               | `string[]` | What ▶ Run runs                              |
-| `runProfiles`               | `string`   |                                              |
-| `reviewPublishInstructions` | `string`   |                                              |
-| `reviewTestSheet`           | `boolean`  |                                              |
-| `reviewTestRun`             | `boolean`  |                                              |
-| `qaNotes`                   | `string`   |                                              |
-| `feedbackInstructions`      | `string`   |                                              |
-| `testSheetInstructions`     | `string`   |                                              |
-| `reviewAuthor`              | `string`   |                                              |
-| `reviewProviderId`          | `integer?` | The provider reviews and errands run on      |
-| `reviewModel`               | `string`   |                                              |
-| `reviewEffort`              | `string`   |                                              |
-| `workerProviderId`          | `integer?` |                                              |
-| `workerModel`               | `string`   |                                              |
-| `workerEffort`              | `string`   |                                              |
-| `isSelf`                    | `boolean`  | Whether this project is Briareus itself      |
-| `stepRuntimes`              | `object`   | A runtime per errand step                    |
-| `promptTemplates`           | `object`   | Per-project prompt overrides                 |
-| `createdAt`                 | `string`   | ISO time; set by the server                  |
-| `updatedAt`                 | `string`   | ISO time; set by the server                  |
+| Field                       | Type       |                                                          |
+| --------------------------- | ---------- | -------------------------------------------------------- |
+| `id`                        | `integer`  | Its id; not in `defaults` or a create body               |
+| `repo`                      | `string`   | `owner/name`                                             |
+| `label`                     | `string`   | Its display name                                         |
+| `enabled`                   | `boolean`  | Whether sessions can start on it                         |
+| `sortOrder`                 | `integer`  | Its place in the list                                    |
+| `setupCommands`             | `string[]` | Run to prepare a checkout                                |
+| `phpBinDir`                 | `string`   |                                                          |
+| `localDir`                  | `string`   | Its local checkout, if any                               |
+| `autoUpdate`                | `boolean`  | Whether a merged pull request updates the local checkout |
+| `updateCommands`            | `string[]` | Run in the local checkout after it updates               |
+| `dbPoolEnabled`             | `boolean`  | Whether its sessions claim a database server             |
+| `dbPoolDatabase`            | `string`   |                                                          |
+| `dbRestoreSql`              | `string`   |                                                          |
+| `dbExtensions`              | `string[]` |                                                          |
+| `envTemplate`               | `string`   | The `.env` written into a checkout                       |
+| `runCommands`               | `string[]` | What ▶ Run runs                                          |
+| `runProfiles`               | `string`   |                                                          |
+| `reviewPublishInstructions` | `string`   |                                                          |
+| `reviewTestSheet`           | `boolean`  |                                                          |
+| `reviewTestRun`             | `boolean`  |                                                          |
+| `qaNotes`                   | `string`   |                                                          |
+| `feedbackInstructions`      | `string`   |                                                          |
+| `testSheetInstructions`     | `string`   |                                                          |
+| `reviewAuthor`              | `string`   |                                                          |
+| `reviewProviderId`          | `integer?` | The provider reviews and errands run on                  |
+| `reviewModel`               | `string`   |                                                          |
+| `reviewEffort`              | `string`   |                                                          |
+| `workerProviderId`          | `integer?` |                                                          |
+| `workerModel`               | `string`   |                                                          |
+| `workerEffort`              | `string`   |                                                          |
+| `isSelf`                    | `boolean`  | Whether this project is Briareus itself                  |
+| `stepRuntimes`              | `object`   | A runtime per errand step                                |
+| `promptTemplates`           | `object`   | Per-project prompt overrides                             |
+| `createdAt`                 | `string`   | ISO time; set by the server                              |
+| `updatedAt`                 | `string`   | ISO time; set by the server                              |
 
 ### Provider
 
@@ -1697,6 +1711,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/projects`                           | `POST /settings/projects`                                  |
 | `PUT /api/projects/:id`                        | `PUT /settings/projects/{id}`                              |
 | `DELETE /api/projects/:id`                     | `DELETE /settings/projects/{id}`                           |
+| `GET /api/projects/:id/update`                 | `GET /settings/projects/{id}/update`                       |
+| `POST /api/projects/:id/update`                | `POST /settings/projects/{id}/update`                      |
 | `GET /api/templates`                           | `GET /settings/templates`                                  |
 | `PUT /api/templates/1`                         | `PUT /settings/templates`                                  |
 | `POST /api/providers/test`                     | `POST /settings/providers/test`                            |
