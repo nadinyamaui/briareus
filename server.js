@@ -11,7 +11,6 @@ import { previewFeedbackRoutes } from './lib/preview-feedback.js';
 import { initMemorySelection } from './lib/memory-selection.js';
 import { memoryMaintenanceRoutes } from './lib/memory-maintenance-routes.js';
 import { operationsRoutes } from './lib/operations-routes.js';
-import { dashboardRoutes } from './lib/dashboard-routes.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
@@ -220,7 +219,6 @@ app.use(securityHeaders);
 // itself instead, with an HMAC over the raw body. See lib/webhooks.js.
 app.use('/webhooks', webhookRouter());
 
-const dashboard = dashboardRoutes({ app: api, getProject, getJob, listActions });
 // The client API: owner-issued tokens (`npm run create-token` for the first,
 // an admin token for the rest), in front of the handlers below.
 const mobileAuth = createMobileAuth();
@@ -839,7 +837,7 @@ function findingsParams(body) {
   return { repo: project.repo, prNumber };
 }
 
-dashboard.register('get', '/api/pr/view', async (req, res) => {
+api.get('/api/pr/view', async (req, res) => {
   try {
     const { repo, prNumber } = findingsParams(req.query);
     res.json(await pullRequestView({ repo }, prNumber, pullRequestViewOptions(req.query)));
@@ -848,7 +846,7 @@ dashboard.register('get', '/api/pr/view', async (req, res) => {
   }
 });
 
-dashboard.register('post', '/api/pr/merge', async (req, res) => {
+api.post('/api/pr/merge', async (req, res) => {
   try {
     const { repo, prNumber } = findingsParams(req.body || {});
     const { method, headSha, baseRef } = req.body || {};
@@ -877,7 +875,7 @@ api.get('/api/pr/commit', async (req, res) => {
   }
 });
 
-dashboard.register('get', '/api/pr/findings', async (req, res) => {
+api.get('/api/pr/findings', async (req, res) => {
   try {
     const { repo, prNumber } = findingsParams(req.query);
     res.json(await getFindings(repo, prNumber));
@@ -886,7 +884,7 @@ dashboard.register('get', '/api/pr/findings', async (req, res) => {
   }
 });
 
-dashboard.register('post', '/api/pr/findings/decision', async (req, res) => {
+api.post('/api/pr/findings/decision', async (req, res) => {
   try {
     const { repo, prNumber } = findingsParams(req.body || {});
     const { key, decision } = req.body || {};
@@ -1312,7 +1310,7 @@ api.get('/api/dev/projects', (req, res) => {
 // The project dashboard: one project's open pull requests, with the labels the
 // review workflow speaks in and the errand each one is asking for, and, on the
 // same payload, the repo's open issues, so the board's tabs cost one call.
-dashboard.register('get', '/api/dev/pulls', async (req, res) => {
+api.get('/api/dev/pulls', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
   try {
@@ -1325,7 +1323,7 @@ dashboard.register('get', '/api/dev/pulls', async (req, res) => {
 // What a project has spent this calendar month, from the per-turn ledger:
 // sessions that ran a turn, tokens in and out, and the cost of the turns whose
 // provider priced them.
-dashboard.register('get', '/api/dev/usage', async (req, res) => {
+api.get('/api/dev/usage', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
   res.json(await projectUsage(project));
@@ -1353,7 +1351,7 @@ api.get('/api/dev/usage/all', async (req, res) => {
 // line changes, commits, linked issues, review verdicts and CI checks. It is
 // what the session panel shows for a session's own PR, served here for the
 // board drilled into a pull request, which has no session to read it from.
-dashboard.register('get', '/api/dev/pull', async (req, res) => {
+api.get('/api/dev/pull', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
   const number = Number(req.query.pr);
@@ -1421,11 +1419,11 @@ api.get('/api/dev/providers', async (req, res) => {
   res.set('Cache-Control', 'no-store').json({ providers });
 });
 
-// The mobile API's runtimes operation: what /api/dev/providers offers, without
+// What a client picks a runtime from: what /api/dev/providers offers, without
 // the accounts behind each entry, plus the project's own default (see
 // runtimeCatalog). Availability goes on the login probes already made rather
 // than probing on every poll.
-dashboard.register('get', '/api/dev/runtimes', (req, res) => {
+api.get('/api/dev/runtimes', (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
   res.json(runtimeCatalog(reviewerRuntime(project), getConfig(), (p) => cachedProviderAuth(p.id)));
@@ -1433,7 +1431,7 @@ dashboard.register('get', '/api/dev/runtimes', (req, res) => {
 
 // The branches of one project, for the composer's branch picker: the default
 // branch first, then the rest alphabetically.
-dashboard.register('get', '/api/dev/branches', async (req, res) => {
+api.get('/api/dev/branches', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
   try {
@@ -1492,7 +1490,7 @@ api.post('/api/dev/transcribe', express.raw({ type: () => true, limit: '25mb' })
 // request the user names. The list is served so the menu grows with lib/actions.js
 // rather than with a second copy of it in the client.
 
-dashboard.register('get', '/api/dev/actions', (req, res) => {
+api.get('/api/dev/actions', (req, res) => {
   res.json({ actions: listActions() });
 });
 
@@ -1503,7 +1501,7 @@ dashboard.register('get', '/api/dev/actions', (req, res) => {
 // in the project's local checkout (a fresh clone and a pooled database server
 // would be claimed for nothing) while an action that has to run the app (the
 // test run) gets a workspace clone with the full setup, like a review does.
-dashboard.register('post', '/api/dev/actions', async (req, res) => {
+api.post('/api/dev/actions', async (req, res) => {
   const { action: actionId, repo, prNumber, provider, model, effort, input } = req.body || {};
   const action = getAction(actionId);
   if (!action) return res.status(400).json({ error: `Unknown action: ${actionId}` });
@@ -1594,7 +1592,7 @@ dashboard.register('post', '/api/dev/actions', async (req, res) => {
 // GitHub, then prepare a clean session workspace and serve it without sending
 // an agent turn. The returned session remains available in the sidebar so the
 // user can inspect it, chat in it, or close it to release its resources.
-dashboard.register('post', '/api/dev/pulls/:number/serve', async (req, res) => {
+api.post('/api/dev/pulls/:number/serve', async (req, res) => {
   const { repo, provider, model, effort } = req.body || {};
   const project = getProject(repo || '');
   if (!project) return res.status(400).json({ error: `Unknown project: ${repo || ''}` });
@@ -1658,12 +1656,12 @@ async function currentJobUsageEstimates() {
   }
 }
 
-dashboard.register('get', '/api/dev/sessions', async (req, res) => {
+api.get('/api/dev/sessions', async (req, res) => {
   const estimates = await currentJobUsageEstimates();
   const sessions = listDevSessions(estimates);
-  // One project for a dashboard tool call, a client token's own projects for
-  // the client API (lib/api-v1.js), everything for the dashboard's pages.
-  const repos = req.apiProject ? [req.apiProject] : res.locals?.apiRepos;
+  // A project-limited token's own projects, everything for an admin token
+  // (lib/api-v1.js).
+  const repos = res.locals.apiRepos;
   res.json({ sessions: repos ? sessions.filter((s) => repos.includes(s.repo)) : sessions });
 });
 
@@ -1678,7 +1676,7 @@ dashboard.register('get', '/api/dev/sessions', async (req, res) => {
 // to start a session over a label.
 const COMPOSER_ACTIVITIES = new Set(['issue']);
 
-dashboard.register('post', '/api/dev/sessions', (req, res) => {
+api.post('/api/dev/sessions', (req, res) => {
   // prNumber is the project dashboard's: a review started from a pull request
   // row already knows which one it is, so the review prompt and the session's
   // title can say so instead of making the agent find out.
@@ -1763,7 +1761,7 @@ const transcript = sessionTranscriptRoutes({
   bus,
 });
 
-dashboard.register('get', '/api/dev/sessions/:id', transcript.read);
+api.get('/api/dev/sessions/:id', transcript.read);
 
 api.get('/api/dev/sessions/:id/events', transcript.stream);
 
@@ -1771,7 +1769,7 @@ api.get('/api/dev/sessions/:id/events', transcript.stream);
 // queued rather than refused otherwise, and one to a session that
 // let go of its workspace reopens it first, so this only fails on a message
 // the session could not accept at all.
-dashboard.register('post', '/api/dev/sessions/:id/message', (req, res) => {
+api.post('/api/dev/sessions/:id/message', (req, res) => {
   try {
     const { text, attachments, zeusRoles } = req.body || {};
     res.json({ session: sendDevMessage(req.params.id, text, attachments, zeusRoles) });
@@ -1811,11 +1809,11 @@ const editSession = sessionEditRoute({
   setDevSessionAutoCompact,
   setDevSessionCompactInstructions,
 });
-dashboard.register('patch', '/api/dev/sessions/:id', editSession);
+api.patch('/api/dev/sessions/:id', editSession);
 
 // Manual recovery for a PR that automatic branch/URL discovery missed. The
 // jobs layer reads GitHub and verifies the branch before storing the link.
-dashboard.register('post', '/api/dev/sessions/:id/link-pr', async (req, res) => {
+api.post('/api/dev/sessions/:id/link-pr', async (req, res) => {
   try {
     res.json({ session: await linkPrToSession(req.params.id, req.body?.pr) });
   } catch (e) {
@@ -1824,7 +1822,7 @@ dashboard.register('post', '/api/dev/sessions/:id/link-pr', async (req, res) => 
 });
 
 // Take a queued message back before the session gets to it.
-dashboard.register('delete', '/api/dev/sessions/:id/queue/:index', (req, res) => {
+api.delete('/api/dev/sessions/:id/queue/:index', (req, res) => {
   try {
     const dropped = dropQueuedMessage(req.params.id, Number(req.params.index));
     res.json({ ok: true, dropped, session: publicJob(getJob(req.params.id)) });
@@ -1836,7 +1834,7 @@ dashboard.register('delete', '/api/dev/sessions/:id/queue/:index', (req, res) =>
 // 🔁 Review loop: arm or disarm it on a session that is already running. The
 // composer's chip only speaks for a session that does not exist yet, and
 // wanting the reviews is usually something the work teaches you.
-dashboard.register('post', '/api/dev/sessions/:id/loop', (req, res) => {
+api.post('/api/dev/sessions/:id/loop', (req, res) => {
   try {
     const { on } = req.body || {};
     res.json({ session: setReviewLoop(req.params.id, on === true) });
@@ -1852,10 +1850,12 @@ dashboard.register('post', '/api/dev/sessions/:id/loop', (req, res) => {
 // optional so it is not offered again. On a review of somebody else's pull
 // request it takes nothing and rules nothing — those findings are that
 // author's to fix — and only clears the card.
-dashboard.register('post', '/api/dev/sessions/:id/triage', async (req, res) => {
+api.post('/api/dev/sessions/:id/triage', async (req, res) => {
   try {
     const { verdicts, note } = req.body || {};
-    res.json(await triageReviewFindings(req.params.id, { verdicts, note, by: req.apiActor || 'the user' }));
+    res.json(
+      await triageReviewFindings(req.params.id, { verdicts, note, by: res.locals.apiActor || 'the user' }),
+    );
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1865,10 +1865,10 @@ dashboard.register('post', '/api/dev/sessions/:id/triage', async (req, res) => {
 // request: the text
 // goes on that finding's own thread on the pull request, where its author
 // answers it. It rules nothing and leaves the finding on the card.
-dashboard.register('post', '/api/dev/sessions/:id/findings/reply', async (req, res) => {
+api.post('/api/dev/sessions/:id/findings/reply', async (req, res) => {
   try {
     const { key, text } = req.body || {};
-    res.json(await replyToReviewFinding(req.params.id, key, text, { by: req.apiActor || 'the user' }));
+    res.json(await replyToReviewFinding(req.params.id, key, text, { by: res.locals.apiActor || 'the user' }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1878,10 +1878,10 @@ dashboard.register('post', '/api/dev/sessions/:id/findings/reply', async (req, r
 // leaves the review — its inline comment on the pull request and the review's
 // own findings block — rather than only this card. Irreversible on GitHub; the
 // screen asks before calling it.
-dashboard.register('post', '/api/dev/sessions/:id/findings/delete', async (req, res) => {
+api.post('/api/dev/sessions/:id/findings/delete', async (req, res) => {
   try {
     const { key } = req.body || {};
-    res.json(await deleteReviewFinding(req.params.id, key, { by: req.apiActor || 'the user' }));
+    res.json(await deleteReviewFinding(req.params.id, key, { by: res.locals.apiActor || 'the user' }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1890,11 +1890,15 @@ dashboard.register('post', '/api/dev/sessions/:id/findings/delete', async (req, 
 // ⚑ Findings, Save comments: the verdicts picked and the reasons and note
 // typed so far, kept on the held round and posted on the pull request as one
 // comment. Nothing is ruled; the round goes on waiting for Complete.
-dashboard.register('post', '/api/dev/sessions/:id/triage/save', async (req, res) => {
+api.post('/api/dev/sessions/:id/triage/save', async (req, res) => {
   try {
     const { verdicts, note } = req.body || {};
     res.json(
-      await saveReviewFindingsDrafts(req.params.id, { verdicts, note, by: req.apiActor || 'the user' }),
+      await saveReviewFindingsDrafts(req.params.id, {
+        verdicts,
+        note,
+        by: res.locals.apiActor || 'the user',
+      }),
     );
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -1903,7 +1907,7 @@ dashboard.register('post', '/api/dev/sessions/:id/triage/save', async (req, res)
 
 // 🎬 QA loop: the second live chip, queued behind an armed review loop. It is
 // armed independently because not every reviewed task should spend a QA run.
-dashboard.register('post', '/api/dev/sessions/:id/qa-loop', (req, res) => {
+api.post('/api/dev/sessions/:id/qa-loop', (req, res) => {
   try {
     const { on } = req.body || {};
     res.json({ session: setQaLoop(req.params.id, on === true) });
@@ -1914,7 +1918,7 @@ dashboard.register('post', '/api/dev/sessions/:id/qa-loop', (req, res) => {
 
 // Reopen a closed / interrupted / failed session: its workspace clone and
 // database server are claimed again, without a message to the agent.
-dashboard.register('post', '/api/dev/sessions/:id/reopen', (req, res) => {
+api.post('/api/dev/sessions/:id/reopen', (req, res) => {
   try {
     res.json({ session: reopenDevSession(req.params.id) });
   } catch (e) {
@@ -1926,7 +1930,7 @@ dashboard.register('post', '/api/dev/sessions/:id/reopen', (req, res) => {
 // with one link per tenant host when the run profile names tenants. `profile`
 // picks one of the project's run profiles; without it the session serves the
 // one it served last.
-dashboard.register('post', '/api/dev/sessions/:id/serve', async (req, res) => {
+api.post('/api/dev/sessions/:id/serve', async (req, res) => {
   try {
     const profile = req.body && typeof req.body.profile === 'string' ? req.body.profile : null;
     res.json(await startDevServe(req.params.id, { profile }));
@@ -1935,13 +1939,13 @@ dashboard.register('post', '/api/dev/sessions/:id/serve', async (req, res) => {
   }
 });
 
-dashboard.register('post', '/api/dev/sessions/:id/cancel', (req, res) => {
+api.post('/api/dev/sessions/:id/cancel', (req, res) => {
   const session = cancelDevTurn(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session not found' });
   res.json({ session });
 });
 
-dashboard.register('post', '/api/dev/sessions/:id/close', async (req, res) => {
+api.post('/api/dev/sessions/:id/close', async (req, res) => {
   const session = await closeDevSession(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session not found' });
   res.json({ session });
@@ -1949,7 +1953,7 @@ dashboard.register('post', '/api/dev/sessions/:id/close', async (req, res) => {
 
 // Delete = close (release the clone and MySQL instance) then trash the record
 // and its log.
-dashboard.register('delete', '/api/dev/sessions/:id', async (req, res) => {
+api.delete('/api/dev/sessions/:id', async (req, res) => {
   const job = getJob(req.params.id);
   if (!job || job.kind !== 'devchat') return res.status(404).json({ error: 'Session not found' });
   try {
