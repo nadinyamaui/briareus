@@ -10,6 +10,7 @@ import {
   previewHostname,
   localHostname,
   serveHostname,
+  previewAccess,
   _resetForTests,
 } from '../lib/tunnel.js';
 
@@ -45,9 +46,20 @@ function fakeCloudflare(url, opts = {}) {
   }
   if (u.pathname === '/client/v4/accounts/acct/access/apps') {
     if (method === 'GET') return envelope(cf.apps);
-    cf.apps.push(body);
+    const app = { id: `app-${cf.apps.length + 1}`, ...body };
+    cf.apps.push(app);
+    return envelope(app);
+  }
+  const appPolicies = u.pathname.match(/^\/client\/v4\/accounts\/acct\/access\/apps\/([^/]+)\/policies$/);
+  if (appPolicies && method === 'POST') {
+    const app = cf.apps.find((a) => a.id === appPolicies[1]);
+    app.policies = [...(app.policies || []), body];
     return envelope(body);
   }
+  const oneApp = u.pathname.match(/^\/client\/v4\/accounts\/acct\/access\/apps\/([^/]+)$/);
+  if (oneApp && method === 'GET') return envelope(cf.appDetails[oneApp[1]]);
+  if (u.pathname === '/client/v4/accounts/acct/access/service_tokens' && method === 'GET')
+    return envelope(cf.serviceTokens);
   if (u.pathname === '/client/v4/zones/zone/dns_records') {
     if (method === 'GET') return envelope(cf.dns.filter((r) => r.name === u.searchParams.get('name')));
     cf.dns.push(body);
@@ -67,6 +79,11 @@ beforeEach(() => {
   calls = [];
   cf = {
     apps: [],
+    appDetails: {},
+    serviceTokens: [
+      { id: 'other-token', client_id: 'other.access', name: 'CI' },
+      { id: 'svc-token', client_id: 'briareus.access', name: 'Briareus clients' },
+    ],
     dns: [],
     config: {
       ingress: [
@@ -255,5 +272,129 @@ describe('tenant hostnames', () => {
     await publicAppUrl(8101, 'demo');
     expect(calls.length).toBe(after);
     expect(cf.apps).toHaveLength(2);
+  });
+});
+
+describe('the service token', () => {
+  const SERVICE_TOKEN = { clientId: 'briareus.access', clientSecret: 'svc-secret' };
+  const ALLOWED = {
+    id: 'pol-1',
+    name: 'Allowed users',
+    decision: 'allow',
+    include: [{ email: { email: 'hand-added@example.com' } }],
+    precedence: 1,
+  };
+  const CLIENTS = {
+    name: 'Briareus clients',
+    decision: 'non_identity',
+    include: [{ service_token: { token_id: 'svc-token' } }],
+  };
+
+  beforeEach(() => {
+    cfgState.previewTunnel = { ...TUNNEL, serviceToken: SERVICE_TOKEN };
+  });
+
+  it('adds nothing to a new application without one', async () => {
+    cfgState.previewTunnel = { ...TUNNEL, serviceToken: null };
+
+    await publicAppUrl(8100);
+
+    expect(cf.apps[0].policies.map((p) => p.name)).toEqual(['Allowed users']);
+    expect(calls.some((c) => c.path.endsWith('service_tokens'))).toBe(false);
+  });
+
+  it('gives a new application a second policy letting the token through', async () => {
+    await publicAppUrl(8100);
+
+    expect(cf.apps[0].policies).toHaveLength(2);
+    expect(cf.apps[0].policies[0].name).toBe('Allowed users');
+    expect(cf.apps[0].policies[1]).toEqual(CLIENTS);
+  });
+
+  it('looks the token id up once per process, by client id', async () => {
+    await publicAppUrl(8100);
+    await publicAppUrl(8101);
+
+    expect(calls.filter((c) => c.path.endsWith('/access/service_tokens'))).toHaveLength(1);
+    expect(cf.apps[1].policies[1].include).toEqual([{ service_token: { token_id: 'svc-token' } }]);
+  });
+
+  it('refuses to publish when no token has the client id, without the secret in the error', async () => {
+    cf.serviceTokens = [{ id: 'other-token', client_id: 'other.access' }];
+
+    const error = await publicAppUrl(8100).catch((e) => e);
+    expect(error.message).toMatch(/No Cloudflare Access service token has the client id briareus\.access/);
+    expect(error.message).not.toContain('svc-secret');
+    expect(calls.some((c) => c.method !== 'GET')).toBe(false);
+  });
+
+  it('asks again after a failed lookup', async () => {
+    cf.serviceTokens = [];
+    await expect(publicAppUrl(8100)).rejects.toThrow(/No Cloudflare Access service token/);
+    cf.serviceTokens = [{ id: 'svc-token', client_id: 'briareus.access' }];
+
+    expect(await publicAppUrl(8100)).toBe('https://preview-8100.example.com');
+  });
+
+  it('adds only its own policy to an existing application that lacks it, after the rest', async () => {
+    cf.apps.push({ id: 'app-old', domain: 'preview-8100.example.com', policies: [ALLOWED] });
+
+    await publicAppUrl(8100);
+
+    expect(cf.apps).toHaveLength(1);
+    expect(cf.apps[0].policies).toEqual([ALLOWED, { ...CLIENTS, precedence: 2 }]);
+    const writes = calls.filter((c) => c.method !== 'GET' && c.path.includes('/access/'));
+    expect(writes.map((c) => `${c.method} ${c.path}`)).toEqual([
+      'POST /client/v4/accounts/acct/access/apps/app-old/policies',
+    ]);
+  });
+
+  it('leaves an existing application alone when a policy already includes the token', async () => {
+    const handMade = {
+      id: 'pol-2',
+      name: 'Hand-made',
+      decision: 'non_identity',
+      include: [{ service_token: { token_id: 'svc-token' } }, { service_token: { token_id: 'other-token' } }],
+      precedence: 2,
+    };
+    cf.apps.push({ id: 'app-old', domain: 'preview-8100.example.com', policies: [ALLOWED, handMade] });
+
+    await publicAppUrl(8100);
+
+    expect(cf.apps[0].policies).toEqual([ALLOWED, handMade]);
+    expect(calls.some((c) => c.path.includes('/policies'))).toBe(false);
+  });
+
+  it('reads the application when the listing leaves its policies out', async () => {
+    cf.apps.push({ id: 'app-old', domain: 'preview-8100.example.com' });
+    cf.appDetails['app-old'] = { id: 'app-old', policies: [{ ...CLIENTS, id: 'pol-9', precedence: 4 }] };
+
+    await publicAppUrl(8100);
+
+    expect(calls.some((c) => c.path.endsWith('/apps/app-old'))).toBe(true);
+    expect(calls.some((c) => c.path.includes('/policies'))).toBe(false);
+  });
+});
+
+describe('previewAccess', () => {
+  it('is null without a tunnel or without a service token', () => {
+    cfgState.previewTunnel = null;
+    expect(previewAccess()).toBeNull();
+    cfgState.previewTunnel = { ...TUNNEL, serviceToken: null };
+    expect(previewAccess()).toBeNull();
+  });
+
+  it('hands over the token and the suffix after the template’s first label', () => {
+    cfgState.previewTunnel = {
+      ...TUNNEL,
+      hostname: '{tenant}--preview-{port}.dev.example.com',
+      serviceToken: { clientId: 'briareus.access', clientSecret: 'svc-secret' },
+    };
+
+    expect(previewAccess()).toEqual({
+      clientId: 'briareus.access',
+      clientSecret: 'svc-secret',
+      hostSuffix: 'dev.example.com',
+    });
   });
 });

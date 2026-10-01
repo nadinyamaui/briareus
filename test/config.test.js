@@ -80,8 +80,7 @@ beforeEach(() => {
   disk.whichOutput = null;
   savedEnv = { ...process.env };
   for (const k of Object.keys(process.env))
-    if (k.startsWith('R2_') || k.startsWith('CLOUDFLARE_') || k.startsWith('OPENAI_TRANSCRIBE_'))
-      delete process.env[k];
+    if (/^(R2_|CLOUDFLARE_|OPENAI_TRANSCRIBE_|PREVIEW_ACCESS_CLIENT_)/.test(k)) delete process.env[k];
 });
 
 afterEach(() => {
@@ -553,6 +552,16 @@ describe('the R2 video bucket', () => {
   });
 });
 
+// What getConfig throws with; the first call is the only one that throws.
+function messageOf(getConfig) {
+  try {
+    getConfig();
+  } catch (e) {
+    return e.message;
+  }
+  return '';
+}
+
 describe('the preview tunnel', () => {
   const TUNNEL = {
     CLOUDFLARE_API_TOKEN: 'cf',
@@ -579,6 +588,7 @@ describe('the preview tunnel', () => {
       tunnelId: 'tun',
       hostname: 'preview-{port}.example.com',
       accessEmails: ['a@example.com', 'b@example.com'],
+      serviceToken: null,
     });
   });
 
@@ -630,6 +640,46 @@ describe('the preview tunnel', () => {
 
       expect(() => getConfig()).toThrow(/PREVIEW_HOSTNAME/);
     }
+  });
+
+  it('reads the service token when both halves are set', async () => {
+    const { getConfig } = await loadConfig(
+      complete({ ...TUNNEL, PREVIEW_ACCESS_CLIENT_ID: 'id.access', PREVIEW_ACCESS_CLIENT_SECRET: 's3cret' }),
+    );
+
+    expect(getConfig().previewTunnel.serviceToken).toEqual({ clientId: 'id.access', clientSecret: 's3cret' });
+  });
+
+  it('refuses one half of the service token, naming the other and never the secret', async () => {
+    for (const [given, value, absent] of [
+      ['PREVIEW_ACCESS_CLIENT_ID', 'id.access', 'PREVIEW_ACCESS_CLIENT_SECRET'],
+      ['PREVIEW_ACCESS_CLIENT_SECRET', 's3cret', 'PREVIEW_ACCESS_CLIENT_ID'],
+    ]) {
+      const { getConfig } = await loadConfig(complete({ ...TUNNEL, [given]: value }));
+
+      const message = messageOf(getConfig);
+      expect(message).toContain(absent);
+      expect(message).not.toContain('s3cret');
+    }
+  });
+
+  it('refuses a service token without the tunnel it opens', async () => {
+    const { getConfig } = await loadConfig(
+      complete({ PREVIEW_ACCESS_CLIENT_ID: 'id.access', PREVIEW_ACCESS_CLIENT_SECRET: 's3cret' }),
+    );
+
+    const message = messageOf(getConfig);
+    for (const key of ['CLOUDFLARE_API_TOKEN', 'PREVIEW_HOSTNAME', 'PREVIEW_ACCESS_EMAILS'])
+      expect(message).toContain(key);
+    expect(message).not.toContain('s3cret');
+  });
+
+  it('takes the service token from the process environment', async () => {
+    process.env.PREVIEW_ACCESS_CLIENT_ID = 'id.access';
+    process.env.PREVIEW_ACCESS_CLIENT_SECRET = 'from-env';
+    const { getConfig } = await loadConfig(complete(TUNNEL));
+
+    expect(getConfig().previewTunnel.serviceToken.clientSecret).toBe('from-env');
   });
 
   it('takes the token from the process environment over the file', async () => {

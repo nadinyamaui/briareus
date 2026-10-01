@@ -559,6 +559,12 @@ Send feedback on a preview page as a message with an annotated screenshot. Needs
 
 **Returns** `{ session: Session }`
 
+### `GET /preview/access`
+
+The Cloudflare Access service token a client sends to ▶ Run preview hostnames. Needs `manage`.
+
+**Returns** `{ clientId: string, clientSecret: string, hostSuffix: string }`. Send `CF-Access-Client-Id` and `CF-Access-Client-Secret` only to hosts ending in `.` + `hostSuffix`. 404 when the server has no tunnel or no service token configured.
+
 ### `GET /sessions/{id}/webhook`
 
 Read a session’s webhook: its settings, URLs and signing keys. Needs `admin`.

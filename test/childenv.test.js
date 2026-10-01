@@ -12,6 +12,7 @@ describe('childEnv', () => {
     vi.stubEnv('OPENAI_TRANSCRIBE_MODEL', 'gpt-4o-transcribe');
     vi.stubEnv('R2_SECRET_ACCESS_KEY', 'r2-secret');
     vi.stubEnv('CLOUDFLARE_API_TOKEN', 'cf-secret');
+    vi.stubEnv('PREVIEW_ACCESS_CLIENT_SECRET', 'svc-secret');
     vi.stubEnv('OPENAI_API_KEY', 'a-session-own-key');
 
     const env = childEnv();
@@ -20,6 +21,7 @@ describe('childEnv', () => {
     expect(env).not.toHaveProperty('OPENAI_TRANSCRIBE_MODEL');
     expect(env).not.toHaveProperty('R2_SECRET_ACCESS_KEY');
     expect(env).not.toHaveProperty('CLOUDFLARE_API_TOKEN');
+    expect(env).not.toHaveProperty('PREVIEW_ACCESS_CLIENT_SECRET');
     expect(env.OPENAI_API_KEY).toBe('a-session-own-key');
     expect(env.PATH).toBe(process.env.PATH);
   });
