@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const gh = vi.hoisted(() => ({ graphql: vi.fn() }));
+const gh = vi.hoisted(() => ({ graphql: vi.fn(), rest: vi.fn() }));
 
 vi.mock('../lib/config.js', () => ({
   getConfig: () => ({ githubToken: 'tok' }),
@@ -8,9 +8,10 @@ vi.mock('../lib/config.js', () => ({
 
 vi.mock('../lib/github.js', () => ({
   githubGraphql: (...args) => gh.graphql(...args),
+  githubRest: (...args) => gh.rest(...args),
 }));
 
-import { hasLabel, LABELS, projectPulls, pullOverview } from '../lib/prboard.js';
+import { closeIssue, hasLabel, LABELS, projectPulls, pullOverview } from '../lib/prboard.js';
 
 describe('hasLabel', () => {
   it('takes the label objects GitHub hands back', () => {
@@ -1154,5 +1155,101 @@ describe('pullOverview', () => {
   it('says so when GitHub has no such pull request', async () => {
     gh.graphql.mockResolvedValue({ repository: { pullRequest: null } });
     await expect(pullOverview(project({ repo: 'acme/shop' }), 9)).rejects.toThrow('acme/shop#9');
+  });
+});
+
+describe('closing an issue', () => {
+  const project = { repo: 'acme/issues' };
+  const answer = (status, body) => ({ ok: status < 300, status, json: async () => body });
+  const open = { number: 7, state: 'open', html_url: 'https://github.com/acme/issues/issues/7' };
+  const closed = {
+    ...open,
+    state: 'closed',
+    state_reason: 'not_planned',
+    closed_at: '2026-10-01T12:00:00Z',
+  };
+  // The read before the close, the comment, then the close itself.
+  const github = ({
+    read = answer(200, open),
+    comment = answer(201, {}),
+    close = answer(200, closed),
+  } = {}) =>
+    gh.rest.mockImplementation(async (_cfg, verb) => ({ GET: read, POST: comment, PATCH: close })[verb]);
+
+  beforeEach(() => gh.rest.mockReset());
+
+  it('posts the comment first, then closes with the reason given', async () => {
+    github();
+    await expect(
+      closeIssue(project, 7, { reason: 'not_planned', comment: 'Duplicate of #3' }),
+    ).resolves.toEqual({
+      issue: {
+        number: 7,
+        state: 'closed',
+        stateReason: 'not_planned',
+        closedAt: '2026-10-01T12:00:00Z',
+        url: 'https://github.com/acme/issues/issues/7',
+      },
+    });
+    expect(gh.rest.mock.calls.map(([, verb, path, body]) => [verb, path, body])).toEqual([
+      ['GET', '/repos/acme/issues/issues/7', undefined],
+      ['POST', '/repos/acme/issues/issues/7/comments', { body: 'Duplicate of #3' }],
+      ['PATCH', '/repos/acme/issues/issues/7', { state: 'closed', state_reason: 'not_planned' }],
+    ]);
+  });
+
+  it('closes as completed and posts nothing when no comment is given', async () => {
+    github();
+    await closeIssue(project, 7);
+    expect(gh.rest.mock.calls.map(([, verb]) => verb)).toEqual(['GET', 'PATCH']);
+    expect(gh.rest).toHaveBeenLastCalledWith(expect.anything(), 'PATCH', '/repos/acme/issues/issues/7', {
+      state: 'closed',
+      state_reason: 'completed',
+    });
+  });
+
+  it('refuses an unknown reason before asking GitHub', async () => {
+    await expect(closeIssue(project, 7, { reason: 'wontfix' })).rejects.toMatchObject({ status: 400 });
+    expect(gh.rest).not.toHaveBeenCalled();
+  });
+
+  it('refuses a pull request’s number without writing anything', async () => {
+    github({ read: answer(200, { ...open, pull_request: { url: 'x' } }) });
+    await expect(closeIssue(project, 7, { comment: 'bye' })).rejects.toMatchObject({ status: 422 });
+    expect(gh.rest.mock.calls.map(([, verb]) => verb)).toEqual(['GET']);
+  });
+
+  it('passes GitHub’s refusal on with its status and reason', async () => {
+    github({ read: answer(404, { message: 'Not Found' }) });
+    await expect(closeIssue(project, 7)).rejects.toMatchObject({
+      status: 404,
+      message: 'GitHub refused reading the issue: Not Found',
+    });
+    github({ close: answer(500, {}) });
+    await expect(closeIssue(project, 7)).rejects.toMatchObject({ status: 502 });
+  });
+
+  it('does not close when the comment could not be posted', async () => {
+    github({ comment: answer(403, { message: 'Resource not accessible by integration' }) });
+    await expect(closeIssue(project, 7, { comment: 'bye' })).rejects.toMatchObject({ status: 403 });
+    expect(gh.rest.mock.calls.map(([, verb]) => verb)).toEqual(['GET', 'POST']);
+  });
+
+  it('drops the board’s cache so the next read stops listing the issue', async () => {
+    gh.graphql.mockReset();
+    gh.graphql.mockResolvedValue({
+      repository: {
+        pullRequests: { nodes: [], pageInfo: { hasNextPage: false } },
+        issues: { nodes: [], pageInfo: { hasNextPage: false } },
+        stackRefs: { nodes: [], pageInfo: { hasNextPage: false } },
+      },
+    });
+    await projectPulls(project);
+    await projectPulls(project);
+    expect(gh.graphql).toHaveBeenCalledTimes(1);
+    github();
+    await closeIssue(project, 7);
+    await projectPulls(project);
+    expect(gh.graphql).toHaveBeenCalledTimes(2);
   });
 });

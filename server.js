@@ -149,7 +149,7 @@ import {
   removeMemoryByName,
 } from './lib/memories.js';
 import { initTemplates, globalTemplates, saveGlobalTemplates, templateCatalog } from './lib/templates.js';
-import { projectPulls, pullOverview } from './lib/prboard.js';
+import { closeIssue, projectPulls, pullOverview } from './lib/prboard.js';
 import { commitView, mergePullRequest, pullRequestView, pullRequestViewOptions } from './lib/prviewer.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
@@ -765,6 +765,29 @@ api.post('/api/pr/merge', async (req, res) => {
         ...(method ? { method: String(method) } : {}),
         headSha: String(headSha || ''),
         baseRef: String(baseRef || ''),
+      }),
+    );
+  } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
+
+// Closing an issue is the board's other write besides merging, so it sits
+// beside the merge and answers GitHub's refusals the same way.
+api.post('/api/issues/close', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const project = getProject(String(body.repo || ''));
+    if (!project) throw Object.assign(new Error(`Unknown project: ${body.repo || ''}`), { status: 404 });
+    const number = Number(body.issue);
+    if (!Number.isInteger(number) || number < 1)
+      throw Object.assign(new Error('The issue number must be a whole number'), { status: 400 });
+    if (body.comment != null && typeof body.comment !== 'string')
+      throw Object.assign(new Error('The comment must be a string'), { status: 400 });
+    res.json(
+      await closeIssue({ repo: project.repo }, number, {
+        ...(body.reason ? { reason: String(body.reason) } : {}),
+        comment: (body.comment || '').trim(),
       }),
     );
   } catch (e) {
