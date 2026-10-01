@@ -5,7 +5,7 @@ import { sshRoutes } from '../lib/ssh-routes.js';
 import { agentOnly } from '../lib/auth.js';
 
 vi.mock('../lib/config.js', () => ({
-  getConfig: () => ({ auth: { secret: 'secret' } }),
+  getConfig: () => ({ auth: { secret: 'secret' }, credentialsKey: 'k'.repeat(32) }),
 }));
 let server, base, service, job, execute;
 const input = {
@@ -149,5 +149,39 @@ describe('SSH HTTP authorization and registration', () => {
     const result = await request(`/api/agent/ssh/requests/${queued.id}`, { token: 'session-token' });
     expect((await result.json()).request).toMatchObject({ status: 'completed', result: { stdout: 'done' } });
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SSH database login over HTTP', () => {
+  it('hands the opened login to the operator only, uncached', async () => {
+    const created = await request('/api/ssh/servers', {
+      operator: true,
+      method: 'POST',
+      body: { ...input, dbUsername: 'app', dbPassword: 's3cret' },
+    });
+    const { server } = await created.json();
+    expect(server.hasDbCredentials).toBe(true);
+    expect(server).not.toHaveProperty('dbPassword');
+    const path = `/api/ssh/servers/${server.id}/db-credentials`;
+    const res = await request(path, { operator: true });
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect((await res.json()).credentials).toEqual({
+      host: '127.0.0.1',
+      port: 3306,
+      username: 'app',
+      password: 's3cret',
+    });
+    expect((await request(path, { operator: true, token: 'session-token' })).status).toBe(403);
+    expect((await request(path)).status).toBe(410);
+    const agents = await (await request('/api/agent/ssh/servers', { token: 'session-token' })).text();
+    expect(agents).not.toContain('s3cret');
+  });
+  it('answers 404 for a server without one', async () => {
+    const { server } = await (
+      await request('/api/ssh/servers', { operator: true, method: 'POST', body: input })
+    ).json();
+    expect((await request(`/api/ssh/servers/${server.id}/db-credentials`, { operator: true })).status).toBe(
+      404,
+    );
   });
 });

@@ -1186,6 +1186,12 @@ Remove a server. Needs `admin`.
 
 **Returns** `{ ok: boolean }`
 
+### `GET /settings/ssh/servers/{id}/db-credentials`
+
+Read the server’s database login, decrypted, to connect through an SSH tunnel to `host`:`port` on it. 404 when none is stored. Needs `admin`.
+
+**Returns** `{ credentials: DbCredentials }`
+
 ## Tokens
 
 ### `GET /settings/devices`
@@ -1577,17 +1583,33 @@ A database server sessions can claim, one session at a time.
 
 A server an agent may run commands on, with approval.
 
-| Field            | Type         |                                                              |
-| ---------------- | ------------ | ------------------------------------------------------------ |
-| `id`             | `integer`    | Its id; set by the server                                    |
-| `label`          | `string`     | Its display name                                             |
-| `repo`           | `string`     | The project whose sessions may use it                        |
-| `host`           | `string`     | Its host                                                     |
-| `port`           | `integer`    | Its port                                                     |
-| `username`       | `string`     | The user to connect as                                       |
-| `identityFile`   | `string`     | The private key file on the Briareus server                  |
-| `permissionMode` | `ask\|allow` | `ask` waits for approval of every command; `allow` runs them |
-| `enabled`        | `boolean`    | Whether agents may use it                                    |
+| Field              | Type         |                                                                                                                      |
+| ------------------ | ------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `id`               | `integer`    | Its id; set by the server                                                                                            |
+| `label`            | `string`     | Its display name                                                                                                     |
+| `repo`             | `string`     | The project whose sessions may use it                                                                                |
+| `host`             | `string`     | Its host                                                                                                             |
+| `port`             | `integer`    | Its port                                                                                                             |
+| `username`         | `string`     | The user to connect as                                                                                               |
+| `identityFile`     | `string`     | The private key file on the Briareus server                                                                          |
+| `permissionMode`   | `ask\|allow` | `ask` waits for approval of every command; `allow` runs them                                                         |
+| `enabled`          | `boolean`    | Whether agents may use it                                                                                            |
+| `dbHost`           | `string`     | Where its database listens, as seen from the server itself; `127.0.0.1` by default                                   |
+| `dbPort`           | `integer`    | Its database’s port; 3306 by default                                                                                 |
+| `dbUsername`       | `string`     | The database user. Write-only: stored encrypted and read back through `GET …/db-credentials`. Empty clears the login |
+| `dbPassword`       | `string`     | That user’s password. Write-only, stored encrypted; left out, the stored one stays                                   |
+| `hasDbCredentials` | `boolean`    | Whether a database login is stored; set by the server                                                                |
+
+### DbCredentials
+
+An SSH server’s database login, opened. Reach `host`:`port` through a tunnel over that server.
+
+| Field      | Type      |                                                     |
+| ---------- | --------- | --------------------------------------------------- |
+| `host`     | `string`  | Where the database listens, as seen from the server |
+| `port`     | `integer` | Its port                                            |
+| `username` | `string`  | The database user                                   |
+| `password` | `string`  | That user’s password                                |
 
 ### Workspace
 
@@ -1769,6 +1791,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/ssh/servers`                        | `POST /settings/ssh/servers`                               |
 | `PUT /api/ssh/servers/:id`                     | `PUT /settings/ssh/servers/{id}`                           |
 | `DELETE /api/ssh/servers/:id`                  | `DELETE /settings/ssh/servers/{id}`                        |
+| `GET /api/ssh/servers/:id/db-credentials`      | `GET /settings/ssh/servers/{id}/db-credentials`            |
 | `GET /api/mobile-devices`                      | Answered by the gateway as `GET /settings/devices`         |
 | `POST /api/mobile-devices`                     | Answered by the gateway as `POST /settings/devices`        |
 | `DELETE /api/mobile-devices/:id`               | Answered by the gateway as `DELETE /settings/devices/{id}` |
