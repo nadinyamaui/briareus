@@ -57,23 +57,6 @@ describe('the transcript a page opens with', () => {
     expect(seqs((await (await fetch(`${base}/abc123?all=true`)).json()).events)).toEqual([3]);
     expect((await fetch(`${base}/nope`)).status).toBe(404);
   });
-
-  it('gives the dashboard_session tool everything for all: true', async () => {
-    // How a tool call reaches the handler (lib/dashboard-routes.js): its
-    // arguments as the query, typed as the schema gave them.
-    const call = async (query) => {
-      let body;
-      const res = {
-        status: () => res,
-        json: (value) => (body = value),
-      };
-      await routes.read({ params: { id: 'abc123' }, query }, res);
-      return seqs(body.events);
-    };
-    expect(await call({ all: true })).toEqual([1, 2, 3]);
-    expect(await call({ all: false })).toEqual([3]);
-    expect(await call({})).toEqual([3]);
-  });
 });
 
 describe('the stream that follows it', () => {

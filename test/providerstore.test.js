@@ -47,6 +47,8 @@ vi.mock('../lib/providers.js', async (importOriginal) => {
   const { resolveDefaultModel } = await importOriginal();
   const binary = (name, models, efforts, defaultModel, defaultEffort) => ({
     label: `${name} label`,
+    // Every CLI is installed except grok's.
+    bin: () => (name === 'grok' ? null : { source: 'path' }),
     models: () => models,
     efforts,
     defaultModel: () => defaultModel,
@@ -93,6 +95,7 @@ const {
   providerDefaultModel,
   providerDefaultEffort,
   resolveRuntime,
+  runtimeCatalog,
   providerGroupKey,
   providerGroup,
   providerGroups,
@@ -538,6 +541,90 @@ describe('resolveRuntime', () => {
 
   it('answers null when there is no runtime at all', () => {
     expect(resolveRuntime(null, cfg)).toBeNull();
+  });
+});
+
+describe('the runtimes a client picks from', () => {
+  // Two logins to one service (one picker entry, named after the first), a
+  // keyed custom endpoint, and a switched-off row, with credentials planted on
+  // the rows so a leak would show.
+  const rows = () => [
+    row({ id: 2, label: 'Claude 1', authData: { accessToken: 'oauth-secret-1' }, sortOrder: 1 }),
+    row({ id: 3, label: 'Claude 2', authData: { accessToken: 'oauth-secret-2' }, sortOrder: 2 }),
+    row({
+      id: 4,
+      label: 'Gateway',
+      binary: 'codex',
+      baseUrl: 'https://llm.internal.example',
+      apiKey: 'sk-gateway-secret',
+      models: ['gpt-x', 'gpt-y'],
+      sortOrder: 3,
+    }),
+    row({ id: 5, label: 'Old Grok', binary: 'grok', active: false, sortOrder: 4 }),
+  ];
+  beforeEach(() => seed(rows()));
+
+  it('lists active runtimes and the default without any account data', () => {
+    const catalog = runtimeCatalog({ providerId: 3, model: 'retired', effort: 'low' }, cfg);
+    expect(catalog).toEqual({
+      // The second login resolves to the entry it is offered under; a model it
+      // no longer offers falls to the provider's default.
+      default: { providerId: 2, model: 'opus', effort: 'low' },
+      providers: [
+        {
+          id: 2,
+          label: 'claude label',
+          available: true,
+          models: [
+            { id: 'opus', label: 'opus', efforts: ['low', 'high'], defaultEffort: 'high' },
+            { id: 'sonnet', label: 'sonnet', efforts: ['low', 'high'], defaultEffort: 'high' },
+          ],
+          defaultModel: 'opus',
+        },
+        {
+          id: 4,
+          label: 'Gateway',
+          available: true,
+          models: [
+            { id: 'gpt-x', label: 'gpt-x', efforts: ['med'], defaultEffort: 'med' },
+            { id: 'gpt-y', label: 'gpt-y', efforts: ['med'], defaultEffort: 'med' },
+          ],
+          defaultModel: 'gpt-x',
+        },
+      ],
+    });
+    const text = JSON.stringify(catalog);
+    for (const secret of ['oauth-secret', 'sk-gateway-secret', 'llm.internal', 'Old Grok'])
+      expect(text).not.toContain(secret);
+    for (const key of ['auth', 'usage', 'accounts', 'apiKey', 'baseUrl', 'authData', 'binary'])
+      expect(text).not.toContain(`"${key}"`);
+    expect(runtimeCatalog(null, cfg).default).toBeNull();
+  });
+
+  it('defaults to the active entry of a login that was switched off', async () => {
+    const [first, second, ...rest] = rows();
+    await seed([first, { ...second, active: false }, ...rest]);
+    const fallback = { providerId: 3, model: 'sonnet', effort: 'low' };
+    expect(runtimeCatalog(fallback, cfg).default).toEqual({ providerId: 2, model: 'sonnet', effort: 'low' });
+    // With the whole group switched off there is nothing to start on.
+    await seed([{ ...first, active: false }, { ...second, active: false }, ...rest]);
+    expect(runtimeCatalog(fallback, cfg).default).toBeNull();
+  });
+
+  it('flags a runtime whose CLI is missing or whose logins are all signed out', async () => {
+    await seed([...rows(), row({ id: 6, label: 'Grok', binary: 'grok', sortOrder: 5 })]);
+    const signedOut = new Set([2]);
+    const available = () =>
+      Object.fromEntries(
+        runtimeCatalog(null, cfg, (p) => (signedOut.has(p.id) ? false : null)).providers.map((p) => [
+          p.label,
+          p.available,
+        ]),
+      );
+    // One login of two signed out keeps the entry usable; an unprobed one counts.
+    expect(available()).toEqual({ 'claude label': true, Gateway: true, Grok: false });
+    signedOut.add(3);
+    expect(available()).toEqual({ 'claude label': false, Gateway: true, Grok: false });
   });
 });
 
