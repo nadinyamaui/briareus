@@ -1,24 +1,28 @@
 ---
 name: stack
-description: The conventions of this codebase: plain ESM JavaScript (no TypeScript, no bundler), Express 5, mysql2, vanilla-JS frontend, .env-driven config, and the comment style. Use before writing or reviewing any code in server.js, lib/ or public/.
+description: The conventions of this codebase: plain ESM JavaScript (no TypeScript, no bundler), Express 5, mysql2, an API-only server with no UI, .env-driven config, and the comment style. Use before writing or reviewing any code in server.js, lib/ or scripts/.
 ---
 
 # This project's stack and conventions
 
 **Node.js ≥ 24, plain ESM JavaScript.** There is no TypeScript, no transpiler
-and no bundler anywhere. `node server.js` runs the source as-is, and the
-frontend (`public/*.js`) is vanilla JS served raw. Do not introduce TS, JSX, a
-build step, or `require()`.
+and no bundler anywhere. `node server.js` runs the source as-is. Do not
+introduce TS, JSX, a build step, or `require()`.
+
+**The core, with no UI.** This repo is the server only: no pages, no static
+files, no browser login. Every client (web, desktop, iOS) lives in a repository
+of its own and talks to `/api/v1` with a token. Client-facing behaviour is a
+route in `lib/api-v1-catalog.js` (then `npm run build:api-docs`), never a page
+or an ad-hoc route.
 
 ## Layout
 
-- `server.js`: the Express 5 app, every route, SSE streams, static serving.
+- `server.js`: the Express 5 app, every handler, SSE streams. The handlers sit
+  on a router only `/api/v1` (lib/api-v1.js) and the agent routes reach.
 - `lib/`: one module per concern (sessions in `jobs.js`, provider CLIs in
   `providers.js`, GitHub in `github.js`, prompts in `templates.js`/`prtasks.js`,
   …). Modules that two sides need live alone to avoid import cycles
   (`markers.js`, `webhooksecrets.js`); respect that when adding imports.
-- `public/`: the frontend, hand-written HTML + vanilla JS, styled with
-  Tailwind (see the `tailwind` skill).
 - `migrations/`: the app's own schema, one timestamped file per change.
 - `test/`: Vitest, one file per lib module (see the `testing` skill).
 
@@ -50,9 +54,7 @@ the `app_settings` DB table via `loadAppSetting`/`saveAppSetting`, not in .env.
 - Timestamps are `Date.now()` epoch millis; ids are short hex/crypto strings.
 - **Formatting is Prettier's job** (`.prettierrc.json`: single quotes, width
   110, trailing commas). Run `npm run format` before committing; CI runs
-  `npm run format:check` and fails on drift. `public/app.css`, `docs/docs.css`
-  and the lockfile are ignored (generated; the stylesheets are not even
-  committed, the deploy builds them).
+  `npm run format:check` and fails on drift. The lockfile is ignored.
 - **Type-checking without TypeScript**: files starting with `// @ts-check` are
   checked by `npm run typecheck` (tsc over JSDoc, CI-gated). All of lib/ is
   opted in except `jobs.js`, `dbpool.js` (mysql2 typing friction) and
@@ -71,4 +73,5 @@ the `app_settings` DB table via `loadAppSetting`/`saveAppSetting`, not in .env.
   `express` + `mysql2` + `umzug` + the provider CLIs, deliberately lean.
 - No ORM, and no query builder: `lib/db.js` hands out a mysql2 pool and the
   modules write their own SQL.
-- Don't move frontend logic into a framework; the vanilla JS is a choice.
+- No pages, static files or browser-only features (cookies, CORS, web push):
+  those belong to a client's repository.

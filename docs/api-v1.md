@@ -1,8 +1,9 @@
 # Client API v1
 
 `/api/v1` is the one HTTP API a Briareus client talks to: a web app in its own
-repository, a desktop app, the iOS app. It is the only API the server has: the
-routes the built-in dashboard called with its login cookie (`/api/dev/*`,
+repository, a desktop app, the iOS app. It is the only API the server has, and
+the server has no UI of its own: the routes the removed dashboard called with
+its login cookie (`/api/dev/*`,
 `/api/projects`, …) and the earlier mobile API (`/api/mobile/v1`) are retired,
 and every handler they reached is behind a route here.
 
@@ -11,24 +12,27 @@ sit in page script, so CORS is off and a web client calls from its own server.
 
 ## Connect a client
 
-1. Enable the password login (`npm run set-password`). The API fails closed
-   with 503 while the login is off: a token is tied to the `AUTH_SECRET` that
-   command writes.
-2. Create the first token on the server itself. The running server picks it
-   up within 15 seconds, with no restart:
+1. Create the first token on the server itself:
 
    ```sh
    npm run create-token -- --label Desktop
    ```
+
+   The first run also writes `AUTH_SECRET` into `.env`: every token is signed
+   with it, and the API fails closed with 503 until it is set. Removing it and
+   running the command again revokes every token at once.
+   The server reads `AUTH_SECRET` at boot, so restart it after that first run.
+   Later tokens need no restart: the running server picks them up within 15
+   seconds.
 
    That is an admin token good for 365 days. `--permission read|manage` with
    one `--repo owner/name` per project makes a narrower one, and `--days`
    (1–365) sets the expiry. `--list` shows the tokens there are and
    `--revoke <id>` revokes one, also without a restart.
 
-3. Give the client the address `https://<your-host>/api/v1` and the token. The
+2. Give the client the address `https://<your-host>/api/v1` and the token. The
    token is shown once.
-4. Check it: `GET /` answers with the token's own record.
+3. Check it: `GET /` answers with the token's own record.
 
 ```sh
 curl -s https://briareus.example.com/api/v1/ -H "Authorization: Bearer brm_..."
@@ -97,13 +101,13 @@ What is there, by area:
 | Sessions      | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops          | read / manage |
 | Composer      | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                       | read to admin |
 | Memory        | `/memories`, `/memories/health`                                                           | read / admin  |
-| Operations    | `/attention`, `/maintenance`, `/deployments`, `/notifications`, `/ssh/requests`, `/tasks` | admin         |
+| Operations    | `/attention`, `/maintenance`, `/deployments`, `/ssh/requests`, `/tasks`, `/videos`        | admin         |
 | Settings      | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `templates` | admin         |
 | Tokens        | `/settings/devices`                                                                       | admin         |
 
-Everything the built-in dashboard could do has a route. The reference ends with
-a table from each of the dashboard's retired routes to the one that replaces
-it, for porting a page. `npm test` fails if a handler is added without a route
+Everything the removed dashboard could do has a route, except its browser push
+notifications, which went with it. The reference ends with a table from each of
+the dashboard's retired routes to the one that replaces it, for porting a page. `npm test` fails if a handler is added without a route
 here, since a handler with no route is one nothing can reach.
 
 ## Pull request data
@@ -159,8 +163,9 @@ as `session` events, without an id.
 
 Add an Access application for **`/api/v1` and `/api/v1/*`** with a **Bypass →
 Everyone** policy: a native client cannot complete Access's browser sign-in.
-Briareus still requires its token on every route. Do not exempt `/api/*` or the
-whole hostname: the login and the videos stay behind Access and the password.
+Briareus still requires its token on every route. GitHub's deliveries need
+the same for **`/webhooks/*`**, since they authenticate themselves with an
+HMAC. Nothing else needs exempting: every other path answers 404 or 410.
 
 ## Tokens
 
@@ -175,14 +180,16 @@ and revoking from the machine.
 
 ## What is not in this API
 
-- Signing in. The password login (`/api/login`) is the cookie in front of the
-  recorded videos, and opens no API; a client authenticates its users itself
-  and calls with its token.
+- Signing in. The server has no login of its own; a client authenticates its
+  users itself and calls with its token.
 - `/api/agent/*`: the calls an agent makes from inside its own session.
 - `/webhooks/*`: deliveries from GitHub and from systems that wake a session.
 - `/healthz` is public and outside the prefix: 200 when the server and its
   database answer.
 
-Anything else under `/api` answers 410 to a signed-in browser and 401 to
-anything else. The built-in dashboard's pages are still served and no longer
-work: they were written against the retired routes.
+Anything else under `/api` answers 410, and any other path a JSON 404.
+
+Test-run videos are fetched at `/videos/*file` here, with a token. Without an
+R2 bucket that is also where the links a run leaves on a pull request point,
+so they open only for a client holding a token; configure R2 for links anyone
+holding them can watch.

@@ -13,17 +13,25 @@
 // once every admin token has been lost or has expired, or to revoke one
 // without an admin token at hand.
 //
+// It is also how the API comes to be switched on: every token is signed with
+// AUTH_SECRET, and the first run writes a random one into .env when there is
+// none. Delete that line and run this again to revoke every token at once.
+//
 // The token is printed once and stored as a hash. The change is written under
 // a lock on the token row, so it cannot cross a change the server makes at the
 // same moment, and the running server reloads the list every 15 seconds: no
-// restart.
+// restart, unless this run had to write AUTH_SECRET, which the server only
+// reads at boot.
 //
 // Uses the same .env the server does, and talks to the database through a pool
 // of its own rather than lib/db.js's, which would apply pending migrations on
 // the way in: issuing a token is not the moment to change the schema.
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { parseArgs } from 'node:util';
 import mysql from 'mysql2/promise';
-import { getConfig } from '../lib/config.js';
+import { getConfig, ROOT } from '../lib/config.js';
 import { updateAppSetting } from '../lib/db.js';
 import { createMobileAuth } from '../lib/mobile-auth.js';
 
@@ -38,12 +46,6 @@ const { values } = parseArgs({
   },
 });
 
-const config = getConfig();
-if (!config.auth.passwordHash || !config.auth.secret) {
-  console.error('The login is off, and the API answers nothing while it is.');
-  console.error('Run `npm run set-password` first: a token is tied to the AUTH_SECRET it writes.');
-  process.exit(1);
-}
 if (!values.label && !values.list && !values.revoke) {
   console.error('Name the token: npm run create-token -- --label Desktop');
   console.error('  --permission read|manage|admin   admin when absent');
@@ -51,6 +53,23 @@ if (!values.label && !values.list && !values.revoke) {
   console.error('  --days 1-365                     365 when absent');
   console.error('Or see and revoke the ones there are: --list, --revoke <id>');
   process.exit(2);
+}
+
+const config = getConfig();
+let secret = config.auth.secret;
+let wroteSecret = false;
+// Only issuing needs a secret: listing and revoking work on the stored hashes,
+// and must not switch the API on as a side effect.
+if (!secret && !values.list && !values.revoke) {
+  // Appended rather than edited in, so every other line of .env (and every
+  // comment) stays exactly where it was. An empty `AUTH_SECRET=` left over
+  // from an older install reads as unset, and this line, coming later, wins.
+  secret = crypto.randomBytes(32).toString('base64url');
+  const envPath = path.join(ROOT, '.env');
+  const text = fs.readFileSync(envPath, 'utf8');
+  fs.writeFileSync(envPath, `${text.replace(/\n*$/, '\n')}AUTH_SECRET=${secret}\n`, 'utf8');
+  wroteSecret = true;
+  console.log('AUTH_SECRET was not set: wrote a new one to .env. It signs every token.');
 }
 
 const { host, port, database, user, password } = config.db;
@@ -75,12 +94,16 @@ async function issue() {
   }
   const { device, token } = await auth.create(
     { label: values.label, permission: values.permission, repos: values.repo, days: Number(values.days) },
-    config.auth.secret,
+    secret,
   );
   const scope = device.permission === 'admin' ? 'every project' : device.repos.join(', ');
   console.log(`\n${token}\n`);
   console.log(`"${device.label}": ${device.permission} on ${scope}, good for ${values.days} days.`);
-  console.log('It is shown this once. The running server accepts it within 15 seconds.');
+  console.log(
+    wroteSecret
+      ? 'It is shown this once. Restart the server to load the new AUTH_SECRET:  pm2 restart reviewer'
+      : 'It is shown this once. The running server accepts it within 15 seconds.',
+  );
 }
 
 function list() {

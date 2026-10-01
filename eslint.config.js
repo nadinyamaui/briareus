@@ -4,7 +4,7 @@ import globals from 'globals';
 // Formatting is Prettier's job; this is only what a formatter cannot see:
 // unused variables, undeclared globals, a forgotten await's dead promise.
 export default [
-  { ignores: ['coverage/', 'node_modules/', 'public/app.css', 'docs/docs.css'] },
+  { ignores: ['coverage/', 'node_modules/'] },
   js.configs.recommended,
   {
     files: ['**/*.js'],
@@ -24,15 +24,6 @@ export default [
       // The sanitizers (uploads, workspace names) strip control characters on
       // purpose: a regex naming \x00 is the point, not an accident.
       'no-control-regex': 'off',
-    },
-  },
-  {
-    // The frontend and the documentation site: plain scripts in a browser, not
-    // modules in node.
-    files: ['public/**/*.js', 'docs/**/*.js'],
-    languageOptions: {
-      sourceType: 'script',
-      globals: globals.browser,
     },
   },
 ];

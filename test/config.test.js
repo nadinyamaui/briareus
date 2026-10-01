@@ -43,7 +43,6 @@ vi.mock('child_process', () => ({
 const COMPLETE = {
   PORT: '3000',
   GITHUB_TOKEN: 'tok',
-  AUTH_USERNAME: 'nadin',
   DB_HOST: 'localhost',
   DB_PORT: '3306',
   DB_DATABASE: 'reviewer',
@@ -270,45 +269,17 @@ describe('the values it builds', () => {
   });
 });
 
-describe('the login', () => {
-  it('is off when neither half is set', async () => {
+describe('the API secret', () => {
+  it('is empty until one is set', async () => {
     const { getConfig } = await loadConfig(complete());
 
-    expect(getConfig().auth).toMatchObject({ passwordHash: '', secret: '' });
+    expect(getConfig().auth).toEqual({ secret: '' });
   });
 
-  it('carries both halves when they are set', async () => {
-    const { getConfig } = await loadConfig(
-      complete({ AUTH_PASSWORD_HASH: 'scrypt$x', AUTH_SECRET: 's3cret' }),
-    );
+  it('carries the secret when it is set', async () => {
+    const { getConfig } = await loadConfig(complete({ AUTH_SECRET: 's3cret' }));
 
-    expect(getConfig().auth).toMatchObject({ passwordHash: 'scrypt$x', secret: 's3cret' });
-  });
-
-  it('requires the username to be named rather than assumed', async () => {
-    const rest = { ...COMPLETE };
-    delete rest.AUTH_USERNAME;
-    const { getConfig } = await loadConfig(envText(rest));
-
-    expect(() => getConfig()).toThrow(/AUTH_USERNAME/);
-  });
-
-  it('keeps a signed-in browser for thirty days by default', async () => {
-    const { getConfig } = await loadConfig(complete());
-
-    expect(getConfig().auth.sessionDays).toBe(30);
-  });
-
-  it('takes a session length that was given', async () => {
-    const { getConfig } = await loadConfig(complete({ AUTH_SESSION_DAYS: '7' }));
-
-    expect(getConfig().auth.sessionDays).toBe(7);
-  });
-
-  it('never lets a session be shorter than a day', async () => {
-    const { getConfig } = await loadConfig(complete({ AUTH_SESSION_DAYS: '0' }));
-
-    expect(getConfig().auth.sessionDays).toBe(1);
+    expect(getConfig().auth).toEqual({ secret: 's3cret' });
   });
 });
 

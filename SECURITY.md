@@ -4,28 +4,32 @@
 
 Briareus runs coding agents on the machine it is installed on. A
 session spawns a CLI that edits files, runs shell commands, and pushes to
-GitHub with the credentials that machine already has. **Anything that can reach
-the port can do all of that.** That is the feature, not a flaw, but it means
+GitHub with the credentials that machine already has. **A client holding an
+admin token can do all of that.** That is the feature, not a flaw, but it means
 the deployment decisions below are part of the security model, not
 hardening you get to postpone.
 
-## The two gates
+## Who gets in
 
 The server listens on `127.0.0.1` only, so a default install is reachable from
-that machine and nowhere else. Both gates below matter the moment you put a
-hostname in front of it:
+that machine and nowhere else. It has no UI and no login of its own; every way
+in authenticates itself:
 
-1. **At the edge.** Put an authenticating proxy on the hostname: a Cloudflare
-   Access application with a policy that allows only your own account is what
-   this is set up for. `/webhooks` needs a Bypass policy of its own, since
-   GitHub cannot sign into your account; those deliveries authenticate
-   themselves with an HMAC signature.
-2. **In the app.** `npm run set-password` writes `AUTH_USERNAME`,
-   `AUTH_PASSWORD_HASH` (scrypt) and `AUTH_SECRET` into `.env`. Until both keys
-   are set the boot log says `login: OFF` and every request is trusted.
+- **`/api/v1`**, the client API, takes a bearer token on every request (below).
+  Until `AUTH_SECRET` is set it answers 503 to everything, and the boot log
+  says `api: OFF`. `npm run create-token` sets it.
+- **`/api/agent/`** takes the token of the session whose agent is calling,
+  minted per process and never stored.
+- **`/webhooks/`** takes deliveries signed with an HMAC: GitHub's with the
+  repository hook's secret, a session's with that session's own key.
+- **`/healthz`** is public and says only whether the app and its database are
+  up. Everything else answers 404, or 410 for a retired `/api` route.
 
-**`login: OFF` plus a public hostname is a remote shell for anyone who finds
-it.** The boot log says so on every start; please believe it.
+An authenticating proxy at the edge is still worth putting on a public
+hostname: a Cloudflare Access application with a policy that allows only your
+own account is what this is set up for, with Bypass policies for `/api/v1`
+(a native client cannot complete Access's sign-in) and `/webhooks` (GitHub
+cannot either).
 
 ## Credentials this app holds
 
@@ -40,13 +44,10 @@ after revoking a leaked one, check the device list for tokens it issued. Read
 and manage tokens are held to the projects they were given and cannot issue
 anything. The API
 refuses requests that carry an `Origin` header and enables no CORS, so a token
-is never usable from a browser page. A Cloudflare Access exception may cover
-only `/api/v1` and its subpaths. See the [client API guide](docs/api-v1.md).
+is never usable from a browser page. See the [client API guide](docs/api-v1.md).
 
 Tokens are stored as hashes, can be revoked through the API, and stop working
-when `AUTH_SECRET` changes. The API fails closed when the password login is
-off. The password login itself opens no API: its cookie is for the recorded
-test videos.
+when `AUTH_SECRET` changes. The API fails closed while `AUTH_SECRET` is unset.
 
 - `GITHUB_TOKEN`: a classic PAT with `repo`, or fine-grained with Pull
   requests read/write and Contents read. It can push to and comment on every
@@ -54,8 +55,8 @@ test videos.
   sessions against.
 - The provider CLI logins (Claude, Codex, Grok), which live in the CLIs' own
   config directories rather than here.
-- The database pool credentials, stored in the app's own database and edited at
-  `/settings`.
+- The database pool credentials, stored in the app's own database and edited
+  through `/api/v1/settings/db-servers`.
 - Git pushes use the machine's own credential helper. The app injects no git
   credentials of its own.
 
@@ -73,7 +74,7 @@ That opens a private advisory only the maintainers can see.
 
 Include what you need to reproduce it: the route or setting involved, what you
 expected, and what happened instead. If it depends on a particular
-configuration (login off, a public hostname, a specific token scope), say so:
+configuration (no `AUTH_SECRET`, a public hostname, a specific token scope), say so:
 that usually is the finding.
 
 Expect an acknowledgement within a week. This is a small project maintained in

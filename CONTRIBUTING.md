@@ -11,9 +11,9 @@ README. The short version:
 
 ```bash
 npm install
-npm run build:css        # not committed; the pages are unstyled without it
-cp .env.example .env     # then fill in the required half
-npm start                # http://localhost:4300
+cp .env.example .env                    # then fill in the required half
+npm run create-token -- --label Dev     # sets AUTH_SECRET, prints a token
+npm start                               # http://localhost:4300/api/v1
 ```
 
 You need a MySQL you can create databases on, Node 24 (what `.nvmrc` pins), and
@@ -35,8 +35,7 @@ Run `npm run format` to fix formatting rather than hand-matching Prettier.
 ## The conventions that matter
 
 - **Plain ESM JavaScript.** No TypeScript, no transpiler, no bundler. `node
-server.js` runs the source as it is written, and `public/*.js` is served
-  raw. Type-checking happens through JSDoc on files marked `// @ts-check`, run
+server.js` runs the source as it is written. Type-checking happens through JSDoc on files marked `// @ts-check`, run
   by `npm run typecheck`.
 - **Comments explain why, not what.** The register throughout is prose about
   intent and trade-offs: why a module is alone, why a default was refused, why
@@ -56,6 +55,10 @@ server.js` runs the source as it is written, and `public/*.js` is served
 - **Schema changes are migrations.** One timestamped file in `migrations/`
   exporting `up` and `down` (`npm run make:migration add_x_to_y`). Never edit a
   migration that has shipped.
+- **No UI in this repository.** It is the core, and every client lives in a
+  repository of its own. Client-facing behaviour is a route in the `/api/v1`
+  catalog (`lib/api-v1-catalog.js`, then `npm run build:api-docs`), not a page
+  or an ad-hoc route.
 - **New runtime dependencies need a strong reason.** The app is `express` +
   `mysql2` + `umzug` + the provider CLIs on purpose.
 
@@ -65,47 +68,16 @@ Vitest, one file per `lib/` module. Add or update the test file alongside the
 module you touch. `test/` is a mirror of `lib/`, and a new module without one
 stands out. `npm run test:watch` while you work.
 
-## Styling
-
-Tailwind v4, source in `src/app.css`, palette declared in `src/theme.css` as
-`@theme` tokens. The compiled `public/app.css` is **not** committed and
-`npm start` does not build it, so a fresh clone needs it once and every class
-you add needs it again:
-
-```bash
-npm run build:css        # once, minified
-npm run watch:css        # while editing
-```
-
-There is nothing to commit: the deploy builds its own copy (the image in a
-stage of its own, a bare-metal checkout with `npm run build:css` after the
-pull). A screenshot in the pull request is what shows the styles landed.
-
 ## Documentation
 
-The site at <https://nadinyamaui.github.io/briareus/> is `docs/`, published by
-`.github/workflows/pages.yml` on a merge to `main`: plain HTML, no generator,
-and the only build is the stylesheet. Each page holds
-nothing but its own `<article class="doc">`; `docs/docs.js` builds the sidebar,
-the "on this page" rail, the copy buttons and the prev/next footer around it, so
-a new page means writing its prose and adding one line to `NAV`.
-
-Its stylesheet is built the same way the app's is, from `src/docs.css` (which
-imports the same `src/theme.css` palette), and is not committed either. Build
-it to look at a page locally; the Pages workflow builds its own before
-publishing:
-
-```bash
-npm run build:docs-css
-```
-
-CI builds both stylesheets, so a source that no longer compiles fails there
-rather than in a deploy.
+The README is the overview; `docs/api-v1.md` is the client API guide, and
+`docs/api-v1-reference.md` is generated from the catalog by
+`npm run build:api-docs` (`npm test` fails when it is stale).
 
 ## Commits and pull requests
 
 Keep a pull request to one change. The template asks what it does and how you
-checked it; a screenshot for anything visual saves a round trip.
+checked it.
 
 If you are planning something large, open an issue first: this app is
 shaped around one way of working, and it is kinder to find out early that a

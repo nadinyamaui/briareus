@@ -1,5 +1,2 @@
-# generated output, rebuilt by npm run build:css / build:docs-css, never
-# hand-formatted
-public/app.css
-docs/docs.css
+# generated output, never hand-formatted
 package-lock.json

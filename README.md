@@ -1,30 +1,26 @@
 # Briareus
 
-A local chat dashboard for running coding agents against a project. Each
-session is a conversation with one agent, **Claude Code**, **Codex**,
+The core of a system for running coding agents against a project: a server
+with no UI of its own, driven by clients through one API, [`/api/v1`](#client-api).
+Each session is a conversation with one agent, **Claude Code**, **Codex**,
 **Grok**, **opencode** or **Z.AI** (GLM through the codex CLI), inside a workspace clone of
 its own, with a database server of its
 own, so parallel sessions never share a working tree or a database. You
 describe what to build; the agent edits, runs the app and its tests, and can
 push a feature branch / open a PR when asked.
 
-> **The built-in dashboard is retired.** The server is now driven through
-> [`/api/v1`](#client-api) by a client of its own (a desktop app, a web app, the
-> iOS app); the routes the pages below called are gone, so the pages still load
-> and no longer work. What this README says about the dashboard's screens
-> describes what a client offers through the API, not something served here.
-
-📖 **[Documentation](https://nadinyamaui.github.io/briareus/)**: installing it,
-creating a project field by field, registering database servers and providers,
-the review and QA loops, and the full `.env` reference. This README is the short
-version of the same thing.
+> **There is no web UI here.** The built-in dashboard and everything else that
+> ran in a browser have been removed; the clients (a desktop app, a web app, the
+> iOS app) live in repositories of their own and talk to this server through
+> [`/api/v1`](#client-api). Where this README names a chip, a button or a
+> screen, it is describing what a client offers on top of the API.
 
 > **This app runs shell commands as you.** A session edits files, runs the
 > project's setup and run commands, and pushes to GitHub with the credentials
-> the machine already has, so anything that can reach the port can do all of
-> that. The server listens on `127.0.0.1` only, and the login is **off** until
-> `npm run set-password` has been run (the boot log says `login: OFF` when it
-> is). Before you put a hostname in front of it, read
+> the machine already has, so a client holding an admin token can do all of
+> that. The server listens on `127.0.0.1` only, and the API answers nothing
+> until `npm run create-token` has set its signing secret (the boot log says
+> `api: OFF` until then). Before you put a hostname in front of it, read
 > [Reaching it from anywhere](#reaching-it-from-anywhere) and
 > [SECURITY.md](SECURITY.md).
 
@@ -32,14 +28,14 @@ version of the same thing.
 
 1. **Claim resources.** The session takes an idle workspace clone from the
    pool (`<owner>__<repo>`, then `…__2`, `…__3` as concurrency demands) and,
-   if its project asks for one, claims one of the database servers configured
-   in Settings, exclusively for as long as it stays open. The project's
+   if its project asks for one, claims one of the configured database servers,
+   exclusively for as long as it stays open. The project's
    database is created on the claimed server if it does not exist yet. A
    session that already knows its branch prefers the idle slot that is still
    on that branch: the one whose dependencies, build output and framework
    caches are already the right ones. Idle slots are removed when Briareus
    starts and once every 24 hours; slots claimed by open sessions are skipped.
-   The pool itself is visible under **Settings → Workspaces**: every slot's
+   The pool itself is listed at `GET /api/v1/settings/workspaces`: every slot's
    branch, HEAD, dirty state, size, dependency trees and which open session
    holds it, with two actions for idle slots: _Reset setup_ forgets the
    install fingerprints, _Clean_ also removes `vendor/` and `node_modules/`.
@@ -62,7 +58,7 @@ version of the same thing.
    the clone's `.git/reviewer-setup.json`. Builds and anything touching the
    database run every time.
 4. **Chat.** Every message spawns one headless provider run that resumes the
-   provider's own session state. Output streams into the page live (SSE). The
+   provider's own session state. Output streams to the client live (SSE). The
    session keeps its clone and database server between turns, for as long as
    it stays open.
 5. **▶ Run** serves the session's checkout with the project's run commands
@@ -73,7 +69,7 @@ version of the same thing.
    turn, every 20s while a turn is running, and once a minute otherwise. The
    panel redraws from a pushed session record, so it never waits for a poll.
    **🔗 Link PR** recovers one automatic discovery missed: enter its number or
-   URL, and the dashboard verifies that its repository and head branch match
+   URL, and the server verifies that its repository and head branch match
    the session before attaching it.
 7. **Close** releases the clone slot and the database server; the conversation
    stays readable. **Delete** also trashes the record and its log.
@@ -86,7 +82,7 @@ version of the same thing.
 session composer. Nothing on GitHub starts a session by itself: no push, no
 label and no webhook delivery ever opens one.
 
-What a project configures at `/settings/projects` is who its board is about and
+What a project configures (`/api/v1/settings/projects`) is who its board is about and
 what its errands run on: a **PR author** (a GitHub username, the filter the
 pull request board applies) plus the provider, model and effort a review opens
 on unless the composer picks another. A review session started from a pull
@@ -111,7 +107,7 @@ drawn nested under its parent, an epic says how many of its children are done
 and starting an epic starts one session on its open sub-issues rather than on
 the epic itself.
 
-Each fix commit ends with a `[reviewer-fix]` line so the dashboard can tell a
+Each fix commit ends with a `[reviewer-fix]` line so the server can tell a
 push it made from one a human made.
 
 ### The review loop
@@ -156,7 +152,7 @@ is waiting for you and that the task is not done, and it does not rule on the
 round itself unless you ask it to (`triage_findings` is there for that).
 
 A round that could not run at all — its provider exited non-zero or was out of
-quota, a dashboard restart interrupted its review or fix session, or its
+quota, a server restart interrupted its review or fix session, or its
 review closed having published nothing — is not a review that found nothing:
 the loop records the round as failed and approves nothing.
 Turning the 🔁 chip off and on again re-runs it, and an orchestrator retries its
@@ -281,7 +277,7 @@ removes its transcript but keeps its statistics. The session header shows the
 session's tokens and cost as a chip, each turn's footer in the transcript shows
 its own, and a project's board header shows the calendar month so far:
 sessions, agent time, tokens and priced cost
-(`GET /api/dev/usage?repo=owner/name` returns the same numbers).
+(`GET /api/v1/usage?repo=owner/name` returns the same numbers).
 
 The 📊 button beside **＋ New session** opens the same ledger with no project
 filter: headline tiles, tokens over time, a row per project and a breakdown per
@@ -290,9 +286,9 @@ calendar day, all time a bar per month). Projects switched off since are still
 listed: one disabled mid-month spent what it spent, and leaving it out would
 stop the rows adding up to the totals. A cost wears a `+` when some of the turns
 behind it were never priced, so an unpriced turn never reads as a free one.
-`GET /api/dev/usage/all?period=month|prev|all` returns it as JSON.
+`GET /api/v1/usage/all?period=month|prev|all` returns it as JSON.
 
-The dashboard puts a figure on the turns their CLI never priced: their tokens at
+The server puts a figure on the turns their CLI never priced: their tokens at
 the model's published list price, from the [models.dev](https://models.dev)
 catalog (fetched once a day and cached; an install with no reach keeps whatever
 copy it has, or shows those turns as unpriced). Those costs are shown as one
@@ -338,8 +334,8 @@ two outputs into one document, preserving useful unique findings, checking
 contradictions against evidence and keeping unresolved decisions explicit.
 There are no specialist assignments or separate validator. ZEUS publishes the
 combined epic as a parent issue with linked sub-issues for implementation.
-The document's shape is the _Zeus epic_ template under Settings → Prompts,
-overridable per project.
+The document's shape is the _Zeus epic_ prompt template, overridable per
+project.
 
 Session history and logs live in MySQL (`jobs` / `job_events`) and nowhere
 else, so they survive restarts and nothing is capped or trimmed. Writes are
@@ -375,12 +371,12 @@ written idempotently so a database from before then just gets its row in
 - MySQL 5.7+ / MariaDB 10.2+ for session history (created on first run).
   The schema is a set of migrations in `migrations/`, applied automatically
   at boot and by `npm run migrate`; see [Database migrations](#database-migrations)
-- The Claude Code CLI, with a provider login or API token configured in
-  **Settings**. Each provider entry has an isolated login, so spawned sessions
+- The Claude Code CLI, with a provider login or API token configured as a
+  provider entry. Each provider entry has an isolated login, so spawned sessions
   do not share the desktop app's login
 - Optionally the Codex, Grok and opencode CLIs (auto-discovered; `CODEX_BIN` /
-  `GROK_BIN` / `OPENCODE_BIN` to override). A Z.AI entry is configured in
-  **Settings** with the codex binary, its endpoint and API key; it runs GLM
+  `GROK_BIN` / `OPENCODE_BIN` to override). A Z.AI entry is configured
+  with the codex binary, its endpoint and API key; it runs GLM
   models in its own `CODEX_HOME`, so the codex login is untouched. An opencode
   entry authenticates with an API key and nothing else, since there is no login
   flow to drive: it names its model the way opencode does (`<service>/<model>`, say
@@ -402,9 +398,9 @@ written idempotently so a database from before then just gets its row in
 
 ```
 npm install
-npm run build:css        # not committed; the pages are unstyled without it
-cp .env.example .env     # then fill it in
-npm start                # http://localhost:4300
+cp .env.example .env                       # then fill it in
+npm run create-token -- --label Desktop    # sets AUTH_SECRET and prints an admin token
+npm start                                  # http://localhost:4300/api/v1
 ```
 
 `--port 4301` (or `PORT` in `.env`) moves the server; `--port` wins so a test
@@ -419,14 +415,14 @@ every install, and those do keep their defaults.
 
 ## In Docker
 
-`docker compose up -d --build` brings up the dashboard and a MySQL of its own on
+`docker compose up -d --build` brings up the core and a MySQL of its own on
 <http://localhost:4300>. What it needs from you is a `GITHUB_TOKEN` in the
 environment, or in the `.env` next to `compose.yaml`, which docker compose
 reads by itself, so an install that already has one is configured:
 
 ```bash
 GITHUB_TOKEN=ghp_… docker compose up -d --build
-docker compose exec app npm run set-password   # then: docker compose restart app
+docker compose exec app npm run create-token -- --label Desktop   # then: docker compose restart app
 ```
 
 `HOST_PORT` moves the published port, `PUBLIC_BASE_URL` names the hostname a
@@ -437,8 +433,8 @@ server binds it there: the way in from outside is a tunnel, not an open port.
 **Configuration still arrives as `.env`.** `lib/config.js` reads that file and
 nothing else, so the entrypoint writes one from the environment on every boot
 (`docker/entrypoint.sh`). It lives on a volume, not in the image, and the keys
-the environment does not name (the login `set-password` writes, anything added
-by hand) are carried across each rewrite. Mounting your own file over
+the environment does not name (the secret `create-token` writes, anything
+added by hand) are carried across each rewrite. Mounting your own file over
 `/app/.env` switches all of that off and uses the file as it is.
 
 **The volumes are the install.** `home` holds the provider CLIs' logins, so
@@ -448,8 +444,8 @@ them is what starting over means.
 
 **The pool**, the extra MySQL servers a session claims so parallel sessions
 never share a database, is the `pool` profile:
-`docker compose --profile pool up -d`. Add them at `/settings` as
-`db-pool-1:3306` and `db-pool-2:3306`; the app reaches them by service name, and
+`docker compose --profile pool up -d`. Add them through
+`POST /api/v1/settings/db-servers` as `db-pool-1:3306` and `db-pool-2:3306`; the app reaches them by service name, and
 their datadir is tmpfs for the reason [deploy/README.md](deploy/README.md) gives.
 
 **What the image does not carry is any project's toolchain.** It has node, git,
@@ -463,25 +459,21 @@ token).
 ## Reaching it from anywhere
 
 The server listens on `127.0.0.1` only; `BIND_HOST` moves it, and a container
-is the only install that has a reason to. To use the dashboard from a phone,
+is the only install that has a reason to. For a client on another machine,
 put a tunnel in front of it rather than opening the port; a Cloudflare tunnel
 (`cloudflared`) pointed at `localhost:4300` is what this is set up for. Then
 set `PUBLIC_BASE_URL` to the public hostname. That one setting is what the
-test-run video links point at _and_ what turns the webhooks below on.
+test-run video links point at (without an R2 bucket) _and_ what turns the
+webhooks below on.
 
-**Two gates, because this app runs shell commands as you.** Anything that
-reaches it can start a session, which means running coding agents on this
-machine with its git and GitHub credentials:
-
-1. **At the edge.** A Cloudflare Access application on the hostname, with a
-   policy that allows only your own email. Add a second application for
-   `<hostname>/webhooks` with a **Bypass** policy: GitHub cannot sign into
-   your Access account, and its deliveries authenticate themselves (below).
-2. **In the app.** `npm run set-password` writes a username, a scrypt hash of
-   the password and a cookie signing secret into `.env`; every request then
-   needs the login (see `lib/auth.js`). Restart for it to take effect. Until
-   both keys are set the boot log says `login: OFF`, and do not leave it that way
-   while the hostname is reachable.
+**Every way in authenticates itself.** A client calls `/api/v1` with a token
+(`npm run create-token` issues the first, an admin token the rest; see the
+[client API guide](docs/api-v1.md)), an agent calls `/api/agent/` with its
+session's token, and a webhook delivery carries an HMAC. Nothing else is
+answered: `/healthz` says whether the app and its database are up, and every
+other path is a JSON 404, or a 410 for a retired `/api` route. A Cloudflare
+Access application on the hostname is still worth having in front of it; the
+[guide](docs/api-v1.md) says which paths need a bypass.
 
 ### Webhooks
 
@@ -517,10 +509,10 @@ key is rotated from its **⚡ Webhook** dialog, without touching the row.
 
 ### Session webhooks
 
-A session's webhook is the one delivery that starts work: it is how a system outside the dashboard (a support
+A session's webhook is the one delivery that starts work: it is how a system outside Briareus (a support
 platform relaying what a customer wrote, an alert, a CI) wakes one conversation with a message.
 
-**It is off until you arm it.** **⚡ Webhook** in the session header arms it, shows the URL and the key, and sets
+**It is off until you arm it.** Arming it (`PUT /api/v1/sessions/:id/webhook`, a client's **⚡ Webhook** dialog) shows the URL and the key, and sets
 the caps its turns run under. The key is derived from a master secret, the session id and an epoch, so it opens
 that one session and no other, and **Rotate key** ends it without touching any other session's. Only a session
 somebody talks to can be armed: not a worker, not a review, fix or QA session.
@@ -579,14 +571,14 @@ curl -X POST "$URL" -H "X-Briareus-Timestamp: $TS" -H "X-Briareus-Signature-256:
 also takes `POST /webhooks/session/:id/instructions`, with a key of its own: the messages key never opens it, nor
 the other way round, and **Rotate key** ends both. It is for a bridge that decides by who wrote a message where it
 goes (a WhatsApp relay sending your own number's messages there and everybody else's to the first route), so what
-it delivers reaches the agent the way a message typed in the dashboard does:
+it delivers reaches the agent the way a message typed in a client does:
 
 - It answers the question the agent stands on, and queues behind a turn under way instead of waiting to be a turn
   of its own.
 - It is the word from you that lifts the turns-in-a-row pause.
 - The hourly cap holds for it as for deliveries, and a retry with the same `id` is taken once.
 - A server in **allow** mode under SSH still asks for approval in a turn an instruction started, since nobody is at
-  the dashboard to see it, unless the session's webhook is set to let it run.
+  a client to see it, unless the session's webhook is set to let it run.
 
 The request is the same as a delivery's; the answer is `202` with `"running"` or `"queued"`, `200` for a
 duplicate, and `409` while instructions are off.
@@ -599,20 +591,7 @@ The sync timer remains as the fallback. Nothing about a laptop-only install
 changes: no public hostname means no hook, and the timer keeps the panels
 fresh.
 
-## Styling
-
-The UI is Tailwind (v4). Source lives in `src/app.css`, and the palette is
-declared there as `@theme` tokens (`bg-raise`, `text-muted`, `border-line`,
-`text-accent`…) and everything else is utilities in `public/developer.html`
-and in the markup `public/developer.js` generates. The compiled
-`public/app.css` is not committed and `npm start` does not build it, so a fresh
-clone builds it once and every class you add rebuilds it (the deploy builds its
-own copy, so there is nothing to commit):
-
-```
-npm run build:css        # once, minified
-npm run watch:css        # while editing
-```
+## Configuration
 
 Key `.env` settings, with `.env.example` holding the full list:
 
@@ -623,12 +602,12 @@ Key `.env` settings, with `.env.example` holding the full list:
 - `DB_*`: where projects and session history are stored
 - `DB_POOL_*`: switches the per-session database pool off, and tunes how long
   a session waits for a server to free up. The servers themselves live in the
-  database and are managed at `/settings/projects`
+  database and are managed through `/api/v1/settings/db-servers`
 
 ## Projects
 
 Everything about a repository a session can run against lives in one `projects`
-row, edited at **`/settings/projects`**:
+row, edited through **`/api/v1/settings/projects`**:
 
 - **Repository** and label
 - **Setup**: the install/build commands run in the checkout before the agent
@@ -654,8 +633,8 @@ give feedback, solve conflicts, fix failing checks, fix test failures, delete
 own comments).
 
 Each resolves in three steps: **the built-in text** this app ships with, **the
-shared text** under _Prompts_ in `/settings`, then **the project's own** under
-_Prompts_ in its form. The first non-empty one wins, so configuring nothing
+shared text** (`/api/v1/settings/templates`), then **the project's own**, in the
+project's settings. The first non-empty one wins, so configuring nothing
 behaves exactly as it always did.
 
 A prompt is plain text with `{{TOKEN}}` placeholders: `{{REPO}}`,
@@ -675,12 +654,12 @@ every PR written before the change unreadable.
 texts for the composer. The 📋 Prompts menu next to the composer's chips lists
 them: the current project's own first, then the ones offered on every project.
 A click drops the text into the message box; _Save current text as
-prompt…_ in the same menu adds what is typed there. Edit, re-scope to a project
-or delete them under _Saved prompts_ in `/settings`. No `{{TOKEN}}`s: they are
+prompt…_ in the same menu adds what is typed there. They are kept at
+`/api/v1/prompts`. No `{{TOKEN}}`s: they are
 inserted exactly as written.
 
-**Memory** is what the agents keep between sessions on a project: the
-dashboard's stand-in for Claude Code's own memory directory, which the headless
+**Memory** is what the agents keep between sessions on a project: Briareus's
+stand-in for Claude Code's own memory directory, which the headless
 runs it spawns never see (every session is a fresh clone with a fresh config
 dir). Memories live in the database, one row per fact, scoped to the
 repository: a kebab-case name, a type (`user`, `feedback`, `project`,
@@ -693,9 +672,9 @@ server headless, are told the same thing over HTTP (`$REVIEWER_MEMORY_URL/api/ag
 with `$REVIEWER_MEMORY_TOKEN` as a bearer token, both in the turn's
 environment). The token is the session's own, minted per process and never
 stored, and it only reaches that session's project. Read, correct or prune what
-was remembered under _Memory_ in `/settings`.
+was remembered through `/api/v1/memories`.
 
-The **Database pool** section on the same page holds the servers sessions can
+The **database pool** (`/api/v1/settings/db-servers`) holds the servers sessions can
 claim: label, host, port, username and password per entry. One session holds a
 server at a time, so add as many entries as sessions you want to run in parallel
 with a database. Migrations and seeding belong in the project's setup
@@ -708,12 +687,14 @@ repository: a web app, a desktop app, the iOS app. It puts a bearer token in
 front of every handler, so it covers sessions, transcripts, pull requests
 (files, commits, checks, comments, reviews), findings, settings and two event
 streams. `npm run create-token -- --label Desktop` issues the first token, an
-admin one, which the running server picks up within 15 seconds. An admin token then issues the rest:
+admin one; restart the server once if that run wrote `AUTH_SECRET`, and later
+tokens need no restart. An admin token then issues the rest:
 read or manage on chosen projects, or admin for everything.
 
-The routes the built-in dashboard called with its login cookie, and the earlier
-`/api/mobile/v1`, are retired: they answer 410 to a signed-in browser and 401
-to anything else. The dashboard's pages are still served and no longer work.
+The routes the removed dashboard called with its login cookie, and the earlier
+`/api/mobile/v1`, are retired and answer 410. The API refuses a request that
+carries an `Origin` header: a client calls it from a server or a native app,
+never from browser script, so a web client keeps its token on its own server.
 
 See the [client API guide](docs/api-v1.md) for tokens, permissions, the event
 streams and the Cloudflare Access exception, and the
@@ -746,9 +727,9 @@ issue.
 
 ### Registered SSH servers
 
-Open **Settings → SSH servers → ＋ New**, select a project, and register the host, port,
+Register a server (`POST /api/v1/settings/ssh/servers`) for a project with its host, port,
 username and optional absolute private-key path on the machine running Briareus.
-The key must be readable by the operating-system account running the dashboard. An empty
+The key must be readable by the operating-system account running Briareus. An empty
 key path uses that account's default keys or SSH agent; encrypted keys need to be unlocked
 in its agent. Password authentication, SSH config aliases, jump hosts and interactive
 terminals are not supported.
@@ -761,8 +742,8 @@ remote shell ([OpenSSH configuration reference](https://man.openbsd.org/ssh_conf
 Each server has one permission mode:
 
 - **Ask for all commands** (default): the exact command, destination, project and session
-  appear in an approval panel on both the sessions and settings pages; **Approve command**
-  executes it once, and **Deny** returns the denial to the agent.
+  wait in `GET /api/v1/ssh/requests` and the attention inbox; approving
+  (`POST /api/v1/ssh/requests/:id/decision`) executes it once, and denying returns the denial to the agent.
 - **Don't ask anything**: every command submitted through the SSH tool starts immediately.
 
 Claude and Codex sessions receive `ssh_list_servers`, `ssh_execute` and `ssh_result` MCP
@@ -784,15 +765,15 @@ operating-system sandbox restricting every possible way to reach a server.
 
 ### Operator attention
 
-**Needs attention** in the session sidebar opens `/attention`: unanswered agent
+`GET /api/v1/attention` is the operator's inbox: unanswered agent
 questions, held findings, interrupted sessions, review/QA failures and pending
-SSH commands across projects. Answer questions or approve/deny an exact SSH
-command there; findings open the existing decision screen. The inbox is a live
-projection, refreshed every seven seconds, and does not dismiss unresolved work.
+SSH commands across projects. It is a live projection, read on every request,
+and does not dismiss unresolved work.
 
 ### Recovery and maintenance
 
-Interrupted/failed inbox cards open a recovery report: expected and actual
+An interrupted or failed session has a recovery report
+(`GET /api/v1/sessions/:id/recovery`): expected and actual
 branch, HEAD, working-file changes and the pending phase. Resume checks that
 report again and refuses missing, recycled or busy workspaces, and a session
 whose provider conversation never started. Reopening a
@@ -811,7 +792,7 @@ mid-turn, left work in (except loop review, fix and QA children, which their
 parent retries, and sessions whose agent never started). A session that was
 idle at the restart reserves nothing and reopens like a closed one.
 
-`/maintenance` drains work: new top-level sessions, messages that would start
+`POST /api/v1/maintenance` drains work: new top-level sessions, messages that would start
 a turn on a settled session, reopening, compaction, arming the review or QA
 loop, review retries, triage that marks findings to fix, orchestrator worker
 spawns and sends, and ▶ Run previews are refused, while answers to questions, messages to running
@@ -825,28 +806,25 @@ server. Wait for ready before the normal deployment procedure.
 Briefings prioritize user/feedback memories and matches against the session
 title and latest user message, then recency, within the existing body budget.
 Selection is local lexical matching, with no model call or embedding service.
-`/memory-health` lists possible duplicates and memories needing verification:
+`GET /api/v1/memories/health` lists possible duplicates and memories needing verification:
 mark facts checked, archive/restore them, or review a combined text before
 merging. Merging saves the edited target and archives the source without
 removing its text. Verification applies to the exact content and expires after
 90 days for maintenance purposes; it never automatically invalidates a fact.
-Archived memories remain readable in Settings and through the memory tools,
+Archived memories remain readable through the API and the memory tools,
 but are omitted from briefings. Metadata persists in `app_settings`.
 
 ### Visual preview feedback
 
-A running session offers **Comment on preview**. Open the app, capture its tab
-with the browser's screen-sharing picker (desktop), or upload a screenshot
-(mobile or desktop), then click the element and type or dictate your feedback.
-The annotated PNG, exact page URL and image coordinates go to the same agent
-conversation. Preview origins are checked against that session's Run links;
-no cross-origin iframe access or injected application scripts are required.
-Capture dimensions are image pixels, not an inferred CSS viewport. Voice uses
-the existing transcription service and is offered only when configured.
+`POST /api/v1/sessions/:id/preview/feedback` takes a screenshot of a running
+session's preview (an uploaded PNG), the point marked on it and a comment, and
+sends the annotated PNG, exact page URL and image coordinates to the same agent
+conversation. Preview origins are checked against that session's Run links.
+Capture dimensions are image pixels, not an inferred CSS viewport.
 
 ### Task history
 
-**Task history** in a conversation opens its implementation, review, fix and QA
+A task's history (`GET /api/v1/tasks/:id`) is its implementation, review, fix and QA
 sessions together, including independent errands linked to the same PR. It
 shows their times/statuses, review rounds, QA outcome, PR evidence link and
 combined ledger cost (estimated and unpriced turns stay marked). Workers remain
@@ -857,11 +835,11 @@ writes and before deletion. Deleting a conversation still deletes its transcript
 the title, branch, relationships, lifecycle and PR/QA metadata survive with its
 usage ledger. Records deleted before this feature cannot be reconstructed. The
 migration rollback drops this audit history, without touching conversations or
-usage. A task URL remains readable after its conversation is deleted.
+usage. A task remains readable after its conversation is deleted.
 
 ### Deployment state and actions
 
-`/deployments` reads the latest 20 GitHub deployments, their latest status and
+`GET /api/v1/deployments` reads the latest 20 GitHub deployments, their latest status and
 active successful revision per environment, with a 30-second cache. Failed or
 requested deployments never count as the currently published commit. An optional
 configured HTTP(S) health URL is probed with a five-second timeout and no redirects;
@@ -869,8 +847,8 @@ health alone does not prove which commit is deployed.
 
 Configure each project's environment, workflow filename/ID, workflow branch/tag,
 source branch/tag and SHA input name. None of these machine/project choices is
-guessed. **Inspect deployment** resolves the source revision and CI; **Deploy this
-revision** rechecks CI and dispatches the workflow with that immutable SHA input.
+guessed. Planning a deployment resolves the source revision and CI; dispatching
+it rechecks CI and dispatches the workflow with that immutable SHA input.
 The workflow must accept that input, check out that SHA, perform the project's
 deploy procedure and report deployment status for the configured environment.
 For example its `workflow_dispatch.inputs.revision` is a required string and
@@ -884,26 +862,7 @@ Projects marked as Briareus itself must be drained in Maintenance before dispatc
 
 The existing GitHub token needs Actions write access to dispatch. The operator
 must check/acknowledge the previous request before another dispatch, including an
-ambiguous network failure; requests persist across dashboard restarts. A dispatch
+ambiguous network failure; requests persist across server restarts. A dispatch
 is reported as requested, never deployed, until GitHub reports its outcome.
 See [workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
 and [deployment statuses](https://docs.github.com/en/rest/deployments/statuses).
-
-### Opt-in Web Push
-
-`/notifications` configures an installation contact (HTTPS URL or `mailto:`)
-and enables alerts on the current browser, optionally filtered by project.
-Signing keys are generated once and kept with subscriptions in `app_settings`;
-only the public key is exposed. Nothing subscribes or asks browser permission
-until **Enable on this browser** is pressed. Disable removes both the server
-record and browser subscription. Push requires a supported secure browser;
-iOS requires installation as a home-screen web app.
-
-Every 15 seconds the server projects the attention inbox and sends new items,
-grouped by task. Delivery state survives restarts; expired subscriptions are
-removed and transient failures back off. Notifications show counts and open
-the inbox, without exposing commands or conversation text. Delivery may be
-repeated if the process dies after sending but before saving; the task tag
-replaces the previous notification. Only known browser push-service HTTPS
-endpoints are accepted. The `web-push` dependency supplies standard VAPID and
-payload encryption instead of maintaining a custom cryptographic implementation.

@@ -17,7 +17,7 @@ const jobs = {
   review: { id: 'review', repo, kind: 'review' },
 };
 
-let auth, server, url, clock, loginOn, bus, sessions, project, handler, tokens, savesFail;
+let auth, server, url, clock, apiOn, bus, sessions, project, handler, tokens, savesFail;
 beforeEach(async () => {
   let saved = [];
   savesFail = false;
@@ -25,7 +25,7 @@ beforeEach(async () => {
   const down = () =>
     Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3306'), { code: 'ECONNREFUSED' });
   clock = Date.now();
-  loginOn = true;
+  apiOn = true;
   auth = createMobileAuth({
     load: async () => structuredClone(saved),
     save: async (_name, value) => {
@@ -76,7 +76,7 @@ beforeEach(async () => {
     apiV1Routes({
       auth,
       listProjects: () => [project, { repo: 'other/project', label: 'Other' }],
-      loginEnabled: () => loginOn,
+      apiEnabled: () => apiOn,
       ownerSecret: () => secret,
       handlers,
       getJob: (id) => jobs[id] || null,
@@ -92,8 +92,8 @@ beforeEach(async () => {
       recheckMs: 20,
     }),
   );
-  // What sits behind the client API in the real app: the login gate.
-  app.use((_req, res) => res.status(401).json({ error: 'Not signed in' }));
+  // What sits behind the client API in the real app: nothing that answers.
+  app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
   server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   url = `http://127.0.0.1:${server.address().port}`;
@@ -161,10 +161,10 @@ describe('who gets in', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
-  it('fails closed while the dashboard login is off, and once a token expires or is revoked', async () => {
-    loginOn = false;
+  it('fails closed while no AUTH_SECRET is set, and once a token expires or is revoked', async () => {
+    apiOn = false;
     expect((await request('/sessions')).status).toBe(503);
-    loginOn = true;
+    apiOn = true;
     expect((await request('/sessions')).status).toBe(200);
     expect(await json('/token', { method: 'DELETE' })).toEqual({ ok: true });
     expect((await request('/sessions')).status).toBe(401);
@@ -639,26 +639,6 @@ describe('the contract', () => {
     expect(Object.keys(NOT_IN_API).filter((key) => !registered.has(key))).toEqual([]);
     // And what is listed as retired is gone.
     expect(Object.keys(RETIRED).filter((key) => registered.has(key))).toEqual([]);
-  });
-
-  // The built-in pages no longer work, and are what a client is ported from:
-  // every call they make has to lead somewhere in the reference's table.
-  it('accounts for every call the dashboard’s scripts made', () => {
-    const reachable = [
-      ...API_V1_ROUTES.filter((e) => e.to).map((e) => e.to),
-      ...Object.keys({ ...NOT_IN_API, ...RETIRED }).map((key) => key.split(' ')[1]),
-    ].map((route) => new RegExp(`^${route.replace(/[:*]\w+/g, '[^/]+').replace(/\//g, '\\/')}(\\/|$)`));
-    const called = new Set();
-    for (const file of fs.readdirSync(path.join(root, 'public')).filter((f) => f.endsWith('.js'))) {
-      const source = fs.readFileSync(path.join(root, 'public', file), 'utf8');
-      for (const [, route] of source.matchAll(/['`](\/api\/[A-Za-z0-9/_-]*)/g))
-        called.add(route.replace(/\/$/, ''));
-    }
-    expect(called.size).toBeGreaterThan(40);
-    const unreachable = [...called].filter(
-      (route) => !reachable.some((pattern) => pattern.test(`${route}/x`) || pattern.test(route)),
-    );
-    expect(unreachable).toEqual([]);
   });
 
   it('keeps the object lists in step with the settings they describe', async () => {

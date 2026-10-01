@@ -1,8 +1,8 @@
-# The dashboard, its own MySQL, and, behind the `pool` profile, the extra
+# The core, its own MySQL, and, behind the `pool` profile, the extra
 # MySQL instances a session can claim so parallel sessions never share a
 # database.
 #
-#   docker compose up -d --build          the dashboard and its database
+#   docker compose up -d --build          the core and its database
 #   docker compose --profile pool up -d   plus two servers for the pool
 #
 # Settings that describe this install are read from the shell (or from the .env
@@ -32,7 +32,6 @@ services:
       DB_DATABASE: ${DB_DATABASE:-reviewer}
       DB_USERNAME: root
       DB_PASSWORD: ${DB_PASSWORD:-reviewer}
-      AUTH_USERNAME: ${AUTH_USERNAME:-admin}
       # Shared video links through an R2 bucket: optional, and all five keys
       # or none (see .env.example). Empty is how "not configured" is spelled;
       # lib/config.js treats an all-blank group as absent.
@@ -50,7 +49,7 @@ services:
       # this port, not the port itself. Publish on 0.0.0.0 only behind a gate.
       - '127.0.0.1:${HOST_PORT:-4300}:4300'
     volumes:
-      # .env, and the login `npm run set-password` writes into it.
+      # .env, and the signing secret `npm run create-token` writes into it.
       - state:/app/state
       # The provider CLIs' logins (~/.claude-provider-*, ~/.codex-*, ~/.grok-*,
       # ~/.opencode-provider-*). Losing these means logging every provider in again.
