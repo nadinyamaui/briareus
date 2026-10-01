@@ -365,6 +365,20 @@ describe('the service token', () => {
     expect(calls.some((c) => c.path.includes('/policies'))).toBe(false);
   });
 
+  it('still publishes an existing application when adding the policy fails', async () => {
+    cf.apps.push({ id: 'app-old', domain: 'preview-8100.example.com', policies: [ALLOWED] });
+    cf.fail = '/apps/app-old/policies';
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await publicAppUrl(8100)).toBe('https://preview-8100.example.com');
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('preview-8100.example.com'),
+      expect.stringContaining('denied'),
+    );
+    expect(cf.config.ingress.map((r) => r.hostname)).toContain('preview-8100.example.com');
+    log.mockRestore();
+  });
+
   it('reads the application when the listing leaves its policies out', async () => {
     cf.apps.push({ id: 'app-old', domain: 'preview-8100.example.com' });
     cf.appDetails['app-old'] = { id: 'app-old', policies: [{ ...CLIENTS, id: 'pol-9', precedence: 4 }] };
