@@ -379,6 +379,26 @@ describe('the service token', () => {
     log.mockRestore();
   });
 
+  it('still publishes an existing application when the token lookup fails', async () => {
+    cf.apps.push({ id: 'app-old', domain: 'preview-8100.example.com', policies: [ALLOWED] });
+    cf.serviceTokens = [];
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await publicAppUrl(8100)).toBe('https://preview-8100.example.com');
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('preview-8100.example.com'),
+      expect.stringContaining('No Cloudflare Access service token'),
+    );
+    expect(cf.apps[0].policies).toEqual([ALLOWED]);
+    log.mockRestore();
+  });
+
+  it('names the permission a refused lookup needs', async () => {
+    cf.fail = '/access/service_tokens';
+
+    await expect(publicAppUrl(8100)).rejects.toThrow(/denied.*Access: Service Tokens > Read/);
+  });
+
   it('reads the application when the listing leaves its policies out', async () => {
     cf.apps.push({ id: 'app-old', domain: 'preview-8100.example.com' });
     cf.appDetails['app-old'] = { id: 'app-old', policies: [{ ...CLIENTS, id: 'pol-9', precedence: 4 }] };
