@@ -12,9 +12,6 @@ import { initMemorySelection } from './lib/memory-selection.js';
 import { memoryMaintenanceRoutes } from './lib/memory-maintenance-routes.js';
 import { operationsRoutes } from './lib/operations-routes.js';
 import { dashboardRoutes } from './lib/dashboard-routes.js';
-import { createRemoteMcpAuth } from './lib/remote-mcp-auth.js';
-import { remoteMcpRoutes } from './lib/remote-mcp.js';
-import { remoteMcpSettingsRoutes } from './lib/remote-mcp-settings.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
 import { mobileApiRoutes, mobileSettingsRoutes } from './lib/mobile-api.js';
 import { apiV1Routes } from './lib/api-v1.js';
@@ -224,11 +221,7 @@ app.use(securityHeaders);
 // itself instead, with an HMAC over the raw body. See lib/webhooks.js.
 app.use('/webhooks', webhookRouter());
 
-// The external MCP transport authenticates OAuth independently of browser
-// cookies. Its own Origin gate runs before the browser-only middleware below.
 const dashboard = dashboardRoutes({ app: api, getProject, getJob, listActions });
-const remoteMcpAuth = createRemoteMcpAuth();
-app.use(remoteMcpRoutes({ auth: remoteMcpAuth, dashboard, loginEnabled: authEnabled }));
 const mobileAuth = createMobileAuth();
 const mobileOptions = {
   auth: mobileAuth,
@@ -248,7 +241,6 @@ app.use(
 app.use(
   apiV1Routes({
     ...mobileOptions,
-    mcpAuth: remoteMcpAuth,
     handlers: api,
     getJob,
     getProject,
@@ -268,15 +260,6 @@ app.use(express.json({ limit: '1mb' }));
 // videos and APIs are all behind it; see lib/auth.js for what stays public.
 app.use(requireAuth);
 app.use(mobileSettingsRoutes({ ...mobileOptions, signedIn, getProject, listProjects }));
-app.use(
-  remoteMcpSettingsRoutes({
-    auth: remoteMcpAuth,
-    loginEnabled: authEnabled,
-    signedIn,
-    getProject,
-    listProjects,
-  }),
-);
 // Routes are added to it for the rest of this file; it is mounted here, behind
 // the login gate and ahead of the pages, because nothing under /api/ or
 // /videos is a page.
@@ -467,7 +450,6 @@ for (const section of ['projects', 'providers', 'servers', 'ssh', 'saved-prompts
 // The prompts are a single shared row, so the section is the whole address.
 app.get('/settings/prompts', settingsPage);
 app.get('/settings/workspaces', settingsPage);
-app.get('/settings/mcp', pageHandler(PUBLIC, 'mcp-settings.html'));
 app.get('/settings/mobile', pageHandler(PUBLIC, 'mobile-settings.html'));
 
 // ---- projects ----
@@ -1691,7 +1673,7 @@ dashboard.register('get', '/api/dev/sessions', async (req, res) => {
   const sessions = listDevSessions(estimates);
   // One project for a dashboard tool call, a client token's own projects for
   // the client API (lib/api-v1.js), everything for the dashboard's pages.
-  const repos = req.mcpProject ? [req.mcpProject] : res.locals?.apiRepos;
+  const repos = req.apiProject ? [req.apiProject] : res.locals?.apiRepos;
   res.json({ sessions: repos ? sessions.filter((s) => repos.includes(s.repo)) : sessions });
 });
 
@@ -1883,7 +1865,7 @@ dashboard.register('post', '/api/dev/sessions/:id/loop', (req, res) => {
 dashboard.register('post', '/api/dev/sessions/:id/triage', async (req, res) => {
   try {
     const { verdicts, note } = req.body || {};
-    res.json(await triageReviewFindings(req.params.id, { verdicts, note, by: req.mcpActor || 'the user' }));
+    res.json(await triageReviewFindings(req.params.id, { verdicts, note, by: req.apiActor || 'the user' }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1896,7 +1878,7 @@ dashboard.register('post', '/api/dev/sessions/:id/triage', async (req, res) => {
 dashboard.register('post', '/api/dev/sessions/:id/findings/reply', async (req, res) => {
   try {
     const { key, text } = req.body || {};
-    res.json(await replyToReviewFinding(req.params.id, key, text, { by: req.mcpActor || 'the user' }));
+    res.json(await replyToReviewFinding(req.params.id, key, text, { by: req.apiActor || 'the user' }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1909,7 +1891,7 @@ dashboard.register('post', '/api/dev/sessions/:id/findings/reply', async (req, r
 dashboard.register('post', '/api/dev/sessions/:id/findings/delete', async (req, res) => {
   try {
     const { key } = req.body || {};
-    res.json(await deleteReviewFinding(req.params.id, key, { by: req.mcpActor || 'the user' }));
+    res.json(await deleteReviewFinding(req.params.id, key, { by: req.apiActor || 'the user' }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1922,7 +1904,7 @@ dashboard.register('post', '/api/dev/sessions/:id/triage/save', async (req, res)
   try {
     const { verdicts, note } = req.body || {};
     res.json(
-      await saveReviewFindingsDrafts(req.params.id, { verdicts, note, by: req.mcpActor || 'the user' }),
+      await saveReviewFindingsDrafts(req.params.id, { verdicts, note, by: req.apiActor || 'the user' }),
     );
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -2016,7 +1998,6 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initProjects();
     await initDbServers();
     await sshService.init();
-    await remoteMcpAuth.init();
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
