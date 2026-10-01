@@ -390,6 +390,7 @@ written idempotently so a database from before then just gets its row in
   PR/CI sync. A classic `repo` PAT covers everything; a fine-grained token wants
   Pull requests: read/write and Contents: read, plus Issues: read for the
   project view's ⊙ Issues tab, which says what it is missing without it
+  (read/write to close issues from a client)
 - Git pushes/fetches authenticate through the machine's own credential helper
   (`gh auth setup-git`, `git-credential-libsecret`, or whatever `credential.helper`
   points at); the app injects no git credentials

@@ -106,7 +106,7 @@ Start an errand on a pull request; starts a paid session. Needs `manage`, held t
 
 **Returns** 201 `{ session: Session }`
 
-## Pull requests
+## Pull requests and issues
 
 ### `GET /pulls`
 
@@ -291,6 +291,20 @@ Prepare a workspace for a pull request and serve it with the project’s run com
 | `effort`            | `string`  | An effort that model offers; its default when absent                             |
 
 **Returns** 201 `{ session: Session, url: string, profile: string? }`
+
+### `POST /issues/{number}/close`
+
+Close an issue on GitHub, with an optional comment posted just before. Needs `manage`, held to `repo`.
+
+**Body**
+
+| Field               | Type                     |                                                  |
+| ------------------- | ------------------------ | ------------------------------------------------ |
+| `repo` **required** | `string`                 | A project, as `owner/name`                       |
+| `reason`            | `completed\|not_planned` | Why it is closed; `completed` when absent        |
+| `comment`           | `string`                 | A comment to post on the issue before closing it |
+
+**Returns** `{ issue: ClosedIssue }`. A pull request’s number is refused with 422: GitHub would close it through the same endpoint, and this route closes issues only. Closing one that is already closed updates its reason.
 
 ### `GET /commits/{sha}`
 
@@ -1468,6 +1482,18 @@ Something a Briareus review declared on a pull request.
 | `decision` | `fix\|optional\|dismissed?`   | The verdict recorded for it               |
 | `fixed`    | `boolean`                     | Whether a later review ticked it as fixed |
 
+### ClosedIssue
+
+An issue as closing it left it.
+
+| Field         | Type                      |                     |
+| ------------- | ------------------------- | ------------------- |
+| `number`      | `integer`                 | Its number          |
+| `state`       | `closed`                  | Always `closed`     |
+| `stateReason` | `completed\|not_planned?` | Why it was closed   |
+| `closedAt`    | `string?`                 | When, ISO 8601      |
+| `url`         | `string`                  | The issue on GitHub |
+
 ### Project
 
 A project’s full settings. A body may carry any of these; what it leaves out keeps its value.
@@ -1654,6 +1680,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/pr/findings/decision`               | `POST /pulls/{number}/findings/decision`                   |
 | `POST /api/pr/merge`                           | `POST /pulls/{number}/merge`                               |
 | `POST /api/dev/pulls/:number/serve`            | `POST /pulls/{number}/serve`                               |
+| `POST /api/issues/close`                       | `POST /issues/{number}/close`                              |
 | `GET /api/pr/commit`                           | `GET /commits/{sha}`                                       |
 | `GET /api/dev/sessions`                        | `GET /sessions`                                            |
 | `POST /api/dev/sessions`                       | `POST /sessions`                                           |
