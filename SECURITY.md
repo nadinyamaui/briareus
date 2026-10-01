@@ -29,11 +29,12 @@ it.** The boot log says so on every start; please believe it.
 
 ## Credentials this app holds
 
-The client API at `/api/v1` takes the same owner-issued bearer tokens as the
-mobile API below, and adds an `admin` permission: a token with it can do
-everything the dashboard can, on every project, including reading and changing
-provider keys, database servers and SSH settings. Treat an admin token like the
-dashboard password, and issue one only to a client that replaces the dashboard.
+The client API at `/api/v1` is the server's only API. It takes owner-issued
+bearer tokens with a permission, a project list and an expiry; the first is
+issued on the machine with `npm run create-token`. A token with the `admin`
+permission can do everything, on every project, including reading and changing
+provider keys, database servers and SSH settings. Treat an admin token like a
+password to the machine, and issue one only to the client you run Briareus from.
 An admin token can also issue and revoke tokens, so
 after revoking a leaked one, check the device list for tokens it issued. Read
 and manage tokens are held to the projects they were given and cannot issue
@@ -42,13 +43,10 @@ refuses requests that carry an `Origin` header and enables no CORS, so a token
 is never usable from a browser page. A Cloudflare Access exception may cover
 only `/api/v1` and its subpaths. See the [client API guide](docs/api-v1.md).
 
-The native mobile API at `/api/mobile/v1` uses separate, owner-issued bearer
-tokens with project permissions and expiry. A Cloudflare Access exception may
-cover only `/api/mobile/v1` and its subpaths; `/api/mobile-devices` and
-`/settings/mobile` remain browser-only. Device tokens are stored as hashes,
-can be revoked in Settings, and stop working when `AUTH_SECRET` changes. Mobile
-authentication fails closed when dashboard login is disabled. See the
-[mobile integration guide](docs/mobile-api.md) for the deployment checks.
+Tokens are stored as hashes, can be revoked through the API, and stop working
+when `AUTH_SECRET` changes. The API fails closed when the password login is
+off. The password login itself opens no API: its cookie is for the recorded
+test videos.
 
 - `GITHUB_TOKEN`: a classic PAT with `repo`, or fine-grained with Pull
   requests read/write and Contents read. It can push to and comment on every
