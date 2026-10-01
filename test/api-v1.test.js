@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { createMobileAuth } from '../lib/mobile-auth.js';
 import { apiV1Routes } from '../lib/api-v1.js';
-import { API_V1_ROUTES, FIELDS, NOT_IN_API, OBJECTS } from '../lib/api-v1-catalog.js';
+import { API_V1_ROUTES, FIELDS, NOT_IN_API, OBJECTS, RETIRED } from '../lib/api-v1-catalog.js';
 import { apiV1OpenApi, apiV1Reference, schemaOf } from '../lib/api-v1-docs.js';
 
 const repo = 'owner/project';
@@ -92,7 +92,7 @@ beforeEach(async () => {
       recheckMs: 20,
     }),
   );
-  // What sits behind the client API in the real app: the cookie login.
+  // What sits behind the client API in the real app: the login gate.
   app.use((_req, res) => res.status(401).json({ error: 'Not signed in' }));
   server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
@@ -619,19 +619,18 @@ describe('the contract', () => {
     expect(missing).toEqual([]);
   });
 
-  // The other direction, and the point of the API: whatever the dashboard's
-  // pages can call, a client can. A handler added for a page fails this until
-  // it is given a route in the catalog, or a line in NOT_IN_API saying why it
-  // has none.
-  it('leaves nothing the dashboard can do without a route', () => {
+  // The other direction: a handler with no route is one nothing can reach,
+  // now that the handlers have no door of their own. One added fails this
+  // until it is given a route in the catalog, or a line in NOT_IN_API saying
+  // why it has none.
+  it('leaves no handler without a route', () => {
     const covered = new Set(API_V1_ROUTES.filter((e) => e.to).map((e) => `${e.method} ${e.to}`));
-    // Not the dashboard's: what an agent calls from inside its session, what
-    // other systems deliver, the transports with their own contracts, and the
-    // pages themselves.
+    // Not a client's: what an agent calls from inside its session, what other
+    // systems deliver, the transports with their own contracts, and the pages
+    // themselves.
     const elsewhere = (key, file) =>
       / \/api\/agent\//.test(key) ||
       ['lib/webhooks.js', 'lib/api-v1.js'].includes(file) ||
-      (file === 'lib/mobile-api.js' && !key.includes('/api/mobile-devices')) ||
       !/ \/api\//.test(key);
     const uncovered = [...registeredRoutes()]
       .filter(([key, file]) => !covered.has(key) && !(key in NOT_IN_API) && !elsewhere(key, file))
@@ -640,12 +639,16 @@ describe('the contract', () => {
     // And nothing is excused that no longer exists.
     const registered = registeredRoutes();
     expect(Object.keys(NOT_IN_API).filter((key) => !registered.has(key))).toEqual([]);
+    // And what is listed as retired is gone.
+    expect(Object.keys(RETIRED).filter((key) => registered.has(key))).toEqual([]);
   });
 
-  it('keeps every call the dashboard’s scripts make within reach', () => {
+  // The built-in pages no longer work, and are what a client is ported from:
+  // every call they make has to lead somewhere in the reference's table.
+  it('accounts for every call the dashboard’s scripts made', () => {
     const reachable = [
       ...API_V1_ROUTES.filter((e) => e.to).map((e) => e.to),
-      ...Object.keys(NOT_IN_API).map((key) => key.split(' ')[1]),
+      ...Object.keys({ ...NOT_IN_API, ...RETIRED }).map((key) => key.split(' ')[1]),
     ].map((route) => new RegExp(`^${route.replace(/[:*]\w+/g, '[^/]+').replace(/\//g, '\\/')}(\\/|$)`));
     const called = new Set();
     for (const file of fs.readdirSync(path.join(root, 'public')).filter((f) => f.endsWith('.js'))) {

@@ -1,20 +1,31 @@
 # Client API v1
 
 `/api/v1` is the one HTTP API a Briareus client talks to: a web app in its own
-repository, the iOS app, a desktop app. It reaches the same handlers the
-built-in dashboard does, so a client can do everything the dashboard can, and
-nothing it cannot.
+repository, a desktop app, the iOS app. It is the only API the server has: the
+routes the built-in dashboard called with its login cookie (`/api/dev/*`,
+`/api/projects`, …) and the earlier mobile API (`/api/mobile/v1`) are retired,
+and every handler they reached is behind a route here.
 
 It is for servers and native apps. A browser page is refused: the token would
 sit in page script, so CORS is off and a web client calls from its own server.
 
 ## Connect a client
 
-1. Enable the password login (`npm run set-password`, then restart). The API
-   fails closed with 503 while the login is off.
-2. Sign in to the dashboard and open **Settings → Devices and clients**
-   (`/settings/mobile`). Create a token: a name, a permission, the projects it
-   may use, and an expiry of 1–365 days.
+1. Enable the password login (`npm run set-password`). The API fails closed
+   with 503 while the login is off: a token is tied to the `AUTH_SECRET` that
+   command writes.
+2. Create the first token on the server itself. The running server picks it
+   up within 15 seconds, with no restart:
+
+   ```sh
+   npm run create-token -- --label Desktop
+   ```
+
+   That is an admin token good for 365 days. `--permission read|manage` with
+   one `--repo owner/name` per project makes a narrower one, and `--days`
+   (1–365) sets the expiry. `--list` shows the tokens there are and
+   `--revoke <id>` revokes one, also without a restart.
+
 3. Give the client the address `https://<your-host>/api/v1` and the token. The
    token is shown once.
 4. Check it: `GET /` answers with the token's own record.
@@ -24,37 +35,20 @@ curl -s https://briareus.example.com/api/v1/ -H "Authorization: Bearer brm_..."
 # {"version":1,"client":{"id":"...","label":"Web","repos":[],"permission":"admin",...},"transcribe":false}
 ```
 
-### From a shell
-
-The same tokens can be made without a browser, on the machine that runs
-Briareus (`docker compose exec app npm run token -- ...` under Docker):
-
-```sh
-npm run token -- issue --name Web --permission admin --days 90
-npm run token -- issue --name CI --permission read --repo owner/app --repo owner/api
-npm run token -- list
-npm run token -- revoke <id>
-```
-
-`issue` prints only the token on stdout (the rest goes to stderr), so
-`TOKEN=$(npm run -s token -- issue ...)` captures it. It needs the login on, as
-the dashboard does. A running server picks up a token issued or revoked here
-within 15 seconds, and the settings page lists it like any other.
-
-Tokens are the same ones the [mobile API](mobile-api.md) uses, stored as hashes
-only. Revoking one in Settings, its expiry, or a changed `AUTH_SECRET` stops it
-at the next request, and ends its open event streams within 15 seconds. A
-client can revoke its own token with `DELETE /token`. The first token is
-created in the dashboard, behind the password, or with `npm run token`; after that an admin token can
-issue and revoke others (see [Tokens and connections](#tokens-and-connections)).
+Tokens are stored as hashes only. Revoking one, its expiry, or a changed
+`AUTH_SECRET` stops it at the next request, and ends its open event streams
+within 15 seconds. A client can revoke its own token with `DELETE /token`. Only
+the first token needs the command line; after that an admin token issues and
+revokes the others (see [Tokens and connections](#tokens-and-connections)), and
+those take effect at once, with no restart.
 
 ## Permissions
 
-| Permission | What it may do                                                                                         |
-| ---------- | ------------------------------------------------------------------------------------------------------ |
-| `read`     | Read the projects it was given: sessions, transcripts, pull requests, findings, usage                  |
-| `manage`   | Also start paid agents, send messages, merge, decide findings and delete sessions, on those projects   |
-| `admin`    | Everything the dashboard can do, on every project: settings, provider keys, SSH approvals, deployments |
+| Permission | What it may do                                                                                       |
+| ---------- | ---------------------------------------------------------------------------------------------------- |
+| `read`     | Read the projects it was given: sessions, transcripts, pull requests, findings, usage                |
+| `manage`   | Also start paid agents, send messages, merge, decide findings and delete sessions, on those projects |
+| `admin`    | Everything, on every project: settings, provider keys, SSH approvals, deployments, tokens            |
 
 A `read` or `manage` token is held to its project list:
 
@@ -65,8 +59,8 @@ A `read` or `manage` token is held to its project list:
 - `/projects`, `/sessions` and `/events` show only the token's projects.
 
 An `admin` token carries no project list and is the operator's own: treat it
-like the dashboard password. It is what a client that replaces the dashboard
-needs; give the iPhone app `manage`.
+like a password to the machine. It is what the client you run Briareus from
+needs; give a client that only follows and steers sessions `manage`.
 
 ## Conventions
 
@@ -77,8 +71,7 @@ needs; give the iPhone app `manage`.
 - An error is `{ "error": "..." }` with a 4xx or 5xx status. 401 means the
   token is missing, wrong, expired or revoked; 403 that it lacks the permission
   or the project.
-- Responses are the dashboard's own shapes and may grow: ignore fields and
-  event kinds you do not know.
+- Responses may grow: ignore fields and event kinds you do not know.
 - `GET /openapi.json` describes every route: its parameters and body with
   their types, its answer, the permission it needs (`x-briareus-access`) and
   how it is held to a project (`x-briareus-scope`).
@@ -108,10 +101,10 @@ What is there, by area:
 | Settings      | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `templates` | admin         |
 | Tokens        | `/settings/devices`                                                                       | admin         |
 
-Everything the built-in dashboard can do has a route. The reference ends with a
-table from each of the dashboard's own routes to the one that replaces it, for
-porting a page. `npm test` fails if a handler is added for the dashboard
-without a route here.
+Everything the built-in dashboard could do has a route. The reference ends with
+a table from each of the dashboard's retired routes to the one that replaces
+it, for porting a page. `npm test` fails if a handler is added without a route
+here, since a handler with no route is one nothing can reach.
 
 ## Pull request data
 
@@ -165,30 +158,31 @@ as `session` events, without an id.
 ## Deploying behind Cloudflare Access
 
 Add an Access application for **`/api/v1` and `/api/v1/*`** with a **Bypass →
-Everyone** policy, as the [mobile guide](mobile-api.md#cloudflare-access) does
-for `/api/mobile/v1`. Briareus still requires its token on every route. Do not
-exempt `/api/*`: the dashboard's own routes and the pages that issue tokens
-stay behind Access and the password.
+Everyone** policy: a native client cannot complete Access's browser sign-in.
+Briareus still requires its token on every route. Do not exempt `/api/*` or the
+whole hostname: the login and the videos stay behind Access and the password.
 
 ## Tokens
 
-An admin token manages tokens as the dashboard's settings page does:
-`/settings/devices` lists, issues and revokes them. A token's secret is in the
-answer that creates it and nowhere afterwards.
+An admin token manages tokens: `/settings/devices` lists, issues and revokes
+them. A token's secret is in the answer that creates it and nowhere afterwards.
 
 An admin token can issue other tokens, admin ones included. Revoking a leaked
 admin token is therefore not enough on its own: check the device list for
-tokens it issued.
+tokens it issued. With no admin token left, `npm run create-token` issues a new
+one, and `npm run create-token -- --list` / `--revoke <id>` do the same checking
+and revoking from the machine.
 
 ## What is not in this API
 
-- Signing in. The dashboard's password login (`/api/login`) is the built-in
-  pages' own; a client authenticates its users itself and calls with its token.
+- Signing in. The password login (`/api/login`) is the cookie in front of the
+  recorded videos, and opens no API; a client authenticates its users itself
+  and calls with its token.
 - `/api/agent/*`: the calls an agent makes from inside its own session.
 - `/webhooks/*`: deliveries from GitHub and from systems that wake a session.
 - `/healthz` is public and outside the prefix: 200 when the server and its
   database answer.
 
-The dashboard's own routes (`/api/dev/*`, `/api/projects`, …) still exist for
-the built-in pages and take only the login cookie. They are not a contract;
-build against `/api/v1`.
+Anything else under `/api` answers 410 to a signed-in browser and 401 to
+anything else. The built-in dashboard's pages are still served and no longer
+work: they were written against the retired routes.
