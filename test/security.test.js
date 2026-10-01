@@ -1,6 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { securityHeaders, sameOriginWrites } from '../lib/security.js';
 
 function run(middleware, req) {
@@ -53,15 +51,6 @@ describe('securityHeaders', () => {
     expect(csp).toContain("object-src 'none'");
     // The recorded QA videos are served from this origin.
     expect(csp).toContain("media-src 'self'");
-  });
-
-  it('lets the page import map in by the hash of its exact contents', () => {
-    const html = readFileSync(new URL('../public/developer.html', import.meta.url), 'utf8');
-    const body = html.match(/<script type="importmap">([\s\S]*?)<\/script>/)?.[1];
-    expect(body).toBeTruthy();
-    const hash = createHash('sha256').update(body).digest('base64');
-    const csp = run(securityHeaders, { method: 'GET' }).headers['Content-Security-Policy'];
-    expect(csp).toContain(`script-src 'self' 'sha256-${hash}'`);
   });
 });
 

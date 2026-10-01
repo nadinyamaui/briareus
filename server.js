@@ -318,15 +318,6 @@ app.get('/healthz', async (req, res) => {
 // bytes, so a changed file is a changed URL; see lib/assets.js for why the
 // browser cannot be left to work that out for itself.
 app.use(express.static(PUBLIC, { setHeaders: assetCacheHeaders(PUBLIC) }));
-// three.js, for the office. Served straight out of node_modules rather than
-// copied under public/: the package's own build is what the island module
-// imports, and its version moves with the lockfile like any other
-// dependency. The addons (the water, the bloom pass) live in the package's
-// examples tree and import the core as the bare `three`, which the page's
-// import map points back here. The addons route goes first: the build route
-// would otherwise swallow its prefix and answer 404.
-app.use('/vendor/three/addons', express.static(path.join(ROOT, 'node_modules', 'three', 'examples', 'jsm')));
-app.use('/vendor/three', express.static(path.join(ROOT, 'node_modules', 'three', 'build')));
 // The scenario videos a test run records. The run copies each .webm here and
 // links this route from the PR's test sheet, so the evidence outlives the
 // session workspace it was recorded in.
@@ -440,7 +431,6 @@ const settingsPage = pageHandler(PUBLIC, 'settings.html');
 
 app.get('/', devPage);
 app.get('/dashboard', devPage);
-app.get('/office', devPage);
 app.get('/findings', devPage);
 app.get(
   [

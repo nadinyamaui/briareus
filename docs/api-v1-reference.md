@@ -1854,7 +1854,6 @@ The built-in dashboard called its handlers by the paths on the left, with the lo
 | `POST /api/ssh/servers`                          | `POST /settings/ssh/servers`                                                                                                   |
 | `PUT /api/ssh/servers/:id`                       | `PUT /settings/ssh/servers/{id}`                                                                                               |
 | `DELETE /api/ssh/servers/:id`                    | `DELETE /settings/ssh/servers/{id}`                                                                                            |
-| `GET /api/dev/office/events`                     | Superseded by `GET /events`, which sends the whole session record                                                              |
 | `GET /api/mobile-devices`                        | Answered by the gateway as `GET /settings/devices`                                                                             |
 | `POST /api/mobile-devices`                       | Answered by the gateway as `POST /settings/devices`                                                                            |
 | `DELETE /api/mobile-devices/:id`                 | Answered by the gateway as `DELETE /settings/devices/{id}`                                                                     |

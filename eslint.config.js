@@ -35,13 +35,4 @@ export default [
       globals: globals.browser,
     },
   },
-  {
-    // The one frontend file that is a module: it imports three.js, which only
-    // ships as one, and developer.js imports it in turn.
-    files: ['public/island3d.js'],
-    languageOptions: {
-      sourceType: 'module',
-      globals: globals.browser,
-    },
-  },
 ];
