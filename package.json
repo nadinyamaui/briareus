@@ -18,6 +18,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "set-password": "node scripts/set-password.js",
+    "token": "node scripts/token.js",
     "migrate": "node scripts/migrate.js up",
     "migrate:rollback": "node scripts/migrate.js rollback",
     "migrate:status": "node scripts/migrate.js status",

@@ -24,11 +24,28 @@ curl -s https://briareus.example.com/api/v1/ -H "Authorization: Bearer brm_..."
 # {"version":1,"client":{"id":"...","label":"Web","repos":[],"permission":"admin",...},"transcribe":false}
 ```
 
+### From a shell
+
+The same tokens can be made without a browser, on the machine that runs
+Briareus (`docker compose exec app npm run token -- ...` under Docker):
+
+```sh
+npm run token -- issue --name Web --permission admin --days 90
+npm run token -- issue --name CI --permission read --repo owner/app --repo owner/api
+npm run token -- list
+npm run token -- revoke <id>
+```
+
+`issue` prints only the token on stdout (the rest goes to stderr), so
+`TOKEN=$(npm run -s token -- issue ...)` captures it. It needs the login on, as
+the dashboard does. A running server picks up a token issued or revoked here
+within 15 seconds, and the settings page lists it like any other.
+
 Tokens are the same ones the [mobile API](mobile-api.md) uses, stored as hashes
 only. Revoking one in Settings, its expiry, or a changed `AUTH_SECRET` stops it
 at the next request, and ends its open event streams within 15 seconds. A
 client can revoke its own token with `DELETE /token`. The first token is
-created in the dashboard, behind the password; after that an admin token can
+created in the dashboard, behind the password, or with `npm run token`; after that an admin token can
 issue and revoke others (see [Tokens and connections](#tokens-and-connections)).
 
 ## Permissions
