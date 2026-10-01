@@ -3654,9 +3654,6 @@
       hook.held
         ? `${hook.held} ${hook.held === 1 ? 'delivery is' : 'deliveries are'} waiting for the session to be free.`
         : '',
-      hook.armed && hook.spentUsd
-        ? `Turns started by deliveries spent $${hook.spentUsd.toFixed(2)} in the last 24 hours.`
-        : '',
     ].filter(Boolean);
     return `<div class="flex flex-col gap-3">
       ${hook.armed ? copy('URL', 'url', hook.url) + copy('Key', 'key', hook.key) : ''}
@@ -3670,7 +3667,6 @@
       <div class="flex items-end gap-2">
         ${cap('Deliveries an hour', 'perHour', hook.perHour, 1, 600, 1)}
         ${cap('Turns in a row', 'maxTurns', hook.maxTurns, 1, 1000, 1)}
-        ${cap('$ in 24 hours, 0 for no cap', 'budgetUsd', hook.budgetUsd, 0, 10000, 0.01)}
       </div>
       <label class="flex items-start gap-2 text-[12px] text-muted">
         <input type="checkbox" name="sshUnattended" class="mt-0.5" ${hook.sshUnattended ? 'checked' : ''} />
@@ -3698,7 +3694,6 @@
     return {
       perHour: field('perHour').valueAsNumber,
       maxTurns: field('maxTurns').valueAsNumber,
-      budgetUsd: field('budgetUsd').valueAsNumber,
       sshUnattended: field('sshUnattended').checked,
       instructions: field('instructions').checked,
     };

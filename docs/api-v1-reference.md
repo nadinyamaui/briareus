@@ -576,7 +576,6 @@ Change a session’s webhook settings. Needs `admin`.
 | `armed`         | `boolean` | Whether deliveries are accepted                                                             |
 | `perHour`       | `integer` | Deliveries taken in any one hour                                                            |
 | `maxTurns`      | `integer` | Turns deliveries may start in a row with no word from the operator                          |
-| `budgetUsd`     | `number`  | What those turns may spend in 24 hours; 0 is no cap                                         |
 | `sshUnattended` | `boolean` | Whether an SSH server in `allow` mode runs commands unapproved in a turn a delivery started |
 | `instructions`  | `boolean` | Whether the second, instructions webhook is on                                              |
 
@@ -1542,7 +1541,6 @@ A project’s full settings. A body may carry any of these; what it leaves out k
 | `workerProviderId`          | `integer?` |                                                          |
 | `workerModel`               | `string`   |                                                          |
 | `workerEffort`              | `string`   |                                                          |
-| `workerBudgetUsd`           | `number?`  |                                                          |
 | `isSelf`                    | `boolean`  | Whether this project is Briareus itself                  |
 | `stepRuntimes`              | `object`   | A runtime per errand step                                |
 | `promptTemplates`           | `object`   | Per-project prompt overrides                             |
@@ -1659,14 +1657,12 @@ A session’s webhook: where an outside system posts to wake it, and the limits 
 | `armed`           | `boolean` | Whether deliveries are accepted                                                             |
 | `perHour`         | `integer` | Deliveries taken in any one hour                                                            |
 | `maxTurns`        | `integer` | Turns deliveries may start in a row with no word from the operator                          |
-| `budgetUsd`       | `number`  | What those turns may spend in 24 hours; 0 is no cap                                         |
 | `sshUnattended`   | `boolean` | Whether an SSH server in `allow` mode runs commands unapproved in a turn a delivery started |
 | `instructions`    | `boolean` | Whether the second, instructions webhook is on                                              |
 | `url`             | `string`  | Where a sender posts; not in a body                                                         |
 | `key`             | `string?` | The key a sender signs with; null while unarmed; not in a body                              |
 | `instructionsUrl` | `string`  | Where instructions are posted; not in a body                                                |
 | `instructionsKey` | `string?` | The instructions webhook’s key; not in a body                                               |
-| `spentUsd`        | `number`  | Spent in the current 24 hours; not in a body                                                |
 | `held`            | `integer` | Deliveries waiting; not in a body                                                           |
 | `paused`          | `object?` | Why deliveries are paused; not in a body                                                    |
 

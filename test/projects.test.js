@@ -377,7 +377,7 @@ describe('the reviewer runtime', () => {
   });
 });
 
-describe('the worker runtime and budget', () => {
+describe('the worker runtime', () => {
   it('keeps a worker provider id that is a positive integer', async () => {
     expect((await createProject({ ...base, workerProviderId: '4' })).workerProviderId).toBe(4);
   });
@@ -390,14 +390,6 @@ describe('the worker runtime and budget', () => {
     const saved = await createProject({ ...base, workerModel: ' haiku ', workerEffort: ' low ' });
 
     expect(saved).toMatchObject({ workerModel: 'haiku', workerEffort: 'low' });
-  });
-
-  it('keeps a positive budget in dollars', async () => {
-    expect((await createProject({ ...base, workerBudgetUsd: '12.5' })).workerBudgetUsd).toBe(12.5);
-  });
-
-  it.each([0, -3, 'abc', null, ''])('reads %o as no spending cap', async (workerBudgetUsd) => {
-    expect((await createProject({ ...base, workerBudgetUsd })).workerBudgetUsd).toBeNull();
   });
 });
 
