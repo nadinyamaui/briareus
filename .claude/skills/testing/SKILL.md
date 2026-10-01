@@ -43,8 +43,6 @@ Several `lib/` modules keep state at module level; tests must not share it:
   `test/findings.test.js` / `test/prboard.test.js`) or pass `{ fresh: true }`.
 - `lib/webhooksecrets.js` caches the secrets after the first read. Tests that
   care use `vi.resetModules()` + a fresh dynamic `import()` per test.
-- `lib/auth.js` keeps the login-lockout map in memory. Use a unique IP string
-  per test.
 - `lib/templates.js` keeps the global overrides in memory. A test that calls
   `saveGlobalTemplates` must reset with `saveGlobalTemplates({})` before ending.
 

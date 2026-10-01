@@ -133,7 +133,7 @@ describe('testRunPrompt', () => {
   it('composes the video paths from the config, slugging the repo', () => {
     const prompt = testRunPrompt(base);
     expect(prompt).toContain('/srv/videos/acme__shop/pr-<pr-number>');
-    expect(prompt).toContain('https://reviewer.example.com/videos/acme__shop/pr-<pr-number>');
+    expect(prompt).toContain('https://reviewer.example.com/api/v1/videos/acme__shop/pr-<pr-number>');
   });
 
   it('chains the project run commands and keeps their placeholders', () => {

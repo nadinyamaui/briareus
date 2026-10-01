@@ -97,5 +97,5 @@ it('validates the name, the permission, the projects and the expiry', () => {
     { repos: ['not a repo'] },
   ])
     expect(() => auth.create({ ...input, ...overrides }, secret)).toThrow();
-  expect(() => auth.create(input, '')).toThrow('login');
+  expect(() => auth.create(input, '')).toThrow('AUTH_SECRET');
 });

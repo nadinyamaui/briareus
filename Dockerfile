@@ -1,18 +1,4 @@
-# public/app.css is build output and is not committed, so the image builds it.
-# Its own stage because Tailwind is a dev dependency and the runtime install
-# below is `--omit=dev`: this way the CLI and its native binary are downloaded,
-# used, and then thrown away with the stage rather than shipped.
-FROM node:24-bookworm-slim AS css
-WORKDIR /build
-COPY package.json package-lock.json ./
-RUN npm ci --no-audit
-# src/app.css declares `@source "../public"`, so the class scan needs the pages
-# and the JS that builds markup out of class strings, not just the stylesheet.
-COPY src ./src
-COPY public ./public
-RUN npm run build:css
-
-# The dashboard itself, in a container: node, the provider CLIs, and the
+# The core itself, in a container: node, the provider CLIs, and the
 # command-line tools a session shells out to (git, gh, the mysql and psql
 # clients). What it deliberately does not carry is any given project's
 # toolchain: a project's setup steps are operator-authored and run whatever is
@@ -60,16 +46,13 @@ RUN set -eux; \
     grok --version
 
 COPY . .
-# After `COPY . .`, so a stylesheet left in the build context by somebody's
-# local `npm run build:css` cannot win over the one this build produced.
-COPY --from=css /build/public/app.css ./public/app.css
 COPY docker/entrypoint.sh /usr/local/bin/reviewer-entrypoint
 RUN chmod +x /usr/local/bin/reviewer-entrypoint
 
 # Everything the container writes lives in one of these, and each one is a
-# volume in compose.yaml: the .env (and the login `npm run set-password`
-# writes into it), the provider CLIs' logins under HOME, the session clones and
-# the test-run videos.
+# volume in compose.yaml: the .env (and the signing secret `npm run
+# create-token` writes into it), the provider CLIs' logins under HOME, the
+# session clones and the test-run videos.
 RUN mkdir -p /app/state /workspaces /test-videos \
     && chown -R node:node /app /workspaces /test-videos
 

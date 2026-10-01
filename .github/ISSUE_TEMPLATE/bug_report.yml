@@ -60,7 +60,7 @@ body:
       label: Configuration
       description: Whichever of these apply; they usually decide which code path you were on.
       options:
-        - label: The login is on (`AUTH_PASSWORD_HASH` and `AUTH_SECRET` are set)
+        - label: The API is on (`AUTH_SECRET` is set)
         - label: A public `PUBLIC_BASE_URL` is set, so webhooks are in play
         - label: The session claimed a pooled database server
         - label: The session was in Local mode (⌂), not a worktree

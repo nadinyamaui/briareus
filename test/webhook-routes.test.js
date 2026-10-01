@@ -2,11 +2,10 @@ import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sessionWebhookRoutes } from '../lib/webhook-routes.js';
 import { normalizeWebhookSettings, publicWebhook, WEBHOOK_DEFAULTS } from '../lib/deliveries.js';
-import { sameOriginWrites } from '../lib/security.js';
-import { requireAuth } from '../lib/auth.js';
+import { agentOnly } from '../lib/auth.js';
 
 vi.mock('../lib/config.js', () => ({
-  getConfig: () => ({ auth: { username: 'admin', passwordHash: 'configured', secret: 'secret' } }),
+  getConfig: () => ({ auth: { secret: 'secret' } }),
 }));
 
 // The session's side of it, as lib/jobs.js keeps it: the routes are what is
@@ -28,30 +27,29 @@ beforeEach(async () => {
   );
   const app = express();
   app.use(express.json());
-  app.use(sameOriginWrites);
-  app.use((req, res, next) => {
-    // A test-only stand-in for the signed-in browser; everything else uses the real auth gate.
-    if (req.headers.cookie === 'test-browser') return next();
-    return requireAuth(req, res, next);
+  // The real app's shape: the operator reaches these through /api/v1 with a
+  // token (a header stands in for one here), an agent's own routes are the
+  // only ones answered at their own path, and the rest of /api is retired.
+  const routes = sessionWebhookRoutes({
+    state,
+    update: (id, input) => {
+      found(id);
+      hook = normalizeWebhookSettings(input, hook);
+      return state(id);
+    },
+    rotate: (id) => {
+      found(id);
+      hook = { ...hook, epoch: hook.epoch + 1 };
+      return state(id);
+    },
+    url: (id, channel) =>
+      `https://reviewer.example.com/webhooks/session/${id}${channel === 'instructions' ? '/instructions' : ''}`,
+    key,
   });
-  app.use(
-    sessionWebhookRoutes({
-      state,
-      update: (id, input) => {
-        found(id);
-        hook = normalizeWebhookSettings(input, hook);
-        return state(id);
-      },
-      rotate: (id) => {
-        found(id);
-        hook = { ...hook, epoch: hook.epoch + 1 };
-        return state(id);
-      },
-      url: (id, channel) =>
-        `https://reviewer.example.com/webhooks/session/${id}${channel === 'instructions' ? '/instructions' : ''}`,
-      key,
-    }),
+  app.use((req, res, next) =>
+    req.headers['x-test-operator'] ? routes(req, res, next) : agentOnly(routes)(req, res, next),
   );
+  app.use('/api', (req, res) => res.status(410).json({ error: 'This route is retired' }));
   server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
@@ -60,14 +58,13 @@ afterEach(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
-const request = (path, { browser = true, token = '', method = 'GET', body, origin } = {}) =>
+const request = (path, { operator = true, token = '', method = 'GET', body } = {}) =>
   fetch(`${base}/api/dev/sessions/${path}`, {
     method,
     headers: {
       'Content-Type': 'application/json',
-      ...(browser ? { cookie: 'test-browser' } : {}),
+      ...(operator ? { 'x-test-operator': '1' } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(origin ? { origin } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
     redirect: 'manual',
@@ -142,7 +139,7 @@ describe('a session’s webhook in the dashboard', () => {
     expect((await request('nope/webhook/rotate', { method: 'POST' })).status).toBe(404);
   });
 
-  it('is the signed-in browser’s alone: no agent token reads a key or arms a webhook', async () => {
+  it('is the operator’s alone: no agent token reads a key or arms a webhook', async () => {
     for (const [path, method] of [
       ['abc123/webhook', 'GET'],
       ['abc123/webhook', 'PUT'],
@@ -151,20 +148,10 @@ describe('a session’s webhook in the dashboard', () => {
       const body = method === 'GET' ? undefined : { armed: true };
       const agent = await request(path, { method, token: 'session-token', body });
       expect(agent.status).toBe(403);
-      const stranger = await request(path, { method, browser: false, body });
-      expect(stranger.status).toBe(401);
+      const stranger = await request(path, { method, operator: false, body });
+      expect(stranger.status).toBe(410);
     }
     expect(hook.armed).toBe(false);
     expect(key).not.toHaveBeenCalled();
-  });
-
-  it('takes no write from another origin', async () => {
-    const res = await request('abc123/webhook', {
-      method: 'PUT',
-      body: { armed: true },
-      origin: 'https://evil.example',
-    });
-    expect(res.status).toBe(403);
-    expect(hook.armed).toBe(false);
   });
 });
