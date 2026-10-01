@@ -12,6 +12,7 @@ import {
   parseContextReport,
   contextWindowFor,
   claudeUsage,
+  retryAfterAt,
   grokUsage,
   zaiUsage,
   canResume,
@@ -1487,27 +1488,49 @@ describe('the grok parser', () => {
   });
 });
 
+describe('retryAfterAt', () => {
+  const now = Date.parse('2026-10-01T12:00:00Z');
+
+  it('reads seconds and HTTP dates', () => {
+    expect(retryAfterAt('120', now)).toBe('2026-10-01T12:02:00.000Z');
+    expect(retryAfterAt('Thu, 01 Oct 2026 12:30:00 GMT', now)).toBe('2026-10-01T12:30:00.000Z');
+  });
+
+  it('holds off fifteen minutes when the header is missing, unreadable or past', () => {
+    for (const h of [null, '', 'soon', '0', 'Thu, 01 Oct 2026 11:00:00 GMT'])
+      expect(retryAfterAt(h, now)).toBe('2026-10-01T12:15:00.000Z');
+  });
+});
+
 describe('claudeUsage', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
-  function stub(status, body = {}) {
+  function stub(status, body = {}, headers = {}) {
     vi.spyOn(fs, 'readFileSync').mockReturnValue(
       JSON.stringify({ claudeAiOauth: { accessToken: 'access-token' } }),
     );
-    const fetch = vi.fn(async () => ({ ok: status === 200, status, json: async () => body }));
+    const fetch = vi.fn(async () => ({
+      ok: status === 200,
+      status,
+      headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+      json: async () => body,
+    }));
     vi.stubGlobal('fetch', fetch);
     return fetch;
   }
 
-  it('reports a refused usage check without inventing quota usage', async () => {
-    stub(429);
-    expect(await claudeUsage('/tmp/claude-home')).toEqual({
-      windows: [],
-      error: 'Claude rate limited the usage check. Please try again later.',
-    });
+  it('reports a refused usage check, and when to ask again, without inventing quota usage', async () => {
+    stub(429, {}, { 'retry-after': '2755' });
+    const before = Date.now();
+    const usage = await claudeUsage('/tmp/claude-home');
+    expect(usage.windows).toEqual([]);
+    expect(usage.error).toMatch(/^Claude rate limited the usage check\. It can be checked again at /);
+    const wait = Date.parse(usage.retryAt) - before;
+    expect(wait).toBeGreaterThanOrEqual(2755_000);
+    expect(wait).toBeLessThan(2765_000);
   });
 
   it('reports HTTP failures without exposing the upstream response body', async () => {

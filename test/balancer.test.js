@@ -230,8 +230,7 @@ describe('pickLeastUsedProvider', () => {
     // Nothing cached yet: picker order decides, and the pick kicks off the reads.
     expect(pickLeastUsedProvider(row(1)).id).toBe(1);
     await vi.waitFor(() => expect(providers.claudeUsage).toHaveBeenCalledTimes(3));
-    await Promise.resolve();
-    expect(pickLeastUsedProvider(row(1)).id).toBe(2);
+    await vi.waitFor(() => expect(pickLeastUsedProvider(row(1), { refresh: false }).id).toBe(2));
   });
 });
 
@@ -279,6 +278,43 @@ describe('providerUsage', () => {
     expect(await providerUsage(row(2))).toBe(null);
     expect(await providerUsage(row(2))).toBe(null);
     expect(providers.claudeUsage).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('providerUsage after a rate limit', () => {
+  const refused = (retryAt) => ({ windows: [], error: 'Claude rate limited the usage check.', retryAt });
+
+  it('does not read the meter again before retryAt, not even on a manual refresh', async () => {
+    state.usage['/claude-1'] = refused(new Date(Date.now() + 60 * 60_000).toISOString());
+    await providerUsage(row(1));
+    await providerUsage(row(1), { ttlMs: 0 });
+    await providerUsage(row(1), { ttlMs: 0 });
+    expect(providers.claudeUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads it again once retryAt has passed', async () => {
+    state.usage['/claude-1'] = refused(new Date(Date.now() - 1000).toISOString());
+    await providerUsage(row(1));
+    state.usage['/claude-1'] = windows(20);
+    expect(await providerUsage(row(1), { ttlMs: 0 })).toEqual(windows(20));
+    expect(providers.claudeUsage).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the last windows, marked stale, so the balancer still has a load', async () => {
+    state.usage['/claude-1'] = windows(40, 10);
+    await providerUsage(row(1));
+    const retryAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    state.usage['/claude-1'] = refused(retryAt);
+    const value = await providerUsage(row(1), { ttlMs: 0 });
+    expect(value).toEqual({ ...refused(retryAt), windows: windows(40, 10).windows, stale: true });
+    expect(providerLoad(cachedProviderUsage(row(1)))).toBe(providerLoad(windows(40, 10)));
+  });
+
+  it('does not keep old windows under a failure that gives no retry time', async () => {
+    state.usage['/claude-1'] = windows(40);
+    await providerUsage(row(1));
+    state.usage['/claude-1'] = { windows: [], error: 'Claude usage check failed (HTTP 401).' };
+    expect(await providerUsage(row(1), { ttlMs: 0 })).toEqual(state.usage['/claude-1']);
   });
 });
 
