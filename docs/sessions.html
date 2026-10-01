@@ -352,12 +352,11 @@
       </p>
       <p>
         A cost total wears a <code>+</code> when some of the turns behind it could not be priced at all, so an
-        unpriced turn cannot be read as a free one, and a <code>~</code> when some of them were priced by the
-        dashboard rather than by their own CLI: their tokens at the model's published list price, from the
-        <a href="https://models.dev">models.dev</a> catalog the app fetches once a day and caches. The Cost
-        tile and every cost tooltip say how many turns of the total that was. An estimate is arithmetic over
-        tokens, never an invoice: the ledger itself still stores only what the providers reported. Same
-        numbers as JSON:
+        unpriced turn cannot be read as a free one. Turns their own CLI did not price are priced by the
+        dashboard and shown under the same single price: their tokens at the model's published list price,
+        from the <a href="https://models.dev">models.dev</a> catalog the app fetches once a day and caches.
+        That part is arithmetic over tokens, never an invoice: the ledger itself still stores only what the
+        providers reported. Same numbers as JSON:
       </p>
       <pre><code>GET /api/dev/usage/all?period=month|prev|all</code></pre>
 

@@ -1375,17 +1375,7 @@ dashboard.register('get', '/api/dev/usage', async (req, res) => {
 // make the per-project rows fail to add up to the headline totals.
 api.get('/api/dev/usage/all', async (req, res) => {
   const filter = {};
-  for (const key of [
-    'project',
-    'model',
-    'provider',
-    'activity',
-    'account',
-    'session',
-    'pricing',
-    'from',
-    'to',
-  ]) {
+  for (const key of ['project', 'model', 'provider', 'activity', 'account', 'session', 'from', 'to']) {
     const value = req.query[key];
     if (value != null) filter[key] = Array.isArray(value) ? value.map(String) : String(value);
   }

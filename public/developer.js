@@ -1669,9 +1669,9 @@
     return next;
   }
 
-  // "12.4k tok · ~$0.83": what the session has consumed so far. Codex does
-  // not report a price, so its catalog-priced total carries the same estimate
-  // marker and partial-total suffix as the usage dashboards.
+  // "12.4k tok · $0.83": what the session has consumed so far. Codex does
+  // not report a price, so its total is the catalog-priced one, with the same
+  // partial-total suffix as the usage dashboards.
   function usageChip(s) {
     const u = sessionUsage(s);
     const tokens = (u.inputTokens || 0) + (u.outputTokens || 0);
@@ -2728,7 +2728,7 @@
           (e.isError ? 'text-danger' : 'text-muted');
         const bits = [];
         if (e.isError) bits.push('turn failed');
-        if (e.costUsd != null) bits.push(`${e.costEstimated ? '~' : ''}$${e.costUsd.toFixed(4)}`);
+        if (e.costUsd != null) bits.push(`$${e.costUsd.toFixed(4)}`);
         if (e.durationMs != null) bits.push(`${Math.round(e.durationMs / 1000)}s`);
         if (e.numTurns != null) bits.push(`${e.numTurns} turns`);
         if (e.inputTokens != null || e.outputTokens != null)
@@ -4955,25 +4955,19 @@
 
   function fmtCost(u) {
     if (u.costUsd == null) return null;
-    // Two marks, both the board header's: `~` says some of the turns in the
-    // total were priced from published list prices rather than by their own
-    // CLI, `+` that some carry no price at all. A total can wear both.
-    return `${u.estimatedTurns ? '~' : ''}$${u.costUsd.toFixed(2)}${u.unpricedTurns ? '+' : ''}`;
+    // One price, whether a turn's CLI reported it or the list prices filled it
+    // in. The only mark left is `+`: some turns carry no price at all, so the
+    // total is a floor.
+    return `$${u.costUsd.toFixed(2)}${u.unpricedTurns ? '+' : ''}`;
   }
 
-  // What the marks mean, in words: the tooltip on every cost cell and the line
-  // under the Cost tile. Said the same way everywhere so `~` and `+` only ever
-  // have to be explained once.
+  // What the `+` means, in words: the tooltip on every cost cell and the line
+  // under the Cost tile. Said the same way everywhere so the mark only ever
+  // has to be explained once.
   function costNote(u) {
-    const bits = [];
-    if (u.estimatedTurns)
-      bits.push(
-        `${u.estimatedTurns} of ${u.turns} turn${u.turns === 1 ? '' : 's'} estimated from list prices`,
-      );
     if (u.unpricedTurns)
-      bits.push(`${u.unpricedTurns} turn${u.unpricedTurns === 1 ? '' : 's'} could not be priced at all`);
-    if (bits.length) return bits.join(' · ');
-    return u.costUsd == null ? 'no turn reported a price' : 'as the providers priced it';
+      return `${u.unpricedTurns} of ${u.turns} turn${u.turns === 1 ? '' : 's'} could not be priced`;
+    return u.costUsd == null ? 'no turn carries a price' : 'every turn priced';
   }
 
   // ---------- share donuts ----------
@@ -5137,7 +5131,7 @@
   // The four headline tiles, said once for both dashboards: the project's own
   // 📊 pane and the main one draw the same four over different windows.
   const TILE_HINTS = {
-    cost: 'What the window cost, over the turns that carry a price. Turns their CLI never priced are filled in from published list prices where the catalog knows the model, and left out of the total where it does not — the line under the figure says which happened.',
+    cost: 'What the window cost, over the turns that carry a price. Turns their CLI never priced are filled in from published list prices where the catalog knows the model, and left out of the total where it does not — the line under the figure says how many.',
     tokens:
       'Input plus output over every turn in the window. Input counts the context re-sent on each model call, so it dwarfs output and is mostly cache reads.',
     sessions:
@@ -5999,7 +5993,7 @@
       return `${label}: ${percent > 0 ? '+' : ''}${percent.toFixed(1)}%`;
     };
     const comparison = previous
-      ? `<p class="mt-3 text-xs text-muted">Compared with ${esc(new Date(previous.from).toLocaleDateString())} – ${esc(new Date(previous.to - 1).toLocaleDateString())}${previous.partial ? ' (matching elapsed time)' : ''}: ${['costUsd', 'totalTokens', 'sessions'].map((key, n) => delta(key, ['Cost', 'Tokens', 'Sessions'][n])).join(' · ')}${u.estimatedTurns || previous.estimatedTurns ? ' · includes estimates' : ''}${u.unpricedTurns || previous.unpricedTurns ? ' · cost comparison is partial' : ''}</p>`
+      ? `<p class="mt-3 text-xs text-muted">Compared with ${esc(new Date(previous.from).toLocaleDateString())} – ${esc(new Date(previous.to - 1).toLocaleDateString())}${previous.partial ? ' (matching elapsed time)' : ''}: ${['costUsd', 'totalTokens', 'sessions'].map((key, n) => delta(key, ['Cost', 'Tokens', 'Sessions'][n])).join(' · ')}${u.unpricedTurns || previous.unpricedTurns ? ' · cost comparison is partial' : ''}</p>`
       : '';
     const sessions = u.topSessions
       .map(
@@ -6011,10 +6005,10 @@
       ${statTile('Cost / session', averageCost(i.costPerSession), 'within this selection', costNote(u))}
       ${statTile('Cost / turn', averageCost(i.costPerTurn), 'within this selection', costNote(u))}
       ${statTile('Average turn duration', i.averageDurationMs == null ? '—' : fmtDur(i.averageDurationMs), `${i.timedTurns} turns with timing`, 'Averages only turns whose duration was recorded.')}
-      ${statTile('Pricing coverage', `${u.turns ? Math.round(((u.turns - u.unpricedTurns) / u.turns) * 100) : 0}%`, `${i.reportedTurns} reported · ${u.estimatedTurns} estimated · ${u.unpricedTurns} unpriced`, 'Share of turns with a reported or estimated cost.')}
+      ${statTile('Pricing coverage', `${u.turns ? Math.round(((u.turns - u.unpricedTurns) / u.turns) * 100) : 0}%`, `${u.turns - u.unpricedTurns} of ${u.turns} turns priced`, 'Share of turns that carry a price.')}
     </div>${comparison}
-    ${bucketChart(u.buckets, { unit: u.unit, today: u.today, metric: 'costUsd', title: u.unit === 'month' ? 'Cost per month' : 'Cost per day', hint: 'Reported and estimated USD costs. Unpriced usage is excluded; hover each bar for details.' }) || '<p class="mt-3 text-xs text-muted">No priced spend to plot in this selection.</p>'}
-    ${sessions ? `<div class="mt-3 rounded-xl border border-line bg-raise p-3"><div class="text-sm">Most expensive sessions in this selection</div><p class="text-xs text-muted">Top 10 by known cost, including estimates. Deleted sessions retain their usage but cannot be reopened.</p><table class="w-full text-sm"><thead><tr><th class="text-left">Session</th><th class="text-right pr-3">Turns</th><th class="text-right pr-3">Tokens</th><th class="text-right">Cost</th></tr></thead><tbody>${sessions}</tbody></table></div>` : ''}`;
+    ${bucketChart(u.buckets, { unit: u.unit, today: u.today, metric: 'costUsd', title: u.unit === 'month' ? 'Cost per month' : 'Cost per day', hint: 'USD cost per bar. Unpriced usage is excluded; hover each bar for details.' }) || '<p class="mt-3 text-xs text-muted">No priced spend to plot in this selection.</p>'}
+    ${sessions ? `<div class="mt-3 rounded-xl border border-line bg-raise p-3"><div class="text-sm">Most expensive sessions in this selection</div><p class="text-xs text-muted">Top 10 by known cost. Deleted sessions retain their usage but cannot be reopened.</p><table class="w-full text-sm"><thead><tr><th class="text-left">Session</th><th class="text-right pr-3">Turns</th><th class="text-right pr-3">Tokens</th><th class="text-right">Cost</th></tr></thead><tbody>${sessions}</tbody></table></div>` : ''}`;
   }
 
   function renderHome() {
@@ -6053,15 +6047,6 @@
         })),
       );
     }
-    fillHomePicker(
-      'home-pricing',
-      'pricing',
-      'All pricing',
-      ['reported', 'estimated', 'unpriced'].map((key) => ({
-        key,
-        label: key[0].toUpperCase() + key.slice(1),
-      })),
-    );
     $('home-dates').classList.toggle('hidden', homePeriod !== 'custom');
     const list = $('home-list');
     if (homeError && !u) {
@@ -6152,7 +6137,7 @@
     loadHomeUsage();
   });
 
-  for (const which of ['project', 'model', 'activity', 'provider', 'account', 'pricing', 'session']) {
+  for (const which of ['project', 'model', 'activity', 'provider', 'account', 'session']) {
     $(`home-${which}`).addEventListener('change', (e) => {
       const value = ['project', 'model'].includes(which)
         ? [...$(`home-${which}`).querySelectorAll('input:checked')].map((input) => input.value)
