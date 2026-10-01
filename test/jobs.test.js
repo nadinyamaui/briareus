@@ -859,8 +859,8 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(createDevSession({ ...base }).workerRuntime).toBeNull();
   });
 
-  // What the mobile API's start_session relies on: it passes a picked runtime
-  // on as sent (lib/dashboard-routes.js).
+  // What the client API's session start relies on: it passes a named runtime
+  // on as sent (lib/api-v1.js).
   it('falls to the provider’s defaults for a model or effort it does not offer, or none at all', () => {
     const picked = createDevSession({ ...base, model: 'claude-fable-5-1', effort: 'low' });
     expect(picked).toMatchObject({ model: 'claude-fable-5-1', effort: 'low' });

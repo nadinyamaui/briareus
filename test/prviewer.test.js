@@ -4,7 +4,7 @@ const cfg = vi.hoisted(() => ({ githubToken: 'token' }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
 vi.mock('../lib/github.js', () => ({ githubRest: vi.fn(), githubGraphql: vi.fn() }));
 import { githubRest } from '../lib/github.js';
-import { commitView, mergePullRequest, pullRequestView } from '../lib/prviewer.js';
+import { commitView, mergePullRequest, pullRequestView, pullRequestViewOptions } from '../lib/prviewer.js';
 
 const project = { repo: 'owner/repo' };
 const raw = {
@@ -251,6 +251,21 @@ describe('in-app pull request content', () => {
       expect(githubRest).not.toHaveBeenCalled();
     },
   );
+
+  it('reads its options from a query, where every value is a string', () => {
+    expect(pullRequestViewOptions({ repo: 'owner/repo', pr: '42' })).toEqual({
+      section: 'description',
+      page: 1,
+      headSha: '',
+      baseSha: '',
+    });
+    expect(pullRequestViewOptions({ section: 'files', page: '2', headSha: 'abc', baseSha: 'def' })).toEqual({
+      section: 'files',
+      page: 2,
+      headSha: 'abc',
+      baseSha: 'def',
+    });
+  });
 });
 
 describe('the lists a pull request carries', () => {
