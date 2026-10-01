@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const cfg = vi.hoisted(() => ({ githubToken: 'token' }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
@@ -434,10 +434,19 @@ describe('merging from the in-app viewer', () => {
       mergePullRequest(project, 42, { method: 'rebase', headSha: sha, baseRef: 'main' }),
     ).resolves.toEqual({
       merged: true,
+      status: 'merged',
       sha: 'b'.repeat(40),
       message: 'Merged',
     });
-    expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'GET', '/repos/owner/repo/pulls/42');
+    expect(githubRest).toHaveBeenCalledWith(
+      expect.anything(),
+      'GET',
+      '/repos/owner/repo/pulls/42',
+      undefined,
+      {
+        apiVersion: '2026-03-10',
+      },
+    );
     expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'PUT', '/repos/owner/repo/pulls/42/merge', {
       merge_method: 'rebase',
       sha,
@@ -488,6 +497,103 @@ describe('merging from the in-app viewer', () => {
     cfg.githubToken = '';
     await expect(mergePullRequest(project, 42, { headSha: sha, baseRef: 'main' })).rejects.toMatchObject({
       status: 503,
+    });
+  });
+
+  describe('a stacked pull request', () => {
+    const stacked = answer(200, { ...raw, stack: { id: 7, number: 3, size: 2, position: 2 } });
+    // The pull read, the merge-async request, then each poll of its result.
+    const githubStack = (accepted, ...polls) =>
+      githubRest.mockImplementation(async (_cfg, verb, url) => {
+        if (verb === 'PUT') return accepted;
+        if (url.includes('/merge-async/')) return polls.shift() ?? answer(200, pendingBody);
+        return stacked;
+      });
+    const pendingBody = { status: 'pending', details: { uuid: 'u-1', message: 'Merge requested' } };
+
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('merges through the asynchronous endpoint and waits for the result', async () => {
+      githubStack(
+        answer(202, pendingBody),
+        answer(200, { status: 'merged', details: { message: 'Merged', sha: 'c'.repeat(40) } }),
+      );
+      const merging = mergePullRequest(project, 42, { method: 'rebase', headSha: sha, baseRef: 'main' });
+      await vi.runAllTimersAsync();
+      await expect(merging).resolves.toEqual({
+        merged: true,
+        status: 'merged',
+        sha: 'c'.repeat(40),
+        message: 'Merged',
+      });
+      expect(githubRest).toHaveBeenCalledWith(
+        expect.anything(),
+        'PUT',
+        '/repos/owner/repo/pulls/42/merge-async',
+        { merge_method: 'rebase', sha },
+        { apiVersion: '2026-03-10' },
+      );
+      expect(githubRest).toHaveBeenCalledWith(
+        expect.anything(),
+        'GET',
+        '/repos/owner/repo/pulls/42/merge-async/u-1',
+        undefined,
+        { apiVersion: '2026-03-10' },
+      );
+      expect(githubRest).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'PUT',
+        '/repos/owner/repo/pulls/42/merge',
+        expect.anything(),
+      );
+    });
+
+    it('reports a stack sent to the merge queue without polling', async () => {
+      githubStack(answer(200, { status: 'enqueued', details: { message: 'Enqueued' } }));
+      await expect(mergePullRequest(project, 42, { headSha: sha, baseRef: 'main' })).resolves.toEqual({
+        merged: false,
+        status: 'enqueued',
+        sha: null,
+        message: 'Added to the merge queue with the 1 below it in the stack',
+      });
+      expect(githubRest).toHaveBeenCalledTimes(2);
+    });
+
+    it('reports a merge still running after the wait as pending', async () => {
+      githubStack(answer(202, pendingBody));
+      const merging = mergePullRequest(project, 42, { headSha: sha, baseRef: 'main' });
+      await vi.runAllTimersAsync();
+      await expect(merging).resolves.toMatchObject({ merged: false, status: 'pending' });
+      // The pull read, the request, then ten polls.
+      expect(githubRest).toHaveBeenCalledTimes(12);
+    });
+
+    it('refuses with 409 when GitHub reports the stacked merge failed', async () => {
+      githubStack(
+        answer(202, pendingBody),
+        answer(200, { status: 'failed', details: { message: 'Required checks are failing' } }),
+      );
+      const merging = mergePullRequest(project, 42, { headSha: sha, baseRef: 'main' });
+      const settled = expect(merging).rejects.toMatchObject({
+        status: 409,
+        message: 'GitHub could not merge the stack: Required checks are failing',
+      });
+      await vi.runAllTimersAsync();
+      await settled;
+    });
+
+    it.each([
+      [400, 409],
+      [409, 409],
+      [422, 422],
+      [500, 502],
+    ])('passes a refused request (GitHub %s) through as %s', async (githubStatus, status) => {
+      githubStack(answer(githubStatus, { message: 'Pull request is not mergeable' }));
+      await expect(mergePullRequest(project, 42, { headSha: sha, baseRef: 'main' })).rejects.toMatchObject({
+        status,
+        message: 'GitHub refused the merge: Pull request is not mergeable',
+      });
     });
   });
 
