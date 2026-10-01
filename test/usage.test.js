@@ -1032,7 +1032,7 @@ describe('dashboard filters and insights', () => {
     ).toMatchObject({ accountId: 7, accountLabel: 'Work', sessionTitle: 'Build' });
   });
 
-  it('combines multiple projects/models with account, activity, provider, pricing and session', () => {
+  it('combines multiple projects/models with account, activity, provider and session', () => {
     expect(
       filterUsageRows(rows, projects, {
         project: ['p:1', 'p:2'],
@@ -1040,11 +1040,10 @@ describe('dashboard filters and insights', () => {
         account: '7',
         activity: 'chat',
         provider: 'codex',
-        pricing: 'estimated',
         session: 'a',
       }),
     ).toEqual([rows[0]]);
-    expect(filterUsageRows(rows, projects, { account: 'unknown', pricing: 'unpriced' })).toEqual([rows[2]]);
+    expect(filterUsageRows(rows, projects, { account: 'unknown' })).toEqual([rows[2]]);
     expect(filterUsageRows(rows, projects, { account: 'missing' })).toEqual([]);
     expect(filterUsageRows(rows, projects, { project: [], model: [] })).toEqual(rows);
   });

@@ -783,7 +783,6 @@ Read usage and costs across every project. Needs `admin`.
 | `activity` | `string`                                   | Only this kind of work. Repeatable                                          |
 | `account`  | `string`                                   | Only this account; a key from `options.accounts`. Repeatable                |
 | `session`  | `string`                                   | Only this session; a key from `options.sessions`. Repeatable                |
-| `pricing`  | `string`                                   | Only turns priced this way                                                  |
 
 **Returns** `object`. Totals, `buckets` over time, breakdowns by `projects`, `providers`, `models` and `activities`, `topSessions`, a `comparison` with the window before, and the `options` each filter accepts.
 
