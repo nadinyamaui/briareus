@@ -1,4 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 vi.mock('../lib/db.js', () => ({ loadAppSetting: vi.fn(), saveAppSetting: vi.fn() }));
 vi.mock('../lib/projects.js', () => ({ getProject: vi.fn() }));
@@ -150,6 +153,21 @@ describe('local checkout auto-update', () => {
     expect(status.trigger.prNumber).toBe(3);
   });
 
+  it('does not let a merge into another branch displace one into the checkout’s', async () => {
+    const checkout = fakeCheckout();
+    let open;
+    const gate = new Promise((resolve) => (open = resolve));
+    const claim = vi.fn(() => gate);
+    const { u } = updater(project(), checkout, { claim });
+    const first = u.onMerged('acme/shop', { base: 'main', prNumber: 1 });
+    u.onMerged('acme/shop', { base: 'main', prNumber: 2 });
+    u.onMerged('acme/shop', { base: 'release/1.x', prNumber: 3 });
+    open();
+    await first;
+    expect(claim).toHaveBeenCalledTimes(3);
+    expect(checkout.calls.filter((c) => c === 'git fetch origin main')).toHaveLength(2);
+  });
+
   it('reports an update the server restarted under as interrupted', async () => {
     const { u, saved } = updater(project(), fakeCheckout());
     saved.set('local-update:acme/shop', { state: 'running', startedAt: 1 });
@@ -171,9 +189,29 @@ describe('local checkout auto-update', () => {
 });
 
 describe('runCommand', () => {
+  let dir;
+  beforeAll(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'local-update-'));
+  });
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
   it('runs a shell line and hands back its exit code and output', async () => {
     const r = await runCommand('echo hi && exit 3', null, { cwd: process.cwd(), env: process.env });
     expect(r).toEqual({ code: 3, output: 'hi\n' });
+  });
+
+  it('finishes when the command exits, leaving a worker it backgrounded running', async () => {
+    const started = Date.now();
+    const r = await runCommand('echo up; sleep 30 & echo $! > pid', null, {
+      cwd: dir,
+      env: process.env,
+      timeoutMs: 5000,
+    });
+    expect(r).toEqual({ code: 0, output: 'up\n' });
+    expect(Date.now() - started).toBeLessThan(3000);
+    const pid = Number(fs.readFileSync(path.join(dir, 'pid'), 'utf8'));
+    expect(() => process.kill(pid, 0)).not.toThrow();
+    process.kill(pid, 'SIGKILL');
   });
 
   it('kills a command that runs past its time', async () => {
