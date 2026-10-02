@@ -2,6 +2,8 @@
 import express from 'express';
 import { createDeploymentService } from './lib/deployments.js';
 import { deploymentRoutes } from './lib/deployment-routes.js';
+import { createForgeClient } from './lib/forge.js';
+import { forgeRoutes } from './lib/forge-routes.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
 import { estimateCosts } from './lib/prices.js';
 import { previewFeedbackRoutes } from './lib/preview-feedback.js';
@@ -541,6 +543,7 @@ api.use(
     readyForSelfDeploy: () => maintenanceState(listDevSessions(), sshService.runningCount()).ready,
   }),
 );
+api.use(forgeRoutes({ client: createForgeClient() }));
 
 api.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
