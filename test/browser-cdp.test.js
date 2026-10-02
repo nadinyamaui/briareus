@@ -56,10 +56,6 @@ async function probe(id) {
   };
 }
 
-const page = (targetId, url = 'about:blank', title = url) => ({
-  targetInfo: { targetId, type: 'page', url, title },
-});
-
 describe('starting', () => {
   it('launches, finds the first tab and hands out a loopback endpoint', async () => {
     const id = sessionId();
