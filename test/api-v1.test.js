@@ -17,20 +17,15 @@ const jobs = {
   review: { id: 'review', repo, kind: 'review' },
 };
 
-let auth, server, url, clock, apiOn, bus, sessions, project, handler, tokens, savesFail, previewAccess;
+let auth, server, url, clock, apiOn, bus, sessions, project, handler, tokens, previewAccess;
 beforeEach(async () => {
   let saved = [];
-  savesFail = false;
   previewAccess = null;
-  // What the database driver raises: an error with a code and no HTTP status.
-  const down = () =>
-    Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3306'), { code: 'ECONNREFUSED' });
   clock = Date.now();
   apiOn = true;
   auth = createMobileAuth({
     load: async () => structuredClone(saved),
     save: async (_name, value) => {
-      if (savesFail) throw down();
       saved = structuredClone(value);
     },
     now: () => clock,
@@ -76,7 +71,6 @@ beforeEach(async () => {
   app.use(
     apiV1Routes({
       auth,
-      listProjects: () => [project, { repo: 'other/project', label: 'Other' }],
       apiEnabled: () => apiOn,
       ownerSecret: () => secret,
       handlers,
@@ -215,8 +209,7 @@ describe('who gets in', () => {
       repos: [repo],
       permission: 'owner',
     });
-    for (const route of ['/sessions', '/settings/providers', '/settings/devices'])
-      expect((await request(route)).status).toBe(403);
+    for (const route of ['/sessions', '/settings/providers']) expect((await request(route)).status).toBe(403);
     expect(handler).not.toHaveBeenCalled();
   });
 
@@ -469,61 +462,22 @@ describe('the event streams', () => {
   });
 });
 
-describe('tokens and connections', () => {
-  const admin = (route, options = {}) => request(route, { token: tokens.admin, ...options });
-
-  it('lists the tokens issued without their secrets', async () => {
-    const { devices, projects } = await (await admin('/settings/devices')).json();
-    expect(devices.map((d) => d.permission).sort()).toEqual(['admin', 'manage', 'read']);
-    expect(JSON.stringify(devices)).not.toMatch(/brm_|Hash/);
-    expect(projects).toEqual([
-      { repo, label: 'Project' },
-      { repo: 'other/project', label: 'Other' },
-    ]);
-  });
-
-  it('issues a token that works, and revokes it', async () => {
-    const issued = await admin('/settings/devices', {
-      method: 'POST',
-      body: { label: 'Phone', permission: 'read', repos: [repo], days: 7 },
-    });
-    expect(issued.status).toBe(201);
-    const { device, token } = await issued.json();
-    expect(device).toMatchObject({ label: 'Phone', permission: 'read', repos: [repo] });
-    expect((await request('/sessions', { token })).status).toBe(200);
-    expect(await (await admin(`/settings/devices/${device.id}`, { method: 'DELETE' })).json()).toEqual({
-      ok: true,
-    });
-    expect((await request('/sessions', { token })).status).toBe(401);
-  });
-
-  it('refuses a token for a project that does not exist, or with no project and no admin', async () => {
-    for (const body of [
-      { label: 'x', permission: 'read', repos: ['no/such'], days: 7 },
-      { label: 'x', permission: 'manage', repos: [], days: 7 },
-      { label: 'x', permission: 'owner', repos: [repo], days: 7 },
-      { label: 'x', permission: 'read', repos: [repo], days: 0 },
+describe('tokens', () => {
+  // Issuing, listing and revoking other tokens is `npm run create-token`'s,
+  // on the machine: no token, admin or not, reaches them over the API.
+  it('cannot be managed through the API', async () => {
+    for (const [method, route] of [
+      ['GET', '/settings/devices'],
+      ['POST', '/settings/devices'],
+      ['DELETE', '/settings/devices/x'],
     ]) {
-      const response = await admin('/settings/devices', { method: 'POST', body });
-      expect(response.status).toBe(400);
-      expect((await response.json()).error).toBeTruthy();
+      const response = await request(route, {
+        token: tokens.admin,
+        method,
+        body: method === 'POST' ? {} : undefined,
+      });
+      expect([method, response.status]).toEqual([method, 404]);
     }
-    expect(auth.list()).toHaveLength(3);
-  });
-
-  it('answers a store that cannot save as the server’s failure, without the driver’s words', async () => {
-    savesFail = true;
-    const response = await admin('/settings/devices', {
-      method: 'POST',
-      body: { label: 'x', permission: 'read', repos: [repo], days: 7 },
-    });
-    expect(response.status).toBe(500);
-    expect(await response.json()).toEqual({ error: 'Server error' });
-  });
-
-  it('keeps token management from anything below admin', async () => {
-    expect((await request('/settings/devices')).status).toBe(403);
-    expect((await request('/settings/devices', { method: 'POST', body: {} })).status).toBe(403);
     expect(auth.list()).toHaveLength(3);
   });
 });
