@@ -876,12 +876,16 @@ and [deployment statuses](https://docs.github.com/en/rest/deployments/statuses).
 
 ### Laravel Forge
 
-With `FORGE_API_TOKEN` and `FORGE_ORGANIZATION` set (see `.env.example`), an
-admin token reaches one Forge organization through `/api/v1/forge`: it lists
-the servers and each server's sites, reads a site, and reads or replaces a
-site's deployment script and `.env`. The server makes every call with its own
-Forge token, so no client holds it, and the process environment it lives in is
-stripped of `FORGE_*` before any session's child sees it. Forge allows 60 calls
+Forge accounts are kept in the database, added and edited through
+`/api/v1/settings/forge/accounts`: each is an organization (the slug in
+`forge.laravel.com/<organization>/…`), an API token for it, and the projects it
+is available to, so a client working on a project offers that project's
+accounts (`?repo=owner/name`). The token is stored encrypted under
+`CREDENTIALS_KEY` and never sent back. Through
+`/api/v1/forge/accounts/:account`, an admin token lists the account's servers
+and each server's sites, reads a site, and reads or replaces a site's
+deployment script and `.env`; the server makes every call with the account's
+token, so no client holds it. Forge allows 60 calls
 a minute per token; past that the routes answer 429. Replacing a `.env` is
 accepted by Forge and written to the server shortly after; it does not deploy,
 clear the config cache or restart queue workers.

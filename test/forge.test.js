@@ -11,16 +11,28 @@ function forge(...answers) {
     const [status, body, headers] = answers.shift();
     return new Response(body === undefined ? null : JSON.stringify(body), { status, headers });
   });
-  const client = createForgeClient({ config: () => ({ forge: FORGE }), request });
+  const client = createForgeClient({ account: () => FORGE, request })(1);
   return { client, request };
 }
 
 describe('the Forge client', () => {
-  it('refuses with 503 and calls nothing when the server has no Forge token', async () => {
+  it('calls nothing for an account that is not there', async () => {
     const request = vi.fn();
-    const client = createForgeClient({ config: () => ({ forge: null }), request });
-    await expect(client.servers()).rejects.toMatchObject({ status: 503 });
+    const account = () => {
+      throw Object.assign(new Error('Forge account not found'), { status: 404 });
+    };
+    await expect(createForgeClient({ account, request })(9).servers()).rejects.toMatchObject({ status: 404 });
     expect(request).not.toHaveBeenCalled();
+  });
+
+  it('calls each account’s organization with its own token', async () => {
+    const accounts = { 1: FORGE, 2: { token: 'other-secret', organization: 'hq' } };
+    const request = vi.fn(async () => new Response(JSON.stringify({ data: [], meta: {} }), { status: 200 }));
+    const client = createForgeClient({ account: (id) => accounts[id], request });
+    await client(2).servers();
+    const [url, init] = request.mock.calls[0];
+    expect(url).toContain('/orgs/hq/servers?');
+    expect(init.headers.Authorization).toBe('Bearer other-secret');
   });
 
   it('lists servers under the organization with its token, flattened, with the next cursor', async () => {
@@ -101,7 +113,7 @@ describe('the Forge client', () => {
     const { client } = forge([401, { message: 'Unauthenticated.' }]);
     await expect(client.servers()).rejects.toMatchObject({
       status: 502,
-      message: expect.stringContaining('FORGE_API_TOKEN'),
+      message: expect.stringContaining("account's token"),
     });
   });
 
@@ -122,11 +134,12 @@ describe('the Forge routes', () => {
   async function serve(client, fn) {
     const app = express();
     app.use(express.json());
-    app.use(forgeRoutes({ client }));
+    const forAccount = vi.fn(() => client);
+    app.use(forgeRoutes({ client: forAccount, accounts: {}, getProject: () => null }));
     const server = app.listen(0, '127.0.0.1');
     await new Promise((r) => server.once('listening', r));
     try {
-      await fn(`http://127.0.0.1:${server.address().port}`);
+      await fn(`http://127.0.0.1:${server.address().port}`, forAccount);
     } finally {
       await new Promise((r) => server.close(r));
     }
@@ -137,15 +150,16 @@ describe('the Forge routes', () => {
     const sites = vi.fn(async () => {
       throw Object.assign(new Error('Not found on Forge'), { status: 404 });
     });
-    await serve({ setEnvironment, sites }, async (base) => {
-      const put = await fetch(`${base}/api/forge/servers/7/sites/9/env`, {
+    await serve({ setEnvironment, sites }, async (base, forAccount) => {
+      const put = await fetch(`${base}/api/forge/accounts/3/servers/7/sites/9/env`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: 'A=1' }),
       });
       expect(await put.json()).toEqual({ ok: true });
       expect(setEnvironment).toHaveBeenCalledWith('7', '9', { content: 'A=1' });
-      const missing = await fetch(`${base}/api/forge/servers/7/sites`);
+      expect(forAccount).toHaveBeenCalledWith('3');
+      const missing = await fetch(`${base}/api/forge/accounts/3/servers/7/sites`);
       expect(missing.status).toBe(404);
     });
   });
@@ -153,7 +167,9 @@ describe('the Forge routes', () => {
   it('turns away a request still carrying an agent’s token', async () => {
     const servers = vi.fn();
     await serve({ servers }, async (base) => {
-      const res = await fetch(`${base}/api/forge/servers`, { headers: { Authorization: 'Bearer agent' } });
+      const res = await fetch(`${base}/api/forge/accounts/3/servers`, {
+        headers: { Authorization: 'Bearer agent' },
+      });
       expect(res.status).toBe(403);
       expect(servers).not.toHaveBeenCalled();
     });
