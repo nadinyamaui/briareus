@@ -738,6 +738,19 @@ describe('buildArgs', () => {
       expect(BINARIES[id].reviewPrompt(opts)).toContain('reviewer:findings');
     }
   });
+
+  it('asks every review to verify its findings before posting, except where /code-review already does', () => {
+    const verifies = (prompt) => prompt.includes('Before posting anything');
+    for (const effort of ['high', 'xhigh', 'max']) {
+      expect(verifies(BINARIES.claude.reviewPrompt({ prNumber: 7, effort }))).toBe(false);
+    }
+    for (const effort of ['low', 'medium']) {
+      expect(verifies(BINARIES.claude.reviewPrompt({ prNumber: 7, effort }))).toBe(true);
+    }
+    expect(verifies(BINARIES.codex.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
+    expect(verifies(BINARIES.grok.reviewPrompt({ prNumber: 7 }))).toBe(true);
+    expect(verifies(BINARIES.opencode.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
+  });
 });
 
 describe('parseContextReport', () => {
