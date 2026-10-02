@@ -1609,9 +1609,9 @@ api.post('/api/dev/branches/serve', async (req, res) => {
     if (!name) {
       return res.status(502).json({ error: `Could not tell ${project.repo}’s default branch` });
     }
-    res.status(201).json(
-      await startPullRequestPreview({ provider, model, effort, repo: project.repo, branch: name }),
-    );
+    res
+      .status(201)
+      .json(await startPullRequestPreview({ provider, model, effort, repo: project.repo, branch: name }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
