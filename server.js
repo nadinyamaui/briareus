@@ -201,7 +201,7 @@ app.use(securityHeaders);
 app.use('/webhooks', webhookRouter());
 
 // The client API, and the only one: owner-issued tokens (`npm run
-// create-token` for the first, an admin token for the rest), in front of the
+// create-token`, the only place tokens are issued or listed), in front of the
 // handlers below.
 const mobileAuth = createMobileAuth();
 app.use(
@@ -212,7 +212,6 @@ app.use(
     handlers: api,
     getJob,
     getProject,
-    listProjects,
     listSessions: listDevSessions,
     bus,
     reviewerRuntime,

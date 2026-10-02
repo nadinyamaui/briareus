@@ -3,6 +3,7 @@ import { createSshService, normalizeSshServer, executeSsh } from '../lib/ssh.js'
 import { execFile } from 'node:child_process';
 
 vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
+vi.mock('../lib/config.js', () => ({ getConfig: () => ({ credentialsKey: 'k'.repeat(32) }) }));
 const input = { repo: 'owner/repo', host: 'example.com', username: 'deploy' };
 let service, execute, save, job;
 beforeEach(async () => {
@@ -86,7 +87,8 @@ describe('SSH permission boundary', () => {
     expect(execute).not.toHaveBeenCalled();
     service.decide(request.id, 'approve');
     expect(() => service.decide(request.id, 'approve')).toThrow('no longer');
-    expect(execute).toHaveBeenCalledExactlyOnceWith(server, request.command, 60);
+    const { hasDbCredentials, ...stored } = server;
+    expect(execute).toHaveBeenCalledExactlyOnceWith(stored, request.command, 60);
     await Promise.resolve();
     expect(service.result(job, request.id).status).toBe('completed');
   });
@@ -269,5 +271,49 @@ describe('OpenSSH execution', () => {
       error: error.message,
       stderr: 'error',
     });
+  });
+});
+
+describe('SSH database login', () => {
+  const login = { dbUsername: 'app', dbPassword: 's3cret' };
+  it('stores it sealed and never lists it', async () => {
+    const server = await service.create({ ...input, ...login });
+    expect(server).toMatchObject({ hasDbCredentials: true, dbHost: '127.0.0.1', dbPort: 3306 });
+    expect(JSON.stringify(server)).not.toContain('s3cret');
+    expect(JSON.stringify(service.list())).not.toContain('s3cret');
+    const stored = JSON.stringify(save.mock.calls.at(-1)[1]);
+    expect(stored).not.toContain('s3cret');
+    expect(stored).not.toContain('"app"');
+    expect(service.dbLogin(server.id)).toEqual({
+      host: '127.0.0.1',
+      port: 3306,
+      username: 'app',
+      password: 's3cret',
+    });
+  });
+  it('survives a restart', async () => {
+    const server = await service.create({ ...input, ...login, dbPort: 3307 });
+    const restored = createSshService({ load: async () => save.mock.calls.at(-1)[1] });
+    await restored.init();
+    expect(restored.dbLogin(server.id)).toMatchObject({ port: 3307, password: 's3cret' });
+  });
+  it('keeps the password when only the user changes, and clears on an empty user', async () => {
+    const server = await service.create({ ...input, ...login });
+    await service.update(server.id, { dbUsername: 'other' });
+    expect(service.dbLogin(server.id)).toMatchObject({ username: 'other', password: 's3cret' });
+    await service.update(server.id, { label: 'renamed' });
+    expect(service.dbLogin(server.id).username).toBe('other');
+    const cleared = await service.update(server.id, { dbUsername: '', dbPassword: '' });
+    expect(cleared.hasDbCredentials).toBe(false);
+    expect(() => service.dbLogin(server.id)).toThrow(/No database login/);
+  });
+  it('refuses a password without a user, and a bad database host or port', async () => {
+    await expect(service.create({ ...input, dbPassword: 'x' })).rejects.toThrow(/username/);
+    expect(() => normalizeSshServer({ ...input, dbHost: '-oProxy' })).toThrow();
+    expect(() => normalizeSshServer({ ...input, dbPort: 70000 })).toThrow();
+  });
+  it('is not handed to agents with the server list', async () => {
+    await service.create({ ...input, ...login });
+    expect(JSON.stringify(service.list(input.repo))).not.toContain('dbCredentials');
   });
 });

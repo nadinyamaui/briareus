@@ -473,7 +473,7 @@ test-run video links point at (without an R2 bucket) _and_ what turns the
 webhooks below on.
 
 **Every way in authenticates itself.** A client calls `/api/v1` with a token
-(`npm run create-token` issues the first, an admin token the rest; see the
+(issued, listed and revoked on the machine with `npm run create-token`; see the
 [client API guide](docs/api-v1.md)), an agent calls `/api/agent/` with its
 session's token, and a webhook delivery carries an HMAC. Nothing else is
 answered: `/healthz` says whether the app and its database are up, and every
@@ -694,8 +694,9 @@ front of every handler, so it covers sessions, transcripts, pull requests
 (files, commits, checks, comments, reviews), findings, settings and two event
 streams. `npm run create-token -- --label Desktop` issues the first token, an
 admin one; restart the server once if that run wrote `AUTH_SECRET`, and later
-tokens need no restart. An admin token then issues the rest:
-read or manage on chosen projects, or admin for everything.
+tokens need no restart. The same command issues the rest (read or manage on
+chosen projects, or admin for everything), lists them and revokes them; the
+API itself cannot issue or list tokens.
 
 The routes the removed dashboard called with its login cookie, and the earlier
 `/api/mobile/v1`, are retired and answer 410. The API refuses a request that
