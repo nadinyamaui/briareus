@@ -155,7 +155,15 @@ import { ensureProfileDatabase, profileDbElsewhere, dropSessionDatabase } from '
 import { publicAppUrl } from '../lib/tunnel.js';
 import { getProviderForJob, captureProviderAuth } from '../lib/providerstore.js';
 import { BINARIES } from '../lib/providers.js';
-import { bus, initJobs, getJob, startDevServe, closeDevSession, sendDevMessage } from '../lib/jobs.js';
+import {
+  bus,
+  initJobs,
+  getJob,
+  startDevServe,
+  closeDevSession,
+  sendDevMessage,
+  stopAllDevServes,
+} from '../lib/jobs.js';
 
 const PROFILES = [
   'profile: projects',
@@ -508,6 +516,36 @@ describe('▶ Run: the links it answers with', () => {
     expect(unhandled).not.toHaveBeenCalled();
     process.off('unhandledRejection', unhandled);
     error.mockRestore();
+  });
+});
+
+describe('▶ Run: nothing left holding a port', () => {
+  it('kills what the run commands left in their group when the server exits on its own', async () => {
+    const job = session();
+    await startDevServe(job.id);
+    const proc = state.procs[0];
+
+    proc.exitCode = 255;
+    proc.emit('exit', 255);
+
+    expect(kill).toHaveBeenCalledWith(-proc.pid, 'SIGKILL');
+    expect(job.serveProc).toBe(null);
+    expect(job.events.some((e) => e.text?.startsWith('App server died (exit 255)'))).toBe(true);
+  });
+
+  it('kills every running server on shutdown', async () => {
+    const a = session();
+    await startDevServe(a.id);
+    seq++;
+    const b = session();
+    await startDevServe(b.id);
+
+    stopAllDevServes();
+
+    expect(kill).toHaveBeenCalledWith(-state.procs[0].pid, 'SIGKILL');
+    expect(kill).toHaveBeenCalledWith(-state.procs[1].pid, 'SIGKILL');
+    expect(a.serveProc).toBe(null);
+    expect(b.serveProc).toBe(null);
   });
 });
 
