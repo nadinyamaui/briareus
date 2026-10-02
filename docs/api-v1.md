@@ -78,9 +78,10 @@ needs; give a client that only follows and steers sessions `manage`.
 - `GET /openapi.json` describes every route: its parameters and body with
   their types, its answer, the permission it needs (`x-briareus-access`) and
   how it is held to a project (`x-briareus-scope`).
-- A start (`POST /sessions`, `POST /actions`, `POST /pulls/{number}/serve`)
-  that names no `provider` runs on the project's configured review runtime, or
-  the errand's own step runtime. `GET /runtimes` lists what can be named.
+- A start (`POST /sessions`, `POST /actions`, `POST /pulls/{number}/serve`,
+  `POST /branches/serve`) that names no `provider` runs on the project's
+  configured review runtime, or the errand's own step runtime. `GET /runtimes`
+  lists what can be named.
 
 ## Routes
 

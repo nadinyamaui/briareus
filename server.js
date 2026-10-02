@@ -1591,6 +1591,32 @@ api.post('/api/dev/pulls/:number/serve', async (req, res) => {
   }
 });
 
+// ▶ Run on the board itself: the same clean preview a pull request gets, of a
+// branch (the default one unless the client names another), so what is live
+// can be compared with what a pull request would change.
+api.post('/api/dev/branches/serve', async (req, res) => {
+  const { repo, branch, provider, model, effort } = req.body || {};
+  const project = getProject(repo || '');
+  if (!project) return res.status(400).json({ error: `Unknown project: ${repo || ''}` });
+  if (!project.runCommands.length) {
+    return res
+      .status(400)
+      .json({ error: `No run command is configured for ${project.repo}; add one in Settings` });
+  }
+  try {
+    let name = typeof branch === 'string' ? branch.trim() : '';
+    if (!name) name = (await listRepoBranches(getConfig(), project.repo)).defaultBranch;
+    if (!name) {
+      return res.status(502).json({ error: `Could not tell ${project.repo}’s default branch` });
+    }
+    res.status(201).json(
+      await startPullRequestPreview({ provider, model, effort, repo: project.repo, branch: name }),
+    );
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 async function currentJobUsageEstimates() {
   const plain = listDevSessions();
   try {

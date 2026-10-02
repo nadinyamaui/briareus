@@ -292,6 +292,22 @@ Prepare a workspace for a pull request and serve it with the project’s run com
 
 **Returns** 201 `{ session: Session, url: string, profile: string? }`
 
+### `POST /branches/serve`
+
+Prepare a workspace for a branch and serve it with the project’s run commands, without an agent turn. Needs `manage`, held to `repo`.
+
+**Body**
+
+| Field               | Type      |                                                                                  |
+| ------------------- | --------- | -------------------------------------------------------------------------------- |
+| `repo` **required** | `string`  | A project, as `owner/name`                                                       |
+| `branch`            | `string`  | The branch to serve; the project’s default branch when absent                    |
+| `provider`          | `integer` | A provider id from `GET /runtimes`; the project’s configured runtime when absent |
+| `model`             | `string`  | A model of that provider; its default when absent                                |
+| `effort`            | `string`  | An effort that model offers; its default when absent                             |
+
+**Returns** 201 `{ session: Session, url: string, profile: string? }`
+
 ### `POST /issues/{number}/close`
 
 Close an issue on GitHub, with an optional comment posted just before. Needs `manage`, held to `repo`.
@@ -1944,6 +1960,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/pr/findings/decision`                                                 | `POST /pulls/{number}/findings/decision`                                        |
 | `POST /api/pr/merge`                                                             | `POST /pulls/{number}/merge`                                                    |
 | `POST /api/dev/pulls/:number/serve`                                              | `POST /pulls/{number}/serve`                                                    |
+| `POST /api/dev/branches/serve`                                                   | `POST /branches/serve`                                                          |
 | `POST /api/issues/close`                                                         | `POST /issues/{number}/close`                                                   |
 | `GET /api/pr/commit`                                                             | `GET /commits/{sha}`                                                            |
 | `GET /api/dev/sessions`                                                          | `GET /sessions`                                                                 |
