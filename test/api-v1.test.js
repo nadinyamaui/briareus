@@ -318,6 +318,26 @@ describe('handing a request to the dashboard’s handler', () => {
     ).toMatchObject({ method: 'POST', path: '/api/pr/merge', body: { repo, pr: '7', headSha: 'a' } });
   });
 
+  it('hands an issue read to its handler with the issue number, for a read token, held to its projects', async () => {
+    expect(await json(`/issues/7?repo=${repo}`, { token: tokens.read })).toMatchObject({
+      method: 'GET',
+      path: '/api/issues/view',
+      query: { repo, issue: '7' },
+    });
+    expect(
+      await json(`/issues/7/timeline?repo=${repo}&page=2&issue=9`, { token: tokens.read }),
+    ).toMatchObject({
+      path: '/api/issues/timeline',
+      query: { repo, page: '2', issue: '7' },
+    });
+    handler.mockClear();
+    for (const route of ['/issues/7', '/issues/7/timeline']) {
+      expect((await request(`${route}?repo=other/project`, { token: tokens.read })).status).toBe(403);
+      expect((await request(route, { token: tokens.read })).status).toBe(403);
+    }
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it('a client cannot override the section or the pull request a path names', async () => {
     expect((await json(`/pulls/7/files?repo=${repo}&section=checks&pr=9`)).query).toMatchObject({
       pr: '7',

@@ -168,6 +168,7 @@ import {
 import { initTemplates, globalTemplates, saveGlobalTemplates, templateCatalog } from './lib/templates.js';
 import { closeIssue, projectPulls, pullOverview } from './lib/prboard.js';
 import { commitView, mergePullRequest, pullRequestView, pullRequestViewOptions } from './lib/prviewer.js';
+import { issueTimeline, issueView } from './lib/issueviewer.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload, getUpload } from './lib/uploads.js';
@@ -816,6 +817,32 @@ api.post('/api/issues/close', async (req, res) => {
         comment: (body.comment || '').trim(),
       }),
     );
+  } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
+
+// One issue read whole, and its timeline a page at a time: what a client opens
+// from the board's issue rows. Answered like the pull request reads beside them.
+function issueParams(query) {
+  const project = getProject(String(query.repo || ''));
+  if (!project) throw Object.assign(new Error(`Unknown project: ${query.repo || ''}`), { status: 404 });
+  return { project: { repo: project.repo }, number: Number(query.issue) };
+}
+
+api.get('/api/issues/view', async (req, res) => {
+  try {
+    const { project, number } = issueParams(req.query);
+    res.json(await issueView(project, number));
+  } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
+
+api.get('/api/issues/timeline', async (req, res) => {
+  try {
+    const { project, number } = issueParams(req.query);
+    res.json(await issueTimeline(project, number, { page: Number(req.query.page || 1) }));
   } catch (e) {
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
   }
