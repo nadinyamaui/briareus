@@ -872,3 +872,15 @@ ambiguous network failure; requests persist across server restarts. A dispatch
 is reported as requested, never deployed, until GitHub reports its outcome.
 See [workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
 and [deployment statuses](https://docs.github.com/en/rest/deployments/statuses).
+
+### Laravel Forge
+
+With `FORGE_API_TOKEN` and `FORGE_ORGANIZATION` set (see `.env.example`), an
+admin token reaches one Forge organization through `/api/v1/forge`: it lists
+the servers and each server's sites, reads a site, and reads or replaces a
+site's deployment script and `.env`. The server makes every call with its own
+Forge token, so no client holds it, and the process environment it lives in is
+stripped of `FORGE_*` before any session's child sees it. Forge allows 60 calls
+a minute per token; past that the routes answer 429. Replacing a `.env` is
+accepted by Forge and written to the server shortly after; it does not deploy,
+clear the config cache or restart queue workers.
