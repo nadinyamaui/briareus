@@ -58,6 +58,22 @@ List a project’s branches, the default one first. Needs `read`, held to `repo`
 
 **Returns** `{ defaultBranch: string?, branches: string[] }`
 
+### `POST /branches/serve`
+
+Prepare a workspace on a branch with no pull request, the default one unless named, and serve it with the project’s run commands, without an agent turn. Needs `manage`, held to `repo`.
+
+**Body**
+
+| Field               | Type      |                                                                                  |
+| ------------------- | --------- | -------------------------------------------------------------------------------- |
+| `repo` **required** | `string`  | A project, as `owner/name`                                                       |
+| `branch`            | `string`  | An existing branch to serve; the default branch when absent                      |
+| `provider`          | `integer` | A provider id from `GET /runtimes`; the project’s configured runtime when absent |
+| `model`             | `string`  | A model of that provider; its default when absent                                |
+| `effort`            | `string`  | An effort that model offers; its default when absent                             |
+
+**Returns** 201 `{ session: Session, url: string, profile: string? }`. Another call for the same branch replaces the session the last one left, as long as nobody has chatted in it. An untouched session closes and deletes itself ten minutes after the last call, as a pull request’s does.
+
 ### `GET /runtimes`
 
 List the providers, models and efforts a session can start on, and the project’s default. Needs `read`, held to `repo`.
@@ -1927,6 +1943,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | `GET /api/dev/projects`                                                          | `GET /projects`                                                                 |
 | `GET /api/dev/branches`                                                          | `GET /branches`                                                                 |
+| `POST /api/dev/branches/serve`                                                   | `POST /branches/serve`                                                          |
 | `GET /api/dev/runtimes`                                                          | `GET /runtimes`                                                                 |
 | `GET /api/dev/usage`                                                             | `GET /usage`                                                                    |
 | `GET /api/dev/actions`                                                           | `GET /actions`                                                                  |

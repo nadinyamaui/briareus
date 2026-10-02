@@ -56,6 +56,7 @@ import {
   dropQueuedMessage,
   startDevServe,
   startPullRequestPreview,
+  startBranchPreview,
   flushJobs,
   stopAllDevServes,
   spawnWorkerSession,
@@ -1586,6 +1587,40 @@ api.post('/api/dev/pulls/:number/serve', async (req, res) => {
         title: pr.title || '',
       }),
     );
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ▶ Run on a branch with no pull request, the default branch unless another is
+// named: what is live, served the same way a pull request is. The branch must
+// exist on origin; the workspace would otherwise cut a new branch of that name
+// off the default one and serve it under the wrong label.
+api.post('/api/dev/branches/serve', async (req, res) => {
+  const { repo, branch: wanted, provider, model, effort } = req.body || {};
+  const project = getProject(repo || '');
+  if (!project) return res.status(400).json({ error: `Unknown project: ${repo || ''}` });
+  if (wanted != null && (typeof wanted !== 'string' || !wanted.trim())) {
+    return res.status(400).json({ error: 'The branch must be a branch name' });
+  }
+  if (!project.runCommands.length) {
+    return res
+      .status(400)
+      .json({ error: `No run command is configured for ${project.repo}; add one in Settings` });
+  }
+  let listed;
+  try {
+    listed = await listRepoBranches(getConfig(), project.repo);
+  } catch (e) {
+    return res.status(502).json({ error: e.message });
+  }
+  const branch = wanted ? wanted.trim() : listed.defaultBranch;
+  if (!branch) return res.status(502).json({ error: `Could not tell ${project.repo}'s default branch` });
+  if (!listed.branches.includes(branch)) {
+    return res.status(404).json({ error: `${project.repo} has no branch ${branch}` });
+  }
+  try {
+    res.status(201).json(await startBranchPreview({ provider, model, effort, repo: project.repo, branch }));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

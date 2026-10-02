@@ -246,6 +246,7 @@ import {
   retryLoopRound,
   reopenDevSession,
   startPullRequestPreview,
+  isReplaceablePreview,
   workspaceStartBranch,
   workspaceBranchPlan,
   workspaceCheckoutPlan,
@@ -469,6 +470,39 @@ describe('sweepExpiredPreviews', () => {
     expect(getJob('preview-fresh')).not.toBeNull();
     expect(getJob('preview-chatted')).not.toBeNull();
     expect(getJob('not-a-preview')).not.toBeNull();
+  });
+});
+
+describe('isReplaceablePreview', () => {
+  const preview = (extra) => ({
+    kind: 'devchat',
+    repo: 'acme/shop',
+    preview: true,
+    startedOnPr: null,
+    startBranch: 'main',
+    ...extra,
+  });
+
+  it('a branch run replaces a pristine preview of the same branch with no pull request', () => {
+    expect(isReplaceablePreview(preview(), { repo: 'acme/shop', branch: 'main' })).toBe(true);
+    expect(isReplaceablePreview(preview(), { repo: 'acme/shop', branch: 'develop' })).toBe(false);
+    expect(isReplaceablePreview(preview(), { repo: 'acme/other', branch: 'main' })).toBe(false);
+  });
+
+  it('keeps a pull request and a bare branch apart, even on the same branch name', () => {
+    const onPr = preview({ startedOnPr: 77 });
+    expect(isReplaceablePreview(onPr, { repo: 'acme/shop', branch: 'main' })).toBe(false);
+    expect(isReplaceablePreview(onPr, { repo: 'acme/shop', branch: 'main', prNumber: 77 })).toBe(true);
+    expect(isReplaceablePreview(preview(), { repo: 'acme/shop', branch: 'main', prNumber: 77 })).toBe(false);
+  });
+
+  it('leaves alone one somebody chatted in, and every session that is not a preview', () => {
+    expect(isReplaceablePreview(preview({ chatStarted: true }), { repo: 'acme/shop', branch: 'main' })).toBe(
+      false,
+    );
+    expect(isReplaceablePreview(preview({ preview: false }), { repo: 'acme/shop', branch: 'main' })).toBe(
+      false,
+    );
   });
 });
 
