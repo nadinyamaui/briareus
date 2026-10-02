@@ -21,6 +21,14 @@ import { sessionWebhookRoutes } from './lib/webhook-routes.js';
 import { sessionTranscriptRoutes } from './lib/transcript-routes.js';
 import { providerTestRoutes } from './lib/provider-test-routes.js';
 import { sessionEditRoute } from './lib/session-edit-route.js';
+import { sessionBrowserRoutes } from './lib/browser-routes.js';
+import {
+  browserInput,
+  browserScreenshot,
+  browserState,
+  stopAllBrowsers,
+  watchBrowser,
+} from './lib/browser.js';
 import fs from 'fs';
 import { execFile, spawn } from 'child_process';
 import { getConfig } from './lib/config.js';
@@ -59,6 +67,8 @@ import {
   startBranchPreview,
   flushJobs,
   stopAllDevServes,
+  openSessionBrowser,
+  closeSessionBrowser,
   spawnWorkerSession,
   workerSessionsFor,
   workerSummary,
@@ -1747,6 +1757,23 @@ api.get('/api/dev/sessions/:id', transcript.read);
 
 api.get('/api/dev/sessions/:id/events', transcript.stream);
 
+// The browser the session shares with its user (lib/browser-routes.js).
+const sharedBrowser = sessionBrowserRoutes({
+  getJob,
+  openSessionBrowser,
+  closeSessionBrowser,
+  browserState,
+  watchBrowser,
+  browserInput,
+  browserScreenshot,
+});
+api.get('/api/dev/sessions/:id/browser', sharedBrowser.state);
+api.post('/api/dev/sessions/:id/browser', sharedBrowser.open);
+api.delete('/api/dev/sessions/:id/browser', sharedBrowser.close);
+api.get('/api/dev/sessions/:id/browser/stream', sharedBrowser.stream);
+api.get('/api/dev/sessions/:id/browser/screenshot', sharedBrowser.screenshot);
+api.post('/api/dev/sessions/:id/browser/input', sharedBrowser.input);
+
 // A message mid-turn goes into a claude turn still reading its input, or is
 // queued rather than refused otherwise, and one to a session that
 // let go of its workspace reopens it first, so this only fails on a message
@@ -2070,6 +2097,7 @@ let stopping = false;
 process.on('uncaughtException', (e) => {
   console.error('Uncaught exception:', e);
   stopAllDevServes();
+  stopAllBrowsers();
   const giveUp = setTimeout(() => process.exit(1), 3000);
   flushJobs()
     .catch(() => {})
@@ -2083,6 +2111,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     if (stopping) process.exit(1); // a second Ctrl-C means "now"
     stopping = true;
     stopAllDevServes();
+    stopAllBrowsers();
     flushJobs()
       .catch((e) => console.error('Could not write the last sessions on shutdown:', e.message))
       .finally(() => process.exit(0));

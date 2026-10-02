@@ -269,6 +269,22 @@ records a video of each and writes the results back into the sheet. Nothing
 follows the run: the ❌ rows are there to be read, and ⚙ Implement feedback is
 the errand that acts on them.
 
+### The shared browser
+
+A session can be given a headless Chromium of its own that its agent and its
+user drive together, on the same tabs. `POST /api/v1/sessions/{id}/browser`
+starts it; from the next turn the agent drives it (Claude and Codex through the
+Playwright MCP server mounted as `browser`, Grok and opencode through
+Playwright's `connectOverCDP`), and a client watches it as a stream of JPEG
+frames and clicks, types and navigates in it through the API. So a client can
+follow the agent through a flow, log in for it, or do a step by hand and tell it
+to carry on from there. The browser outlives every turn and the profile
+outlives a close, so a login stays logged in until the session is deleted.
+[docs/api-v1.md](docs/api-v1.md#the-shared-browser) has the routes.
+
+Chromium is found by itself when Playwright has downloaded one (any QA run
+does) or one is on PATH; `BROWSER_BIN` overrides it.
+
 ### What a session costs
 
 Every finished turn is written to a project-owned `turn_usage` ledger (agent

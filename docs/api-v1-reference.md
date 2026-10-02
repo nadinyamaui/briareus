@@ -466,6 +466,59 @@ Serve the session’s checkout with one of the project’s run profiles. Needs `
 
 **Returns** `{ url: string, profile: string? }`
 
+### `GET /sessions/{id}/browser`
+
+Read the state of the session’s shared browser. Needs `read`, held to the session’s project.
+
+**Returns** `{ browser: Browser }`
+
+### `POST /sessions/{id}/browser`
+
+Switch the shared browser on and start it; the agent drives it from its next turn. Needs `manage`, held to the session’s project.
+
+**Returns** `{ session: Session, browser: Browser }`. 409 when the session is closed; reopen it first. 503 when the server has no Chromium. The profile (cookies, logins) lasts as long as the session.
+
+### `DELETE /sessions/{id}/browser`
+
+Switch the shared browser off and stop it; its profile is kept until the session is deleted. Needs `manage`, held to the session’s project.
+
+**Returns** `{ session: Session }`
+
+### `GET /sessions/{id}/browser/stream`
+
+Watch the shared browser: `tabs` events `{ tabs, active }` on every tab change, `frame` events (a BrowserFrame) as the tab in view repaints, and `closed` when it stops, which ends the stream. Needs `read`, held to the session’s project.
+
+**Returns** a server-sent event stream; see the guide’s Events section.
+
+### `GET /sessions/{id}/browser/screenshot`
+
+A PNG of the tab in view, for a client that does not hold a stream open. Needs `read`, held to the session’s project.
+
+**Returns** the file.
+
+### `POST /sessions/{id}/browser/input`
+
+Act in the shared browser: click, type, press a key, scroll, navigate or change tabs. Needs `manage`, held to the session’s project.
+
+**Body**
+
+| Field               | Type                                                                                              |                                                                                                                                                                         |
+| ------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type` **required** | `click\|down\|up\|move\|wheel\|type\|key\|navigate\|back\|forward\|reload\|tab\|newTab\|closeTab` | What to do. `click`, `down`, `up`, `move` and `wheel` take `x` and `y`; `type` takes `text`; `key` takes `key`; `navigate` takes `url`; `tab` and `closeTab` take `tab` |
+| `x`                 | `number`                                                                                          | From the viewport’s left edge, in the CSS pixels of a frame’s `width`                                                                                                   |
+| `y`                 | `number`                                                                                          | From the viewport’s top edge, in the CSS pixels of a frame’s `height`                                                                                                   |
+| `button`            | `left\|right\|middle`                                                                             | The mouse button; `left` when absent                                                                                                                                    |
+| `clickCount`        | `integer`                                                                                         | 2 for a double click; 1 when absent                                                                                                                                     |
+| `deltaX`            | `number`                                                                                          | On `wheel`: pixels to scroll right                                                                                                                                      |
+| `deltaY`            | `number`                                                                                          | On `wheel`: pixels to scroll down                                                                                                                                       |
+| `text`              | `string`                                                                                          | On `type`: the text to insert where the focus is                                                                                                                        |
+| `key`               | `string`                                                                                          | On `key`: one character, or Enter, Tab, Backspace, Delete, Escape, ArrowLeft, ArrowUp, ArrowRight, ArrowDown, Home, End, PageUp, PageDown                               |
+| `modifiers`         | `string[]`                                                                                        | Keys held down: `alt`, `ctrl`, `meta`, `shift`                                                                                                                          |
+| `url`               | `string`                                                                                          | On `navigate` and `newTab`: an http or https URL                                                                                                                        |
+| `tab`               | `string`                                                                                          | On `tab`: the tab to bring into view; on `closeTab`: the tab to close, the one in view when absent                                                                      |
+
+**Returns** `{ ok: boolean }`. 409 when the browser is not running. The agent drives the same tabs, so what it does mid-turn and what you do interleave.
+
 ### `POST /sessions/{id}/compact`
 
 Compact the session’s context now. Needs `manage`, held to the session’s project.
@@ -1460,49 +1513,82 @@ A project as a session picker needs it.
 
 A conversation with an agent. The record is pushed whole on every change, so replace your copy rather than merging.
 
-| Field            | Type                                                            |                                                                                                           |
-| ---------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `id`             | `string`                                                        | Its id                                                                                                    |
-| `title`          | `string`                                                        | Its title                                                                                                 |
-| `repo`           | `string`                                                        | The project it belongs to                                                                                 |
-| `status`         | `queued\|preparing\|running\|idle\|closed\|failed\|interrupted` | `idle` is waiting for a message; `closed` has released its workspace and can be reopened                  |
-| `error`          | `string?`                                                       | Why it failed                                                                                             |
-| `activity`       | `string`                                                        | What its spend is filed under: `chat`, `code-review`, `qa`, `orchestrator`, an errand id, …               |
-| `provider`       | `string`                                                        | The provider’s label                                                                                      |
-| `providerId`     | `integer`                                                       | The provider’s id                                                                                         |
-| `model`          | `string`                                                        | The model it runs on                                                                                      |
-| `effort`         | `string`                                                        | The effort it runs at                                                                                     |
-| `branch`         | `string?`                                                       | The branch its workspace is on                                                                            |
-| `baseBranch`     | `string?`                                                       | The branch that one was cut from                                                                          |
-| `startBranch`    | `string?`                                                       | The existing branch it was started on, if any                                                             |
-| `local`          | `boolean`                                                       | Whether it works in the project’s local checkout                                                          |
-| `createdAt`      | `string`                                                        | ISO time it was created                                                                                   |
-| `startedAt`      | `string?`                                                       | ISO time its current turn started                                                                         |
-| `endedAt`        | `string?`                                                       | ISO time it last settled                                                                                  |
-| `turns`          | `integer`                                                       | Turns run so far                                                                                          |
-| `costUsd`        | `number?`                                                       | What this conversation spent, when its provider prices turns                                              |
-| `inputTokens`    | `integer?`                                                      | Input tokens consumed                                                                                     |
-| `outputTokens`   | `integer?`                                                      | Output tokens consumed                                                                                    |
-| `contextTokens`  | `integer?`                                                      | The live context size                                                                                     |
-| `contextWindow`  | `integer?`                                                      | The model’s context window                                                                                |
-| `usage`          | `object`                                                        | Spend including every session it ordered: `sessions`, `costUsd`, `estimatedCostUsd`, tokens, `durationMs` |
-| `awaitingAnswer` | `boolean`                                                       | Whether the agent asked a question and is waiting                                                         |
-| `queued`         | `object[]`                                                      | Messages waiting for the turn to end, each `{ text }`; absent when none                                   |
-| `liveInput`      | `boolean`                                                       | Whether a message sent now goes into the running turn rather than the queue                               |
-| `lastText`       | `string?`                                                       | The opening of the agent’s latest message                                                                 |
-| `lastTool`       | `string?`                                                       | The tool the running turn is on                                                                           |
-| `subagents`      | `object[]`                                                      | The sub-agents working right now, each `{ id, name, summary, startedAt }`                                 |
-| `prStatus`       | `object?`                                                       | Its pull request, once it has one: number, URL, state, checks and reviews                                 |
-| `serveLinks`     | `object[]?`                                                     | Where ▶ Run is serving its checkout, each `{ url }`; null when not running                                |
-| `reviewLoop`     | `object?`                                                       | The review loop’s state when armed                                                                        |
-| `qaLoop`         | `object?`                                                       | The QA loop’s state when armed                                                                            |
-| `reviewTriage`   | `object?`                                                       | Review findings held for the user’s verdicts                                                              |
-| `orchestrator`   | `boolean`                                                       | Whether it is a supervisor of worker sessions                                                             |
-| `parentId`       | `string?`                                                       | The orchestrator it works for                                                                             |
-| `canCompact`     | `boolean`                                                       | Whether `POST /sessions/{id}/compact` would run now                                                       |
-| `compacting`     | `boolean`                                                       | Whether a compaction is running                                                                           |
-| `autoCompactAt`  | `integer?`                                                      | The context size at which it compacts itself                                                              |
-| `hiddenLines`    | `integer`                                                       | How many transcript lines a Clear or compaction hid; absent when none                                     |
+| Field            | Type                                                            |                                                                                                                                |
+| ---------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `id`             | `string`                                                        | Its id                                                                                                                         |
+| `title`          | `string`                                                        | Its title                                                                                                                      |
+| `repo`           | `string`                                                        | The project it belongs to                                                                                                      |
+| `status`         | `queued\|preparing\|running\|idle\|closed\|failed\|interrupted` | `idle` is waiting for a message; `closed` has released its workspace and can be reopened                                       |
+| `error`          | `string?`                                                       | Why it failed                                                                                                                  |
+| `activity`       | `string`                                                        | What its spend is filed under: `chat`, `code-review`, `qa`, `orchestrator`, an errand id, …                                    |
+| `provider`       | `string`                                                        | The provider’s label                                                                                                           |
+| `providerId`     | `integer`                                                       | The provider’s id                                                                                                              |
+| `model`          | `string`                                                        | The model it runs on                                                                                                           |
+| `effort`         | `string`                                                        | The effort it runs at                                                                                                          |
+| `branch`         | `string?`                                                       | The branch its workspace is on                                                                                                 |
+| `baseBranch`     | `string?`                                                       | The branch that one was cut from                                                                                               |
+| `startBranch`    | `string?`                                                       | The existing branch it was started on, if any                                                                                  |
+| `local`          | `boolean`                                                       | Whether it works in the project’s local checkout                                                                               |
+| `createdAt`      | `string`                                                        | ISO time it was created                                                                                                        |
+| `startedAt`      | `string?`                                                       | ISO time its current turn started                                                                                              |
+| `endedAt`        | `string?`                                                       | ISO time it last settled                                                                                                       |
+| `turns`          | `integer`                                                       | Turns run so far                                                                                                               |
+| `costUsd`        | `number?`                                                       | What this conversation spent, when its provider prices turns                                                                   |
+| `inputTokens`    | `integer?`                                                      | Input tokens consumed                                                                                                          |
+| `outputTokens`   | `integer?`                                                      | Output tokens consumed                                                                                                         |
+| `contextTokens`  | `integer?`                                                      | The live context size                                                                                                          |
+| `contextWindow`  | `integer?`                                                      | The model’s context window                                                                                                     |
+| `usage`          | `object`                                                        | Spend including every session it ordered: `sessions`, `costUsd`, `estimatedCostUsd`, tokens, `durationMs`                      |
+| `awaitingAnswer` | `boolean`                                                       | Whether the agent asked a question and is waiting                                                                              |
+| `queued`         | `object[]`                                                      | Messages waiting for the turn to end, each `{ text }`; absent when none                                                        |
+| `liveInput`      | `boolean`                                                       | Whether a message sent now goes into the running turn rather than the queue                                                    |
+| `lastText`       | `string?`                                                       | The opening of the agent’s latest message                                                                                      |
+| `lastTool`       | `string?`                                                       | The tool the running turn is on                                                                                                |
+| `subagents`      | `object[]`                                                      | The sub-agents working right now, each `{ id, name, summary, startedAt }`                                                      |
+| `prStatus`       | `object?`                                                       | Its pull request, once it has one: number, URL, state, checks and reviews                                                      |
+| `serveLinks`     | `object[]?`                                                     | Where ▶ Run is serving its checkout, each `{ url }`; null when not running                                                     |
+| `browser`        | `object?`                                                       | The shared browser, `{ running }`, when it is switched on; null when off. Switched on and not running, the next turn starts it |
+| `reviewLoop`     | `object?`                                                       | The review loop’s state when armed                                                                                             |
+| `qaLoop`         | `object?`                                                       | The QA loop’s state when armed                                                                                                 |
+| `reviewTriage`   | `object?`                                                       | Review findings held for the user’s verdicts                                                                                   |
+| `orchestrator`   | `boolean`                                                       | Whether it is a supervisor of worker sessions                                                                                  |
+| `parentId`       | `string?`                                                       | The orchestrator it works for                                                                                                  |
+| `canCompact`     | `boolean`                                                       | Whether `POST /sessions/{id}/compact` would run now                                                                            |
+| `compacting`     | `boolean`                                                       | Whether a compaction is running                                                                                                |
+| `autoCompactAt`  | `integer?`                                                      | The context size at which it compacts itself                                                                                   |
+| `hiddenLines`    | `integer`                                                       | How many transcript lines a Clear or compaction hid; absent when none                                                          |
+
+### Browser
+
+A session’s shared browser: the Chromium its agent drives and a client watches and drives too, at the same time and on the same tabs.
+
+| Field     | Type           |                                                                                         |
+| --------- | -------------- | --------------------------------------------------------------------------------------- |
+| `on`      | `boolean`      | Whether it is switched on for the session; the next turn starts one that is on and down |
+| `running` | `boolean`      | Whether it is up right now                                                              |
+| `tabs`    | `BrowserTab[]` | Its open tabs, oldest first                                                             |
+| `active`  | `string?`      | The `id` of the tab in view: the one frames show and input goes to                      |
+
+### BrowserTab
+
+A tab of the shared browser.
+
+| Field   | Type     |                |
+| ------- | -------- | -------------- |
+| `id`    | `string` | Its id         |
+| `url`   | `string` | What it shows  |
+| `title` | `string` | Its page title |
+
+### BrowserFrame
+
+One picture of the tab in view. `width` × `height` is the page’s viewport in CSS pixels, the space input coordinates are in; a client showing the image at another size scales its pointer back to it.
+
+| Field    | Type      |                       |
+| -------- | --------- | --------------------- |
+| `data`   | `string`  | A JPEG, base64        |
+| `width`  | `integer` | The viewport’s width  |
+| `height` | `integer` | The viewport’s height |
+| `tab`    | `string`  | The tab it shows      |
 
 ### TranscriptEvent
 
@@ -1975,6 +2061,12 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/dev/sessions/:id/close`                                               | `POST /sessions/{id}/close`                                                     |
 | `POST /api/dev/sessions/:id/reopen`                                              | `POST /sessions/{id}/reopen`                                                    |
 | `POST /api/dev/sessions/:id/serve`                                               | `POST /sessions/{id}/serve`                                                     |
+| `GET /api/dev/sessions/:id/browser`                                              | `GET /sessions/{id}/browser`                                                    |
+| `POST /api/dev/sessions/:id/browser`                                             | `POST /sessions/{id}/browser`                                                   |
+| `DELETE /api/dev/sessions/:id/browser`                                           | `DELETE /sessions/{id}/browser`                                                 |
+| `GET /api/dev/sessions/:id/browser/stream`                                       | `GET /sessions/{id}/browser/stream`                                             |
+| `GET /api/dev/sessions/:id/browser/screenshot`                                   | `GET /sessions/{id}/browser/screenshot`                                         |
+| `POST /api/dev/sessions/:id/browser/input`                                       | `POST /sessions/{id}/browser/input`                                             |
 | `POST /api/dev/sessions/:id/compact`                                             | `POST /sessions/{id}/compact`                                                   |
 | `POST /api/dev/sessions/:id/clear`                                               | `POST /sessions/{id}/clear`                                                     |
 | `POST /api/dev/sessions/:id/loop`                                                | `POST /sessions/{id}/review-loop`                                               |
