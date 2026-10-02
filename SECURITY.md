@@ -35,14 +35,13 @@ cannot either).
 
 The client API at `/api/v1` is the server's only API. It takes owner-issued
 bearer tokens with a permission, a project list and an expiry; the first is
-issued on the machine with `npm run create-token`. A token with the `admin`
+issued, listed and revoked only on the machine, with `npm run create-token`. A token with the `admin`
 permission can do everything, on every project, including reading and changing
 provider keys, database servers and SSH settings. Treat an admin token like a
 password to the machine, and issue one only to the client you run Briareus from.
-An admin token can also issue and revoke tokens, so
-after revoking a leaked one, check the device list for tokens it issued. Read
-and manage tokens are held to the projects they were given and cannot issue
-anything. The API
+No token can issue another, so revoking a leaked one
+(`npm run create-token -- --revoke <id>`) is the whole cleanup. Read and manage
+tokens are held to the projects they were given. The API
 refuses requests that carry an `Origin` header and enables no CORS, so a token
 is never usable from a browser page. See the [client API guide](docs/api-v1.md).
 

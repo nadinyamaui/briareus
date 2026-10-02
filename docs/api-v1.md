@@ -41,10 +41,9 @@ curl -s https://briareus.example.com/api/v1/ -H "Authorization: Bearer brm_..."
 
 Tokens are stored as hashes only. Revoking one, its expiry, or a changed
 `AUTH_SECRET` stops it at the next request, and ends its open event streams
-within 15 seconds. A client can revoke its own token with `DELETE /token`. Only
-the first token needs the command line; after that an admin token issues and
-revokes the others (see [Tokens and connections](#tokens-and-connections)), and
-those take effect at once, with no restart.
+within 15 seconds. A client can revoke its own token with `DELETE /token`.
+Every other token is issued, listed and revoked on the machine with
+`npm run create-token`; the API has no route for it, admin or not.
 
 ## Permissions
 
@@ -52,7 +51,7 @@ those take effect at once, with no restart.
 | ---------- | ---------------------------------------------------------------------------------------------------- |
 | `read`     | Read the projects it was given: sessions, transcripts, pull requests, findings, usage                |
 | `manage`   | Also start paid agents, send messages, merge, decide findings and delete sessions, on those projects |
-| `admin`    | Everything, on every project: settings, provider keys, SSH approvals, deployments, tokens            |
+| `admin`    | Everything, on every project: settings, provider keys, SSH approvals, deployments                    |
 
 A `read` or `manage` token is held to its project list:
 
@@ -103,7 +102,6 @@ What is there, by area:
 | Memory                   | `/memories`, `/memories/health`                                                                                     | read / admin  |
 | Operations               | `/attention`, `/maintenance`, `/deployments`, `/ssh/requests`, `/tasks`, `/videos`                                  | admin         |
 | Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `templates`                           | admin         |
-| Tokens                   | `/settings/devices`                                                                                                 | admin         |
 
 Everything the removed dashboard could do has a route, except its browser push
 notifications, which went with it. The reference ends with a table from each of
@@ -167,21 +165,13 @@ Briareus still requires its token on every route. GitHub's deliveries need
 the same for **`/webhooks/*`**, since they authenticate themselves with an
 HMAC. Nothing else needs exempting: every other path answers 404 or 410.
 
-## Tokens
-
-An admin token manages tokens: `/settings/devices` lists, issues and revokes
-them. A token's secret is in the answer that creates it and nowhere afterwards.
-
-An admin token can issue other tokens, admin ones included. Revoking a leaked
-admin token is therefore not enough on its own: check the device list for
-tokens it issued. With no admin token left, `npm run create-token` issues a new
-one, and `npm run create-token -- --list` / `--revoke <id>` do the same checking
-and revoking from the machine.
-
 ## What is not in this API
 
 - Signing in. The server has no login of its own; a client authenticates its
   users itself and calls with its token.
+- Managing tokens. `npm run create-token` issues, lists (`--list`) and revokes
+  (`--revoke <id>`) them on the machine; a client can only revoke its own, with
+  `DELETE /token`.
 - `/api/agent/*`: the calls an agent makes from inside its own session.
 - `/webhooks/*`: deliveries from GitHub and from systems that wake a session.
 - `/healthz` is public and outside the prefix: 200 when the server and its

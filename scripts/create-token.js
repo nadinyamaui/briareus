@@ -7,11 +7,9 @@
 //   npm run create-token -- --list
 //   npm run create-token -- --revoke <id>
 //
-// This is how the first token comes to exist: the API takes nothing else, so
-// the first one cannot come from the API. After that an admin token issues
-// and revokes the rest (`/settings/devices`), and this is only needed again
-// once every admin token has been lost or has expired, or to revoke one
-// without an admin token at hand.
+// This is the only place tokens are issued or listed: the API has no route for
+// it, so a leaked token, admin or not, cannot mint more of itself. A client
+// can still revoke its own token with `DELETE /token`.
 //
 // It is also how the API comes to be switched on: every token is signed with
 // AUTH_SECRET, and the first run writes a random one into .env when there is
