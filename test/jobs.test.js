@@ -163,6 +163,17 @@ vi.mock('../lib/uploads.js', () => ({
   getUpload: vi.fn(() => null),
 }));
 
+// No Chromium here: the shared browser's endpoint is whatever a test says it is.
+const browserState = vi.hoisted(() => ({ endpoint: null }));
+vi.mock('../lib/browser.js', async (original) => ({
+  ...(await original()),
+  browserEndpoint: () => browserState.endpoint,
+  browserRunning: () => !!browserState.endpoint,
+  startBrowser: vi.fn(async () => {}),
+  stopBrowser: vi.fn(),
+  forgetBrowser: vi.fn(),
+}));
+
 vi.mock('../lib/usage.js', () => ({
   jobUsageEstimates: vi.fn(async () => new Map()),
   recordTurnUsage: vi.fn(),
@@ -202,6 +213,7 @@ import {
   deleteJobById,
   jobEventsSince,
   publicJob,
+  sharedBrowserNote,
   getJob,
   createDevSession,
   stepProvider,
@@ -10351,5 +10363,41 @@ describe('maintenance drain at the operator entry points', () => {
       startPullRequestPreview({ provider: 1, repo: 'acme/shop', branch: 'feat/x', prNumber: 77 }),
     ).rejects.toThrow(/Maintenance/);
     expect(getJob('drain-preview')).toMatchObject({ status: 'idle', preview: true });
+  });
+});
+
+describe('the shared browser', () => {
+  afterEach(() => {
+    browserState.endpoint = null;
+  });
+
+  it('tells a turn nothing when it is off, or on and not up', () => {
+    browserState.endpoint = 'http://127.0.0.1:41234';
+    expect(sharedBrowserNote({ id: 'b1', browser: false }, 'claude')).toBe('');
+    browserState.endpoint = null;
+    expect(sharedBrowserNote({ id: 'b1', browser: true }, 'claude')).toBe('');
+  });
+
+  it('points claude and codex at the MCP tools, and the rest at connectOverCDP', () => {
+    browserState.endpoint = 'http://127.0.0.1:41234';
+    for (const binary of ['claude', 'codex']) {
+      const note = sharedBrowserNote({ id: 'b1', browser: true }, binary);
+      expect(note).toContain('`browser` MCP tools');
+      expect(note).toContain('http://127.0.0.1:41234');
+      expect(note).toMatch(/Never close the browser/);
+    }
+    for (const binary of ['grok', 'opencode']) {
+      const note = sharedBrowserNote({ id: 'b1', browser: true }, binary);
+      expect(note).toContain("chromium.connectOverCDP('http://127.0.0.1:41234')");
+      expect(note).not.toContain('MCP');
+    }
+  });
+
+  it('projects as null when off and as whether it is up when on', () => {
+    const base = { id: 'b2', kind: 'devchat', events: [] };
+    expect(publicJob(base).browser).toBeNull();
+    expect(publicJob({ ...base, browser: true }).browser).toEqual({ running: false });
+    browserState.endpoint = 'http://127.0.0.1:41234';
+    expect(publicJob({ ...base, browser: true }).browser).toEqual({ running: true });
   });
 });

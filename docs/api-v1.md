@@ -138,7 +138,7 @@ commit; `truncated` says when a file list hit its limit. A review comment's
 
 ## Events
 
-Two server-sent event streams. Both send a `: ping` comment every 25 seconds.
+Three server-sent event streams. Each sends a `: ping` comment every 25 seconds.
 
 **`GET /events`** follows every session the token can see, on one connection:
 
@@ -156,6 +156,43 @@ for the transcript lines after the last `event.seq` you saw.
 unnamed events whose `id:` is their `seq`, so reconnecting with `Last-Event-ID`
 (or `?since=<seq>`) resumes without gaps or repeats. The session record arrives
 as `session` events, without an id.
+
+**`GET /sessions/{id}/browser/stream`** shows the session's shared browser (see
+below):
+
+| Event    | Data                                         | When                                                                          |
+| -------- | -------------------------------------------- | ----------------------------------------------------------------------------- |
+| `tabs`   | `{ "tabs": [{ id, url, title }], "active" }` | On connect, then whenever a tab opens, closes, navigates or the view switches |
+| `frame`  | `{ "data", "width", "height", "tab" }`       | On connect when there is a picture, then as the tab in view repaints          |
+| `closed` | `{}`                                         | The browser stopped; the stream ends after it                                 |
+
+## The shared browser
+
+A session can have a Chromium of its own that its agent and its user drive
+together: the agent through Playwright, a client through this API, on the same
+tabs, so a client can watch the agent work, log in for it, or take over a step
+and hand back with a message.
+
+1. `POST /sessions/{id}/browser` switches it on and starts it. The agent is told
+   about it from its next turn (Claude and Codex get Playwright's MCP tools,
+   Grok and opencode the DevTools endpoint for `connectOverCDP`), and every turn
+   that finds it down starts it again, so it survives a close and reopen. The
+   profile, cookies and logins included, lasts until the session is deleted.
+2. `GET /sessions/{id}/browser/stream` shows it. A frame is a base64 JPEG of the
+   tab in view; draw the latest one and drop the rest. At most ten arrive a
+   second, and only while somebody watches. `GET …/browser/screenshot` is a PNG
+   for a client that does not hold a stream open.
+3. `POST /sessions/{id}/browser/input` acts in it: `{ "type": "click", "x", "y" }`,
+   `{ "type": "type", "text" }`, `{ "type": "key", "key": "Enter" }`,
+   `{ "type": "wheel", "x", "y", "deltaY" }`, `{ "type": "navigate", "url" }`, and
+   `back`, `forward`, `reload`, `tab`, `newTab`, `closeTab`. Coordinates are in the
+   viewport's CSS pixels, the `width` × `height` every frame carries: a client
+   that draws the frame at another size scales its pointer by
+   `frame.width / drawnWidth` first.
+4. `DELETE /sessions/{id}/browser` switches it off.
+
+The session record's `browser` is `null` while it is off and `{ "running" }`
+while it is on, so a client knows when to offer the view without asking.
 
 ## Deploying behind Cloudflare Access
 
