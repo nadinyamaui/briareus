@@ -6,6 +6,7 @@ import { createForgeClient } from './lib/forge.js';
 import { forgeRoutes } from './lib/forge-routes.js';
 import { createEnvoyerService } from './lib/envoyer.js';
 import { envoyerRoutes } from './lib/envoyer-routes.js';
+import { createForgeAccounts } from './lib/forge-accounts.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
 import { estimateCosts } from './lib/prices.js';
 import { previewFeedbackRoutes } from './lib/preview-feedback.js';
@@ -545,9 +546,16 @@ api.use(
     readyForSelfDeploy: () => maintenanceState(listDevSessions(), sshService.runningCount()).ready,
   }),
 );
-api.use(forgeRoutes({ client: createForgeClient() }));
 const envoyerService = createEnvoyerService();
 api.use(envoyerRoutes({ service: envoyerService, getProject }));
+const forgeAccounts = createForgeAccounts();
+api.use(
+  forgeRoutes({
+    accounts: forgeAccounts,
+    client: createForgeClient({ account: (id) => forgeAccounts.credentials(id) }),
+    getProject,
+  }),
+);
 
 api.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
@@ -1937,6 +1945,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initDbServers();
     await sshService.init();
     await envoyerService.init();
+    await forgeAccounts.init();
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
