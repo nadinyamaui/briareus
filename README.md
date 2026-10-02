@@ -885,3 +885,16 @@ stripped of `FORGE_*` before any session's child sees it. Forge allows 60 calls
 a minute per token; past that the routes answer 429. Replacing a `.env` is
 accepted by Forge and written to the server shortly after; it does not deploy,
 clear the config cache or restart queue workers.
+
+### Laravel Envoyer
+
+Envoyer is reached per account rather than with one server-wide token. An
+admin token keeps the list at `/api/v1/settings/envoyer/accounts`: each account
+is a name, an Envoyer API token and the one project it is available to. The
+token is stored encrypted under `CREDENTIALS_KEY` and never returned. Any token
+of that project lists the accounts it may use (`GET /api/v1/envoyer/accounts`);
+a manage token reads an account's Envoyer projects, their servers and
+deployments, and deploys a branch or tag through
+`/api/v1/envoyer/accounts/:id/projects/…`, always naming the project in `repo`.
+An account another project was given answers 404. Deploying needs the
+`deployments:create` scope on the Envoyer token.

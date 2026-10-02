@@ -1012,6 +1012,94 @@ Replace a Forge site’s .env. Needs `admin`.
 
 **Returns** `{ ok: boolean }`. Forge accepts the file and writes it to the server shortly after, so `ok` means accepted. It does not clear the config cache or restart queue workers.
 
+## Laravel Envoyer
+
+### `GET /envoyer/accounts`
+
+List the Envoyer accounts available to a project. Needs `read`, held to `repo`.
+
+**Query**
+
+| Field               | Type     |                            |
+| ------------------- | -------- | -------------------------- |
+| `repo` **required** | `string` | A project, as `owner/name` |
+
+**Returns** `{ accounts: EnvoyerAccount[] }`
+
+### `GET /envoyer/accounts/{id}/projects`
+
+List the account’s Envoyer projects. Needs `manage`, held to `repo`.
+
+**Query**
+
+| Field               | Type     |                            |
+| ------------------- | -------- | -------------------------- |
+| `repo` **required** | `string` | A project, as `owner/name` |
+
+**Returns** `{ projects: object[] }`. Runs as the account, which must be available to `repo`; 404 when it is not. 502 when Envoyer refuses the account’s token, 429 when it is rate limiting it. Envoyer’s objects come back as Envoyer shapes them.
+
+### `GET /envoyer/accounts/{id}/projects/{project}`
+
+Read one Envoyer project. Needs `manage`, held to `repo`.
+
+**Query**
+
+| Field               | Type     |                            |
+| ------------------- | -------- | -------------------------- |
+| `repo` **required** | `string` | A project, as `owner/name` |
+
+**Returns** `{ project: object }`. Runs as the account, which must be available to `repo`; 404 when it is not. 502 when Envoyer refuses the account’s token, 429 when it is rate limiting it. Envoyer’s objects come back as Envoyer shapes them.
+
+### `GET /envoyer/accounts/{id}/projects/{project}/servers`
+
+List an Envoyer project’s servers. Needs `manage`, held to `repo`.
+
+**Query**
+
+| Field               | Type     |                            |
+| ------------------- | -------- | -------------------------- |
+| `repo` **required** | `string` | A project, as `owner/name` |
+
+**Returns** `{ servers: object[] }`. Runs as the account, which must be available to `repo`; 404 when it is not. 502 when Envoyer refuses the account’s token, 429 when it is rate limiting it. Envoyer’s objects come back as Envoyer shapes them.
+
+### `GET /envoyer/accounts/{id}/projects/{project}/deployments`
+
+List an Envoyer project’s deployments. Needs `manage`, held to `repo`.
+
+**Query**
+
+| Field               | Type     |                            |
+| ------------------- | -------- | -------------------------- |
+| `repo` **required** | `string` | A project, as `owner/name` |
+
+**Returns** `{ deployments: object[] }`. Runs as the account, which must be available to `repo`; 404 when it is not. 502 when Envoyer refuses the account’s token, 429 when it is rate limiting it. Envoyer’s objects come back as Envoyer shapes them.
+
+### `GET /envoyer/accounts/{id}/projects/{project}/deployments/{deployment}`
+
+Read one Envoyer deployment. Needs `manage`, held to `repo`.
+
+**Query**
+
+| Field               | Type     |                            |
+| ------------------- | -------- | -------------------------- |
+| `repo` **required** | `string` | A project, as `owner/name` |
+
+**Returns** `{ deployment: object }`. Runs as the account, which must be available to `repo`; 404 when it is not. 502 when Envoyer refuses the account’s token, 429 when it is rate limiting it. Envoyer’s objects come back as Envoyer shapes them.
+
+### `POST /envoyer/accounts/{id}/projects/{project}/deployments`
+
+Deploy an Envoyer project. Needs `manage`, held to `repo`.
+
+**Body**
+
+| Field               | Type     |                                                                                    |
+| ------------------- | -------- | ---------------------------------------------------------------------------------- |
+| `repo` **required** | `string` | A project, as `owner/name`                                                         |
+| `branch`            | `string` | The branch to deploy; the project’s own branch when neither this nor `tag` is sent |
+| `tag`               | `string` | The tag to deploy, instead of a branch                                             |
+
+**Returns** `{ ok: boolean }`. Runs as the account, which must be available to `repo`; 404 when it is not. 502 when Envoyer refuses the account’s token, 429 when it is rate limiting it. Envoyer’s objects come back as Envoyer shapes them. `ok` means Envoyer queued it; the deployments list shows it run. The account’s token needs the `deployments:create` scope.
+
 ## Settings
 
 ### `PUT /settings/projects/order`
@@ -1260,6 +1348,34 @@ Remove a server. Needs `admin`.
 Read the server’s database login, decrypted, to connect through an SSH tunnel to `host`:`port` on it. 404 when none is stored. Needs `admin`.
 
 **Returns** `{ credentials: DbCredentials }`
+
+### `GET /settings/envoyer/accounts`
+
+List every account, with the values a new one starts from. Needs `admin`.
+
+**Returns** `{ accounts: EnvoyerAccount[], defaults: EnvoyerAccount }`
+
+### `POST /settings/envoyer/accounts`
+
+Add a account. Needs `admin`.
+
+**Body**: a [EnvoyerAccount](#envoyeraccount), whole or in part.
+
+**Returns** 201 `{ account: EnvoyerAccount }`
+
+### `PUT /settings/envoyer/accounts/{id}`
+
+Change a account. Needs `admin`.
+
+**Body**: a [EnvoyerAccount](#envoyeraccount), whole or in part.
+
+**Returns** `{ account: EnvoyerAccount }`
+
+### `DELETE /settings/envoyer/accounts/{id}`
+
+Remove a account. Needs `admin`.
+
+**Returns** `{ ok: boolean }`
 
 ## Objects
 
@@ -1647,6 +1763,17 @@ A site on a Forge server, with the rest of Forge’s attributes named as Forge n
 | `deployment_status` | `string?` | The deployment under way, if any                 |
 | `quick_deploy`      | `boolean` | Whether a push deploys it                        |
 
+### EnvoyerAccount
+
+A Laravel Envoyer account, and the one project whose clients may use it.
+
+| Field   | Type      |                                                                                                                     |
+| ------- | --------- | ------------------------------------------------------------------------------------------------------------------- |
+| `id`    | `integer` | Its id; set by the server                                                                                           |
+| `label` | `string`  | Its display name                                                                                                    |
+| `repo`  | `string`  | The project it is available to                                                                                      |
+| `token` | `string`  | Its Envoyer API token. Write-only: stored encrypted and never returned; left out of an update, the stored one stays |
+
 ### SshServer
 
 A server an agent may run commands on, with approval.
@@ -1749,124 +1876,135 @@ A session’s webhook: where an outside system posts to wake it, and the limits 
 
 The built-in dashboard, since removed, called its handlers by the paths on the left, with a login cookie. Those paths are retired and answer 410; each has the route on the right, for a client ported from the old pages.
 
-| Dashboard                                                      | API                                                                   |
-| -------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `GET /api/dev/projects`                                        | `GET /projects`                                                       |
-| `GET /api/dev/branches`                                        | `GET /branches`                                                       |
-| `GET /api/dev/runtimes`                                        | `GET /runtimes`                                                       |
-| `GET /api/dev/usage`                                           | `GET /usage`                                                          |
-| `GET /api/dev/actions`                                         | `GET /actions`                                                        |
-| `POST /api/dev/actions`                                        | `POST /actions`                                                       |
-| `GET /api/dev/pulls`                                           | `GET /pulls`                                                          |
-| `GET /api/dev/pull`                                            | `GET /pulls/{number}`                                                 |
-| `GET /api/pr/view?section=description`                         | `GET /pulls/{number}/description`                                     |
-| `GET /api/pr/view?section=files`                               | `GET /pulls/{number}/files`                                           |
-| `GET /api/pr/view?section=commits`                             | `GET /pulls/{number}/commits`                                         |
-| `GET /api/pr/view?section=checks`                              | `GET /pulls/{number}/checks`                                          |
-| `GET /api/pr/view?section=comments`                            | `GET /pulls/{number}/comments`                                        |
-| `GET /api/pr/view?section=reviews`                             | `GET /pulls/{number}/reviews`                                         |
-| `GET /api/pr/view?section=review-comments`                     | `GET /pulls/{number}/review-comments`                                 |
-| `GET /api/pr/findings`                                         | `GET /pulls/{number}/findings`                                        |
-| `POST /api/pr/findings/decision`                               | `POST /pulls/{number}/findings/decision`                              |
-| `POST /api/pr/merge`                                           | `POST /pulls/{number}/merge`                                          |
-| `POST /api/dev/pulls/:number/serve`                            | `POST /pulls/{number}/serve`                                          |
-| `POST /api/issues/close`                                       | `POST /issues/{number}/close`                                         |
-| `GET /api/pr/commit`                                           | `GET /commits/{sha}`                                                  |
-| `GET /api/dev/sessions`                                        | `GET /sessions`                                                       |
-| `POST /api/dev/sessions`                                       | `POST /sessions`                                                      |
-| `GET /api/dev/sessions/:id`                                    | `GET /sessions/{id}`                                                  |
-| `GET /api/dev/sessions/:id/events`                             | `GET /sessions/{id}/events`                                           |
-| `PATCH /api/dev/sessions/:id`                                  | `PATCH /sessions/{id}`                                                |
-| `DELETE /api/dev/sessions/:id`                                 | `DELETE /sessions/{id}`                                               |
-| `POST /api/dev/sessions/:id/message`                           | `POST /sessions/{id}/messages`                                        |
-| `DELETE /api/dev/sessions/:id/queue/:index`                    | `DELETE /sessions/{id}/queue/{index}`                                 |
-| `POST /api/dev/sessions/:id/cancel`                            | `POST /sessions/{id}/cancel`                                          |
-| `POST /api/dev/sessions/:id/close`                             | `POST /sessions/{id}/close`                                           |
-| `POST /api/dev/sessions/:id/reopen`                            | `POST /sessions/{id}/reopen`                                          |
-| `POST /api/dev/sessions/:id/serve`                             | `POST /sessions/{id}/serve`                                           |
-| `POST /api/dev/sessions/:id/compact`                           | `POST /sessions/{id}/compact`                                         |
-| `POST /api/dev/sessions/:id/clear`                             | `POST /sessions/{id}/clear`                                           |
-| `POST /api/dev/sessions/:id/loop`                              | `POST /sessions/{id}/review-loop`                                     |
-| `POST /api/dev/sessions/:id/qa-loop`                           | `POST /sessions/{id}/qa-loop`                                         |
-| `POST /api/dev/sessions/:id/link-pr`                           | `POST /sessions/{id}/link-pr`                                         |
-| `POST /api/dev/sessions/:id/triage`                            | `POST /sessions/{id}/findings/triage`                                 |
-| `POST /api/dev/sessions/:id/triage/save`                       | `POST /sessions/{id}/findings/save`                                   |
-| `POST /api/dev/sessions/:id/findings/reply`                    | `POST /sessions/{id}/findings/reply`                                  |
-| `POST /api/dev/sessions/:id/findings/delete`                   | `POST /sessions/{id}/findings/delete`                                 |
-| `GET /api/operations/preview/:id`                              | `GET /sessions/{id}/preview`                                          |
-| `POST /api/operations/preview/:id`                             | `POST /sessions/{id}/preview/feedback`                                |
-| `GET /api/dev/sessions/:id/webhook`                            | `GET /sessions/{id}/webhook`                                          |
-| `PUT /api/dev/sessions/:id/webhook`                            | `PUT /sessions/{id}/webhook`                                          |
-| `POST /api/dev/sessions/:id/webhook/rotate`                    | `POST /sessions/{id}/webhook/rotate`                                  |
-| `GET /api/operations/recovery/:id`                             | `GET /sessions/{id}/recovery`                                         |
-| `POST /api/operations/recovery/:id`                            | `POST /sessions/{id}/recovery`                                        |
-| `GET /api/operations/tasks/:id`                                | `GET /tasks/{id}`                                                     |
-| `GET /api/dev/prompts`                                         | `GET /prompts`                                                        |
-| `POST /api/dev/prompts`                                        | `POST /prompts`                                                       |
-| `PUT /api/dev/prompts/:id`                                     | `PUT /prompts/{id}`                                                   |
-| `DELETE /api/dev/prompts/:id`                                  | `DELETE /prompts/{id}`                                                |
-| `POST /api/dev/uploads`                                        | `POST /uploads`                                                       |
-| `GET /api/dev/transcribe`                                      | `GET /transcribe`                                                     |
-| `POST /api/dev/transcribe`                                     | `POST /transcribe`                                                    |
-| `GET /api/dev/providers`                                       | `GET /providers`                                                      |
-| `GET /api/memories`                                            | `GET /memories`                                                       |
-| `GET /api/operations/memories`                                 | `GET /memories/health`                                                |
-| `POST /api/operations/memories/merge/apply`                    | `POST /memories/merge`                                                |
-| `POST /api/operations/memories/:id`                            | `POST /memories/{id}/policy`                                          |
-| `POST /api/memories`                                           | `POST /memories`                                                      |
-| `PUT /api/memories/:id`                                        | `PUT /memories/{id}`                                                  |
-| `DELETE /api/memories/:id`                                     | `DELETE /memories/{id}`                                               |
-| `GET /api/dev/usage/all`                                       | `GET /usage/all`                                                      |
-| `GET /api/operations/attention`                                | `GET /attention`                                                      |
-| `GET /api/operations/maintenance`                              | `GET /maintenance`                                                    |
-| `POST /api/operations/maintenance`                             | `POST /maintenance`                                                   |
-| `GET /api/ssh/requests`                                        | `GET /ssh/requests`                                                   |
-| `POST /api/ssh/requests/:id/decision`                          | `POST /ssh/requests/{id}/decision`                                    |
-| `GET /api/operations/deployments`                              | `GET /deployments`                                                    |
-| `GET /api/operations/deployments/config`                       | `GET /deployments/config`                                             |
-| `POST /api/operations/deployments/config`                      | `POST /deployments/config`                                            |
-| `POST /api/operations/deployments/plan`                        | `POST /deployments/plan`                                              |
-| `POST /api/operations/deployments/dispatch`                    | `POST /deployments/dispatch`                                          |
-| `POST /api/operations/deployments/acknowledge`                 | `POST /deployments/acknowledge`                                       |
-| `GET /api/forge/servers`                                       | `GET /forge/servers`                                                  |
-| `GET /api/forge/servers/:server/sites`                         | `GET /forge/servers/{server}/sites`                                   |
-| `GET /api/forge/servers/:server/sites/:site`                   | `GET /forge/servers/{server}/sites/{site}`                            |
-| `GET /api/forge/servers/:server/sites/:site/deployment-script` | `GET /forge/servers/{server}/sites/{site}/deployment-script`          |
-| `PUT /api/forge/servers/:server/sites/:site/deployment-script` | `PUT /forge/servers/{server}/sites/{site}/deployment-script`          |
-| `GET /api/forge/servers/:server/sites/:site/env`               | `GET /forge/servers/{server}/sites/{site}/env`                        |
-| `PUT /api/forge/servers/:server/sites/:site/env`               | `PUT /forge/servers/{server}/sites/{site}/env`                        |
-| `GET /videos/*file`                                            | `GET /videos/{file}`                                                  |
-| `PUT /api/projects/order`                                      | `PUT /settings/projects/order`                                        |
-| `GET /api/projects`                                            | `GET /settings/projects`                                              |
-| `POST /api/projects`                                           | `POST /settings/projects`                                             |
-| `PUT /api/projects/:id`                                        | `PUT /settings/projects/{id}`                                         |
-| `DELETE /api/projects/:id`                                     | `DELETE /settings/projects/{id}`                                      |
-| `GET /api/projects/:id/update`                                 | `GET /settings/projects/{id}/update`                                  |
-| `POST /api/projects/:id/update`                                | `POST /settings/projects/{id}/update`                                 |
-| `GET /api/templates`                                           | `GET /settings/templates`                                             |
-| `PUT /api/templates/1`                                         | `PUT /settings/templates`                                             |
-| `POST /api/providers/test`                                     | `POST /settings/providers/test`                                       |
-| `GET /api/providers`                                           | `GET /settings/providers`                                             |
-| `POST /api/providers`                                          | `POST /settings/providers`                                            |
-| `PUT /api/providers/:id`                                       | `PUT /settings/providers/{id}`                                        |
-| `DELETE /api/providers/:id`                                    | `DELETE /settings/providers/{id}`                                     |
-| `GET /api/providers/:id/status`                                | `GET /settings/providers/{id}/status`                                 |
-| `POST /api/providers/:id/login`                                | `POST /settings/providers/{id}/login`                                 |
-| `POST /api/providers/:id/login/start`                          | `POST /settings/providers/{id}/login/start`                           |
-| `POST /api/providers/:id/login/finish`                         | `POST /settings/providers/{id}/login/finish`                          |
-| `POST /api/dbservers/test`                                     | `POST /settings/db-servers/test`                                      |
-| `GET /api/dbservers`                                           | `GET /settings/db-servers`                                            |
-| `POST /api/dbservers`                                          | `POST /settings/db-servers`                                           |
-| `PUT /api/dbservers/:id`                                       | `PUT /settings/db-servers/{id}`                                       |
-| `DELETE /api/dbservers/:id`                                    | `DELETE /settings/db-servers/{id}`                                    |
-| `GET /api/workspaces`                                          | `GET /settings/workspaces`                                            |
-| `POST /api/workspaces/:slot/reset-setup`                       | `POST /settings/workspaces/{slot}/reset-setup`                        |
-| `POST /api/workspaces/:slot/clean`                             | `POST /settings/workspaces/{slot}/clean`                              |
-| `GET /api/ssh/servers`                                         | `GET /settings/ssh/servers`                                           |
-| `POST /api/ssh/servers`                                        | `POST /settings/ssh/servers`                                          |
-| `PUT /api/ssh/servers/:id`                                     | `PUT /settings/ssh/servers/{id}`                                      |
-| `DELETE /api/ssh/servers/:id`                                  | `DELETE /settings/ssh/servers/{id}`                                   |
-| `GET /api/ssh/servers/:id/db-credentials`                      | `GET /settings/ssh/servers/{id}/db-credentials`                       |
-| `GET /api/mobile-devices`                                      | Not in the API: `npm run create-token -- --list` on the server        |
-| `POST /api/mobile-devices`                                     | Not in the API: `npm run create-token` on the server                  |
-| `DELETE /api/mobile-devices/:id`                               | Not in the API: `npm run create-token -- --revoke <id>` on the server |
+| Dashboard                                                                 | API                                                                      |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `GET /api/dev/projects`                                                   | `GET /projects`                                                          |
+| `GET /api/dev/branches`                                                   | `GET /branches`                                                          |
+| `GET /api/dev/runtimes`                                                   | `GET /runtimes`                                                          |
+| `GET /api/dev/usage`                                                      | `GET /usage`                                                             |
+| `GET /api/dev/actions`                                                    | `GET /actions`                                                           |
+| `POST /api/dev/actions`                                                   | `POST /actions`                                                          |
+| `GET /api/dev/pulls`                                                      | `GET /pulls`                                                             |
+| `GET /api/dev/pull`                                                       | `GET /pulls/{number}`                                                    |
+| `GET /api/pr/view?section=description`                                    | `GET /pulls/{number}/description`                                        |
+| `GET /api/pr/view?section=files`                                          | `GET /pulls/{number}/files`                                              |
+| `GET /api/pr/view?section=commits`                                        | `GET /pulls/{number}/commits`                                            |
+| `GET /api/pr/view?section=checks`                                         | `GET /pulls/{number}/checks`                                             |
+| `GET /api/pr/view?section=comments`                                       | `GET /pulls/{number}/comments`                                           |
+| `GET /api/pr/view?section=reviews`                                        | `GET /pulls/{number}/reviews`                                            |
+| `GET /api/pr/view?section=review-comments`                                | `GET /pulls/{number}/review-comments`                                    |
+| `GET /api/pr/findings`                                                    | `GET /pulls/{number}/findings`                                           |
+| `POST /api/pr/findings/decision`                                          | `POST /pulls/{number}/findings/decision`                                 |
+| `POST /api/pr/merge`                                                      | `POST /pulls/{number}/merge`                                             |
+| `POST /api/dev/pulls/:number/serve`                                       | `POST /pulls/{number}/serve`                                             |
+| `POST /api/issues/close`                                                  | `POST /issues/{number}/close`                                            |
+| `GET /api/pr/commit`                                                      | `GET /commits/{sha}`                                                     |
+| `GET /api/dev/sessions`                                                   | `GET /sessions`                                                          |
+| `POST /api/dev/sessions`                                                  | `POST /sessions`                                                         |
+| `GET /api/dev/sessions/:id`                                               | `GET /sessions/{id}`                                                     |
+| `GET /api/dev/sessions/:id/events`                                        | `GET /sessions/{id}/events`                                              |
+| `PATCH /api/dev/sessions/:id`                                             | `PATCH /sessions/{id}`                                                   |
+| `DELETE /api/dev/sessions/:id`                                            | `DELETE /sessions/{id}`                                                  |
+| `POST /api/dev/sessions/:id/message`                                      | `POST /sessions/{id}/messages`                                           |
+| `DELETE /api/dev/sessions/:id/queue/:index`                               | `DELETE /sessions/{id}/queue/{index}`                                    |
+| `POST /api/dev/sessions/:id/cancel`                                       | `POST /sessions/{id}/cancel`                                             |
+| `POST /api/dev/sessions/:id/close`                                        | `POST /sessions/{id}/close`                                              |
+| `POST /api/dev/sessions/:id/reopen`                                       | `POST /sessions/{id}/reopen`                                             |
+| `POST /api/dev/sessions/:id/serve`                                        | `POST /sessions/{id}/serve`                                              |
+| `POST /api/dev/sessions/:id/compact`                                      | `POST /sessions/{id}/compact`                                            |
+| `POST /api/dev/sessions/:id/clear`                                        | `POST /sessions/{id}/clear`                                              |
+| `POST /api/dev/sessions/:id/loop`                                         | `POST /sessions/{id}/review-loop`                                        |
+| `POST /api/dev/sessions/:id/qa-loop`                                      | `POST /sessions/{id}/qa-loop`                                            |
+| `POST /api/dev/sessions/:id/link-pr`                                      | `POST /sessions/{id}/link-pr`                                            |
+| `POST /api/dev/sessions/:id/triage`                                       | `POST /sessions/{id}/findings/triage`                                    |
+| `POST /api/dev/sessions/:id/triage/save`                                  | `POST /sessions/{id}/findings/save`                                      |
+| `POST /api/dev/sessions/:id/findings/reply`                               | `POST /sessions/{id}/findings/reply`                                     |
+| `POST /api/dev/sessions/:id/findings/delete`                              | `POST /sessions/{id}/findings/delete`                                    |
+| `GET /api/operations/preview/:id`                                         | `GET /sessions/{id}/preview`                                             |
+| `POST /api/operations/preview/:id`                                        | `POST /sessions/{id}/preview/feedback`                                   |
+| `GET /api/dev/sessions/:id/webhook`                                       | `GET /sessions/{id}/webhook`                                             |
+| `PUT /api/dev/sessions/:id/webhook`                                       | `PUT /sessions/{id}/webhook`                                             |
+| `POST /api/dev/sessions/:id/webhook/rotate`                               | `POST /sessions/{id}/webhook/rotate`                                     |
+| `GET /api/operations/recovery/:id`                                        | `GET /sessions/{id}/recovery`                                            |
+| `POST /api/operations/recovery/:id`                                       | `POST /sessions/{id}/recovery`                                           |
+| `GET /api/operations/tasks/:id`                                           | `GET /tasks/{id}`                                                        |
+| `GET /api/dev/prompts`                                                    | `GET /prompts`                                                           |
+| `POST /api/dev/prompts`                                                   | `POST /prompts`                                                          |
+| `PUT /api/dev/prompts/:id`                                                | `PUT /prompts/{id}`                                                      |
+| `DELETE /api/dev/prompts/:id`                                             | `DELETE /prompts/{id}`                                                   |
+| `POST /api/dev/uploads`                                                   | `POST /uploads`                                                          |
+| `GET /api/dev/transcribe`                                                 | `GET /transcribe`                                                        |
+| `POST /api/dev/transcribe`                                                | `POST /transcribe`                                                       |
+| `GET /api/dev/providers`                                                  | `GET /providers`                                                         |
+| `GET /api/memories`                                                       | `GET /memories`                                                          |
+| `GET /api/operations/memories`                                            | `GET /memories/health`                                                   |
+| `POST /api/operations/memories/merge/apply`                               | `POST /memories/merge`                                                   |
+| `POST /api/operations/memories/:id`                                       | `POST /memories/{id}/policy`                                             |
+| `POST /api/memories`                                                      | `POST /memories`                                                         |
+| `PUT /api/memories/:id`                                                   | `PUT /memories/{id}`                                                     |
+| `DELETE /api/memories/:id`                                                | `DELETE /memories/{id}`                                                  |
+| `GET /api/dev/usage/all`                                                  | `GET /usage/all`                                                         |
+| `GET /api/operations/attention`                                           | `GET /attention`                                                         |
+| `GET /api/operations/maintenance`                                         | `GET /maintenance`                                                       |
+| `POST /api/operations/maintenance`                                        | `POST /maintenance`                                                      |
+| `GET /api/ssh/requests`                                                   | `GET /ssh/requests`                                                      |
+| `POST /api/ssh/requests/:id/decision`                                     | `POST /ssh/requests/{id}/decision`                                       |
+| `GET /api/operations/deployments`                                         | `GET /deployments`                                                       |
+| `GET /api/operations/deployments/config`                                  | `GET /deployments/config`                                                |
+| `POST /api/operations/deployments/config`                                 | `POST /deployments/config`                                               |
+| `POST /api/operations/deployments/plan`                                   | `POST /deployments/plan`                                                 |
+| `POST /api/operations/deployments/dispatch`                               | `POST /deployments/dispatch`                                             |
+| `POST /api/operations/deployments/acknowledge`                            | `POST /deployments/acknowledge`                                          |
+| `GET /api/forge/servers`                                                  | `GET /forge/servers`                                                     |
+| `GET /api/forge/servers/:server/sites`                                    | `GET /forge/servers/{server}/sites`                                      |
+| `GET /api/forge/servers/:server/sites/:site`                              | `GET /forge/servers/{server}/sites/{site}`                               |
+| `GET /api/forge/servers/:server/sites/:site/deployment-script`            | `GET /forge/servers/{server}/sites/{site}/deployment-script`             |
+| `PUT /api/forge/servers/:server/sites/:site/deployment-script`            | `PUT /forge/servers/{server}/sites/{site}/deployment-script`             |
+| `GET /api/forge/servers/:server/sites/:site/env`                          | `GET /forge/servers/{server}/sites/{site}/env`                           |
+| `PUT /api/forge/servers/:server/sites/:site/env`                          | `PUT /forge/servers/{server}/sites/{site}/env`                           |
+| `GET /api/envoyer/available`                                              | `GET /envoyer/accounts`                                                  |
+| `GET /api/envoyer/accounts/:id/projects`                                  | `GET /envoyer/accounts/{id}/projects`                                    |
+| `GET /api/envoyer/accounts/:id/projects/:project`                         | `GET /envoyer/accounts/{id}/projects/{project}`                          |
+| `GET /api/envoyer/accounts/:id/projects/:project/servers`                 | `GET /envoyer/accounts/{id}/projects/{project}/servers`                  |
+| `GET /api/envoyer/accounts/:id/projects/:project/deployments`             | `GET /envoyer/accounts/{id}/projects/{project}/deployments`              |
+| `GET /api/envoyer/accounts/:id/projects/:project/deployments/:deployment` | `GET /envoyer/accounts/{id}/projects/{project}/deployments/{deployment}` |
+| `POST /api/envoyer/accounts/:id/projects/:project/deployments`            | `POST /envoyer/accounts/{id}/projects/{project}/deployments`             |
+| `GET /videos/*file`                                                       | `GET /videos/{file}`                                                     |
+| `PUT /api/projects/order`                                                 | `PUT /settings/projects/order`                                           |
+| `GET /api/projects`                                                       | `GET /settings/projects`                                                 |
+| `POST /api/projects`                                                      | `POST /settings/projects`                                                |
+| `PUT /api/projects/:id`                                                   | `PUT /settings/projects/{id}`                                            |
+| `DELETE /api/projects/:id`                                                | `DELETE /settings/projects/{id}`                                         |
+| `GET /api/projects/:id/update`                                            | `GET /settings/projects/{id}/update`                                     |
+| `POST /api/projects/:id/update`                                           | `POST /settings/projects/{id}/update`                                    |
+| `GET /api/templates`                                                      | `GET /settings/templates`                                                |
+| `PUT /api/templates/1`                                                    | `PUT /settings/templates`                                                |
+| `POST /api/providers/test`                                                | `POST /settings/providers/test`                                          |
+| `GET /api/providers`                                                      | `GET /settings/providers`                                                |
+| `POST /api/providers`                                                     | `POST /settings/providers`                                               |
+| `PUT /api/providers/:id`                                                  | `PUT /settings/providers/{id}`                                           |
+| `DELETE /api/providers/:id`                                               | `DELETE /settings/providers/{id}`                                        |
+| `GET /api/providers/:id/status`                                           | `GET /settings/providers/{id}/status`                                    |
+| `POST /api/providers/:id/login`                                           | `POST /settings/providers/{id}/login`                                    |
+| `POST /api/providers/:id/login/start`                                     | `POST /settings/providers/{id}/login/start`                              |
+| `POST /api/providers/:id/login/finish`                                    | `POST /settings/providers/{id}/login/finish`                             |
+| `POST /api/dbservers/test`                                                | `POST /settings/db-servers/test`                                         |
+| `GET /api/dbservers`                                                      | `GET /settings/db-servers`                                               |
+| `POST /api/dbservers`                                                     | `POST /settings/db-servers`                                              |
+| `PUT /api/dbservers/:id`                                                  | `PUT /settings/db-servers/{id}`                                          |
+| `DELETE /api/dbservers/:id`                                               | `DELETE /settings/db-servers/{id}`                                       |
+| `GET /api/workspaces`                                                     | `GET /settings/workspaces`                                               |
+| `POST /api/workspaces/:slot/reset-setup`                                  | `POST /settings/workspaces/{slot}/reset-setup`                           |
+| `POST /api/workspaces/:slot/clean`                                        | `POST /settings/workspaces/{slot}/clean`                                 |
+| `GET /api/ssh/servers`                                                    | `GET /settings/ssh/servers`                                              |
+| `POST /api/ssh/servers`                                                   | `POST /settings/ssh/servers`                                             |
+| `PUT /api/ssh/servers/:id`                                                | `PUT /settings/ssh/servers/{id}`                                         |
+| `DELETE /api/ssh/servers/:id`                                             | `DELETE /settings/ssh/servers/{id}`                                      |
+| `GET /api/ssh/servers/:id/db-credentials`                                 | `GET /settings/ssh/servers/{id}/db-credentials`                          |
+| `GET /api/envoyer/accounts`                                               | `GET /settings/envoyer/accounts`                                         |
+| `POST /api/envoyer/accounts`                                              | `POST /settings/envoyer/accounts`                                        |
+| `PUT /api/envoyer/accounts/:id`                                           | `PUT /settings/envoyer/accounts/{id}`                                    |
+| `DELETE /api/envoyer/accounts/:id`                                        | `DELETE /settings/envoyer/accounts/{id}`                                 |
+| `GET /api/mobile-devices`                                                 | Not in the API: `npm run create-token -- --list` on the server           |
+| `POST /api/mobile-devices`                                                | Not in the API: `npm run create-token` on the server                     |
+| `DELETE /api/mobile-devices/:id`                                          | Not in the API: `npm run create-token -- --revoke <id>` on the server    |

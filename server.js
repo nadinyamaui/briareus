@@ -4,6 +4,8 @@ import { createDeploymentService } from './lib/deployments.js';
 import { deploymentRoutes } from './lib/deployment-routes.js';
 import { createForgeClient } from './lib/forge.js';
 import { forgeRoutes } from './lib/forge-routes.js';
+import { createEnvoyerService } from './lib/envoyer.js';
+import { envoyerRoutes } from './lib/envoyer-routes.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
 import { estimateCosts } from './lib/prices.js';
 import { previewFeedbackRoutes } from './lib/preview-feedback.js';
@@ -544,6 +546,8 @@ api.use(
   }),
 );
 api.use(forgeRoutes({ client: createForgeClient() }));
+const envoyerService = createEnvoyerService();
+api.use(envoyerRoutes({ service: envoyerService, getProject }));
 
 api.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
@@ -1932,6 +1936,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initProjects();
     await initDbServers();
     await sshService.init();
+    await envoyerService.init();
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
