@@ -308,6 +308,31 @@ Prepare a workspace for a pull request and serve it with the project’s run com
 
 **Returns** 201 `{ session: Session, url: string, profile: string? }`
 
+### `GET /issues/{number}`
+
+Read an issue in full: body, type, parent and sub-issues, linked pull requests and its Projects v2 fields. Needs `read`, held to `repo`.
+
+**Query**
+
+| Field               | Type     |                            |
+| ------------------- | -------- | -------------------------- |
+| `repo` **required** | `string` | A project, as `owner/name` |
+
+**Returns** `{ issue: Issue }`. A pull request’s number is refused with 422, as closing one is; a number that is neither gets 404. The project fields need Projects: read on the server’s token; without it the issue is still read, with `projects` empty and `projectsError` saying why.
+
+### `GET /issues/{number}/timeline`
+
+Read one page of an issue’s timeline: its comments and events, oldest first. Needs `read`, held to `repo`.
+
+**Query**
+
+| Field               | Type      |                                             |
+| ------------------- | --------- | ------------------------------------------- |
+| `repo` **required** | `string`  | A project, as `owner/name`                  |
+| `page`              | `integer` | Which page of 100 rows, 1–30; 1 when absent |
+
+**Returns** `{ issue: object, events: TimelineEvent[], nextPage: integer? }`. `issue` is `{ number, title, state, url }`. Only the kinds `TimelineEvent` lists are read, so every page but the last holds 100 of them; GitHub’s other kinds (subscriptions, mentions, pins, …) are left out. A pull request’s number gets 422, an unknown one 404. Without Projects: read on the server’s token, the project kinds come with `project` null and the answer carries `projectsError`.
+
 ### `POST /issues/{number}/close`
 
 Close an issue on GitHub, with an optional comment posted just before. Needs `manage`, held to `repo`.
@@ -1792,6 +1817,76 @@ An issue as closing it left it.
 | `closedAt`    | `string?`                 | When, ISO 8601      |
 | `url`         | `string`                  | The issue on GitHub |
 
+### Issue
+
+An issue as GitHub has it right now, with what its page on GitHub shows beside the body.
+
+| Field           | Type                                           |                                                                                                                                                                                                                                                          |
+| --------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `number`        | `integer`                                      | Its number                                                                                                                                                                                                                                               |
+| `title`         | `string`                                       | Its title                                                                                                                                                                                                                                                |
+| `url`           | `string`                                       | Its page on GitHub                                                                                                                                                                                                                                       |
+| `state`         | `open\|closed`                                 | Where it stands                                                                                                                                                                                                                                          |
+| `stateReason`   | `completed\|not_planned\|duplicate\|reopened?` | Why it was last closed or reopened                                                                                                                                                                                                                       |
+| `body`          | `string`                                       | Its description, markdown; empty when it has none                                                                                                                                                                                                        |
+| `author`        | `string?`                                      | Who opened it; null for a deleted account                                                                                                                                                                                                                |
+| `authorAvatar`  | `string?`                                      | Their avatar’s URL                                                                                                                                                                                                                                       |
+| `assignees`     | `string[]`                                     | Their logins                                                                                                                                                                                                                                             |
+| `labels`        | `object[]`                                     | Each `{ name, color }`, as on the board’s rows                                                                                                                                                                                                           |
+| `milestone`     | `string?`                                      | Its milestone’s title                                                                                                                                                                                                                                    |
+| `comments`      | `integer`                                      | How many comments it has                                                                                                                                                                                                                                 |
+| `createdAt`     | `string`                                       | ISO time                                                                                                                                                                                                                                                 |
+| `updatedAt`     | `string`                                       | ISO time                                                                                                                                                                                                                                                 |
+| `closedAt`      | `string?`                                      | ISO time it was last closed                                                                                                                                                                                                                              |
+| `type`          | `string?`                                      | Its GitHub issue type, such as `Bug` or `Feature`                                                                                                                                                                                                        |
+| `parent`        | `IssueRef?`                                    | The issue it is a sub-issue of, in whatever repository                                                                                                                                                                                                   |
+| `subIssues`     | `object`                                       | `{ total, completed, items }`: counts of every sub-issue, and up to 100 of them as `IssueRef`s                                                                                                                                                           |
+| `pulls`         | `object[]`                                     | Up to 25 pull requests linked to close it (GitHub’s Development box), each an `IssueRef` with `draft`                                                                                                                                                    |
+| `projects`      | `object[]`                                     | One `{ title, url, status, fields }` per Projects v2 board it is on. `status` is its Status, or null; `fields` is every other set single-select, text, number, date and iteration field as `{ name, value }`. Empty when the token may not read projects |
+| `projectsError` | `string`                                       | Present only when GitHub refused the project read, which needs Projects: read on the server’s token: GitHub’s reason. Everything else is still read                                                                                                      |
+
+### IssueRef
+
+An issue or pull request another one points to.
+
+| Field    | Type      |                                                         |
+| -------- | --------- | ------------------------------------------------------- |
+| `number` | `integer` | Its number                                              |
+| `title`  | `string`  | Its title                                               |
+| `state`  | `string`  | `open` or `closed`; for a pull request also `merged`    |
+| `url`    | `string`  | Its page on GitHub                                      |
+| `repo`   | `string?` | Its repository, `owner/name`: not always this project’s |
+
+### TimelineEvent
+
+One entry of an issue’s timeline: a comment or an event. `kind` says which fields beside the first five it carries; ignore kinds you do not know. The kinds read are `commented`, `labeled`, `unlabeled`, `assigned`, `unassigned`, `milestoned`, `demilestoned`, `renamed`, `closed`, `reopened`, `cross-referenced`, `referenced`, `connected`, `disconnected`, `parent_issue_added`, `parent_issue_removed`, `sub_issue_added`, `sub_issue_removed`, `issue_type_added`, `issue_type_changed`, `issue_type_removed`, `added_to_project_v2`, `removed_from_project_v2` and `project_v2_item_status_changed`.
+
+| Field               | Type      |                                                                                                                   |
+| ------------------- | --------- | ----------------------------------------------------------------------------------------------------------------- |
+| `id`                | `string`  | Its GitHub node id                                                                                                |
+| `kind`              | `string`  | What happened, named as GitHub’s REST timeline names it                                                           |
+| `actor`             | `string?` | Who did it, or wrote it; null for a deleted account                                                               |
+| `actorAvatar`       | `string?` | Their avatar’s URL                                                                                                |
+| `createdAt`         | `string`  | ISO time                                                                                                          |
+| `body`              | `string`  | On `commented`: the comment, markdown                                                                             |
+| `url`               | `string`  | On `commented`: its place on GitHub                                                                               |
+| `updatedAt`         | `string`  | On `commented`: ISO time of its last edit                                                                         |
+| `authorAssociation` | `string`  | On `commented`: `OWNER`, `MEMBER`, `CONTRIBUTOR`, `NONE`, …                                                       |
+| `label`             | `object?` | On `labeled`, `unlabeled`: `{ name, color }`                                                                      |
+| `assignee`          | `string?` | On `assigned`, `unassigned`: their login                                                                          |
+| `milestone`         | `string?` | On `milestoned`, `demilestoned`: its title                                                                        |
+| `from`              | `string`  | On `renamed`: the old title                                                                                       |
+| `to`                | `string`  | On `renamed`: the new title                                                                                       |
+| `stateReason`       | `string?` | On `closed`, `reopened`: `completed`, `not_planned`, `duplicate` or `reopened`                                    |
+| `source`            | `object?` | On `cross-referenced`, `connected`, `disconnected`: what points here, an `IssueRef` with `kind` `issue` or `pull` |
+| `commit`            | `object?` | On `referenced`: the commit that mentions the issue, `{ sha, message, url, repo }`, message cut to its first line |
+| `issue`             | `object?` | On `parent_issue_*`: the parent; on `sub_issue_*`: the sub-issue. `{ number, title, url, repo }`                  |
+| `type`              | `string?` | On `issue_type_*`: the type set, or removed                                                                       |
+| `previousType`      | `string?` | On `issue_type_changed`: the type before                                                                          |
+| `project`           | `string?` | On the `*_project_v2` kinds: the board’s title; null when the token may not read projects                         |
+| `status`            | `string?` | On `project_v2_item_status_changed`: the new Status                                                               |
+| `previousStatus`    | `string?` | On `project_v2_item_status_changed`: the Status before                                                            |
+
 ### Project
 
 A project’s full settings. A body may carry any of these; what it leaves out keeps its value.
@@ -2047,6 +2142,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/pr/findings/decision`                                                 | `POST /pulls/{number}/findings/decision`                                        |
 | `POST /api/pr/merge`                                                             | `POST /pulls/{number}/merge`                                                    |
 | `POST /api/dev/pulls/:number/serve`                                              | `POST /pulls/{number}/serve`                                                    |
+| `GET /api/issues/view`                                                           | `GET /issues/{number}`                                                          |
+| `GET /api/issues/timeline`                                                       | `GET /issues/{number}/timeline`                                                 |
 | `POST /api/issues/close`                                                         | `POST /issues/{number}/close`                                                   |
 | `GET /api/pr/commit`                                                             | `GET /commits/{sha}`                                                            |
 | `GET /api/dev/sessions`                                                          | `GET /sessions`                                                                 |

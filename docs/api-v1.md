@@ -92,16 +92,16 @@ from, so neither can describe a route the server does not have.
 
 What is there, by area:
 
-| Area                     | Paths                                                                                                               | Needs         |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------- | ------------- |
-| The token                | `/`, `/openapi.json`, `/token`, `/events`                                                                           | read          |
-| Projects                 | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                                                         | read / manage |
-| Pull requests and issues | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits`; `/issues/{number}/close` | read / manage |
-| Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops; `/preview/access`                 | read / manage |
-| Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                 | read to admin |
-| Memory                   | `/memories`, `/memories/health`                                                                                     | read / admin  |
-| Operations               | `/attention`, `/maintenance`, `/deployments`, `/ssh/requests`, `/tasks`, `/videos`                                  | admin         |
-| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `templates`                           | admin         |
+| Area                     | Paths                                                                                                                                 | Needs         |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| The token                | `/`, `/openapi.json`, `/token`, `/events`                                                                                             | read          |
+| Projects                 | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                                                                           | read / manage |
+| Pull requests and issues | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits`; `/issues/{number}` and its timeline, close | read / manage |
+| Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops; `/preview/access`                                   | read / manage |
+| Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                                   | read to admin |
+| Memory                   | `/memories`, `/memories/health`                                                                                                       | read / admin  |
+| Operations               | `/attention`, `/maintenance`, `/deployments`, `/ssh/requests`, `/tasks`, `/videos`                                                    | admin         |
+| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `templates`                                             | admin         |
 
 Everything the removed dashboard could do has a route, except its browser push
 notifications, which went with it. The reference ends with a table from each of
@@ -129,12 +129,19 @@ instead of mixing two revisions.
 | `/pulls/{number}/review-comments` | `{ pr, reviewComments, nextPage }`; adds `path`, `line`, `originalLine`, `side`, `diffHunk`, `reviewId`, `inReplyTo`               |
 | `/pulls/{number}/findings`        | The findings Briareus's reviews declared, with their verdicts                                                                      |
 | `/commits/{sha}`                  | `{ commit, files, truncated }`: one commit and the files it changed, with patches                                                  |
+| `/issues/{number}`                | `{ issue }`: body, state, labels, type, parent, sub-issues, linked pull requests and Projects v2 fields                            |
+| `/issues/{number}/timeline`       | `{ issue, events, nextPage }`: comments and events, oldest first; see `TimelineEvent` for the kinds                                |
 
 `patch` is `null` for a binary file or a diff GitHub would not render. GitHub
 lists at most 3,000 files on a pull request, 250 commits, and 300 files on one
 commit; `truncated` says when a file list hit its limit. A review comment's
 `line` is `null` once a later push moved the code it was written on;
 `originalLine` still says where it was.
+
+The issue reads take `repo` the same way and answer a pull request's number
+with 422. An issue's project fields need Projects: read on the server's token
+(a classic token's `read:project`); without it the issue is still read, with
+`projects` empty and `projectsError` carrying GitHub's reason.
 
 ## Events
 
