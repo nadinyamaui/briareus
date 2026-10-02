@@ -164,7 +164,7 @@ vi.mock('../lib/uploads.js', () => ({
 }));
 
 // No Chromium here: the shared browser's endpoint is whatever a test says it is.
-const browserState = vi.hoisted(() => ({ endpoint: null }));
+const browserState = vi.hoisted(() => ({ endpoint: null, changed: null }));
 vi.mock('../lib/browser.js', async (original) => ({
   ...(await original()),
   browserEndpoint: () => browserState.endpoint,
@@ -172,6 +172,9 @@ vi.mock('../lib/browser.js', async (original) => ({
   startBrowser: vi.fn(async () => {}),
   stopBrowser: vi.fn(),
   forgetBrowser: vi.fn(),
+  onBrowserChange: (fn) => {
+    browserState.changed = fn;
+  },
 }));
 
 vi.mock('../lib/usage.js', () => ({
@@ -180,6 +183,7 @@ vi.mock('../lib/usage.js', () => ({
 }));
 
 import { deleteJob, jobEventMaxSeqs, loadJobEvents, saveJob } from '../lib/db.js';
+import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
 import { dropSessionDatabase } from '../lib/dbpool.js';
 import {
   latestReviewFindings,
@@ -214,6 +218,8 @@ import {
   jobEventsSince,
   publicJob,
   sharedBrowserNote,
+  openSessionBrowser,
+  closeSessionBrowser,
   getJob,
   createDevSession,
   stepProvider,
@@ -10399,5 +10405,236 @@ describe('the shared browser', () => {
     expect(publicJob({ ...base, browser: true }).browser).toEqual({ running: false });
     browserState.endpoint = 'http://127.0.0.1:41234';
     expect(publicJob({ ...base, browser: true }).browser).toEqual({ running: true });
+  });
+});
+
+describe('the shared browser in a session', () => {
+  const ENDPOINT = 'http://127.0.0.1:41234';
+  const row = (id, extra = {}) => ({
+    id,
+    kind: 'devchat',
+    status: 'closed',
+    repo: 'acme/shop',
+    providerId: 1,
+    turns: 1,
+    createdAt: '2026-08-21T00:00:00.000Z',
+    meta: {},
+    ...extra,
+  });
+
+  beforeAll(async () => {
+    state.stored = [row('br-open'), row('br-closed'), row('br-turn'), row('br-delete')];
+    await initJobs();
+  });
+  beforeEach(() => {
+    startBrowser.mockReset();
+    startBrowser.mockImplementation(async () => {
+      browserState.endpoint = ENDPOINT;
+    });
+    stopBrowser.mockReset();
+    stopBrowser.mockImplementation(() => {
+      browserState.endpoint = null;
+    });
+    forgetBrowser.mockReset();
+  });
+  afterEach(() => {
+    browserState.endpoint = null;
+  });
+
+  // One claude turn on a stand-in CLI: what it was started with, the MCP
+  // servers its config file mounts, and the first message it was sent. The
+  // turn answers at once and exits, unless `hold` leaves it to the test.
+  async function turn(job, text, { hold = false } = {}) {
+    job.status = 'idle';
+    getProviderForJob.mockReturnValue(state.provider);
+    captureProviderAuth.mockResolvedValue(undefined);
+    const bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    const seen = { spawned: false, args: null, mcp: null, prompt: null };
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
+      const [args] = rest;
+      seen.spawned = true;
+      seen.args = args;
+      // The file goes with the turn, so it is read while the turn is alive.
+      seen.mcp = JSON.parse(fs.readFileSync(args[args.indexOf('--mcp-config') + 1], 'utf8')).mcpServers;
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin.on('data', (chunk) => {
+        seen.prompt ??= JSON.parse(chunk.toString()).message.content;
+        if (hold) return;
+        child.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' }) + '\n');
+      });
+      child.stdin.on('finish', () => setImmediate(() => child.emit('close', 0)));
+      seen.child = child;
+      return child;
+    });
+    const settled = new Promise((resolve) => {
+      const onJob = (session) => {
+        if (session.id !== job.id || session.status !== 'idle') return;
+        bus.off('job', onJob);
+        resolve();
+      };
+      bus.on('job', onJob);
+    });
+    sendDevMessage(job.id, text);
+    return {
+      seen,
+      settled: settled.finally(() => {
+        bin.mockRestore();
+        spawn.mockReset();
+        getProviderForJob.mockReset();
+        captureProviderAuth.mockReset();
+      }),
+    };
+  }
+
+  it('opens: starts the browser, switches it on and says so once', async () => {
+    const job = getJob('br-open');
+    job.status = 'idle';
+    const record = await openSessionBrowser(job.id);
+    expect(startBrowser).toHaveBeenCalledWith(job.id);
+    expect(record.browser).toEqual({ running: true });
+    expect(job.browser).toBe(true);
+    await openSessionBrowser(job.id);
+    expect(job.events.filter((e) => e.text?.startsWith('Shared browser opened'))).toHaveLength(1);
+  });
+
+  it('refuses to open the browser of a closed session, or of none', async () => {
+    await expect(openSessionBrowser('br-closed')).rejects.toMatchObject({ status: 409 });
+    expect(getJob('br-closed').browser).toBeFalsy();
+    await expect(openSessionBrowser('nope')).rejects.toMatchObject({ status: 404 });
+    expect(() => closeSessionBrowser('nope')).toThrow(expect.objectContaining({ status: 404 }));
+    expect(startBrowser).not.toHaveBeenCalled();
+  });
+
+  it('closes: stops it and switches it off, so no turn starts it again', async () => {
+    const job = getJob('br-open');
+    job.browser = true;
+    browserState.endpoint = ENDPOINT;
+    const record = closeSessionBrowser(job.id);
+    expect(stopBrowser).toHaveBeenCalledWith(job.id);
+    expect(record.browser).toBeNull();
+    expect(job.browser).toBe(false);
+    expect(job.events.at(-1).text).toBe('Shared browser closed.');
+  });
+
+  it('mounts the Playwright MCP server on the live endpoint, outside the checkout, and tells the turn', async () => {
+    const job = getJob('br-turn');
+    job.browser = true;
+    browserState.endpoint = ENDPOINT;
+    const { seen, settled } = await turn(job, 'Log in and check the cart');
+    await settled;
+    expect(startBrowser).not.toHaveBeenCalled();
+    expect(seen.mcp.browser.args).toEqual([
+      '-y',
+      expect.stringMatching(/^@playwright\/mcp@\d/),
+      '--cdp-endpoint',
+      ENDPOINT,
+      '--output-dir',
+      expect.stringMatching(/briareus-browser[/\\]br-turn-output$/),
+    ]);
+    expect(seen.prompt).toMatch(
+      /^<shared-browser>[\s\S]*http:\/\/127\.0\.0\.1:41234[\s\S]*<\/shared-browser>\n\nLog in/,
+    );
+  });
+
+  it('mounts nothing and says nothing when the browser is off', async () => {
+    const job = getJob('br-turn');
+    job.browser = false;
+    browserState.endpoint = ENDPOINT;
+    const { seen, settled } = await turn(job, 'Just code');
+    await settled;
+    expect(seen.mcp).not.toHaveProperty('browser');
+    expect(seen.prompt).toBe('Just code');
+  });
+
+  it('starts a browser that is on and down before the turn, which then gets it', async () => {
+    const job = getJob('br-turn');
+    job.browser = true;
+    const { seen, settled } = await turn(job, 'Open the shop');
+    await settled;
+    expect(startBrowser).toHaveBeenCalledWith(job.id);
+    expect(seen.mcp.browser.args).toContain(ENDPOINT);
+  });
+
+  it('runs the turn without browser tools when the browser will not start', async () => {
+    const job = getJob('br-turn');
+    job.browser = true;
+    startBrowser.mockRejectedValueOnce(new Error('No Chromium on this server'));
+    const { seen, settled } = await turn(job, 'Open the shop');
+    await settled;
+    expect(seen.spawned).toBe(true);
+    expect(seen.mcp).not.toHaveProperty('browser');
+    expect(
+      job.events.some((e) => e.text === 'Shared browser could not start: No Chromium on this server'),
+    ).toBe(true);
+  });
+
+  it('does not take a Stop of the previous turn as a Stop of this one', async () => {
+    const job = getJob('br-turn');
+    job.browser = true;
+    job.turnCanceled = true;
+    const { seen, settled } = await turn(job, 'Again');
+    await settled;
+    expect(seen.spawned).toBe(true);
+  });
+
+  it('spawns nothing for a turn stopped while its browser was starting', async () => {
+    const job = getJob('br-turn');
+    job.browser = true;
+    let launched;
+    startBrowser.mockImplementationOnce(() => new Promise((resolve) => (launched = resolve)));
+    const { seen, settled } = await turn(job, 'Open the shop');
+    await vi.waitFor(() => expect(startBrowser).toHaveBeenCalled());
+    cancelDevTurn(job.id);
+    browserState.endpoint = ENDPOINT;
+    launched();
+    await settled;
+    expect(seen.spawned).toBe(false);
+    expect(job.events.some((e) => e.kind === 'info' && e.text === 'Turn canceled.')).toBe(true);
+  });
+
+  it('spawns nothing for a session closed while its browser was starting, and stops that browser', async () => {
+    const job = getJob('br-turn');
+    job.browser = true;
+    let launched;
+    startBrowser.mockImplementationOnce(() => new Promise((resolve) => (launched = resolve)));
+    const { seen } = await turn(job, 'Open the shop');
+    await vi.waitFor(() => expect(startBrowser).toHaveBeenCalled());
+    const closing = closeDevSession(job.id);
+    launched();
+    await closing;
+    await vi.waitFor(() => expect(job.events.some((e) => e.text === 'Turn canceled.')).toBe(true));
+    expect(seen.spawned).toBe(false);
+    expect(job.status).toBe('closed');
+    expect(stopBrowser).toHaveBeenCalledWith(job.id);
+    // Still switched on: the next turn after a reopen brings it back.
+    expect(job.browser).toBe(true);
+    spawn.mockReset();
+    getProviderForJob.mockReset();
+    captureProviderAuth.mockReset();
+  });
+
+  it('drops the browser and its profile with a deleted session', async () => {
+    await deleteJobById('br-delete');
+    expect(forgetBrowser).toHaveBeenCalledWith('br-delete');
+  });
+
+  it('pushes the record again when the browser comes up or goes away on its own', () => {
+    const job = getJob('br-open');
+    job.browser = true;
+    const records = [];
+    const onJob = (record) => record.id === job.id && records.push(record);
+    bus.on('job', onJob);
+    // The callback jobs.js registered with the module, called the way the
+    // module calls it when Chromium exits.
+    browserState.changed(job.id);
+    browserState.changed('not-a-session');
+    bus.off('job', onJob);
+    expect(records).toHaveLength(1);
+    expect(records[0].browser).toEqual({ running: false });
   });
 });

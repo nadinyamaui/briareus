@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { execFileSync } from 'child_process';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const cfg = vi.hoisted(() => ({ browserBin: '/opt/chromium/chrome' }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
@@ -67,6 +71,72 @@ describe('a session with no browser running', () => {
 describe('findBrowserBin', () => {
   it('takes BROWSER_BIN as it is when set', () => {
     expect(browser.findBrowserBin()).toBe('/opt/chromium/chrome');
+  });
+
+  describe('without BROWSER_BIN', () => {
+    const saved = { HOME: process.env.HOME, PATH: process.env.PATH };
+    let root;
+    // A home and a PATH of the test's own, and a fresh copy of the module,
+    // since the answer is cached for the life of the process.
+    const fresh = async ({ builds = [], onPath = [] } = {}) => {
+      root = fs.mkdtempSync(path.join(os.tmpdir(), 'find-browser-'));
+      for (const [build, sub] of builds) {
+        const dir = path.join(root, 'home', '.cache', 'ms-playwright', build, sub);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'chrome'), '');
+      }
+      const bin = path.join(root, 'bin');
+      fs.mkdirSync(bin, { recursive: true });
+      for (const name of onPath) fs.writeFileSync(path.join(bin, name), '#!/bin/sh\n', { mode: 0o755 });
+      process.env.HOME = path.join(root, 'home');
+      // Only `which` from the system, so a browser installed on this machine
+      // cannot answer for the one the test set up.
+      const sys = path.join(root, 'sys');
+      fs.mkdirSync(sys);
+      fs.symlinkSync(
+        execFileSync('sh', ['-c', 'command -v which'], { encoding: 'utf8' }).trim(),
+        path.join(sys, 'which'),
+      );
+      process.env.PATH = `${bin}:${sys}`;
+      vi.resetModules();
+      return import('../lib/browser.js');
+    };
+    beforeEach(() => {
+      cfg.browserBin = '';
+    });
+    afterEach(() => {
+      cfg.browserBin = '/opt/chromium/chrome';
+      Object.assign(process.env, saved);
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+
+    it('takes the newest Chromium Playwright downloaded', async () => {
+      const mod = await fresh({
+        builds: [
+          ['chromium-999', 'chrome-linux'],
+          ['chromium-1243', 'chrome-linux-arm64'],
+          ['chromium_headless_shell-2000', 'chrome-linux'],
+        ],
+        onPath: ['chromium'],
+      });
+      expect(mod.findBrowserBin()).toBe(
+        path.join(root, 'home', '.cache', 'ms-playwright', 'chromium-1243', 'chrome-linux-arm64', 'chrome'),
+      );
+    });
+
+    it('falls back to a Chromium on PATH', async () => {
+      const mod = await fresh({ onPath: ['chromium-browser'] });
+      expect(mod.findBrowserBin()).toBe(path.join(root, 'bin', 'chromium-browser'));
+    });
+
+    it('finds none, and a start says what to install', async () => {
+      const mod = await fresh();
+      expect(mod.findBrowserBin()).toBeNull();
+      await expect(mod.startBrowser('nobin')).rejects.toMatchObject({
+        status: 503,
+        message: expect.stringMatching(/npx playwright install chromium/),
+      });
+    });
   });
 });
 

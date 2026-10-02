@@ -144,3 +144,35 @@ it('hands input to the browser and passes its refusals back with their status', 
   const bad = await post('/abc123/browser/input', { type: 'nope' });
   expect(bad.status).toBe(400);
 });
+
+it('passes a close the session layer refuses back with its status', async () => {
+  deps.closeSessionBrowser.mockImplementationOnce(() => {
+    throw Object.assign(new Error('Session not found'), { status: 404 });
+  });
+  const res = await fetch(`${base}/abc123/browser`, { method: 'DELETE' });
+  expect(res.status).toBe(404);
+});
+
+it('ends the stream at once when the browser goes down between the check and the watch', async () => {
+  deps.watchBrowser.mockImplementationOnce(() => {
+    throw Object.assign(new Error('The session’s browser is not running'), { status: 409 });
+  });
+  const res = await fetch(`${base}/abc123/browser/stream`);
+  expect(res.status).toBe(200);
+  expect(await res.text()).toBe('event: closed\ndata: {}\n\n');
+});
+
+it('answers a screenshot of a browser that is not there with its status, as JSON', async () => {
+  deps.browserScreenshot.mockRejectedValueOnce(
+    Object.assign(new Error('The session’s browser is not running'), { status: 409 }),
+  );
+  const res = await fetch(`${base}/abc123/browser/screenshot`);
+  expect(res.status).toBe(409);
+  expect(await res.json()).toEqual({ error: 'The session’s browser is not running' });
+});
+
+it('reads a failure with no status as the browser having gone away mid-call: 409', async () => {
+  deps.browserInput.mockRejectedValueOnce(new Error('The browser went away'));
+  const res = await post('/abc123/browser/input', { type: 'reload' });
+  expect(res.status).toBe(409);
+});
