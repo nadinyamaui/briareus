@@ -116,6 +116,38 @@ describe('the Slack workspaces', () => {
     expect(slack.calls.length).toBe(before);
   });
 
+  it.each([{ projects: [] }, { projects: [{ repo: 'o/a', directMessages: false, permissionMode: 'ask' }] }])(
+    'rejects a token update if concurrent restrictions were saved: %j',
+    async (restrictions) => {
+      const { s, w, slack, stored } = await service({ project: { permissionMode: 'allow' } });
+      const originalToken = stored.slack_workspaces[0].token;
+      const auth = await slack.api(TOKEN, 'auth.test');
+      let finishValidation;
+      const validating = new Promise((resolve) => {
+        slack.api.mockImplementationOnce(() => {
+          resolve();
+          return new Promise((done) => {
+            finishValidation = () => done(auth);
+          });
+        });
+      });
+      const rotation = s.update(w.id, { token: `${TOKEN}-rotated` });
+      const rejected = expect(rotation).rejects.toMatchObject({ status: 409 });
+      await validating;
+      const restricted = await s.update(w.id, restrictions);
+      finishValidation();
+      await rejected;
+
+      expect(s.list()).toEqual([restricted]);
+      expect(stored.slack_workspaces[0].projects).toEqual(restricted.projects);
+      expect(stored.slack_workspaces[0].token).toBe(originalToken);
+      await expect(s.request(job(), { to: 'U1', text: 'Hi' })).rejects.toThrow(
+        restrictions.projects.length ? 'may not send direct messages' : 'no Slack workspace',
+      );
+      expect(slack.posted()).toHaveLength(0);
+    },
+  );
+
   it('refuses a bot token, a project in two workspaces and settings it cannot use', async () => {
     const { s } = await service();
     await expect(s.create({ token: 'xoxb-1-2-abcdefghijkl', projects: [] })).rejects.toThrow('user token');
