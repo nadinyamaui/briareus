@@ -100,8 +100,8 @@ What is there, by area:
 | Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops; `/preview/access`                                   | read / manage |
 | Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                                   | read to admin |
 | Memory                   | `/memories`, `/memories/health`                                                                                                       | read / admin  |
-| Operations               | `/attention`, `/maintenance`, `/deployments`, `/ssh/requests`, `/tasks`, `/videos`                                                    | admin         |
-| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `templates`                                             | admin         |
+| Operations               | `/attention`, `/maintenance`, `/deployments`, `/ssh/requests`, `/slack/requests`, `/tasks`, `/videos`                                 | admin         |
+| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `slack/workspaces`, `templates`                         | admin         |
 
 Everything the removed dashboard could do has a route, except its browser push
 notifications, which went with it. The reference ends with a table from each of

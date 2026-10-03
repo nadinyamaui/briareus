@@ -17,6 +17,8 @@ import { createMobileAuth } from './lib/mobile-auth.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
+import { createSlackService } from './lib/slack.js';
+import { slackRoutes, slackEventsRouter } from './lib/slack-routes.js';
 import { sessionWebhookRoutes } from './lib/webhook-routes.js';
 import { sessionTranscriptRoutes } from './lib/transcript-routes.js';
 import { providerTestRoutes } from './lib/provider-test-routes.js';
@@ -82,6 +84,10 @@ import {
   deleteReviewFinding,
   replyToReviewFinding,
   retryLoopRound,
+  deliverToSession,
+  noteSession,
+  webhookUnfit,
+  setSlackAccess,
   DEV_OPEN,
 } from './lib/jobs.js';
 import {
@@ -211,9 +217,22 @@ const api = express.Router();
 // headers say so (lib/security.js).
 app.use(securityHeaders);
 
+// Slack for sessions (lib/slack.js): created here because its events route
+// is a webhook, and webhooks come before everything else.
+const slackService = createSlackService({
+  getJob,
+  deliver: (id, delivery) => deliverToSession(id, delivery, { via: 'slack' }),
+  note: noteSession,
+  unfit: webhookUnfit,
+  eventsUrl: (id) => `${getConfig().publicBaseUrl}/webhooks/slack/${id}`,
+});
+setSlackAccess((repo) => slackService.briefing(repo));
+
 // Webhooks come first, ahead of the JSON body parser: GitHub signs the raw
 // bytes (a re-serialized body verifies against nothing). Each delivery
-// authenticates itself with an HMAC over the raw body. See lib/webhooks.js.
+// authenticates itself with an HMAC over the raw body. See lib/webhooks.js;
+// Slack's events are signed the same way, with the Slack app's secret.
+app.use('/webhooks/slack', slackEventsRouter({ service: slackService }));
 app.use('/webhooks', webhookRouter());
 
 // The client API, and the only one: owner-issued tokens (`npm run
@@ -536,8 +555,15 @@ function agentSession(req, res) {
 
 const sshService = createSshService({ getJob });
 api.use(sshRoutes({ service: sshService, agentSession, getProject }));
+api.use(slackRoutes({ service: slackService, agentSession, getProject }));
 api.use(
-  operationsRoutes({ listSessions: devSessionRecords, ssh: sshService, getJob, sendMessage: sendDevMessage }),
+  operationsRoutes({
+    listSessions: devSessionRecords,
+    ssh: sshService,
+    slack: slackService,
+    getJob,
+    sendMessage: sendDevMessage,
+  }),
 );
 
 api.use(memoryMaintenanceRoutes({ listMemories, updateMemory }));
@@ -2033,6 +2059,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initProjects();
     await initDbServers();
     await sshService.init();
+    await slackService.init();
     await envoyerService.init();
     await forgeAccounts.init();
     await mobileAuth.init();

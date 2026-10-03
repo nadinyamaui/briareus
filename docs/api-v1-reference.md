@@ -901,7 +901,7 @@ Read usage and costs across every project. Needs `admin`.
 
 ### `GET /attention`
 
-List what is waiting on the operator: questions, findings to rule on, failures, SSH approvals. Needs `admin`.
+List what is waiting on the operator: questions, findings to rule on, failures, SSH and Slack approvals. Needs `admin`.
 
 **Returns** `{ items: object[] }`. An item is `{ id, sessionId, taskId, revision, repo, title, kind, summary, href, at }`.
 
@@ -940,6 +940,24 @@ Approve or deny an SSH command. Needs `admin`.
 | `decision` **required** | `approve\|deny` | The ruling |
 
 **Returns** `{ request: object }`
+
+### `GET /slack/requests`
+
+List the Slack messages agents are waiting for approval to send. Needs `admin`.
+
+**Returns** `{ requests: object[] }`. A request is `{ id, workspaceLabel, sendsAs, repo, jobId, sessionTitle, to: { kind, id, label }, text, threadTs, status, createdAt, expiresAt, unattended }`. One waits a day at most.
+
+### `POST /slack/requests/{id}/decision`
+
+Approve or deny a Slack message; approving sends it. Needs `admin`.
+
+**Body**
+
+| Field                   | Type            |            |
+| ----------------------- | --------------- | ---------- |
+| `decision` **required** | `approve\|deny` | The ruling |
+
+**Returns** `{ request: object }`. The request comes back `sent` or `failed`, with `error` saying why.
 
 ### `GET /deployments`
 
@@ -1476,6 +1494,40 @@ Remove a server. Needs `admin`.
 Read the server’s database login, decrypted, to connect through an SSH tunnel to `host`:`port` on it. 404 when none is stored. Needs `admin`.
 
 **Returns** `{ credentials: DbCredentials }`
+
+### `GET /settings/slack/workspaces`
+
+List every workspace, with the values a new one starts from. Needs `admin`.
+
+**Query**
+
+| Field  | Type     |                                                                |
+| ------ | -------- | -------------------------------------------------------------- |
+| `repo` | `string` | Only the workspace this project sends through, as `owner/name` |
+
+**Returns** `{ workspaces: SlackWorkspace[], defaults: SlackWorkspace }`
+
+### `POST /settings/slack/workspaces`
+
+Add a workspace. Needs `admin`.
+
+**Body**: a [SlackWorkspace](#slackworkspace), whole or in part.
+
+**Returns** 201 `{ workspace: SlackWorkspace }`
+
+### `PUT /settings/slack/workspaces/{id}`
+
+Change a workspace. Needs `admin`.
+
+**Body**: a [SlackWorkspace](#slackworkspace), whole or in part.
+
+**Returns** `{ workspace: SlackWorkspace }`
+
+### `DELETE /settings/slack/workspaces/{id}`
+
+Remove a workspace. Needs `admin`.
+
+**Returns** `{ ok: boolean }`
 
 ### `GET /settings/envoyer/accounts`
 
@@ -2039,6 +2091,26 @@ A server an agent may run commands on, with approval.
 | `dbPassword`       | `string`     | That user’s password. Write-only, stored encrypted; left out, the stored one stays                                   |
 | `hasDbCredentials` | `boolean`    | Whether a database login is stored; set by the server                                                                |
 
+### SlackWorkspace
+
+A Slack workspace sessions send messages in, as the user who installed the Slack app, and the projects that may use it.
+
+| Field              | Type       |                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`               | `integer`  | Its id; set by the server                                                                                                                                                                                                                                                                                                                         |
+| `label`            | `string`   | Its display name; the workspace’s name when left empty                                                                                                                                                                                                                                                                                            |
+| `token`            | `string`   | A Slack user token (`xoxp-…`) with the scopes chat:write, users:read, channels:read, groups:read, im:write, im:history, channels:history and groups:history. Write-only: checked with Slack, stored encrypted and never returned; empty or absent keeps the stored one                                                                            |
+| `signingSecret`    | `string`   | The Slack app’s signing secret, which lets replies reach sessions through `eventsUrl`. Write-only, stored encrypted; empty or absent keeps the stored one                                                                                                                                                                                         |
+| `projects`         | `object[]` | The projects that may send through it, each `{ repo, channels, directMessages, permissionMode }`: `channels` the channel names or ids it may post to, `directMessages` whether it may write to people (true when absent), `permissionMode` `ask` (each message waits for approval, the default) or `allow`. A project is in one workspace at most |
+| `team`             | `string`   | The workspace’s name, from Slack; read-only                                                                                                                                                                                                                                                                                                       |
+| `teamId`           | `string`   | The workspace’s Slack id; read-only                                                                                                                                                                                                                                                                                                               |
+| `user`             | `string`   | Whose account the messages go out as; read-only                                                                                                                                                                                                                                                                                                   |
+| `userId`           | `string`   | That user’s Slack id; read-only                                                                                                                                                                                                                                                                                                                   |
+| `url`              | `string`   | The workspace’s address; read-only                                                                                                                                                                                                                                                                                                                |
+| `hasToken`         | `boolean`  | Whether a token is stored; read-only                                                                                                                                                                                                                                                                                                              |
+| `hasSigningSecret` | `boolean`  | Whether a signing secret is stored, so replies reach sessions; read-only                                                                                                                                                                                                                                                                          |
+| `eventsUrl`        | `string`   | The Request URL to give the Slack app’s Event Subscriptions, subscribed on behalf of users to message.im, message.channels and message.groups; read-only                                                                                                                                                                                          |
+
 ### DbCredentials
 
 An SSH server’s database login, opened. Reach `host`:`port` through a tunnel over that server.
@@ -2202,6 +2274,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/operations/maintenance`                                               | `POST /maintenance`                                                             |
 | `GET /api/ssh/requests`                                                          | `GET /ssh/requests`                                                             |
 | `POST /api/ssh/requests/:id/decision`                                            | `POST /ssh/requests/{id}/decision`                                              |
+| `GET /api/slack/requests`                                                        | `GET /slack/requests`                                                           |
+| `POST /api/slack/requests/:id/decision`                                          | `POST /slack/requests/{id}/decision`                                            |
 | `GET /api/operations/deployments`                                                | `GET /deployments`                                                              |
 | `GET /api/operations/deployments/config`                                         | `GET /deployments/config`                                                       |
 | `POST /api/operations/deployments/config`                                        | `POST /deployments/config`                                                      |
@@ -2258,6 +2332,10 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `PUT /api/ssh/servers/:id`                                                       | `PUT /settings/ssh/servers/{id}`                                                |
 | `DELETE /api/ssh/servers/:id`                                                    | `DELETE /settings/ssh/servers/{id}`                                             |
 | `GET /api/ssh/servers/:id/db-credentials`                                        | `GET /settings/ssh/servers/{id}/db-credentials`                                 |
+| `GET /api/slack/workspaces`                                                      | `GET /settings/slack/workspaces`                                                |
+| `POST /api/slack/workspaces`                                                     | `POST /settings/slack/workspaces`                                               |
+| `PUT /api/slack/workspaces/:id`                                                  | `PUT /settings/slack/workspaces/{id}`                                           |
+| `DELETE /api/slack/workspaces/:id`                                               | `DELETE /settings/slack/workspaces/{id}`                                        |
 | `GET /api/envoyer/accounts`                                                      | `GET /settings/envoyer/accounts`                                                |
 | `POST /api/envoyer/accounts`                                                     | `POST /settings/envoyer/accounts`                                               |
 | `PUT /api/envoyer/accounts/:id`                                                  | `PUT /settings/envoyer/accounts/{id}`                                           |

@@ -247,6 +247,8 @@ import {
   instructSession,
   flushDeliveries,
   setSessionWebhook,
+  setSlackAccess,
+  slackProtocol,
   rotateSessionWebhook,
   sessionWebhookState,
   flushJobs,
@@ -2800,14 +2802,16 @@ describe('webhook deliveries', () => {
     'in-busy',
     'in-turns',
     'in-dup',
+    'hk-slack',
   ];
 
   beforeAll(async () => {
     state.stored = [
-      ...IDLE.filter((id) => !['hk-off', 'hk-orch', 'hk-zeus', 'hk-brief'].includes(id)).map((id) =>
-        row(id, { webhook: armed() }),
+      ...IDLE.filter((id) => !['hk-off', 'hk-orch', 'hk-zeus', 'hk-brief', 'hk-slack'].includes(id)).map(
+        (id) => row(id, { webhook: armed() }),
       ),
       row('hk-off', {}),
+      row('hk-slack', {}),
       row('hk-orch', { orchestrator: true, costUsd: 5, webhook: armed() }),
       row('hk-zeus', {
         orchestrator: true,
@@ -3300,6 +3304,52 @@ describe('webhook deliveries', () => {
     ]);
     expect(refused(() => deliverToSession('hk-off', { text: 'hi' }))).toMatchObject({ status: 409 });
     job.awaitingAnswer = false;
+  });
+
+  it('takes a Slack reply with the webhook off, says it is one, and keeps it when the webhook is saved off', async () => {
+    const { prompts } = fakeCli();
+    const job = getJob('hk-slack');
+    expect(refused(() => deliverToSession('hk-slack', { text: 'hi' }))).toMatchObject({ status: 409 });
+    job.awaitingAnswer = true;
+    expect(
+      deliverToSession('hk-slack', { text: 'Sounds good', source: 'Slack @andres' }, { via: 'slack' }),
+    ).toEqual({ status: 'held', held: 1 });
+    setSessionWebhook('hk-slack', { armed: false });
+    expect(job.pendingDeliveries).toHaveLength(1);
+    sendDevMessage('hk-slack', 'Go on');
+    await cli.finish(job, 0, 0);
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    expect(prompts[1]).toMatch(/^Slack reply, not from the operator\. /);
+    expect(prompts[1]).toMatch(/--- delivery, from Slack @andres, [^\n]+\nSounds good\n/);
+    expect(job.unattendedTurn).toBe(true);
+    await cli.finish(job, 0, 1);
+  });
+
+  it('briefs a session about Slack only when its project has a workspace and the session takes replies', () => {
+    const slack = {
+      team: 'Okanet',
+      user: 'nadin',
+      permissionMode: 'ask',
+      directMessages: true,
+      channels: ['dev'],
+      replies: true,
+    };
+    setSlackAccess(() => slack);
+    try {
+      const told = slackProtocol(getJob('hk-free'));
+      expect(told).toContain('in the Okanet workspace as nadin');
+      expect(told).toContain('direct messages to people and the channels #dev');
+      expect(told).toContain('Each message waits for the user');
+      expect(told).toContain('opening with "Slack reply"');
+      expect(slackProtocol(getJob('hk-worker'))).toBe('');
+      expect(slackProtocol(getJob('hk-review'))).toBe('');
+      setSlackAccess(() => ({ ...slack, permissionMode: 'allow', replies: false }));
+      expect(slackProtocol(getJob('hk-free'))).toContain('A message sent in a turn nobody is watching waits');
+      expect(slackProtocol(getJob('hk-free'))).not.toContain('Slack reply');
+    } finally {
+      setSlackAccess(() => null);
+    }
+    expect(slackProtocol(getJob('hk-free'))).toBe('');
   });
 
   it('rotating raises the epoch the key is derived from, and nothing else', () => {
