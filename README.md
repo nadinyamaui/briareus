@@ -786,11 +786,45 @@ A restart discards requests and never replays them. These permissions govern the
 Briareus's coding agents still run with their existing local shell access, so this is not an
 operating-system sandbox restricting every possible way to reach a server.
 
+### Slack
+
+A session can send a Slack message when you tell it to ("send this to Andres"),
+and what Andres answers comes back into that session. Messages go out **as you**:
+the workspace is a Slack user token, not a bot.
+
+1. Create a Slack app at api.slack.com/apps. Under _OAuth & Permissions_, give it these
+   **user token** scopes: `chat:write`, `users:read`, `channels:read`, `groups:read`,
+   `im:write`, `im:history`, `channels:history` and `groups:history`. Install it to the
+   workspace and copy the _User OAuth Token_ (`xoxp-…`).
+2. Add the workspace (`POST /api/v1/settings/slack/workspaces`) with that `token`, the
+   app's `signingSecret` (from _Basic Information_), and the `projects` that may use it,
+   each `{ repo, channels, directMessages, permissionMode }`. The token is checked with
+   Slack and stored encrypted under `CREDENTIALS_KEY`, as is the secret. A project sends
+   through one workspace at most.
+3. For replies, turn on the app's _Event Subscriptions_ with the workspace's `eventsUrl`
+   (`PUBLIC_BASE_URL/webhooks/slack/<id>`) as the Request URL, and subscribe **on behalf of
+   users** to `message.im`, `message.channels` and `message.groups`. Like the other webhooks,
+   that path must bypass Cloudflare Access.
+
+Sessions whose project has a workspace receive the `slack_destinations`, `slack_find_people`,
+`slack_send` and `slack_result` MCP tools; reviews, QA, loop sessions and workers do not.
+A project may post only to the channels it lists, and to people only with `directMessages`.
+In **ask** mode (the default) each message waits in `GET /api/v1/slack/requests` and the
+attention inbox until approved (`POST /api/v1/slack/requests/:id/decision`), for a day at most;
+in **allow** mode it is sent at once, except in a turn a webhook delivery or a Slack reply
+started, which always asks. Approvals are held in memory, so a restart sends nothing.
+
+A reply reaches the session when it answers in a direct message the session wrote in during
+the last 14 days, or in the thread of a message the session sent. It arrives as a delivery
+("Slack reply", between marked lines): the other person's word, never yours. It starts a turn
+under the session's webhook caps (or their defaults), without the webhook having to be armed.
+Nothing else that happens in the workspace reaches any session.
+
 ### Operator attention
 
 `GET /api/v1/attention` is the operator's inbox: unanswered agent
 questions, held findings, interrupted sessions, review/QA failures and pending
-SSH commands across projects. It is a live projection, read on every request,
+SSH commands and Slack messages across projects. It is a live projection, read on every request,
 and does not dismiss unresolved work.
 
 ### Recovery and maintenance
