@@ -236,6 +236,53 @@ describe('a session sending', () => {
     expect(s.result(job(), b.id).status).toBe('denied');
   });
 
+  it.each([
+    ['U1', 'users.list', { repo: 'o/a', directMessages: false, permissionMode: 'ask' }],
+    ['U1', 'users.list', { repo: 'o/a', permissionMode: 'ask' }],
+    ['#dev', 'conversations.list', { repo: 'o/a', channels: [], permissionMode: 'allow' }],
+    ['U1', 'users.list', null],
+  ])('rejects %s when settings change during %s', async (to, method, project) => {
+    const { s, w, slack } = await service({ project: { permissionMode: 'allow' } });
+    const original = slack.api.getMockImplementation();
+    let resume;
+    let started;
+    const paused = new Promise((resolve) => {
+      started = resolve;
+    });
+    slack.api.mockImplementation(async (...args) => {
+      if (args[1] === method) {
+        started();
+        await new Promise((resolve) => {
+          resume = resolve;
+        });
+      }
+      return original(...args);
+    });
+    const pending = s.request(job(), { to, text: 'Hi' });
+    const rejected = expect(pending).rejects.toThrow('Slack settings changed');
+    await paused;
+    await s.update(w.id, { projects: project ? [project] : [] });
+    resume();
+    await rejected;
+    expect(s.pending()).toEqual([]);
+    expect(slack.posted()).toEqual([]);
+    expect(slack.calls.some((c) => c.method === 'conversations.open')).toBe(false);
+  });
+
+  it('does not post a DM if settings change while opening it', async () => {
+    const { s, w, slack } = await service({ project: { permissionMode: 'allow' } });
+    const original = slack.api.getMockImplementation();
+    slack.api.mockImplementation(async (...args) => {
+      if (args[1] === 'conversations.open') await s.update(w.id, { projects: [] });
+      return original(...args);
+    });
+    expect(await s.request(job(), { to: 'U1', text: 'Hi' })).toMatchObject({
+      status: 'failed',
+      error: 'Slack settings changed; send the message again',
+    });
+    expect(slack.posted()).toEqual([]);
+  });
+
   it('tells the agent where it may send', async () => {
     const { s } = await service({ project: { channels: ['dev', 'nowhere'] } });
     expect(await s.destinations(job())).toEqual({
@@ -339,6 +386,53 @@ describe('replies through the Events API', () => {
     delete jobs.j1;
     const late = dm({ user: 'U1', text: 'hello?' }, 'd');
     expect(s.receive(String(w.id), late.raw, late.headers).then).toBeUndefined();
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it.each(['U1', '#dev'])('ignores replies to %s after the project is removed', async (to) => {
+    const { s, w, deliver } = await sentTo(to);
+    await s.update(w.id, { projects: [] });
+    const reply = signed(
+      event({
+        channel: to === 'U1' ? 'D-U1' : 'C1',
+        channel_type: to === 'U1' ? 'im' : 'channel',
+        thread_ts: '1700000000.000100',
+        user: 'U1',
+        text: 'ok',
+        ts: '1.2',
+      }),
+    );
+    expect(s.briefing('o/a')).toBeNull();
+    expect(s.receive(String(w.id), reply.raw, reply.headers).then).toBeUndefined();
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it('rechecks project access after looking up the reply sender', async () => {
+    const { s, w, deliver, slack } = await sentTo();
+    // Replacing the token clears the cached directory, so the reply lookup awaits Slack.
+    await s.update(w.id, { token: TOKEN });
+    const original = slack.api.getMockImplementation();
+    let resume;
+    let started;
+    const paused = new Promise((resolve) => {
+      started = resolve;
+    });
+    slack.api.mockImplementation(async (...args) => {
+      if (args[1] === 'users.list') {
+        started();
+        await new Promise((resolve) => {
+          resume = resolve;
+        });
+      }
+      return original(...args);
+    });
+    const reply = signed(event({ channel: 'D-U1', channel_type: 'im', user: 'U1', text: 'ok', ts: '1.2' }));
+    const outcome = s.receive(String(w.id), reply.raw, reply.headers);
+    const delivering = outcome.then();
+    await paused;
+    await s.update(w.id, { projects: [] });
+    resume();
+    await delivering;
     expect(deliver).not.toHaveBeenCalled();
   });
 
