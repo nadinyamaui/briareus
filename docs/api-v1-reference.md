@@ -347,6 +347,19 @@ Close an issue on GitHub, with an optional comment posted just before. Needs `ma
 
 **Returns** `{ issue: ClosedIssue }`. A pull request’s number is refused with 422: GitHub would close it through the same endpoint, and this route closes issues only. Closing one that is already closed updates its reason.
 
+### `GET /project-board`
+
+Read the project’s GitHub Projects v2 board, filtered and grouped into columns the way its view is on GitHub. Needs `read`, held to `repo`.
+
+**Query**
+
+| Field               | Type     |                                                    |
+| ------------------- | -------- | -------------------------------------------------- |
+| `repo` **required** | `string` | A project, as `owner/name`                         |
+| `fresh`             | `0\|1`   | `1` skips the server’s short cache and reads again |
+
+**Returns** `{ project: object?, view: object?, groupBy: string?, columns: BoardColumn[], truncated: boolean, unsupportedFilters: string[], projectsError: string? }`. The board is the one named by the project’s `projectBoard` setting; a project without one gets 404 (`hasBoard` on `GET /projects` says which do). `project` is `{ title, url }` and `view` `{ name, number, filter, url }`, null when the setting names no view. The view’s filter is applied by GitHub itself, every qualifier included (`iteration:@current`, `-status:`, `repo:` lists, …), so `unsupportedFilters` is empty. Columns follow the view’s group-by field (Status when it names none, or one that is not a single-select or an iteration), in that field’s order, with a `No <field>` column first when items lack a value; a column the filter excludes on that field (`-status:Backlog`) is left out, as GitHub’s page does. Archived items are left out. A board spans repositories, so a token held to some projects gets only the cards of their repositories (no drafts), with each column’s `count` and `sums` over those, and a parent in another repository comes back null. `truncated` says the board stopped at 2,000 items. Reading a board needs Projects: read on the server’s token (a classic token’s `read:project`); without it, or for a project or view GitHub cannot resolve, the answer has no columns and `projectsError` says why. Cached for 45 seconds; `fresh=1` reads again. Read-only: cards cannot be moved yet.
+
 ### `GET /commits/{sha}`
 
 Read one commit with the files it changed and their patches. Needs `read`, held to `repo`.
@@ -1576,15 +1589,16 @@ A token’s own record. The token itself is shown once, when it is created.
 
 A project as a session picker needs it.
 
-| Field              | Type       |                                                       |
-| ------------------ | ---------- | ----------------------------------------------------- |
-| `repo`             | `string`   | `owner/name`                                          |
-| `label`            | `string`   | Its display name                                      |
-| `hasLocal`         | `boolean`  | Whether it has a local checkout a session can work in |
-| `reviewProviderId` | `integer?` | The provider its reviews and errands run on           |
-| `reviewModel`      | `string`   | That runtime’s model, or empty                        |
-| `reviewEffort`     | `string`   | That runtime’s effort, or empty                       |
-| `runProfiles`      | `string[]` | The names ▶ Run offers, the default first             |
+| Field              | Type       |                                                                      |
+| ------------------ | ---------- | -------------------------------------------------------------------- |
+| `repo`             | `string`   | `owner/name`                                                         |
+| `label`            | `string`   | Its display name                                                     |
+| `hasLocal`         | `boolean`  | Whether it has a local checkout a session can work in                |
+| `reviewProviderId` | `integer?` | The provider its reviews and errands run on                          |
+| `reviewModel`      | `string`   | That runtime’s model, or empty                                       |
+| `reviewEffort`     | `string`   | That runtime’s effort, or empty                                      |
+| `runProfiles`      | `string[]` | The names ▶ Run offers, the default first                            |
+| `hasBoard`         | `boolean`  | Whether it names a Projects v2 board, read with `GET /project-board` |
 
 ### Session
 
@@ -1897,6 +1911,39 @@ An issue as GitHub has it right now, with what its page on GitHub shows beside t
 | `projects`      | `object[]`                                     | One `{ title, url, status, fields }` per Projects v2 board it is on. `status` is its Status, or null; `fields` is every other set single-select, text, number, date and iteration field as `{ name, value }`. Empty when the token may not read projects |
 | `projectsError` | `string`                                       | Present only when GitHub refused the project read, which needs Projects: read on the server’s token: GitHub’s reason. Everything else is still read                                                                                                      |
 
+### BoardColumn
+
+One column of a Projects v2 board: one value of the field the view groups by.
+
+| Field   | Type          |                                                                                                                                        |
+| ------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`    | `string?`     | The single-select option or iteration it stands for; null for the “No …” column                                                        |
+| `name`  | `string`      | Its heading, such as `In Progress`, or `No Status` for the items without a value                                                       |
+| `color` | `string?`     | A single-select option’s colour as GitHub names it: `GRAY`, `BLUE`, `GREEN`, `YELLOW`, `ORANGE`, `RED`, `PINK` or `PURPLE`             |
+| `count` | `integer`     | How many items it holds                                                                                                                |
+| `sums`  | `object`      | Every number field of the board totalled over its items, keyed by field name, such as `{ "Story Points": 21 }`; 0 where nothing is set |
+| `items` | `BoardItem[]` | Its cards, in the board’s own order                                                                                                    |
+
+### BoardItem
+
+One card of a Projects v2 board.
+
+| Field       | Type                           |                                                                                                                                                                                                                             |
+| ----------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`        | `string`                       | The project item’s node id                                                                                                                                                                                                  |
+| `type`      | `issue\|pull\|draft\|redacted` | What it is; `redacted` is an item the token may not see                                                                                                                                                                     |
+| `repo`      | `string?`                      | Its repository, `owner/name`; null for a draft                                                                                                                                                                              |
+| `number`    | `integer?`                     | Its number; null for a draft                                                                                                                                                                                                |
+| `title`     | `string?`                      | Its title                                                                                                                                                                                                                   |
+| `url`       | `string?`                      | Its page on GitHub; null for a draft                                                                                                                                                                                        |
+| `state`     | `string?`                      | `open` or `closed`, and `merged` for a pull request; null for a draft                                                                                                                                                       |
+| `createdAt` | `string?`                      | ISO time                                                                                                                                                                                                                    |
+| `author`    | `string?`                      | Who opened it, or created the draft                                                                                                                                                                                         |
+| `assignees` | `object[]`                     | Each `{ login, avatarUrl }`                                                                                                                                                                                                 |
+| `labels`    | `object[]`                     | Each `{ name, color }`, colour as hex                                                                                                                                                                                       |
+| `parent`    | `object?`                      | The issue it is a sub-issue of (its epic): `{ repo, number, title, url }`                                                                                                                                                   |
+| `fields`    | `object[]`                     | Its set single-select, text, number, date and iteration fields as `{ name, value }`, single-selects with the option’s `color`; the issue’s GitHub issue type comes as `Type`. The Title and the group-by field are left out |
+
 ### IssueRef
 
 An issue or pull request another one points to.
@@ -1943,43 +1990,44 @@ One entry of an issue’s timeline: a comment or an event. `kind` says which fie
 
 A project’s full settings. A body may carry any of these; what it leaves out keeps its value.
 
-| Field                       | Type       |                                                          |
-| --------------------------- | ---------- | -------------------------------------------------------- |
-| `id`                        | `integer`  | Its id; not in `defaults` or a create body               |
-| `repo`                      | `string`   | `owner/name`                                             |
-| `label`                     | `string`   | Its display name                                         |
-| `enabled`                   | `boolean`  | Whether sessions can start on it                         |
-| `sortOrder`                 | `integer`  | Its place in the list                                    |
-| `setupCommands`             | `string[]` | Run to prepare a checkout                                |
-| `phpBinDir`                 | `string`   |                                                          |
-| `localDir`                  | `string`   | Its local checkout, if any                               |
-| `autoUpdate`                | `boolean`  | Whether a merged pull request updates the local checkout |
-| `updateCommands`            | `string[]` | Run in the local checkout after it updates               |
-| `dbPoolEnabled`             | `boolean`  | Whether its sessions claim a database server             |
-| `dbPoolDatabase`            | `string`   |                                                          |
-| `dbRestoreSql`              | `string`   |                                                          |
-| `dbExtensions`              | `string[]` |                                                          |
-| `envTemplate`               | `string`   | The `.env` written into a checkout                       |
-| `runCommands`               | `string[]` | What ▶ Run runs                                          |
-| `runProfiles`               | `string`   |                                                          |
-| `reviewPublishInstructions` | `string`   |                                                          |
-| `reviewTestSheet`           | `boolean`  |                                                          |
-| `reviewTestRun`             | `boolean`  |                                                          |
-| `qaNotes`                   | `string`   |                                                          |
-| `feedbackInstructions`      | `string`   |                                                          |
-| `testSheetInstructions`     | `string`   |                                                          |
-| `reviewAuthor`              | `string`   |                                                          |
-| `reviewProviderId`          | `integer?` | The provider reviews and errands run on                  |
-| `reviewModel`               | `string`   |                                                          |
-| `reviewEffort`              | `string`   |                                                          |
-| `workerProviderId`          | `integer?` |                                                          |
-| `workerModel`               | `string`   |                                                          |
-| `workerEffort`              | `string`   |                                                          |
-| `isSelf`                    | `boolean`  | Whether this project is Briareus itself                  |
-| `stepRuntimes`              | `object`   | A runtime per errand step                                |
-| `promptTemplates`           | `object`   | Per-project prompt overrides                             |
-| `createdAt`                 | `string`   | ISO time; set by the server                              |
-| `updatedAt`                 | `string`   | ISO time; set by the server                              |
+| Field                       | Type       |                                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`                        | `integer`  | Its id; not in `defaults` or a create body                                                                                                                                                                                                                                                                                                                         |
+| `repo`                      | `string`   | `owner/name`                                                                                                                                                                                                                                                                                                                                                       |
+| `label`                     | `string`   | Its display name                                                                                                                                                                                                                                                                                                                                                   |
+| `enabled`                   | `boolean`  | Whether sessions can start on it                                                                                                                                                                                                                                                                                                                                   |
+| `sortOrder`                 | `integer`  | Its place in the list                                                                                                                                                                                                                                                                                                                                              |
+| `setupCommands`             | `string[]` | Run to prepare a checkout                                                                                                                                                                                                                                                                                                                                          |
+| `phpBinDir`                 | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `localDir`                  | `string`   | Its local checkout, if any                                                                                                                                                                                                                                                                                                                                         |
+| `autoUpdate`                | `boolean`  | Whether a merged pull request updates the local checkout                                                                                                                                                                                                                                                                                                           |
+| `updateCommands`            | `string[]` | Run in the local checkout after it updates                                                                                                                                                                                                                                                                                                                         |
+| `dbPoolEnabled`             | `boolean`  | Whether its sessions claim a database server                                                                                                                                                                                                                                                                                                                       |
+| `dbPoolDatabase`            | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `dbRestoreSql`              | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `dbExtensions`              | `string[]` |                                                                                                                                                                                                                                                                                                                                                                    |
+| `envTemplate`               | `string`   | The `.env` written into a checkout                                                                                                                                                                                                                                                                                                                                 |
+| `runCommands`               | `string[]` | What ▶ Run runs                                                                                                                                                                                                                                                                                                                                                    |
+| `runProfiles`               | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `reviewPublishInstructions` | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `reviewTestSheet`           | `boolean`  |                                                                                                                                                                                                                                                                                                                                                                    |
+| `reviewTestRun`             | `boolean`  |                                                                                                                                                                                                                                                                                                                                                                    |
+| `qaNotes`                   | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `feedbackInstructions`      | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `testSheetInstructions`     | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `reviewAuthor`              | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `reviewProviderId`          | `integer?` | The provider reviews and errands run on                                                                                                                                                                                                                                                                                                                            |
+| `reviewModel`               | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `reviewEffort`              | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `workerProviderId`          | `integer?` |                                                                                                                                                                                                                                                                                                                                                                    |
+| `workerModel`               | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `workerEffort`              | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `isSelf`                    | `boolean`  | Whether this project is Briareus itself                                                                                                                                                                                                                                                                                                                            |
+| `stepRuntimes`              | `object`   | A runtime per errand step                                                                                                                                                                                                                                                                                                                                          |
+| `promptTemplates`           | `object`   | Per-project prompt overrides                                                                                                                                                                                                                                                                                                                                       |
+| `projectBoard`              | `object?`  | The GitHub Projects v2 board `GET /project-board` draws: `{ owner, ownerType, number, view }`, where `owner` is an organization or user login, `ownerType` is `organization` (the default) or `user`, `number` is the project’s number and `view` an optional view number whose filter and grouping the board follows. Null, or a blank owner and number, for none |
+| `createdAt`                 | `string`   | ISO time; set by the server                                                                                                                                                                                                                                                                                                                                        |
+| `updatedAt`                 | `string`   | ISO time; set by the server                                                                                                                                                                                                                                                                                                                                        |
 
 ### Provider
 
@@ -2217,6 +2265,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/issues/view`                                                           | `GET /issues/{number}`                                                          |
 | `GET /api/issues/timeline`                                                       | `GET /issues/{number}/timeline`                                                 |
 | `POST /api/issues/close`                                                         | `POST /issues/{number}/close`                                                   |
+| `GET /api/dev/project-board`                                                     | `GET /project-board`                                                            |
 | `GET /api/pr/commit`                                                             | `GET /commits/{sha}`                                                            |
 | `GET /api/dev/sessions`                                                          | `GET /sessions`                                                                 |
 | `POST /api/dev/sessions`                                                         | `POST /sessions`                                                                |

@@ -460,6 +460,66 @@ describe('the SQL seam', () => {
   });
 });
 
+describe('the project board', () => {
+  it('has none by default', async () => {
+    expect((await createProject(base)).projectBoard).toBe(null);
+  });
+
+  it('keeps an organization board with a view, numbers from a form taken as numbers', async () => {
+    const saved = await createProject({
+      ...base,
+      projectBoard: { owner: ' @hqrentalsoftware ', ownerType: 'Organization', number: '1', view: '42' },
+    });
+    expect(saved.projectBoard).toEqual({
+      owner: 'hqrentalsoftware',
+      ownerType: 'organization',
+      number: 1,
+      view: 42,
+    });
+  });
+
+  it('takes an organization when no owner type is given, and no view as null', async () => {
+    const saved = await createProject({ ...base, projectBoard: { owner: 'ada', number: 3, view: '' } });
+    expect(saved.projectBoard).toEqual({ owner: 'ada', ownerType: 'organization', number: 3, view: null });
+  });
+
+  it('keeps a user board', async () => {
+    const saved = await createProject({
+      ...base,
+      projectBoard: { owner: 'ada', ownerType: 'user', number: 2 },
+    });
+    expect(saved.projectBoard.ownerType).toBe('user');
+  });
+
+  it.each([null, '', { owner: '', number: '' }, { owner: ' ', number: null, view: 4 }])(
+    'reads %o as no board',
+    async (projectBoard) => {
+      expect((await createProject({ ...base, projectBoard })).projectBoard).toBe(null);
+    },
+  );
+
+  it.each([
+    [{ owner: 'not a login', number: 1 }, /is not a GitHub organization or user/],
+    [{ owner: '', number: 1 }, /is not a GitHub organization or user/],
+    [{ owner: 'acme', ownerType: 'team', number: 1 }, /owner type must be organization or user/],
+    [{ owner: 'acme' }, /needs its project number/],
+    [{ owner: 'acme', number: 0 }, /needs its project number/],
+    [{ owner: 'acme', number: '1.5' }, /needs its project number/],
+    [{ owner: 'acme', number: 1, view: -2 }, /view must be a whole number/],
+    [{ owner: 'acme', number: 1, view: 'all' }, /view must be a whole number/],
+    ['acme/1', /must be an object/],
+    [[1], /must be an object/],
+  ])('refuses %o', async (projectBoard, message) => {
+    await expect(createProject({ ...base, projectBoard })).rejects.toThrow(message);
+  });
+
+  it('is cleared by an edit that sends null, and kept by one that leaves it out', async () => {
+    const saved = await createProject({ ...base, projectBoard: { owner: 'acme', number: 1 } });
+    expect((await updateProject(saved.id, { label: 'Renamed' })).projectBoard).toMatchObject({ number: 1 });
+    expect((await updateProject(saved.id, { projectBoard: null })).projectBoard).toBe(null);
+  });
+});
+
 describe('the per-step runtimes', () => {
   it('keeps an entry that names a provider', async () => {
     const saved = await createProject({
