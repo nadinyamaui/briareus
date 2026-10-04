@@ -175,6 +175,7 @@ import { initTemplates, globalTemplates, saveGlobalTemplates, templateCatalog } 
 import { closeIssue, projectPulls, pullOverview } from './lib/prboard.js';
 import { commitView, mergePullRequest, pullRequestView, pullRequestViewOptions } from './lib/prviewer.js';
 import { issueTimeline, issueView } from './lib/issueviewer.js';
+import { projectBoard } from './lib/projectboard.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload, getUpload } from './lib/uploads.js';
@@ -1314,6 +1315,8 @@ api.get('/api/dev/projects', (req, res) => {
       reviewEffort: p.reviewEffort || '',
       // The names ▶ Run's dropdown offers, the default first.
       runProfiles: projectRunProfiles(p).map((r) => r.name),
+      // Whether it names a Projects v2 board, which is what offers the board tab.
+      hasBoard: !!p.projectBoard,
     })),
   });
 });
@@ -1328,6 +1331,19 @@ api.get('/api/dev/pulls', async (req, res) => {
     res.json(await projectPulls(project, { fresh: req.query.fresh === '1' }));
   } catch (e) {
     res.status(502).json({ error: e.message });
+  }
+});
+
+// The project's GitHub Projects v2 board, filtered and grouped the way its
+// view is, for a client to draw as a tab after the issues. Cached and
+// refreshed the way the pull request board is.
+api.get('/api/dev/project-board', async (req, res) => {
+  const project = getProject(req.query.repo || '');
+  if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
+  try {
+    res.json(await projectBoard(project, { fresh: req.query.fresh === '1' }));
+  } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
   }
 });
 

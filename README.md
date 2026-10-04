@@ -103,6 +103,14 @@ The issues ride on the board's own query rather than a request of their own, and
 each row carries a **▶ Start** button: it opens a session that reads the issue,
 implements it on a branch of its own and opens a pull request closing it.
 
+A project can also name a GitHub Projects v2 board in its settings
+(`projectBoard`: the organization or user that owns it, the project's number, and
+optionally a view). Clients draw it as a tab after the issues, from
+`GET /api/v1/project-board`: the view's filter applied by GitHub, the cards in
+columns by the view's group-by field (Status by default), each column with its
+count and its Story Points (every number field) totalled. It is read-only, and
+needs Projects: read on the token (see below).
+
 Epics are GitHub's own sub-issues, not a label or a title prefix: a sub-issue is
 drawn nested under its parent, an epic says how many of its children are done
 (counting the closed ones and any the tab never listed) and folds them away,
@@ -406,7 +414,8 @@ written idempotently so a database from before then just gets its row in
   PR/CI sync. A classic `repo` PAT covers everything; a fine-grained token wants
   Pull requests: read/write and Contents: read, plus Issues: read for the
   project view's ⊙ Issues tab, which says what it is missing without it
-  (read/write to close issues from a client)
+  (read/write to close issues from a client), and Projects: read (a classic
+  token's `read:project`) for an issue's project fields and the project board
 - Git pushes/fetches authenticate through the machine's own credential helper
   (`gh auth setup-git`, `git-credential-libsecret`, or whatever `credential.helper`
   points at); the app injects no git credentials
