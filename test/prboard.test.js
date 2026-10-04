@@ -989,7 +989,7 @@ describe('projectPulls', () => {
     });
 
     it('UNKNOWN mergeable is GitHub still computing, not a conflict', async () => {
-      expect(await recommendedFor(prNode({ mergeable: 'UNKNOWN' }))).toBeNull();
+      expect(await recommendedFor(prNode({ mergeable: 'UNKNOWN' }))).toBe('review');
     });
 
     it('feedback-given asks for the feedback to be implemented', async () => {
@@ -1005,8 +1005,16 @@ describe('projectPulls', () => {
       expect(await recommendedFor(prNode({ labels: ['feedback-implemented'] }))).toBe('review');
     });
 
-    it('a label-less pull request gets no recommendation', async () => {
-      expect(await recommendedFor(prNode())).toBeNull();
+    it('a label-less pull request asks for a review', async () => {
+      expect(await recommendedFor(prNode())).toBe('review');
+    });
+
+    it('labels outside the workflow recommend nothing', async () => {
+      expect(await recommendedFor(prNode({ labels: ['enhancement'] }))).toBeNull();
+    });
+
+    it('a label-less pull request that conflicts still asks for the conflicts first', async () => {
+      expect(await recommendedFor(prNode({ mergeable: 'CONFLICTING' }))).toBe('solve-conflicts');
     });
   });
 
