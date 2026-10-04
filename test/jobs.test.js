@@ -249,6 +249,7 @@ import {
   setSessionWebhook,
   setSlackAccess,
   slackProtocol,
+  pushProtocol,
   rotateSessionWebhook,
   sessionWebhookState,
   flushJobs,
@@ -3350,6 +3351,25 @@ describe('webhook deliveries', () => {
       setSlackAccess(() => null);
     }
     expect(slackProtocol(getJob('hk-free'))).toBe('');
+  });
+
+  it('a coding session is told last to push what it committed; orchestrators and analysts are not', async () => {
+    expect(pushProtocol(getJob('hk-free'))).toContain(
+      'If there is a commit pending, push it: always push it.',
+    );
+    expect(pushProtocol(getJob('hk-worker'))).toContain('# Pending commits');
+    expect(pushProtocol(getJob('hk-orch'))).toBe('');
+    expect(pushProtocol(getJob('hk-zeus'))).toBe('');
+    expect(pushProtocol(getJob('hk-analyst'))).toBe('');
+    // It closes the briefing a conversation opens with, after the webhook's own.
+    const { prompts } = fakeCli();
+    const job = getJob('hk-guard');
+    job.chats = undefined;
+    sendDevMessage('hk-guard', 'hello');
+    const context = prompts[0].split('</workspace-context>')[0];
+    expect(context.trimEnd()).toMatch(/default branch\.$/);
+    expect(context.indexOf('# Pending commits')).toBeGreaterThan(context.indexOf('# Webhook deliveries'));
+    await cli.finish(job);
   });
 
   it('rotating raises the epoch the key is derived from, and nothing else', () => {
