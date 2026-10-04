@@ -5,6 +5,7 @@ vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
 vi.mock('../lib/github.js', () => ({ githubGraphql: vi.fn() }));
 import { githubGraphql } from '../lib/github.js';
 import {
+  boardInScope,
   boardItem,
   buildColumns,
   columnsShown,
@@ -51,12 +52,12 @@ const iteration = {
   dataType: 'ITERATION',
   configuration: {
     iterations: [
-      { id: 'i15', title: 'Iteration 15', startDate: '2026-10-12' },
-      { id: 'i14', title: 'Iteration 14', startDate: '2026-09-28' },
+      { id: 'i15', title: 'Iteration 15', startDate: '2026-10-12', duration: 14 },
+      { id: 'i14', title: 'Iteration 14', startDate: '2026-09-28', duration: 14 },
     ],
     completedIterations: [
-      { id: 'i12', title: 'Iteration 12', startDate: '2026-08-31' },
-      { id: 'i13', title: 'Iteration 13', startDate: '2026-09-14' },
+      { id: 'i12', title: 'Iteration 12', startDate: '2026-08-31', duration: 14 },
+      { id: 'i13', title: 'Iteration 13', startDate: '2026-09-14', duration: 14 },
     ],
   },
 };
@@ -152,6 +153,57 @@ describe('columnsShown', () => {
     const field = { name: 'Project Status' };
     expect(names(columnsShown(columns, field, '-project-status:QA'))).not.toContain('QA');
   });
+
+  describe('on an iteration field', () => {
+    // 4 October 2026 falls in Iteration 14 (28 September for 14 days).
+    const now = Date.parse('2026-10-04T12:00:00Z');
+    const iterations = [
+      { id: null, name: 'No Iteration' },
+      { id: 'i13', name: 'Iteration 13' },
+      { id: 'i14', name: 'Iteration 14' },
+      { id: 'i15', name: 'Iteration 15' },
+    ];
+
+    it('works out @current, @previous and @next from the iterations’ dates', () => {
+      expect(names(columnsShown(iterations, iteration, 'iteration:@current', now))).toEqual([
+        'No Iteration',
+        'Iteration 14',
+      ]);
+      expect(names(columnsShown(iterations, iteration, 'iteration:@previous,@next', now))).toEqual([
+        'No Iteration',
+        'Iteration 13',
+        'Iteration 15',
+      ]);
+      expect(names(columnsShown(iterations, iteration, '-iteration:@current', now))).toEqual([
+        'No Iteration',
+        'Iteration 13',
+        'Iteration 15',
+      ]);
+    });
+
+    it('takes the iteration starting today as the current one', () => {
+      const monday = Date.parse('2026-10-12T00:30:00Z');
+      expect(names(columnsShown(iterations, iteration, 'iteration:@current', monday))).toContain(
+        'Iteration 15',
+      );
+    });
+
+    it('still matches an iteration by its title', () => {
+      expect(names(columnsShown(iterations, iteration, 'iteration:"Iteration 13"', now))).toEqual([
+        'No Iteration',
+        'Iteration 13',
+      ]);
+    });
+
+    it('leaves a selector it cannot work out to GitHub', () => {
+      expect(columnsShown(iterations, iteration, 'iteration:>@current', now)).toEqual(iterations);
+      const undated = {
+        ...iteration,
+        configuration: { iterations: [{ id: 'i14', title: 'Iteration 14', startDate: '2026-09-28' }] },
+      };
+      expect(columnsShown(iterations, undated, 'iteration:@current', now)).toEqual(iterations);
+    });
+  });
 });
 
 describe('groupField', () => {
@@ -241,11 +293,70 @@ describe('buildColumns', () => {
     ]);
   });
 
+  it('keeps the column an iteration:@current filter selected', () => {
+    const items = [item({ extra: [{ title: 'Iteration 14', iterationId: 'i14', field: ref(iteration) }] })];
+    const now = Date.parse('2026-10-04T12:00:00Z');
+    expect(buildColumns(items, FIELDS, iteration, 'iteration:@current', now)).toEqual([
+      expect.objectContaining({ id: 'i14', name: 'Iteration 14', count: 1 }),
+    ]);
+  });
+
   it('puts everything in one column when the board has nothing to group by', () => {
     const columns = buildColumns([item(), item()], [title, points], null);
     expect(columns).toEqual([
       expect.objectContaining({ id: null, name: 'All items', count: 2, sums: { 'Story Points': 0 } }),
     ]);
+  });
+});
+
+describe('boardInScope', () => {
+  const card = (repo, pts, parent = null) => ({
+    repo,
+    parent: parent && { repo: parent, number: 1, title: 'Epic', url: 'u' },
+    fields: [{ name: 'Story Points', value: pts }],
+  });
+  const board = () => ({
+    project: { title: 'Board', url: 'u' },
+    columns: [
+      {
+        id: null,
+        name: 'No Status',
+        count: 1,
+        sums: { 'Story Points': 5 },
+        items: [card('acme/mobile-app', 5)],
+      },
+      {
+        id: 'o_qa',
+        name: 'QA',
+        count: 4,
+        sums: { 'Story Points': 10 },
+        items: [
+          card('acme/core', 1, 'acme/mobile-app'),
+          card('acme/mobile-app', 2),
+          card(null, 3),
+          card('acme/core', 4, 'acme/core'),
+        ],
+      },
+    ],
+  });
+
+  it('answers the whole board to a token that sees everything', () => {
+    const whole = board();
+    expect(boardInScope(whole, null)).toBe(whole);
+  });
+
+  it('keeps only the cards of the token’s repositories, recounting each column', () => {
+    const whole = board();
+    const scoped = boardInScope(whole, ['acme/core']);
+    expect(scoped.columns).toEqual([
+      expect.objectContaining({ id: 'o_qa', count: 2, sums: { 'Story Points': 5 } }),
+    ]);
+    expect(scoped.columns[0].items.map((c) => c.repo)).toEqual(['acme/core', 'acme/core']);
+    // A parent in a repository the token cannot see is not named.
+    expect(scoped.columns[0].items[0].parent).toBeNull();
+    expect(scoped.columns[0].items[1].parent).toMatchObject({ repo: 'acme/core' });
+    // The shared, cached answer is left as it was.
+    expect(whole).toEqual(board());
   });
 });
 
