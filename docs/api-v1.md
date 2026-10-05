@@ -118,6 +118,23 @@ notifications, which went with it. The reference ends with a table from each of
 the dashboard's retired routes to the one that replaces it, for porting a page. `npm test` fails if a handler is added without a route
 here, since a handler with no route is one nothing can reach.
 
+## Autonomous review loops
+
+Set `autonomousReviewLoop` to `true` with
+`PUT /api/v1/settings/projects/{id}` and the body
+`{ "autonomousReviewLoop": true }` to send every finding in that project's
+review-loop rounds to an Implement feedback session automatically, including
+low-severity and previously parked findings. The fixes are pushed and reviewed
+again through the existing loop; a clean round completes only after the review's
+publishing policy has applied `code-approved`. Author-specific approval rules
+still apply, and a missing approval label keeps the round pending for the existing
+retry window before it stalls.
+
+The setting defaults to `false`. Sessions still need their review loop enabled;
+standalone reviews keep their manual findings workflow. The existing maximum
+round count and repeated-findings checks still stop a loop that cannot converge.
+If automatic triage fails, its held findings remain available for manual retry.
+
 ## Pull request data
 
 To bring a PR branch up to date with its base, call

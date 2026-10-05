@@ -787,3 +787,14 @@ describe('token substitution', () => {
     expect(render('{n}', { n: 0 })).toBe('0');
   });
 });
+
+describe('autonomous review loops', () => {
+  it('defaults off and preserves the option through partial updates', async () => {
+    const saved = await createProject({ repo: 'acme/autonomous' });
+    expect(saved.autonomousReviewLoop).toBe(false);
+    const enabled = await updateProject(saved.id, { autonomousReviewLoop: true });
+    expect(enabled.autonomousReviewLoop).toBe(true);
+    expect((await updateProject(saved.id, { label: 'Autonomous' })).autonomousReviewLoop).toBe(true);
+    expect((await updateProject(saved.id, { autonomousReviewLoop: false })).autonomousReviewLoop).toBe(false);
+  });
+});

@@ -4571,6 +4571,16 @@ describe('the review loop: what a closing loop review reports back', () => {
 
   beforeAll(async () => {
     state.stored = [
+      parentRow('auto-par', 'auto-rev', { rounds: 2 }),
+      reviewRow('auto-rev', 'auto-par', true),
+      parentRow('auto-cap', 'auto-cap-rev', { rounds: 3 }),
+      reviewRow('auto-cap-rev', 'auto-cap', true),
+      parentRow('auto-clean', 'auto-clean-rev'),
+      reviewRow('auto-clean-rev', 'auto-clean', true),
+      parentRow('auto-unapproved', 'auto-unapproved-rev'),
+      reviewRow('auto-unapproved-rev', 'auto-unapproved', true),
+      parentRow('auto-fail', 'auto-fail-rev'),
+      reviewRow('auto-fail-rev', 'auto-fail', true),
       parentRow('par-1', 'rev-1'),
       reviewRow('rev-1', 'par-1', false),
       parentRow('par-2', 'rev-2'),
@@ -4660,6 +4670,16 @@ describe('the review loop: what a closing loop review reports back', () => {
     ];
     await initJobs();
     for (const id of [
+      'auto-par',
+      'auto-rev',
+      'auto-cap',
+      'auto-cap-rev',
+      'auto-clean',
+      'auto-clean-rev',
+      'auto-unapproved',
+      'auto-unapproved-rev',
+      'auto-fail',
+      'auto-fail-rev',
       'loop-orch',
       'par-12',
       'rev-12',
@@ -4715,6 +4735,105 @@ describe('the review loop: what a closing loop review reports back', () => {
     }
     throw new Error('the loop never reached the expected state');
   };
+
+  it('automatically records every finding as Fix, including later-round lows', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    try {
+      // Refuse the child before it can spawn a real CLI in this state test.
+      getJob('auto-par').providerId = 999999;
+      const found = [
+        { key: 'auto-high', severity: 'high', title: 'A bug' },
+        { key: 'auto-low', severity: 'low', title: 'A nit' },
+      ];
+      latestReviewFindings.mockResolvedValueOnce(found);
+      const sorts = sortFindingsForFix.mock.calls.length;
+      await closeDevSession('auto-rev');
+      await waitFor(() => !!getJob('auto-par').reviewLoop.lastFindings);
+      expect(recordTriage).toHaveBeenCalledWith(
+        'acme/loop',
+        77,
+        found.map((f) => expect.objectContaining({ ...f, decision: 'fix' })),
+        { round: 2, by: 'the autonomous review loop', note: undefined },
+      );
+      expect(sortFindingsForFix.mock.calls.length).toBe(sorts);
+      expect(getJob('auto-par').reviewLoop.triage).toBeNull();
+      expect(getJob('auto-par').reviewLoop.done).toBeFalsy();
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      recordTriage.mockClear();
+    }
+  });
+
+  it('keeps the round cap for autonomous fixes without approving findings', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    try {
+      latestReviewFindings.mockResolvedValueOnce([{ key: 'cap', severity: 'low', title: 'A nit' }]);
+      const approvals = addPullRequestLabel.mock.calls.length;
+      await closeDevSession('auto-cap-rev');
+      await waitFor(() => !!getJob('auto-cap').reviewLoop.stalled);
+      expect(getJob('auto-cap').reviewLoop.triage).toBeNull();
+      expect(getJob('auto-cap').reviewLoop.done).toBeFalsy();
+      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      recordTriage.mockClear();
+    }
+  });
+
+  it('ends an autonomous clean round only after confirming the approval label', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    try {
+      latestReviewFindings.mockResolvedValueOnce([]);
+      githubRest.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ labels: [{ name: 'code-approved' }] }),
+      });
+      await closeDevSession('auto-clean-rev');
+      await waitFor(() => !!getJob('auto-clean').reviewLoop.done);
+      expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'GET', '/repos/acme/loop/pulls/77');
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      recordTriage.mockClear();
+    }
+  });
+
+  it('keeps a clean autonomous round pending when the project has not approved it', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    const approvals = addPullRequestLabel.mock.calls.length;
+    latestReviewFindings.mockResolvedValue([]);
+    githubRest.mockResolvedValue({
+      ok: true,
+      json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
+    });
+    try {
+      await closeDevSession('auto-unapproved-rev');
+      await waitFor(() => !!getJob('auto-unapproved').reviewLoop.pendingResult?.error);
+      expect(getJob('auto-unapproved').reviewLoop.done).toBeFalsy();
+      expect(getJob('auto-unapproved').reviewLoop.pendingResult.error).toMatch(
+        /has not applied the code-approved label/,
+      );
+      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      getJob('auto-unapproved').reviewLoop.pendingResult = null;
+      githubRest.mockReset();
+    }
+  });
+
+  it('retains the held round if automatic verdict recording fails', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    try {
+      latestReviewFindings.mockResolvedValueOnce([{ key: 'failed', severity: 'high', title: 'A bug' }]);
+      recordTriage.mockRejectedValueOnce(new Error('offline'));
+      await closeDevSession('auto-fail-rev');
+      await waitFor(() => infoTexts(getJob('auto-fail')).some((t) => t.includes('automatic triage failed')));
+      expect(getJob('auto-fail').reviewLoop.triage.findings).toHaveLength(1);
+      expect(getJob('auto-fail').reviewLoop.done).toBeFalsy();
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      recordTriage.mockClear();
+    }
+  });
 
   it('a review stopped mid-way releases the loop without a fix turn', async () => {
     await closeDevSession('rev-1');
