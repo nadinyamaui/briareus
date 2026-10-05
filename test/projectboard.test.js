@@ -10,6 +10,7 @@ import {
   buildColumns,
   columnsShown,
   groupField,
+  moveBoardItem,
   parseFilter,
   projectBoard,
 } from '../lib/projectboard.js';
@@ -613,5 +614,191 @@ describe('projectBoard', () => {
     cfg.githubToken = '';
     await expect(projectBoard(board())).rejects.toMatchObject({ status: 503 });
     expect(githubGraphql).not.toHaveBeenCalled();
+  });
+});
+
+describe('moveBoardItem', () => {
+  let n = 0;
+  const board = (extra = {}) => ({
+    repo: 'acme/core',
+    projectBoard: { owner: `mover${++n}`, ownerType: 'organization', number: 1, view: 42, ...extra },
+  });
+  const read = ({ groupBy = status, item = {}, view = true } = {}) => ({
+    owner: {
+      projectV2: {
+        id: 'PVT_1',
+        ...(view
+          ? {
+              view: {
+                verticalGroupByFields: { nodes: groupBy ? [groupBy] : [] },
+                groupByFields: { nodes: [] },
+              },
+            }
+          : {}),
+        fields: { nodes: FIELDS },
+      },
+    },
+    item: {
+      id: 'PVTI_1',
+      project: { id: 'PVT_1' },
+      content: { repository: { nameWithOwner: 'acme/core' } },
+      ...item,
+    },
+  });
+
+  beforeEach(() => {
+    vi.mocked(githubGraphql).mockReset();
+    cfg.githubToken = 'token';
+  });
+
+  it('sets the group-by field to the column’s option and drops every view of the project from the cache', async () => {
+    const project = board();
+    const page = { owner: { projectV2: { items: { pageInfo: { hasNextPage: false }, nodes: [] } } } };
+    const meta = {
+      owner: {
+        projectV2: { title: 'B', url: 'u', view: read().owner.projectV2.view, fields: { nodes: FIELDS } },
+      },
+    };
+    vi.mocked(githubGraphql).mockResolvedValueOnce(meta).mockResolvedValueOnce(page);
+    await projectBoard(project);
+    // Another repository's board on a different view of the same project.
+    const other = { repo: 'acme/web', projectBoard: { ...project.projectBoard, view: 43 } };
+    vi.mocked(githubGraphql).mockResolvedValueOnce(meta).mockResolvedValueOnce(page);
+    await projectBoard(other);
+    vi.mocked(githubGraphql).mockClear();
+
+    vi.mocked(githubGraphql).mockResolvedValueOnce(read()).mockResolvedValueOnce({});
+    expect(await moveBoardItem(project, { repo: 'acme/core', itemId: 'PVTI_1', columnId: 'o_qa' })).toEqual({
+      item: { id: 'PVTI_1', columnId: 'o_qa', column: 'QA', field: 'Status' },
+    });
+    const calls = vi.mocked(githubGraphql).mock.calls;
+    expect(calls[0][1]).toMatch(/organization\(login: \$login\)/);
+    expect(calls[0][2]).toMatchObject({
+      login: project.projectBoard.owner,
+      number: 1,
+      view: 42,
+      item: 'PVTI_1',
+    });
+    expect(calls[1][1]).toMatch(/updateProjectV2ItemFieldValue/);
+    expect(calls[1][2]).toEqual({
+      project: 'PVT_1',
+      item: 'PVTI_1',
+      field: 'F_status',
+      value: { singleSelectOptionId: 'o_qa' },
+    });
+
+    // The cache of both views is gone: the next read of each goes to GitHub again.
+    vi.mocked(githubGraphql).mockResolvedValueOnce(meta).mockResolvedValueOnce(page);
+    await projectBoard(project);
+    vi.mocked(githubGraphql).mockResolvedValueOnce(meta).mockResolvedValueOnce(page);
+    await projectBoard(other);
+    expect(githubGraphql).toHaveBeenCalledTimes(6);
+    expect(vi.mocked(githubGraphql).mock.calls[4][2]).toMatchObject({ view: 43 });
+  });
+
+  it('moves along an iteration field, and clears the field for the “No …” column', async () => {
+    vi.mocked(githubGraphql)
+      .mockResolvedValueOnce(read({ groupBy: iteration }))
+      .mockResolvedValueOnce({});
+    expect((await moveBoardItem(board(), { itemId: 'PVTI_1', columnId: 'i15' })).item.column).toBe(
+      'Iteration 15',
+    );
+    expect(vi.mocked(githubGraphql).mock.calls[1][2]).toMatchObject({
+      field: 'F_iter',
+      value: { iterationId: 'i15' },
+    });
+
+    vi.mocked(githubGraphql)
+      .mockResolvedValueOnce(read({ view: false }))
+      .mockResolvedValueOnce({});
+    expect(await moveBoardItem(board({ view: null }), { itemId: 'PVTI_1', columnId: null })).toEqual({
+      item: { id: 'PVTI_1', columnId: null, column: 'No Status', field: 'Status' },
+    });
+    const [, query, variables] = vi.mocked(githubGraphql).mock.calls[3];
+    expect(query).toMatch(/clearProjectV2ItemFieldValue/);
+    expect(variables).toEqual({ project: 'PVT_1', item: 'PVTI_1', field: 'F_status' });
+  });
+
+  it.each([
+    [{ columnId: 'o_qa' }, /itemId/],
+    [{ itemId: ' ', columnId: 'o_qa' }, /itemId/],
+    [{ itemId: 'PVTI_1' }, /columnId/],
+    [{ itemId: 'PVTI_1', columnId: 7 }, /columnId/],
+  ])('refuses %o before asking GitHub', async (input, message) => {
+    await expect(moveBoardItem(board(), input)).rejects.toMatchObject({ status: 400, message });
+    expect(githubGraphql).not.toHaveBeenCalled();
+  });
+
+  it('refuses a column the group-by field does not have', async () => {
+    vi.mocked(githubGraphql).mockResolvedValueOnce(read());
+    await expect(moveBoardItem(board(), { itemId: 'PVTI_1', columnId: 'o_high' })).rejects.toMatchObject({
+      status: 422,
+      message: "No such column on this board's Status field",
+    });
+    expect(githubGraphql).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a card of another project, one GitHub cannot resolve, and one out of the token’s reach', async () => {
+    vi.mocked(githubGraphql).mockResolvedValueOnce(read({ item: { project: { id: 'PVT_other' } } }));
+    await expect(moveBoardItem(board(), { itemId: 'PVTI_1', columnId: 'o_qa' })).rejects.toMatchObject({
+      status: 404,
+      message: 'No such card on this board',
+    });
+
+    const data = { ...read(), item: null };
+    vi.mocked(githubGraphql).mockRejectedValueOnce(
+      refusal([{ type: 'NOT_FOUND', path: ['item'], message: 'Could not resolve to a node' }], data),
+    );
+    await expect(moveBoardItem(board(), { itemId: 'nope', columnId: 'o_qa' })).rejects.toMatchObject({
+      status: 404,
+      message: 'No such card on this board',
+    });
+
+    const scoped = { repos: ['acme/mobile-app'] };
+    vi.mocked(githubGraphql).mockResolvedValueOnce(read());
+    await expect(
+      moveBoardItem(board(), { itemId: 'PVTI_1', columnId: 'o_qa' }, scoped),
+    ).rejects.toMatchObject({
+      status: 404,
+    });
+    vi.mocked(githubGraphql).mockResolvedValueOnce(read({ item: { content: {} } }));
+    await expect(
+      moveBoardItem(board(), { itemId: 'PVTI_1', columnId: 'o_qa' }, scoped),
+    ).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(githubGraphql).toHaveBeenCalledTimes(4);
+  });
+
+  it('answers a token without Projects: write with 403 and GitHub’s reason', async () => {
+    const scopes = "Your token has not been granted the required scopes to execute this query. ['project']";
+    vi.mocked(githubGraphql)
+      .mockResolvedValueOnce(read())
+      .mockRejectedValueOnce(refusal([{ type: 'INSUFFICIENT_SCOPES', message: scopes }]));
+    await expect(moveBoardItem(board(), { itemId: 'PVTI_1', columnId: 'o_qa' })).rejects.toMatchObject({
+      status: 403,
+      message: `GitHub refused moving the card: ${scopes}`,
+    });
+  });
+
+  it('refuses a board that cannot be read, passes a rate limit on, and needs a board and a token', async () => {
+    vi.mocked(githubGraphql).mockRejectedValueOnce(
+      refusal([{ type: 'NOT_FOUND', path: ['owner', 'projectV2'], message: 'Could not resolve' }], {
+        owner: { projectV2: null },
+      }),
+    );
+    await expect(moveBoardItem(board(), { itemId: 'PVTI_1', columnId: 'o_qa' })).rejects.toMatchObject({
+      status: 404,
+    });
+    const limited = Object.assign(new Error('limit'), { status: 429, rateLimited: true });
+    vi.mocked(githubGraphql).mockRejectedValueOnce(limited);
+    await expect(moveBoardItem(board(), { itemId: 'PVTI_1', columnId: 'o_qa' })).rejects.toBe(limited);
+    await expect(
+      moveBoardItem({ repo: 'acme/core', projectBoard: null }, { itemId: 'PVTI_1', columnId: 'o_qa' }),
+    ).rejects.toMatchObject({ status: 404 });
+    cfg.githubToken = '';
+    await expect(moveBoardItem(board(), { itemId: 'PVTI_1', columnId: 'o_qa' })).rejects.toMatchObject({
+      status: 503,
+    });
   });
 });

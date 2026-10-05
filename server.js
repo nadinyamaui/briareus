@@ -181,7 +181,7 @@ import {
   updatePullRequestBranch,
 } from './lib/prviewer.js';
 import { issueTimeline, issueView } from './lib/issueviewer.js';
-import { boardInScope, projectBoard } from './lib/projectboard.js';
+import { boardInScope, moveBoardItem, projectBoard } from './lib/projectboard.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload, getUpload } from './lib/uploads.js';
@@ -1380,6 +1380,19 @@ api.get('/api/dev/project-board', async (req, res) => {
     // A token held to some repositories (lib/api-v1.js) sees only their cards.
     const board = await projectBoard(project, { fresh: req.query.fresh === '1' });
     res.json(boardInScope(board, res.locals.apiRepos));
+  } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
+
+// A card dragged to another column of that board. A token held to some
+// repositories moves only the cards it can see.
+api.post('/api/dev/project-board/move', async (req, res) => {
+  const body = req.body || {};
+  const project = getProject(typeof body.repo === 'string' ? body.repo : '');
+  if (!project) return res.status(404).json({ error: 'Unknown project' });
+  try {
+    res.json(await moveBoardItem(project, body, { repos: res.locals.apiRepos }));
   } catch (e) {
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
   }
