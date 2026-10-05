@@ -1316,60 +1316,68 @@ describe('spawnWorkerSession', () => {
   const replay = (content) => ({ type: 'user', message: { role: 'user', content }, isReplay: true });
   const result = (text) => ({ type: 'result', subtype: 'success', result: text });
 
-  it('resumes the same conversation on the least-used account after a quota failure, keeping live messages', async () => {
-    const job = getJob('bg-claude');
-    job.status = 'idle';
-    job.providerId = 1;
-    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
-    state.otherProviders = [2, 3].map((id) => ({ ...state.provider, id, label: `Claude ${id}` }));
-    state.group = [state.provider, ...state.otherProviders];
-    await providerUsage(state.otherProviders[0], {
-      read: async () => ({ windows: [{ short: '5h', usedPct: 60 }] }),
-    });
-    await providerUsage(state.otherProviders[1], {
-      read: async () => ({ windows: [{ short: '5h', usedPct: 20 }] }),
-    });
-    const { children, settled, restore } = fakeClaude();
-    getProviderForJob.mockImplementation((j) => state.group.find((p) => p.id === j.providerId));
-    try {
-      sendDevMessage(job.id, 'Run the migration');
-      children[0].emitLines(replay('Run the migration'));
-      sendDevMessage(job.id, 'Then check the logs');
-      children[0].emitLines(
-        {
-          type: 'assistant',
-          error: 'rate_limit',
-          message: { content: [{ type: 'text', text: "You've hit your limit" }] },
-        },
-        { type: 'result', is_error: true, result: "You've hit your limit" },
-      );
-      children[0].emit('close', 0);
-      await vi.waitFor(() => expect(children).toHaveLength(2));
-      expect(job.providerId).toBe(3);
-      expect(job.chats[3]).toEqual({ sessionId: 'bg-sid', started: true });
-      expect(transferClaudeSession).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionId: 'bg-sid',
-          fromDir: expect.stringContaining('provider-1'),
-          toDir: expect.stringContaining('provider-3'),
-        }),
-      );
-      expect(children[1].writes[0]).toContain('Continue the unfinished requests');
-      expect(children[1].writes[1]).toBe('Then check the logs');
-      expect(spawn.mock.calls.filter(([cmd]) => cmd === '/mock/agent')[1][1]).toEqual(
-        expect.arrayContaining(['--resume', 'bg-sid']),
-      );
-      const done = settled(job);
-      children[1].emitLines(replay(children[1].writes[0]), replay('Then check the logs'), result('done'));
-      await vi.waitFor(() => expect(children[1].ended).toBe(true));
-      children[1].emit('close', 0);
-      await done;
-      expect(job.events.filter((e) => e.kind === 'user' && e.text === 'Then check the logs')).toHaveLength(1);
-    } finally {
+  it.each(["You've hit your limit", "You've hit your session limit · resets 8pm (Europe/Berlin)"])(
+    'resumes the same conversation after %s on the least-used account, keeping live messages',
+    async (limit) => {
+      const job = getJob('bg-claude');
+      job.status = 'idle';
       job.providerId = 1;
-      restore();
-    }
-  });
+      job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+      state.otherProviders = [2, 3].map((id) => ({ ...state.provider, id, label: `Claude ${id}` }));
+      state.group = [state.provider, ...state.otherProviders];
+      await providerUsage(state.otherProviders[0], {
+        read: async () => ({ windows: [{ short: '5h', usedPct: 60 }] }),
+      });
+      await providerUsage(state.otherProviders[1], {
+        read: async () => ({ windows: [{ short: '5h', usedPct: 20 }] }),
+      });
+      const { children, settled, restore } = fakeClaude();
+      getProviderForJob.mockImplementation((j) => state.group.find((p) => p.id === j.providerId));
+      const queuedEventsBefore = job.events.filter(
+        (e) => e.kind === 'user' && e.text === 'Then check the logs',
+      ).length;
+      try {
+        sendDevMessage(job.id, 'Run the migration');
+        children[0].emitLines(replay('Run the migration'));
+        sendDevMessage(job.id, 'Then check the logs');
+        children[0].emitLines(
+          {
+            type: 'assistant',
+            error: 'rate_limit',
+            message: { content: [{ type: 'text', text: limit }] },
+          },
+          { type: 'result', is_error: true, result: limit },
+        );
+        children[0].emit('close', 0);
+        await vi.waitFor(() => expect(children).toHaveLength(2));
+        expect(job.providerId).toBe(3);
+        expect(job.chats[3]).toEqual({ sessionId: 'bg-sid', started: true });
+        expect(transferClaudeSession).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionId: 'bg-sid',
+            fromDir: expect.stringContaining('provider-1'),
+            toDir: expect.stringContaining('provider-3'),
+          }),
+        );
+        expect(children[1].writes[0]).toContain('Continue the unfinished requests');
+        expect(children[1].writes[1]).toBe('Then check the logs');
+        expect(spawn.mock.calls.filter(([cmd]) => cmd === '/mock/agent')[1][1]).toEqual(
+          expect.arrayContaining(['--resume', 'bg-sid']),
+        );
+        const done = settled(job);
+        children[1].emitLines(replay(children[1].writes[0]), replay('Then check the logs'), result('done'));
+        await vi.waitFor(() => expect(children[1].ended).toBe(true));
+        children[1].emit('close', 0);
+        await done;
+        expect(job.events.filter((e) => e.kind === 'user' && e.text === 'Then check the logs')).toHaveLength(
+          queuedEventsBefore + 1,
+        );
+      } finally {
+        job.providerId = 1;
+        restore();
+      }
+    },
+  );
 
   it('tries each eligible Claude account once and stops when all quotas are exhausted', async () => {
     const job = getJob('bg-claude');
