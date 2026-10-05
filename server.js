@@ -172,7 +172,7 @@ import {
   removeMemoryByName,
 } from './lib/memories.js';
 import { initTemplates, globalTemplates, saveGlobalTemplates, templateCatalog } from './lib/templates.js';
-import { closeIssue, projectPulls, pullOverview } from './lib/prboard.js';
+import { closeIssue, projectPulls, pullOverview, updateGithubItem } from './lib/prboard.js';
 import { commitView, mergePullRequest, pullRequestView, pullRequestViewOptions } from './lib/prviewer.js';
 import { issueTimeline, issueView } from './lib/issueviewer.js';
 import { boardInScope, projectBoard } from './lib/projectboard.js';
@@ -808,6 +808,21 @@ api.get('/api/pr/view', async (req, res) => {
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
   }
 });
+
+function githubUpdateHandler(kind) {
+  return async (req, res) => {
+    try {
+      const body = req.body || {};
+      const project = getProject(typeof body.repo === 'string' ? body.repo : '');
+      if (!project) return res.status(404).json({ error: 'Unknown project' });
+      res.json(await updateGithubItem(project, Number(body[kind]), kind, body));
+    } catch (e) {
+      res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+    }
+  };
+}
+api.patch('/api/pr/update', githubUpdateHandler('pr'));
+api.patch('/api/issues/update', githubUpdateHandler('issue'));
 
 api.post('/api/pr/merge', async (req, res) => {
   try {
