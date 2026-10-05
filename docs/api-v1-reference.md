@@ -312,6 +312,20 @@ Update an issue on GitHub. Needs `manage`, held to `repo`.
 
 **Returns** `{ issue: UpdatedGithubItem }`. Supply at least one update field; omitted fields stay as they are. Unknown fields and invalid values get 400. A number of the other resource type gets 422 before any write. The board cache is cleared after a successful update.
 
+### `POST /pulls/{number}/update-branch`
+
+Update a pull request branch with the latest changes from its base branch on GitHub. Needs `manage`, held to `repo`.
+
+**Body**
+
+| Field                  | Type     |                                                                      |
+| ---------------------- | -------- | -------------------------------------------------------------------- |
+| `repo` **required**    | `string` | A project, as `owner/name`                                           |
+| `headSha` **required** | `string` | The `pr.headSha` that was read; a push since then refuses the update |
+| `baseRef` **required** | `string` | The base branch the pull request was read with                       |
+
+**Returns** 202 `{ status: string, message: string }`. `status` is `accepted`: GitHub updates the branch asynchronously; read the pull request and checks again to track completion. A changed head or base branch returns 409; GitHub refusals, including conflicts, may return 422. This updates the PR branch without merging the PR into its base.
+
 ### `POST /pulls/{number}/merge`
 
 Merge a pull request on GitHub, at the head and into the base it was read with. Needs `manage`, held to `repo`.
@@ -2312,6 +2326,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/pr/findings/decision`                                                 | `POST /pulls/{number}/findings/decision`                                        |
 | `PATCH /api/pr/update`                                                           | `PATCH /pulls/{number}`                                                         |
 | `PATCH /api/issues/update`                                                       | `PATCH /issues/{number}`                                                        |
+| `POST /api/pr/update-branch`                                                     | `POST /pulls/{number}/update-branch`                                            |
 | `POST /api/pr/merge`                                                             | `POST /pulls/{number}/merge`                                                    |
 | `POST /api/dev/pulls/:number/serve`                                              | `POST /pulls/{number}/serve`                                                    |
 | `GET /api/issues/view`                                                           | `GET /issues/{number}`                                                          |

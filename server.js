@@ -173,7 +173,13 @@ import {
 } from './lib/memories.js';
 import { initTemplates, globalTemplates, saveGlobalTemplates, templateCatalog } from './lib/templates.js';
 import { closeIssue, projectPulls, pullOverview, updateGithubItem } from './lib/prboard.js';
-import { commitView, mergePullRequest, pullRequestView, pullRequestViewOptions } from './lib/prviewer.js';
+import {
+  commitView,
+  mergePullRequest,
+  pullRequestView,
+  pullRequestViewOptions,
+  updatePullRequestBranch,
+} from './lib/prviewer.js';
 import { issueTimeline, issueView } from './lib/issueviewer.js';
 import { boardInScope, projectBoard } from './lib/projectboard.js';
 import { getFindings, decideFinding } from './lib/findings.js';
@@ -804,6 +810,21 @@ api.get('/api/pr/view', async (req, res) => {
   try {
     const { repo, prNumber } = findingsParams(req.query);
     res.json(await pullRequestView({ repo }, prNumber, pullRequestViewOptions(req.query)));
+  } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
+
+api.post('/api/pr/update-branch', async (req, res) => {
+  try {
+    const { repo, prNumber } = findingsParams(req.body || {});
+    const { headSha, baseRef } = req.body || {};
+    res.status(202).json(
+      await updatePullRequestBranch({ repo }, prNumber, {
+        headSha: String(headSha || ''),
+        baseRef: String(baseRef || ''),
+      }),
+    );
   } catch (e) {
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
   }

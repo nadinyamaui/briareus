@@ -4,7 +4,13 @@ const cfg = vi.hoisted(() => ({ githubToken: 'token' }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
 vi.mock('../lib/github.js', () => ({ githubRest: vi.fn(), githubGraphql: vi.fn() }));
 import { githubRest } from '../lib/github.js';
-import { commitView, mergePullRequest, pullRequestView, pullRequestViewOptions } from '../lib/prviewer.js';
+import {
+  commitView,
+  mergePullRequest,
+  pullRequestView,
+  pullRequestViewOptions,
+  updatePullRequestBranch,
+} from '../lib/prviewer.js';
 
 const project = { repo: 'owner/repo' };
 const raw = {
@@ -418,6 +424,78 @@ describe('one commit', () => {
     expect(githubRest).not.toHaveBeenCalled();
     respond = () => ({ ok: false, status: 422, json: async () => ({}) });
     await expect(commitView(project, 'abc1234')).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('updating a pull request branch', () => {
+  const sha = 'a'.repeat(40);
+  const options = { headSha: sha, baseRef: 'main' };
+  const answer = (status, body) => ({ ok: status < 300, status, json: async () => body });
+  const github = (update, pull = answer(200, { ...raw, head: { ...raw.head, sha } })) =>
+    githubRest.mockImplementation(async (_cfg, verb) => (verb === 'GET' ? pull : update));
+
+  it('asks GitHub to update the pinned head and reports acceptance, not completion', async () => {
+    github(answer(202, { message: 'Updating pull request branch.' }));
+    await expect(updatePullRequestBranch(project, 42, options)).resolves.toEqual({
+      status: 'accepted',
+      message: 'Updating pull request branch.',
+    });
+    expect(githubRest).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'PUT',
+      '/repos/owner/repo/pulls/42/update-branch',
+      { expected_head_sha: sha },
+    );
+  });
+
+  it.each([
+    { ...raw, head: { sha: 'b'.repeat(40) } },
+    { ...raw, head: { sha }, base: { ref: 'release' } },
+    { ...raw, head: { sha }, state: 'closed' },
+  ])('refuses a changed or closed PR before updating: %o', async (pull) => {
+    github(answer(202, {}), answer(200, pull));
+    await expect(updatePullRequestBranch(project, 42, options)).rejects.toMatchObject({ status: 409 });
+    expect(githubRest).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([{ headSha: '', baseRef: 'main' }, { headSha: 'main', baseRef: 'main' }, { headSha: sha }])(
+    'rejects incomplete or invalid revision input: %o',
+    async (input) => {
+      await expect(updatePullRequestBranch(project, 42, input)).rejects.toMatchObject({ status: 400 });
+      expect(githubRest).not.toHaveBeenCalled();
+    },
+  );
+
+  it('requires a configured GitHub token', async () => {
+    cfg.githubToken = '';
+    await expect(updatePullRequestBranch(project, 42, options)).rejects.toMatchObject({ status: 503 });
+    expect(githubRest).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [403, 403],
+    [404, 404],
+    [401, 502],
+    [500, 502],
+  ])('does not write when the initial read returns %i', async (githubStatus, status) => {
+    github(answer(202, {}), answer(githubStatus, {}));
+    await expect(updatePullRequestBranch(project, 42, options)).rejects.toMatchObject({ status });
+    expect(githubRest).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [403, 403],
+    [404, 404],
+    [409, 409],
+    [422, 422],
+    [401, 502],
+    [500, 502],
+  ])('preserves GitHub refusal %i without exposing an upstream 401', async (githubStatus, status) => {
+    github(answer(githubStatus, { message: 'Cannot update' }));
+    await expect(updatePullRequestBranch(project, 42, options)).rejects.toMatchObject({
+      status,
+      message: 'GitHub refused the branch update: Cannot update',
+    });
   });
 });
 

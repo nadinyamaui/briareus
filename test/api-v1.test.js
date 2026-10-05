@@ -324,6 +324,31 @@ describe('holding a token to its projects', () => {
 });
 
 describe('handing a request to the dashboard’s handler', () => {
+  it('exposes branch updates only to manage tokens within their project scope', async () => {
+    const body = { repo, headSha: 'a'.repeat(40), baseRef: 'main' };
+    expect(await json('/pulls/7/update-branch', { method: 'POST', body })).toMatchObject({
+      method: 'POST',
+      path: '/api/pr/update-branch',
+      body: { ...body, pr: '7' },
+    });
+    handler.mockClear();
+    expect(
+      (await request('/pulls/7/update-branch', { method: 'POST', body, token: tokens.read })).status,
+    ).toBe(403);
+    expect(
+      (
+        await request('/pulls/7/update-branch', {
+          method: 'POST',
+          body: { ...body, repo: 'other/project' },
+        })
+      ).status,
+    ).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
+    const op = (await json('/openapi.json', { token: tokens.read })).paths['/pulls/{number}/update-branch']
+      .post;
+    expect(op).toMatchObject({ 'x-briareus-access': 'manage', responses: { 202: expect.anything() } });
+  });
+
   it.each(['pulls', 'issues'])('scopes and forwards PATCH /%s/:number', async (resource) => {
     const route = `/${resource}/7`;
     const body = { repo, labels: ['bug'], assignees: [], [resource === 'pulls' ? 'pr' : 'issue']: 99 };
