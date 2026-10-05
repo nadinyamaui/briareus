@@ -11,7 +11,14 @@ vi.mock('../lib/github.js', () => ({
   githubRest: (...args) => gh.rest(...args),
 }));
 
-import { closeIssue, hasLabel, LABELS, projectPulls, pullOverview } from '../lib/prboard.js';
+import {
+  closeIssue,
+  hasLabel,
+  LABELS,
+  projectPulls,
+  pullOverview,
+  updateGithubItem,
+} from '../lib/prboard.js';
 
 describe('hasLabel', () => {
   it('takes the label objects GitHub hands back', () => {
@@ -1258,6 +1265,135 @@ describe('closing an issue', () => {
     github();
     await closeIssue(project, 7);
     await projectPulls(project);
+    expect(gh.graphql).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('updateGithubItem', () => {
+  const answer = (status, value) => ({ ok: status < 300, status, json: async () => value });
+  const item = {
+    number: 7,
+    title: 'Changed',
+    body: '',
+    state: 'open',
+    html_url: 'https://github.com/acme/shop/issues/7',
+    labels: [{ name: 'bug', color: 'ff0000' }],
+    assignees: [{ login: 'octocat' }],
+  };
+  beforeEach(() => gh.rest.mockReset());
+  const github = (kind, status = 200) =>
+    gh.rest
+      .mockResolvedValueOnce(answer(200, { ...item, ...(kind === 'pr' ? { pull_request: {} } : {}) }))
+      .mockResolvedValueOnce(answer(status, status === 200 ? item : { message: 'Denied' }));
+
+  it.each(['pr', 'issue'])(
+    'updates %s labels and assignees, keeping omitted fields out of the write',
+    async (kind) => {
+      github(kind);
+      const p = project();
+      await expect(
+        updateGithubItem(p, 7, kind, { labels: ['bug'], assignees: ['octocat'] }),
+      ).resolves.toEqual({
+        [kind]: {
+          number: 7,
+          title: 'Changed',
+          body: '',
+          state: 'open',
+          stateReason: null,
+          url: item.html_url,
+          labels: item.labels,
+          assignees: ['octocat'],
+        },
+      });
+      expect(gh.rest).toHaveBeenLastCalledWith(expect.anything(), 'PATCH', `/repos/${p.repo}/issues/7`, {
+        labels: ['bug'],
+        assignees: ['octocat'],
+      });
+    },
+  );
+
+  it('clears lists and the description explicitly', async () => {
+    github('pr');
+    await updateGithubItem(project(), 7, 'pr', { body: '', labels: [], assignees: [] });
+    expect(gh.rest.mock.calls[1][3]).toEqual({ body: '', labels: [], assignees: [] });
+  });
+
+  it.each([
+    { state: 'closed', stateReason: 'not_planned' },
+    { state: 'open', stateReason: 'reopened' },
+    { stateReason: null },
+    { title: 'New title', body: 'Description' },
+  ])('updates issue fields %j', async (input) => {
+    github('issue');
+    await updateGithubItem(project(), 7, 'issue', input);
+    const { stateReason, ...fields } = input;
+    expect(gh.rest.mock.calls[1][3]).toEqual({
+      ...fields,
+      ...('stateReason' in input ? { state_reason: stateReason } : {}),
+    });
+  });
+
+  it.each([
+    {},
+    { title: ' ' },
+    { title: 4 },
+    { body: null },
+    { labels: 'bug' },
+    { labels: [''] },
+    { assignees: [null] },
+    { assignees: Array(11).fill('octocat') },
+    { state: 'merged' },
+    { stateReason: 'invalid' },
+    { unexpected: true },
+    [],
+  ])('rejects invalid fields before contacting GitHub: %j', async (input) => {
+    await expect(updateGithubItem(project(), 7, 'issue', input)).rejects.toMatchObject({ status: 400 });
+    expect(gh.rest).not.toHaveBeenCalled();
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity])('rejects invalid number %s', async (number) => {
+    await expect(updateGithubItem(project(), number, 'pr', { labels: [] })).rejects.toMatchObject({
+      status: 400,
+    });
+    expect(gh.rest).not.toHaveBeenCalled();
+  });
+
+  it('refuses changing PR state through this endpoint', async () => {
+    await expect(updateGithubItem(project(), 7, 'pr', { state: 'closed' })).rejects.toMatchObject({
+      status: 400,
+    });
+    expect(gh.rest).not.toHaveBeenCalled();
+  });
+
+  it.each(['pr', 'issue'])('refuses the wrong resource type for %s without writing', async (kind) => {
+    github(kind === 'pr' ? 'issue' : 'pr');
+    await expect(updateGithubItem(project(), 7, kind, { labels: [] })).rejects.toMatchObject({ status: 422 });
+    expect(gh.rest.mock.calls.map(([, method]) => method)).toEqual(['GET']);
+  });
+
+  it.each([403, 404, 422, 500])('propagates a failed update (%s)', async (status) => {
+    github('issue', status);
+    await expect(updateGithubItem(project(), 7, 'issue', { labels: [] })).rejects.toMatchObject({
+      status: status === 500 ? 502 : status,
+      message: 'GitHub refused updating the item: Denied',
+    });
+  });
+
+  it('does not write if the initial read fails', async () => {
+    gh.rest.mockResolvedValueOnce(answer(404, { message: 'Not Found' }));
+    await expect(updateGithubItem(project(), 7, 'pr', { labels: [] })).rejects.toMatchObject({ status: 404 });
+    expect(gh.rest).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['pr', 'issue'])('invalidates the board after updating %s', async (kind) => {
+    const p = project();
+    serve([prNode()]);
+    await projectPulls(p);
+    await projectPulls(p);
+    expect(gh.graphql).toHaveBeenCalledTimes(1);
+    github(kind);
+    await updateGithubItem(p, 7, kind, { labels: [] });
+    await projectPulls(p);
     expect(gh.graphql).toHaveBeenCalledTimes(2);
   });
 });

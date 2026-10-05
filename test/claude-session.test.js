@@ -1,7 +1,92 @@
 import { describe, it, expect } from 'vitest';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
-import { compactClaudeSession } from '../lib/claude-session.js';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { compactClaudeSession, claudeQuotaFailure, transferClaudeSession } from '../lib/claude-session.js';
+
+describe('Claude account transfer', () => {
+  it('copies only the selected conversation and updates an older destination copy', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-transfer-'));
+    const sessionId = '12345678-1234-1234-1234-123456789abc';
+    const fromDir = path.join(root, 'a');
+    const toDir = path.join(root, 'b');
+    const project = path.join('projects', '-tmp-work');
+    try {
+      fs.mkdirSync(path.join(fromDir, project, sessionId, 'subagents'), { recursive: true });
+      fs.writeFileSync(path.join(fromDir, project, `${sessionId}.jsonl`), 'latest conversation');
+      fs.writeFileSync(path.join(fromDir, project, sessionId, 'subagents', 'agent.jsonl'), 'agent history');
+      fs.writeFileSync(path.join(fromDir, project, 'other.jsonl'), 'unrelated');
+      fs.writeFileSync(path.join(fromDir, '.credentials.json'), 'source credential');
+      fs.mkdirSync(path.join(toDir, project), { recursive: true });
+      fs.writeFileSync(path.join(toDir, '.credentials.json'), 'destination credential');
+      fs.writeFileSync(path.join(toDir, project, `${sessionId}.jsonl`), 'old');
+      transferClaudeSession({ fromDir, toDir, sessionId });
+      expect(fs.readFileSync(path.join(toDir, project, `${sessionId}.jsonl`), 'utf8')).toBe(
+        'latest conversation',
+      );
+      expect(fs.readFileSync(path.join(toDir, project, sessionId, 'subagents', 'agent.jsonl'), 'utf8')).toBe(
+        'agent history',
+      );
+      expect(fs.readFileSync(path.join(toDir, '.credentials.json'), 'utf8')).toBe('destination credential');
+      expect(fs.existsSync(path.join(toDir, project, 'other.jsonl'))).toBe(false);
+      expect(() => transferClaudeSession({ fromDir, toDir, sessionId: '../bad' })).toThrow('Invalid');
+      fs.mkdirSync(path.join(fromDir, 'projects', '-other'), { recursive: true });
+      fs.writeFileSync(path.join(fromDir, 'projects', '-other', `${sessionId}.jsonl`), 'ambiguous');
+      expect(() => transferClaudeSession({ fromDir, toDir, sessionId })).toThrow('uniquely');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('recognizes terminal quota failures without treating tool errors or warnings as account exhaustion', () => {
+    expect(
+      claudeQuotaFailure({
+        type: 'assistant',
+        error: 'rate_limit',
+        message: { content: [{ type: 'text', text: "You've hit your limit · resets 3am" }] },
+      }),
+    ).toBe(true);
+    expect(
+      claudeQuotaFailure({
+        type: 'assistant',
+        error: 'rate_limit',
+        message: { content: 'Usage limit reached' },
+      }),
+    ).toBe(true);
+    expect(
+      claudeQuotaFailure({ type: 'result', is_error: true, result: "You've hit your limit · resets 3am" }),
+    ).toBe(true);
+    expect(claudeQuotaFailure({ type: 'result', is_error: true, errors: ['Weekly limit exceeded'] })).toBe(
+      true,
+    );
+    for (const message of [
+      { type: 'rate_limit_event', rate_limit_info: { status: 'allowed_warning' } },
+      { type: 'assistant', error: 'rate_limit', parent_tool_use_id: 'agent' },
+      { type: 'assistant', error: 'rate_limit' },
+      {
+        type: 'assistant',
+        error: 'rate_limit',
+        message: { content: [{ type: 'text', text: 'API Error: 429 temporary rate limit' }] },
+      },
+      {
+        type: 'assistant',
+        error: 'rate_limit',
+        parent_tool_use_id: 'agent',
+        message: { content: [{ type: 'text', text: "You've hit your limit" }] },
+      },
+      {
+        type: 'user',
+        message: { content: [{ type: 'tool_result', is_error: true, content: "You've hit your limit" }] },
+      },
+      { type: 'result', is_error: true, result: 'API Error: 429 temporary rate limit' },
+      { type: 'result', is_error: true, result: 'Invalid API key' },
+      { type: 'result', result: "You've hit your limit" },
+    ])
+      expect(claudeQuotaFailure(message)).toBe(false);
+  });
+});
 
 function run(opts = {}) {
   const calls = [];

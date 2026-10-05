@@ -278,6 +278,40 @@ Record a verdict on a finding; `fix` updates the Required fixes comment on GitHu
 
 **Returns** `{ findings: Finding[], fixesUrl: string? }`
 
+### `PATCH /pulls/{number}`
+
+Update a pull request on GitHub. Needs `manage`, held to `repo`.
+
+**Body**
+
+| Field               | Type       |                                                                      |
+| ------------------- | ---------- | -------------------------------------------------------------------- |
+| `repo` **required** | `string`   | A project, as `owner/name`                                           |
+| `title`             | `string`   | The new title; cannot be blank                                       |
+| `body`              | `string`   | The new Markdown description; empty clears it                        |
+| `labels`            | `string[]` | Replace all labels with these names; [] clears them                  |
+| `assignees`         | `string[]` | Replace all assignees with these logins, at most ten; [] clears them |
+
+**Returns** `{ pr: UpdatedGithubItem }`. Supply at least one update field; omitted fields stay as they are. Unknown fields and invalid values get 400. A number of the other resource type gets 422 before any write. The board cache is cleared after a successful update.
+
+### `PATCH /issues/{number}`
+
+Update an issue on GitHub. Needs `manage`, held to `repo`.
+
+**Body**
+
+| Field               | Type                                |                                                                      |
+| ------------------- | ----------------------------------- | -------------------------------------------------------------------- |
+| `repo` **required** | `string`                            | A project, as `owner/name`                                           |
+| `title`             | `string`                            | The new title; cannot be blank                                       |
+| `body`              | `string`                            | The new Markdown description; empty clears it                        |
+| `labels`            | `string[]`                          | Replace all labels with these names; [] clears them                  |
+| `assignees`         | `string[]`                          | Replace all assignees with these logins, at most ten; [] clears them |
+| `state`             | `open\|closed`                      | Reopen or close the issue                                            |
+| `stateReason`       | `completed\|not_planned\|reopened?` | Its state reason; null clears it                                     |
+
+**Returns** `{ issue: UpdatedGithubItem }`. Supply at least one update field; omitted fields stay as they are. Unknown fields and invalid values get 400. A number of the other resource type gets 422 before any write. The board cache is cleared after a successful update.
+
 ### `POST /pulls/{number}/update-branch`
 
 Update a pull request branch with the latest changes from its base branch on GitHub. Needs `manage`, held to `repo`.
@@ -1590,14 +1624,15 @@ Remove a account. Needs `admin`.
 
 A token’s own record. The token itself is shown once, when it is created.
 
-| Field        | Type                  |                                                                             |
-| ------------ | --------------------- | --------------------------------------------------------------------------- |
-| `id`         | `string`              | Its id                                                                      |
-| `label`      | `string`              | The name it was given                                                       |
-| `permission` | `read\|manage\|admin` | What it may do                                                              |
-| `repos`      | `string[]`            | The projects it is held to; empty for an admin token, which is held to none |
-| `createdAt`  | `integer`             | When it was issued, epoch milliseconds                                      |
-| `expiresAt`  | `integer`             | When it stops working, epoch milliseconds                                   |
+| Field        | Type                  |                                                                                                             |
+| ------------ | --------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `id`         | `string`              | Its id                                                                                                      |
+| `label`      | `string`              | The name it was given                                                                                       |
+| `permission` | `read\|manage\|admin` | What it may do                                                                                              |
+| `repos`      | `string[]`            | The projects it is held to; empty for an admin token, which is held to none                                 |
+| `createdAt`  | `integer`             | When it was issued, epoch milliseconds                                                                      |
+| `expiresAt`  | `integer`             | When it stops working, epoch milliseconds                                                                   |
+| `lastUsedAt` | `integer?`            | Last recorded authenticated request, epoch milliseconds; saved at most once per minute, null until recorded |
 
 ### ProjectSummary
 
@@ -1896,6 +1931,21 @@ An issue as closing it left it.
 | `stateReason` | `completed\|not_planned?` | Why it was closed   |
 | `closedAt`    | `string?`                 | When, ISO 8601      |
 | `url`         | `string`                  | The issue on GitHub |
+
+### UpdatedGithubItem
+
+The fields returned after editing an issue or pull request; read the resource again for its full detail.
+
+| Field         | Type                                |                                                            |
+| ------------- | ----------------------------------- | ---------------------------------------------------------- |
+| `number`      | `integer`                           | Its number                                                 |
+| `title`       | `string`                            | Its title                                                  |
+| `body`        | `string`                            | Its description, markdown; empty when it has none          |
+| `state`       | `open\|closed`                      | Its issue state; a merged pull request is also closed here |
+| `stateReason` | `completed\|not_planned\|reopened?` | Why it was closed or reopened, when available              |
+| `url`         | `string`                            | Its page on GitHub                                         |
+| `labels`      | `object[]`                          | Each `{ name, color }`                                     |
+| `assignees`   | `string[]`                          | Their logins                                               |
 
 ### Issue
 
@@ -2274,6 +2324,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/pr/view?section=review-comments`                                       | `GET /pulls/{number}/review-comments`                                           |
 | `GET /api/pr/findings`                                                           | `GET /pulls/{number}/findings`                                                  |
 | `POST /api/pr/findings/decision`                                                 | `POST /pulls/{number}/findings/decision`                                        |
+| `PATCH /api/pr/update`                                                           | `PATCH /pulls/{number}`                                                         |
+| `PATCH /api/issues/update`                                                       | `PATCH /issues/{number}`                                                        |
 | `POST /api/pr/update-branch`                                                     | `POST /pulls/{number}/update-branch`                                            |
 | `POST /api/pr/merge`                                                             | `POST /pulls/{number}/merge`                                                    |
 | `POST /api/dev/pulls/:number/serve`                                              | `POST /pulls/{number}/serve`                                                    |
