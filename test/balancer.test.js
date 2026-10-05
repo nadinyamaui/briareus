@@ -28,6 +28,7 @@ import {
   cachedProviderAuth,
   zaiHost,
   AUTH_TTL_MS,
+  rememberProviderExhausted,
 } from '../lib/balancer.js';
 
 const windows = (...pcts) => ({ windows: pcts.map((usedPct, i) => ({ usedPct, short: i ? 'wk' : '5h' })) });
@@ -109,6 +110,32 @@ describe('providerLoad', () => {
 });
 
 describe('pickLeastUsedProvider', () => {
+  it('fails over to the least used eligible sibling and returns null when none remain', () => {
+    const usageOf = (p) => ({ windows: [{ short: '5h', usedPct: { 1: 5, 2: 60, 3: 20 }[p.id] }] });
+    rememberProviderExhausted(row(1));
+    expect(pickLeastUsedProvider(row(1), { usageOf }).id).toBe(3);
+    expect(pickLeastUsedProvider(row(1), { usageOf, availableOnly: true, excludeIds: new Set([3]) }).id).toBe(
+      2,
+    );
+    expect(
+      pickLeastUsedProvider(row(1), { usageOf, availableOnly: true, excludeIds: new Set([2, 3]) }),
+    ).toBeNull();
+    forgetProviderUsage(1);
+    expect(pickLeastUsedProvider(row(1), { usageOf }).id).toBe(1);
+  });
+
+  it('allows a quota-rejected account again after its reset', () => {
+    vi.useFakeTimers();
+    try {
+      rememberProviderExhausted(row(1), new Date(Date.now() + 3600000).toISOString());
+      const usageOf = (p) => windows(p.id === 1 ? 1 : 20);
+      expect(pickLeastUsedProvider(row(1), { usageOf }).id).toBe(2);
+      vi.advanceTimersByTime(3600001);
+      expect(pickLeastUsedProvider(row(1), { usageOf }).id).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it('answers the row itself when it has no siblings', () => {
     state.rows = [row(1)];
     expect(pickLeastUsedProvider(row(1))).toEqual(row(1));

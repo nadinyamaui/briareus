@@ -9,6 +9,12 @@ import { spawn, spawnSync } from 'child_process';
 import { BINARIES } from '../lib/providers.js';
 import * as providerTools from '../lib/providers.js';
 import { compactCodexThread } from '../lib/codex-session.js';
+import { transferClaudeSession } from '../lib/claude-session.js';
+import { forgetProviderUsage, providerUsage } from '../lib/balancer.js';
+vi.mock('../lib/claude-session.js', async (original) => ({
+  ...(await original()),
+  transferClaudeSession: vi.fn(),
+}));
 import { recordTurnUsage } from '../lib/usage.js';
 import { setDraining } from '../lib/recovery.js';
 vi.mock('../lib/codex-session.js', async (original) => ({
@@ -276,6 +282,8 @@ import {
 } from '../lib/jobs.js';
 
 beforeEach(() => {
+  forgetProviderUsage();
+  transferClaudeSession.mockReset();
   state.provider = { id: 1, label: 'Claude entry', binary: 'claude', active: true };
   state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '' }];
   state.claimsServer = false;
@@ -1307,6 +1315,186 @@ describe('spawnWorkerSession', () => {
   };
   const replay = (content) => ({ type: 'user', message: { role: 'user', content }, isReplay: true });
   const result = (text) => ({ type: 'result', subtype: 'success', result: text });
+
+  it('resumes the same conversation on the least-used account after a quota failure, keeping live messages', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.providerId = 1;
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    state.otherProviders = [2, 3].map((id) => ({ ...state.provider, id, label: `Claude ${id}` }));
+    state.group = [state.provider, ...state.otherProviders];
+    await providerUsage(state.otherProviders[0], {
+      read: async () => ({ windows: [{ short: '5h', usedPct: 60 }] }),
+    });
+    await providerUsage(state.otherProviders[1], {
+      read: async () => ({ windows: [{ short: '5h', usedPct: 20 }] }),
+    });
+    const { children, settled, restore } = fakeClaude();
+    getProviderForJob.mockImplementation((j) => state.group.find((p) => p.id === j.providerId));
+    try {
+      sendDevMessage(job.id, 'Run the migration');
+      children[0].emitLines(replay('Run the migration'));
+      sendDevMessage(job.id, 'Then check the logs');
+      children[0].emitLines(
+        {
+          type: 'assistant',
+          error: 'rate_limit',
+          message: { content: [{ type: 'text', text: "You've hit your limit" }] },
+        },
+        { type: 'result', is_error: true, result: "You've hit your limit" },
+      );
+      children[0].emit('close', 0);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(job.providerId).toBe(3);
+      expect(job.chats[3]).toEqual({ sessionId: 'bg-sid', started: true });
+      expect(transferClaudeSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'bg-sid',
+          fromDir: expect.stringContaining('provider-1'),
+          toDir: expect.stringContaining('provider-3'),
+        }),
+      );
+      expect(children[1].writes[0]).toContain('Continue the unfinished requests');
+      expect(children[1].writes[1]).toBe('Then check the logs');
+      expect(spawn.mock.calls.filter(([cmd]) => cmd === '/mock/agent')[1][1]).toEqual(
+        expect.arrayContaining(['--resume', 'bg-sid']),
+      );
+      const done = settled(job);
+      children[1].emitLines(replay(children[1].writes[0]), replay('Then check the logs'), result('done'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+      expect(job.events.filter((e) => e.kind === 'user' && e.text === 'Then check the logs')).toHaveLength(1);
+    } finally {
+      job.providerId = 1;
+      restore();
+    }
+  });
+
+  it('tries each eligible Claude account once and stops when all quotas are exhausted', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.providerId = 1;
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    state.otherProviders = [{ ...state.provider, id: 2, label: 'Claude spare' }];
+    state.group = [state.provider, ...state.otherProviders];
+    const { children, settled, restore } = fakeClaude();
+    getProviderForJob.mockImplementation((j) => state.group.find((p) => p.id === j.providerId));
+    try {
+      const done = settled(job);
+      sendDevMessage(job.id, 'Continue');
+      children[0].emitLines({ type: 'result', is_error: true, result: "You've hit your limit" });
+      children[0].emit('close', 1);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(children[1].writes).toEqual(['Continue']);
+      children[1].emitLines({ type: 'result', is_error: true, result: "You've hit your limit" });
+      children[1].emit('close', 1);
+      await done;
+      expect(children).toHaveLength(2);
+      expect(job.events.some((e) => /no other account has available quota/.test(e.text || ''))).toBe(true);
+    } finally {
+      job.providerId = 1;
+      restore();
+    }
+  });
+
+  it('leaves the original account selected if copying its conversation fails', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.providerId = 1;
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    state.otherProviders = [{ ...state.provider, id: 2, label: 'Claude spare' }];
+    state.group = [state.provider, ...state.otherProviders];
+    transferClaudeSession.mockImplementation(() => {
+      throw new Error('Missing transcript');
+    });
+    const { children, settled, restore } = fakeClaude();
+    try {
+      const done = settled(job);
+      sendDevMessage(job.id, 'Continue');
+      children[0].emitLines({ type: 'result', is_error: true, result: "You've hit your limit" });
+      children[0].emit('close', 1);
+      await done;
+      expect(job.providerId).toBe(1);
+      expect(job.chats[2]).toBeUndefined();
+      expect(children).toHaveLength(1);
+      expect(job.events.some((e) => /Missing transcript/.test(e.text || ''))).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('stops background work that prevents an exhausted Claude process from exiting', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.providerId = 1;
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    state.otherProviders = [{ ...state.provider, id: 2, label: 'Claude spare' }];
+    state.group = [state.provider, ...state.otherProviders];
+    const { children, settled, restore } = fakeClaude();
+    getProviderForJob.mockImplementation((j) => state.group.find((p) => p.id === j.providerId));
+    const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+    try {
+      sendDevMessage(job.id, 'Continue');
+      children[0].pid = 87654;
+      children[0].exitCode = null;
+      children[0].emitLines(
+        {
+          type: 'system',
+          subtype: 'task_started',
+          task_id: 'monitor',
+          tool_use_id: 'watch',
+          is_backgrounded: true,
+        },
+        { type: 'result', is_error: true, result: "You've hit your limit" },
+      );
+      await vi.waitFor(() => expect(kill).toHaveBeenCalledWith(-87654, 'SIGKILL'), { timeout: 2000 });
+      children[0].emit('close', null);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      const done = settled(job);
+      children[1].emitLines(replay(children[1].writes[0]), result('done'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+      expect(job.providerId).toBe(2);
+    } finally {
+      job.providerId = 1;
+      kill.mockRestore();
+      restore();
+    }
+  });
+
+  it.each(['temporary API error', 'canceled quota failure'])(
+    'does not switch accounts for a %s',
+    async (failure) => {
+      const job = getJob('bg-claude');
+      job.status = 'idle';
+      job.providerId = 1;
+      job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+      state.otherProviders = [{ ...state.provider, id: 2, label: 'Claude spare' }];
+      state.group = [state.provider, ...state.otherProviders];
+      const { children, settled, restore } = fakeClaude();
+      try {
+        const done = settled(job);
+        sendDevMessage(job.id, 'Continue');
+        children[0].emitLines({
+          type: 'result',
+          is_error: true,
+          result: failure.startsWith('canceled')
+            ? "You've hit your limit"
+            : 'API Error: 429 temporary rate limit',
+        });
+        if (failure.startsWith('canceled')) cancelDevTurn(job.id);
+        children[0].emit('close', 1);
+        await done;
+        expect(job.providerId).toBe(1);
+        expect(children).toHaveLength(1);
+        expect(transferClaudeSession).not.toHaveBeenCalled();
+      } finally {
+        restore();
+      }
+    },
+  );
 
   it('Stop hands what a claude turn was told and never answered to the next turn', async () => {
     const job = getJob('bg-claude');

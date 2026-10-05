@@ -322,6 +322,16 @@ price with the reported ones, in the session header, turn footer, tiles and
 tooltips alike. They are arithmetic over tokens, not an invoice: what the ledger
 stores is still only what the providers themselves reported.
 
+### Claude account failover
+
+Sessions start on the interchangeable account with the most available quota.
+When a Claude subscription account reaches its usage limit, Briareus resumes
+the saved conversation on the least-used eligible account in the same provider
+group, keeping the workspace, model, and pending requests. The transcript says
+which account took over. Each account is tried at most once per turn; if none
+has quota, the turn stops and can be retried after an account resets. Tool
+errors, authentication failures, and temporary API errors do not switch accounts.
+
 ### Merged pull requests
 
 A merge ends every errand on a pull request. As soon as any session mirroring it
