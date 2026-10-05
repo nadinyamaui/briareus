@@ -4748,7 +4748,8 @@ describe('the review loop: what a closing loop review reports back', () => {
       latestReviewFindings.mockResolvedValueOnce(found);
       const sorts = sortFindingsForFix.mock.calls.length;
       await closeDevSession('auto-rev');
-      await waitFor(() => !!getJob('auto-par').reviewLoop.lastFindings);
+      const parent = getJob('auto-par');
+      await waitFor(() => infoTexts(parent).some((t) => t.includes('fix session did not start')));
       expect(recordTriage).toHaveBeenCalledWith(
         'acme/loop',
         77,
@@ -4756,8 +4757,22 @@ describe('the review loop: what a closing loop review reports back', () => {
         { round: 2, by: 'the autonomous review loop', note: undefined },
       );
       expect(sortFindingsForFix.mock.calls.length).toBe(sorts);
-      expect(getJob('auto-par').reviewLoop.triage).toBeNull();
-      expect(getJob('auto-par').reviewLoop.done).toBeFalsy();
+      expect(parent.reviewLoop.triage).toMatchObject({ prNumber: 77, round: 2, findings: found });
+      expect(parent.reviewLoop.fixing).toBe(false);
+      expect(parent.reviewLoop.pendingResult).toBeNull();
+      expect(parent.reviewLoop.lastFindings).toBeUndefined();
+      expect(parent.reviewLoop.done).toBeFalsy();
+      // A manual retry attempts startup again, rather than stopping at the
+      // repeated-findings gate left behind by the refused dispatch.
+      const refusals = () => infoTexts(parent).filter((t) => t.includes('Unknown provider: 999999'));
+      expect(refusals()).toHaveLength(1);
+      const held = parent.reviewLoop.triage;
+      await triageLoopFindings(parent.id, {
+        verdicts: found.map((f) => ({ key: f.key, decision: 'fix' })),
+      });
+      expect(refusals()).toHaveLength(2);
+      expect(parent.reviewLoop.triage).toBe(held);
+      expect(parent.reviewLoop.stalled).toBeFalsy();
     } finally {
       state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
       recordTriage.mockClear();
@@ -4974,7 +4989,7 @@ describe('the review loop: what a closing loop review reports back', () => {
     expect(infoTexts(parent).join('\n')).toMatch(/same 1 finding\(s\) as the round before it/);
   });
 
-  it('a sent round that found something new goes to a fix session and becomes the next comparison', async () => {
+  it('a refused fix for new findings preserves the previous comparison and held round', async () => {
     const parent = getJob('par-9');
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k2', severity: 'high', title: 'Another' }]);
     await closeDevSession('rev-9');
@@ -4982,7 +4997,10 @@ describe('the review loop: what a closing loop review reports back', () => {
     expect(parent.reviewLoop.lastFindings).toBe('k1'); // untouched while the round is on hold
     await triageLoopFindings('par-9', { verdicts: [{ key: 'k2', decision: 'fix' }] });
     expect(parent.reviewLoop.stalled).toBeFalsy(); // restored rows carry no flag until one is set
-    expect(parent.reviewLoop.lastFindings).toBe('k2');
+    expect(parent.reviewLoop.lastFindings).toBe('k1');
+    expect(parent.reviewLoop.triage.findings).toEqual([
+      expect.objectContaining({ key: 'k2', severity: 'high', title: 'Another' }),
+    ]);
     expect(infoTexts(parent).join('\n')).toMatch(/could not start the fix session/); // the spawn was attempted
   });
 
@@ -5776,6 +5794,8 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
   });
 
   it('records the verdicts, then sends what was kept to a fix session with the note', async () => {
+    const held = getJob('tri-1').reviewLoop.triage;
+    const previousFindings = getJob('tri-1').reviewLoop.lastFindings;
     const result = await triageLoopFindings('tri-1', {
       verdicts: [
         { key: 'k1', decision: 'fix' },
@@ -5784,7 +5804,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       note: 'Keep the public signature.',
     });
     const worker = getJob('tri-1');
-    expect(worker.reviewLoop.triage).toBeNull();
+    expect(worker.reviewLoop.triage).toBe(held);
     // Every verdict goes on record, "dismiss" spelled the way the panel spells it.
     expect(recordTriage).toHaveBeenLastCalledWith(
       'acme/triage',
@@ -5803,9 +5823,9 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       ],
       { round: 2, by: 'the orchestrator', note: 'Keep the public signature.' },
     );
-    // What was kept is the next round's comparison, and is what the fix
-    // session is briefed with, as a decided list plus the note.
-    expect(worker.reviewLoop.lastFindings).toBe('k1');
+    // A refused startup preserves the comparison, while the attempted fix
+    // is still briefed with the decided list and note.
+    expect(worker.reviewLoop.lastFindings).toBe(previousFindings);
     expect(implementFeedbackPrompt).toHaveBeenLastCalledWith(
       expect.objectContaining({
         prNumber: 79,
