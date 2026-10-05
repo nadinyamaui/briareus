@@ -17,6 +17,47 @@ beforeEach(async () => {
 });
 const bearer = (credentials) => `Bearer ${credentials.token}`;
 
+it('persists usage across restart, throttles writes and supports old token records', async () => {
+  delete saved[0].lastUsedAt;
+  await auth.refresh();
+  expect(auth.list()[0].lastUsedAt).toBeNull();
+  auth.authenticate(bearer(issued), secret);
+  expect(save).toHaveBeenCalledTimes(1);
+  await auth.recordUsage(issued.device.id);
+  expect(saved[0].lastUsedAt).toBe(clock);
+  clock += 59_999;
+  await auth.recordUsage(issued.device.id);
+  expect(save).toHaveBeenCalledTimes(2);
+  clock += 1;
+  await Promise.all([auth.recordUsage(issued.device.id), auth.recordUsage(issued.device.id)]);
+  expect(save).toHaveBeenCalledTimes(3);
+  expect(saved[0].lastUsedAt).toBe(clock);
+  const restarted = createMobileAuth({ load, save, now: () => clock });
+  await restarted.init();
+  expect(restarted.list()[0].lastUsedAt).toBe(clock);
+});
+
+it('retries failed usage writes without publishing an unsaved timestamp', async () => {
+  save.mockRejectedValueOnce(new Error('DB offline'));
+  await expect(auth.recordUsage(issued.device.id)).rejects.toThrow('DB offline');
+  expect(auth.list()[0].lastUsedAt).toBeNull();
+  await auth.recordUsage(issued.device.id);
+  expect(saved[0].lastUsedAt).toBe(clock);
+});
+
+it('usage writes preserve externally issued tokens and never resurrect revoked ones', async () => {
+  const cli = createMobileAuth({ load, save, now: () => clock });
+  await cli.init();
+  const outside = await cli.create({ ...input, label: 'New token' }, secret);
+  await auth.recordUsage(issued.device.id);
+  expect(saved.map((d) => d.id)).toEqual([issued.device.id, outside.device.id]);
+  await cli.revoke(issued.device.id);
+  clock += 60_000;
+  await auth.recordUsage(issued.device.id);
+  expect(saved.map((d) => d.id)).toEqual([outside.device.id]);
+  expect(saved[0].lastUsedAt).toBeNull();
+});
+
 it('persists hashes only, survives restart, expires and is invalidated by owner secret rotation', async () => {
   expect(JSON.stringify(saved)).not.toContain(issued.token);
   expect(JSON.stringify(saved)).not.toContain(secret);

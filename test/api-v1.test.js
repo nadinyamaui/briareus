@@ -171,13 +171,37 @@ describe('who gets in', () => {
   it('says who the token is and what the server can do', async () => {
     expect(await json('/')).toMatchObject({
       version: 1,
-      client: { label: 'manage client', permission: 'manage', repos: [repo] },
+      client: { label: 'manage client', permission: 'manage', repos: [repo], lastUsedAt: clock },
       transcribe: true,
     });
     expect((await json('/', { token: tokens.admin })).client).toMatchObject({
       permission: 'admin',
       repos: [],
     });
+  });
+
+  it('records authenticated requests including route errors, but rejects invalid credentials without recording', async () => {
+    expect(auth.list().every((d) => d.lastUsedAt === null)).toBe(true);
+    expect((await request('/', { token: 'invalid' })).status).toBe(401);
+    expect((await request('/', { headers: { Origin: 'https://example.com' } })).status).toBe(403);
+    expect(auth.list().every((d) => d.lastUsedAt === null)).toBe(true);
+    expect((await request('/settings/providers')).status).toBe(403);
+    expect(auth.list().find((d) => d.permission === 'manage').lastUsedAt).toBe(clock);
+    expect(auth.list().find((d) => d.permission === 'admin').lastUsedAt).toBeNull();
+  });
+
+  it('serves valid requests when usage persistence fails and retries next time', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const usage = vi.spyOn(auth, 'recordUsage').mockRejectedValueOnce(new Error('DB offline'));
+    try {
+      expect((await json('/')).client.lastUsedAt).toBeNull();
+      expect(log).toHaveBeenCalledWith('Could not record token usage:', 'DB offline');
+      expect((await json('/')).client.lastUsedAt).toBe(clock);
+      expect(usage).toHaveBeenCalledTimes(2);
+    } finally {
+      log.mockRestore();
+      usage.mockRestore();
+    }
   });
 
   it('holds each permission to its own routes', async () => {
@@ -420,6 +444,28 @@ describe('starting on the project’s configured runtime', () => {
 });
 
 describe('the event streams', () => {
+  it('records stream connections but not periodic authentication checks', async () => {
+    const usage = vi.spyOn(auth, 'recordUsage');
+    const authenticate = vi.spyOn(auth, 'authenticate');
+    try {
+      for (const route of ['/events', '/sessions/mine/events']) {
+        const response = await request(route);
+        const reader = response.body.getReader();
+        await reader.read();
+        const at = auth.list().find((d) => d.permission === 'manage').lastUsedAt;
+        clock += 60_000;
+        const checks = authenticate.mock.calls.length;
+        await vi.waitFor(() => expect(authenticate.mock.calls.length).toBeGreaterThan(checks));
+        expect(auth.list().find((d) => d.permission === 'manage').lastUsedAt).toBe(at);
+        await reader.cancel();
+      }
+      expect(usage).toHaveBeenCalledTimes(2);
+    } finally {
+      usage.mockRestore();
+      authenticate.mockRestore();
+    }
+  });
+
   it('opens with the sessions in scope, then follows their records, transcripts and deletions', async () => {
     const events = await readEvents('/events?transcripts=1', 4, {
       onChunk: (seen) => {

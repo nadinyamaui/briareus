@@ -110,7 +110,10 @@ function list() {
   for (const d of devices) {
     const scope = d.permission === 'admin' ? 'every project' : d.repos.join(', ');
     const state = d.expiresAt <= Date.now() ? 'expired' : `until ${day(d.expiresAt)}`;
-    console.log(`${d.id}  ${d.permission.padEnd(6)}  ${state.padEnd(16)}  ${d.label} (${scope})`);
+    const lastUsed = d.lastUsedAt == null ? 'never recorded' : new Date(d.lastUsedAt).toISOString();
+    console.log(
+      `${d.id}  ${d.permission.padEnd(6)}  ${state.padEnd(16)}  ${d.label} (${scope})  last used: ${lastUsed}`,
+    );
   }
 }
 
