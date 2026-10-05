@@ -41,7 +41,20 @@ describe('Claude account transfer', () => {
   });
 
   it('recognizes terminal quota failures without treating tool errors or warnings as account exhaustion', () => {
-    expect(claudeQuotaFailure({ type: 'assistant', error: 'rate_limit' })).toBe(true);
+    expect(
+      claudeQuotaFailure({
+        type: 'assistant',
+        error: 'rate_limit',
+        message: { content: [{ type: 'text', text: "You've hit your limit · resets 3am" }] },
+      }),
+    ).toBe(true);
+    expect(
+      claudeQuotaFailure({
+        type: 'assistant',
+        error: 'rate_limit',
+        message: { content: 'Usage limit reached' },
+      }),
+    ).toBe(true);
     expect(
       claudeQuotaFailure({ type: 'result', is_error: true, result: "You've hit your limit · resets 3am" }),
     ).toBe(true);
@@ -51,6 +64,18 @@ describe('Claude account transfer', () => {
     for (const message of [
       { type: 'rate_limit_event', rate_limit_info: { status: 'allowed_warning' } },
       { type: 'assistant', error: 'rate_limit', parent_tool_use_id: 'agent' },
+      { type: 'assistant', error: 'rate_limit' },
+      {
+        type: 'assistant',
+        error: 'rate_limit',
+        message: { content: [{ type: 'text', text: 'API Error: 429 temporary rate limit' }] },
+      },
+      {
+        type: 'assistant',
+        error: 'rate_limit',
+        parent_tool_use_id: 'agent',
+        message: { content: [{ type: 'text', text: "You've hit your limit" }] },
+      },
       {
         type: 'user',
         message: { content: [{ type: 'tool_result', is_error: true, content: "You've hit your limit" }] },

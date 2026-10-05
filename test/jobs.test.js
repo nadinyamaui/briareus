@@ -1464,7 +1464,7 @@ describe('spawnWorkerSession', () => {
     }
   });
 
-  it.each(['temporary API error', 'canceled quota failure'])(
+  it.each(['temporary API error', 'temporary API error without text', 'canceled quota failure'])(
     'does not switch accounts for a %s',
     async (failure) => {
       const job = getJob('bg-claude');
@@ -1477,6 +1477,15 @@ describe('spawnWorkerSession', () => {
       try {
         const done = settled(job);
         sendDevMessage(job.id, 'Continue');
+        if (failure.startsWith('temporary')) {
+          children[0].emitLines({
+            type: 'assistant',
+            error: 'rate_limit',
+            ...(failure.endsWith('without text')
+              ? {}
+              : { message: { content: [{ type: 'text', text: 'API Error: 429 temporary rate limit' }] } }),
+          });
+        }
         children[0].emitLines({
           type: 'result',
           is_error: true,
