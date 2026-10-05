@@ -40,6 +40,29 @@ describe('Claude account transfer', () => {
     }
   });
 
+  it.each(["You've hit your limit", "You've hit your session limit", 'You’ve hit your session limit'])(
+    'recognizes %s only in main-thread quota failures',
+    (limit) => {
+      const text = `${limit} · resets 8pm (Europe/Berlin)`;
+      for (const message of [
+        { type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text }] } },
+        { type: 'assistant', error: 'rate_limit', message: { content: text } },
+        { type: 'result', is_error: true, result: text },
+        { type: 'result', is_error: true, errors: [text] },
+      ]) {
+        expect(claudeQuotaFailure(message)).toBe(true);
+        expect(claudeQuotaFailure({ ...message, parent_tool_use_id: 'agent' })).toBe(false);
+      }
+      expect(
+        claudeQuotaFailure({
+          type: 'user',
+          message: { content: [{ type: 'tool_result', is_error: true, content: text }] },
+        }),
+      ).toBe(false);
+      expect(claudeQuotaFailure({ type: 'result', result: text })).toBe(false);
+    },
+  );
+
   it('recognizes terminal quota failures without treating tool errors or warnings as account exhaustion', () => {
     expect(
       claudeQuotaFailure({
