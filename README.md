@@ -108,8 +108,9 @@ A project can also name a GitHub Projects v2 board in its settings
 optionally a view). Clients draw it as a tab after the issues, from
 `GET /api/v1/project-board`: the view's filter applied by GitHub, the cards in
 columns by the view's group-by field (Status by default), each column with its
-count and its Story Points (every number field) totalled. It is read-only, and
-needs Projects: read on the token (see below).
+count and its Story Points (every number field) totalled. It needs Projects: read
+on the token (see below); with Projects: write a client can also move a card to
+another column (`POST /api/v1/project-board/move`).
 
 Epics are GitHub's own sub-issues, not a label or a title prefix: a sub-issue is
 drawn nested under its parent, an epic says how many of its children are done
@@ -426,6 +427,7 @@ written idempotently so a database from before then just gets its row in
   project view's ⊙ Issues tab, which says what it is missing without it
   (read/write to close issues from a client), and Projects: read (a classic
   token's `read:project`) for an issue's project fields and the project board
+  (read/write, a classic token's `project`, to move its cards from a client)
 - Git pushes/fetches authenticate through the machine's own credential helper
   (`gh auth setup-git`, `git-credential-libsecret`, or whatever `credential.helper`
   points at); the app injects no git credentials

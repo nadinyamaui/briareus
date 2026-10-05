@@ -324,6 +324,23 @@ describe('holding a token to its projects', () => {
 });
 
 describe('handing a request to the dashboard’s handler', () => {
+  it('scopes and forwards a board move, with the token’s repositories', async () => {
+    const body = { repo, itemId: 'PVTI_1', columnId: null };
+    const options = { method: 'POST', body };
+    expect((await request('/project-board/move', { ...options, token: tokens.read })).status).toBe(403);
+    expect(
+      (await request('/project-board/move', { ...options, body: { ...body, repo: 'other/project' } })).status,
+    ).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
+    expect(await json('/project-board/move', options)).toMatchObject({
+      method: 'POST',
+      path: '/api/dev/project-board/move',
+      body,
+      repos: [repo],
+      authorization: null,
+    });
+  });
+
   it('exposes branch updates only to manage tokens within their project scope', async () => {
     const body = { repo, headSha: 'a'.repeat(40), baseRef: 'main' };
     expect(await json('/pulls/7/update-branch', { method: 'POST', body })).toMatchObject({

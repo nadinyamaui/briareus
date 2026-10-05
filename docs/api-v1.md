@@ -171,6 +171,9 @@ itself, `iteration:@current` and all, and the columns follow the view's group-by
 field (Status by default), each with its item count and the total of every number
 field, such as Story Points. It needs the same Projects: read, and answers its
 absence the same way: no columns, and `projectsError` saying why.
+`POST /project-board/move` with `{ repo, itemId, columnId }` moves a card to
+another column, the way dragging it does on GitHub: it sets the group-by field
+to the column's value (`columnId` null clears it), and needs Projects: write.
 
 ## Events
 
