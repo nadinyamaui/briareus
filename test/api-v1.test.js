@@ -300,6 +300,22 @@ describe('holding a token to its projects', () => {
 });
 
 describe('handing a request to the dashboard’s handler', () => {
+  it.each(['pulls', 'issues'])('scopes and forwards PATCH /%s/:number', async (resource) => {
+    const route = `/${resource}/7`;
+    const body = { repo, labels: ['bug'], assignees: [], [resource === 'pulls' ? 'pr' : 'issue']: 99 };
+    const options = { method: 'PATCH', body };
+    expect((await request(route, { ...options, token: tokens.read })).status).toBe(403);
+    expect((await request(route, { ...options, body: { ...body, repo: 'other/project' } })).status).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
+    const numberKey = resource === 'pulls' ? 'pr' : 'issue';
+    expect(await json(route, options)).toMatchObject({
+      method: 'PATCH',
+      path: `/api/${resource === 'pulls' ? 'pr' : 'issues'}/update`,
+      body: { repo, labels: ['bug'], assignees: [], [numberKey]: '7' },
+      authorization: null,
+    });
+  });
+
   it('rewrites the path, carries the query over and names the pull request as the handler reads it', async () => {
     expect(await json(`/pulls/7/files?repo=${repo}&page=2&headSha=abc`)).toMatchObject({
       method: 'GET',
