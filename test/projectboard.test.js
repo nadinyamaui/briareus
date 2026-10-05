@@ -651,7 +651,7 @@ describe('moveBoardItem', () => {
     cfg.githubToken = 'token';
   });
 
-  it('sets the group-by field to the column’s option and drops the board from the cache', async () => {
+  it('sets the group-by field to the column’s option and drops every view of the project from the cache', async () => {
     const project = board();
     const page = { owner: { projectV2: { items: { pageInfo: { hasNextPage: false }, nodes: [] } } } };
     const meta = {
@@ -661,31 +661,39 @@ describe('moveBoardItem', () => {
     };
     vi.mocked(githubGraphql).mockResolvedValueOnce(meta).mockResolvedValueOnce(page);
     await projectBoard(project);
+    // Another repository's board on a different view of the same project.
+    const other = { repo: 'acme/web', projectBoard: { ...project.projectBoard, view: 43 } };
+    vi.mocked(githubGraphql).mockResolvedValueOnce(meta).mockResolvedValueOnce(page);
+    await projectBoard(other);
+    vi.mocked(githubGraphql).mockClear();
 
     vi.mocked(githubGraphql).mockResolvedValueOnce(read()).mockResolvedValueOnce({});
     expect(await moveBoardItem(project, { repo: 'acme/core', itemId: 'PVTI_1', columnId: 'o_qa' })).toEqual({
       item: { id: 'PVTI_1', columnId: 'o_qa', column: 'QA', field: 'Status' },
     });
     const calls = vi.mocked(githubGraphql).mock.calls;
-    expect(calls[2][1]).toMatch(/organization\(login: \$login\)/);
-    expect(calls[2][2]).toMatchObject({
+    expect(calls[0][1]).toMatch(/organization\(login: \$login\)/);
+    expect(calls[0][2]).toMatchObject({
       login: project.projectBoard.owner,
       number: 1,
       view: 42,
       item: 'PVTI_1',
     });
-    expect(calls[3][1]).toMatch(/updateProjectV2ItemFieldValue/);
-    expect(calls[3][2]).toEqual({
+    expect(calls[1][1]).toMatch(/updateProjectV2ItemFieldValue/);
+    expect(calls[1][2]).toEqual({
       project: 'PVT_1',
       item: 'PVTI_1',
       field: 'F_status',
       value: { singleSelectOptionId: 'o_qa' },
     });
 
-    // The cache is gone: the next read goes to GitHub again.
+    // The cache of both views is gone: the next read of each goes to GitHub again.
     vi.mocked(githubGraphql).mockResolvedValueOnce(meta).mockResolvedValueOnce(page);
     await projectBoard(project);
+    vi.mocked(githubGraphql).mockResolvedValueOnce(meta).mockResolvedValueOnce(page);
+    await projectBoard(other);
     expect(githubGraphql).toHaveBeenCalledTimes(6);
+    expect(vi.mocked(githubGraphql).mock.calls[4][2]).toMatchObject({ view: 43 });
   });
 
   it('moves along an iteration field, and clears the field for the “No …” column', async () => {
