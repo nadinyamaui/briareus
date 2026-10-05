@@ -300,6 +300,31 @@ describe('holding a token to its projects', () => {
 });
 
 describe('handing a request to the dashboard’s handler', () => {
+  it('exposes branch updates only to manage tokens within their project scope', async () => {
+    const body = { repo, headSha: 'a'.repeat(40), baseRef: 'main' };
+    expect(await json('/pulls/7/update-branch', { method: 'POST', body })).toMatchObject({
+      method: 'POST',
+      path: '/api/pr/update-branch',
+      body: { ...body, pr: '7' },
+    });
+    handler.mockClear();
+    expect(
+      (await request('/pulls/7/update-branch', { method: 'POST', body, token: tokens.read })).status,
+    ).toBe(403);
+    expect(
+      (
+        await request('/pulls/7/update-branch', {
+          method: 'POST',
+          body: { ...body, repo: 'other/project' },
+        })
+      ).status,
+    ).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
+    const op = (await json('/openapi.json', { token: tokens.read })).paths['/pulls/{number}/update-branch']
+      .post;
+    expect(op).toMatchObject({ 'x-briareus-access': 'manage', responses: { 202: expect.anything() } });
+  });
+
   it('rewrites the path, carries the query over and names the pull request as the handler reads it', async () => {
     expect(await json(`/pulls/7/files?repo=${repo}&page=2&headSha=abc`)).toMatchObject({
       method: 'GET',

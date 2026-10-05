@@ -110,6 +110,15 @@ here, since a handler with no route is one nothing can reach.
 
 ## Pull request data
 
+To bring a PR branch up to date with its base, call
+`POST /api/v1/pulls/{number}/update-branch` with
+`{ "repo": "owner/name", "headSha": "<pr.headSha>", "baseRef": "<pr.baseRef>" }`.
+This requires `manage` access to the project and returns HTTP 202 with
+`{ "status": "accepted", "message": "Updating pull request branch." }`.
+GitHub completes the update asynchronously; read the PR and its checks again
+to track completion. A changed head or base branch returns 409, and GitHub
+can refuse the update with 422 for conflicts or a concurrent push.
+
 Every read takes `?repo=owner/name`. The list reads return 100 rows a page:
 pass `page` (1–30) and follow `nextPage` until it is `null`. Each also returns
 `pr`, the pull request as GitHub has it now, with `headSha` and `baseSha`. Pass
