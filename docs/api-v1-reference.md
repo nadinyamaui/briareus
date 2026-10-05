@@ -1576,14 +1576,15 @@ Remove a account. Needs `admin`.
 
 A token’s own record. The token itself is shown once, when it is created.
 
-| Field        | Type                  |                                                                             |
-| ------------ | --------------------- | --------------------------------------------------------------------------- |
-| `id`         | `string`              | Its id                                                                      |
-| `label`      | `string`              | The name it was given                                                       |
-| `permission` | `read\|manage\|admin` | What it may do                                                              |
-| `repos`      | `string[]`            | The projects it is held to; empty for an admin token, which is held to none |
-| `createdAt`  | `integer`             | When it was issued, epoch milliseconds                                      |
-| `expiresAt`  | `integer`             | When it stops working, epoch milliseconds                                   |
+| Field        | Type                  |                                                                                                             |
+| ------------ | --------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `id`         | `string`              | Its id                                                                                                      |
+| `label`      | `string`              | The name it was given                                                                                       |
+| `permission` | `read\|manage\|admin` | What it may do                                                                                              |
+| `repos`      | `string[]`            | The projects it is held to; empty for an admin token, which is held to none                                 |
+| `createdAt`  | `integer`             | When it was issued, epoch milliseconds                                                                      |
+| `expiresAt`  | `integer`             | When it stops working, epoch milliseconds                                                                   |
+| `lastUsedAt` | `integer?`            | Last recorded authenticated request, epoch milliseconds; saved at most once per minute, null until recorded |
 
 ### ProjectSummary
 

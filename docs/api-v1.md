@@ -45,6 +45,16 @@ within 15 seconds. A client can revoke its own token with `DELETE /token`.
 Every other token is issued, listed and revoked on the machine with
 `npm run create-token`; the API has no route for it, admin or not.
 
+`--list` also shows each token's last recorded usage in UTC. Its own record
+(`GET /`) includes `lastUsedAt` in epoch milliseconds, or `null` until usage
+has been recorded; older tokens have no usage history to backfill. An
+authenticated request counts even if the route later returns an error.
+Usage is persisted at most once per minute per token, so the timestamp may
+trail the latest request by less than a minute. Stream keepalive checks do
+not count as new requests. Failed usage writes are logged and retried on
+the next request without failing authentication; timestamps can be stale
+while the database is unavailable.
+
 ## Permissions
 
 | Permission | What it may do                                                                                       |
