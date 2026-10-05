@@ -4571,6 +4571,16 @@ describe('the review loop: what a closing loop review reports back', () => {
 
   beforeAll(async () => {
     state.stored = [
+      parentRow('auto-par', 'auto-rev', { rounds: 2 }),
+      reviewRow('auto-rev', 'auto-par', true),
+      parentRow('auto-cap', 'auto-cap-rev', { rounds: 3 }),
+      reviewRow('auto-cap-rev', 'auto-cap', true),
+      parentRow('auto-clean', 'auto-clean-rev'),
+      reviewRow('auto-clean-rev', 'auto-clean', true),
+      parentRow('auto-unapproved', 'auto-unapproved-rev'),
+      reviewRow('auto-unapproved-rev', 'auto-unapproved', true),
+      parentRow('auto-fail', 'auto-fail-rev'),
+      reviewRow('auto-fail-rev', 'auto-fail', true),
       parentRow('par-1', 'rev-1'),
       reviewRow('rev-1', 'par-1', false),
       parentRow('par-2', 'rev-2'),
@@ -4660,6 +4670,16 @@ describe('the review loop: what a closing loop review reports back', () => {
     ];
     await initJobs();
     for (const id of [
+      'auto-par',
+      'auto-rev',
+      'auto-cap',
+      'auto-cap-rev',
+      'auto-clean',
+      'auto-clean-rev',
+      'auto-unapproved',
+      'auto-unapproved-rev',
+      'auto-fail',
+      'auto-fail-rev',
       'loop-orch',
       'par-12',
       'rev-12',
@@ -4715,6 +4735,120 @@ describe('the review loop: what a closing loop review reports back', () => {
     }
     throw new Error('the loop never reached the expected state');
   };
+
+  it('automatically records every finding as Fix, including later-round lows', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    try {
+      // Refuse the child before it can spawn a real CLI in this state test.
+      getJob('auto-par').providerId = 999999;
+      const found = [
+        { key: 'auto-high', severity: 'high', title: 'A bug' },
+        { key: 'auto-low', severity: 'low', title: 'A nit' },
+      ];
+      latestReviewFindings.mockResolvedValueOnce(found);
+      const sorts = sortFindingsForFix.mock.calls.length;
+      await closeDevSession('auto-rev');
+      const parent = getJob('auto-par');
+      await waitFor(() => infoTexts(parent).some((t) => t.includes('fix session did not start')));
+      expect(recordTriage).toHaveBeenCalledWith(
+        'acme/loop',
+        77,
+        found.map((f) => expect.objectContaining({ ...f, decision: 'fix' })),
+        { round: 2, by: 'the autonomous review loop', note: undefined },
+      );
+      expect(sortFindingsForFix.mock.calls.length).toBe(sorts);
+      expect(parent.reviewLoop.triage).toMatchObject({ prNumber: 77, round: 2, findings: found });
+      expect(parent.reviewLoop.fixing).toBe(false);
+      expect(parent.reviewLoop.pendingResult).toBeNull();
+      expect(parent.reviewLoop.lastFindings).toBeUndefined();
+      expect(parent.reviewLoop.done).toBeFalsy();
+      // A manual retry attempts startup again, rather than stopping at the
+      // repeated-findings gate left behind by the refused dispatch.
+      const refusals = () => infoTexts(parent).filter((t) => t.includes('Unknown provider: 999999'));
+      expect(refusals()).toHaveLength(1);
+      const held = parent.reviewLoop.triage;
+      await triageLoopFindings(parent.id, {
+        verdicts: found.map((f) => ({ key: f.key, decision: 'fix' })),
+      });
+      expect(refusals()).toHaveLength(2);
+      expect(parent.reviewLoop.triage).toBe(held);
+      expect(parent.reviewLoop.stalled).toBeFalsy();
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      recordTriage.mockClear();
+    }
+  });
+
+  it('keeps the round cap for autonomous fixes without approving findings', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    try {
+      latestReviewFindings.mockResolvedValueOnce([{ key: 'cap', severity: 'low', title: 'A nit' }]);
+      const approvals = addPullRequestLabel.mock.calls.length;
+      await closeDevSession('auto-cap-rev');
+      await waitFor(() => !!getJob('auto-cap').reviewLoop.stalled);
+      expect(getJob('auto-cap').reviewLoop.triage).toBeNull();
+      expect(getJob('auto-cap').reviewLoop.done).toBeFalsy();
+      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      recordTriage.mockClear();
+    }
+  });
+
+  it('ends an autonomous clean round only after confirming the approval label', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    try {
+      latestReviewFindings.mockResolvedValueOnce([]);
+      githubRest.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ labels: [{ name: 'code-approved' }] }),
+      });
+      await closeDevSession('auto-clean-rev');
+      await waitFor(() => !!getJob('auto-clean').reviewLoop.done);
+      expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'GET', '/repos/acme/loop/pulls/77');
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      recordTriage.mockClear();
+    }
+  });
+
+  it('keeps a clean autonomous round pending when the project has not approved it', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    const approvals = addPullRequestLabel.mock.calls.length;
+    latestReviewFindings.mockResolvedValue([]);
+    githubRest.mockResolvedValue({
+      ok: true,
+      json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
+    });
+    try {
+      await closeDevSession('auto-unapproved-rev');
+      await waitFor(() => !!getJob('auto-unapproved').reviewLoop.pendingResult?.error);
+      expect(getJob('auto-unapproved').reviewLoop.done).toBeFalsy();
+      expect(getJob('auto-unapproved').reviewLoop.pendingResult.error).toMatch(
+        /has not applied the code-approved label/,
+      );
+      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      getJob('auto-unapproved').reviewLoop.pendingResult = null;
+      githubRest.mockReset();
+    }
+  });
+
+  it('retains the held round if automatic verdict recording fails', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    try {
+      latestReviewFindings.mockResolvedValueOnce([{ key: 'failed', severity: 'high', title: 'A bug' }]);
+      recordTriage.mockRejectedValueOnce(new Error('offline'));
+      await closeDevSession('auto-fail-rev');
+      await waitFor(() => infoTexts(getJob('auto-fail')).some((t) => t.includes('automatic triage failed')));
+      expect(getJob('auto-fail').reviewLoop.triage.findings).toHaveLength(1);
+      expect(getJob('auto-fail').reviewLoop.done).toBeFalsy();
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      recordTriage.mockClear();
+    }
+  });
 
   it('a review stopped mid-way releases the loop without a fix turn', async () => {
     await closeDevSession('rev-1');
@@ -4855,7 +4989,7 @@ describe('the review loop: what a closing loop review reports back', () => {
     expect(infoTexts(parent).join('\n')).toMatch(/same 1 finding\(s\) as the round before it/);
   });
 
-  it('a sent round that found something new goes to a fix session and becomes the next comparison', async () => {
+  it('a refused fix for new findings preserves the previous comparison and held round', async () => {
     const parent = getJob('par-9');
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k2', severity: 'high', title: 'Another' }]);
     await closeDevSession('rev-9');
@@ -4863,7 +4997,10 @@ describe('the review loop: what a closing loop review reports back', () => {
     expect(parent.reviewLoop.lastFindings).toBe('k1'); // untouched while the round is on hold
     await triageLoopFindings('par-9', { verdicts: [{ key: 'k2', decision: 'fix' }] });
     expect(parent.reviewLoop.stalled).toBeFalsy(); // restored rows carry no flag until one is set
-    expect(parent.reviewLoop.lastFindings).toBe('k2');
+    expect(parent.reviewLoop.lastFindings).toBe('k1');
+    expect(parent.reviewLoop.triage.findings).toEqual([
+      expect.objectContaining({ key: 'k2', severity: 'high', title: 'Another' }),
+    ]);
     expect(infoTexts(parent).join('\n')).toMatch(/could not start the fix session/); // the spawn was attempted
   });
 
@@ -5657,6 +5794,8 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
   });
 
   it('records the verdicts, then sends what was kept to a fix session with the note', async () => {
+    const held = getJob('tri-1').reviewLoop.triage;
+    const previousFindings = getJob('tri-1').reviewLoop.lastFindings;
     const result = await triageLoopFindings('tri-1', {
       verdicts: [
         { key: 'k1', decision: 'fix' },
@@ -5665,7 +5804,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       note: 'Keep the public signature.',
     });
     const worker = getJob('tri-1');
-    expect(worker.reviewLoop.triage).toBeNull();
+    expect(worker.reviewLoop.triage).toBe(held);
     // Every verdict goes on record, "dismiss" spelled the way the panel spells it.
     expect(recordTriage).toHaveBeenLastCalledWith(
       'acme/triage',
@@ -5684,9 +5823,9 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       ],
       { round: 2, by: 'the orchestrator', note: 'Keep the public signature.' },
     );
-    // What was kept is the next round's comparison, and is what the fix
-    // session is briefed with, as a decided list plus the note.
-    expect(worker.reviewLoop.lastFindings).toBe('k1');
+    // A refused startup preserves the comparison, while the attempted fix
+    // is still briefed with the decided list and note.
+    expect(worker.reviewLoop.lastFindings).toBe(previousFindings);
     expect(implementFeedbackPrompt).toHaveBeenLastCalledWith(
       expect.objectContaining({
         prNumber: 79,
