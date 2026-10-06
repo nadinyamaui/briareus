@@ -259,6 +259,7 @@ import {
   rotateSessionWebhook,
   sessionWebhookState,
   flushJobs,
+  devSessionRecords,
   sendDevMessage,
   sessionUsage,
   childSessionsOf,
@@ -705,6 +706,21 @@ describe('devSessionSlots', () => {
 });
 
 describe('createDevSession: the validation gauntlet', () => {
+  beforeAll(() => {
+    getProviderForJob.mockReset();
+  });
+  afterAll(async () => {
+    // Successful validation cases still prepare real sessions asynchronously.
+    // Settle them before the following suite installs its fake provider CLI.
+    await vi.waitFor(
+      () => {
+        expect(devSessionRecords().filter((job) => ['preparing', 'running'].includes(job.status))).toEqual(
+          [],
+        );
+      },
+      { timeout: 30_000 },
+    );
+  });
   const base = {
     provider: 1,
     model: 'claude-fable-5-1',
@@ -815,75 +831,11 @@ describe('createDevSession: the validation gauntlet', () => {
     }
   });
 
-  it('a Zeus session is an orchestrator with the same refusals, filed under its own activity', () => {
-    for (const extra of [{ review: true }, { local: true }, { reviewLoop: true }, { branch: 'feature' }]) {
-      expect(() => createDevSession({ ...base, zeus: true, ...extra })).toThrow(
-        /only chats and manages workers/,
-      );
-    }
-    const zeusRoles = { product: { providerId: 1 }, architecture: { providerId: 1 } };
-    const zeus = createDevSession({ ...base, zeus: true, zeusRoles });
-    expect(zeus.orchestrator).toBe(true);
-    expect(zeus.zeus).toBe(true);
-    expect(zeus.activity).toBe('zeus');
-    expect(zeus.readOnly).toBe(false);
-    // Its workers' runtime is the orchestrator's, so the epic dialog's pick
-    // shape works for Zeus too.
-    expect(
-      createDevSession({ ...base, zeus: true, zeusRoles, workerRuntime: { providerId: 1 } }).workerRuntime,
-    ).toEqual({
-      providerId: 1,
-      model: 'claude-fable-5-1',
-      effort: 'high',
-    });
-    expect(createDevSession({ ...base, orchestrator: true }).zeus).toBe(false);
-  });
-
-  it('a Zeus session stores a runtime per analyst role, and only Zeus does', () => {
-    expect(() =>
-      createDevSession({ ...base, orchestrator: true, zeusRoles: { qa: { providerId: 1 } } }),
-    ).toThrow(/Only a Zeus session carries runtimes for analyst roles/);
-    expect(() =>
-      createDevSession({ ...base, zeus: true, zeusRoles: { designer: { providerId: 1 } } }),
-    ).toThrow(/Unknown Zeus analyst role: designer/);
-    expect(() => createDevSession({ ...base, zeus: true, zeusRoles: { qa: { providerId: 99 } } })).toThrow(
-      /Unknown worker provider: 99/,
-    );
-    const picked = createDevSession({
-      ...base,
-      zeus: true,
-      zeusRoles: {
-        product: { providerId: 1, model: 'claude-fable-5-1', effort: 'low' },
-        architecture: { providerId: 1, model: 'gone-model', effort: 'extreme' },
-      },
-    });
-    expect(picked.zeusRoles).toEqual({
-      product: { providerId: 1, model: 'claude-fable-5-1', effort: 'low' },
-      architecture: { providerId: 1, model: 'claude-fable-5-1', effort: 'high' },
-    });
-    // A session started before the fusion dropped to two proposals still reads
-    // back its third pick; it is simply no longer asked for.
-    expect(
-      createDevSession({
-        ...base,
-        zeus: true,
-        zeusRoles: {
-          product: { providerId: 1 },
-          architecture: { providerId: 1 },
-          qa: { providerId: 1, model: 'claude-fable-5-1', effort: 'low' },
-        },
-      }).zeusRoles.qa,
-    ).toEqual({ providerId: 1, model: 'claude-fable-5-1', effort: 'low' });
-    for (const zeusRoles of [undefined, {}, { product: { providerId: 1 } }, { qa: { providerId: 1 } }]) {
-      expect(() => createDevSession({ ...base, zeus: true, zeusRoles })).toThrow(
-        /Choose a model for both proposal slots/,
-      );
-    }
-  });
-
   it('a read-only analyst is always somebody’s worker and takes nothing that pushes', () => {
-    expect(() => createDevSession({ ...base, readOnly: true })).toThrow(/worker session of some Zeus/);
-    for (const extra of [{ orchestrator: true }, { zeus: true }, { reviewLoop: true }, { autoClose: true }]) {
+    expect(() => createDevSession({ ...base, readOnly: true })).toThrow(
+      /worker session of some orchestrator/,
+    );
+    for (const extra of [{ orchestrator: true }, { reviewLoop: true }, { autoClose: true }]) {
       expect(() => createDevSession({ ...base, readOnly: true, parentId: 'x', ...extra })).toThrow(
         /only reads and reports/,
       );
@@ -967,148 +919,14 @@ describe('spawnWorkerSession', () => {
       row('plain-a', {}),
       row('w-a1', { parentId: 'orch-a', day: 2 }),
       row('w-a2', { parentId: 'orch-a', day: 3 }),
-      row('zeus-a', { orchestrator: true, zeus: true }),
-      row('zeus-resume', { orchestrator: true, zeus: true }),
-      row('zeus-resume-codex', { orchestrator: true, zeus: true }),
-      row('zeus-resume-grok', { orchestrator: true, zeus: true }),
-      row('zeus-resume-opencode', { orchestrator: true, zeus: true }),
       row('bg-claude', {}),
-      // Started from the composer's dialog with a pick for two roles; its own
-      // effort is the provider's default, so an analyst on 'low' proves the
-      // role's pick was used, and one on 'high' that the fallback was.
-      row('zeus-roles', {
-        orchestrator: true,
-        zeus: true,
-        effort: 'high',
-        zeusRoles: {
-          product: { providerId: 1, model: 'claude-fable-5-1', effort: 'low' },
-          validator: { providerId: 1, model: 'claude-fable-5-1', effort: 'low' },
-        },
-      }),
     ];
     await initJobs();
     getJob('orch-a').status = 'idle';
     getJob('orch-c').status = 'idle';
     getJob('orch-gone').status = 'idle';
-    getJob('zeus-a').status = 'idle';
-    getJob('zeus-roles').status = 'idle';
   });
-  afterAll(() => settleWorkers(['orch-a', 'orch-c', 'orch-gone', 'zeus-a', 'zeus-roles']));
-
-  it('a resumed Zeus saves complete model choices before queuing its brief', () => {
-    const job = getJob('zeus-resume');
-    job.status = 'running';
-    const pick = { providerId: 1, model: 'claude-fable-5-1', effort: 'low' };
-    const roles = { product: pick, architecture: pick };
-    expect(() => sendDevMessage(job.id, 'Brief', [], { product: pick })).toThrow(/both proposal slots/);
-    expect(job.zeusRoles).toBeUndefined();
-    expect(() => sendDevMessage('orch-a', 'Brief', [], roles)).toThrow(/Only a Zeus/);
-    const session = sendDevMessage(job.id, 'Same complete brief', [], roles);
-    expect(session.zeusRoles).toEqual(roles);
-    expect(session.queued[0].text).toBe('Same complete brief');
-    const analyst = spawnWorkerSession(job, {
-      title: 'Model 2',
-      prompt: 'Full proposal',
-      role: 'architecture',
-    });
-    expect(analyst.effort).toBe('low');
-    expect(job.zeusProposalPrompt).toBe('Full proposal');
-    expect(() => spawnWorkerSession(job, { title: 'Model 3', prompt: 'Only QA', role: 'qa' })).toThrow(
-      /exactly the same prompt/,
-    );
-    const other = spawnWorkerSession(job, { title: 'Model 3', prompt: 'Full proposal', role: 'qa' });
-    expect(getJob(other.id).events.find((event) => event.kind === 'user').text).toBe('Full proposal');
-    expect(getJob(analyst.id).events.find((event) => event.kind === 'user').text).toBe('Full proposal');
-    sendDevMessage(job.id, 'A new brief');
-    expect(job.zeusProposalPrompt).toBe('Full proposal'); // queued: the old round still owns the prompt
-    dropQueuedMessage(job.id, 1);
-    dropQueuedMessage(job.id, 0);
-    job.status = 'idle';
-    sendDevMessage(job.id, 'A new brief');
-    expect(job.zeusProposalPrompt).toBeNull();
-  });
-
-  it.each(['codex', 'grok', 'opencode'])(
-    '%s receives updated Zeus choices on immediate and queued resumed turns',
-    async (binary) => {
-      // One session per provider keeps a fire-and-forget turn from another
-      // case from publishing a same-id status transition into this case.
-      const job = getJob(`zeus-resume-${binary}`);
-      job.status = 'idle';
-      job.chats = { 1: { sessionId: binary === 'opencode' ? 'ses_resume' : 'resume-id', started: true } };
-      const provider = { ...state.provider, binary };
-      getProviderForJob.mockReturnValue(provider);
-      captureProviderAuth.mockResolvedValue(undefined);
-      const bin = vi.spyOn(BINARIES[binary], 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
-      const children = [];
-      const prompts = [];
-      // Only the provider CLI is this test's business. Sessions created by
-      // earlier tests prepare their workspaces in the background, and a git
-      // process of theirs landing here would be counted as a turn's child and
-      // closed in its place, leaving the real turn running for good: the flake
-      // this filter exists for. Everything that is not the CLI is spawned for
-      // real, exactly as it is in every other test of this file.
-      const realSpawn = spawn.getMockImplementation();
-      spawn.mockImplementation((cmd, ...rest) => {
-        if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
-        const child = new EventEmitter();
-        child.stdin = new PassThrough();
-        child.stdout = new PassThrough();
-        child.stderr = new PassThrough();
-        if (binary === 'grok') {
-          prompts.push(fs.readFileSync(`/tmp/reviewer-prompts/${job.id}-prompt.txt`, 'utf8'));
-        } else {
-          child.stdin.on('data', (chunk) => prompts.push(chunk.toString()));
-        }
-        children.push(child);
-        return child;
-      });
-      try {
-        const pick = { providerId: 1, model: 'claude-fable-5-1', effort: 'low' };
-        const roles = { product: pick, architecture: pick };
-        sendDevMessage(job.id, 'Immediate brief', [], roles);
-        expect(prompts).toHaveLength(1);
-        const queued = sendDevMessage(job.id, 'Queued brief', [], roles);
-        expect(queued.queued[0].text).toBe('Queued brief');
-        expect(prompts).toHaveLength(1);
-        children[0].emit('close', 0);
-        await vi.waitFor(() => expect(prompts).toHaveLength(2));
-        for (const [index, prompt] of prompts.entries()) {
-          expect(prompt).toContain(index === 0 ? 'Immediate brief' : 'Queued brief');
-          expect(prompt).toContain('supersede any earlier missing or partial picks');
-          expect(prompt).toContain('Omit provider_id and model');
-          expect(prompt).toContain('same complete proposal prompt to both');
-          for (const role of Object.keys(roles)) {
-            expect(prompt).toContain(`- ${role}: Claude entry (provider_id 1), claude-fable-5-1, effort low`);
-          }
-          // Resumed providers do not receive the full initial system briefing.
-          expect(prompt).not.toContain('# Fusion');
-          expect(prompt).toContain('ZEUS itself consolidates both complete outputs');
-        }
-        expect(children).toHaveLength(2);
-        // The child close resolves runDevTurn first; the queue-drain
-        // continuation publishes idle on the job bus afterwards. Listen
-        // before closing instead of racing that continuation with a
-        // wall-clock poll, which is unreliable on a loaded CI runner.
-        const settled = new Promise((resolve) => {
-          const onJob = (session) => {
-            if (session.id !== job.id || session.status !== 'idle') return;
-            bus.off('job', onJob);
-            resolve();
-          };
-          bus.on('job', onJob);
-        });
-        children[1].emit('close', 0);
-        await settled;
-        expect(job.status).toBe('idle');
-      } finally {
-        bin.mockRestore();
-        spawn.mockReset();
-        getProviderForJob.mockReset();
-        captureProviderAuth.mockReset();
-      }
-    },
-  );
+  afterAll(() => settleWorkers(['orch-a', 'orch-c', 'orch-gone']));
 
   it('a claude turn takes messages live until it answers with nothing in the background', async () => {
     const job = getJob('bg-claude');
@@ -1551,7 +1369,7 @@ describe('spawnWorkerSession', () => {
     job.chats = { 1: { sessionId: 'bg-sid', started: true } };
     const { children, settled, restore } = fakeClaude();
     try {
-      sendDevMessage(job.id, 'CI failed', undefined, undefined, { unattended: true });
+      sendDevMessage(job.id, 'CI failed', undefined, { unattended: true });
       const bubble = job.events.findLast((e) => e.kind === 'user').seq;
       children[0].emitLines(replay(children[0].writes[0]));
       sendDevMessage(job.id, 'Actually, do X instead');
@@ -1587,7 +1405,7 @@ describe('spawnWorkerSession', () => {
     job.webhookTurns = [];
     const { children, restore } = fakeClaude();
     try {
-      sendDevMessage(job.id, 'CI failed', undefined, undefined, { unattended: true });
+      sendDevMessage(job.id, 'CI failed', undefined, { unattended: true });
       const bubble = job.events.findLast((e) => e.kind === 'user').seq;
       children[0].emitLines(replay(children[0].writes[0]));
       sendDevMessage(job.id, 'Also check the logs');
@@ -1637,7 +1455,7 @@ describe('spawnWorkerSession', () => {
     const { children, restore } = fakeClaude();
     const line = (re) => job.events.find((e) => re.test(e.text || ''));
     try {
-      sendDevMessage(job.id, 'CI failed', undefined, undefined, { unattended: true });
+      sendDevMessage(job.id, 'CI failed', undefined, { unattended: true });
       children[0].emitLines(replay(children[0].writes[0]), {
         type: 'assistant',
         message: { content: [{ type: 'text', text: `See https://github.com/${job.repo}/pull/42` }] },
@@ -2160,53 +1978,6 @@ describe('spawnWorkerSession', () => {
     }
   });
 
-  it('a live Zeus brief starts a new proposal round only once the answer under way is over', async () => {
-    const job = getJob('bg-claude');
-    job.status = 'idle';
-    job.zeus = true;
-    const { children, settled, restore } = fakeClaude();
-    try {
-      sendDevMessage(job.id, 'Compare two designs');
-      children[0].emitLines(
-        init,
-        replay('Compare two designs'),
-        ...monitorStarted,
-        said('Spawning the product analyst.'),
-      );
-      // The answer spawned its first proposal model with this prompt.
-      job.zeusProposalPrompt = 'the brief';
-      sendDevMessage(job.id, 'Keep it small');
-      expect(job.zeusProposalPrompt).toBe('the brief');
-      // Read into that answer, which may still spawn the second model.
-      children[0].emitLines(replay('Keep it small'));
-      await new Promise((r) => setTimeout(r, 20));
-      expect(job.zeusProposalPrompt).toBe('the brief');
-      children[0].emitLines(said('Spawned both.'), result('Spawned both.'));
-      await vi.waitFor(() => expect(job.zeusProposalPrompt).toBe(null));
-      job.zeusProposalPrompt = 'the next brief';
-      sendDevMessage(job.id, 'Now a third one');
-      expect(job.zeusProposalPrompt).toBe('the next brief');
-      // A brief that opens an answer of its own starts its round at once.
-      children[0].emitLines(init, replay('Now a third one'));
-      await vi.waitFor(() => expect(job.zeusProposalPrompt).toBe(null));
-      const done = settled(job);
-      children[0].emitLines(said('On it.'), result('On it.'));
-      children[0].emitLines(
-        { type: 'system', subtype: 'task_notification', task_id: 'm1', tool_use_id: 'call-m' },
-        init,
-        said('The log is quiet.'),
-        result('The log is quiet.'),
-      );
-      await vi.waitFor(() => expect(children[0].ended).toBe(true));
-      children[0].emit('close', 0);
-      await done;
-    } finally {
-      job.zeus = false;
-      job.zeusProposalPrompt = null;
-      restore();
-    }
-  });
-
   it('a short reply is not read off a line of the same text in another message', async () => {
     const job = getJob('bg-claude');
     job.status = 'idle';
@@ -2573,77 +2344,6 @@ describe('spawnWorkerSession', () => {
     }
   });
 
-  it('a role is a Zeus analyst’s and one of the four', () => {
-    expect(() => spawnWorkerSession(getJob('orch-a'), { title: 'R', prompt: 'x', role: 'qa' })).toThrow(
-      /Only a Zeus session starts analysts by role/,
-    );
-    expect(() => spawnWorkerSession(getJob('zeus-a'), { title: 'R', prompt: 'x', role: 'designer' })).toThrow(
-      /Unknown analyst role "designer"/,
-    );
-  });
-
-  it('an analyst spawned by role runs on the runtime the user picked for that role', () => {
-    const product = spawnWorkerSession(getJob('zeus-roles'), {
-      title: 'Product',
-      prompt: 'x',
-      role: 'product',
-    });
-    expect(product.effort).toBe('low');
-    expect(product.analystRole).toBe('product');
-    // A role with no pick falls through to the usual worker runtime chain,
-    // which here ends at the Zeus session's own entry.
-    const qa = spawnWorkerSession(getJob('zeus-roles'), { title: 'QA', prompt: 'x', role: 'qa' });
-    expect(qa.effort).toBe('high');
-    expect(qa.analystRole).toBe('qa');
-    // A spawn that names its own runtime is taken at its word over the pick:
-    // naming the model alone skips the role's pick (and its 'low').
-    const named = spawnWorkerSession(getJob('zeus-roles'), {
-      title: 'Named',
-      prompt: 'x',
-      role: 'validator',
-      model: 'claude-fable-5-1',
-    });
-    expect(named.effort).toBe('high');
-    expect(named.analystRole).toBe('validator');
-    // No role at all: still a read-only analyst, unlabelled.
-    const plain = spawnWorkerSession(getJob('zeus-roles'), { title: 'Plain', prompt: 'x' });
-    expect(plain.readOnly).toBe(true);
-    expect(plain.analystRole).toBeNull();
-  });
-
-  it('a Zeus session starts read-only analysts and refuses loops and branches for them', () => {
-    expect(() =>
-      spawnWorkerSession(getJob('zeus-a'), { title: 'Looped', prompt: 'x', reviewLoop: true }),
-    ).toThrow(/read-only: it pushes nothing/);
-    expect(() => spawnWorkerSession(getJob('zeus-a'), { title: 'QA', prompt: 'x', qaLoop: true })).toThrow(
-      /read-only: it pushes nothing/,
-    );
-    expect(() =>
-      spawnWorkerSession(getJob('zeus-a'), { title: 'Branch', prompt: 'x', branch: 'feature' }),
-    ).toThrow(/takes no branch/);
-    // A plain worker under Zeus cannot be made by hand either.
-    expect(() =>
-      createDevSession({
-        provider: 1,
-        model: 'claude-fable-5-1',
-        effort: 'high',
-        prompt: 'x',
-        repo: 'acme/shop',
-        parentId: 'zeus-a',
-      }),
-    ).toThrow(/only starts read-only analysts/);
-  });
-
-  it('an analyst files under Zeus as a read-only worker on the analyst activity', () => {
-    const analyst = spawnWorkerSession(getJob('zeus-a'), { title: 'Product', prompt: 'x' });
-    expect(analyst.readOnly).toBe(true);
-    expect(analyst.parentId).toBe('zeus-a');
-    expect(analyst.activity).toBe('analyst');
-    expect(analyst.reviewLoop).toBeNull();
-    expect(analyst.qaLoop).toBeNull();
-    expect(workerSessionsFor(getJob('zeus-a')).map((j) => j.id)).toEqual([analyst.id]);
-  });
-
   it('refuses a parent that is not an orchestrator', () => {
     expect(() => spawnWorkerSession(getJob('plain-a'), { prompt: 'x' })).toThrow(
       /Only an orchestrator session/,
@@ -2939,7 +2639,7 @@ describe('the unattended-turn breaker and the delivery holds', () => {
   });
 
   it('a webhook delivery is no sign of the user either: the breaker stays tripped', () => {
-    sendDevMessage('brk-hook', 'CI failed', undefined, undefined, { unattended: true });
+    sendDevMessage('brk-hook', 'CI failed', undefined, { unattended: true });
     const orch = getJob('brk-hook');
     expect(orch.unattendedTurns).toBe(7);
     expect(orch.unattendedSaid).toBe(true);
@@ -2988,7 +2688,6 @@ describe('webhook deliveries', () => {
     'hk-orch',
     'hk-dup',
     'hk-full',
-    'hk-zeus',
     'hk-fail',
     'hk-close',
     'hk-brief',
@@ -3013,18 +2712,12 @@ describe('webhook deliveries', () => {
 
   beforeAll(async () => {
     state.stored = [
-      ...IDLE.filter((id) => !['hk-off', 'hk-orch', 'hk-zeus', 'hk-brief', 'hk-slack'].includes(id)).map(
-        (id) => row(id, { webhook: armed() }),
+      ...IDLE.filter((id) => !['hk-off', 'hk-orch', 'hk-brief', 'hk-slack'].includes(id)).map((id) =>
+        row(id, { webhook: armed() }),
       ),
       row('hk-off', {}),
       row('hk-slack', {}),
       row('hk-orch', { orchestrator: true, costUsd: 5, webhook: armed() }),
-      row('hk-zeus', {
-        orchestrator: true,
-        zeus: true,
-        zeusProposalPrompt: 'the shared prompt',
-        webhook: armed(),
-      }),
       row('hk-brief', { chats: undefined, webhook: armed() }),
       row('hk-closed', { webhook: armed() }),
       row('hk-noslot', { webhook: armed() }),
@@ -3348,7 +3041,7 @@ describe('webhook deliveries', () => {
     sendDevMessage('hk-queued', 'second');
     await cli.finish(job, 1);
     expect(publicJob(job).queued).toHaveLength(1);
-    sendDevMessage('hk-queued', 'from outside', undefined, undefined, { unattended: true });
+    sendDevMessage('hk-queued', 'from outside', undefined, { unattended: true });
     // 'second' goes first; the delivery waits, its bubble pushed only when its turn starts.
     expect(publicJob(job).queued.map((q) => q.text)).toEqual(['from outside']);
     await vi.waitFor(() => expect(cli.children).toHaveLength(2));
@@ -3403,14 +3096,6 @@ describe('webhook deliveries', () => {
       status: 429,
     });
     expect(deliverToSession('hk-full', { text: 'y'.repeat(5000) }).status).toBe('held');
-  });
-
-  it('is no new brief to a Zeus session', async () => {
-    fakeCli();
-    const job = getJob('hk-zeus');
-    expect(deliverToSession('hk-zeus', { text: 'CI failed' }).status).toBe('running');
-    expect(job.zeusProposalPrompt).toBe('the shared prompt');
-    await cli.finish(job);
   });
 
   it('a turn it started that fails pauses the webhook until the operator has looked', async () => {
@@ -3564,7 +3249,6 @@ describe('webhook deliveries', () => {
     );
     expect(pushProtocol(getJob('hk-worker'))).toContain('# Pending commits');
     expect(pushProtocol(getJob('hk-orch'))).toBe('');
-    expect(pushProtocol(getJob('hk-zeus'))).toBe('');
     expect(pushProtocol(getJob('hk-analyst'))).toBe('');
     // It closes the briefing a conversation opens with, after the webhook's own.
     const { prompts } = fakeCli();
@@ -3642,8 +3326,7 @@ describe('webhook deliveries', () => {
   it('the send itself refuses to be a delivery into a turn, or onto a question', async () => {
     fakeCli();
     const job = getJob('hk-guard');
-    const send = () =>
-      sendDevMessage('hk-guard', 'outside words', undefined, undefined, { unattended: true });
+    const send = () => sendDevMessage('hk-guard', 'outside words', undefined, { unattended: true });
     job.awaitingAnswer = true;
     expect(send).toThrow(/joins no turn and answers no question/);
     expect(job.awaitingAnswer).toBe(true);
@@ -10430,7 +10113,7 @@ describe('auto-compaction after a turn', () => {
     setDevSessionAutoCompact(job.id, true);
     compactCodexThread.mockResolvedValue(undefined);
     const done = idle(job);
-    sendDevMessage(job.id, 'CI failed', undefined, undefined, { unattended: true });
+    sendDevMessage(job.id, 'CI failed', undefined, { unattended: true });
     const bubble = job.events.findLast((e) => e.kind === 'user').seq;
     children[0].emit('close', 0);
     await done;
@@ -10453,7 +10136,7 @@ describe('auto-compaction after a turn', () => {
     let finish;
     compactCodexThread.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
     const done = idle(job);
-    sendDevMessage(job.id, 'CI failed', undefined, undefined, { unattended: true });
+    sendDevMessage(job.id, 'CI failed', undefined, { unattended: true });
     const bubble = job.events.findLast((e) => e.kind === 'user').seq;
     children.at(-1).emit('close', 0);
     await vi.waitFor(() => expect(compactCodexThread).toHaveBeenCalledTimes(1));

@@ -558,7 +558,7 @@ describe('▶ Run during a webhook turn', () => {
     captureProviderAuth.mockResolvedValue(undefined);
     const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
     try {
-      sendDevMessage(job.id, 'from outside', undefined, undefined, { unattended: true });
+      sendDevMessage(job.id, 'from outside', undefined, { unattended: true });
       const [[bubble]] = job.webhookTurnOpen;
       await vi.waitFor(() => expect(state.procs.some((p) => p.command === '/mock/agent')).toBe(true));
       await startDevServe(job.id);

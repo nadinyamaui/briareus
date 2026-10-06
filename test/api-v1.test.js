@@ -624,6 +624,12 @@ describe('the contract', () => {
 
   it('describes every route once in the OpenAPI document, with typed fields and a typed answer', () => {
     const doc = apiV1OpenApi();
+    const sessionBody = doc.paths['/sessions'].post.requestBody.content['application/json'].schema;
+    expect(sessionBody.properties).not.toHaveProperty('zeus');
+    expect(sessionBody.properties).not.toHaveProperty('zeusRoles');
+    const messageBody =
+      doc.paths['/sessions/{id}/messages'].post.requestBody.content['application/json'].schema;
+    expect(messageBody.properties).not.toHaveProperty('zeusRoles');
     const operations = Object.values(doc.paths).flatMap((methods) => Object.values(methods));
     expect(operations).toHaveLength(API_V1_ROUTES.length);
     const ids = operations.map((op) => op.operationId);

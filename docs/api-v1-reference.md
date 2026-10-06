@@ -464,9 +464,7 @@ Start a session; starts a paid agent. Needs `manage`, held to `repo`.
 | `qaLoop`            | `boolean`  | Run QA after the review loop passes                                              |
 | `local`             | `boolean`  | Work in the project’s local checkout instead of a workspace clone                |
 | `orchestrator`      | `boolean`  | Start a supervisor that runs worker sessions instead of editing code             |
-| `zeus`              | `boolean`  | Start a supervisor that turns the prompt into a GitHub epic through analysts     |
 | `workerRuntime`     | `object`   | `{ providerId, model, effort }` an orchestrator’s workers default to             |
-| `zeusRoles`         | `object`   | The runtime each analyst role runs on, keyed by role                             |
 | `activity`          | `string`   | What to file the spend under; `issue` is the only value taken                    |
 
 **Returns** 201 `{ session: Session }`. A plain session needs `prompt` or `attachments`; a `review` or `qa` needs `branch`.
@@ -522,11 +520,10 @@ Send a message; it starts a turn, joins the running one or waits in the queue. N
 
 **Body**
 
-| Field         | Type       |                                                      |
-| ------------- | ---------- | ---------------------------------------------------- |
-| `text`        | `string`   | The text                                             |
-| `attachments` | `string[]` | Upload ids from `POST /uploads`                      |
-| `zeusRoles`   | `object`   | The runtime each analyst role runs on, keyed by role |
+| Field         | Type       |                                 |
+| ------------- | ---------- | ------------------------------- |
+| `text`        | `string`   | The text                        |
+| `attachments` | `string[]` | Upload ids from `POST /uploads` |
 
 **Returns** `{ session: Session }`
 

@@ -120,6 +120,7 @@ describe('the JSON-RPC frame', () => {
       'close_worker',
     ]);
     expect(res.result.tools[0].inputSchema.required).toEqual(['title', 'prompt']);
+    expect(res.result.tools[0].inputSchema.properties).not.toHaveProperty('role');
     expect(res.result.tools[1].inputSchema.required).toEqual(['title', 'prompt']);
   });
 });

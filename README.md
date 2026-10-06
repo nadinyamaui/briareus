@@ -351,29 +351,6 @@ branch it has checked out, and its real local database are used as they stand.
 One local session at a time per checkout; the branch picker and ⌕ Code review
 only apply to worktree sessions.
 
-### Zeus mode
-
-The same chip's **⚡ Zeus** turns a session into an epic writer: you give it a
-brief, it hands back a GitHub epic. It is a 🧭 orchestrator in its machinery
-(no branch, no loops, the worker tools) with two differences: it gets a
-read-only shallow clone of the default branch to investigate and verify against,
-and every worker it starts is a read-only **analyst** that reports instead of
-pushing (the spawn refuses loops and branches for them). Selecting **⚡ Zeus**
-opens the model picker immediately: choose two models for the same task.
-The session model selected in the composer is ZEUS, the summarizer.
-New Zeus sessions require both choices; resuming an older session without
-complete choices opens the picker before sending the next message.
-
-Both models receive the same complete prompt, independently investigate the
-repository and produce a complete epic. The server refuses a different proposal
-prompt within the same user brief, including after a restart. ZEUS combines the
-two outputs into one document, preserving useful unique findings, checking
-contradictions against evidence and keeping unresolved decisions explicit.
-There are no specialist assignments or separate validator. ZEUS publishes the
-combined epic as a parent issue with linked sub-issues for implementation.
-The document's shape is the _Zeus epic_ prompt template, overridable per
-project.
-
 Session history and logs live in MySQL (`jobs` / `job_events`) and nowhere
 else, so they survive restarts and nothing is capped or trimmed. Writes are
 batched and retried while the database is unreachable, and flushed on
