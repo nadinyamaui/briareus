@@ -62,7 +62,11 @@ push a feature branch / open a PR when asked.
 4. **Chat.** Every message spawns one headless provider run that resumes the
    provider's own session state. Output streams to the client live (SSE). The
    session keeps its clone and database server between turns, for as long as
-   it stays open.
+   it stays open. On a Claude session, a message starting with `/btw` (or
+   `POST /api/v1/sessions/{id}/btw`) is a side question instead: it is
+   answered from a fork of the conversation that is never saved, without
+   tools, even while a turn runs, and neither it nor its answer reaches the
+   agent. Both show in the transcript as `btw` / `btw_answer` lines.
 5. **▶ Run** serves the session's checkout with the project's run commands
    against the session's own database, on an app port of its own (one per
    pool entry: 8101, 8102, …).

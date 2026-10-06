@@ -622,6 +622,18 @@ Compact the session’s context now. Needs `manage`, held to the session’s pro
 
 **Returns** `{ session: Session }`
 
+### `POST /sessions/{id}/btw`
+
+Ask a side question (/btw) about a Claude session; the agent never sees it or its answer. Needs `manage`, held to the session’s project.
+
+**Body**
+
+| Field               | Type     |                                  |
+| ------------------- | -------- | -------------------------------- |
+| `text` **required** | `string` | The question, without the `/btw` |
+
+**Returns** `{ session: Session, id: string, text: string, isError: boolean, costUsd: number? }`. Answered from a fork of the conversation that is never saved, without tools, beside a running turn or on an idle session; waits for the answer. Both halves also land in the transcript as `btw` and `btw_answer` lines sharing an `id`. A message whose text starts with `/btw` does the same without waiting. 400 when the session is not a Claude one, has no conversation yet, is closed or is compacting; an answer that failed comes back with `isError`.
+
 ### `POST /sessions/{id}/clear`
 
 Hide the transcript so far; the stored log keeps it. Needs `manage`, held to the session’s project.
@@ -1745,23 +1757,24 @@ One picture of the tab in view. `width` × `height` is the page’s viewport in 
 
 One line of a session’s transcript. `kind` says how to read the rest; ignore kinds you do not know.
 
-| Field          | Type       |                                                                                                                                                                                                                                                |
-| -------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `seq`          | `integer`  | Its position in the session’s log; the cursor for `since` and `Last-Event-ID`                                                                                                                                                                  |
-| `t`            | `string`   | ISO time                                                                                                                                                                                                                                       |
-| `kind`         | `string`   | `user` a message sent in; `text` the agent speaking; `ask` a question to answer; `tool` and `tool_error` a tool call; `result` the end of a turn; `status` a status change; `info`, `cmd`, `git`, `setup`, `stderr` and `claude` are log lines |
-| `text`         | `string`   | The line’s text, on most kinds                                                                                                                                                                                                                 |
-| `status`       | `string`   | On `status`: the session’s new status                                                                                                                                                                                                          |
-| `attachments`  | `object[]` | On `user`: the files sent, each `{ name }`                                                                                                                                                                                                     |
-| `via`          | `string`   | On `user`: `webhook` or `instruction` when it was not typed                                                                                                                                                                                    |
-| `name`         | `string`   | On `tool`: the tool’s name                                                                                                                                                                                                                     |
-| `links`        | `object[]` | On `info`: links ▶ Run published                                                                                                                                                                                                               |
-| `hidden`       | `boolean`  | On `info`: this line stands in for lines a Clear or compaction hid                                                                                                                                                                             |
-| `isError`      | `boolean`  | On `result`: the turn failed                                                                                                                                                                                                                   |
-| `costUsd`      | `number?`  | On `result`: what the turn cost                                                                                                                                                                                                                |
-| `durationMs`   | `integer`  | On `result`: how long the turn ran                                                                                                                                                                                                             |
-| `inputTokens`  | `integer`  | On `result`                                                                                                                                                                                                                                    |
-| `outputTokens` | `integer`  | On `result`                                                                                                                                                                                                                                    |
+| Field          | Type       |                                                                                                                                                                                                                                                                                                                                  |
+| -------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `seq`          | `integer`  | Its position in the session’s log; the cursor for `since` and `Last-Event-ID`                                                                                                                                                                                                                                                    |
+| `t`            | `string`   | ISO time                                                                                                                                                                                                                                                                                                                         |
+| `kind`         | `string`   | `user` a message sent in; `text` the agent speaking; `ask` a question to answer; `tool` and `tool_error` a tool call; `result` the end of a turn; `status` a status change; `btw` a side question and `btw_answer` its answer, both outside the conversation; `info`, `cmd`, `git`, `setup`, `stderr` and `claude` are log lines |
+| `text`         | `string`   | The line’s text, on most kinds                                                                                                                                                                                                                                                                                                   |
+| `status`       | `string`   | On `status`: the session’s new status                                                                                                                                                                                                                                                                                            |
+| `attachments`  | `object[]` | On `user`: the files sent, each `{ name }`                                                                                                                                                                                                                                                                                       |
+| `via`          | `string`   | On `user`: `webhook` or `instruction` when it was not typed                                                                                                                                                                                                                                                                      |
+| `name`         | `string`   | On `tool`: the tool’s name                                                                                                                                                                                                                                                                                                       |
+| `links`        | `object[]` | On `info`: links ▶ Run published                                                                                                                                                                                                                                                                                                 |
+| `hidden`       | `boolean`  | On `info`: this line stands in for lines a Clear or compaction hid                                                                                                                                                                                                                                                               |
+| `id`           | `string`   | On `btw` and `btw_answer`: pairs a side question with its answer                                                                                                                                                                                                                                                                 |
+| `isError`      | `boolean`  | On `result`: the turn failed; on `btw_answer`: the text says why there is no answer                                                                                                                                                                                                                                              |
+| `costUsd`      | `number?`  | On `result` and `btw_answer`: what it cost                                                                                                                                                                                                                                                                                       |
+| `durationMs`   | `integer`  | On `result` and `btw_answer`: how long it ran                                                                                                                                                                                                                                                                                    |
+| `inputTokens`  | `integer`  | On `result`                                                                                                                                                                                                                                                                                                                      |
+| `outputTokens` | `integer`  | On `result`                                                                                                                                                                                                                                                                                                                      |
 
 ### PullRequest
 
@@ -2366,6 +2379,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/dev/sessions/:id/browser/screenshot`                                   | `GET /sessions/{id}/browser/screenshot`                                         |
 | `POST /api/dev/sessions/:id/browser/input`                                       | `POST /sessions/{id}/browser/input`                                             |
 | `POST /api/dev/sessions/:id/compact`                                             | `POST /sessions/{id}/compact`                                                   |
+| `POST /api/dev/sessions/:id/btw`                                                 | `POST /sessions/{id}/btw`                                                       |
 | `POST /api/dev/sessions/:id/clear`                                               | `POST /sessions/{id}/clear`                                                     |
 | `POST /api/dev/sessions/:id/loop`                                                | `POST /sessions/{id}/review-loop`                                               |
 | `POST /api/dev/sessions/:id/qa-loop`                                             | `POST /sessions/{id}/qa-loop`                                                   |

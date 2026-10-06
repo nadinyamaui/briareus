@@ -9,11 +9,12 @@ import { spawn, spawnSync } from 'child_process';
 import { BINARIES } from '../lib/providers.js';
 import * as providerTools from '../lib/providers.js';
 import { compactCodexThread } from '../lib/codex-session.js';
-import { transferClaudeSession } from '../lib/claude-session.js';
+import { askClaudeSideQuestion, transferClaudeSession } from '../lib/claude-session.js';
 import { forgetProviderUsage, providerUsage } from '../lib/balancer.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
+  askClaudeSideQuestion: vi.fn(),
 }));
 import { recordTurnUsage } from '../lib/usage.js';
 import { setDraining } from '../lib/recovery.js';
@@ -218,6 +219,8 @@ import {
   PREVIEW_TTL_MS,
   closeDevSession,
   compactDevSession,
+  askDevSessionBtw,
+  btwQuestion,
   clearDevTranscript,
   visibleEvents,
   deleteJobById,
@@ -10992,5 +10995,117 @@ describe('the shared browser in a session', () => {
     bus.off('job', onJob);
     expect(records).toHaveLength(1);
     expect(records[0].browser).toEqual({ running: false });
+  });
+});
+
+describe('/btw side questions', () => {
+  let bin;
+  beforeEach(async () => {
+    bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/claude' });
+    askClaudeSideQuestion.mockReset();
+    recordTurnUsage.mockClear();
+    state.stored = [
+      {
+        id: 'btw-session',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+        provider: 'Claude entry',
+        providerSessionId: '11111111-2222-3333-4444-555555555555',
+        chatStarted: true,
+        model: 'claude-opus-5-5',
+        workDir: '/tmp/workspace',
+        turns: 1,
+      },
+    ];
+    await initJobs();
+    getJob('btw-session').status = 'idle';
+    getProviderForJob.mockReturnValue(state.provider);
+  });
+  afterEach(() => {
+    bin.mockRestore();
+    getProviderForJob.mockReset();
+  });
+
+  it('reads the question out of a /btw message', () => {
+    expect(btwQuestion('/btw what is left?')).toBe('what is left?');
+    expect(btwQuestion('  /BTW  two\nlines ')).toBe('two\nlines');
+    expect(btwQuestion('/btw')).toBe('');
+    expect(btwQuestion('/btwx')).toBeNull();
+    expect(btwQuestion('so /btw is a thing')).toBeNull();
+    expect(btwQuestion(undefined)).toBeNull();
+  });
+
+  it('answers beside a running turn: no queue, no user line, the answer paired by id', async () => {
+    const job = getJob('btw-session');
+    job.status = 'running';
+    let finish;
+    askClaudeSideQuestion.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const before = job.events.length;
+    const session = sendDevMessage('btw-session', '/btw which file are you editing?');
+    expect(session.queued).toBeUndefined();
+    expect(askClaudeSideQuestion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: '11111111-2222-3333-4444-555555555555',
+        model: 'claude-opus-5-5',
+        cwd: '/tmp/workspace',
+        question: 'which file are you editing?',
+      }),
+    );
+    const asked = job.events.slice(before);
+    expect(asked.map((e) => e.kind)).toEqual(['btw']);
+    finish({
+      text: 'lib/jobs.js',
+      costUsd: 0.02,
+      durationMs: 3000,
+      inputTokens: 21000,
+      outputTokens: 30,
+      cachedInputTokens: 20000,
+    });
+    await vi.waitFor(() => expect(job.events.at(-1).kind).toBe('btw_answer'));
+    const answer = job.events.at(-1);
+    expect(answer).toMatchObject({ id: asked[0].id, text: 'lib/jobs.js', costUsd: 0.02 });
+    expect(job.events.slice(before).some((e) => e.kind === 'user')).toBe(false);
+    expect(job.status).toBe('running');
+    await vi.waitFor(() =>
+      expect(recordTurnUsage).toHaveBeenLastCalledWith(
+        job,
+        expect.objectContaining({ inputTokens: 21000, cachedInputTokens: 20000, costUsd: 0.02 }),
+        state.provider,
+        'claude-opus-5-5',
+      ),
+    );
+  });
+
+  it('puts a failed answer in the transcript and hands it to a caller who waits', async () => {
+    askClaudeSideQuestion.mockRejectedValueOnce(
+      Object.assign(new Error('The side question needed tools to answer; ask it in the main chat instead'), {
+        usage: { costUsd: 0.01 },
+      }),
+    );
+    const asked = askDevSessionBtw('btw-session', 'run the tests?');
+    await expect(asked.answer).rejects.toThrow('needed tools');
+    expect(getJob('btw-session').events.at(-1)).toMatchObject({
+      kind: 'btw_answer',
+      id: asked.id,
+      isError: true,
+    });
+  });
+
+  it('refuses what it cannot answer', () => {
+    expect(() => askDevSessionBtw('btw-session', '  ')).toThrow('Ask a question');
+    expect(() => sendDevMessage('btw-session', '/btw')).toThrow('Ask a question');
+    getJob('btw-session').status = 'closed';
+    expect(() => askDevSessionBtw('btw-session', 'hi')).toThrow('Reopen');
+    getJob('btw-session').status = 'idle';
+    getProviderForJob.mockReturnValue({ id: 3, label: 'Codex', binary: 'codex', active: true });
+    expect(() => askDevSessionBtw('btw-session', 'hi')).toThrow('Claude session');
+    expect(askClaudeSideQuestion).not.toHaveBeenCalled();
   });
 });
