@@ -574,6 +574,25 @@ describe('buildArgs', () => {
     }
   });
 
+  it('codex reviews use a fresh exec turn with independent delegation enabled', () => {
+    const built = BINARIES.codex.buildReviewArgs({
+      model: 'gpt-6.1-sol',
+      effort: 'medium',
+      resume: true,
+      sessionId: 'existing-thread',
+    });
+    expect(built.args[0]).toBe('exec');
+    expect(built.args).not.toContain('review');
+    expect(built.args).not.toContain('resume');
+    expect(built.args).not.toContain('existing-thread');
+    expect(built.args).toEqual(expect.arrayContaining(['--enable', 'multi_agent']));
+    expect(built.args[built.args.indexOf('-m') + 1]).toBe('gpt-6.1-sol');
+    expect(built.args).toContain('model_reasoning_effort="medium"');
+    expect(built.args.at(-1)).toBe('-');
+    expect(built.promptVia).toBe('stdin');
+    expect(built.briefingInPrompt).toBe(true);
+  });
+
   it('codex leaves the window alone on a plain pick', () => {
     for (const build of [BINARIES.codex.buildArgs, BINARIES.codex.buildReviewArgs]) {
       const plain = build({ model: 'gpt-6-astra', effort: 'high', sessionId: 't' });
