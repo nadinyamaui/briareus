@@ -17,7 +17,7 @@ vi.mock('../lib/claude-session.js', async (original) => ({
   askClaudeSideQuestion: vi.fn(),
 }));
 import { recordTurnUsage } from '../lib/usage.js';
-import { setDraining } from '../lib/recovery.js';
+import { maintenanceState, setDraining } from '../lib/recovery.js';
 vi.mock('../lib/codex-session.js', async (original) => ({
   ...(await original()),
   compactCodexThread: vi.fn(),
@@ -189,7 +189,7 @@ vi.mock('../lib/usage.js', () => ({
   recordTurnUsage: vi.fn(),
 }));
 
-import { deleteJob, jobEventMaxSeqs, loadJobEvents, saveJob } from '../lib/db.js';
+import { deleteJob, jobEventMaxSeqs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
 import { dropSessionDatabase } from '../lib/dbpool.js';
 import {
@@ -11081,6 +11081,94 @@ describe('/btw side questions', () => {
         'claude-opus-5-5',
       ),
     );
+  });
+
+  it.each(['idle', 'running'])('drains a side answer and its accounting on a %s session', async (status) => {
+    const job = getJob('btw-session');
+    job.status = status;
+    let finishAnswer;
+    let finishAccounting;
+    askClaudeSideQuestion.mockImplementationOnce(({ onSpawn }) => {
+      onSpawn({ kill: vi.fn() });
+      return new Promise((resolve) => {
+        finishAnswer = resolve;
+      });
+    });
+    recordTurnUsage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishAccounting = resolve;
+        }),
+    );
+    const asked = askDevSessionBtw(job.id, 'What changed?');
+    setDraining(true);
+    try {
+      expect(maintenanceState([publicJob(job)]).ready).toBe(false);
+      expect(maintenanceState([publicJob(job)]).active).toEqual([
+        { id: job.id, title: job.title, status: status === 'idle' ? 'answering a side question' : status },
+      ]);
+      expect(() => askDevSessionBtw(job.id, 'Anything else?')).toThrow('Maintenance');
+      let flushed = false;
+      const flush = flushJobs().then(() => {
+        flushed = true;
+      });
+      await Promise.resolve();
+      expect(flushed).toBe(false);
+      finishAnswer({ text: 'Done', costUsd: 0.25, inputTokens: 100, outputTokens: 5, durationMs: 500 });
+      await vi.waitFor(() => expect(finishAccounting).toBeTypeOf('function'));
+      expect(job.events.at(-1).kind).toBe('btw_answer');
+      // The child has exited, but its ledger write must still block the drain.
+      job.status = 'idle';
+      expect(maintenanceState([publicJob(job)]).ready).toBe(false);
+      expect(flushed).toBe(false);
+      finishAccounting();
+      await asked.answer;
+      await flush;
+      expect(maintenanceState([publicJob(job)]).ready).toBe(true);
+      expect(publicJob(job).sideQuestionsPending).toBe(0);
+      const stored = saveJob.mock.calls.map(([j]) => j).findLast((j) => j.id === job.id);
+      expect(stored.sideQuestionUsage).toEqual({ inputTokens: 100, outputTokens: 5, durationMs: 500 });
+      expect(stored.costUsd).toBe(0.25);
+      expect(saveJobEvents.mock.calls.flatMap(([, events]) => events)).toEqual(
+        expect.arrayContaining([expect.objectContaining({ kind: 'btw_answer', text: 'Done' })]),
+      );
+    } finally {
+      setDraining(false);
+    }
+  });
+
+  it('settles failed side answers and ledger failures before flushing', async () => {
+    const job = getJob('btw-session');
+    let failAnswer;
+    askClaudeSideQuestion.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          failAnswer = reject;
+        }),
+    );
+    recordTurnUsage.mockRejectedValueOnce(new Error('ledger unavailable'));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const asked = askDevSessionBtw(job.id, 'What changed?');
+    setDraining(true);
+    try {
+      const flush = flushJobs();
+      expect(maintenanceState([publicJob(job)]).ready).toBe(false);
+      failAnswer(
+        Object.assign(new Error('answer failed'), {
+          usage: { costUsd: 0.01, inputTokens: 100, outputTokens: 5, durationMs: 500 },
+        }),
+      );
+      await expect(asked.answer).rejects.toThrow('answer failed');
+      await flush;
+      expect(maintenanceState([publicJob(job)]).ready).toBe(true);
+      expect(job.events.at(-1)).toMatchObject({ kind: 'btw_answer', isError: true });
+      const stored = saveJob.mock.calls.map(([j]) => j).findLast((j) => j.id === job.id);
+      expect(stored.sideQuestionUsage).toEqual({ inputTokens: 100, outputTokens: 5, durationMs: 500 });
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('ledger unavailable'));
+    } finally {
+      setDraining(false);
+      log.mockRestore();
+    }
   });
 
   it('persists idle side-question usage and rolls it up after restore', async () => {
