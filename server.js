@@ -181,6 +181,7 @@ import {
   updatePullRequestBranch,
 } from './lib/prviewer.js';
 import { issueTimeline, issueView } from './lib/issueviewer.js';
+import { repoFile, repoTree } from './lib/repofiles.js';
 import { boardInScope, moveBoardItem, projectBoard } from './lib/projectboard.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
@@ -914,6 +915,29 @@ api.get('/api/pr/commit', async (req, res) => {
     const project = getProject(String(req.query.repo || ''));
     if (!project) throw Object.assign(new Error(`Unknown project: ${req.query.repo || ''}`), { status: 404 });
     res.json(await commitView({ repo: project.repo }, String(req.query.sha || '')));
+  } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
+
+// The project's repository as a client's file browser reads it: every path at
+// a branch, and one file's text.
+api.get('/api/repo/tree', async (req, res) => {
+  try {
+    const project = getProject(String(req.query.repo || ''));
+    if (!project) throw Object.assign(new Error(`Unknown project: ${req.query.repo || ''}`), { status: 404 });
+    res.json(await repoTree({ repo: project.repo }, req.query.ref ? String(req.query.ref) : undefined));
+  } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
+
+api.get('/api/repo/file', async (req, res) => {
+  try {
+    const project = getProject(String(req.query.repo || ''));
+    if (!project) throw Object.assign(new Error(`Unknown project: ${req.query.repo || ''}`), { status: 404 });
+    const ref = req.query.ref ? String(req.query.ref) : undefined;
+    res.json(await repoFile({ repo: project.repo }, ref, String(req.query.path || '')));
   } catch (e) {
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
   }

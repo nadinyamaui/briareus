@@ -420,6 +420,28 @@ describe('handing a request to the dashboard’s handler', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it('hands a repository tree or file read to its handler, for a read token, held to its projects', async () => {
+    expect(await json(`/repo/tree?repo=${repo}&ref=main`, { token: tokens.read })).toMatchObject({
+      method: 'GET',
+      path: '/api/repo/tree',
+      query: { repo, ref: 'main' },
+    });
+    expect(
+      await json(`/repo/file?repo=${repo}&ref=abc&path=src%2Fa.js`, { token: tokens.read }),
+    ).toMatchObject({
+      method: 'GET',
+      path: '/api/repo/file',
+      query: { repo, ref: 'abc', path: 'src/a.js' },
+    });
+    handler.mockClear();
+    for (const route of ['/repo/tree', '/repo/file?path=a.js']) {
+      const join = route.includes('?') ? '&' : '?';
+      expect((await request(`${route}${join}repo=other/project`, { token: tokens.read })).status).toBe(403);
+      expect((await request(route, { token: tokens.read })).status).toBe(403);
+    }
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it('a client cannot override the section or the pull request a path names', async () => {
     expect((await json(`/pulls/7/files?repo=${repo}&section=checks&pr=9`)).query).toMatchObject({
       pr: '7',
