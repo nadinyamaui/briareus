@@ -11171,6 +11171,89 @@ describe('/btw side questions', () => {
     }
   });
 
+  it.each([true, false])(
+    'settles canceled side-question accounting before close/delete (autoClose=%s)',
+    async (autoClose) => {
+      state.stored[0] = { ...state.stored[0], autoClose, parentId: 'btw-parent', costUsd: 1 };
+      state.stored.push({
+        id: 'btw-parent',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+      });
+      await initJobs();
+      const job = getJob('btw-session');
+      job.status = 'idle';
+      let failAnswer;
+      let finishAccounting;
+      const kill = vi.fn();
+      askClaudeSideQuestion.mockImplementationOnce(({ onSpawn }) => {
+        onSpawn({ kill });
+        return new Promise((_, reject) => {
+          failAnswer = reject;
+        });
+      });
+      recordTurnUsage.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishAccounting = resolve;
+          }),
+      );
+      deleteJob.mockClear();
+      dropSessionDatabase.mockClear();
+      const asked = askDevSessionBtw(job.id, 'What changed?');
+      let closed = false;
+      const closing = closeDevSession(job.id).then(() => {
+        closed = true;
+      });
+      expect(kill).toHaveBeenCalledOnce();
+      expect(job.closing).toBe(true);
+      expect(() => askDevSessionBtw(job.id, 'Anything else?')).toThrow('Reopen');
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      expect(deleteJob).not.toHaveBeenCalled();
+      expect(dropSessionDatabase).not.toHaveBeenCalled();
+      failAnswer(
+        Object.assign(new Error('The side question was stopped'), {
+          usage: { costUsd: 0.25, inputTokens: 1000, outputTokens: 40, durationMs: 5000 },
+        }),
+      );
+      await vi.waitFor(() => expect(finishAccounting).toBeTypeOf('function'));
+      expect(closed).toBe(false);
+      expect(deleteJob).not.toHaveBeenCalled();
+      expect(dropSessionDatabase).not.toHaveBeenCalled();
+      finishAccounting();
+      await expect(asked.answer).rejects.toThrow('stopped');
+      await closing;
+      if (!autoClose) {
+        expect(getJob(job.id).status).toBe('closed');
+        await deleteJobById(job.id);
+      }
+      expect(getJob(job.id)).toBeNull();
+      expect(deleteJob).toHaveBeenCalledWith(job.id, {
+        intoJobId: 'btw-parent',
+        sessions: 1,
+        costUsd: 1.25,
+        inputTokens: 1000,
+        outputTokens: 40,
+        durationMs: 5000,
+      });
+      expect(sessionUsage(getJob('btw-parent'))).toEqual({
+        sessions: 1,
+        costUsd: 1.25,
+        inputTokens: 1000,
+        outputTokens: 40,
+        durationMs: 5000,
+      });
+      saveJob.mockClear();
+      saveJobEvents.mockClear();
+      await flushJobs();
+      expect(saveJob.mock.calls.some(([saved]) => saved.id === job.id)).toBe(false);
+      expect(saveJobEvents.mock.calls.some(([id]) => id === job.id)).toBe(false);
+    },
+  );
+
   it('persists idle side-question usage and rolls it up after restore', async () => {
     const job = getJob('btw-session');
     Object.assign(job, { costUsd: 1, inputTokens: 100, outputTokens: 20, durationMs: 1000 });

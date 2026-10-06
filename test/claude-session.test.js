@@ -228,7 +228,7 @@ function ask(opts = {}) {
 }
 
 describe('Claude side questions (/btw)', () => {
-  it('asks an unsaved fork with built-in and configured MCP tools disabled, over stdin', async () => {
+  it('asks an unsaved fork with tools, MCP servers and inherited hooks disabled, over stdin', async () => {
     const { promise, calls, finish, stdin } = ask();
     finish({
       type: 'result',
@@ -261,6 +261,8 @@ describe('Claude side questions (/btw)', () => {
       '--tools',
       '',
       '--strict-mcp-config',
+      '--settings',
+      '{"disableAllHooks":true}',
       '--max-turns',
       '1',
       '--output-format',
