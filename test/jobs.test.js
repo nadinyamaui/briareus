@@ -11083,6 +11083,92 @@ describe('/btw side questions', () => {
     );
   });
 
+  it('persists idle side-question usage and rolls it up after restore', async () => {
+    const job = getJob('btw-session');
+    Object.assign(job, { costUsd: 1, inputTokens: 100, outputTokens: 20, durationMs: 1000 });
+    askClaudeSideQuestion.mockResolvedValue({
+      text: 'Answer',
+      costUsd: 0.25,
+      inputTokens: 10000,
+      outputTokens: 40,
+      durationMs: 3000,
+    });
+    await askDevSessionBtw(job.id, 'What changed?').answer;
+    const expected = { sessions: 0, costUsd: 1.25, inputTokens: 10100, outputTokens: 60, durationMs: 4000 };
+    expect(sessionUsage(job)).toEqual(expected);
+    await askDevSessionBtw(job.id, 'Anything else?').answer;
+    const accumulated = {
+      sessions: 0,
+      costUsd: 1.5,
+      inputTokens: 20100,
+      outputTokens: 100,
+      durationMs: 7000,
+    };
+    expect(sessionUsage(job)).toEqual(accumulated);
+    saveJob.mockClear();
+    await flushJobs();
+    const stored = saveJob.mock.calls.map(([j]) => j).find((j) => j.id === job.id);
+    expect(stored.sideQuestionUsage).toEqual({ inputTokens: 20000, outputTokens: 80, durationMs: 6000 });
+    state.stored = [
+      { ...stored, parentId: 'btw-parent' },
+      { id: 'btw-parent', kind: 'devchat', status: 'idle', repo: 'acme/shop', providerId: 1 },
+    ];
+    await initJobs();
+    expect(sessionUsage(getJob(job.id))).toEqual(accumulated);
+    expect(sessionUsage(getJob('btw-parent'))).toEqual({ ...accumulated, sessions: 1 });
+  });
+
+  it('retains side-question usage when a concurrent main turn reapplies its baseline', async () => {
+    const job = getJob('btw-session');
+    Object.assign(job, { costUsd: 1, inputTokens: 100, outputTokens: 20, durationMs: 1000 });
+    const realSpawn = spawn.getMockImplementation();
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    spawn.mockImplementation((cmd, ...rest) => (cmd === '/mock/claude' ? child : realSpawn(cmd, ...rest)));
+    captureProviderAuth.mockResolvedValue(undefined);
+    askClaudeSideQuestion.mockResolvedValue({
+      text: 'Answer',
+      costUsd: 0.25,
+      inputTokens: 10000,
+      outputTokens: 40,
+      durationMs: 3000,
+    });
+    try {
+      sendDevMessage(job.id, 'Continue');
+      expect(job.proc).toBe(child);
+      await askDevSessionBtw(job.id, 'What changed?').answer;
+      child.stdout.write(
+        JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          result: 'Done',
+          total_cost_usd: 0.5,
+          duration_ms: 2000,
+          usage: { input_tokens: 200, output_tokens: 10 },
+        }) + '\n',
+      );
+      await vi.waitFor(() => expect(job.inputTokens).toBe(300));
+      expect(sessionUsage(job)).toMatchObject({ inputTokens: 10300, outputTokens: 70 });
+      child.emit('close', 0);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      expect(sessionUsage(job)).toEqual({
+        sessions: 0,
+        costUsd: 1.75,
+        inputTokens: 10300,
+        outputTokens: 70,
+        durationMs: 6000,
+      });
+    } finally {
+      if (job.proc) {
+        child.emit('close', 0);
+        await vi.waitFor(() => expect(job.proc).toBeNull());
+      }
+      spawn.mockImplementation(realSpawn);
+    }
+  });
+
   it.each(['claude', 'codex'])(
     'uses the active %s runtime instead of the original conversation',
     async (binary) => {
@@ -11157,11 +11243,17 @@ describe('/btw side questions', () => {
   it('puts a failed answer in the transcript and hands it to a caller who waits', async () => {
     askClaudeSideQuestion.mockRejectedValueOnce(
       Object.assign(new Error('The side question needed tools to answer; ask it in the main chat instead'), {
-        usage: { costUsd: 0.01 },
+        usage: { costUsd: 0.01, inputTokens: 100, outputTokens: 5, durationMs: 500 },
       }),
     );
     const asked = askDevSessionBtw('btw-session', 'run the tests?');
     await expect(asked.answer).rejects.toThrow('needed tools');
+    expect(sessionUsage(getJob('btw-session'))).toMatchObject({
+      costUsd: 0.01,
+      inputTokens: 100,
+      outputTokens: 5,
+      durationMs: 500,
+    });
     expect(getJob('btw-session').events.at(-1)).toMatchObject({
       kind: 'btw_answer',
       id: asked.id,
