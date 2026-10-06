@@ -4587,6 +4587,12 @@ describe('the review loop: what a closing loop review reports back', () => {
       reviewRow('auto-clean-rev', 'auto-clean', true),
       parentRow('auto-unapproved', 'auto-unapproved-rev'),
       reviewRow('auto-unapproved-rev', 'auto-unapproved', true),
+      parentRow('auto-filtered', 'auto-filtered-rev'),
+      reviewRow('auto-filtered-rev', 'auto-filtered', true),
+      parentRow('auto-filtered-approved', 'auto-filtered-approved-rev'),
+      reviewRow('auto-filtered-approved-rev', 'auto-filtered-approved', true),
+      parentRow('auto-filtered-error', 'auto-filtered-error-rev'),
+      reviewRow('auto-filtered-error-rev', 'auto-filtered-error', true),
       parentRow('auto-missing', 'auto-missing-rev'),
       reviewRow('auto-missing-rev', 'auto-missing', true),
       parentRow('auto-optional-refused', 'auto-optional-refused-rev'),
@@ -4692,6 +4698,12 @@ describe('the review loop: what a closing loop review reports back', () => {
       'auto-clean-rev',
       'auto-unapproved',
       'auto-unapproved-rev',
+      'auto-filtered',
+      'auto-filtered-rev',
+      'auto-filtered-approved',
+      'auto-filtered-approved-rev',
+      'auto-filtered-error',
+      'auto-filtered-error-rev',
       'auto-missing',
       'auto-missing-rev',
       'auto-optional-refused',
@@ -4844,6 +4856,64 @@ describe('the review loop: what a closing loop review reports back', () => {
     } finally {
       state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
       recordTriage.mockClear();
+    }
+  });
+
+  it('requires approval when prior verdicts filter out every autonomous finding', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    const parent = getJob('auto-filtered');
+    const approvals = addPullRequestLabel.mock.calls.length;
+    const records = recordTriage.mock.calls.length;
+    const reads = githubRest.mock.calls.length;
+    latestReviewFindings.mockResolvedValue([{ key: 'prior', severity: 'high', title: 'Prior finding' }]);
+    sortFindingsForFix.mockResolvedValue({ kept: [], parked: [] });
+    githubRest.mockResolvedValue({
+      ok: true,
+      json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
+    });
+    try {
+      await closeDevSession('auto-filtered-rev');
+      await waitFor(() => !!parent.reviewLoop.pendingResult?.error || !!parent.reviewLoop.done);
+      expect(parent.reviewLoop.done).toBeFalsy();
+      expect(parent.reviewLoop.pendingResult.error).toMatch(/has not applied the code-approved label/);
+      expect(githubRest.mock.calls.length).toBeGreaterThan(reads);
+      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
+      expect(recordTriage.mock.calls.length).toBe(records);
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      parent.reviewLoop.pendingResult = null;
+      latestReviewFindings.mockReset().mockResolvedValue([]);
+      sortFindingsForFix
+        .mockReset()
+        .mockImplementation(async (repo, prNumber, findings) => ({ kept: findings, parked: [] }));
+      githubRest.mockReset();
+    }
+  });
+
+  it.each([
+    ['approved', { ok: true, json: async () => ({ labels: [{ name: 'code-approved' }] }) }],
+    ['error', { ok: false, status: 503 }],
+  ])('checks approval for a filtered round when GitHub returns %s', async (outcome, response) => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    const parent = getJob(`auto-filtered-${outcome}`);
+    latestReviewFindings.mockResolvedValueOnce([{ key: 'prior', severity: 'high', title: 'Prior finding' }]);
+    sortFindingsForFix.mockResolvedValueOnce({ kept: [], parked: [] });
+    githubRest.mockResolvedValueOnce(response);
+    try {
+      await closeDevSession(`auto-filtered-${outcome}-rev`);
+      await waitFor(() => !!parent.reviewLoop.pendingResult?.error || !!parent.reviewLoop.done);
+      if (outcome === 'approved') {
+        expect(parent.reviewLoop.done).toBe(true);
+        expect(parent.reviewLoop.pendingResult).toBeNull();
+      } else {
+        expect(parent.reviewLoop.done).toBeFalsy();
+        expect(parent.reviewLoop.pendingResult.error).toContain('GitHub answered 503');
+      }
+      expect(parent.reviewLoop.triage).toBeFalsy();
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      parent.reviewLoop.pendingResult = null;
+      githubRest.mockReset();
     }
   });
 
