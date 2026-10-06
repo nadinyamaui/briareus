@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const cfg = vi.hoisted(() => ({ githubToken: 'token' }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
-vi.mock('../lib/github.js', () => ({ githubRest: vi.fn(), listRepoBranches: vi.fn() }));
-import { githubRest, listRepoBranches } from '../lib/github.js';
+vi.mock('../lib/github.js', () => ({ githubRest: vi.fn() }));
+import { githubRest } from '../lib/github.js';
 import { MAX_FILE_BYTES, repoFile, repoTree } from '../lib/repofiles.js';
 
 const project = { repo: 'owner/repo' };
@@ -15,8 +15,6 @@ let respond;
 beforeEach(() => {
   cfg.githubToken = 'token';
   githubRest.mockReset();
-  listRepoBranches.mockReset();
-  listRepoBranches.mockResolvedValue({ defaultBranch: 'main', branches: ['main'] });
   githubRest.mockImplementation(async (_cfg, method, path) => {
     expect(method).toBe('GET');
     return respond(path);
@@ -26,6 +24,7 @@ beforeEach(() => {
 describe('a repository’s tree', () => {
   it('reads the default branch’s commit, then its tree, pinned to that commit', async () => {
     respond = (path) => {
+      if (path === '/repos/owner/repo') return ok({ default_branch: 'main' });
       if (path === '/repos/owner/repo/commits/main') return ok(commit);
       if (path === '/repos/owner/repo/git/trees/tree1?recursive=1')
         return ok({
@@ -60,7 +59,30 @@ describe('a repository’s tree', () => {
       truncated: true,
       entries: [],
     });
-    expect(listRepoBranches).not.toHaveBeenCalled();
+    expect(githubRest).not.toHaveBeenCalledWith(cfg, 'GET', '/repos/owner/repo');
+  });
+
+  it.each([403, 404, 422, 500])('maps default-branch metadata status %s', async (code) => {
+    respond = (path) => {
+      expect(path).toBe('/repos/owner/repo');
+      return status(code);
+    };
+    await expect(repoTree(project)).rejects.toMatchObject({
+      status: code === 422 ? 404 : code === 500 ? 502 : code,
+    });
+    expect(githubRest).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a rate-limit error from default-branch resolution', async () => {
+    const error = Object.assign(new Error('GitHub rate limit'), { status: 429, retryAfter: 60 });
+    githubRest.mockRejectedValue(error);
+    await expect(repoTree(project)).rejects.toBe(error);
+    expect(githubRest).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a repository without a default branch', async () => {
+    respond = () => ok({ default_branch: null });
+    await expect(repoTree(project)).rejects.toMatchObject({ status: 404 });
   });
 
   it('refuses a ref that is not one, and maps GitHub’s refusals', async () => {
@@ -75,6 +97,49 @@ describe('a repository’s tree', () => {
   it('needs a GitHub token', async () => {
     cfg.githubToken = '';
     await expect(repoTree(project)).rejects.toMatchObject({ status: 503 });
+  });
+});
+
+describe('Git refs on both routes', () => {
+  it.each(['feature/test#1', 'feature/ñ', 'リリース/v1', 'release/v1!'])(
+    'accepts and encodes %s',
+    async (ref) => {
+      respond = (path) => {
+        if (path === `/repos/owner/repo/commits/${encodeURIComponent(ref)}`) return ok(commit);
+        if (path === '/repos/owner/repo/git/trees/tree1?recursive=1') return ok({ tree: [] });
+        if (path === `/repos/owner/repo/contents/a.js?ref=${encodeURIComponent(ref)}`)
+          return ok({ type: 'file', size: 1, encoding: 'base64', content: base64('a') });
+        throw new Error(`Unexpected URL: ${path}`);
+      };
+      expect(await repoTree(project, ref)).toMatchObject({ ref, sha: commit.sha });
+      expect(await repoFile(project, ref, 'a.js')).toMatchObject({ ref, content: 'a' });
+    },
+  );
+
+  it.each([
+    '../x',
+    '/main',
+    'main/',
+    'a//b',
+    'a b',
+    'a\u0000b',
+    'a\u007fb',
+    'a~b',
+    'a^b',
+    'a:b',
+    'a?b',
+    'a*b',
+    'a[b',
+    'a\\b',
+    '@',
+    'a@{b',
+    'a/.b',
+    'a/b.lock',
+    'main.',
+  ])('rejects invalid ref %j before contacting GitHub', async (ref) => {
+    await expect(repoTree(project, ref)).rejects.toMatchObject({ status: 400 });
+    await expect(repoFile(project, ref, 'a.js')).rejects.toMatchObject({ status: 400 });
+    expect(githubRest).not.toHaveBeenCalled();
   });
 });
 
