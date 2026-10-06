@@ -129,6 +129,31 @@ describe('findingUrl', () => {
 });
 
 describe('latestReviewFindings', () => {
+  it('preserves verified value assessments and does not trust incomplete ones', async () => {
+    const assessment = {
+      verified: true,
+      evidence: ' lib/x.js:10 reachable failure ',
+      worthFixing: false,
+      reason: ' Cost exceeds impact ',
+    };
+    gh.comments = [
+      findingsComment([
+        { title: 'Assessed', assessment },
+        { title: 'Missing evidence', assessment: { ...assessment, evidence: '' } },
+        { title: 'Not verified', assessment: { ...assessment, verified: false } },
+        { title: 'Not boolean', assessment: { ...assessment, worthFixing: 'false' } },
+        { title: 'Legacy' },
+      ]),
+    ];
+    const findings = await latestReviewFindings(repo, 5);
+    expect(findings.find((f) => f.title === 'Assessed').assessment).toEqual({
+      verified: true,
+      evidence: 'lib/x.js:10 reachable failure',
+      worthFixing: false,
+      reason: 'Cost exceeds impact',
+    });
+    expect(findings.filter((f) => f.title !== 'Assessed').every((f) => !f.assessment)).toBe(true);
+  });
   it('parses the newest findings block, sorted by severity then title', async () => {
     gh.comments = [
       findingsComment([{ title: 'Old finding', severity: 'critical' }], 1),
@@ -350,6 +375,22 @@ describe('queueFindingsForFix', () => {
 // later round is allowed to send back to be implemented, and what it only
 // records. See lib/jobs.js for where the floor comes from.
 describe('sortFindingsForFix: the split as advice, nothing written', () => {
+  it('parks a confirmed finding whose fix is not worthwhile, regardless of severity', async () => {
+    const finding = {
+      title: 'Expensive low-impact remedy',
+      severity: 'high',
+      assessment: {
+        verified: true,
+        evidence: 'Reachable failure',
+        worthFixing: false,
+        reason: 'Risk exceeds benefit',
+      },
+    };
+    const { kept, parked } = await sortFindingsForFix(repo, 5, [finding]);
+    expect(kept).toEqual([]);
+    expect(parked).toEqual([{ ...finding, reason: 'value' }]);
+    expect(gh.writes).toEqual([]);
+  });
   const round = [
     { key: findingKey('Needs fixing'), severity: 'high', title: 'Needs fixing' },
     { key: findingKey('Also this'), severity: 'low', title: 'Also this' },
