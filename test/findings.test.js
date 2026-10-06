@@ -176,6 +176,26 @@ describe('latestReviewFindings', () => {
     expect(await latestReviewFindings(repo, 5)).toEqual([]);
   });
 
+  it('reports incomplete verification instead of falling back to an older clean review', async () => {
+    gh.comments = [
+      { ...findingsComment([], 1), created_at: '2026-01-01T10:00:00Z' },
+      {
+        id: 2,
+        body: 'Verification unavailable. <!-- reviewer:incomplete -->',
+        created_at: '2026-01-01T12:00:00Z',
+      },
+    ];
+    await expect(latestReviewFindings(repo, 5)).rejects.toMatchObject({
+      name: 'ReviewIncompleteError',
+    });
+    await expect(latestReviewFindings(repo, 5, { since: '2026-01-01T11:00:00Z' })).rejects.toMatchObject({
+      name: 'ReviewIncompleteError',
+    });
+    expect(await latestReviewFindings(repo, 5, { since: '2026-01-01T13:00:00Z' })).toEqual([]);
+    gh.comments.push(findingsComment([], 3));
+    expect(await latestReviewFindings(repo, 5)).toEqual([]);
+  });
+
   it('answers an empty list when no review declared anything', async () => {
     gh.comments = [{ id: 1, body: 'just a human comment' }];
     expect(await latestReviewFindings(repo, 5)).toEqual([]);

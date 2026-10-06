@@ -4601,6 +4601,8 @@ describe('the review loop: what a closing loop review reports back', () => {
       reviewRow('auto-optional-rev', 'auto-optional', true),
       parentRow('auto-fail', 'auto-fail-rev'),
       reviewRow('auto-fail-rev', 'auto-fail', true),
+      parentRow('incomplete-par', 'incomplete-rev'),
+      reviewRow('incomplete-rev', 'incomplete-par', true),
       parentRow('par-1', 'rev-1'),
       reviewRow('rev-1', 'par-1', false),
       parentRow('par-2', 'rev-2'),
@@ -4719,6 +4721,8 @@ describe('the review loop: what a closing loop review reports back', () => {
       'rev-13',
       'par-14',
       'rev-14',
+      'incomplete-par',
+      'incomplete-rev',
       'par-1',
       'rev-1',
       'par-2',
@@ -5335,6 +5339,24 @@ describe('the review loop: what a closing loop review reports back', () => {
       },
     ]);
     expect(workerSummary(parent).reviewLoop.triage.findings[0].parked).toBe('below the floor');
+  });
+
+  it('an incomplete verification result fails the round without convergence or read retries', async () => {
+    const parent = getJob('incomplete-par');
+    const error = new Error('Independent review verification is incomplete');
+    error.name = 'ReviewIncompleteError';
+    latestReviewFindings.mockRejectedValueOnce(error);
+    const before = latestReviewFindings.mock.calls.length;
+    await closeDevSession('incomplete-rev');
+    await waitFor(() => !!parent.reviewLoop.failure);
+    expect(latestReviewFindings.mock.calls.length - before).toBe(1);
+    expect(parent.reviewLoop.done).toBeFalsy();
+    expect(parent.reviewLoop.pendingResult).toBeNull();
+    expect(parent.reviewLoop.reviewing).toBe(false);
+    expect(parent.reviewLoop.failure).toMatchObject({ round: 1, reason: error.message });
+    expect(parent.reviewLoop.triage).toBeUndefined();
+    expect(infoTexts(parent).join('\n')).toContain('verification incomplete, so it approved nothing');
+    expect(infoTexts(parent).join('\n')).not.toContain('declared no findings');
   });
 
   // The failure the loop used to swallow: the review had finished and

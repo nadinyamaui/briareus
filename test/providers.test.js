@@ -736,6 +736,7 @@ describe('buildArgs', () => {
       ['opencode', { prNumber: 7, branch: 'b', base: 'main' }],
     ]) {
       expect(BINARIES[id].reviewPrompt(opts)).toContain('reviewer:findings');
+      expect(BINARIES[id].reviewPrompt(opts)).toContain('<!-- reviewer:incomplete -->');
     }
   });
 
