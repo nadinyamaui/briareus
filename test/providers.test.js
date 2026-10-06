@@ -774,6 +774,40 @@ describe('buildArgs', () => {
     expect(verifies(BINARIES.grok.reviewPrompt({ prNumber: 7 }))).toBe(true);
     expect(verifies(BINARIES.opencode.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
   });
+
+  // A loop round that had read the earlier rounds reviewed only the newest
+  // commit and came back clean on a PR a fresh /code-review found ten problems in.
+  it('discovers candidates over the whole diff in an agent that has not read the PR history', () => {
+    for (const prompt of [
+      BINARIES.claude.reviewPrompt({ prNumber: 7, effort: 'high' }),
+      BINARIES.codex.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
+      BINARIES.opencode.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
+    ]) {
+      expect(prompt).toContain('fresh discovery sub-agent');
+      expect(prompt).toContain('not the prior PR discussion');
+      for (const angle of [
+        'Line by line',
+        'Removed behavior',
+        'Callers and callees',
+        'Failure paths',
+        'Conventions',
+        'Altitude',
+      ]) {
+        expect(prompt).toContain(`- ${angle}:`);
+      }
+      // Discovery comes first, and its candidates still go through the verifier.
+      expect(prompt.indexOf('fresh discovery sub-agent')).toBeLessThan(
+        prompt.indexOf('Before posting anything'),
+      );
+    }
+    // grok's /review does its own discovery; it gets only the scope rule.
+    expect(BINARIES.grok.reviewPrompt({ prNumber: 7 })).not.toContain('fresh discovery sub-agent');
+    for (const id of ['claude', 'codex', 'grok', 'opencode']) {
+      expect(BINARIES[id].reviewPrompt({ prNumber: 7, effort: 'high', branch: 'b', base: 'main' })).toContain(
+        'every review covers the whole base-to-head diff, including code an earlier round already reviewed',
+      );
+    }
+  });
 });
 
 describe('parseContextReport', () => {
