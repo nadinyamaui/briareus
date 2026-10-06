@@ -129,6 +129,31 @@ describe('findingUrl', () => {
 });
 
 describe('latestReviewFindings', () => {
+  it('preserves verified value assessments and does not trust incomplete ones', async () => {
+    const assessment = {
+      verified: true,
+      evidence: ' lib/x.js:10 reachable failure ',
+      worthFixing: false,
+      reason: ' Cost exceeds impact ',
+    };
+    gh.comments = [
+      findingsComment([
+        { title: 'Assessed', assessment },
+        { title: 'Missing evidence', assessment: { ...assessment, evidence: '' } },
+        { title: 'Not verified', assessment: { ...assessment, verified: false } },
+        { title: 'Not boolean', assessment: { ...assessment, worthFixing: 'false' } },
+        { title: 'Legacy' },
+      ]),
+    ];
+    const findings = await latestReviewFindings(repo, 5);
+    expect(findings.find((f) => f.title === 'Assessed').assessment).toEqual({
+      verified: true,
+      evidence: 'lib/x.js:10 reachable failure',
+      worthFixing: false,
+      reason: 'Cost exceeds impact',
+    });
+    expect(findings.filter((f) => f.title !== 'Assessed').every((f) => !f.assessment)).toBe(true);
+  });
   it('parses the newest findings block, sorted by severity then title', async () => {
     gh.comments = [
       findingsComment([{ title: 'Old finding', severity: 'critical' }], 1),
@@ -148,6 +173,26 @@ describe('latestReviewFindings', () => {
 
   it('an empty block means "this review found nothing", not "fall back"', async () => {
     gh.comments = [findingsComment([{ title: 'Older finding' }], 1), findingsComment([], 2)];
+    expect(await latestReviewFindings(repo, 5)).toEqual([]);
+  });
+
+  it('reports incomplete verification instead of falling back to an older clean review', async () => {
+    gh.comments = [
+      { ...findingsComment([], 1), created_at: '2026-01-01T10:00:00Z' },
+      {
+        id: 2,
+        body: 'Verification unavailable. <!-- reviewer:incomplete -->',
+        created_at: '2026-01-01T12:00:00Z',
+      },
+    ];
+    await expect(latestReviewFindings(repo, 5)).rejects.toMatchObject({
+      name: 'ReviewIncompleteError',
+    });
+    await expect(latestReviewFindings(repo, 5, { since: '2026-01-01T11:00:00Z' })).rejects.toMatchObject({
+      name: 'ReviewIncompleteError',
+    });
+    expect(await latestReviewFindings(repo, 5, { since: '2026-01-01T13:00:00Z' })).toEqual([]);
+    gh.comments.push(findingsComment([], 3));
     expect(await latestReviewFindings(repo, 5)).toEqual([]);
   });
 
@@ -350,6 +395,22 @@ describe('queueFindingsForFix', () => {
 // later round is allowed to send back to be implemented, and what it only
 // records. See lib/jobs.js for where the floor comes from.
 describe('sortFindingsForFix: the split as advice, nothing written', () => {
+  it('parks a confirmed finding whose fix is not worthwhile, regardless of severity', async () => {
+    const finding = {
+      title: 'Expensive low-impact remedy',
+      severity: 'high',
+      assessment: {
+        verified: true,
+        evidence: 'Reachable failure',
+        worthFixing: false,
+        reason: 'Risk exceeds benefit',
+      },
+    };
+    const { kept, parked } = await sortFindingsForFix(repo, 5, [finding]);
+    expect(kept).toEqual([]);
+    expect(parked).toEqual([{ ...finding, reason: 'value' }]);
+    expect(gh.writes).toEqual([]);
+  });
   const round = [
     { key: findingKey('Needs fixing'), severity: 'high', title: 'Needs fixing' },
     { key: findingKey('Also this'), severity: 'low', title: 'Also this' },

@@ -122,9 +122,15 @@ here, since a handler with no route is one nothing can reach.
 
 Set `autonomousReviewLoop` to `true` with
 `PUT /api/v1/settings/projects/{id}` and the body
-`{ "autonomousReviewLoop": true }` to send every finding in that project's
-review-loop rounds to an Implement feedback session automatically, including
-low-severity and previously parked findings. The fixes are pushed and reviewed
+`{ "autonomousReviewLoop": true }` to automatically fix independently verified
+findings whose benefit outweighs implementation effort and regression risk.
+Every review requires a fresh verifier before publication; its findings block
+includes `assessment: { verified: true, evidence, worthFixing, reason }`.
+Confirmed findings with `worthFixing: false` are optional and do not prolong the
+loop. Previously dismissed/optional findings and findings outside the PR scope
+are not automatically fixed. Missing or incomplete assessments hold the round
+in Findings for a manual decision. A worthwhile low-severity defect can still
+be fixed in later rounds. The fixes are pushed and reviewed
 again through the existing loop; a clean round completes only after the review's
 publishing policy has applied `code-approved`. Author-specific approval rules
 still apply, and a missing approval label keeps the round pending for the existing

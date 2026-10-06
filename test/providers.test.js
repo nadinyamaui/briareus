@@ -736,16 +736,20 @@ describe('buildArgs', () => {
       ['opencode', { prNumber: 7, branch: 'b', base: 'main' }],
     ]) {
       expect(BINARIES[id].reviewPrompt(opts)).toContain('reviewer:findings');
+      expect(BINARIES[id].reviewPrompt(opts)).toContain('<!-- reviewer:incomplete -->');
     }
   });
 
-  it('asks every review to verify its findings before posting, except where /code-review already does', () => {
+  it('requires independent verification and a value assessment at every effort', () => {
     const verifies = (prompt) => prompt.includes('Before posting anything');
-    for (const effort of ['high', 'xhigh', 'max']) {
-      expect(verifies(BINARIES.claude.reviewPrompt({ prNumber: 7, effort }))).toBe(false);
-    }
-    for (const effort of ['low', 'medium']) {
-      expect(verifies(BINARIES.claude.reviewPrompt({ prNumber: 7, effort }))).toBe(true);
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+      const prompt = BINARIES.claude.reviewPrompt({ prNumber: 7, effort });
+      expect(verifies(prompt)).toBe(true);
+      expect(prompt).not.toMatch(/^\/code-review/);
+      expect(prompt).toContain('fresh independent verification sub-agent');
+      expect(prompt).toContain('without model overrides');
+      expect(prompt).toContain('worthFixing');
+      expect(prompt).toContain('verification incomplete');
     }
     expect(verifies(BINARIES.codex.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
     expect(verifies(BINARIES.grok.reviewPrompt({ prNumber: 7 }))).toBe(true);

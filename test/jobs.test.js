@@ -4587,8 +4587,22 @@ describe('the review loop: what a closing loop review reports back', () => {
       reviewRow('auto-clean-rev', 'auto-clean', true),
       parentRow('auto-unapproved', 'auto-unapproved-rev'),
       reviewRow('auto-unapproved-rev', 'auto-unapproved', true),
+      parentRow('auto-filtered', 'auto-filtered-rev'),
+      reviewRow('auto-filtered-rev', 'auto-filtered', true),
+      parentRow('auto-filtered-approved', 'auto-filtered-approved-rev'),
+      reviewRow('auto-filtered-approved-rev', 'auto-filtered-approved', true),
+      parentRow('auto-filtered-error', 'auto-filtered-error-rev'),
+      reviewRow('auto-filtered-error-rev', 'auto-filtered-error', true),
+      parentRow('auto-missing', 'auto-missing-rev'),
+      reviewRow('auto-missing-rev', 'auto-missing', true),
+      parentRow('auto-optional-refused', 'auto-optional-refused-rev'),
+      reviewRow('auto-optional-refused-rev', 'auto-optional-refused', true),
+      parentRow('auto-optional', 'auto-optional-rev'),
+      reviewRow('auto-optional-rev', 'auto-optional', true),
       parentRow('auto-fail', 'auto-fail-rev'),
       reviewRow('auto-fail-rev', 'auto-fail', true),
+      parentRow('incomplete-par', 'incomplete-rev'),
+      reviewRow('incomplete-rev', 'incomplete-par', true),
       parentRow('par-1', 'rev-1'),
       reviewRow('rev-1', 'par-1', false),
       parentRow('par-2', 'rev-2'),
@@ -4686,6 +4700,18 @@ describe('the review loop: what a closing loop review reports back', () => {
       'auto-clean-rev',
       'auto-unapproved',
       'auto-unapproved-rev',
+      'auto-filtered',
+      'auto-filtered-rev',
+      'auto-filtered-approved',
+      'auto-filtered-approved-rev',
+      'auto-filtered-error',
+      'auto-filtered-error-rev',
+      'auto-missing',
+      'auto-missing-rev',
+      'auto-optional-refused',
+      'auto-optional-refused-rev',
+      'auto-optional',
+      'auto-optional-rev',
       'auto-fail',
       'auto-fail-rev',
       'loop-orch',
@@ -4695,6 +4721,8 @@ describe('the review loop: what a closing loop review reports back', () => {
       'rev-13',
       'par-14',
       'rev-14',
+      'incomplete-par',
+      'incomplete-rev',
       'par-1',
       'rev-1',
       'par-2',
@@ -4744,16 +4772,62 @@ describe('the review loop: what a closing loop review reports back', () => {
     throw new Error('the loop never reached the expected state');
   };
 
-  it('automatically records every finding as Fix, including later-round lows', async () => {
+  it('automatically fixes confirmed worthwhile findings, including later-round lows', async () => {
     state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
     try {
       // Refuse the child before it can spawn a real CLI in this state test.
       getJob('auto-par').providerId = 999999;
       const found = [
-        { key: 'auto-high', severity: 'high', title: 'A bug' },
-        { key: 'auto-low', severity: 'low', title: 'A nit' },
+        {
+          key: 'auto-high',
+          severity: 'high',
+          title: 'A bug',
+          assessment: {
+            verified: true,
+            evidence: 'Reproduced',
+            worthFixing: true,
+            reason: 'Prevents data loss',
+          },
+        },
+        {
+          key: 'auto-low',
+          severity: 'low',
+          title: 'A small bug',
+          assessment: {
+            verified: true,
+            evidence: 'Traced reachable failure',
+            worthFixing: true,
+            reason: 'Small safe fix',
+          },
+        },
+        {
+          key: 'auto-optional',
+          severity: 'low',
+          title: 'Minor cleanup',
+          assessment: {
+            verified: true,
+            evidence: 'Duplicate helper',
+            worthFixing: false,
+            reason: 'Not worth expanding this PR',
+          },
+        },
+        {
+          key: 'auto-outside',
+          severity: 'high',
+          title: 'Unrelated defect',
+          assessment: {
+            verified: true,
+            evidence: 'Reachable failure',
+            worthFixing: true,
+            reason: 'Fix separately',
+          },
+        },
       ];
       latestReviewFindings.mockResolvedValueOnce(found);
+      sortFindingsForFix.mockResolvedValueOnce({
+        kept: found.slice(0, 3),
+        parked: [{ ...found[3], reason: 'out-of-diff' }],
+      });
       const sorts = sortFindingsForFix.mock.calls.length;
       await closeDevSession('auto-rev');
       const parent = getJob('auto-par');
@@ -4761,11 +4835,13 @@ describe('the review loop: what a closing loop review reports back', () => {
       expect(recordTriage).toHaveBeenCalledWith(
         'acme/loop',
         77,
-        found.map((f) => expect.objectContaining({ ...f, decision: 'fix' })),
+        found.map((f, i) => expect.objectContaining({ ...f, decision: i < 2 ? 'fix' : 'optional' })),
         { round: 2, by: 'the autonomous review loop', note: undefined },
       );
-      expect(sortFindingsForFix.mock.calls.length).toBe(sorts);
-      expect(parent.reviewLoop.triage).toMatchObject({ prNumber: 77, round: 2, findings: found });
+      expect(sortFindingsForFix.mock.calls.length).toBe(sorts + 1);
+      expect(sortFindingsForFix).toHaveBeenLastCalledWith('acme/loop', 77, found, { severityFloor: 'low' });
+      expect(parent.reviewLoop.triage).toMatchObject({ prNumber: 77, round: 2 });
+      expect(parent.reviewLoop.triage.findings).toHaveLength(4);
       expect(parent.reviewLoop.fixing).toBe(false);
       expect(parent.reviewLoop.pendingResult).toBeNull();
       expect(parent.reviewLoop.lastFindings).toBeUndefined();
@@ -4787,10 +4863,168 @@ describe('the review loop: what a closing loop review reports back', () => {
     }
   });
 
+  it('requires approval when prior verdicts filter out every autonomous finding', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    const parent = getJob('auto-filtered');
+    const approvals = addPullRequestLabel.mock.calls.length;
+    const records = recordTriage.mock.calls.length;
+    const reads = githubRest.mock.calls.length;
+    latestReviewFindings.mockResolvedValue([{ key: 'prior', severity: 'high', title: 'Prior finding' }]);
+    sortFindingsForFix.mockResolvedValue({ kept: [], parked: [] });
+    githubRest.mockResolvedValue({
+      ok: true,
+      json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
+    });
+    try {
+      await closeDevSession('auto-filtered-rev');
+      await waitFor(() => !!parent.reviewLoop.pendingResult?.error || !!parent.reviewLoop.done);
+      expect(parent.reviewLoop.done).toBeFalsy();
+      expect(parent.reviewLoop.pendingResult.error).toMatch(/has not applied the code-approved label/);
+      expect(githubRest.mock.calls.length).toBeGreaterThan(reads);
+      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
+      expect(recordTriage.mock.calls.length).toBe(records);
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      parent.reviewLoop.pendingResult = null;
+      latestReviewFindings.mockReset().mockResolvedValue([]);
+      sortFindingsForFix
+        .mockReset()
+        .mockImplementation(async (repo, prNumber, findings) => ({ kept: findings, parked: [] }));
+      githubRest.mockReset();
+    }
+  });
+
+  it.each([
+    ['approved', { ok: true, json: async () => ({ labels: [{ name: 'code-approved' }] }) }],
+    ['error', { ok: false, status: 503 }],
+  ])('checks approval for a filtered round when GitHub returns %s', async (outcome, response) => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    const parent = getJob(`auto-filtered-${outcome}`);
+    latestReviewFindings.mockResolvedValueOnce([{ key: 'prior', severity: 'high', title: 'Prior finding' }]);
+    sortFindingsForFix.mockResolvedValueOnce({ kept: [], parked: [] });
+    githubRest.mockResolvedValueOnce(response);
+    try {
+      await closeDevSession(`auto-filtered-${outcome}-rev`);
+      await waitFor(() => !!parent.reviewLoop.pendingResult?.error || !!parent.reviewLoop.done);
+      if (outcome === 'approved') {
+        expect(parent.reviewLoop.done).toBe(true);
+        expect(parent.reviewLoop.pendingResult).toBeNull();
+      } else {
+        expect(parent.reviewLoop.done).toBeFalsy();
+        expect(parent.reviewLoop.pendingResult.error).toContain('GitHub answered 503');
+      }
+      expect(parent.reviewLoop.triage).toBeFalsy();
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      parent.reviewLoop.pendingResult = null;
+      githubRest.mockReset();
+    }
+  });
+
+  it('holds unassessed findings without automatically fixing or approving them', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    try {
+      latestReviewFindings.mockResolvedValueOnce([
+        { key: 'legacy', severity: 'high', title: 'Unverified claim' },
+      ]);
+      const records = recordTriage.mock.calls.length;
+      const approvals = addPullRequestLabel.mock.calls.length;
+      await closeDevSession('auto-missing-rev');
+      const parent = getJob('auto-missing');
+      await waitFor(() => !!parent.reviewLoop.triage);
+      expect(parent.reviewLoop.triage.findings).toHaveLength(1);
+      expect(infoTexts(parent).join('\n')).toContain('fix-value assessment is missing');
+      expect(recordTriage.mock.calls.length).toBe(records);
+      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
+      expect(parent.reviewLoop.done).toBeFalsy();
+      expect(parent.reviewLoop.fixing).toBeFalsy();
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      recordTriage.mockClear();
+    }
+  });
+
+  it('converges an autonomous round when verified findings are not worth fixing', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    try {
+      const assessment = {
+        verified: true,
+        evidence: 'Traced code',
+        worthFixing: false,
+        reason: 'Broad refactor for negligible benefit',
+      };
+      const finding = { key: 'optional', severity: 'low', title: 'Minor inefficiency', assessment };
+      latestReviewFindings.mockResolvedValueOnce([finding]);
+      githubRest.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ labels: [{ name: 'code-approved' }] }),
+      });
+      const approvals = addPullRequestLabel.mock.calls.length;
+      await closeDevSession('auto-optional-rev');
+      const parent = getJob('auto-optional');
+      await waitFor(() => !!parent.reviewLoop.done);
+      expect(recordTriage).toHaveBeenCalledWith(
+        'acme/loop',
+        77,
+        [expect.objectContaining({ decision: 'optional', reason: assessment.reason })],
+        expect.anything(),
+      );
+      expect(parent.reviewLoop.fixing).toBeFalsy();
+      expect(parent.reviewLoop.lastFindings).toBeUndefined();
+      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      recordTriage.mockClear();
+    }
+  });
+
+  it('holds an optional-only round when the publishing policy has not approved it', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    try {
+      latestReviewFindings.mockResolvedValueOnce([
+        {
+          key: 'optional-refused',
+          severity: 'low',
+          title: 'Minor cleanup',
+          assessment: {
+            verified: true,
+            evidence: 'Traced code',
+            worthFixing: false,
+            reason: 'Marginal benefit',
+          },
+        },
+      ]);
+      githubRest.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
+      });
+      const approvals = addPullRequestLabel.mock.calls.length;
+      const records = recordTriage.mock.calls.length;
+      await closeDevSession('auto-optional-refused-rev');
+      const parent = getJob('auto-optional-refused');
+      await waitFor(() => infoTexts(parent).some((t) => t.includes('optional-only review has not applied')));
+      expect(parent.reviewLoop.triage.findings).toHaveLength(1);
+      expect(parent.reviewLoop.done).toBeFalsy();
+      expect(parent.reviewLoop.fixing).toBeFalsy();
+      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
+      expect(recordTriage.mock.calls.length).toBe(records);
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      recordTriage.mockClear();
+    }
+  });
+
   it('keeps the round cap for autonomous fixes without approving findings', async () => {
     state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
     try {
-      latestReviewFindings.mockResolvedValueOnce([{ key: 'cap', severity: 'low', title: 'A nit' }]);
+      latestReviewFindings.mockResolvedValueOnce([
+        {
+          key: 'cap',
+          severity: 'low',
+          title: 'A bug',
+          assessment: { verified: true, evidence: 'Reproduced', worthFixing: true, reason: 'Worth fixing' },
+        },
+      ]);
       const approvals = addPullRequestLabel.mock.calls.length;
       await closeDevSession('auto-cap-rev');
       await waitFor(() => !!getJob('auto-cap').reviewLoop.stalled);
@@ -4846,7 +5080,14 @@ describe('the review loop: what a closing loop review reports back', () => {
   it('retains the held round if automatic verdict recording fails', async () => {
     state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
     try {
-      latestReviewFindings.mockResolvedValueOnce([{ key: 'failed', severity: 'high', title: 'A bug' }]);
+      latestReviewFindings.mockResolvedValueOnce([
+        {
+          key: 'failed',
+          severity: 'high',
+          title: 'A bug',
+          assessment: { verified: true, evidence: 'Reproduced', worthFixing: true, reason: 'Worth fixing' },
+        },
+      ]);
       recordTriage.mockRejectedValueOnce(new Error('offline'));
       await closeDevSession('auto-fail-rev');
       await waitFor(() => infoTexts(getJob('auto-fail')).some((t) => t.includes('automatic triage failed')));
@@ -5098,6 +5339,24 @@ describe('the review loop: what a closing loop review reports back', () => {
       },
     ]);
     expect(workerSummary(parent).reviewLoop.triage.findings[0].parked).toBe('below the floor');
+  });
+
+  it('an incomplete verification result fails the round without convergence or read retries', async () => {
+    const parent = getJob('incomplete-par');
+    const error = new Error('Independent review verification is incomplete');
+    error.name = 'ReviewIncompleteError';
+    latestReviewFindings.mockRejectedValueOnce(error);
+    const before = latestReviewFindings.mock.calls.length;
+    await closeDevSession('incomplete-rev');
+    await waitFor(() => !!parent.reviewLoop.failure);
+    expect(latestReviewFindings.mock.calls.length - before).toBe(1);
+    expect(parent.reviewLoop.done).toBeFalsy();
+    expect(parent.reviewLoop.pendingResult).toBeNull();
+    expect(parent.reviewLoop.reviewing).toBe(false);
+    expect(parent.reviewLoop.failure).toMatchObject({ round: 1, reason: error.message });
+    expect(parent.reviewLoop.triage).toBeUndefined();
+    expect(infoTexts(parent).join('\n')).toContain('verification incomplete, so it approved nothing');
+    expect(infoTexts(parent).join('\n')).not.toContain('declared no findings');
   });
 
   // The failure the loop used to swallow: the review had finished and
