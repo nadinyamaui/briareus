@@ -124,19 +124,12 @@ describe('templateCatalog', () => {
   it('lists every template with its built-in text and token hints', () => {
     const catalog = templateCatalog();
     expect(catalog.map((t) => t.id)).toEqual(TEMPLATE_IDS);
+    expect(catalog.map((t) => t.id)).not.toContain('zeusEpic');
     for (const entry of catalog) {
       expect(entry.label).toBeTruthy();
       // The orchestrator instructions are deliberately empty built-in: there
       // is no generic text worth appending to every install's briefing.
       if (entry.id !== 'orchestrator') expect(entry.builtIn).toBeTruthy();
-      if (entry.id === 'zeusEpic') {
-        // The epic's four sections are what Zeus, its analysts and its
-        // validator all work to; a template that lost one would silently
-        // drop that part of every epic.
-        for (const h of ['# Context', '# Requirements', '# Implementation Plan', '# Definition of Done']) {
-          expect(entry.builtIn).toContain(h);
-        }
-      }
       for (const v of entry.vars) {
         expect(v.name).toMatch(/^[A-Z0-9_]+$/);
         expect(v.hint).toBeTruthy();

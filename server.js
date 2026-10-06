@@ -684,10 +684,7 @@ api.post('/api/agent/sessions', (req, res) => {
     // under this orchestration. `qaLoop` queues the test run behind it.
     // `tooling` is the fix_tooling tool: the worker goes to the project
     // flagged as the dashboard itself, with the review loop armed regardless.
-    // `role` is a Zeus analyst's role, which picks the runtime the user chose
-    // for it when the session started.
-    const { title, prompt, providerId, model, effort, branch, reviewLoop, qaLoop, tooling, role } =
-      req.body || {};
+    const { title, prompt, providerId, model, effort, branch, reviewLoop, qaLoop, tooling } = req.body || {};
     const session = spawnWorkerSession(orchestrator, {
       title,
       prompt,
@@ -698,7 +695,6 @@ api.post('/api/agent/sessions', (req, res) => {
       reviewLoop: reviewLoop === true,
       qaLoop: qaLoop === true,
       tooling: tooling === true,
-      role: typeof role === 'string' ? role : undefined,
     });
     res.status(201).json({ session: workerSummary(session) });
   } catch (e) {
@@ -1801,11 +1797,6 @@ api.post('/api/dev/sessions', (req, res) => {
   // checkout, whose agent starts and steers worker sessions instead;
   // `workerRuntime` ({ providerId, model, effort }) is what those workers
   // default to, when the start picked one (the board's epic dialog does).
-  // `zeus` is the composer's ⚡ mode: the same supervisor, briefed to turn the
-  // brief into a GitHub epic through read-only analysts rather than to land
-  // code (lib/jobs.js, zeusSystemPrompt); `zeusRoles` is what each analyst
-  // role (product, architecture, qa, validator) runs on, when the composer's
-  // dialog picked them.
   // `activity` is what the start files its spend under in the usage ledger,
   // for the starts the server cannot tell apart from a plain chat; see
   // COMPOSER_ACTIVITIES above.
@@ -1820,9 +1811,7 @@ api.post('/api/dev/sessions', (req, res) => {
     qa,
     local,
     orchestrator,
-    zeus,
     workerRuntime,
-    zeusRoles,
     attachments,
     prNumber,
     reviewLoop,
@@ -1843,9 +1832,7 @@ api.post('/api/dev/sessions', (req, res) => {
         qa,
         local,
         orchestrator: orchestrator === true,
-        zeus: zeus === true,
         workerRuntime: workerRuntime && typeof workerRuntime === 'object' ? workerRuntime : null,
-        zeusRoles: zeusRoles && typeof zeusRoles === 'object' ? zeusRoles : null,
         attachments,
         prNumber: number,
         reviewLoop: reviewLoop === true,
@@ -1900,8 +1887,8 @@ api.post('/api/dev/sessions/:id/browser/input', sharedBrowser.input);
 // the session could not accept at all.
 api.post('/api/dev/sessions/:id/message', (req, res) => {
   try {
-    const { text, attachments, zeusRoles } = req.body || {};
-    res.json({ session: sendDevMessage(req.params.id, text, attachments, zeusRoles) });
+    const { text, attachments } = req.body || {};
+    res.json({ session: sendDevMessage(req.params.id, text, attachments) });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
