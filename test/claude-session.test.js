@@ -228,7 +228,7 @@ function ask(opts = {}) {
 }
 
 describe('Claude side questions (/btw)', () => {
-  it('asks a fork of the session that is never saved, one step and no bypass, over stdin', async () => {
+  it('asks an unsaved fork with built-in and configured MCP tools disabled, over stdin', async () => {
     const { promise, calls, finish, stdin } = ask();
     finish({
       type: 'result',
@@ -258,6 +258,9 @@ describe('Claude side questions (/btw)', () => {
       'sess-1',
       '--fork-session',
       '--no-session-persistence',
+      '--tools',
+      '',
+      '--strict-mcp-config',
       '--max-turns',
       '1',
       '--output-format',

@@ -11083,6 +11083,77 @@ describe('/btw side questions', () => {
     );
   });
 
+  it.each(['claude', 'codex'])(
+    'uses the active %s runtime instead of the original conversation',
+    async (binary) => {
+      const job = getJob('btw-session');
+      const originalModel = job.model;
+      const activeProvider = { id: 2, label: 'QA run', binary, active: true };
+      const activeChat = { sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', started: true };
+      job.chats = {
+        1: { sessionId: job.providerSessionId, started: true },
+        2: activeChat,
+      };
+      job.model = 'qa-model';
+      getProviderForJob.mockReturnValue(activeProvider);
+      const activeBin =
+        binary === 'codex' ? vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/claude' }) : null;
+      const realSpawn = spawn.getMockImplementation();
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      spawn.mockImplementation((cmd, ...rest) => (cmd === '/mock/claude' ? child : realSpawn(cmd, ...rest)));
+      captureProviderAuth.mockResolvedValue(undefined);
+      askClaudeSideQuestion.mockResolvedValue({ text: 'The active run', costUsd: 0.01 });
+      try {
+        sendDevMessage(job.id, 'Continue the QA run');
+        expect(job.proc).toBe(child);
+        // A step runtime does not replace the session's stored provider/model.
+        getProviderForJob.mockReturnValue(state.provider);
+        job.model = originalModel;
+        if (binary === 'claude') {
+          // The running CLI can announce a new conversation before it exits.
+          child.stdout.write(
+            JSON.stringify({ type: 'system', subtype: 'init', session_id: activeChat.sessionId }) + '\n',
+          );
+          await askDevSessionBtw(job.id, 'What are you doing?').answer;
+          expect(askClaudeSideQuestion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              sessionId: activeChat.sessionId,
+              model: 'qa-model',
+            }),
+          );
+          expect(recordTurnUsage).toHaveBeenLastCalledWith(
+            job,
+            expect.anything(),
+            activeProvider,
+            'qa-model',
+          );
+        } else {
+          expect(() => askDevSessionBtw(job.id, 'What are you doing?')).toThrow('Claude session');
+          expect(askClaudeSideQuestion).not.toHaveBeenCalled();
+        }
+        child.emit('close', 0);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        await askDevSessionBtw(job.id, 'What was the original task?').answer;
+        expect(askClaudeSideQuestion).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            sessionId: job.providerSessionId,
+            model: originalModel,
+          }),
+        );
+      } finally {
+        if (job.proc) {
+          child.emit('close', 0);
+          await vi.waitFor(() => expect(job.proc).toBeNull());
+        }
+        spawn.mockImplementation(realSpawn);
+        activeBin?.mockRestore();
+      }
+    },
+  );
+
   it('puts a failed answer in the transcript and hands it to a caller who waits', async () => {
     askClaudeSideQuestion.mockRejectedValueOnce(
       Object.assign(new Error('The side question needed tools to answer; ask it in the main chat instead'), {
