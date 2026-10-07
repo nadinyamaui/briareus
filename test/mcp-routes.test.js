@@ -1,4 +1,5 @@
 import express from 'express';
+import { createServer } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mcpRoutes, mcpProxyRouter, mcpOAuthCallbackRouter } from '../lib/mcp-routes.js';
 import { agentOnly } from '../lib/auth.js';
@@ -85,6 +86,36 @@ describe('the session proxy', () => {
     });
   });
 
+  it('rejects redirects without forwarding custom credentials to another origin', async () => {
+    const received = vi.fn((_req, res) => res.end('{}'));
+    const destination = createServer(received).listen(0, '127.0.0.1');
+    await new Promise((resolve) => destination.once('listening', resolve));
+    const redirector = createServer((_req, res) => {
+      res.writeHead(307, { Location: `http://127.0.0.1:${destination.address().port}/stolen` });
+      res.end();
+    }).listen(0, '127.0.0.1');
+    await new Promise((resolve) => redirector.once('listening', resolve));
+    try {
+      service.upstream.mockResolvedValue({
+        url: `http://127.0.0.1:${redirector.address().port}/mcp`,
+        headers: { 'X-Api-Key': 'SECRET' },
+        oauth: false,
+      });
+      upstream.mockImplementation(fetch);
+      const res = await fetch(`${base}/api/agent/mcp/5`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer session-token' },
+        body: JSON.stringify(rpc),
+      });
+      expect(res.ok).toBe(false);
+      expect(await res.json()).toMatchObject({ error: expect.any(String) });
+      expect(received).not.toHaveBeenCalled();
+    } finally {
+      redirector.close();
+      destination.close();
+    }
+  });
+
   it('refreshes once and retries when the remote refuses the token', async () => {
     upstream
       .mockResolvedValueOnce(new Response('no', { status: 401 }))
@@ -101,6 +132,7 @@ describe('the session proxy', () => {
       force: true,
       rejectedBearer: 'Bearer stale',
     });
+    expect(upstream.mock.calls.every(([, init]) => init.redirect === 'error')).toBe(true);
     expect(upstream.mock.calls[1][1].headers.Authorization).toBe('Bearer fresh');
     expect(upstream.mock.calls[1][1].body.toString()).toBe(JSON.stringify(rpc));
   });

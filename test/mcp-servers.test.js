@@ -1,3 +1,4 @@
+import { createServer } from 'node:http';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMcpService, normalizeMcpServer, parseBearerChallenge } from '../lib/mcp-servers.js';
 
@@ -450,15 +451,193 @@ describe('review regressions', () => {
     expect(remote.tokenRequests).toEqual([]);
   });
 
-  it('does not return credentials after the server is disabled during refresh', async () => {
+  it.each([
+    [{ repos: ['o/r', 'o/other'] }, true],
+    [{ repos: ['o/other'] }, false],
+    [{ enabled: false }, false],
+    [{ enabled: true }, true],
+  ])('preserves a rotating refresh across permission update %j', async (update, allowed) => {
     const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+    const original = remote.fetch.getMockImplementation();
+    // The provider consumes R1 before the configuration update, then delays R2.
     const delayed = delayNext((url) => url.endsWith('/token'));
     const old = service.upstream(server.id, 'o/r', { force: true });
-    const rejected = expect(old).rejects.toMatchObject({ status: 409 });
+    const result = allowed
+      ? expect(old).resolves.toMatchObject({ headers: { Authorization: 'Bearer access-2' } })
+      : expect(old).rejects.toMatchObject({ status: 404 });
     await delayed.waiting;
-    await service.update(server.id, { enabled: false });
-    delayed.release(json({ access_token: 'STALE' }));
-    await rejected;
+    const rotated = await original('https://auth.example.com/token', {
+      body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: 'refresh-1' }),
+    });
+    await service.update(server.id, update);
+    delayed.release(rotated);
+    await result;
+    expect(service.list()[0].signedIn).toBe(true);
+    if (!allowed) {
+      expect(service.mounts('o/r')).toEqual([]);
+      await expect(service.upstream(server.id, 'o/r')).rejects.toMatchObject({ status: 404 });
+    }
+    await service.update(server.id, { enabled: true, repos: ['o/r'] });
+    expect((await service.upstream(server.id, 'o/r')).headers.Authorization).toBe('Bearer access-2');
+    remote.fetch.mockImplementation((url, init) => {
+      const params = new URLSearchParams(String(init.body));
+      if (params.get('grant_type') === 'refresh_token' && params.get('refresh_token') !== 'refresh-2')
+        return json({ error: 'invalid_grant' }, 400);
+      return original(url, init);
+    });
+    expect((await service.upstream(server.id, 'o/r', { force: true })).headers.Authorization).toBe(
+      'Bearer access-3',
+    );
+    expect(remote.tokenRequests.at(-1)).toMatchObject({ refresh_token: 'refresh-2' });
+  });
+
+  it('rejects setup and cleanup redirects without leaking custom credentials', async () => {
+    const received = vi.fn((_req, res) => res.end('{}'));
+    const destination = createServer(received).listen(0, '127.0.0.1');
+    await new Promise((resolve) => destination.once('listening', resolve));
+    let redirectProbe = true;
+    const redirector = createServer((req, res) => {
+      if (redirectProbe || req.method === 'DELETE') {
+        res.writeHead(307, { Location: `http://127.0.0.1:${destination.address().port}/stolen` });
+        res.end();
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Mcp-Session-Id': 'session' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }));
+      }
+    }).listen(0, '127.0.0.1');
+    await new Promise((resolve) => redirector.once('listening', resolve));
+    try {
+      let cleanupFinished = false;
+      const local = createMcpService({
+        load: async () => [],
+        save: async () => {},
+        fetchImpl: async (url, init) => {
+          try {
+            return await fetch(url, init);
+          } finally {
+            if (init.method === 'DELETE') cleanupFinished = true;
+          }
+        },
+      });
+      await local.init();
+      const server = await local.create({
+        name: 'redirect',
+        url: `http://127.0.0.1:${redirector.address().port}/mcp`,
+        headers: { 'X-Api-Key': 'SECRET' },
+      });
+      expect(server.status).toBe('error');
+      expect(received).not.toHaveBeenCalled();
+      redirectProbe = false;
+      expect((await local.connect(server.id)).status).toBe('ready');
+      // Wait for the fire-and-forget cleanup request to finish.
+      await vi.waitFor(() => expect(cleanupFinished).toBe(true));
+      expect(received).not.toHaveBeenCalled();
+    } finally {
+      redirector.close();
+      destination.close();
+    }
+  });
+
+  it.each(['resource metadata', 'authorization server', 'metadata issuer'])(
+    'rejects insecure %s before trusting endpoints',
+    async (source) => {
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation(async (url, init) => {
+        const response = await original(url, init);
+        if (source === 'resource metadata' && String(url) === MCP)
+          return new Response(null, {
+            status: 401,
+            headers: { 'WWW-Authenticate': 'Bearer resource_metadata="http://metadata.test/resource"' },
+          });
+        if (source === 'authorization server' && String(url).includes('oauth-protected-resource'))
+          return json({ authorization_servers: ['http://metadata.test/issuer'] });
+        if (source === 'metadata issuer' && String(url).includes('oauth-authorization-server')) {
+          const meta = await response.json();
+          return json({ ...meta, issuer: 'http://metadata.test/issuer' });
+        }
+        return response;
+      });
+      const server = await service.create({
+        name: 'meta',
+        url: MCP,
+        oauthClientId: 'client',
+        oauthClientSecret: 'SECRET',
+      });
+      expect(server).toMatchObject({ status: 'error', signInUrl: null });
+      expect(server.error).toMatch(/https/);
+      expect(remote.calls.some((call) => call.url.startsWith('http://metadata.test'))).toBe(false);
+      expect(remote.tokenRequests).toEqual([]);
+    },
+  );
+
+  it.each(['oauth-protected-resource', 'oauth-authorization-server'])(
+    'rejects redirects from %s instead of trusting substituted metadata',
+    async (source) => {
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation((url, init) => {
+        if (String(url).includes(source)) {
+          expect(init.redirect).toBe('manual');
+          return new Response(null, { status: 307, headers: { Location: 'http://metadata.test/stolen' } });
+        }
+        return original(url, init);
+      });
+      const server = await service.create({ name: 'meta', url: MCP });
+      expect(server).toMatchObject({ status: 'error', signInUrl: null });
+      expect(server.error).toMatch(/metadata redirects/);
+      expect(remote.registrations).toBe(0);
+      expect(remote.tokenRequests).toEqual([]);
+    },
+  );
+
+  it('allows loopback HTTP resource and issuer metadata', async () => {
+    const original = remote.fetch.getMockImplementation();
+    remote.fetch.mockImplementation(async (url, init) => {
+      if (String(url) === MCP)
+        return new Response(null, {
+          status: 401,
+          headers: { 'WWW-Authenticate': 'Bearer resource_metadata="http://localhost/resource"' },
+        });
+      if (String(url) === 'http://localhost/resource')
+        return json({ authorization_servers: ['http://127.0.0.1:9000'] });
+      if (String(url) === 'http://127.0.0.1:9000/.well-known/oauth-authorization-server')
+        return json({
+          issuer: 'http://127.0.0.1:9000',
+          authorization_endpoint: 'http://localhost/authorize',
+          token_endpoint: 'http://localhost/token',
+        });
+      return original(url, init);
+    });
+    const server = await service.create({ name: 'local', url: MCP, oauthClientId: 'client' });
+    expect(server.status).toBe('needs-sign-in');
+    expect(new URL(server.signInUrl).origin).toBe('http://localhost');
+  });
+
+  it('re-registers dynamic clients for changed scopes and reuses them for the same scope', async () => {
+    const scopes = new Map();
+    const original = remote.fetch.getMockImplementation();
+    remote.fetch.mockImplementation(async (url, init) => {
+      const response = await original(url, init);
+      if (String(url).endsWith('/register')) {
+        const client = await response.clone().json();
+        scopes.set(client.client_id, JSON.parse(init.body).scope);
+      }
+      if (String(url).endsWith('/token')) {
+        const params = new URLSearchParams(String(init.body));
+        if (scopes.get(params.get('client_id')) !== service.list()[0].oauthScope)
+          return json({ error: 'invalid_scope' }, 400);
+      }
+      return response;
+    });
+    const server = await signIn(await service.create({ name: 'meta', url: MCP, oauthScope: 'read' }));
+    await service.update(server.id, { oauthScope: 'read write' });
+    const next = await service.connect(server.id, { signIn: true });
+    expect(remote.registrations).toBe(2);
+    expect(remote.lastRegistration.scope).toBe('read write');
+    expect(new URL(next.signInUrl).searchParams.get('client_id')).toBe('client-2');
+    expect(await signIn(next)).toMatchObject({ signedIn: true, status: 'ready' });
+    expect(service.mounts('o/r')).toHaveLength(1);
+    await signIn(await service.connect(server.id, { signIn: true }));
+    expect(remote.registrations).toBe(2);
   });
 
   it.each(['token_endpoint', 'authorization_endpoint', 'registration_endpoint'])(
