@@ -1,3 +1,4 @@
+import { open } from '../lib/secretbox.js';
 import { createServer } from 'node:http';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMcpService, normalizeMcpServer, parseBearerChallenge } from '../lib/mcp-servers.js';
@@ -358,6 +359,87 @@ describe('a server that only lets clients it knows sign in', () => {
 });
 
 describe('review regressions', () => {
+  it('reads only the Bearer parameters regardless of challenge order', () => {
+    expect(
+      parseBearerChallenge(
+        'Basic realm="legacy, Bearer fake", Bearer resource_metadata="https://mcp.test/custom", scope="read,write", Digest realm="other", scope="wrong"',
+      ),
+    ).toEqual({
+      resource_metadata: 'https://mcp.test/custom',
+      scope: 'read,write',
+    });
+    expect(parseBearerChallenge('Basic realm="escaped \\" quote", Bearer scope=read')).toEqual({
+      scope: 'read',
+    });
+    expect(parseBearerChallenge('Basic realm="Bearer scope=wrong"')).toBeNull();
+  });
+
+  it.each([undefined, 'https://legit.test/mcp', 'https://mcp.example.com/other', `${MCP}/`])(
+    'rejects resource metadata identifying %s before registration or authorization',
+    async (resource) => {
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation((url, init) =>
+        String(url).includes('oauth-protected-resource')
+          ? json({ resource, authorization_servers: ['https://auth.example.com/devtools'] })
+          : original(url, init),
+      );
+      const server = await service.create({ name: 'meta', url: MCP });
+      expect(server).toMatchObject({ status: 'error', signedIn: false, signInUrl: null });
+      expect(server.error).toMatch(/resource metadata does not match/);
+      expect(remote.registrations).toBe(0);
+      expect(remote.tokenRequests).toEqual([]);
+      expect(remote.calls.some((call) => call.url.includes('oauth-authorization-server'))).toBe(false);
+    },
+  );
+
+  it.each([503, 'network'])(
+    'retains a recoverable grant after refresh failure %s during connect',
+    async (failure) => {
+      const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+      clock += 3_550_000;
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation((url, init) => {
+        if (String(url).endsWith('/token')) {
+          if (failure === 'network') throw new Error('network unavailable');
+          return json({ error: 'temporarily_unavailable' }, failure);
+        }
+        return original(url, init);
+      });
+      remote.calls.length = 0;
+      const checked = await service.connect(server.id);
+      expect(checked).toMatchObject({ status: 'error', signedIn: true, signInUrl: null });
+      expect(checked.error).toMatch(/temporarily_unavailable|network unavailable/);
+      expect(remote.calls).toEqual([]);
+      expect(service.mounts('o/r')).toHaveLength(1);
+      remote.fetch.mockImplementation(original);
+      expect((await service.upstream(server.id, 'o/r')).headers.Authorization).toBe('Bearer access-2');
+      expect(remote.tokenRequests.at(-1).refresh_token).toBe('refresh-1');
+    },
+  );
+
+  it.each(['2025-03-26', '2025-06-18'])(
+    'closes probe sessions with negotiated protocol %s',
+    async (protocolVersion) => {
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation(async (url, init) => {
+        const response = await original(url, init);
+        if (String(url) === MCP && init.method === 'POST' && response.ok)
+          return json({ jsonrpc: '2.0', id: 1, result: { protocolVersion } }, 200, {
+            'mcp-session-id': 'sess-1',
+          });
+        return response;
+      });
+      await signIn(await service.create({ name: 'meta', url: MCP }));
+      await Promise.resolve();
+      const cleanup = remote.calls.filter((call) => call.method === 'DELETE');
+      expect(cleanup).toHaveLength(1);
+      expect(cleanup[0].headers).toMatchObject({
+        'MCP-Protocol-Version': protocolVersion,
+        'Mcp-Session-Id': 'sess-1',
+      });
+    },
+  );
+
   // Hold one specific remote operation while a newer connection is installed.
   function delayNext(match) {
     const original = remote.fetch.getMockImplementation();
@@ -392,7 +474,12 @@ describe('review regressions', () => {
       await delayed.waiting;
       const movedUrl = 'https://other.example.com/mcp';
       const original = remote.fetch.getMockImplementation();
-      remote.fetch.mockImplementation((url, init) => original(String(url) === movedUrl ? MCP : url, init));
+      remote.fetch.mockImplementation(async (url, init) => {
+        const response = await original(String(url) === movedUrl ? MCP : url, init);
+        if (String(url).includes('oauth-protected-resource') && response.ok)
+          return json({ ...(await response.json()), resource: movedUrl });
+        return response;
+      });
       const moved = await service.update(server.id, { url: movedUrl });
       await signIn(moved);
       const current = await service.upstream(server.id, 'o/r');
@@ -456,7 +543,9 @@ describe('review regressions', () => {
     [{ repos: ['o/other'] }, false],
     [{ enabled: false }, false],
     [{ enabled: true }, true],
-  ])('preserves a rotating refresh across permission update %j', async (update, allowed) => {
+    [{ headers: { 'X-Tenant': 'new' } }, true],
+    [{ headers: {} }, true],
+  ])('preserves a rotating refresh across grant-preserving update %j', async (update, allowed) => {
     const server = await signIn(await service.create({ name: 'meta', url: MCP }));
     const original = remote.fetch.getMockImplementation();
     // The provider consumes R1 before the configuration update, then delays R2.
@@ -469,8 +558,14 @@ describe('review regressions', () => {
     const rotated = await original('https://auth.example.com/token', {
       body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: 'refresh-1' }),
     });
-    await service.update(server.id, update);
+    const updating = service.update(server.id, update);
+    await vi.waitFor(() => {
+      const stored = saved.find((s) => s.id === server.id);
+      if (update.headers) expect(JSON.parse(open(stored.secrets)).headers).toEqual(update.headers);
+      else expect(stored).toMatchObject(update);
+    });
     delayed.release(rotated);
+    await updating;
     await result;
     expect(service.list()[0].signedIn).toBe(true);
     if (!allowed) {
@@ -550,7 +645,7 @@ describe('review regressions', () => {
             headers: { 'WWW-Authenticate': 'Bearer resource_metadata="http://metadata.test/resource"' },
           });
         if (source === 'authorization server' && String(url).includes('oauth-protected-resource'))
-          return json({ authorization_servers: ['http://metadata.test/issuer'] });
+          return json({ resource: MCP, authorization_servers: ['http://metadata.test/issuer'] });
         if (source === 'metadata issuer' && String(url).includes('oauth-authorization-server')) {
           const meta = await response.json();
           return json({ ...meta, issuer: 'http://metadata.test/issuer' });
@@ -598,7 +693,7 @@ describe('review regressions', () => {
           headers: { 'WWW-Authenticate': 'Bearer resource_metadata="http://localhost/resource"' },
         });
       if (String(url) === 'http://localhost/resource')
-        return json({ authorization_servers: ['http://127.0.0.1:9000'] });
+        return json({ resource: MCP, authorization_servers: ['http://127.0.0.1:9000'] });
       if (String(url) === 'http://127.0.0.1:9000/.well-known/oauth-authorization-server')
         return json({
           issuer: 'http://127.0.0.1:9000',
@@ -625,7 +720,7 @@ describe('review regressions', () => {
         return new Response(null, {
           status: 401,
           headers: {
-            'WWW-Authenticate': `Bearer resource_metadata="${metadataUrl}", scope="read manage"`,
+            'WWW-Authenticate': `Basic realm="legacy", Bearer resource_metadata="${metadataUrl}", scope="read manage"`,
           },
         });
       return response;
