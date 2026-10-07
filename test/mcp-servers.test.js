@@ -503,7 +503,7 @@ describe('review regressions', () => {
     'retains a recoverable grant after refresh failure %s during connect',
     async (failure) => {
       const server = await signIn(await service.create({ name: 'meta', url: MCP }));
-      clock += 3_550_000;
+      clock += 3_600_000;
       const original = remote.fetch.getMockImplementation();
       remote.fetch.mockImplementation((url, init) => {
         if (String(url).endsWith('/token')) {
@@ -521,6 +521,107 @@ describe('review regressions', () => {
       remote.fetch.mockImplementation(original);
       expect((await service.upstream(server.id, 'o/r')).headers.Authorization).toBe('Bearer access-2');
       expect(remote.tokenRequests.at(-1).refresh_token).toBe('refresh-1');
+    },
+  );
+
+  it.each([503, 'network'])(
+    'uses a still-valid bearer during temporary early-refresh failure %s',
+    async (failure) => {
+      const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+      clock += 3_550_000;
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation((url, init) => {
+        if (String(url).endsWith('/token')) {
+          if (failure === 'network') throw new Error('network unavailable');
+          return json({ error: 'temporarily_unavailable' }, failure);
+        }
+        return original(url, init);
+      });
+      const [first, second] = await Promise.all([
+        service.upstream(server.id, 'o/r'),
+        service.upstream(server.id, 'o/r'),
+      ]);
+      expect(first.headers.Authorization).toBe('Bearer access-1');
+      expect(second.headers.Authorization).toBe('Bearer access-1');
+      expect(await service.connect(server.id)).toMatchObject({ status: 'ready', signedIn: true });
+      await expect(service.upstream(server.id, 'o/r', { force: true })).rejects.toMatchObject({
+        status: 502,
+      });
+      clock += 50_000;
+      await expect(service.upstream(server.id, 'o/r')).rejects.toMatchObject({ status: 502 });
+      remote.fetch.mockImplementation(original);
+      expect((await service.upstream(server.id, 'o/r')).headers.Authorization).toBe('Bearer access-2');
+      expect(remote.tokenRequests.at(-1).refresh_token).toBe('refresh-1');
+    },
+  );
+
+  it.each(['invalid_grant', 'invalid_client'])(
+    'does not fall back to a valid bearer after %s',
+    async (error) => {
+      const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+      clock += 3_550_000;
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation((url, init) =>
+        String(url).endsWith('/token') ? json({ error }, 400) : original(url, init),
+      );
+      await expect(service.upstream(server.id, 'o/r')).rejects.toMatchObject({
+        status: error === 'invalid_grant' ? 401 : 502,
+      });
+      expect(service.list()[0].signedIn).toBe(error !== 'invalid_grant');
+    },
+  );
+
+  it('does not use an early-refresh fallback after the bearer expires while waiting', async () => {
+    const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+    clock += 3_550_000;
+    const delayed = delayNext((url) => url.endsWith('/token'));
+    const request = expect(service.upstream(server.id, 'o/r')).rejects.toMatchObject({ status: 502 });
+    await delayed.waiting;
+    clock += 50_000;
+    delayed.release(json({ error: 'temporarily_unavailable' }, 503));
+    await request;
+  });
+
+  it.each([
+    { oauthScope: 'expanded' },
+    { oauthClientName: 'new' },
+    { oauthRedirect: 'loopback' },
+    { oauthClientSecret: 'new' },
+  ])('invalidates a pending sign-in after grant-preserving maintenance %j', async (update) => {
+    const server = await service.create({
+      name: 'meta',
+      url: MCP,
+      oauthClientId: 'client',
+      oauthClientSecret: 'old',
+    });
+    const state = new URL(server.signInUrl).searchParams.get('state');
+    await service.update(server.id, update);
+    await expect(service.complete({ state, code: 'old-code' })).rejects.toThrow(
+      'This sign-in link has expired or was already used',
+    );
+    expect(remote.tokenRequests).toEqual([]);
+  });
+
+  it.each([['private_key_jwt'], ['client_secret_jwt'], ['private_key_jwt', 'client_secret_jwt']])(
+    'explains unsupported token authentication methods %j before sign-in',
+    async (...methods) => {
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation(async (url, init) => {
+        const response = await original(url, init);
+        if (String(url).includes('oauth-authorization-server'))
+          return json({ ...(await response.json()), token_endpoint_auth_methods_supported: methods });
+        return response;
+      });
+      const server = await service.create({
+        name: 'meta',
+        url: MCP,
+        oauthClientId: 'client',
+        oauthClientSecret: 'secret',
+      });
+      expect(server).toMatchObject({ status: 'error', signInUrl: null });
+      expect(server.error).toContain('Unsupported OAuth token authentication methods: ' + methods.join(', '));
+      expect(server.error).toContain('JWT authentication is not supported');
+      expect(remote.tokenRequests).toEqual([]);
     },
   );
 
@@ -657,10 +758,22 @@ describe('review regressions', () => {
     [{ oauthClientId: '' }, true],
     [{ oauthClientSecret: '' }, true],
     [{ oauthScope: '' }, true],
+    [{ oauthScope: 'expanded' }, true],
+    [{ oauthClientName: 'New client' }, true],
+    [{ oauthRedirect: 'loopback' }, true],
+    [{ oauthClientSecret: 'new' }, true],
     [{ oauthClientName: '' }, true],
     [{ oauthRedirect: 'callback' }, true],
   ])('preserves a rotating refresh across grant-preserving update %j', async (update, allowed) => {
-    const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+    const server = await signIn(
+      await service.create({
+        name: 'meta',
+        url: MCP,
+        ...(update.oauthClientSecret === 'new'
+          ? { oauthClientId: 'explicit', oauthClientSecret: 'old' }
+          : {}),
+      }),
+    );
     const original = remote.fetch.getMockImplementation();
     // The provider consumes R1 before the configuration update, then delays R2.
     const delayed = delayNext((url) => url.endsWith('/token'));
