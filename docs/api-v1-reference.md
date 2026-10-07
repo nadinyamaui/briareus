@@ -1144,7 +1144,7 @@ Send a message or thread reply as the operator. Needs `admin`.
 | `text` **required** | `string` | The message in Slack mrkdwn, 1–8000 characters                                        |
 | `threadTs`          | `string` | The parent message’s Slack timestamp for a thread reply; omit for a top-level message |
 
-**Returns** 201 `{ channel: string, ts: string, message: object }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits. Human-authored messages send immediately, without an agent approval. Do not automatically retry an ambiguous failed send.
+**Returns** 201 `{ channel: string, ts: string, message: object }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits. Human-authored messages send immediately, without an agent approval. If credentials change or the workspace is removed during a confirmed send, returns 201 with only { channel, ts, workspaceChanged: true }; refresh the workspace and do not resend. Do not automatically retry an ambiguous failed send.
 
 ### `POST /slack/workspaces/{id}/conversations/{channel}/read`
 

@@ -110,9 +110,18 @@ afterEach(async () => {
   }
 });
 
-function signed(workspace, event, { team = 'T1', eventId = 'Ev1', secret = SECRET } = {}) {
+function signed(
+  workspace,
+  event,
+  {
+    team = 'T1',
+    eventId = 'Ev1',
+    secret = SECRET,
+    authorizations = [{ team_id: 'T1', user_id: 'U3', is_bot: false }],
+  } = {},
+) {
   const raw = Buffer.from(
-    JSON.stringify({ type: 'event_callback', team_id: team, event_id: eventId, event }),
+    JSON.stringify({ type: 'event_callback', team_id: team, event_id: eventId, event, authorizations }),
   );
   const timestamp = String(Math.floor(Date.now() / 1000));
   const signature = `v0=${crypto.createHmac('sha256', secret).update(`v0:${timestamp}:`).update(raw).digest('hex')}`;
@@ -224,7 +233,16 @@ describe('the operator Slack inbox', () => {
       unfurl_media: false,
     });
     expect(ctx.s.pending()).toEqual([]);
-    expect(ctx.stored.slack_conversations).toBeUndefined();
+    expect(ctx.stored.slack_conversations).toEqual([
+      {
+        workspaceId: ctx.w.id,
+        channel: 'D1',
+        ts: '1700000002.000001',
+        threadTs: MESSAGE.ts,
+        jobId: null,
+        at: expect.any(Number),
+      },
+    ]);
     const read = await ctx.request(`${ctx.at}/conversations/D1/read`, {
       method: 'POST',
       body: { ts: MESSAGE.ts },
@@ -335,6 +353,23 @@ describe('the operator Slack inbox', () => {
     expect(ctx.api.mock.calls.filter(([, method]) => method === 'chat.postMessage')).toHaveLength(1);
   });
 
+  it.each(['rotate', 'remove'])('returns a confirmed send receipt across workspace %s', async (change) => {
+    const ctx = await setup();
+    let finish;
+    ctx.api.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const sending = ctx.s.inbox.send(ctx.w.id, 'D1', { text: 'Human question' });
+    if (change === 'rotate') await ctx.s.update(ctx.w.id, { token: `${TOKEN}-rotated` });
+    else await ctx.s.remove(ctx.w.id);
+    finish({ channel: 'D1', ts: MESSAGE.ts, message: MESSAGE });
+    expect(await sending).toEqual({ channel: 'D1', ts: MESSAGE.ts, workspaceChanged: true });
+    expect(ctx.api.mock.calls.filter(([, method]) => method === 'chat.postMessage')).toHaveLength(1);
+  });
+
   it('refuses stale history when the workspace is removed during a Slack call', async () => {
     const ctx = await setup();
     let finish;
@@ -353,6 +388,63 @@ describe('the operator Slack inbox', () => {
 });
 
 describe('live Slack inbox events', () => {
+  it('checks connected-account access when the reported installation belongs to another user', async () => {
+    const ctx = await setup();
+    const listener = vi.fn();
+    ctx.s.inbox.subscribe(ctx.w.id, listener);
+    const authorizations = [{ team_id: 'T1', user_id: 'U4', is_bot: false }];
+    ctx.api.mockRejectedValueOnce(new Error('channel_not_found'));
+    receive(ctx, { ...MESSAGE, channel: 'D4' }, { authorizations });
+    await vi.waitFor(() =>
+      expect(ctx.api).toHaveBeenCalledWith(TOKEN, 'conversations.info', { channel: 'D4' }),
+    );
+    expect(listener).not.toHaveBeenCalled();
+    // The reported installation is truncated: U3 can still see this shared conversation.
+    ctx.api.mockResolvedValueOnce({ channel: { id: 'C1' } });
+    receive(ctx, { ...MESSAGE, channel: 'C1' }, { eventId: 'shared', authorizations });
+    await vi.waitFor(() => expect(listener).toHaveBeenCalledOnce());
+    expect(listener.mock.calls[0][1].event.channel).toBe('C1');
+  });
+
+  it('does not publish access-check results after credentials change', async () => {
+    const ctx = await setup();
+    const listener = vi.fn();
+    let finish;
+    ctx.s.inbox.subscribe(ctx.w.id, listener);
+    ctx.api.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    receive(ctx, { ...MESSAGE, channel: 'D4' }, { authorizations: [] });
+    await ctx.s.update(ctx.w.id, { token: `${TOKEN}-rotated` });
+    listener.mockClear();
+    ctx.s.inbox.subscribe(ctx.w.id, listener);
+    finish({ channel: { id: 'D4' } });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('accepts connected-user authorization anywhere in the installation list', async () => {
+    const ctx = await setup();
+    const listener = vi.fn();
+    ctx.s.inbox.subscribe(ctx.w.id, listener);
+    const before = ctx.api.mock.calls.length;
+    receive(
+      ctx,
+      { ...MESSAGE, channel: 'D1' },
+      {
+        authorizations: [
+          { team_id: 'T1', user_id: 'U4', is_bot: false },
+          { team_id: 'T1', user_id: 'U3', is_bot: false },
+        ],
+      },
+    );
+    expect(listener).toHaveBeenCalledOnce();
+    expect(ctx.api).toHaveBeenCalledTimes(before);
+  });
+
   it('streams signed new messages even without an agent conversation, including own messages and bots', async () => {
     const ctx = await setup();
     const events = await stream(ctx);
