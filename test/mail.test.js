@@ -1,0 +1,480 @@
+import crypto from 'node:crypto';
+import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
+
+const cfg = vi.hoisted(() => ({ credentialsKey: 'k'.repeat(32) }));
+vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
+// The service is handed a store of its own below; the database's is never reached.
+vi.mock('../lib/db.js', () => ({
+  countMailMessages: vi.fn(),
+  deleteMailAccount: vi.fn(),
+  deleteMailMessages: vi.fn(),
+  deleteMailMessagesOutsideFolders: vi.fn(),
+  deleteMailMessagesReceivedBefore: vi.fn(),
+  deleteMailMessagesSyncedBefore: vi.fn(),
+  getMailMessage: vi.fn(),
+  insertMailAccount: vi.fn(),
+  listMailMessages: vi.fn(),
+  loadMailAccountRows: vi.fn(),
+  updateMailAccount: vi.fn(),
+  updateMailMessageFlags: vi.fn(),
+  upsertMailMessages: vi.fn(),
+}));
+
+const { createMailService } = await import('../lib/mail.js');
+const { open } = await import('../lib/secretbox.js');
+
+const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me';
+const GOOGLE = { clientId: 'gid', clientSecret: 'gsecret', redirectUri: 'http://127.0.0.1' };
+const DAY = 24 * 3600_000;
+
+// The store's contract, in memory: what lib/db.js does in MySQL.
+function memoryStore() {
+  const accounts = new Map();
+  const messages = new Map();
+  let nextId = 1;
+  const key = (accountId, id) => `${accountId}:${id}`;
+  const ofAccount = (accountId) => [...messages.values()].filter((m) => m.accountId === accountId);
+  const drop = (pred) => {
+    for (const [k, m] of messages) if (pred(m)) messages.delete(k);
+  };
+  return {
+    accounts,
+    messages,
+    loadAccounts: async () => [...accounts.values()].map((a) => ({ ...a })),
+    insertAccount: async (a) => {
+      if ([...accounts.values()].some((b) => b.provider === a.provider && b.email === a.email))
+        throw Object.assign(new Error('Duplicate entry'), { code: 'ER_DUP_ENTRY' });
+      const row = {
+        ...a,
+        id: nextId++,
+        syncState: null,
+        lastSyncAt: null,
+        lastSyncError: null,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      accounts.set(row.id, row);
+      return { ...row };
+    },
+    updateAccount: async (id, changes) => {
+      Object.assign(accounts.get(id), changes);
+      return 1;
+    },
+    deleteAccount: async (id) => {
+      accounts.delete(id);
+      drop((m) => m.accountId === id);
+      return 1;
+    },
+    upsert: async (accountId, rows, syncedAt) => {
+      for (const r of rows) messages.set(key(accountId, r.id), { ...r, accountId, syncedAt });
+    },
+    flags: async (accountId, id, flags, syncedAt) => {
+      const m = messages.get(key(accountId, id));
+      if (!m) return 0;
+      Object.assign(m, flags, { syncedAt });
+      return 1;
+    },
+    remove: async (accountId, ids, folderId) =>
+      drop(
+        (m) =>
+          m.accountId === accountId && ids.includes(m.id) && (folderId == null || m.folderId === folderId),
+      ),
+    pruneOlder: async (accountId, before) => drop((m) => m.accountId === accountId && m.receivedAt < before),
+    pruneUnseen: async (accountId, syncedAt, folderId) =>
+      drop(
+        (m) =>
+          m.accountId === accountId && m.syncedAt < syncedAt && (folderId == null || m.folderId === folderId),
+      ),
+    keepFolders: async (accountId, folderIds) =>
+      drop((m) => m.accountId === accountId && !folderIds.includes(m.folderId)),
+    list: vi.fn(async ({ accountIds, cursor, limit, unread }) =>
+      [...messages.values()]
+        .filter((m) => accountIds.includes(m.accountId))
+        .filter((m) => unread == null || m.isRead === !unread)
+        .sort((a, b) => b.receivedAt - a.receivedAt || b.accountId - a.accountId || (a.id < b.id ? 1 : -1))
+        .filter(
+          (m) =>
+            !cursor ||
+            m.receivedAt < cursor[0] ||
+            (m.receivedAt === cursor[0] &&
+              (m.accountId < cursor[1] || (m.accountId === cursor[1] && m.id < cursor[2]))),
+        )
+        .slice(0, limit)
+        .map(({ bodyText, bodyHtml, syncedAt, ...m }) => m),
+    ),
+    get: async (accountId, id) => {
+      const m = messages.get(key(accountId, id));
+      if (!m) return null;
+      const { bodyText, bodyHtml, bodyTruncated, syncedAt, ...rest } = m;
+      return {
+        ...rest,
+        body: { text: bodyText ?? null, html: bodyHtml ?? null, truncated: !!bodyTruncated },
+      };
+    },
+    counts: async () => {
+      const out = new Map();
+      for (const a of accounts.keys())
+        out.set(a, {
+          messages: ofAccount(a).length,
+          unread: ofAccount(a).filter((m) => !m.isRead && m.inInbox).length,
+        });
+      return out;
+    },
+    ofAccount,
+  };
+}
+
+// A Gmail that answers from `mailbox`: the profile, the labels, a listing of
+// every message and each message in full.
+function fakeGmail(mailbox) {
+  const tokenCalls = [];
+  const gate = { wait: null, refresh: null };
+  const request = vi.fn(async (url, init = {}) => {
+    const reply = (body, status = 200) => new Response(JSON.stringify(body), { status });
+    url = String(url);
+    if (url === 'https://oauth2.googleapis.com/token') {
+      const form = Object.fromEntries(new URLSearchParams(init.body));
+      tokenCalls.push(form);
+      if (form.grant_type === 'refresh_token' && gate.refresh) await gate.refresh;
+      if (mailbox.refreshRefused && form.grant_type === 'refresh_token')
+        return reply(
+          { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' },
+          400,
+        );
+      return reply({
+        access_token: `access-${tokenCalls.length}`,
+        refresh_token: form.grant_type === 'authorization_code' ? `refresh-${form.code}` : undefined,
+        expires_in: 3600,
+        scope: 'https://www.googleapis.com/auth/gmail.readonly',
+      });
+    }
+    if (gate.wait) await gate.wait;
+    if (url.startsWith(`${GMAIL}/profile`)) return reply({ emailAddress: mailbox.email, historyId: '10' });
+    if (url.startsWith(`${GMAIL}/labels`)) return reply({ labels: [] });
+    if (url.startsWith(`${GMAIL}/messages?`))
+      return reply({ messages: Object.keys(mailbox.messages).map((id) => ({ id })) });
+    if (url.startsWith(`${GMAIL}/history?`)) return reply({ historyId: '11' });
+    const full = /messages\/([^?]+)\?format=full/.exec(url);
+    if (full && mailbox.messages[full[1]]) {
+      const id = full[1];
+      const { at, unread } = mailbox.messages[id];
+      return reply({
+        id,
+        threadId: `t-${id}`,
+        labelIds: ['INBOX', ...(unread ? ['UNREAD'] : [])],
+        internalDate: String(at),
+        snippet: id,
+        payload: {
+          mimeType: 'text/plain',
+          headers: [{ name: 'Subject', value: `About ${id}` }],
+          body: { data: Buffer.from(`Body of ${id}`).toString('base64url') },
+        },
+      });
+    }
+    return reply({ error: { message: 'Not Found' } }, 404);
+  });
+  return { request, tokenCalls, gate };
+}
+
+let clock, store, mailbox, gmail, service, errors;
+
+beforeEach(async () => {
+  cfg.credentialsKey = 'k'.repeat(32);
+  cfg.mail = { syncMinutes: 5, google: GOOGLE, microsoft: null };
+  clock = Date.parse('2026-10-07T12:00:00Z');
+  store = memoryStore();
+  mailbox = {
+    email: 'me@gmail.com',
+    messages: { a: { at: clock - DAY, unread: true }, b: { at: clock - 2 * DAY, unread: false } },
+  };
+  gmail = fakeGmail(mailbox);
+  errors = [];
+  service = createMailService({
+    store,
+    request: gmail.request,
+    sleep: async () => {},
+    now: () => clock,
+    log: { error: (...args) => errors.push(args.join(' ')) },
+  });
+  await service.init();
+});
+
+afterEach(() => {
+  service.stop();
+  vi.useRealTimers();
+});
+
+// Starts a sign-in and finishes it the way a client would: with the address
+// the provider sent the browser to.
+async function connect(input = {}, code = 'code-1') {
+  const start = service.connectStart({ provider: 'gmail', ...input });
+  return service.connectFinish({ url: `http://127.0.0.1/?state=${start.state}&code=${code}&scope=x` });
+}
+
+const settled = async () =>
+  vi.waitFor(async () => expect((await service.list()).every((a) => !a.syncing)).toBe(true));
+
+describe('connecting a mailbox', () => {
+  it('lists only the providers this server has a client for', () => {
+    expect(service.providers()).toEqual(['gmail']);
+    expect(() => service.connectStart({ provider: 'outlook' })).toThrow(/MICROSOFT_OAUTH_\* is not set/);
+    expect(() => service.connectStart({ provider: 'yahoo' })).toThrow(/Choose `gmail` or `outlook`/);
+  });
+
+  it('refuses to start before CREDENTIALS_KEY is set, rather than after the sign-in', () => {
+    cfg.credentialsKey = '';
+    expect(() => service.connectStart({ provider: 'gmail' })).toThrow(/CREDENTIALS_KEY/);
+  });
+
+  it('hands out a PKCE sign-in and finishes it with the matching verifier', async () => {
+    const start = service.connectStart({ provider: 'gmail', label: 'Personal', syncDays: 7 });
+    expect(start).toMatchObject({ redirectUri: 'http://127.0.0.1', expiresAt: clock + 15 * 60_000 });
+    const url = new URL(start.url);
+    expect(url.searchParams.get('state')).toBe(start.state);
+
+    const account = await service.connectFinish({ state: start.state, code: 'abc' });
+
+    const exchange = gmail.tokenCalls[0];
+    expect(exchange).toMatchObject({ grant_type: 'authorization_code', code: 'abc' });
+    expect(crypto.createHash('sha256').update(exchange.code_verifier).digest('base64url')).toBe(
+      url.searchParams.get('code_challenge'),
+    );
+    expect(account).toMatchObject({
+      provider: 'gmail',
+      email: 'me@gmail.com',
+      label: 'Personal',
+      syncDays: 7,
+      enabled: true,
+      status: 'connected',
+    });
+    expect(account).not.toHaveProperty('credentials');
+    expect(account).not.toHaveProperty('syncState');
+    // Stored sealed, never as the tokens themselves.
+    const stored = store.accounts.get(account.id).credentials;
+    expect(stored).not.toContain('refresh-abc');
+    expect(JSON.parse(open(stored))).toEqual({
+      refreshToken: 'refresh-abc',
+      accessToken: 'access-1',
+      expiresAt: clock + 3600_000,
+    });
+  });
+
+  it('syncs a new mailbox straight away', async () => {
+    const account = await connect();
+    await settled();
+
+    expect(
+      store
+        .ofAccount(account.id)
+        .map((m) => m.id)
+        .sort(),
+    ).toEqual(['a', 'b']);
+    const [listed] = await service.list();
+    expect(listed).toMatchObject({
+      messages: 2,
+      unread: 1,
+      lastSyncAt: clock,
+      lastSyncError: null,
+      syncing: false,
+    });
+    expect(store.accounts.get(account.id).syncState).toEqual({ historyId: '10' });
+  });
+
+  it('finishes each sign-in once, and not after it expired', async () => {
+    const start = service.connectStart({ provider: 'gmail' });
+    await service.connectFinish({ state: start.state, code: 'c' });
+    await expect(service.connectFinish({ state: start.state, code: 'c' })).rejects.toThrow(
+      /expired or was already used/,
+    );
+
+    const late = service.connectStart({ provider: 'gmail' });
+    clock += 16 * 60_000;
+    await expect(service.connectFinish({ state: late.state, code: 'c' })).rejects.toThrow(/expired/);
+  });
+
+  it('passes on what the provider said when the sign-in was refused', async () => {
+    const start = service.connectStart({ provider: 'gmail' });
+    await expect(
+      service.connectFinish({ url: `http://127.0.0.1/?error=access_denied&state=${start.state}` }),
+    ).rejects.toMatchObject({ status: 400, message: 'The sign-in did not finish: access_denied' });
+    await expect(service.connectFinish({ url: 'not a url' })).rejects.toThrow(/whole address/);
+  });
+
+  it('reconnects a mailbox signed in to again, keeping its messages and settings', async () => {
+    const first = await connect({ label: 'Work' }, 'one');
+    await settled();
+    const again = await connect({}, 'two');
+
+    expect(again.id).toBe(first.id);
+    expect(again.label).toBe('Work');
+    expect(JSON.parse(open(store.accounts.get(first.id).credentials)).refreshToken).toBe('refresh-two');
+    expect(store.accounts.size).toBe(1);
+  });
+
+  it('refuses a reconnect that signed in to another mailbox', async () => {
+    const first = await connect();
+    await settled();
+    mailbox.email = 'someone-else@gmail.com';
+    const start = service.connectStart({ provider: 'gmail', accountId: first.id });
+    expect(new URL(start.url).searchParams.get('login_hint')).toBe('me@gmail.com');
+
+    await expect(service.connectFinish({ state: start.state, code: 'x' })).rejects.toMatchObject({
+      status: 409,
+    });
+  });
+});
+
+describe('syncing', () => {
+  it('refreshes a lapsed access token and keeps the refresh token Google does not resend', async () => {
+    const account = await connect();
+    await settled();
+    clock += 2 * 3600_000;
+
+    await service.sync(account.id);
+    await settled();
+
+    const refresh = gmail.tokenCalls.find((c) => c.grant_type === 'refresh_token');
+    expect(refresh).toMatchObject({ refresh_token: 'refresh-code-1', client_secret: 'gsecret' });
+    const creds = JSON.parse(open(store.accounts.get(account.id).credentials));
+    expect(creds).toMatchObject({ refreshToken: 'refresh-code-1', expiresAt: clock + 3600_000 });
+    expect(store.accounts.get(account.id).syncState).toEqual({ historyId: '11' });
+  });
+
+  it('marks an account whose grant was revoked, and will not sync it until it is reconnected', async () => {
+    const account = await connect();
+    await settled();
+    clock += 2 * 3600_000;
+    mailbox.refreshRefused = true;
+
+    await service.sync(account.id);
+    await settled();
+
+    const [listed] = await service.list();
+    expect(listed.status).toBe('reauth');
+    expect(listed.lastSyncError).toMatch(/expired or revoked/);
+    expect(errors.join('\n')).toMatch(/Mail sync of me@gmail.com failed/);
+    await expect(service.sync(account.id)).rejects.toMatchObject({ status: 409 });
+
+    mailbox.refreshRefused = false;
+    expect((await connect({ accountId: account.id }, 'again')).status).toBe('connected');
+  });
+
+  it('does not mark a reconnected account for its old grant’s refusal', async () => {
+    const account = await connect();
+    await settled();
+    clock += 2 * 3600_000;
+    mailbox.refreshRefused = true;
+    let release;
+    gmail.gate.refresh = new Promise((resolve) => (release = resolve));
+    await service.sync(account.id);
+
+    await connect({ accountId: account.id }, 'fresh');
+    release();
+    await settled();
+
+    const [listed] = await service.list();
+    expect(listed.status).toBe('connected');
+    expect(JSON.parse(open(store.accounts.get(account.id).credentials)).refreshToken).toBe('refresh-fresh');
+  });
+
+  it('drops what falls out of the window', async () => {
+    const account = await connect();
+    await settled();
+    clock += 29 * DAY;
+
+    await service.sync(account.id);
+    await settled();
+
+    expect(store.ofAccount(account.id).map((m) => m.id)).toEqual(['a']);
+  });
+
+  it('starts over with a first pass when the window changes', async () => {
+    const account = await connect();
+    await settled();
+    expect(store.accounts.get(account.id).syncState).toEqual({ historyId: '10' });
+
+    gmail.gate.wait = new Promise(() => {});
+    const updated = await service.update(account.id, { syncDays: 90, label: 'Renamed' });
+    expect(updated).toMatchObject({ syncDays: 90, label: 'Renamed', syncing: true });
+    expect(store.accounts.get(account.id).syncState).toBeNull();
+
+    await expect(service.update(account.id, { syncDays: 0 })).rejects.toThrow(/1–365/);
+    await expect(service.update(account.id, { enabled: 'yes' })).rejects.toThrow(/true or false/);
+    await expect(service.update(999, {})).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('writes nothing for an account removed while its pass runs', async () => {
+    let release;
+    const account = await connect({ enabled: false });
+    gmail.gate.wait = new Promise((resolve) => (release = resolve));
+    await service.sync(account.id);
+    const upsert = vi.spyOn(store, 'upsert');
+
+    const removing = service.remove(account.id);
+    release();
+    await removing;
+
+    expect(upsert).not.toHaveBeenCalled();
+    expect(store.accounts.size).toBe(0);
+    expect(store.messages.size).toBe(0);
+    await expect(service.sync(account.id)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('sweeps the enabled, connected accounts on the timer', async () => {
+    vi.useFakeTimers({ now: clock, toFake: ['setTimeout', 'setInterval', 'clearInterval'] });
+    const on = await connect({}, 'on');
+    mailbox.email = 'off@gmail.com';
+    const off = await connect({ enabled: false }, 'off');
+    await vi.waitFor(() => expect(store.accounts.get(on.id).syncState).toEqual({ historyId: '10' }));
+
+    service.start();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(store.accounts.get(on.id).syncState).toEqual({ historyId: '11' }));
+    expect(store.accounts.get(off.id).syncState).toBeNull();
+    expect(store.ofAccount(off.id)).toHaveLength(0);
+  });
+});
+
+describe('reading', () => {
+  beforeEach(async () => {
+    mailbox.messages = Object.fromEntries(
+      Array.from({ length: 5 }, (_, i) => [`m${i}`, { at: clock - (i + 1) * 3600_000, unread: i % 2 === 0 }]),
+    );
+    await connect();
+    await settled();
+  });
+
+  it('pages newest first with an opaque cursor', async () => {
+    const first = await service.messages({ limit: '2' });
+    expect(first.messages.map((m) => m.id)).toEqual(['m0', 'm1']);
+    expect(first.nextCursor).toEqual(expect.any(String));
+
+    const second = await service.messages({ limit: '2', cursor: first.nextCursor });
+    expect(second.messages.map((m) => m.id)).toEqual(['m2', 'm3']);
+    const last = await service.messages({ limit: '2', cursor: second.nextCursor });
+    expect(last).toMatchObject({ messages: [{ id: 'm4' }], nextCursor: null });
+  });
+
+  it('passes the filters on and checks them', async () => {
+    const unread = await service.messages({ unread: '1' });
+    expect(unread.messages.map((m) => m.id)).toEqual(['m0', 'm2', 'm4']);
+    expect(store.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ unread: true, inbox: undefined, limit: 51 }),
+    );
+
+    await expect(service.messages({ limit: '500' })).rejects.toThrow(/1–100/);
+    await expect(service.messages({ unread: 'maybe' })).rejects.toThrow(/1 or 0/);
+    await expect(service.messages({ cursor: 'garbage' })).rejects.toThrow(/nextCursor/);
+    await expect(service.messages({ account: '42' })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('reads one message with its body', async () => {
+    const [account] = await service.list();
+    expect(await service.message(account.id, 'm0')).toMatchObject({
+      id: 'm0',
+      subject: 'About m0',
+      body: { text: 'Body of m0', html: null, truncated: false },
+    });
+    await expect(service.message(account.id, 'nope')).rejects.toMatchObject({ status: 404 });
+  });
+});

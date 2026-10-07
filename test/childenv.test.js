@@ -14,6 +14,8 @@ describe('childEnv', () => {
     vi.stubEnv('CLOUDFLARE_API_TOKEN', 'cf-secret');
     vi.stubEnv('PREVIEW_ACCESS_CLIENT_SECRET', 'svc-secret');
     vi.stubEnv('FORGE_API_TOKEN', 'forge-secret');
+    vi.stubEnv('GOOGLE_OAUTH_CLIENT_SECRET', 'google-secret');
+    vi.stubEnv('MICROSOFT_OAUTH_CLIENT_SECRET', 'microsoft-secret');
     vi.stubEnv('OPENAI_API_KEY', 'a-session-own-key');
 
     const env = childEnv();
@@ -24,6 +26,8 @@ describe('childEnv', () => {
     expect(env).not.toHaveProperty('CLOUDFLARE_API_TOKEN');
     expect(env).not.toHaveProperty('PREVIEW_ACCESS_CLIENT_SECRET');
     expect(env).not.toHaveProperty('FORGE_API_TOKEN');
+    expect(env).not.toHaveProperty('GOOGLE_OAUTH_CLIENT_SECRET');
+    expect(env).not.toHaveProperty('MICROSOFT_OAUTH_CLIENT_SECRET');
     expect(env.OPENAI_API_KEY).toBe('a-session-own-key');
     expect(env.PATH).toBe(process.env.PATH);
   });

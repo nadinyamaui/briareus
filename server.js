@@ -7,6 +7,8 @@ import { forgeRoutes } from './lib/forge-routes.js';
 import { createEnvoyerService } from './lib/envoyer.js';
 import { envoyerRoutes } from './lib/envoyer-routes.js';
 import { createForgeAccounts } from './lib/forge-accounts.js';
+import { createMailService } from './lib/mail.js';
+import { mailRoutes } from './lib/mail-routes.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
 import { estimateCosts } from './lib/prices.js';
 import { previewFeedbackRoutes } from './lib/preview-feedback.js';
@@ -603,6 +605,8 @@ api.use(
     getProject,
   }),
 );
+const mailService = createMailService();
+api.use(mailRoutes({ service: mailService }));
 
 api.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
@@ -2158,6 +2162,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await slackService.init();
     await envoyerService.init();
     await forgeAccounts.init();
+    await mailService.init();
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
@@ -2197,6 +2202,9 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   // boot and once a day so a project's peak concurrency does not permanently
   // consume disk; the pruner sees the live session registry and skips claims.
   startWorkspacePruner();
+  // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
+  // a client reads its mail from the database rather than from the provider.
+  mailService.start();
   // Every project gets (or keeps) a hook pointing at this install's public
   // hostname, so an open session's pull request panel keeps up with the reviews,
   // comments and CI runs landing on its branch. Best effort: a repo whose hook

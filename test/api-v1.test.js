@@ -791,6 +791,7 @@ describe('the contract', () => {
     const { DB_SERVER_DEFAULTS } = await import('../lib/dbservers.js');
     const { SSH_DEFAULTS } = await import('../lib/ssh.js');
     const { WEBHOOK_DEFAULTS } = await import('../lib/deliveries.js');
+    const { MAIL_ACCOUNT_DEFAULTS } = await import('../lib/mail.js');
     const fields = (name) => Object.keys(OBJECTS[name].fields);
     for (const key of Object.keys(PROJECT_DEFAULTS)) expect(fields('Project'), key).toContain(key);
     // The stored login is the one provider field that never leaves the server.
@@ -800,6 +801,7 @@ describe('the contract', () => {
     for (const key of Object.keys(SSH_DEFAULTS)) expect(fields('SshServer'), key).toContain(key);
     for (const key of Object.keys(WEBHOOK_DEFAULTS).filter((k) => k !== 'epoch'))
       expect(fields('Webhook'), key).toContain(key);
+    for (const key of Object.keys(MAIL_ACCOUNT_DEFAULTS)) expect(fields('MailAccount'), key).toContain(key);
   });
 
   it('has a reference on disk that is what the catalog would write', async () => {
