@@ -171,6 +171,37 @@ describe('the session proxy', () => {
     expect(upstream.mock.calls[1][1].body.toString()).toBe(JSON.stringify(rpc));
   });
 
+  it.each(['GET', 'POST'])('flushes idle SSE headers for %s before the first event', async (method) => {
+    let controller;
+    upstream.mockResolvedValue(
+      new Response(
+        new ReadableStream({
+          start(c) {
+            controller = c;
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream', 'mcp-session-id': 'idle' } },
+      ),
+    );
+    try {
+      const res = await fetch(`${base}/api/agent/mcp/5`, {
+        method,
+        headers: { Authorization: 'Bearer session-token' },
+        signal: AbortSignal.timeout(1000),
+        ...(method === 'POST' ? { body: JSON.stringify(rpc) } : {}),
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('text/event-stream');
+      expect(res.headers.get('mcp-session-id')).toBe('idle');
+      controller.enqueue(new TextEncoder().encode(': first event\n\n'));
+      const reader = res.body.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe(': first event\n\n');
+      await reader.cancel();
+    } finally {
+      controller.close();
+    }
+  });
+
   it('streams an event stream through as it comes', async () => {
     const enc = new TextEncoder();
     let push;

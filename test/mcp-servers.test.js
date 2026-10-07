@@ -418,6 +418,87 @@ describe('review regressions', () => {
     },
   );
 
+  it.each([404, 503, 'malformed', 'network'])(
+    'fails closed when advertised authorization metadata is unavailable: %s',
+    async (failure) => {
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation((url, init) => {
+        if (String(url).startsWith('https://auth.example.com/')) {
+          if (failure === 'network') throw new Error('unavailable');
+          if (failure === 'malformed') return new Response('not json');
+          return json({}, failure);
+        }
+        return original(url, init);
+      });
+      const server = await service.create({
+        name: 'meta',
+        url: MCP,
+        oauthClientId: 'client',
+        oauthClientSecret: 'SECRET',
+      });
+      expect(server).toMatchObject({ status: 'error', signInUrl: null, signedIn: false });
+      expect(server.error).toMatch(/advertised authorization server.*metadata/);
+      expect(remote.registrations).toBe(0);
+      expect(remote.tokenRequests).toEqual([]);
+      remote.fetch.mockImplementation(original);
+      expect(await service.connect(server.id)).toMatchObject({ status: 'needs-sign-in' });
+    },
+  );
+
+  it('retains legacy resource-origin endpoints when no authorization server is advertised', async () => {
+    const original = remote.fetch.getMockImplementation();
+    remote.fetch.mockImplementation((url, init) =>
+      String(url).includes('/.well-known/') ? json({}, 404) : original(url, init),
+    );
+    const server = await service.create({ name: 'legacy', url: MCP, oauthClientId: 'client' });
+    expect(server.status).toBe('needs-sign-in');
+    expect(new URL(server.signInUrl).origin).toBe('https://mcp.example.com');
+    expect(new URL(server.signInUrl).pathname).toBe('/authorize');
+  });
+
+  it.each([
+    [401, 'invalid_client'],
+    [400, 'invalid_request'],
+    [400, 'invalid_scope'],
+    [401, undefined],
+  ])(
+    'preserves refresh grants after HTTP %s %s and recovers after secret correction',
+    async (status, error) => {
+      const server = await signIn(
+        await service.create({
+          name: 'meta',
+          url: MCP,
+          oauthClientId: 'client',
+          oauthClientSecret: 'old',
+        }),
+      );
+      await service.update(server.id, { oauthClientSecret: 'mistake' });
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation((url, init) => {
+        if (
+          String(url).endsWith('/token') &&
+          new URLSearchParams(String(init.body)).get('client_secret') === 'mistake'
+        )
+          return json({ error, error_description: 'client configuration failed' }, status);
+        return original(url, init);
+      });
+      await expect(service.upstream(server.id, 'o/r', { force: true })).rejects.toMatchObject({
+        status: 502,
+      });
+      expect(service.list()[0].signedIn).toBe(true);
+      clock += 3_550_000;
+      expect(await service.connect(server.id)).toMatchObject({
+        status: 'error',
+        signedIn: true,
+        signInUrl: null,
+      });
+      expect(service.mounts('o/r')).toHaveLength(1);
+      await service.update(server.id, { oauthClientSecret: 'old' });
+      expect((await service.upstream(server.id, 'o/r')).headers.Authorization).toBe('Bearer access-2');
+      expect(remote.tokenRequests.at(-1).refresh_token).toBe('refresh-1');
+    },
+  );
+
   it.each([503, 'network'])(
     'retains a recoverable grant after refresh failure %s during connect',
     async (failure) => {
