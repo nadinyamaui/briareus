@@ -47,6 +47,8 @@ function fakeSink() {
     }),
     pruneUnseen: vi.fn(async (folderId = null) => sink.pruned.push(folderId)),
     keepFolders: vi.fn(async (ids) => (sink.kept = ids)),
+    renameLabels: vi.fn(async () => {}),
+    renameFolder: vi.fn(async () => {}),
   };
   return sink;
 }
@@ -147,6 +149,22 @@ describe('gmailMessage', () => {
   it('leaves out the trash, spam and drafts', () => {
     for (const label of ['TRASH', 'SPAM', 'DRAFT'])
       expect(gmailMessage(gmailFull('x', { labels: [label] }), new Map(), 'me')).toBeNull();
+  });
+
+  it('takes a multipart attachment whole, rather than reading its parts as the body', () => {
+    const m = gmailFull('m');
+    m.payload.parts.unshift({
+      mimeType: 'multipart/alternative',
+      filename: 'attached.mime',
+      headers: [{ name: 'Content-Disposition', value: 'attachment; filename="attached.mime"' }],
+      body: { size: 0 },
+      parts: [{ mimeType: 'text/plain', body: { data: b64('attachment text') } }],
+    });
+
+    const row = gmailMessage(m, new Map(), 'me@gmail.com');
+
+    expect(row.bodyText).toBe('café');
+    expect(row.attachments.map((a) => a.name)).toEqual(['attached.mime', 'invoice.pdf']);
   });
 });
 
@@ -369,7 +387,7 @@ describe('gmailProvider', () => {
       email: 'me@gmail.com',
     });
 
-    expect(state).toEqual({ historyId: '900' });
+    expect(state).toEqual({ historyId: '900', labels: { INBOX: 'INBOX' } });
     const list = new URL(calls.find((c) => c.url.startsWith(`${GMAIL}/messages?`)).url);
     expect(list.searchParams.get('q')).toBe(`after:${Math.floor(SINCE / 1000)}`);
     expect(sink.upserted.map((r) => r.id)).toEqual(['a']);
@@ -434,7 +452,7 @@ describe('gmailProvider', () => {
       email: 'me@gmail.com',
     });
 
-    expect(state).toEqual({ historyId: '1200' });
+    expect(state).toEqual({ historyId: '1200', labels: {} });
     expect(sink.removed.flatMap((r) => r.ids).sort()).toEqual(['old', 'trashed']);
     expect(sink.flagged).toEqual([
       { id: 'read', flags: { labels: ['INBOX'], inInbox: true, isRead: true, isStarred: false } },
@@ -443,6 +461,57 @@ describe('gmailProvider', () => {
     // A relabelled message the store did not hold is fetched whole.
     expect(sink.upserted.map((r) => r.id)).toEqual(['new', 'restored']);
     expect(sink.pruned).toEqual([]);
+  });
+
+  it('relabels the messages carrying a label renamed since the last pass', async () => {
+    const { request } = fakeFetch([
+      [
+        `${GMAIL}/labels`,
+        () => ({
+          body: {
+            labels: [
+              { id: 'INBOX', name: 'INBOX' },
+              { id: 'Label_1', name: 'Clients/Acme' },
+              { id: 'Label_2', name: 'Done' },
+              { id: 'Label_3', name: 'Later' },
+              { id: 'Label_4', name: 'Now' },
+            ],
+          },
+        }),
+      ],
+      [`${GMAIL}/history?`, () => ({ body: { historyId: '1001' } })],
+    ]);
+    const gmail = gmailProvider(GOOGLE, { request });
+    const sink = fakeSink();
+
+    const state = await gmail.sync({
+      api: gmail.api(token),
+      state: {
+        historyId: '1000',
+        labels: { INBOX: 'INBOX', Label_1: 'Acme', Label_2: 'Done', Label_3: 'Now', Label_4: 'Later' },
+      },
+      since: SINCE,
+      sink,
+      email: 'me',
+    });
+
+    // In one go, so two names swapped do not run into each other.
+    expect(sink.renameLabels.mock.calls).toEqual([
+      [
+        [
+          ['Acme', 'Clients/Acme'],
+          ['Now', 'Later'],
+          ['Later', 'Now'],
+        ],
+      ],
+    ]);
+    expect(state.labels).toEqual({
+      INBOX: 'INBOX',
+      Label_1: 'Clients/Acme',
+      Label_2: 'Done',
+      Label_3: 'Later',
+      Label_4: 'Now',
+    });
   });
 
   it('falls back to a first pass when Gmail no longer has the cursor', async () => {
@@ -466,7 +535,7 @@ describe('gmailProvider', () => {
       email: 'me',
     });
 
-    expect(state).toEqual({ historyId: '5000' });
+    expect(state).toEqual({ historyId: '5000', labels: {} });
     expect(sink.pruned).toEqual([null]);
   });
 });
@@ -488,6 +557,7 @@ function graphMessage(id, folder, extra = {}) {
     from: { emailAddress: { name: 'Ann', address: 'ann@x.com' } },
     toRecipients: [{ emailAddress: { name: 'Me', address: 'me@outlook.com' } }],
     ccRecipients: [],
+    replyTo: [],
     subject: `Subject ${id}`,
     bodyPreview: 'Preview',
     body: { contentType: 'html', content: '<p>Hello</p>' },
@@ -700,6 +770,98 @@ describe('outlookProvider', () => {
     ]);
     expect(sink.pruned).toEqual(['INBOX-ID', 'ARCH-ID', 'SUB-ID']);
     expect(sink.kept).toEqual(['INBOX-ID', 'ARCH-ID', 'SUB-ID']);
+  });
+
+  it('reads again an update missing any field it is stored with, labeled with the folder it is in now', async () => {
+    const { request, calls } = fakeFetch([
+      [
+        `${GRAPH}/mailFolders?`,
+        () => ({
+          body: {
+            value: [
+              { id: 'INBOX-ID', displayName: 'Inbox' },
+              { id: 'ARCH-ID', displayName: 'Archive' },
+            ],
+          },
+        }),
+      ],
+      // Moved to the archive since the inbox's delta saw it.
+      [`${GRAPH}/messages/m?`, () => ({ body: graphMessage('m', 'ARCH-ID', { isRead: true }) })],
+      [
+        `${GRAPH}/mailFolders/INBOX-ID/messages/delta`,
+        () => ({
+          body: {
+            // The date is there, the subject, the sender and the body are not.
+            value: [{ id: 'm', receivedDateTime: new Date(NOW).toISOString(), isRead: true }],
+            '@odata.deltaLink': `${GRAPH}/mailFolders/INBOX-ID/messages/delta?token=i`,
+          },
+        }),
+      ],
+      [
+        `${GRAPH}/mailFolders/ARCH-ID/messages/delta`,
+        () => ({
+          body: { value: [], '@odata.deltaLink': `${GRAPH}/mailFolders/ARCH-ID/messages/delta?token=a` },
+        }),
+      ],
+    ]);
+    const outlook = outlookProvider(MICROSOFT, { request });
+    const sink = fakeSink();
+
+    await outlook.sync({
+      api: outlook.api(token),
+      state: { known: { inbox: 'INBOX-ID', skip: [] }, deltas: {} },
+      since: SINCE,
+      sink,
+    });
+
+    expect(calls.filter((c) => c.url.startsWith(`${GRAPH}/messages/m?`))).toHaveLength(1);
+    expect(sink.upserted).toEqual([
+      expect.objectContaining({
+        id: 'm',
+        folderId: 'ARCH-ID',
+        labels: ['Archive', 'Red'],
+        subject: 'Subject m',
+        from: { name: 'Ann', address: 'ann@x.com' },
+        bodyText: 'Hello',
+        isRead: true,
+      }),
+    ]);
+  });
+
+  it('relabels the messages of a folder renamed since the last pass, and of no other', async () => {
+    const { request } = fakeFetch([
+      [
+        `${GRAPH}/mailFolders?`,
+        () => ({
+          body: {
+            value: [
+              { id: 'INBOX-ID', displayName: 'Inbox' },
+              { id: 'ARCH-ID', displayName: 'Old projects' },
+            ],
+          },
+        }),
+      ],
+      [
+        /\/mailFolders\/[\w-]+\/messages\/delta/,
+        (url) => ({ body: { value: [], '@odata.deltaLink': `${url.split('?')[0]}?token=x` } }),
+      ],
+    ]);
+    const outlook = outlookProvider(MICROSOFT, { request });
+    const sink = fakeSink();
+
+    const state = await outlook.sync({
+      api: outlook.api(token),
+      state: {
+        known: { inbox: 'INBOX-ID', skip: [] },
+        deltas: {},
+        folders: { 'INBOX-ID': 'Inbox', 'ARCH-ID': 'Projects' },
+      },
+      since: SINCE,
+      sink,
+    });
+
+    expect(sink.renameFolder.mock.calls).toEqual([['ARCH-ID', 'Old projects']]);
+    expect(state.folders).toEqual({ 'INBOX-ID': 'Inbox', 'ARCH-ID': 'Old projects' });
   });
 
   it('resumes from the stored deltas, and starts a folder over when Graph forgot its token', async () => {

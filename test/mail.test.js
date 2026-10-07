@@ -15,6 +15,8 @@ vi.mock('../lib/db.js', () => ({
   insertMailAccount: vi.fn(),
   listMailMessages: vi.fn(),
   loadMailAccountRows: vi.fn(),
+  renameMailFolder: vi.fn(),
+  renameMailLabels: vi.fn(),
   updateMailAccount: vi.fn(),
   updateMailMessageFlags: vi.fn(),
   upsertMailMessages: vi.fn(),
@@ -87,6 +89,13 @@ function memoryStore() {
       ),
     keepFolders: async (accountId, folderIds) =>
       drop((m) => m.accountId === accountId && !folderIds.includes(m.folderId)),
+    renameLabels: async (accountId, renames) => {
+      const names = new Map(renames);
+      for (const m of ofAccount(accountId)) m.labels = m.labels.map((l) => (names.has(l) ? names.get(l) : l));
+    },
+    renameFolder: async (accountId, folderId, name) => {
+      for (const m of ofAccount(accountId)) if (m.folderId === folderId) m.labels[0] = name;
+    },
     list: vi.fn(async ({ accountIds, cursor, limit, unread }) =>
       [...messages.values()]
         .filter((m) => accountIds.includes(m.accountId))
@@ -150,18 +159,18 @@ function fakeGmail(mailbox) {
     }
     if (gate.wait) await gate.wait;
     if (url.startsWith(`${GMAIL}/profile`)) return reply({ emailAddress: mailbox.email, historyId: '10' });
-    if (url.startsWith(`${GMAIL}/labels`)) return reply({ labels: [] });
+    if (url.startsWith(`${GMAIL}/labels`)) return reply({ labels: mailbox.labels || [] });
     if (url.startsWith(`${GMAIL}/messages?`))
       return reply({ messages: Object.keys(mailbox.messages).map((id) => ({ id })) });
     if (url.startsWith(`${GMAIL}/history?`)) return reply({ historyId: '11' });
     const full = /messages\/([^?]+)\?format=full/.exec(url);
     if (full && mailbox.messages[full[1]]) {
       const id = full[1];
-      const { at, unread } = mailbox.messages[id];
+      const { at, unread, labels = [] } = mailbox.messages[id];
       return reply({
         id,
         threadId: `t-${id}`,
-        labelIds: ['INBOX', ...(unread ? ['UNREAD'] : [])],
+        labelIds: ['INBOX', ...labels, ...(unread ? ['UNREAD'] : [])],
         internalDate: String(at),
         snippet: id,
         payload: {
@@ -291,7 +300,7 @@ describe('connecting a mailbox', () => {
       lastSyncError: null,
       syncing: false,
     });
-    expect(store.accounts.get(account.id).syncState).toEqual({ historyId: '10' });
+    expect(store.accounts.get(account.id).syncState).toEqual({ historyId: '10', labels: {} });
   });
 
   it('finishes each sign-in once, and not after it expired', async () => {
@@ -351,7 +360,7 @@ describe('syncing', () => {
     expect(refresh).toMatchObject({ refresh_token: 'refresh-code-1', client_secret: 'gsecret' });
     const creds = JSON.parse(open(store.accounts.get(account.id).credentials));
     expect(creds).toMatchObject({ refreshToken: 'refresh-code-1', expiresAt: clock + 3600_000 });
-    expect(store.accounts.get(account.id).syncState).toEqual({ historyId: '11' });
+    expect(store.accounts.get(account.id).syncState).toEqual({ historyId: '11', labels: {} });
   });
 
   it('marks an account whose grant was revoked, and will not sync it until it is reconnected', async () => {
@@ -405,7 +414,7 @@ describe('syncing', () => {
   it('starts over with a first pass when the window changes', async () => {
     const account = await connect();
     await settled();
-    expect(store.accounts.get(account.id).syncState).toEqual({ historyId: '10' });
+    expect(store.accounts.get(account.id).syncState).toEqual({ historyId: '10', labels: {} });
 
     gmail.gate.wait = new Promise(() => {});
     const updated = await service.update(account.id, { syncDays: 90, label: 'Renamed' });
@@ -415,6 +424,49 @@ describe('syncing', () => {
     await expect(service.update(account.id, { syncDays: 0 })).rejects.toThrow(/1–365/);
     await expect(service.update(account.id, { enabled: 'yes' })).rejects.toThrow(/true or false/);
     await expect(service.update(999, {})).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('follows a pass on the old window with one on the new, when the window changes during it', async () => {
+    const account = await connect();
+    await settled();
+    mailbox.messages.old = { at: clock - 60 * DAY, unread: false };
+    let release;
+    gmail.gate.wait = new Promise((resolve) => (release = resolve));
+    await service.sync(account.id);
+
+    await service.update(account.id, { syncDays: 90 });
+    gmail.gate.wait = null;
+    release();
+
+    // The pass that was running saves no cursor for the old window; the one
+    // after it takes the new window whole.
+    await vi.waitFor(() =>
+      expect(store.accounts.get(account.id).syncState).toEqual({ historyId: '10', labels: {} }),
+    );
+    expect(
+      store
+        .ofAccount(account.id)
+        .map((m) => m.id)
+        .sort(),
+    ).toEqual(['a', 'b', 'old']);
+  });
+
+  it('carries a label renamed in Gmail over to the messages synced before', async () => {
+    mailbox.labels = [{ id: 'Label_1', name: 'Acme' }];
+    mailbox.messages.a.labels = ['Label_1'];
+    const account = await connect();
+    await settled();
+    expect(store.messages.get(`${account.id}:a`).labels).toEqual(['INBOX', 'Acme']);
+
+    mailbox.labels = [{ id: 'Label_1', name: 'Clients/Acme' }];
+    await service.sync(account.id);
+    await settled();
+
+    expect(store.messages.get(`${account.id}:a`).labels).toEqual(['INBOX', 'Clients/Acme']);
+    expect(store.accounts.get(account.id).syncState).toEqual({
+      historyId: '11',
+      labels: { Label_1: 'Clients/Acme' },
+    });
   });
 
   it('writes nothing for an account removed while its pass runs', async () => {
@@ -439,13 +491,88 @@ describe('syncing', () => {
     const on = await connect({}, 'on');
     mailbox.email = 'off@gmail.com';
     const off = await connect({ enabled: false }, 'off');
-    await vi.waitFor(() => expect(store.accounts.get(on.id).syncState).toEqual({ historyId: '10' }));
+    await vi.waitFor(() =>
+      expect(store.accounts.get(on.id).syncState).toEqual({ historyId: '10', labels: {} }),
+    );
 
     service.start();
     await vi.advanceTimersByTimeAsync(15_000);
-    await vi.waitFor(() => expect(store.accounts.get(on.id).syncState).toEqual({ historyId: '11' }));
+    await vi.waitFor(() =>
+      expect(store.accounts.get(on.id).syncState).toEqual({ historyId: '11', labels: {} }),
+    );
     expect(store.accounts.get(off.id).syncState).toBeNull();
     expect(store.ofAccount(off.id)).toHaveLength(0);
+  });
+});
+
+// An account write the store holds back until `land()`, for the writes
+// matching `which`, to see what lands after it.
+function holdWrites(which) {
+  const held = { holding: false, landed: false, land: () => {} };
+  const gate = new Promise((resolve) => (held.land = resolve));
+  const write = store.updateAccount;
+  store.updateAccount = async (id, changes) => {
+    if (!which(changes)) return write(id, changes);
+    held.holding = true;
+    await gate;
+    const n = await write(id, changes);
+    held.landed = true;
+    return n;
+  };
+  return held;
+}
+
+describe('the order account writes land in', () => {
+  it('keeps a window reset over the cursor of a pass whose write was still landing', async () => {
+    const account = await connect();
+    await settled();
+    const held = holdWrites((changes) => changes.syncState?.historyId === '11');
+    await service.sync(account.id);
+    await vi.waitFor(() => expect(held.holding).toBe(true));
+
+    // The first pass on the new window is kept out, to see what the reset left.
+    gmail.gate.wait = new Promise(() => {});
+    const updating = service.update(account.id, { syncDays: 90 });
+    held.land();
+    await updating;
+    await vi.waitFor(() => expect(held.landed).toBe(true));
+
+    expect(store.accounts.get(account.id)).toMatchObject({ syncDays: 90, syncState: null });
+  });
+
+  it('keeps the tokens of a reconnect over a refresh whose write was still landing', async () => {
+    const account = await connect();
+    await settled();
+    clock += 2 * 3600_000;
+    const held = holdWrites((changes) => changes.credentials && !changes.status);
+    await service.sync(account.id);
+    await vi.waitFor(() => expect(held.holding).toBe(true));
+
+    const reconnecting = connect({ accountId: account.id }, 'fresh');
+    // The reconnect has its tokens and has asked to store them.
+    await vi.waitFor(() => expect(gmail.tokenCalls.some((c) => c.code === 'fresh')).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    held.land();
+    await reconnecting;
+    await settled();
+
+    expect(held.landed).toBe(true);
+    expect(JSON.parse(open(store.accounts.get(account.id).credentials)).refreshToken).toBe('refresh-fresh');
+  });
+
+  it('applies settings changes in turn, each to what the one before left', async () => {
+    const account = await connect();
+    await settled();
+    const held = holdWrites((changes) => changes.label === 'Work');
+    const labeling = service.update(account.id, { label: 'Work' });
+    await vi.waitFor(() => expect(held.holding).toBe(true));
+
+    const disabling = service.update(account.id, { enabled: false });
+    held.land();
+    await Promise.all([labeling, disabling]);
+
+    expect(store.accounts.get(account.id)).toMatchObject({ label: 'Work', enabled: false });
+    expect((await service.list())[0]).toMatchObject({ label: 'Work', enabled: false });
   });
 });
 

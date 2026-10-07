@@ -87,6 +87,11 @@ describe('htmlToText', () => {
     expect(htmlToText(html)).toBe('Hello there,\nLine two\nLine three\n• one\n• two\na b');
   });
 
+  it('keeps a less-than sign that opens no tag as text', () => {
+    expect(htmlToText('<p>1 < 2 and 3 > 2</p>')).toBe('1 < 2 and 3 > 2');
+    expect(htmlToText('a < b, c <= d, <3 and x<<b>y</b>')).toBe('a < b, c <= d, <3 and x<y');
+  });
+
   it('drops an unclosed hidden element or comment to the end', () => {
     expect(htmlToText('before<style>p{}')).toBe('before');
     expect(htmlToText('before<!-- never closed')).toBe('before');

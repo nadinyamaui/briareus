@@ -742,6 +742,16 @@ describe('mail sync', () => {
     });
   });
 
+  it('refuses a sync interval that is not 0 to 1440 minutes', async () => {
+    // 43200 minutes is past Node's timer range, which would run it every millisecond.
+    for (const value of ['43200', 'Infinity', '-1', 'often']) {
+      const { getConfig } = await loadConfig(complete({ MAIL_SYNC_MINUTES: value }));
+      expect(() => getConfig()).toThrow(`MAIL_SYNC_MINUTES (0 to 1440 minutes: ${value})`);
+    }
+    const { getConfig } = await loadConfig(complete({ MAIL_SYNC_MINUTES: '1440' }));
+    expect(getConfig().mail.syncMinutes).toBe(1440);
+  });
+
   it('refuses half a Google client, and a redirect that is not a URL', async () => {
     const half = await loadConfig(complete({ GOOGLE_OAUTH_CLIENT_ID: 'gid' }));
     expect(() => half.getConfig()).toThrow(/GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI/);
