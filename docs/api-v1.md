@@ -102,16 +102,16 @@ from, so neither can describe a route the server does not have.
 
 What is there, by area:
 
-| Area                     | Paths                                                                                                                                                                               | Needs         |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| The token                | `/`, `/openapi.json`, `/token`, `/events`                                                                                                                                           | read          |
-| Projects                 | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                                                                                                                         | read / manage |
-| Pull requests and issues | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits`; `/repo/tree`, `/repo/file`; `/issues/{number}` and its timeline, close; `/project-board` | read / manage |
-| Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops; `/preview/access`                                                                                 | read / manage |
-| Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                                                                                 | read to admin |
-| Memory                   | `/memories`, `/memories/health`                                                                                                                                                     | read / admin  |
-| Operations               | `/attention`, `/maintenance`, `/deployments`, `/ssh/requests`, `/slack/requests`, `/tasks`, `/videos`                                                                               | admin         |
-| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `slack/workspaces`, `templates`                                                                       | admin         |
+| Area                     | Paths                                                                                                                                                                                                | Needs         |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| The token                | `/`, `/openapi.json`, `/token`, `/events`                                                                                                                                                            | read          |
+| Projects                 | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                                                                                                                                          | read / manage |
+| Pull requests and issues | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits`; `/repo/tree`, `/repo/file`, `/repo/archive`; `/issues/{number}` and its timeline, close; `/project-board` | read / manage |
+| Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops; `/preview/access`                                                                                                  | read / manage |
+| Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                                                                                                  | read to admin |
+| Memory                   | `/memories`, `/memories/health`                                                                                                                                                                      | read / admin  |
+| Operations               | `/attention`, `/maintenance`, `/deployments`, `/ssh/requests`, `/slack/requests`, `/tasks`, `/videos`                                                                                                | admin         |
+| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `slack/workspaces`, `templates`                                                                                        | admin         |
 
 Everything the removed dashboard could do has a route, except its browser push
 notifications, which went with it. The reference ends with a table from each of

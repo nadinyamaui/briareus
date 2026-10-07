@@ -461,6 +461,19 @@ Read one file of a project’s repository as text. Needs `read`, held to `repo`.
 
 **Returns** `RepoFile`. A file over 1 MB comes back with `tooLarge` and no `content`, and one that is not UTF-8 text with `binary`; `url` opens either on GitHub. A folder’s path gets 400, and a path the ref does not have 404.
 
+### `GET /repo/archive`
+
+Download a project’s repository at a commit as a gzipped tarball. Needs `read`, held to `repo`.
+
+**Query**
+
+| Field               | Type     |                                                                                   |
+| ------------------- | -------- | --------------------------------------------------------------------------------- |
+| `repo` **required** | `string` | A project, as `owner/name`                                                        |
+| `ref` **required**  | `string` | A branch, tag or commit; the `sha` of `GET /repo/tree`, so the archive matches it |
+
+**Returns** the file.
+
 ## Sessions
 
 ### `GET /sessions`
@@ -2413,6 +2426,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/pr/commit`                                                             | `GET /commits/{sha}`                                                            |
 | `GET /api/repo/tree`                                                             | `GET /repo/tree`                                                                |
 | `GET /api/repo/file`                                                             | `GET /repo/file`                                                                |
+| `GET /api/repo/archive`                                                          | `GET /repo/archive`                                                             |
 | `GET /api/dev/sessions`                                                          | `GET /sessions`                                                                 |
 | `POST /api/dev/sessions`                                                         | `POST /sessions`                                                                |
 | `GET /api/dev/sessions/:id`                                                      | `GET /sessions/{id}`                                                            |

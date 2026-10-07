@@ -4,7 +4,7 @@ const cfg = vi.hoisted(() => ({ githubToken: 'token' }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
 vi.mock('../lib/github.js', () => ({ githubRest: vi.fn() }));
 import { githubRest } from '../lib/github.js';
-import { MAX_FILE_BYTES, repoFile, repoTree } from '../lib/repofiles.js';
+import { MAX_ARCHIVE_BYTES, MAX_FILE_BYTES, repoArchive, repoFile, repoTree } from '../lib/repofiles.js';
 
 const project = { repo: 'owner/repo' };
 const ok = (data) => ({ ok: true, status: 200, json: async () => structuredClone(data) });
@@ -190,5 +190,37 @@ describe('a repository’s file', () => {
       await expect(repoFile(project, 'main', path)).rejects.toMatchObject({ status: 400 });
     respond = () => status(404);
     await expect(repoFile(project, 'main', 'gone.js')).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('a repository’s archive', () => {
+  const tarball = (bytes, length) => ({
+    ok: true,
+    status: 200,
+    headers: new Headers(length === undefined ? {} : { 'content-length': String(length) }),
+    body: new Blob([bytes]).stream(),
+  });
+  const read = async (stream) => {
+    const chunks = [];
+    for await (const c of stream) chunks.push(c);
+    return Buffer.concat(chunks);
+  };
+
+  it('streams GitHub’s tarball at the commit asked for', async () => {
+    respond = (path) => {
+      expect(path).toBe('/repos/owner/repo/tarball/c0ffee');
+      return tarball(Buffer.from('gz'), 2);
+    };
+    const { stream, size } = await repoArchive(project, 'c0ffee');
+    expect(size).toBe(2);
+    expect(String(await read(stream))).toBe('gz');
+  });
+
+  it('refuses one GitHub says is too large, and needs a ref', async () => {
+    respond = () => tarball(Buffer.from('x'), MAX_ARCHIVE_BYTES + 1);
+    await expect(repoArchive(project, 'main')).rejects.toMatchObject({ status: 413 });
+    await expect(repoArchive(project, '')).rejects.toMatchObject({ status: 400 });
+    respond = () => status(404);
+    await expect(repoArchive(project, 'gone')).rejects.toMatchObject({ status: 404 });
   });
 });

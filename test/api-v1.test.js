@@ -433,8 +433,12 @@ describe('handing a request to the dashboard’s handler', () => {
       path: '/api/repo/file',
       query: { repo, ref: 'abc', path: 'src/a.js' },
     });
+    expect(await json(`/repo/archive?repo=${repo}&ref=abc`, { token: tokens.read })).toMatchObject({
+      path: '/api/repo/archive',
+      query: { repo, ref: 'abc' },
+    });
     handler.mockClear();
-    for (const route of ['/repo/tree', '/repo/file?path=a.js']) {
+    for (const route of ['/repo/tree', '/repo/file?path=a.js', '/repo/archive?ref=abc']) {
       const join = route.includes('?') ? '&' : '?';
       expect((await request(`${route}${join}repo=other/project`, { token: tokens.read })).status).toBe(403);
       expect((await request(route, { token: tokens.read })).status).toBe(403);
