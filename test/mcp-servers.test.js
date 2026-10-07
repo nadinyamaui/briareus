@@ -27,10 +27,11 @@ function fakeRemote() {
     remote.calls.push({ url: u, method: init.method || 'GET', headers, body: init.body });
     if (u === MCP) {
       if (init.method === 'DELETE') return new Response(null, { status: 204 });
-      const auth = headers.Authorization || headers.authorization;
+      const auth = new Headers(headers).get('authorization');
       if (remote.valid && auth === `Bearer ${remote.valid}`)
         return json({ jsonrpc: '2.0', id: 1, result: {} }, 200, { 'mcp-session-id': 'sess-1' });
-      if (headers['X-Api-Key'] === 'right') return json({ jsonrpc: '2.0', id: 1, result: {} });
+      if (new Headers(headers).get('X-Api-Key') === 'right')
+        return json({ jsonrpc: '2.0', id: 1, result: {} });
       return new Response('no', {
         status: 401,
         headers: {
@@ -236,6 +237,31 @@ describe('the proxy target', () => {
     ]);
   });
 
+  it.each(['expiry', 'rejection'])('keeps a short-lived nonrefreshable token until %s', async (end) => {
+    const original = remote.fetch.getMockImplementation();
+    remote.fetch.mockImplementation(async (url, init) => {
+      const response = await original(url, init);
+      if (String(url).endsWith('/token')) {
+        const token = await response.json();
+        return json({ access_token: token.access_token, expires_in: 30 });
+      }
+      return response;
+    });
+    const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+    expect(server).toMatchObject({ status: 'ready', signedIn: true });
+    expect(service.mounts('o/r')).toHaveLength(1);
+    clock += 29_999;
+    expect((await service.upstream(server.id, 'o/r')).headers.Authorization).toBe('Bearer access-1');
+    expect(remote.tokenRequests).toHaveLength(1);
+    if (end === 'expiry') clock++;
+    await expect(service.upstream(server.id, 'o/r', { force: end === 'rejection' })).rejects.toMatchObject({
+      status: 401,
+    });
+    expect(service.list()[0].signedIn).toBe(false);
+    expect(service.mounts('o/r')).toEqual([]);
+    expect(remote.tokenRequests).toHaveLength(1);
+  });
+
   it('asks for a sign-in again once the refresh is refused, and stops mounting it', async () => {
     const server = await signIn(await service.create({ name: 'meta', url: MCP }));
     remote.refreshFails = true;
@@ -433,10 +459,9 @@ describe('review regressions', () => {
       await Promise.resolve();
       const cleanup = remote.calls.filter((call) => call.method === 'DELETE');
       expect(cleanup).toHaveLength(1);
-      expect(cleanup[0].headers).toMatchObject({
-        'MCP-Protocol-Version': protocolVersion,
-        'Mcp-Session-Id': 'sess-1',
-      });
+      const headers = new Headers(cleanup[0].headers);
+      expect(headers.get('MCP-Protocol-Version')).toBe(protocolVersion);
+      expect(headers.get('Mcp-Session-Id')).toBe('sess-1');
     },
   );
 
@@ -545,6 +570,14 @@ describe('review regressions', () => {
     [{ enabled: true }, true],
     [{ headers: { 'X-Tenant': 'new' } }, true],
     [{ headers: {} }, true],
+    [{ url: MCP }, true],
+    [{ url: ' https://mcp.example.com/devtools ' }, true],
+    [{ transport: 'http' }, true],
+    [{ oauthClientId: '' }, true],
+    [{ oauthClientSecret: '' }, true],
+    [{ oauthScope: '' }, true],
+    [{ oauthClientName: '' }, true],
+    [{ oauthRedirect: 'callback' }, true],
   ])('preserves a rotating refresh across grant-preserving update %j', async (update, allowed) => {
     const server = await signIn(await service.create({ name: 'meta', url: MCP }));
     const original = remote.fetch.getMockImplementation();
@@ -562,7 +595,9 @@ describe('review regressions', () => {
     await vi.waitFor(() => {
       const stored = saved.find((s) => s.id === server.id);
       if (update.headers) expect(JSON.parse(open(stored.secrets)).headers).toEqual(update.headers);
-      else expect(stored).toMatchObject(update);
+      else if (Object.hasOwn(update, 'oauthClientSecret'))
+        expect(JSON.parse(open(stored.secrets)).clientSecret).toBe(update.oauthClientSecret);
+      else expect(stored).toMatchObject({ ...update, ...(update.url ? { url: MCP } : {}) });
     });
     delayed.release(rotated);
     await updating;
@@ -584,6 +619,61 @@ describe('review regressions', () => {
       'Bearer access-3',
     );
     expect(remote.tokenRequests.at(-1)).toMatchObject({ refresh_token: 'refresh-2' });
+  });
+
+  it('merges probe and cleanup headers case insensitively on the wire', async () => {
+    const received = [];
+    const upstream = createServer((req, res) => {
+      received.push({ method: req.method, headers: req.headers });
+      if (req.method === 'DELETE') return res.writeHead(204).end();
+      if (req.headers['content-type'] !== 'application/json') return res.writeHead(415).end();
+      res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 'allocated' });
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { protocolVersion: '2025-03-26' },
+        }),
+      );
+    }).listen(0, '127.0.0.1');
+    await new Promise((resolve) => upstream.once('listening', resolve));
+    try {
+      const realService = createMcpService({
+        load: async () => [],
+        save: async () => {},
+        fetchImpl: fetch,
+      });
+      await realService.init();
+      const row = await realService.create({
+        name: 'strict',
+        url: `http://127.0.0.1:${upstream.address().port}/mcp`,
+        headers: {
+          'content-type': 'text/plain',
+          accept: 'text/plain',
+          'mcp-protocol-version': 'old',
+          'mcp-session-id': 'configured',
+          'X-Api-Key': 'kept',
+        },
+      });
+      expect(row.status).toBe('ready');
+      await vi.waitFor(() => expect(received).toHaveLength(2));
+      expect(received[0].headers).toMatchObject({
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        'mcp-protocol-version': '2025-06-18',
+        'x-api-key': 'kept',
+      });
+      expect(received[1]).toMatchObject({
+        method: 'DELETE',
+        headers: {
+          'mcp-session-id': 'allocated',
+          'mcp-protocol-version': '2025-03-26',
+          'x-api-key': 'kept',
+        },
+      });
+    } finally {
+      await new Promise((resolve) => upstream.close(resolve));
+    }
   });
 
   it('rejects setup and cleanup redirects without leaking custom credentials', async () => {
@@ -874,6 +964,53 @@ describe('review regressions', () => {
         expect(request.headers.Authorization).toBe(`Basic ${Buffer.from('client:new').toString('base64')}`);
       else expect(request.headers.Authorization).toBeUndefined();
       expect(form.get('client_secret')).toBe(method === 'client_secret_post' ? 'new' : null);
+    },
+  );
+
+  it.each(['client_secret_basic', 'client_secret_post'])(
+    'preserves the exact explicit secret for %s on sign-in and rotation',
+    async (method) => {
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation(async (url, init) => {
+        const response = await original(url, init);
+        if (String(url).includes('oauth-authorization-server')) {
+          const metadata = await response.json();
+          return json({ ...metadata, token_endpoint_auth_methods_supported: [method] });
+        }
+        return response;
+      });
+      const server = await signIn(
+        await service.create({
+          name: 'meta',
+          url: MCP,
+          oauthClientId: 'client',
+          oauthClientSecret: ' secret ',
+        }),
+      );
+      for (const secret of [' secret ', ' rotated ']) {
+        if (secret === ' rotated ') {
+          await service.update(server.id, { oauthClientSecret: secret });
+          await service.upstream(server.id, 'o/r', { force: true });
+        }
+        const request = remote.calls.filter((call) => call.url.endsWith('/token')).at(-1);
+        if (method === 'client_secret_basic') {
+          const basic = Buffer.from(request.headers.Authorization.slice(6), 'base64').toString();
+          expect(decodeURIComponent(basic.split(':')[1])).toBe(secret);
+        } else expect(new URLSearchParams(request.body).get('client_secret')).toBe(secret);
+      }
+    },
+  );
+
+  it.each(['x'.repeat(1025), 'secret\n', '\tsecret', 'secret\0'])(
+    'rejects invalid client secrets without trimming them: %j',
+    async (secret) => {
+      await expect(
+        service.create({
+          name: 'meta',
+          url: MCP,
+          oauthClientSecret: secret,
+        }),
+      ).rejects.toThrow(/too long or has control characters/);
     },
   );
 
