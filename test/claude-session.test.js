@@ -292,6 +292,50 @@ function ask(opts = {}) {
 }
 
 describe('Claude side questions (/btw)', () => {
+  it('pins the resumed transcript and baseline while the main turn saves a newer cost state', async () => {
+    const configDir = transcript([{ type: 'cost-state', sessionId: 'sess-1', totalCostUSD: 3 }]);
+    try {
+      const { promise, calls, finish } = ask({ env: { CLAUDE_CONFIG_DIR: configDir } });
+      const snapshot = calls[0].args[calls[0].args.indexOf('--resume') + 1];
+      expect(path.isAbsolute(snapshot)).toBe(true);
+      const original = path.join(configDir, 'projects', '-tmp-work', 'sess-1.jsonl');
+      // Main turn exits before the child loads --resume.
+      fs.appendFileSync(original, JSON.stringify({ type: 'cost-state', totalCostUSD: 3.5 }) + '\n');
+      const restored = JSON.parse(fs.readFileSync(snapshot, 'utf8').trim()).totalCostUSD;
+      expect(restored).toBe(3);
+      finish({ type: 'result', subtype: 'success', result: 'ok', total_cost_usd: restored + 0.02 });
+      expect((await promise).costUsd).toBeCloseTo(0.02);
+      expect(claudeCostBaseline(configDir, 'sess-1')).toBe(3.5);
+      expect(fs.existsSync(path.dirname(snapshot))).toBe(false);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['error', 'timeout', 'spawn failure'])(
+    'removes the private transcript after %s',
+    async (failure) => {
+      const configDir = transcript([{ type: 'cost-state', sessionId: 'sess-1', totalCostUSD: 3 }]);
+      let snapshot;
+      try {
+        const opts = { env: { CLAUDE_CONFIG_DIR: configDir }, timeoutMs: failure === 'timeout' ? 5 : 300000 };
+        if (failure === 'spawn failure') {
+          opts.spawnProcess = (_bin, args) => {
+            snapshot = args[args.indexOf('--resume') + 1];
+            throw new Error('spawn failed');
+          };
+        }
+        const { promise, calls, finish } = ask(opts);
+        if (failure !== 'spawn failure') snapshot = calls[0].args[calls[0].args.indexOf('--resume') + 1];
+        if (failure === 'error') finish({ subtype: 'error', is_error: true, result: 'failed' }, 1);
+        await expect(promise).rejects.toThrow(failure === 'timeout' ? 'timed out' : 'failed');
+        expect(fs.existsSync(path.dirname(snapshot))).toBe(false);
+      } finally {
+        fs.rmSync(configDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('reports only what the answer cost, not the conversation it forked', async () => {
     const configDir = transcript([{ type: 'cost-state', sessionId: 'sess-1', totalCostUSD: 3 }]);
     try {
