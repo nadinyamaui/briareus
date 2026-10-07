@@ -226,7 +226,7 @@ const api = express.Router();
 // headers say so (lib/security.js).
 app.use(securityHeaders);
 
-// Slack for sessions (lib/slack.js): created here because its events route
+// Slack inbox and session replies (lib/slack.js): created here because its events route
 // is a webhook, and webhooks come before everything else.
 const slackService = createSlackService({
   getJob,

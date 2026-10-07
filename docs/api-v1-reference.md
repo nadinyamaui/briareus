@@ -1052,6 +1052,118 @@ Approve or deny an SSH command. Needs `admin`.
 
 **Returns** `{ request: object }`
 
+### `GET /slack/workspaces`
+
+List the workspaces available to the operator’s Slack inbox. Needs `admin`.
+
+**Returns** `{ workspaces: SlackWorkspace[] }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+
+### `GET /slack/workspaces/{id}/conversations`
+
+List channels, DMs and group DMs. Needs `admin`.
+
+**Query**
+
+| Field    | Type      |                                                                                    |
+| -------- | --------- | ---------------------------------------------------------------------------------- |
+| `cursor` | `string`  | The `nextCursor` of the previous page; omit for the first page                     |
+| `limit`  | `integer` | Items to request, 1–200; 100 for directories and 15 for message history by default |
+| `types`  | `string`  | Comma-separated public_channel, private_channel, im and mpim; all four by default  |
+
+**Returns** `{ conversations: object[], nextCursor: string }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+
+### `GET /slack/workspaces/{id}/conversations/{channel}`
+
+Read a conversation’s details. Needs `admin`.
+
+**Returns** `{ conversation: object }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+
+### `GET /slack/workspaces/{id}/people`
+
+Read the workspace’s directory to resolve message authors. Needs `admin`.
+
+**Query**
+
+| Field    | Type      |                                                                                    |
+| -------- | --------- | ---------------------------------------------------------------------------------- |
+| `cursor` | `string`  | The `nextCursor` of the previous page; omit for the first page                     |
+| `limit`  | `integer` | Items to request, 1–200; 100 for directories and 15 for message history by default |
+
+**Returns** `{ people: object[], nextCursor: string }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+
+### `POST /slack/workspaces/{id}/direct-messages`
+
+Open a direct message with a Slack user. Needs `admin`.
+
+**Body**
+
+| Field                 | Type     |                                              |
+| --------------------- | -------- | -------------------------------------------- |
+| `userId` **required** | `string` | A Slack user ID from the workspace directory |
+
+**Returns** 201 `{ conversation: object }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+
+### `GET /slack/workspaces/{id}/conversations/{channel}/messages`
+
+Read a page of conversation history. Needs `admin`.
+
+**Query**
+
+| Field    | Type      |                                                                                    |
+| -------- | --------- | ---------------------------------------------------------------------------------- |
+| `cursor` | `string`  | The `nextCursor` of the previous page; omit for the first page                     |
+| `limit`  | `integer` | Items to request, 1–200; 100 for directories and 15 for message history by default |
+| `oldest` | `string`  | Only messages after this Slack timestamp, exclusive                                |
+| `latest` | `string`  | Only messages before this Slack timestamp, exclusive                               |
+
+**Returns** `{ messages: object[], nextCursor: string, hasMore: boolean }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+
+### `GET /slack/workspaces/{id}/conversations/{channel}/threads/{ts}`
+
+Read a thread’s parent and replies. Needs `admin`.
+
+**Query**
+
+| Field    | Type      |                                                                                    |
+| -------- | --------- | ---------------------------------------------------------------------------------- |
+| `cursor` | `string`  | The `nextCursor` of the previous page; omit for the first page                     |
+| `limit`  | `integer` | Items to request, 1–200; 100 for directories and 15 for message history by default |
+| `oldest` | `string`  | Only messages after this Slack timestamp, exclusive                                |
+| `latest` | `string`  | Only messages before this Slack timestamp, exclusive                               |
+
+**Returns** `{ messages: object[], nextCursor: string, hasMore: boolean }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+
+### `POST /slack/workspaces/{id}/conversations/{channel}/messages`
+
+Send a message or thread reply as the operator. Needs `admin`.
+
+**Body**
+
+| Field               | Type     |                                                                                       |
+| ------------------- | -------- | ------------------------------------------------------------------------------------- |
+| `text` **required** | `string` | The message in Slack mrkdwn, 1–8000 characters                                        |
+| `threadTs`          | `string` | The parent message’s Slack timestamp for a thread reply; omit for a top-level message |
+
+**Returns** 201 `{ channel: string, ts: string, message: object }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits. Human-authored messages send immediately, without an agent approval. Do not automatically retry an ambiguous failed send.
+
+### `POST /slack/workspaces/{id}/conversations/{channel}/read`
+
+Mark a conversation read through a message. Needs `admin`.
+
+**Body**
+
+| Field             | Type     |                                                                                |
+| ----------------- | -------- | ------------------------------------------------------------------------------ |
+| `ts` **required** | `string` | The latest viewed message’s Slack timestamp; debounce updates per conversation |
+
+**Returns** `{ ok: boolean }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+
+### `GET /slack/workspaces/{id}/events`
+
+Follow new Slack messages, edits and deletions live. Needs `admin`.
+
+**Returns** a server-sent event stream; see the guide’s Events section.
+
 ### `GET /slack/requests`
 
 List the Slack messages agents are waiting for approval to send. Needs `admin`.
@@ -2281,14 +2393,14 @@ A server an agent may run commands on, with approval.
 
 ### SlackWorkspace
 
-A Slack workspace sessions send messages in, as the user who installed the Slack app, and the projects that may use it.
+A Slack workspace the operator reads and replies in through the core inbox, plus optional access for project sessions; messages go out as the user who installed the Slack app.
 
 | Field              | Type       |                                                                                                                                                                                                                                                                                                                                                   |
 | ------------------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `id`               | `integer`  | Its id; set by the server                                                                                                                                                                                                                                                                                                                         |
 | `label`            | `string`   | Its display name; the workspace’s name when left empty                                                                                                                                                                                                                                                                                            |
-| `token`            | `string`   | A Slack user token (`xoxp-…`) with the scopes chat:write, users:read, channels:read, groups:read, im:write, im:history, channels:history and groups:history. Write-only: checked with Slack, stored encrypted and never returned; empty or absent keeps the stored one                                                                            |
-| `signingSecret`    | `string`   | The Slack app’s signing secret, which lets replies reach sessions through `eventsUrl`. Write-only, stored encrypted; empty or absent keeps the stored one                                                                                                                                                                                         |
+| `token`            | `string`   | A Slack user token (`xoxp-…`) with chat:write, users:read, channels:read, groups:read, im:read, mpim:read, im:write, mpim:write, channels:write, groups:write, im:history, mpim:history, channels:history and groups:history. Write-only: checked with Slack, stored encrypted and never returned; empty or absent keeps the stored one           |
+| `signingSecret`    | `string`   | The Slack app’s signing secret for live inbox events and session replies through `eventsUrl`. Write-only, stored encrypted; empty or absent keeps the stored one                                                                                                                                                                                  |
 | `projects`         | `object[]` | The projects that may send through it, each `{ repo, channels, directMessages, permissionMode }`: `channels` the channel names or ids it may post to, `directMessages` whether it may write to people (true when absent), `permissionMode` `ask` (each message waits for approval, the default) or `allow`. A project is in one workspace at most |
 | `team`             | `string`   | The workspace’s name, from Slack; read-only                                                                                                                                                                                                                                                                                                       |
 | `teamId`           | `string`   | The workspace’s Slack id; read-only                                                                                                                                                                                                                                                                                                               |
@@ -2296,8 +2408,8 @@ A Slack workspace sessions send messages in, as the user who installed the Slack
 | `userId`           | `string`   | That user’s Slack id; read-only                                                                                                                                                                                                                                                                                                                   |
 | `url`              | `string`   | The workspace’s address; read-only                                                                                                                                                                                                                                                                                                                |
 | `hasToken`         | `boolean`  | Whether a token is stored; read-only                                                                                                                                                                                                                                                                                                              |
-| `hasSigningSecret` | `boolean`  | Whether a signing secret is stored, so replies reach sessions; read-only                                                                                                                                                                                                                                                                          |
-| `eventsUrl`        | `string`   | The Request URL to give the Slack app’s Event Subscriptions, subscribed on behalf of users to message.im, message.channels and message.groups; read-only                                                                                                                                                                                          |
+| `hasSigningSecret` | `boolean`  | Whether a signing secret is stored for live inbox events and session replies; read-only                                                                                                                                                                                                                                                           |
+| `eventsUrl`        | `string`   | The Request URL to give the Slack app’s Event Subscriptions, subscribed on behalf of users to message.im, message.mpim, message.channels and message.groups; read-only                                                                                                                                                                            |
 
 ### DbCredentials
 
@@ -2470,6 +2582,16 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/operations/maintenance`                                               | `POST /maintenance`                                                             |
 | `GET /api/ssh/requests`                                                          | `GET /ssh/requests`                                                             |
 | `POST /api/ssh/requests/:id/decision`                                            | `POST /ssh/requests/{id}/decision`                                              |
+| `GET /api/slack/inbox/workspaces`                                                | `GET /slack/workspaces`                                                         |
+| `GET /api/slack/inbox/:id/conversations`                                         | `GET /slack/workspaces/{id}/conversations`                                      |
+| `GET /api/slack/inbox/:id/conversations/:channel`                                | `GET /slack/workspaces/{id}/conversations/{channel}`                            |
+| `GET /api/slack/inbox/:id/people`                                                | `GET /slack/workspaces/{id}/people`                                             |
+| `POST /api/slack/inbox/:id/direct-messages`                                      | `POST /slack/workspaces/{id}/direct-messages`                                   |
+| `GET /api/slack/inbox/:id/conversations/:channel/messages`                       | `GET /slack/workspaces/{id}/conversations/{channel}/messages`                   |
+| `GET /api/slack/inbox/:id/conversations/:channel/threads/:ts`                    | `GET /slack/workspaces/{id}/conversations/{channel}/threads/{ts}`               |
+| `POST /api/slack/inbox/:id/conversations/:channel/messages`                      | `POST /slack/workspaces/{id}/conversations/{channel}/messages`                  |
+| `POST /api/slack/inbox/:id/conversations/:channel/read`                          | `POST /slack/workspaces/{id}/conversations/{channel}/read`                      |
+| `GET /api/slack/inbox/:id/events`                                                | `GET /slack/workspaces/{id}/events`                                             |
 | `GET /api/slack/requests`                                                        | `GET /slack/requests`                                                           |
 | `POST /api/slack/requests/:id/decision`                                          | `POST /slack/requests/{id}/decision`                                            |
 | `GET /api/operations/deployments`                                                | `GET /deployments`                                                              |
