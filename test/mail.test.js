@@ -404,6 +404,29 @@ describe('syncing', () => {
     expect(JSON.parse(open(store.accounts.get(account.id).credentials)).refreshToken).toBe('refresh-fresh');
   });
 
+  it('syncs a reconnected account after the pass on its old grant, keeping that pass’s failure off it', async () => {
+    const account = await connect();
+    await settled();
+    clock += 2 * 3600_000;
+    mailbox.refreshRefused = true;
+    let release;
+    gmail.gate.refresh = new Promise((resolve) => (release = resolve));
+    await service.sync(account.id);
+    const writes = vi.spyOn(store, 'updateAccount');
+
+    await connect({ accountId: account.id }, 'fresh');
+    release();
+
+    await vi.waitFor(() =>
+      expect(store.accounts.get(account.id)).toMatchObject({
+        lastSyncAt: clock,
+        syncState: { historyId: '11', labels: {} },
+      }),
+    );
+    expect(store.accounts.get(account.id)).toMatchObject({ status: 'connected', lastSyncError: null });
+    expect(writes.mock.calls.filter(([, changes]) => changes.lastSyncError)).toEqual([]);
+  });
+
   it('drops what falls out of the window', async () => {
     const account = await connect();
     await settled();

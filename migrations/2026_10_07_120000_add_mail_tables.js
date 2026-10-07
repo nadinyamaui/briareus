@@ -37,7 +37,7 @@ export async function up({ context: p }) {
     in_inbox TINYINT(1) NOT NULL DEFAULT 0,
     is_read TINYINT(1) NOT NULL DEFAULT 0,
     is_starred TINYINT(1) NOT NULL DEFAULT 0,
-    attachments TEXT NOT NULL,
+    attachments LONGTEXT NOT NULL,
     body_text MEDIUMTEXT NULL,
     body_html MEDIUMTEXT NULL,
     body_truncated TINYINT(1) NOT NULL DEFAULT 0,

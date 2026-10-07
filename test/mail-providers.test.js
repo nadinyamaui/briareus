@@ -725,13 +725,16 @@ describe('outlookProvider', () => {
       ],
       [
         `${GRAPH}/messages/a/attachments`,
-        () => ({
-          body: {
-            value: [
-              { id: 'f1', name: 'a.pdf', contentType: 'application/pdf', size: 10, isInline: false },
-              { id: 'f2', name: 'logo.png', contentType: 'image/png', size: 5, isInline: true },
-            ],
-          },
+        (url) => ({
+          body: url.includes('page=2')
+            ? { value: [{ id: 'f3', name: 'b.txt', contentType: 'text/plain', size: 3, isInline: false }] }
+            : {
+                value: [
+                  { id: 'f1', name: 'a.pdf', contentType: 'application/pdf', size: 10, isInline: false },
+                  { id: 'f2', name: 'logo.png', contentType: 'image/png', size: 5, isInline: true },
+                ],
+                '@odata.nextLink': `${GRAPH}/messages/a/attachments?page=2`,
+              },
         }),
       ],
       [
@@ -764,7 +767,10 @@ describe('outlookProvider', () => {
     expect(sink.upserted[0]).toMatchObject({
       id: 'a',
       inInbox: true,
-      attachments: [{ id: 'f1', name: 'a.pdf', mimeType: 'application/pdf', size: 10 }],
+      attachments: [
+        { id: 'f1', name: 'a.pdf', mimeType: 'application/pdf', size: 10 },
+        { id: 'f3', name: 'b.txt', mimeType: 'text/plain', size: 3 },
+      ],
     });
     expect(sink.upserted[0]).not.toHaveProperty('hasAttachments');
     expect(sink.removed).toEqual([
