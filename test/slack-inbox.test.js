@@ -381,6 +381,51 @@ describe('the operator Slack inbox', () => {
 });
 
 describe('live Slack inbox events', () => {
+  it.each(['channel_not_found', 'not_in_channel', 'access_denied', 'channel_is_limited_access'])(
+    'keeps inbox streams open and discards repeated visibility denials: %s',
+    async (code) => {
+      const ctx = await setup();
+      const events = await stream(ctx);
+      const listener = vi.fn();
+      ctx.s.inbox.subscribe(ctx.w.id, listener);
+      const wireApi = createSlackApi({
+        fetchImpl: async () => new Response(JSON.stringify({ ok: false, error: code })),
+      });
+      const authorizations = [{ team_id: 'T1', user_id: 'U4', is_bot: false }];
+      for (const eventId of ['private-1', 'private-2']) {
+        ctx.api.mockImplementationOnce(wireApi);
+        expect(receive(ctx, { ...MESSAGE, channel: 'D4' }, { eventId, authorizations }).status).toBe(200);
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(listener).not.toHaveBeenCalled();
+      }
+      // An accessible fallback event still arrives on the original stream.
+      receive(ctx, { ...MESSAGE, channel: 'C1' }, { eventId: 'shared', authorizations });
+      expect((await events.next()).data.eventId).toBe('shared');
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0]).toBe('message');
+    },
+  );
+
+  it.each(['rate-limit', 'transport', 'upstream'])(
+    'still reconnects after a real Slack API %s failure',
+    async (failure) => {
+      const ctx = await setup();
+      const events = await stream(ctx);
+      ctx.api.mockImplementationOnce(
+        createSlackApi({
+          fetchImpl: async () => {
+            if (failure === 'transport') throw new Error('timeout');
+            if (failure === 'rate-limit') return new Response('{}', { status: 429 });
+            return new Response(JSON.stringify({ ok: false, error: 'internal_error' }), { status: 503 });
+          },
+        }),
+      );
+      expect(receive(ctx, { ...MESSAGE, channel: 'C1' }, { authorizations: [] }).status).toBe(200);
+      expect((await events.next()).name).toBe('workspace.changed');
+      expect(await events.next()).toBeNull();
+    },
+  );
+
   it.each([429, 502])(
     'recovers history by reconnecting after an access check fails with %s',
     async (status) => {
