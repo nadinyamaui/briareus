@@ -945,10 +945,14 @@ api.get('/api/repo/file', async (req, res) => {
 });
 
 api.get('/api/repo/archive', async (req, res) => {
+  const controller = new AbortController();
+  res.once('close', () => controller.abort());
   try {
     const project = getProject(String(req.query.repo || ''));
     if (!project) throw Object.assign(new Error(`Unknown project: ${req.query.repo || ''}`), { status: 404 });
-    const { stream, size } = await repoArchive({ repo: project.repo }, String(req.query.ref || ''));
+    const { stream, size } = await repoArchive({ repo: project.repo }, String(req.query.ref || ''), {
+      signal: controller.signal,
+    });
     res.once('close', () => stream.destroy());
     // The client may have disconnected while GitHub was sending headers.
     if (res.destroyed) {
@@ -961,6 +965,7 @@ api.get('/api/repo/archive', async (req, res) => {
     stream.on('error', () => res.destroy());
     stream.pipe(res);
   } catch (e) {
+    if (res.destroyed) return;
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
   }
 });
