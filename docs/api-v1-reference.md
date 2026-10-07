@@ -434,6 +434,33 @@ Read one commit with the files it changed and their patches. Needs `read`, held 
 
 **Returns** `{ commit: CommitDetail, files: File[], truncated: boolean }`
 
+### `GET /repo/tree`
+
+List every file and folder of a project’s repository at a branch. Needs `read`, held to `repo`.
+
+**Query**
+
+| Field               | Type     |                                                         |
+| ------------------- | -------- | ------------------------------------------------------- |
+| `repo` **required** | `string` | A project, as `owner/name`                              |
+| `ref`               | `string` | A branch, tag or commit; the default branch when absent |
+
+**Returns** `{ ref: string, sha: string, truncated: boolean, entries: TreeEntry[] }`. `sha` is the commit `ref` pointed at when it was read; read files at it (`GET /repo/file?ref=<sha>`) so they match the tree while the branch moves on. GitHub lists at most 100,000 entries; past that `truncated` is true and the list stops short. Submodules are left out.
+
+### `GET /repo/file`
+
+Read one file of a project’s repository as text. Needs `read`, held to `repo`.
+
+**Query**
+
+| Field               | Type     |                                                         |
+| ------------------- | -------- | ------------------------------------------------------- |
+| `repo` **required** | `string` | A project, as `owner/name`                              |
+| `ref`               | `string` | A branch, tag or commit; the default branch when absent |
+| `path` **required** | `string` | The file’s path from the repository’s root              |
+
+**Returns** `RepoFile`. A file over 1 MB comes back with `tooLarge` and no `content`, and one that is not UTF-8 text with `binary`; `url` opens either on GitHub. A folder’s path gets 400, and a path the ref does not have 404.
+
 ## Sessions
 
 ### `GET /sessions`
@@ -1865,6 +1892,30 @@ A commit with what it changed.
 | `additions` | `integer?` | Lines added                                          |
 | `deletions` | `integer?` | Lines removed                                        |
 
+### TreeEntry
+
+A file or folder of a repository.
+
+| Field  | Type         |                                             |
+| ------ | ------------ | ------------------------------------------- |
+| `path` | `string`     | Its path from the repository’s root         |
+| `type` | `blob\|tree` | `tree` for a folder, `blob` for a file      |
+| `size` | `integer?`   | A file’s size in bytes; absent for a folder |
+
+### RepoFile
+
+One file of a repository, as text.
+
+| Field      | Type      |                                                                  |
+| ---------- | --------- | ---------------------------------------------------------------- |
+| `path`     | `string`  | Its path from the repository’s root                              |
+| `ref`      | `string`  | The `ref` it was read at, as given; empty for the default branch |
+| `size`     | `integer` | Its size in bytes                                                |
+| `content`  | `string?` | Its text; null when it is binary or too large                    |
+| `binary`   | `boolean` | It does not read as UTF-8 text                                   |
+| `tooLarge` | `boolean` | It is over 1 MB, and only its size is sent                       |
+| `url`      | `string?` | The file on GitHub                                               |
+
 ### Check
 
 A check run or commit status on a pull request’s head.
@@ -2360,6 +2411,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/dev/project-board`                                                     | `GET /project-board`                                                            |
 | `POST /api/dev/project-board/move`                                               | `POST /project-board/move`                                                      |
 | `GET /api/pr/commit`                                                             | `GET /commits/{sha}`                                                            |
+| `GET /api/repo/tree`                                                             | `GET /repo/tree`                                                                |
+| `GET /api/repo/file`                                                             | `GET /repo/file`                                                                |
 | `GET /api/dev/sessions`                                                          | `GET /sessions`                                                                 |
 | `POST /api/dev/sessions`                                                         | `POST /sessions`                                                                |
 | `GET /api/dev/sessions/:id`                                                      | `GET /sessions/{id}`                                                            |
