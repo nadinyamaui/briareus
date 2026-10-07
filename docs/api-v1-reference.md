@@ -472,7 +472,7 @@ Download a project’s repository at a commit as a gzipped tarball. Needs `read`
 | `repo` **required** | `string` | A project, as `owner/name`                                                        |
 | `ref` **required**  | `string` | A branch, tag or commit; the `sha` of `GET /repo/tree`, so the archive matches it |
 
-**Returns** the file.
+**Returns** the file. Every file under one top folder, as GitHub builds it, for a client that indexes the code itself. Archives over 300 MiB (314,572,800 bytes) are refused: 413 before the download when GitHub declares the size; otherwise the connection is cut once the limit is exceeded, leaving a truncated archive after response headers have been sent.
 
 ## Sessions
 
@@ -631,7 +631,7 @@ Watch the shared browser: `tabs` events `{ tabs, active }` on every tab change, 
 
 A PNG of the tab in view, for a client that does not hold a stream open. Needs `read`, held to the session’s project.
 
-**Returns** the file.
+**Returns** the file. 409 when the browser is not running.
 
 ### `POST /sessions/{id}/browser/input`
 

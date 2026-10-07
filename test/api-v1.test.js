@@ -610,6 +610,25 @@ describe('the event streams', () => {
       ).rejects.toThrow();
     }
   });
+
+  it.each(['revoked', 'expired', 'API disabled'])('ends an open binary archive when %s', async (reason) => {
+    handler.mockImplementation((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/gzip' });
+      res.write('gz');
+    });
+    const response = await request(`/repo/archive?repo=${repo}&ref=abc`, { token: tokens.read });
+    expect(response.headers.get('content-type')).toBe('application/gzip');
+    const reader = response.body.getReader();
+    await reader.read();
+    if (reason === 'revoked') await auth.revoke(auth.list().find((d) => d.label === 'read client').id);
+    else if (reason === 'expired') clock += 31 * 24 * 60 * 60 * 1000;
+    else apiOn = false;
+    await expect(
+      (async () => {
+        for (;;) if ((await reader.read()).done) return 'ended';
+      })(),
+    ).rejects.toThrow();
+  });
 });
 
 describe('tokens', () => {
@@ -691,6 +710,16 @@ describe('the contract', () => {
     // Every reference in the document points at a schema that is there.
     for (const [, name] of JSON.stringify(doc).matchAll(/#\/components\/schemas\/(\w+)/g))
       expect(doc.components.schemas, name).toHaveProperty(name);
+  });
+
+  it('documents the binary archive limit and truncated-transfer behavior', () => {
+    const response = apiV1OpenApi().paths['/repo/archive'].get.responses[200];
+    expect(response.content['*/*'].schema).toEqual({ type: 'string', format: 'binary' });
+    for (const text of [response.description, apiV1Reference()]) {
+      expect(text).toContain('300 MiB (314,572,800 bytes)');
+      expect(text).toContain('413 before the download');
+      expect(text).toContain('truncated archive after response headers');
+    }
   });
 
   it('writes catalog types as JSON Schema', () => {

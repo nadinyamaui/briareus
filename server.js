@@ -949,6 +949,12 @@ api.get('/api/repo/archive', async (req, res) => {
     const project = getProject(String(req.query.repo || ''));
     if (!project) throw Object.assign(new Error(`Unknown project: ${req.query.repo || ''}`), { status: 404 });
     const { stream, size } = await repoArchive({ repo: project.repo }, String(req.query.ref || ''));
+    res.once('close', () => stream.destroy());
+    // The client may have disconnected while GitHub was sending headers.
+    if (res.destroyed) {
+      stream.destroy();
+      return;
+    }
     res.setHeader('Content-Type', 'application/gzip');
     if (size) res.setHeader('Content-Length', String(size));
     // A failure once bytes have gone out can only cut the response short.

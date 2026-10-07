@@ -217,10 +217,66 @@ describe('a repository’s archive', () => {
   });
 
   it('refuses one GitHub says is too large, and needs a ref', async () => {
-    respond = () => tarball(Buffer.from('x'), MAX_ARCHIVE_BYTES + 1);
+    const cancel = vi.fn();
+    respond = () => ({
+      ...tarball(Buffer.from('x'), MAX_ARCHIVE_BYTES + 1),
+      body: new ReadableStream({ cancel }),
+    });
     await expect(repoArchive(project, 'main')).rejects.toMatchObject({ status: 413 });
+    expect(cancel).toHaveBeenCalledOnce();
     await expect(repoArchive(project, '')).rejects.toMatchObject({ status: 400 });
     respond = () => status(404);
     await expect(repoArchive(project, 'gone')).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('forwards an upstream failure to the returned stream', async () => {
+    let controller;
+    const body = new ReadableStream({
+      start(c) {
+        controller = c;
+        c.enqueue(Buffer.from('gz'));
+      },
+    });
+    respond = () => ({ ...tarball(Buffer.from('')), body });
+    const { stream } = await repoArchive(project, 'main');
+    const reading = read(stream);
+    const failure = new Error('upstream reset');
+    const rejected = expect(reading).rejects.toThrow(failure);
+    controller.error(failure);
+    await rejected;
+    expect(stream.destroyed).toBe(true);
+  });
+
+  it('cancels the upstream body when the caller destroys the stream', async () => {
+    const cancel = vi.fn();
+    respond = () => ({
+      ...tarball(Buffer.from('')),
+      body: new ReadableStream({ cancel }),
+    });
+    const { stream } = await repoArchive(project, 'main');
+    stream.destroy();
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+  });
+
+  it('cancels an archive with no stated size when the streaming limit fails', async () => {
+    const cancel = vi.fn();
+    const chunk = Buffer.alloc(1024 * 1024);
+    respond = () => ({
+      ...tarball(Buffer.from('')),
+      body: new ReadableStream({
+        pull(controller) {
+          controller.enqueue(chunk);
+        },
+        cancel,
+      }),
+    });
+    const { stream } = await repoArchive(project, 'main');
+    // Consume without buffering the 300 MiB fixture.
+    await expect(
+      (async () => {
+        for await (const chunk of stream) expect(chunk.length).toBe(1024 * 1024);
+      })(),
+    ).rejects.toMatchObject({ status: 413 });
+    expect(cancel).toHaveBeenCalledOnce();
   });
 });
