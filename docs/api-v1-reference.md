@@ -1606,6 +1606,46 @@ Read the server’s database login, decrypted, to connect through an SSH tunnel 
 
 **Returns** `{ credentials: DbCredentials }`
 
+### `GET /settings/mcp/servers`
+
+List every server, with the values a new one starts from. Needs `admin`.
+
+**Returns** `{ servers: McpServer[], defaults: McpServer }`
+
+### `POST /settings/mcp/servers`
+
+Add a server. Needs `admin`.
+
+**Body**: a [McpServer](#mcpserver), whole or in part.
+
+**Returns** 201 `{ server: McpServer }`. Checks the server at once. One that signs in with OAuth answers with `status: needs-sign-in` and a `signInUrl` to open; nothing else is needed to finish the setup.
+
+### `PUT /settings/mcp/servers/{id}`
+
+Change a server. Needs `admin`.
+
+**Body**: a [McpServer](#mcpserver), whole or in part.
+
+**Returns** `{ server: McpServer }`
+
+### `DELETE /settings/mcp/servers/{id}`
+
+Remove a server. Needs `admin`.
+
+**Returns** `{ ok: boolean }`
+
+### `POST /settings/mcp/servers/{id}/connect`
+
+Check a server again; for one that signs in with OAuth and is not signed in, start the sign-in. Needs `admin`.
+
+**Body**
+
+| Field    | Type      |                                                      |
+| -------- | --------- | ---------------------------------------------------- |
+| `signIn` | `boolean` | Start a fresh sign-in even when the stored one works |
+
+**Returns** `{ server: McpServer }`
+
 ### `GET /settings/slack/workspaces`
 
 List every workspace, with the values a new one starts from. Needs `admin`.
@@ -2299,6 +2339,37 @@ A Slack workspace sessions send messages in, as the user who installed the Slack
 | `hasSigningSecret` | `boolean`  | Whether a signing secret is stored, so replies reach sessions; read-only                                                                                                                                                                                                                                                                          |
 | `eventsUrl`        | `string`   | The Request URL to give the Slack app’s Event Subscriptions, subscribed on behalf of users to message.im, message.channels and message.groups; read-only                                                                                                                                                                                          |
 
+### McpServer
+
+An MCP server whose tools Claude and Codex sessions get beside Briareus’s own. A remote one is reached through Briareus, which adds its credentials, so a sign-in serves every provider account.
+
+| Field                  | Type                                     |                                                                                                                                                                                             |
+| ---------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                   | `integer`                                | Its id; set by the server                                                                                                                                                                   |
+| `name`                 | `string`                                 | What the tools are filed under (`mcp__<name>__…`): letters, digits, `_` and `-`, unique, none of Briareus’s own                                                                             |
+| `label`                | `string`                                 | Its display name; the name when left empty                                                                                                                                                  |
+| `transport`            | `http\|stdio`                            | `http` for a remote server (Streamable HTTP), `stdio` for a command run beside each session                                                                                                 |
+| `url`                  | `string`                                 | A remote server’s endpoint; https, or http on the Briareus machine itself                                                                                                                   |
+| `command`              | `string`                                 | What starts a stdio server                                                                                                                                                                  |
+| `args`                 | `string[]`                               | That command’s arguments                                                                                                                                                                    |
+| `repos`                | `string[]`                               | The projects whose sessions get it; empty for every project                                                                                                                                 |
+| `enabled`              | `boolean`                                | Whether sessions get it                                                                                                                                                                     |
+| `headers`              | `object`                                 | Headers sent to a remote server, `{ name: value }`, e.g. an API key. Write-only, stored encrypted; present replaces the whole set. An `Authorization` header here means no OAuth sign-in    |
+| `env`                  | `object`                                 | Environment for a stdio server, `{ NAME: value }`. Write-only, stored encrypted; present replaces the whole set                                                                             |
+| `oauthClientId`        | `string`                                 | An OAuth client to sign in as, for a server that does not let clients register themselves; empty to register automatically                                                                  |
+| `oauthClientSecret`    | `string`                                 | That client’s secret. Write-only, stored encrypted                                                                                                                                          |
+| `oauthScope`           | `string`                                 | The scopes to ask for; empty for what the server asks for                                                                                                                                   |
+| `auth`                 | `none\|oauth`                            | How Briareus authenticates to it; set by the server                                                                                                                                         |
+| `status`               | `unchecked\|ready\|needs-sign-in\|error` | Whether it works: `needs-sign-in` until someone opens `signInUrl`; set by the server                                                                                                        |
+| `error`                | `string`                                 | Why it does not, when it does not; set by the server                                                                                                                                        |
+| `checkedAt`            | `integer?`                               | When it was last checked, epoch milliseconds                                                                                                                                                |
+| `signedInAt`           | `integer?`                               | When the last OAuth sign-in completed, epoch milliseconds                                                                                                                                   |
+| `signedIn`             | `boolean`                                | Whether an OAuth sign-in is stored; set by the server                                                                                                                                       |
+| `signInUrl`            | `string?`                                | Open this in a browser to sign in. Valid for 15 minutes; the provider returns to `PUBLIC_BASE_URL/webhooks/mcp-oauth/callback`, which finishes the setup. Null when no sign-in is under way |
+| `headerNames`          | `string[]`                               | The names of the stored headers; set by the server                                                                                                                                          |
+| `envNames`             | `string[]`                               | The names of the stored environment variables; set by the server                                                                                                                            |
+| `hasOAuthClientSecret` | `boolean`                                | Whether a client secret is stored; set by the server                                                                                                                                        |
+
 ### DbCredentials
 
 An SSH server’s database login, opened. Reach `host`:`port` through a tunnel over that server.
@@ -2528,6 +2599,11 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `PUT /api/ssh/servers/:id`                                                       | `PUT /settings/ssh/servers/{id}`                                                |
 | `DELETE /api/ssh/servers/:id`                                                    | `DELETE /settings/ssh/servers/{id}`                                             |
 | `GET /api/ssh/servers/:id/db-credentials`                                        | `GET /settings/ssh/servers/{id}/db-credentials`                                 |
+| `GET /api/mcp/servers`                                                           | `GET /settings/mcp/servers`                                                     |
+| `POST /api/mcp/servers`                                                          | `POST /settings/mcp/servers`                                                    |
+| `PUT /api/mcp/servers/:id`                                                       | `PUT /settings/mcp/servers/{id}`                                                |
+| `DELETE /api/mcp/servers/:id`                                                    | `DELETE /settings/mcp/servers/{id}`                                             |
+| `POST /api/mcp/servers/:id/connect`                                              | `POST /settings/mcp/servers/{id}/connect`                                       |
 | `GET /api/slack/workspaces`                                                      | `GET /settings/slack/workspaces`                                                |
 | `POST /api/slack/workspaces`                                                     | `POST /settings/slack/workspaces`                                               |
 | `PUT /api/slack/workspaces/:id`                                                  | `PUT /settings/slack/workspaces/{id}`                                           |

@@ -257,6 +257,7 @@ import {
   flushDeliveries,
   setSessionWebhook,
   setSlackAccess,
+  setExternalMcp,
   slackProtocol,
   pushProtocol,
   rotateSessionWebhook,
@@ -10930,6 +10931,35 @@ describe('the shared browser in a session', () => {
     expect(
       job.events.some((e) => e.text === 'Shared browser could not start: No Chromium on this server'),
     ).toBe(true);
+  });
+
+  it('mounts the project’s own MCP servers: a remote one through the proxy, behind the session token', async () => {
+    const job = getJob('br-turn');
+    job.browser = false;
+    const asked = [];
+    setExternalMcp((repo) => {
+      asked.push(repo);
+      return [
+        { id: 7, name: 'meta', transport: 'http' },
+        { id: 8, name: 'local', transport: 'stdio', command: 'npx', args: ['-y', 'x'], env: { K: 'v' } },
+      ];
+    });
+    try {
+      const { seen, settled } = await turn(job, 'List my apps');
+      await settled;
+      expect(asked).toContain('acme/shop');
+      expect(seen.mcp.meta).toEqual({
+        type: 'http',
+        url: expect.stringMatching(/\/api\/agent\/mcp\/7$/),
+        headers: { Authorization: expect.stringMatching(/^Bearer [0-9a-f]{48}$/) },
+      });
+      expect(seen.mcp.meta.headers.Authorization).toBe(
+        `Bearer ${seen.mcp.reviewer_memory.env.REVIEWER_MEMORY_TOKEN}`,
+      );
+      expect(seen.mcp.local).toEqual({ command: 'npx', args: ['-y', 'x'], env: { K: 'v' } });
+    } finally {
+      setExternalMcp(() => []);
+    }
   });
 
   it('does not take a Stop of the previous turn as a Stop of this one', async () => {
