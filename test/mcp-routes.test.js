@@ -13,6 +13,7 @@ beforeEach(async () => {
     list: vi.fn(() => []),
     create: vi.fn(async (input) => ({ id: 1, ...input })),
     connect: vi.fn(async (id, opts) => ({ id, opts })),
+    finishSignIn: vi.fn(async (id, url) => ({ id, url })),
     upstream: vi.fn(async (_id, _repo, opts) => ({
       url: 'https://remote.example/mcp',
       headers: { Authorization: opts?.force ? 'Bearer fresh' : 'Bearer stale' },
@@ -176,6 +177,17 @@ describe('the operator routes', () => {
       body: JSON.stringify({ signIn: true }),
     });
     expect(await connect.json()).toEqual({ server: { id: 3, opts: { signIn: true } } });
+  });
+
+  it('take the pasted address of a loopback sign-in', async () => {
+    const res = await fetch(`${base}/api/mcp/servers/3/finish-sign-in`, {
+      method: 'POST',
+      headers: { 'x-test-operator': '1', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'http://127.0.0.1:1/callback?code=c&state=s' }),
+    });
+    expect(await res.json()).toEqual({
+      server: { id: 3, url: 'http://127.0.0.1:1/callback?code=c&state=s' },
+    });
   });
 
   it('are never reached with a session token', async () => {

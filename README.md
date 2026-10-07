@@ -837,8 +837,12 @@ with `status: needs-sign-in` and a `signInUrl`. Open that link on any device and
 provider sends the browser to `PUBLIC_BASE_URL/webhooks/mcp-oauth/callback`, which completes
 the setup. Like the other webhooks, that path must bypass Cloudflare Access. If a server does
 not let clients register themselves, create an OAuth app with it, give its `oauthClientId` (and
-`oauthClientSecret`), and register that callback URL as the app's redirect. A server that takes
-an API key gets it as `headers` instead. `POST …/servers/:id/connect` checks a server again
+`oauthClientSecret`), and register that callback URL as the app's redirect. Some servers only let clients they already know register, and only with a loopback redirect.
+Meta's is one: it accepts names starting with `Claude Code`. For those, set `oauthClientName`
+(for example `Claude Code (Briareus)`) and `oauthRedirect: loopback`. The sign-in then ends on
+a `http://127.0.0.1:<port>/callback?code=…` page that won't load (`signInNeedsPaste` is true).
+Copy that address and send it to `POST …/servers/:id/finish-sign-in` as `url` to complete the
+setup. A server that takes an API key gets it as `headers` instead. `POST …/servers/:id/connect` checks a server again
 (`{ "signIn": true }` starts a new sign-in, for example to use another account).
 
 One sign-in covers every provider account. Sessions never see a remote server's credentials:

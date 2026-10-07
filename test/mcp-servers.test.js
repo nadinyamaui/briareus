@@ -49,6 +49,24 @@ function fakeRemote() {
       });
     if (u === 'https://mcp.example.com/register') {
       remote.registrations++;
+      const reg = JSON.parse(init.body);
+      remote.lastRegistration = reg;
+      // Like Meta: only known clients, and only to their own loopback,
+      // which it hands back rewritten.
+      if (remote.knownClientsOnly) {
+        if (
+          !reg.client_name.startsWith('Claude Code') ||
+          !/^http:\/\/127\.0\.0\.1:\d+\/callback$/.test(reg.redirect_uris[0])
+        )
+          return json(
+            { error: 'invalid_client_metadata', error_description: 'Not available for this client.' },
+            400,
+          );
+        return json(
+          { client_id: 'known', redirect_uris: [reg.redirect_uris[0].replace('127.0.0.1', 'localhost')] },
+          201,
+        );
+      }
       return json({ client_id: `client-${remote.registrations}` }, 201);
     }
     if (u === 'https://auth.example.com/token') {
@@ -285,5 +303,55 @@ describe('servers that do not sign in', () => {
     const server = await signIn(await service.create({ name: 'meta', url: MCP }));
     const moved = await service.update(server.id, { url: 'https://other.example.com/mcp' });
     expect(moved).toMatchObject({ signedIn: false, auth: 'none', status: 'error' });
+  });
+});
+
+describe('a server that only lets clients it knows sign in', () => {
+  beforeEach(() => {
+    remote.knownClientsOnly = true;
+  });
+
+  it('says what to set when it refuses Briareus', async () => {
+    const server = await service.create({ name: 'meta', url: MCP });
+    expect(server.status).toBe('error');
+    expect(server.error).toMatch(/refused to register Briareus.*oauthClientName.*loopback/);
+  });
+
+  it('registers under the given name to a loopback, and finishes with the pasted address', async () => {
+    const server = await service.create({
+      name: 'meta',
+      url: MCP,
+      oauthClientName: 'Claude Code (Briareus)',
+      oauthRedirect: 'loopback',
+    });
+    expect(server).toMatchObject({ status: 'needs-sign-in', signInNeedsPaste: true });
+    expect(remote.lastRegistration).toMatchObject({
+      client_name: 'Claude Code (Briareus)',
+      redirect_uris: [expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/callback$/)],
+    });
+    const url = new URL(server.signInUrl);
+    // The redirect the registration answered with, not the one asked for.
+    const redirect = url.searchParams.get('redirect_uri');
+    expect(redirect).toMatch(/^http:\/\/localhost:\d+\/callback$/);
+    const landed = `${redirect}?code=the-code&state=${url.searchParams.get('state')}`;
+    await expect(service.finishSignIn(server.id, 'http://127.0.0.1:1/callback')).rejects.toThrow(
+      /code and state/,
+    );
+    const done = await service.finishSignIn(server.id, landed);
+    expect(done).toMatchObject({ status: 'ready', signedIn: true, signInNeedsPaste: false });
+    expect(remote.tokenRequests[0]).toMatchObject({ redirect_uri: redirect, client_id: 'known' });
+    // The registration is kept for the next sign-in.
+    await service.connect(server.id, { signIn: true });
+    expect(remote.registrations).toBe(1);
+  });
+
+  it('refuses an address from another server’s sign-in', async () => {
+    const opts = { url: MCP, oauthClientName: 'Claude Code (B)', oauthRedirect: 'loopback' };
+    const a = await service.create({ name: 'a', ...opts });
+    const b = await service.create({ name: 'b', ...opts });
+    const state = new URL(a.signInUrl).searchParams.get('state');
+    await expect(
+      service.finishSignIn(b.id, `http://127.0.0.1:1/callback?code=c&state=${state}`),
+    ).rejects.toThrow(/another server/);
   });
 });
