@@ -1,8 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+vi.mock('../lib/prices.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  loadCatalog: vi.fn(async () => catalog),
+}));
 import {
   absorbedOwners,
   absorbedRepricing,
   down,
+  up,
 } from '../migrations/2026_10_07_200000_measured_cache_pricing.js';
 
 const catalog = { openai: { models: { gpt: { cost: { input: 4, output: 20, cache_read: 0.4 } } } } };
@@ -69,5 +75,52 @@ describe('absorbed cache repricing', () => {
   });
   it('refuses to roll reconciled dollar snapshots back', async () => {
     await expect(down()).rejects.toThrow('cannot be rolled back');
+  });
+});
+
+describe('absorbed reconciliation writes', () => {
+  const held = 14.800001480000002;
+  function pool(affectedRows) {
+    const conn = {
+      beginTransaction: vi.fn(),
+      commit: vi.fn(),
+      rollback: vi.fn(),
+      release: vi.fn(),
+      query: vi.fn(async () => [{ affectedRows }]),
+    };
+    return {
+      conn,
+      getConnection: async () => conn,
+      query: vi.fn(async (sql) => {
+        if (sql.includes('information_schema')) return [[{ COLUMN_NAME: 'cache_measured' }]];
+        if (sql.startsWith('UPDATE')) return [{ affectedRows: 0 }];
+        if (sql.includes('FROM `jobs`'))
+          return [[{ id: 'parent', meta: JSON.stringify({ ...parent, absorbedEstimatedCostUsd: held }) }]];
+        if (sql.includes('FROM `turn_usage`'))
+          return [
+            [{ job_id: 'deleted', provider: 'codex', model: 'gpt', input_tokens: 10000001, cost_usd: null }],
+          ];
+        if (sql.includes('FROM `task_sessions`'))
+          return [[{ id: 'deleted', meta: JSON.stringify({ parentId: 'parent' }) }]];
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+    };
+  }
+  it('passes the full-precision snapshot through to the conditional update', async () => {
+    const p = pool(1);
+    await up({ context: p });
+    const [, params] = p.conn.query.mock.calls[0];
+    expect(params[0]).toBeCloseTo(5.440000544, 12);
+    expect(params.slice(1)).toEqual(['parent', held]);
+    expect(p.conn.commit).toHaveBeenCalledOnce();
+    expect(p.conn.rollback).not.toHaveBeenCalled();
+    expect(p.conn.release).toHaveBeenCalledOnce();
+  });
+  it('rolls back and fails the migration when a selected snapshot cannot be updated', async () => {
+    const p = pool(0);
+    await expect(up({ context: p })).rejects.toThrow(/parent changed during reconciliation; retry/);
+    expect(p.conn.commit).not.toHaveBeenCalled();
+    expect(p.conn.rollback).toHaveBeenCalledOnce();
+    expect(p.conn.release).toHaveBeenCalledOnce();
   });
 });

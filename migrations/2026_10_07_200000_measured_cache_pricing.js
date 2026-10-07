@@ -131,14 +131,18 @@ export async function up({ context: p }) {
   try {
     await conn.beginTransaction();
     for (const [id, { held, next }] of changes) {
-      await conn.query(
+      const [result] = await conn.query(
         `UPDATE \`jobs\` SET \`meta\` = JSON_SET(\`meta\`,
            '$.absorbedEstimatedCostUsd', ?, '$.absorbedPricingVersion', 'measured-cache-v1')
          WHERE \`id\` = ? AND JSON_VALID(\`meta\`)
-           AND CAST(JSON_UNQUOTE(JSON_EXTRACT(\`meta\`, '$.absorbedEstimatedCostUsd')) AS DECIMAL(12,4)) = ?
+           AND CAST(JSON_UNQUOTE(JSON_EXTRACT(\`meta\`, '$.absorbedEstimatedCostUsd')) AS DOUBLE) = ?
            AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(\`meta\`, '$.absorbedPricingVersion')), '') <> 'measured-cache-v1'`,
         [next, id, held],
       );
+      if (result.affectedRows !== 1)
+        throw new Error(
+          `Measured-cache pricing: absorbed estimate for ${id} changed during reconciliation; retry the migration.`,
+        );
     }
     await conn.commit();
   } catch (error) {
