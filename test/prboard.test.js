@@ -145,6 +145,68 @@ function serve(nodes, defaultBranch = 'main', hasNextPage = false, refs = nodes,
 beforeEach(() => gh.graphql.mockReset());
 
 describe('projectPulls', () => {
+  describe('what a load costs GitHub', () => {
+    const board = () => ({
+      repository: {
+        defaultBranchRef: { name: 'main' },
+        stackRefs: { pageInfo: { hasNextPage: false }, nodes: [prNode({ number: 1 })] },
+        pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [prNode({ number: 1 })] },
+      },
+    });
+
+    it('serves a fresh read from a cache younger than fifteen seconds', async () => {
+      vi.useFakeTimers();
+      try {
+        gh.graphql.mockResolvedValue(board());
+        const p = project();
+        await projectPulls(p);
+        await projectPulls(p, { fresh: true });
+        expect(gh.graphql).toHaveBeenCalledTimes(1);
+        vi.advanceTimersByTime(16_000);
+        await projectPulls(p, { fresh: true });
+        expect(gh.graphql).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps a plain read cached for two minutes', async () => {
+      vi.useFakeTimers();
+      try {
+        gh.graphql.mockResolvedValue(board());
+        const p = project();
+        await projectPulls(p);
+        vi.advanceTimersByTime(110_000);
+        await projectPulls(p);
+        expect(gh.graphql).toHaveBeenCalledTimes(1);
+        vi.advanceTimersByTime(11_000);
+        await projectPulls(p);
+        expect(gh.graphql).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('shares one load between callers that arrive while it runs', async () => {
+      let answer;
+      gh.graphql.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+      const p = project();
+      const both = Promise.all([projectPulls(p), projectPulls(p, { fresh: true })]);
+      answer(board());
+      const [a, b] = await both;
+      expect(a).toBe(b);
+      expect(gh.graphql).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets the next caller try again after a load fails', async () => {
+      gh.graphql.mockRejectedValueOnce(Object.assign(new Error('rate limit'), { rateLimited: true }));
+      gh.graphql.mockResolvedValueOnce(board());
+      const p = project();
+      await expect(projectPulls(p)).rejects.toMatchObject({ rateLimited: true });
+      await expect(projectPulls(p)).resolves.toMatchObject({ repo: p.repo });
+    });
+  });
+
   it('paginates the complete open pull request list', async () => {
     const first = prNode({ number: 1 });
     const second = prNode({ number: 51 });
@@ -347,9 +409,9 @@ describe('projectPulls', () => {
 
       const { pulls, issues, issuesTruncated } = await projectPulls(project());
       expect(pulls.map((p) => p.number)).toEqual([1]);
-      // Four pages: the one that came with the pull requests and three more.
-      expect(gh.graphql).toHaveBeenCalledTimes(4);
-      expect(issues.length).toBe(4);
+      // Two pages: the one that came with the pull requests and one more.
+      expect(gh.graphql).toHaveBeenCalledTimes(2);
+      expect(issues.length).toBe(2);
       expect(issuesTruncated).toBe(true);
     });
 
@@ -1026,14 +1088,20 @@ describe('projectPulls', () => {
   });
 
   it('caches per repo until asked for fresh', async () => {
-    const p = project();
-    serve([prNode({ number: 1 })]);
-    await projectPulls(p);
-    serve([prNode({ number: 2 })]);
-    const cached = await projectPulls(p);
-    expect(cached.pulls[0].number).toBe(1); // still the cached board
-    const fresh = await projectPulls(p, { fresh: true });
-    expect(fresh.pulls[0].number).toBe(2);
+    vi.useFakeTimers();
+    try {
+      const p = project();
+      serve([prNode({ number: 1 })]);
+      await projectPulls(p);
+      serve([prNode({ number: 2 })]);
+      const cached = await projectPulls(p);
+      expect(cached.pulls[0].number).toBe(1); // still the cached board
+      vi.advanceTimersByTime(16_000); // past the floor fresh still respects
+      const fresh = await projectPulls(p, { fresh: true });
+      expect(fresh.pulls[0].number).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
