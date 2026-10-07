@@ -51,6 +51,7 @@ import {
   devSessionRecords,
   createDevSession,
   sendDevMessage,
+  askDevSessionBtw,
   cancelDevTurn,
   compactDevSession,
   clearDevTranscript,
@@ -1892,6 +1893,23 @@ api.post('/api/dev/sessions/:id/message', (req, res) => {
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
+});
+
+// /btw: a side question answered beside the conversation, never in it. The
+// answer is waited for here; the transcript gets it too, for every client.
+api.post('/api/dev/sessions/:id/btw', async (req, res) => {
+  let asked;
+  try {
+    asked = askDevSessionBtw(req.params.id, (req.body || {}).text);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  const answer = await asked.answer.then(
+    ({ text, costUsd }) => ({ text, isError: false, costUsd }),
+    (e) => ({ text: e.message, isError: true, costUsd: e.usage?.costUsd ?? null }),
+  );
+  const job = getJob(req.params.id); // deleted while it was answered: no record to send
+  res.json({ session: job ? publicJob(job) : null, id: asked.id, ...answer });
 });
 
 // Dashboard only: internal session tokens cannot compact other sessions.

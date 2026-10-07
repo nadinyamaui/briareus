@@ -4,7 +4,12 @@ import { PassThrough } from 'stream';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { compactClaudeSession, claudeQuotaFailure, transferClaudeSession } from '../lib/claude-session.js';
+import {
+  askClaudeSideQuestion,
+  compactClaudeSession,
+  claudeQuotaFailure,
+  transferClaudeSession,
+} from '../lib/claude-session.js';
 
 describe('Claude account transfer', () => {
   it('copies only the selected conversation and updates an older destination copy', () => {
@@ -186,6 +191,126 @@ describe('Claude headless compaction', () => {
 
   it('gives up after the time limit', async () => {
     const { promise } = run({ timeoutMs: 5 });
+    await expect(promise).rejects.toThrow('timed out');
+  });
+});
+
+function ask(opts = {}) {
+  const calls = [];
+  const child = new EventEmitter();
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => child.emit('close', null, 'SIGTERM');
+  let stdin = '';
+  child.stdin.on('data', (c) => {
+    stdin += c.toString('utf8');
+  });
+  const promise = askClaudeSideQuestion({
+    bin: '/mock/claude',
+    cwd: '/tmp/work',
+    env: {},
+    sessionId: 'sess-1',
+    model: 'claude-opus-5-5',
+    question: '--what changed so far?',
+    sysPromptFile: '/tmp/sys.txt',
+    spawnProcess: (bin, args) => {
+      calls.push({ bin, args });
+      return child;
+    },
+    ...opts,
+  });
+  const finish = (report, code = 0) => {
+    child.stdout.end(typeof report === 'string' ? report : JSON.stringify(report));
+    setImmediate(() => child.emit('close', code, null));
+  };
+  return { promise, calls, child, finish, stdin: () => stdin };
+}
+
+describe('Claude side questions (/btw)', () => {
+  it('asks an unsaved fork with tools, MCP servers and inherited hooks disabled, over stdin', async () => {
+    const { promise, calls, finish, stdin } = ask();
+    finish({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      result: ' The login form. ',
+      total_cost_usd: 0.03,
+      duration_ms: 4000,
+      usage: {
+        input_tokens: 10,
+        cache_read_input_tokens: 20000,
+        cache_creation_input_tokens: 500,
+        output_tokens: 40,
+      },
+    });
+    await expect(promise).resolves.toEqual({
+      text: 'The login form.',
+      costUsd: 0.03,
+      durationMs: 4000,
+      inputTokens: 20510,
+      outputTokens: 40,
+      cachedInputTokens: 20000,
+    });
+    expect(calls[0].args).toEqual([
+      '-p',
+      '--resume',
+      'sess-1',
+      '--fork-session',
+      '--no-session-persistence',
+      '--tools',
+      '',
+      '--strict-mcp-config',
+      '--settings',
+      '{"disableAllHooks":true}',
+      '--max-turns',
+      '1',
+      '--output-format',
+      'json',
+      '--model',
+      'claude-opus-5-5',
+      '--append-system-prompt-file',
+      '/tmp/sys.txt',
+    ]);
+    expect(calls[0].args).not.toContain('bypassPermissions');
+    // The question never rides on argv, where a leading dash would read as a flag.
+    expect(stdin()).toMatch(
+      /^<system-reminder>[\s\S]*\/btw[\s\S]*<\/system-reminder>\n\n--what changed so far\?$/,
+    );
+  });
+
+  it('says so when the one step went on a tool call, keeping what it cost', async () => {
+    const { promise, finish } = ask();
+    finish(
+      {
+        type: 'result',
+        subtype: 'error_max_turns',
+        is_error: true,
+        total_cost_usd: 0.01,
+        usage: { output_tokens: 5 },
+      },
+      1,
+    );
+    const error = await promise.catch((e) => e);
+    expect(error.message).toMatch('needed tools');
+    expect(error.usage.costUsd).toBe(0.01);
+  });
+
+  it('rejects an exit without a JSON report, naming stderr', async () => {
+    const { promise, child, finish } = ask();
+    child.stderr.write('No conversation found with session ID: sess-1\n');
+    finish('', 1);
+    await expect(promise).rejects.toThrow('No conversation found');
+  });
+
+  it('reports a kill as a stop', async () => {
+    const { promise, child } = ask();
+    child.kill();
+    await expect(promise).rejects.toThrow('stopped');
+  });
+
+  it('gives up after the time limit', async () => {
+    const { promise } = ask({ timeoutMs: 5 });
     await expect(promise).rejects.toThrow('timed out');
   });
 });

@@ -9,14 +9,15 @@ import { spawn, spawnSync } from 'child_process';
 import { BINARIES } from '../lib/providers.js';
 import * as providerTools from '../lib/providers.js';
 import { compactCodexThread } from '../lib/codex-session.js';
-import { transferClaudeSession } from '../lib/claude-session.js';
+import { askClaudeSideQuestion, transferClaudeSession } from '../lib/claude-session.js';
 import { forgetProviderUsage, providerUsage } from '../lib/balancer.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
+  askClaudeSideQuestion: vi.fn(),
 }));
 import { recordTurnUsage } from '../lib/usage.js';
-import { setDraining } from '../lib/recovery.js';
+import { maintenanceState, setDraining } from '../lib/recovery.js';
 vi.mock('../lib/codex-session.js', async (original) => ({
   ...(await original()),
   compactCodexThread: vi.fn(),
@@ -188,7 +189,7 @@ vi.mock('../lib/usage.js', () => ({
   recordTurnUsage: vi.fn(),
 }));
 
-import { deleteJob, jobEventMaxSeqs, loadJobEvents, saveJob } from '../lib/db.js';
+import { deleteJob, jobEventMaxSeqs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
 import { dropSessionDatabase } from '../lib/dbpool.js';
 import {
@@ -218,6 +219,8 @@ import {
   PREVIEW_TTL_MS,
   closeDevSession,
   compactDevSession,
+  askDevSessionBtw,
+  btwQuestion,
   clearDevTranscript,
   visibleEvents,
   deleteJobById,
@@ -10992,5 +10995,451 @@ describe('the shared browser in a session', () => {
     bus.off('job', onJob);
     expect(records).toHaveLength(1);
     expect(records[0].browser).toEqual({ running: false });
+  });
+});
+
+describe('/btw side questions', () => {
+  let bin;
+  beforeEach(async () => {
+    bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/claude' });
+    askClaudeSideQuestion.mockReset();
+    recordTurnUsage.mockClear();
+    state.stored = [
+      {
+        id: 'btw-session',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+        provider: 'Claude entry',
+        providerSessionId: '11111111-2222-3333-4444-555555555555',
+        chatStarted: true,
+        model: 'claude-opus-5-5',
+        workDir: '/tmp/workspace',
+        turns: 1,
+      },
+    ];
+    await initJobs();
+    getJob('btw-session').status = 'idle';
+    getProviderForJob.mockReturnValue(state.provider);
+  });
+  afterEach(() => {
+    bin.mockRestore();
+    getProviderForJob.mockReset();
+  });
+
+  it('reads the question out of a /btw message', () => {
+    expect(btwQuestion('/btw what is left?')).toBe('what is left?');
+    expect(btwQuestion('  /BTW  two\nlines ')).toBe('two\nlines');
+    expect(btwQuestion('/btw')).toBe('');
+    expect(btwQuestion('/btwx')).toBeNull();
+    expect(btwQuestion('so /btw is a thing')).toBeNull();
+    expect(btwQuestion(undefined)).toBeNull();
+  });
+
+  it('answers beside a running turn: no queue, no user line, the answer paired by id', async () => {
+    const job = getJob('btw-session');
+    job.status = 'running';
+    let finish;
+    askClaudeSideQuestion.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const before = job.events.length;
+    const session = sendDevMessage('btw-session', '/btw which file are you editing?');
+    expect(session.queued).toBeUndefined();
+    expect(askClaudeSideQuestion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: '11111111-2222-3333-4444-555555555555',
+        model: 'claude-opus-5-5',
+        cwd: '/tmp/workspace',
+        question: 'which file are you editing?',
+      }),
+    );
+    const asked = job.events.slice(before);
+    expect(asked.map((e) => e.kind)).toEqual(['btw']);
+    finish({
+      text: 'lib/jobs.js',
+      costUsd: 0.02,
+      durationMs: 3000,
+      inputTokens: 21000,
+      outputTokens: 30,
+      cachedInputTokens: 20000,
+    });
+    await vi.waitFor(() => expect(job.events.at(-1).kind).toBe('btw_answer'));
+    const answer = job.events.at(-1);
+    expect(answer).toMatchObject({ id: asked[0].id, text: 'lib/jobs.js', costUsd: 0.02 });
+    expect(job.events.slice(before).some((e) => e.kind === 'user')).toBe(false);
+    expect(job.status).toBe('running');
+    await vi.waitFor(() =>
+      expect(recordTurnUsage).toHaveBeenLastCalledWith(
+        job,
+        expect.objectContaining({ inputTokens: 21000, cachedInputTokens: 20000, costUsd: 0.02 }),
+        state.provider,
+        'claude-opus-5-5',
+      ),
+    );
+  });
+
+  it.each(['idle', 'running'])('drains a side answer and its accounting on a %s session', async (status) => {
+    const job = getJob('btw-session');
+    job.status = status;
+    let finishAnswer;
+    let finishAccounting;
+    askClaudeSideQuestion.mockImplementationOnce(({ onSpawn }) => {
+      onSpawn({ kill: vi.fn() });
+      return new Promise((resolve) => {
+        finishAnswer = resolve;
+      });
+    });
+    recordTurnUsage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishAccounting = resolve;
+        }),
+    );
+    const asked = askDevSessionBtw(job.id, 'What changed?');
+    setDraining(true);
+    try {
+      expect(maintenanceState([publicJob(job)]).ready).toBe(false);
+      expect(maintenanceState([publicJob(job)]).active).toEqual([
+        { id: job.id, title: job.title, status: status === 'idle' ? 'answering a side question' : status },
+      ]);
+      expect(() => askDevSessionBtw(job.id, 'Anything else?')).toThrow('Maintenance');
+      let flushed = false;
+      const flush = flushJobs().then(() => {
+        flushed = true;
+      });
+      await Promise.resolve();
+      expect(flushed).toBe(false);
+      finishAnswer({ text: 'Done', costUsd: 0.25, inputTokens: 100, outputTokens: 5, durationMs: 500 });
+      await vi.waitFor(() => expect(finishAccounting).toBeTypeOf('function'));
+      expect(job.events.at(-1).kind).toBe('btw_answer');
+      // The child has exited, but its ledger write must still block the drain.
+      job.status = 'idle';
+      expect(maintenanceState([publicJob(job)]).ready).toBe(false);
+      expect(flushed).toBe(false);
+      finishAccounting();
+      await asked.answer;
+      await flush;
+      expect(maintenanceState([publicJob(job)]).ready).toBe(true);
+      expect(publicJob(job).sideQuestionsPending).toBe(0);
+      const stored = saveJob.mock.calls.map(([j]) => j).findLast((j) => j.id === job.id);
+      expect(stored.sideQuestionUsage).toEqual({ inputTokens: 100, outputTokens: 5, durationMs: 500 });
+      expect(stored.costUsd).toBe(0.25);
+      expect(saveJobEvents.mock.calls.flatMap(([, events]) => events)).toEqual(
+        expect.arrayContaining([expect.objectContaining({ kind: 'btw_answer', text: 'Done' })]),
+      );
+    } finally {
+      setDraining(false);
+    }
+  });
+
+  it('settles failed side answers and ledger failures before flushing', async () => {
+    const job = getJob('btw-session');
+    let failAnswer;
+    askClaudeSideQuestion.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          failAnswer = reject;
+        }),
+    );
+    recordTurnUsage.mockRejectedValueOnce(new Error('ledger unavailable'));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const asked = askDevSessionBtw(job.id, 'What changed?');
+    setDraining(true);
+    try {
+      const flush = flushJobs();
+      expect(maintenanceState([publicJob(job)]).ready).toBe(false);
+      failAnswer(
+        Object.assign(new Error('answer failed'), {
+          usage: { costUsd: 0.01, inputTokens: 100, outputTokens: 5, durationMs: 500 },
+        }),
+      );
+      await expect(asked.answer).rejects.toThrow('answer failed');
+      await flush;
+      expect(maintenanceState([publicJob(job)]).ready).toBe(true);
+      expect(job.events.at(-1)).toMatchObject({ kind: 'btw_answer', isError: true });
+      const stored = saveJob.mock.calls.map(([j]) => j).findLast((j) => j.id === job.id);
+      expect(stored.sideQuestionUsage).toEqual({ inputTokens: 100, outputTokens: 5, durationMs: 500 });
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('ledger unavailable'));
+    } finally {
+      setDraining(false);
+      log.mockRestore();
+    }
+  });
+
+  it.each([true, false])(
+    'settles canceled side-question accounting before close/delete (autoClose=%s)',
+    async (autoClose) => {
+      state.stored[0] = { ...state.stored[0], autoClose, parentId: 'btw-parent', costUsd: 1 };
+      state.stored.push({
+        id: 'btw-parent',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 1,
+      });
+      await initJobs();
+      const job = getJob('btw-session');
+      job.status = 'idle';
+      let failAnswer;
+      let finishAccounting;
+      const kill = vi.fn();
+      askClaudeSideQuestion.mockImplementationOnce(({ onSpawn }) => {
+        onSpawn({ kill });
+        return new Promise((_, reject) => {
+          failAnswer = reject;
+        });
+      });
+      recordTurnUsage.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishAccounting = resolve;
+          }),
+      );
+      deleteJob.mockClear();
+      dropSessionDatabase.mockClear();
+      const asked = askDevSessionBtw(job.id, 'What changed?');
+      let closed = false;
+      const closing = closeDevSession(job.id).then(() => {
+        closed = true;
+      });
+      expect(kill).toHaveBeenCalledOnce();
+      expect(job.closing).toBe(true);
+      expect(() => askDevSessionBtw(job.id, 'Anything else?')).toThrow('Reopen');
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      expect(deleteJob).not.toHaveBeenCalled();
+      expect(dropSessionDatabase).not.toHaveBeenCalled();
+      failAnswer(
+        Object.assign(new Error('The side question was stopped'), {
+          usage: { costUsd: 0.25, inputTokens: 1000, outputTokens: 40, durationMs: 5000 },
+        }),
+      );
+      await vi.waitFor(() => expect(finishAccounting).toBeTypeOf('function'));
+      expect(closed).toBe(false);
+      expect(deleteJob).not.toHaveBeenCalled();
+      expect(dropSessionDatabase).not.toHaveBeenCalled();
+      finishAccounting();
+      await expect(asked.answer).rejects.toThrow('stopped');
+      await closing;
+      if (!autoClose) {
+        expect(getJob(job.id).status).toBe('closed');
+        await deleteJobById(job.id);
+      }
+      expect(getJob(job.id)).toBeNull();
+      expect(deleteJob).toHaveBeenCalledWith(job.id, {
+        intoJobId: 'btw-parent',
+        sessions: 1,
+        costUsd: 1.25,
+        inputTokens: 1000,
+        outputTokens: 40,
+        durationMs: 5000,
+      });
+      expect(sessionUsage(getJob('btw-parent'))).toEqual({
+        sessions: 1,
+        costUsd: 1.25,
+        inputTokens: 1000,
+        outputTokens: 40,
+        durationMs: 5000,
+      });
+      saveJob.mockClear();
+      saveJobEvents.mockClear();
+      await flushJobs();
+      expect(saveJob.mock.calls.some(([saved]) => saved.id === job.id)).toBe(false);
+      expect(saveJobEvents.mock.calls.some(([id]) => id === job.id)).toBe(false);
+    },
+  );
+
+  it('persists idle side-question usage and rolls it up after restore', async () => {
+    const job = getJob('btw-session');
+    Object.assign(job, { costUsd: 1, inputTokens: 100, outputTokens: 20, durationMs: 1000 });
+    askClaudeSideQuestion.mockResolvedValue({
+      text: 'Answer',
+      costUsd: 0.25,
+      inputTokens: 10000,
+      outputTokens: 40,
+      durationMs: 3000,
+    });
+    await askDevSessionBtw(job.id, 'What changed?').answer;
+    const expected = { sessions: 0, costUsd: 1.25, inputTokens: 10100, outputTokens: 60, durationMs: 4000 };
+    expect(sessionUsage(job)).toEqual(expected);
+    await askDevSessionBtw(job.id, 'Anything else?').answer;
+    const accumulated = {
+      sessions: 0,
+      costUsd: 1.5,
+      inputTokens: 20100,
+      outputTokens: 100,
+      durationMs: 7000,
+    };
+    expect(sessionUsage(job)).toEqual(accumulated);
+    saveJob.mockClear();
+    await flushJobs();
+    const stored = saveJob.mock.calls.map(([j]) => j).find((j) => j.id === job.id);
+    expect(stored.sideQuestionUsage).toEqual({ inputTokens: 20000, outputTokens: 80, durationMs: 6000 });
+    state.stored = [
+      { ...stored, parentId: 'btw-parent' },
+      { id: 'btw-parent', kind: 'devchat', status: 'idle', repo: 'acme/shop', providerId: 1 },
+    ];
+    await initJobs();
+    expect(sessionUsage(getJob(job.id))).toEqual(accumulated);
+    expect(sessionUsage(getJob('btw-parent'))).toEqual({ ...accumulated, sessions: 1 });
+  });
+
+  it('retains side-question usage when a concurrent main turn reapplies its baseline', async () => {
+    const job = getJob('btw-session');
+    Object.assign(job, { costUsd: 1, inputTokens: 100, outputTokens: 20, durationMs: 1000 });
+    const realSpawn = spawn.getMockImplementation();
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    spawn.mockImplementation((cmd, ...rest) => (cmd === '/mock/claude' ? child : realSpawn(cmd, ...rest)));
+    captureProviderAuth.mockResolvedValue(undefined);
+    askClaudeSideQuestion.mockResolvedValue({
+      text: 'Answer',
+      costUsd: 0.25,
+      inputTokens: 10000,
+      outputTokens: 40,
+      durationMs: 3000,
+    });
+    try {
+      sendDevMessage(job.id, 'Continue');
+      expect(job.proc).toBe(child);
+      await askDevSessionBtw(job.id, 'What changed?').answer;
+      child.stdout.write(
+        JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          result: 'Done',
+          total_cost_usd: 0.5,
+          duration_ms: 2000,
+          usage: { input_tokens: 200, output_tokens: 10 },
+        }) + '\n',
+      );
+      await vi.waitFor(() => expect(job.inputTokens).toBe(300));
+      expect(sessionUsage(job)).toMatchObject({ inputTokens: 10300, outputTokens: 70 });
+      child.emit('close', 0);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      expect(sessionUsage(job)).toEqual({
+        sessions: 0,
+        costUsd: 1.75,
+        inputTokens: 10300,
+        outputTokens: 70,
+        durationMs: 6000,
+      });
+    } finally {
+      if (job.proc) {
+        child.emit('close', 0);
+        await vi.waitFor(() => expect(job.proc).toBeNull());
+      }
+      spawn.mockImplementation(realSpawn);
+    }
+  });
+
+  it.each(['claude', 'codex'])(
+    'uses the active %s runtime instead of the original conversation',
+    async (binary) => {
+      const job = getJob('btw-session');
+      const originalModel = job.model;
+      const activeProvider = { id: 2, label: 'QA run', binary, active: true };
+      const activeChat = { sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', started: true };
+      job.chats = {
+        1: { sessionId: job.providerSessionId, started: true },
+        2: activeChat,
+      };
+      job.model = 'qa-model';
+      getProviderForJob.mockReturnValue(activeProvider);
+      const activeBin =
+        binary === 'codex' ? vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/claude' }) : null;
+      const realSpawn = spawn.getMockImplementation();
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      spawn.mockImplementation((cmd, ...rest) => (cmd === '/mock/claude' ? child : realSpawn(cmd, ...rest)));
+      captureProviderAuth.mockResolvedValue(undefined);
+      askClaudeSideQuestion.mockResolvedValue({ text: 'The active run', costUsd: 0.01 });
+      try {
+        sendDevMessage(job.id, 'Continue the QA run');
+        expect(job.proc).toBe(child);
+        // A step runtime does not replace the session's stored provider/model.
+        getProviderForJob.mockReturnValue(state.provider);
+        job.model = originalModel;
+        if (binary === 'claude') {
+          // The running CLI can announce a new conversation before it exits.
+          child.stdout.write(
+            JSON.stringify({ type: 'system', subtype: 'init', session_id: activeChat.sessionId }) + '\n',
+          );
+          await askDevSessionBtw(job.id, 'What are you doing?').answer;
+          expect(askClaudeSideQuestion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              sessionId: activeChat.sessionId,
+              model: 'qa-model',
+            }),
+          );
+          expect(recordTurnUsage).toHaveBeenLastCalledWith(
+            job,
+            expect.anything(),
+            activeProvider,
+            'qa-model',
+          );
+        } else {
+          expect(() => askDevSessionBtw(job.id, 'What are you doing?')).toThrow('Claude session');
+          expect(askClaudeSideQuestion).not.toHaveBeenCalled();
+        }
+        child.emit('close', 0);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        await askDevSessionBtw(job.id, 'What was the original task?').answer;
+        expect(askClaudeSideQuestion).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            sessionId: job.providerSessionId,
+            model: originalModel,
+          }),
+        );
+      } finally {
+        if (job.proc) {
+          child.emit('close', 0);
+          await vi.waitFor(() => expect(job.proc).toBeNull());
+        }
+        spawn.mockImplementation(realSpawn);
+        activeBin?.mockRestore();
+      }
+    },
+  );
+
+  it('puts a failed answer in the transcript and hands it to a caller who waits', async () => {
+    askClaudeSideQuestion.mockRejectedValueOnce(
+      Object.assign(new Error('The side question needed tools to answer; ask it in the main chat instead'), {
+        usage: { costUsd: 0.01, inputTokens: 100, outputTokens: 5, durationMs: 500 },
+      }),
+    );
+    const asked = askDevSessionBtw('btw-session', 'run the tests?');
+    await expect(asked.answer).rejects.toThrow('needed tools');
+    expect(sessionUsage(getJob('btw-session'))).toMatchObject({
+      costUsd: 0.01,
+      inputTokens: 100,
+      outputTokens: 5,
+      durationMs: 500,
+    });
+    expect(getJob('btw-session').events.at(-1)).toMatchObject({
+      kind: 'btw_answer',
+      id: asked.id,
+      isError: true,
+    });
+  });
+
+  it('refuses what it cannot answer', () => {
+    expect(() => askDevSessionBtw('btw-session', '  ')).toThrow('Ask a question');
+    expect(() => sendDevMessage('btw-session', '/btw')).toThrow('Ask a question');
+    getJob('btw-session').status = 'closed';
+    expect(() => askDevSessionBtw('btw-session', 'hi')).toThrow('Reopen');
+    getJob('btw-session').status = 'idle';
+    getProviderForJob.mockReturnValue({ id: 3, label: 'Codex', binary: 'codex', active: true });
+    expect(() => askDevSessionBtw('btw-session', 'hi')).toThrow('Claude session');
+    expect(askClaudeSideQuestion).not.toHaveBeenCalled();
   });
 });
