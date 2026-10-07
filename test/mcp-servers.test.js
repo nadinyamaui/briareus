@@ -355,3 +355,306 @@ describe('a server that only lets clients it knows sign in', () => {
     ).rejects.toThrow(/another server/);
   });
 });
+
+describe('review regressions', () => {
+  // Hold one specific remote operation while a newer connection is installed.
+  function delayNext(match) {
+    const original = remote.fetch.getMockImplementation();
+    let release, started;
+    const waiting = new Promise((resolve) => {
+      started = resolve;
+    });
+    const response = new Promise((resolve) => {
+      release = resolve;
+    });
+    let held = false;
+    remote.fetch.mockImplementation(async (url, init) => {
+      if (!held && match(String(url), init)) {
+        held = true;
+        started();
+        return response;
+      }
+      return original(url, init);
+    });
+    return { waiting, release };
+  }
+
+  it.each([200, 400, 401])(
+    'rejects a stale refresh response (%s) without replacing a newer grant',
+    async (status) => {
+      const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+      const delayed = delayNext(
+        (url, init) => url.endsWith('/token') && String(init.body).includes('refresh_token'),
+      );
+      const oldRequest = service.upstream(server.id, 'o/r', { force: true });
+      const rejected = expect(oldRequest).rejects.toMatchObject({ status: 409 });
+      await delayed.waiting;
+      const movedUrl = 'https://other.example.com/mcp';
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation((url, init) => original(String(url) === movedUrl ? MCP : url, init));
+      const moved = await service.update(server.id, { url: movedUrl });
+      await signIn(moved);
+      const current = await service.upstream(server.id, 'o/r');
+      delayed.release(
+        json(
+          status === 200 ? { access_token: 'STALE', refresh_token: 'STALE' } : { error: 'invalid_grant' },
+          status,
+        ),
+      );
+      await rejected;
+      expect(await service.upstream(server.id, 'o/r')).toEqual(current);
+      expect(current.url).toBe(movedUrl);
+      expect(service.list()[0]).toMatchObject({ signedIn: true, status: 'ready' });
+    },
+  );
+
+  it.each([200, 400])('rejects stale callback results (%s) after a newer sign-in', async (status) => {
+    const server = await service.create({ name: 'meta', url: MCP });
+    const delayed = delayNext((url) => url.endsWith('/token'));
+    const old = signIn(server);
+    const rejected = expect(old).rejects.toMatchObject({ status: 409 });
+    await delayed.waiting;
+    await signIn(await service.connect(server.id, { signIn: true }));
+    const current = await service.upstream(server.id, 'o/r');
+    delayed.release(json(status === 200 ? { access_token: 'STALE' } : { error: 'invalid_grant' }, status));
+    await rejected;
+    expect(await service.upstream(server.id, 'o/r')).toEqual(current);
+    expect(service.list()[0].status).toBe('ready');
+  });
+
+  it('discards stale discovery and its pending sign-in after an update', async () => {
+    const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+    const delayed = delayNext((url) => url.includes('oauth-authorization-server'));
+    const old = service.connect(server.id, { signIn: true });
+    await delayed.waiting;
+    await service.update(server.id, { transport: 'stdio', command: 'node' });
+    delayed.release(
+      json({
+        authorization_endpoint: 'https://auth.example.com/authorize',
+        token_endpoint: 'https://auth.example.com/token',
+      }),
+    );
+    await old;
+    expect(service.list()[0]).toMatchObject({
+      transport: 'stdio',
+      status: 'ready',
+      auth: 'none',
+      signInUrl: null,
+    });
+  });
+
+  it('rejects pending states after the connection changes, before sending the code', async () => {
+    const server = await service.create({ name: 'meta', url: MCP });
+    await service.update(server.id, { transport: 'stdio', command: 'node' });
+    await expect(signIn(server)).rejects.toThrow(/changed|expired/);
+    expect(remote.tokenRequests).toEqual([]);
+  });
+
+  it('does not return credentials after the server is disabled during refresh', async () => {
+    const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+    const delayed = delayNext((url) => url.endsWith('/token'));
+    const old = service.upstream(server.id, 'o/r', { force: true });
+    const rejected = expect(old).rejects.toMatchObject({ status: 409 });
+    await delayed.waiting;
+    await service.update(server.id, { enabled: false });
+    delayed.release(json({ access_token: 'STALE' }));
+    await rejected;
+  });
+
+  it.each(['token_endpoint', 'authorization_endpoint', 'registration_endpoint'])(
+    'refuses insecure discovered %s before using credentials',
+    async (field) => {
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation(async (url, init) => {
+        const response = await original(url, init);
+        if (String(url).includes('oauth-authorization-server')) {
+          const metadata = await response.json();
+          metadata[field] = 'http://remote.test/endpoint';
+          return json(metadata);
+        }
+        return response;
+      });
+      const server = await service.create({
+        name: 'meta',
+        url: MCP,
+        oauthClientId: 'client',
+        oauthClientSecret: 'SECRET',
+      });
+      expect(server).toMatchObject({ status: 'error', signInUrl: null });
+      expect(server.error).toMatch(/https/);
+      expect(remote.calls.some((call) => call.url.startsWith('http://remote.test'))).toBe(false);
+      expect(remote.tokenRequests).toEqual([]);
+    },
+  );
+
+  it('allows a local development token endpoint and disables token redirects', async () => {
+    const original = remote.fetch.getMockImplementation();
+    remote.fetch.mockImplementation(async (url, init) => {
+      if (String(url) === 'http://127.0.0.1:9000/token') {
+        expect(init.redirect).toBe('error');
+        return original('https://auth.example.com/token', init);
+      }
+      const response = await original(url, init);
+      if (String(url).includes('oauth-authorization-server')) {
+        const metadata = await response.json();
+        metadata.token_endpoint = 'http://127.0.0.1:9000/token';
+        return json(metadata);
+      }
+      return response;
+    });
+    expect(await signIn(await service.create({ name: 'meta', url: MCP }))).toMatchObject({
+      signedIn: true,
+      status: 'ready',
+    });
+  });
+
+  it.each([false, true])('switches to a static Authorization header (signed in: %s)', async (signedIn) => {
+    let server = await service.create({ name: 'meta', url: MCP });
+    if (signedIn) server = await signIn(server);
+    remote.valid = 'API';
+    const updated = await service.update(server.id, { headers: { authorization: 'Bearer API' } });
+    expect(updated).toMatchObject({ auth: 'none', signedIn: false, status: 'ready', signInUrl: null });
+    expect(service.mounts('o/r')).toHaveLength(1);
+    expect((await service.upstream(server.id, 'o/r')).headers).toEqual({ authorization: 'Bearer API' });
+  });
+
+  it('preserves OAuth when only unrelated headers change', async () => {
+    const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+    expect(await service.update(server.id, { headers: { 'X-Extra': 'value' } })).toMatchObject({
+      auth: 'oauth',
+      signedIn: true,
+    });
+    expect((await service.upstream(server.id, 'o/r')).headers).toEqual({
+      'X-Extra': 'value',
+      Authorization: 'Bearer access-1',
+    });
+  });
+
+  it.each(['client_secret_basic', 'client_secret_post', 'none'])(
+    'rotates the explicit client secret with %s authentication',
+    async (method) => {
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation(async (url, init) => {
+        const response = await original(url, init);
+        if (String(url).includes('oauth-authorization-server')) {
+          const metadata = await response.json();
+          metadata.token_endpoint_auth_methods_supported = [
+            method === 'none' ? 'client_secret_basic' : method,
+          ];
+          return json(metadata);
+        }
+        return response;
+      });
+      const server = await signIn(
+        await service.create({ name: 'meta', url: MCP, oauthClientId: 'client', oauthClientSecret: 'old' }),
+      );
+      await service.update(server.id, { oauthClientSecret: method === 'none' ? '' : 'new' });
+      await service.upstream(server.id, 'o/r', { force: true });
+      const request = remote.calls.filter((call) => call.url.endsWith('/token')).at(-1);
+      const form = new URLSearchParams(request.body);
+      if (method === 'client_secret_basic')
+        expect(request.headers.Authorization).toBe(`Basic ${Buffer.from('client:new').toString('base64')}`);
+      else expect(request.headers.Authorization).toBeUndefined();
+      expect(form.get('client_secret')).toBe(method === 'client_secret_post' ? 'new' : null);
+    },
+  );
+
+  it('does not replace a dynamically registered client secret with the explicit secret field', async () => {
+    const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+    await service.update(server.id, { oauthClientSecret: 'unrelated' });
+    await service.upstream(server.id, 'o/r', { force: true });
+    expect(
+      remote.calls.filter((call) => call.url.endsWith('/token')).at(-1).headers.Authorization,
+    ).toBeUndefined();
+  });
+
+  it.each(['json', 'sse'])('reports JSON-RPC initialize errors over %s', async (format) => {
+    const original = remote.fetch.getMockImplementation();
+    remote.fetch.mockImplementation((url, init) => {
+      if (String(url) === MCP && init.method === 'POST') {
+        const message = { jsonrpc: '2.0', id: 1, error: { code: -32602, message: 'unsupported version' } };
+        return format === 'json'
+          ? json(message)
+          : new Response(`event: message\ndata: ${JSON.stringify(message)}\n\n`, {
+              headers: { 'content-type': 'text/event-stream' },
+            });
+      }
+      return original(url, init);
+    });
+    const server = await service.create({ name: 'meta', url: MCP });
+    expect(server).toMatchObject({ status: 'error', error: 'Initialize failed: unsupported version' });
+  });
+
+  it('reads a chunked SSE result without waiting for the stream to close', async () => {
+    const cancelled = vi.fn();
+    remote.fetch.mockResolvedValue(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            const encoder = new TextEncoder();
+            controller.enqueue(encoder.encode(': ping\n\nevent: message\ndata: {"jsonrpc":"2.0","id":'));
+            controller.enqueue(encoder.encode('1,"result":{}}\n\n'));
+          },
+          cancel: cancelled,
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      ),
+    );
+    expect(await service.create({ name: 'meta', url: MCP })).toMatchObject({ status: 'ready' });
+    expect(cancelled).toHaveBeenCalled();
+  });
+
+  it('bounds initialize response size and rejects malformed JSON', async () => {
+    remote.fetch.mockResolvedValueOnce(json({ padding: 'x'.repeat(65536) }));
+    expect((await service.create({ name: 'large', url: MCP })).error).toMatch(/too large/);
+    remote.fetch.mockResolvedValueOnce(new Response('bad JSON'));
+    expect((await service.create({ name: 'invalid', url: MCP })).status).toBe('error');
+  });
+
+  it('times out and cancels an initialize stream that never responds', async () => {
+    vi.useFakeTimers();
+    try {
+      const cancelled = vi.fn();
+      remote.fetch.mockResolvedValue(
+        new Response(new ReadableStream({ cancel: cancelled }), {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+      );
+      const pending = service.create({ name: 'meta', url: MCP });
+      await vi.advanceTimersByTimeAsync(15000);
+      expect(await pending).toMatchObject({
+        status: 'error',
+        error: 'Initialize failed: The initialize response timed out',
+      });
+      expect(cancelled).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves own __proto__ entries in env and header maps', async () => {
+    const values = JSON.parse('{"__proto__":"value","OTHER":"kept"}');
+    const local = await service.create({ name: 'local', transport: 'stdio', command: 'node', env: values });
+    expect(local.envNames).toEqual(['__proto__', 'OTHER']);
+    expect(service.mounts('o/r')[0].env).toEqual(values);
+    remote.fetch.mockResolvedValueOnce(json({ jsonrpc: '2.0', id: 1, result: {} }));
+    const server = await service.create({ name: 'meta', url: MCP, headers: values });
+    expect(server.headerNames).toEqual(['__proto__', 'OTHER']);
+    expect((await service.upstream(server.id, 'o/r')).headers).toMatchObject(values);
+  });
+
+  it('reuses the current bearer when a late 401 rejects the previous one', async () => {
+    const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+    const old = await service.upstream(server.id, 'o/r');
+    const fresh = await service.upstream(server.id, 'o/r', {
+      force: true,
+      rejectedBearer: old.headers.Authorization,
+    });
+    expect(
+      await service.upstream(server.id, 'o/r', { force: true, rejectedBearer: old.headers.Authorization }),
+    ).toEqual(fresh);
+    expect(remote.tokenRequests).toHaveLength(2);
+    await service.upstream(server.id, 'o/r', { force: true, rejectedBearer: fresh.headers.Authorization });
+    expect(remote.tokenRequests).toHaveLength(3);
+  });
+});

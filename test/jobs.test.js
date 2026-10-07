@@ -10942,6 +10942,7 @@ describe('the shared browser in a session', () => {
       return [
         { id: 7, name: 'meta', transport: 'http' },
         { id: 8, name: 'local', transport: 'stdio', command: 'npx', args: ['-y', 'x'], env: { K: 'v' } },
+        { id: 9, name: '__proto__', transport: 'stdio', command: 'node', args: [], env: {} },
       ];
     });
     try {
@@ -10957,6 +10958,8 @@ describe('the shared browser in a session', () => {
         `Bearer ${seen.mcp.reviewer_memory.env.REVIEWER_MEMORY_TOKEN}`,
       );
       expect(seen.mcp.local).toEqual({ command: 'npx', args: ['-y', 'x'], env: { K: 'v' } });
+      expect(Object.hasOwn(seen.mcp, '__proto__')).toBe(true);
+      expect(seen.mcp.__proto__).toEqual({ command: 'node', args: [], env: {} });
     } finally {
       setExternalMcp(() => []);
     }

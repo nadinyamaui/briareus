@@ -97,7 +97,10 @@ describe('the session proxy', () => {
       body: JSON.stringify(rpc),
     });
     expect(res.status).toBe(200);
-    expect(service.upstream).toHaveBeenLastCalledWith(5, 'o/r', { force: true });
+    expect(service.upstream).toHaveBeenLastCalledWith(5, 'o/r', {
+      force: true,
+      rejectedBearer: 'Bearer stale',
+    });
     expect(upstream.mock.calls[1][1].headers.Authorization).toBe('Bearer fresh');
     expect(upstream.mock.calls[1][1].body.toString()).toBe(JSON.stringify(rpc));
   });
