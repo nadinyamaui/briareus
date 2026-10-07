@@ -198,6 +198,67 @@ describe('projectPulls', () => {
       expect(gh.graphql).toHaveBeenCalledTimes(1);
     });
 
+    it.each(
+      ['pr', 'issue', 'close'].flatMap((mutation) =>
+        ['old-first', 'new-first'].map((order) => ({ mutation, order })),
+      ),
+    )('invalidates in-flight reads after $mutation ($order)', async ({ mutation, order }) => {
+      const p = project();
+      const snapshot = (title) => ({
+        repository: {
+          defaultBranchRef: { name: 'main' },
+          stackRefs: { pageInfo: { hasNextPage: false }, nodes: [] },
+          pullRequests: {
+            pageInfo: { hasNextPage: false },
+            nodes: [prNode({ title })],
+          },
+          issues: {
+            pageInfo: { hasNextPage: false },
+            nodes: title === 'old' ? [issueNode()] : [],
+          },
+        },
+      });
+      let finishOld, finishNew;
+      gh.graphql
+        .mockReturnValueOnce(new Promise((resolve) => (finishOld = resolve)))
+        .mockReturnValueOnce(new Promise((resolve) => (finishNew = resolve)));
+      const oldRead = projectPulls(p);
+      const item = { number: 9, ...(mutation === 'pr' ? { pull_request: {} } : {}) };
+      gh.rest.mockReset();
+      gh.rest.mockResolvedValue({ ok: true, json: async () => item });
+      if (mutation === 'close') await closeIssue(p, 9);
+      else await updateGithubItem(p, 9, mutation, { title: 'new' });
+
+      const newRead = projectPulls(p, { fresh: true });
+      // Settle the deferred reads even if the regression makes both callers
+      // join the old load, so a failed assertion leaves no read outstanding.
+      if (gh.graphql.mock.calls.length !== 2) {
+        finishOld(snapshot('old'));
+        finishNew(snapshot('new'));
+        await Promise.all([oldRead, newRead]);
+      }
+      expect(gh.graphql).toHaveBeenCalledTimes(2);
+      if (order === 'old-first') {
+        finishOld(snapshot('old'));
+        await oldRead;
+        // The obsolete response must neither populate cache nor clear the new load.
+        const joinedRead = projectPulls(p);
+        expect(gh.graphql).toHaveBeenCalledTimes(2);
+        finishNew(snapshot('new'));
+        expect(await joinedRead).toBe(await newRead);
+      } else {
+        finishNew(snapshot('new'));
+        await newRead;
+        finishOld(snapshot('old'));
+        await oldRead;
+      }
+      const cached = await projectPulls(p);
+      expect(cached).toBe(await newRead);
+      expect(cached.pulls[0].title).toBe('new');
+      expect(cached.issues).toEqual([]);
+      expect(gh.graphql).toHaveBeenCalledTimes(2);
+    });
+
     it('lets the next caller try again after a load fails', async () => {
       gh.graphql.mockRejectedValueOnce(Object.assign(new Error('rate limit'), { rateLimited: true }));
       gh.graphql.mockResolvedValueOnce(board());
