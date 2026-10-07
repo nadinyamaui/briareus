@@ -23,7 +23,7 @@ vi.mock('../lib/db.js', () => ({
 }));
 
 const { createMailService } = await import('../lib/mail.js');
-const { open } = await import('../lib/secretbox.js');
+const { open, seal } = await import('../lib/secretbox.js');
 
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const GOOGLE = { clientId: 'gid', clientSecret: 'gsecret', redirectUri: 'http://127.0.0.1' };
@@ -227,6 +227,96 @@ async function connect(input = {}, code = 'code-1') {
 
 const settled = async () =>
   vi.waitFor(async () => expect((await service.list()).every((a) => !a.syncing)).toBe(true));
+
+describe('Outlook expired continuations', () => {
+  it.each([
+    [410, false],
+    [400, true],
+  ])(
+    'prunes abandoned writes after a %s restart (empty snapshot: %s) with a fixed clock',
+    async (status, empty) => {
+      const graph = 'https://graph.microsoft.com/v1.0/me';
+      const delta = `${graph}/mailFolders/inbox/messages/delta`;
+      const message = (id, folderId) => ({
+        id,
+        parentFolderId: folderId,
+        receivedDateTime: new Date(clock - DAY).toISOString(),
+        body: { contentType: 'text', content: id },
+      });
+      const account = await store.insertAccount({
+        provider: 'outlook',
+        email: 'me@outlook.com',
+        enabled: true,
+        status: 'connected',
+        syncDays: 30,
+        credentials: seal(JSON.stringify({ accessToken: 'a', expiresAt: clock + DAY })),
+      });
+      await store.updateAccount(account.id, {
+        syncState: {
+          known: { inbox: 'inbox', skip: [] },
+          deltas: { inbox: `${delta}?old`, archive: `${graph}/archive-delta` },
+        },
+      });
+      await store.upsert(
+        account.id,
+        [{ id: 'archive', folderId: 'archive', receivedAt: clock - DAY }],
+        clock - 1,
+      );
+      const request = vi.fn(async (url) => {
+        url = String(url);
+        let body;
+        if (url.startsWith(`${graph}/mailFolders?`))
+          body = {
+            value: [
+              { id: 'inbox', displayName: 'Inbox' },
+              { id: 'archive', displayName: 'Archive' },
+            ],
+          };
+        else if (url === `${delta}?old`)
+          body = { value: [message('ghost', 'inbox')], '@odata.nextLink': `${delta}?expired` };
+        else if (url === `${delta}?expired`)
+          return new Response(JSON.stringify({ error: { code: 'SyncStateNotFound' } }), { status });
+        else if (url.startsWith(`${graph}/messages/`))
+          body = message(url.includes('/ghost?') ? 'ghost' : 'live', 'inbox');
+        else if (url === `${graph}/archive-delta`) body = { value: [], '@odata.deltaLink': url };
+        else if (url === `${delta}?new`) body = { value: [], '@odata.deltaLink': url };
+        else if (url.startsWith(`${delta}?`))
+          body = { value: empty ? [] : [message('live', 'inbox')], '@odata.deltaLink': `${delta}?new` };
+        else throw new Error(`Unexpected request: ${url}`);
+        return new Response(JSON.stringify(body));
+      });
+      service = createMailService({
+        store,
+        request,
+        now: () => clock,
+        config: () => ({
+          syncMinutes: 0,
+          google: null,
+          microsoft: { clientId: 'm', redirectUri: 'http://127.0.0.1' },
+        }),
+      });
+      await service.init();
+      await service.sync(account.id);
+      await settled();
+      expect(
+        store
+          .ofAccount(account.id)
+          .map((m) => m.id)
+          .sort(),
+      ).toEqual(empty ? ['archive'] : ['archive', 'live']);
+      expect(store.accounts.get(account.id).syncState.deltas.inbox).toBe(`${delta}?new`);
+      expect((await service.list())[0].lastSyncError).toBeNull();
+      await service.sync(account.id);
+      await settled();
+      expect(
+        store
+          .ofAccount(account.id)
+          .map((m) => m.id)
+          .sort(),
+      ).toEqual(empty ? ['archive'] : ['archive', 'live']);
+    },
+  );
+});
 
 describe('connecting a mailbox', () => {
   it('lists only the providers this server has a client for', () => {

@@ -46,6 +46,7 @@ function fakeSink() {
       return sink.stored.has(id) ? 1 : 0;
     }),
     pruneUnseen: vi.fn(async (folderId = null) => sink.pruned.push(folderId)),
+    restartFolder: vi.fn(async () => {}),
     keepFolders: vi.fn(async (ids) => (sink.kept = ids)),
     renameLabels: vi.fn(async () => {}),
     renameFolder: vi.fn(async () => {}),
