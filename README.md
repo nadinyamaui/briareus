@@ -226,6 +226,14 @@ the evidence. If every executed scenario passes, the QA loop stops. Failed
 scenarios are reported back to the task session as QA feedback, and the loop
 stops there too, since acting on that feedback stays a human decision for now.
 Turning the review loop off also cancels the QA run waiting behind it.
+An orchestrator can toggle QA on its own open task workers independently with
+`set_worker_qa_loop({ id, on })`, or `POST /api/agent/sessions/:id/qa-loop`
+with `{ "on": false }` using its session bearer token; `on` must be a boolean.
+This preserves reviews, findings, fixes and CI and follows the existing QA
+eligibility rules (arming requires an armed review loop).
+Disarming removes queued QA; an active QA session finishes on its own and
+reports nothing back. The response includes `session`, `qaStillRunning` and
+`qaSessionId` so an active run is not mistaken for a cancelled one.
 If the QA provider fails or its session is interrupted, the run is shown as
 failed/interrupted and **not running**, never as queued. For an orchestrated
 worker, `send_to_worker` with a follow-up retries QA after that worker turn

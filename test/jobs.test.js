@@ -6475,6 +6475,51 @@ describe('the QA loop: arming and disarming', () => {
     });
   });
 
+  it.each([false, true])(
+    'disarms QA (running: %s) without changing reviews, findings, fixes or CI',
+    (running) => {
+      const job = getJob('qa-arm-1');
+      job.reviewLoop = {
+        rounds: 2,
+        done: false,
+        reviewing: true,
+        fixing: true,
+        triage: { findings: [{ key: 'keep' }] },
+        pendingFix: { keys: ['keep'] },
+      };
+      job.prStatus = { number: 88, checks: { passed: 1, pending: 2 } };
+      job.qaLoop = { running, sessionId: running ? 'active-qa' : null };
+      const review = structuredClone(job.reviewLoop);
+      const ci = structuredClone(job.prStatus);
+      setQaLoop(job.id, false);
+      expect(job.qaLoop).toBeNull();
+      expect(job.reviewLoop).toEqual(review);
+      expect(job.prStatus).toEqual(ci);
+      expect(jobEventsSince(job, 0).at(-1).text).toContain('QA loop turned off');
+      if (running) expect(jobEventsSince(job, 0).at(-1).text).toContain('already running finishes');
+      setQaLoop(job.id, false);
+      expect(job.reviewLoop).toEqual(review);
+    },
+  );
+
+  it('keeps an already armed QA loop when armed again', () => {
+    const job = getJob('qa-arm-1');
+    job.qaLoop = { running: true, sessionId: 'active-qa' };
+    const qa = job.qaLoop;
+    setQaLoop(job.id, true);
+    expect(job.qaLoop).toBe(qa);
+  });
+
+  it('retains the open-task eligibility rules', () => {
+    const job = getJob('qa-arm-1');
+    job.status = 'closed';
+    expect(() => setQaLoop(job.id, false)).toThrow(/open session/);
+    job.status = 'idle';
+    job.qaBranch = 'qa';
+    expect(() => setQaLoop(job.id, false)).toThrow(/started from scratch/);
+    job.qaBranch = null;
+  });
+
   it('turning the review loop off cancels the QA run queued behind it', () => {
     setReviewLoop('qa-arm-1', false);
     expect(getJob('qa-arm-1').reviewLoop).toBeNull();

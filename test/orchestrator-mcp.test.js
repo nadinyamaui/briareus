@@ -104,7 +104,7 @@ describe('the JSON-RPC frame', () => {
     expect(res.result.serverInfo).toEqual({ name: 'reviewer-workers', version: '1.0.0' });
   });
 
-  it('lists the eight worker tools, with the two spawns requiring title and prompt', async () => {
+  it('lists the nine worker tools, with the two spawns requiring title and prompt', async () => {
     const s = await boot();
 
     const [res] = await s.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
@@ -117,6 +117,7 @@ describe('the JSON-RPC frame', () => {
       'send_to_worker',
       'triage_findings',
       'retry_review',
+      'set_worker_qa_loop',
       'close_worker',
     ]);
     expect(res.result.tools[0].inputSchema.required).toEqual(['title', 'prompt']);
@@ -599,5 +600,52 @@ describe('the worker tools', () => {
     expect(res.result.isError).toBe(true);
     expect(res.result.content[0].text).toMatch(/not configured/);
     expect(fetched).not.toHaveBeenCalled();
+  });
+});
+
+describe('set_worker_qa_loop', () => {
+  it('requires an explicit boolean and id before making a request', async () => {
+    const fetched = stubFetch();
+    const s = await boot();
+    for (const on of [undefined, null, 'false', 0, 1, {}]) {
+      const [res] = await s.send(callTool('set_worker_qa_loop', { id: 'w1', on }));
+      expect(res.result.isError).toBe(true);
+      expect(res.result.content[0].text).toMatch(/boolean/);
+    }
+    const [res] = await s.send(callTool('set_worker_qa_loop', { on: false }));
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toMatch(/worker session id/);
+    expect(fetched).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('posts on: %s to the scoped route', async (on) => {
+    const fetched = stubFetch(
+      reply({ body: { session: worker(), qaStillRunning: false, qaSessionId: null } }),
+    );
+    const s = await boot();
+    const [res] = await s.send(callTool('set_worker_qa_loop', { id: 'w/1', on }));
+    expect(fetched.mock.calls[0][0]).toBe(`${URL_BASE}/api/agent/sessions/w%2F1/qa-loop`);
+    expect(fetched.mock.calls[0][1]).toMatchObject({
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ on }),
+    });
+    expect(res.result.isError).toBeUndefined();
+    expect(res.result.content[0].text).toContain(on ? 'QA loop armed' : 'QA loop off');
+  });
+
+  it('reports active QA as still running, not cancelled', async () => {
+    stubFetch(reply({ body: { session: worker(), qaStillRunning: true, qaSessionId: 'qa-1' } }));
+    const s = await boot();
+    const [res] = await s.send(callTool('set_worker_qa_loop', { id: 'w1', on: false }));
+    expect(res.result.content[0].text).toContain('QA session qa-1 is still running; it was not cancelled');
+  });
+
+  it('surfaces refusal from the existing state rules', async () => {
+    stubFetch(reply({ status: 400, body: { error: 'turn the review loop on first' } }));
+    const s = await boot();
+    const [res] = await s.send(callTool('set_worker_qa_loop', { id: 'w1', on: true }));
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toContain('turn the review loop on first');
   });
 });
