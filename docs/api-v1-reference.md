@@ -1672,7 +1672,7 @@ Remove a workspace. Needs `admin`.
 
 List the connected mailboxes, which providers this server can connect, and the values a new one starts from. Needs `admin`.
 
-**Returns** `{ accounts: MailAccount[], providers: string[], defaults: object }`. `providers` holds `gmail` when the server has a Google OAuth client (`GOOGLE_OAUTH_*`) and `outlook` when it has a Microsoft one (`MICROSOFT_OAUTH_*`). `defaults` is `{ label, enabled, syncDays }`.
+**Returns** `{ accounts: MailAccount[], providers: string[], callbackUrl: string, defaults: object }`. `providers` holds `gmail` when the server has a Google OAuth client (`GOOGLE_OAUTH_*`) and `outlook` when it has a Microsoft one (`MICROSOFT_OAUTH_*`). `callbackUrl` is this server’s own sign-in callback (`PUBLIC_BASE_URL/oauth/mail/callback`): register it as the OAuth client’s redirect URI and set it as `*_OAUTH_REDIRECT_URI` for sign-ins the server finishes itself. `defaults` is `{ label, enabled, syncDays }`.
 
 ### `POST /settings/mail/accounts/connect`
 
@@ -1688,7 +1688,7 @@ Start connecting a mailbox: where to sign in. Needs `admin`.
 | `enabled`               | `boolean`        | Whether the periodic sync includes it; true when absent                                         |
 | `syncDays`              | `integer`        | How many days back to keep, 1–365; 30 when absent                                               |
 
-**Returns** `{ url: string, state: string, redirectUri: string, expiresAt: integer }`. Open `url` in a browser and sign in. The provider then sends the browser to `redirectUri` with `code` and `state` in its query: send that whole address to `…/connect/finish` before `expiresAt` (15 minutes). A native client watches its web view for `redirectUri`; otherwise copy the address from the address bar, even when the page there does not load. The sign-in asks to read mail only. 503 when this server has no OAuth client for `provider`; 400 until `CREDENTIALS_KEY` is set, since the tokens are stored encrypted with it.
+**Returns** `{ url: string, state: string, redirectUri: string, finishesOnServer: boolean, expiresAt: integer }`. Open `url` in a browser and sign in; the provider then sends the browser to `redirectUri` with `code` and `state` in its query. With `finishesOnServer` (the redirect is this server’s `callbackUrl`) the server finishes the sign-in as the browser arrives, and the client only waits for the account to appear in the list. Otherwise the client receives the redirect itself (a loopback listener of its own on a Google Desktop client’s `http://127.0.0.1:<port>`, or a web view it embeds on Microsoft’s nativeclient page) and sends the address to `…/connect/finish` at once: a Microsoft code typically lasts about a minute, and the start itself expires at `expiresAt` (15 minutes). Google’s sign-in must open in a browser, not an embedded web view. The sign-in asks to read mail only. 503 when this server has no OAuth client for `provider`; 400 until `CREDENTIALS_KEY` is set, since the tokens are stored encrypted with it.
 
 ### `POST /settings/mail/accounts/connect/finish`
 
@@ -1702,7 +1702,7 @@ Finish connecting a mailbox with the address its sign-in ended on. Needs `admin`
 | `state` | `string` | Instead of `url`: its `state`          |
 | `code`  | `string` | Instead of `url`: its `code`           |
 
-**Returns** 201 `{ account: MailAccount }`. Each start finishes once, whether or not it succeeds. Signing in to a mailbox that is already connected connects it again (new tokens, the same messages); a start with `accountId` answers 409 when the sign-in was to another mailbox. The first sync starts at once: follow `syncing` and `lastSyncAt`. A Gmail mailbox’s first pass takes the newest 2,000 messages of its window.
+**Returns** 201 `{ account: MailAccount }`. For a client that received the redirect itself; a sign-in that ends on the server’s `callbackUrl` is finished there. Each start finishes once, whether or not it succeeds. Signing in to a mailbox that is already connected connects it again (new tokens, the same messages); a start with `accountId` answers 409 when the sign-in was to another mailbox. The first sync starts at once: follow `syncing` and `lastSyncAt`. A Gmail mailbox’s first pass takes the newest 2,000 messages of its window and is paced to Gmail’s per-user quota, so it takes about eight minutes at most; an Outlook folder’s first pass takes at most 5,000 messages, Graph’s limit for a filtered delta.
 
 ### `PUT /settings/mail/accounts/{id}`
 

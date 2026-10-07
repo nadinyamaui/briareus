@@ -263,7 +263,10 @@ Add an Access application for **`/api/v1` and `/api/v1/*`** with a **Bypass →
 Everyone** policy: a native client cannot complete Access's browser sign-in.
 Briareus still requires its token on every route. GitHub's deliveries need
 the same for **`/webhooks/*`**, since they authenticate themselves with an
-HMAC. Nothing else needs exempting: every other path answers 404 or 410.
+HMAC, and so does **`/oauth/mail/callback`** when a mailbox's sign-in ends on
+this server: the browser that signed in brings it a single-use `state`, which
+is all it accepts. Nothing else needs exempting: every other path answers 404
+or 410.
 
 ## What is not in this API
 
@@ -276,6 +279,8 @@ HMAC. Nothing else needs exempting: every other path answers 404 or 410.
 - `/webhooks/*`: deliveries from GitHub and from systems that wake a session.
 - `/healthz` is public and outside the prefix: 200 when the server and its
   database answer.
+- `/oauth/mail/callback` is where a Gmail or Outlook sign-in ends when its
+  redirect URI is this server's own; it answers the browser in plain text.
 
 Anything else under `/api` answers 410, and any other path a JSON 404.
 

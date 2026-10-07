@@ -8,7 +8,7 @@ import { createEnvoyerService } from './lib/envoyer.js';
 import { envoyerRoutes } from './lib/envoyer-routes.js';
 import { createForgeAccounts } from './lib/forge-accounts.js';
 import { createMailService } from './lib/mail.js';
-import { mailRoutes } from './lib/mail-routes.js';
+import { mailRoutes, mailCallbackRoutes } from './lib/mail-routes.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
 import { estimateCosts } from './lib/prices.js';
 import { previewFeedbackRoutes } from './lib/preview-feedback.js';
@@ -285,6 +285,12 @@ app.get('/healthz', async (req, res) => {
   const db = await dbHealthy();
   res.status(db ? 200 : 503).json({ ok: db, db, uptime: Math.floor(process.uptime()) });
 });
+
+// Where a mailbox's sign-in ends when its redirect URI is this server's own
+// (lib/mail-routes.js). The mail service is created here for it, and the
+// API's mail routes below share it.
+const mailService = createMailService();
+app.use(mailCallbackRoutes({ service: mailService }));
 
 // The scenario videos a test run records. The run copies each .webm here, and
 // a client fetches one through /api/v1 with its token; the links a run leaves
@@ -605,7 +611,6 @@ api.use(
     getProject,
   }),
 );
-const mailService = createMailService();
 api.use(mailRoutes({ service: mailService }));
 
 api.get('/api/agent/memories', (req, res) => {

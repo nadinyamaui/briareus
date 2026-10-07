@@ -2,7 +2,7 @@ import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMobileAuth } from '../lib/mobile-auth.js';
 import { apiV1Routes } from '../lib/api-v1.js';
-import { mailRoutes } from '../lib/mail-routes.js';
+import { mailRoutes, mailCallbackRoutes } from '../lib/mail-routes.js';
 
 // lib/mail.js is only here for its defaults: the service below is a fake,
 // so neither the configuration nor the database is ever read.
@@ -28,8 +28,15 @@ beforeEach(async () => {
   service = {
     list: vi.fn(async () => [{ id: 1, email: 'me@gmail.com' }]),
     providers: vi.fn(() => ['gmail']),
+    callbackUrl: vi.fn(() => 'https://briareus.test/oauth/mail/callback'),
     connectStart: vi.fn((input) => ({ url: 'https://accounts.google.com/x', state: 's', input })),
-    connectFinish: vi.fn(async (input) => ({ id: 1, input })),
+    connectFinish: vi.fn(async (input) => {
+      if (String(input.url).includes('state=stale'))
+        throw Object.assign(new Error('This sign-in has expired or was already used; start it again'), {
+          status: 400,
+        });
+      return { id: 1, email: 'me@gmail.com', input };
+    }),
     update: vi.fn(async (id, input) => ({ id, input })),
     remove: vi.fn(async () => {}),
     sync: vi.fn(async (id) => ({ id, syncing: true })),
@@ -54,6 +61,7 @@ beforeEach(async () => {
       bus: { on() {}, off() {} },
     }),
   );
+  app.use(mailCallbackRoutes({ service }));
   // An agent's session token at the handlers' own path is turned away.
   app.use(express.json(), handlers);
   server = app.listen(0, '127.0.0.1');
@@ -93,6 +101,7 @@ describe('mail through /api/v1', () => {
     expect(await (await call('/api/v1/settings/mail/accounts')).json()).toEqual({
       accounts: [{ id: 1, email: 'me@gmail.com' }],
       providers: ['gmail'],
+      callbackUrl: 'https://briareus.test/oauth/mail/callback',
       defaults: { label: '', enabled: true, syncDays: 30 },
     });
   });
@@ -111,7 +120,7 @@ describe('mail through /api/v1', () => {
     });
     expect(finish.status).toBe(201);
     expect(await finish.json()).toEqual({
-      account: { id: 1, input: { url: 'http://127.0.0.1/?code=c&state=s' } },
+      account: { id: 1, email: 'me@gmail.com', input: { url: 'http://127.0.0.1/?code=c&state=s' } },
     });
   });
 
@@ -139,5 +148,29 @@ describe('mail through /api/v1', () => {
     const missing = await call('/api/v1/mail/accounts/1/messages/missing');
     expect(missing.status).toBe(404);
     expect(await missing.json()).toEqual({ error: 'Message not found' });
+  });
+});
+
+describe('the sign-in callback', () => {
+  it('finishes the sign-in the browser brings back, with no token, in plain text', async () => {
+    const res = await call('/oauth/mail/callback?state=s1&code=4%2F0Ab&scope=x', { token: '' });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/^text\/plain/);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.text()).toBe('Connected me@gmail.com. You can close this window.\n');
+    const { url: finished } = service.connectFinish.mock.calls[0][0];
+    expect(Object.fromEntries(new URL(finished).searchParams)).toEqual({
+      state: 's1',
+      code: '4/0Ab',
+      scope: 'x',
+    });
+  });
+
+  it('says why when the sign-in cannot be finished', async () => {
+    const res = await call('/oauth/mail/callback?state=stale&code=c', { token: '' });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe(
+      'The mailbox was not connected: This sign-in has expired or was already used; start it again\n',
+    );
   });
 });

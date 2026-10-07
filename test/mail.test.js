@@ -191,6 +191,7 @@ beforeEach(async () => {
   errors = [];
   service = createMailService({
     store,
+    callbackUrl: () => 'https://briareus.test/oauth/mail/callback',
     request: gmail.request,
     sleep: async () => {},
     now: () => clock,
@@ -228,7 +229,11 @@ describe('connecting a mailbox', () => {
 
   it('hands out a PKCE sign-in and finishes it with the matching verifier', async () => {
     const start = service.connectStart({ provider: 'gmail', label: 'Personal', syncDays: 7 });
-    expect(start).toMatchObject({ redirectUri: 'http://127.0.0.1', expiresAt: clock + 15 * 60_000 });
+    expect(start).toMatchObject({
+      redirectUri: 'http://127.0.0.1',
+      finishesOnServer: false,
+      expiresAt: clock + 15 * 60_000,
+    });
     const url = new URL(start.url);
     expect(url.searchParams.get('state')).toBe(start.state);
 
@@ -257,6 +262,15 @@ describe('connecting a mailbox', () => {
       accessToken: 'access-1',
       expiresAt: clock + 3600_000,
     });
+  });
+
+  it('says when the sign-in ends on this server’s own callback', () => {
+    cfg.mail.google = { ...GOOGLE, redirectUri: 'https://briareus.test/oauth/mail/callback' };
+    expect(service.connectStart({ provider: 'gmail' })).toMatchObject({
+      redirectUri: 'https://briareus.test/oauth/mail/callback',
+      finishesOnServer: true,
+    });
+    expect(service.callbackUrl()).toBe('https://briareus.test/oauth/mail/callback');
   });
 
   it('syncs a new mailbox straight away', async () => {

@@ -963,6 +963,224 @@ the sign-in asks for `gmail.readonly` or `Mail.Read`, and nothing marks, moves,
 sends or deletes a message. All of it is admin-only, since it is the operator's
 own mail.
 
+The sign-in is the providers' own OAuth flow with PKCE. Its simplest form ends
+on this server: register `PUBLIC_BASE_URL/oauth/mail/callback` (an https
+address) as the OAuth client's redirect URI and the server finishes the
+sign-in as the browser arrives there, whatever device signed in.
+
+1. Register an OAuth client and put it in the server's environment (see
+   `.env.example`):
+   - **Gmail**: in Google Cloud, enable the Gmail API, set up the OAuth consent
+     screen with the `gmail.readonly` scope, and create an OAuth client of type
+     _Web application_ whose authorized redirect URI is exactly
+     `PUBLIC_BASE_URL/oauth/mail/callback`. Set `GOOGLE_OAUTH_CLIENT_ID`,
+     `GOOGLE_OAUTH_CLIENT_SECRET` and `GOOGLE_OAUTH_REDIRECT_URI` (that same
+     address). The consent screen decides how long a connection lasts:
+     - in _Testing_ (an external one), Google expires refresh tokens after 7
+       days, so the mailbox has to be connected again every week;
+     - in _Production_ without verification, sign-in shows Google's
+       unverified-app warning and at most 100 users can connect, which is
+       enough for your own mailboxes;
+     - _Internal_ needs a project owned by a Google Workspace organization, and
+       only that organization's accounts can connect.
+
+     A Gmail token also stops working when the account's password changes, or
+     after six months without use.
+
+   - **Outlook**: in Microsoft Entra, register an app with the delegated Graph
+     permissions `Mail.Read`, `User.Read` and `offline_access`, add a _Web_
+     platform with the redirect URI `PUBLIC_BASE_URL/oauth/mail/callback`, and
+     create a client secret. Set `MICROSOFT_OAUTH_CLIENT_ID`,
+     `MICROSOFT_OAUTH_CLIENT_SECRET` and `MICROSOFT_OAUTH_REDIRECT_URI`. Match
+     `MICROSOFT_OAUTH_TENANT` to the registration's supported account types:
+     `common` (the default) for any organization plus personal accounts,
+     `consumers` for personal accounts only, or your tenant's id or domain for
+     a single-tenant app.
+
+   `CREDENTIALS_KEY` must be set too: the tokens are stored encrypted with it.
+   Behind Cloudflare Access, give `/oauth/mail/callback` the same _Bypass_ as
+   `/api/v1`, so a browser that has not passed Access still reaches it; the
+   route takes nothing but a pending sign-in's single-use `state`.
+
+2. `POST /api/v1/settings/mail/accounts/connect` with `{ "provider": "gmail" }`
+   (or `outlook`) answers with a `url`. Open it in a browser (Google refuses
+   sign-ins in an embedded web view) and sign in. The browser ends on the
+   callback, which says which mailbox it connected, and the first sync starts
+   right away.
+3. Read with `GET /api/v1/mail/messages` (newest first, filtered by `account`,
+   `q`, `unread`, `inbox`, `starred`, `label` or `thread`, paged with
+   `cursor`) and `GET /api/v1/mail/accounts/{account}/messages/{id}` for one
+   message with its body.
+
+A client can also receive the redirect itself, with a redirect URI of its own
+registered instead: a loopback listener on a Google _Desktop app_ client's
+`http://127.0.0.1:<port>`, or a web view watching Microsoft's
+`https://login.microsoftonline.com/common/oauth2/nativeclient` (a _Mobile and
+desktop_ platform, with no secret). It then sends the address it landed on to
+`POST …/connect/finish` as `{ "url": "…" }`, at once: a Microsoft code lasts
+about a minute.
+
+Every enabled mailbox is synced every `MAIL_SYNC_MINUTES` (5 by default; `0`
+leaves it to `POST …/settings/mail/accounts/{id}/sync`). The server keeps the
+last `syncDays` days (30 by default, up to 365).
+
+- **Gmail** syncs everything except trash, spam and drafts, through its
+  history. A first pass takes the newest 2,000 messages in the window, paced
+  to Gmail's quota of 6,000 units a minute per user (a message read costs 20),
+  so it takes up to about eight minutes.
+- **Outlook** syncs every folder except Deleted Items, Junk Email, Drafts,
+  Outbox, search folders and their subfolders, through Graph's per-folder
+  delta, at most four requests at a time. A folder's first pass takes at most
+  5,000 messages, Graph's limit for a filtered delta.
+
+Bodies are kept up to 500,000 characters. Attachments are listed but their
+content is not synced. When a provider stops honouring a sign-in (revoked,
+expired, password changed, new consent required), the account shows
+`status: "reauth"` and stops syncing until it is connected again with its
+`accountId`. Removing an account deletes its tokens and messages here; also
+remove the app's access at Google or Microsoft.
+
+### Operator attention
+
+`GET /api/v1/attention` is the operator's inbox: unanswered agent
+questions, held findings, interrupted sessions, review/QA failures and pending
+SSH commands and Slack messages across projects. It is a live projection, read on every request,
+and does not dismiss unresolved work.
+
+### Recovery and maintenance
+
+An interrupted or failed session has a recovery report
+(`GET /api/v1/sessions/:id/recovery`): expected and actual
+branch, HEAD, working-file changes and the pending phase. Resume checks that
+report again and refuses missing, recycled or busy workspaces, and a session
+whose provider conversation never started. Reopening a
+session in its own clone slot preserves commits and working files and
+refreshes the origin refs before running setup; a clean branch that is only
+behind origin is fast-forwarded, and otherwise the next turn is told the branch
+differs from origin. A new agent turn inspects what
+already happened before continuing. A slot another session has used since (each
+session records itself in the slot's `.git/briareus-owner`, so this holds after
+that session is deleted), or
+one whose checkout is off the session's branch or unreadable, is never reset in
+its place: the first gets a different clone, the others fail the reopen until
+someone inspects them. The clone pool does not hand out, and the daily workspace
+cleanup does not delete, a slot a failed session, or one a restart interrupted
+mid-turn, left work in (except loop review, fix and QA children, which their
+parent retries, and sessions whose agent never started). A session that was
+idle at the restart reserves nothing and reopens like a closed one.
+
+`POST /api/v1/maintenance` drains work: new top-level sessions, messages that would start
+a turn on a settled session, reopening, compaction, arming the review or QA
+loop, review retries, triage that marks findings to fix, orchestrator worker
+spawns and sends, and ▶ Run previews are refused, while answers to questions, messages to running
+turns and the loops' automatic reviews, fixes and QA runs still go through. The ready state
+also waits for running SSH commands. Resume accepting work cancels draining.
+This is an in-process gate, reset on restart; it does not deploy or restart the
+server. Wait for ready before the normal deployment procedure.
+
+### Relevant memory and maintenance
+
+Briefings prioritize user/feedback memories and matches against the session
+title and latest user message, then recency, within the existing body budget.
+Selection is local lexical matching, with no model call or embedding service.
+`GET /api/v1/memories/health` lists possible duplicates and memories needing verification:
+mark facts checked, archive/restore them, or review a combined text before
+merging. Merging saves the edited target and archives the source without
+removing its text. Verification applies to the exact content and expires after
+90 days for maintenance purposes; it never automatically invalidates a fact.
+Archived memories remain readable through the API and the memory tools,
+but are omitted from briefings. Metadata persists in `app_settings`.
+
+### Visual preview feedback
+
+`POST /api/v1/sessions/:id/preview/feedback` takes a screenshot of a running
+session's preview (an uploaded PNG), the point marked on it and a comment, and
+sends the annotated PNG, exact page URL and image coordinates to the same agent
+conversation. Preview origins are checked against that session's Run links.
+Capture dimensions are image pixels, not an inferred CSS viewport.
+
+### Task history
+
+A task's history (`GET /api/v1/tasks/:id`) is its implementation, review, fix and QA
+sessions together, including independent errands linked to the same PR. It
+shows their times/statuses, review rounds, QA outcome, PR evidence link and
+combined ledger cost (estimated and unpriced turns stay marked). Workers remain
+separate from sibling tasks under the same orchestrator.
+
+The `task_sessions` migration stores small audit snapshots alongside session
+writes and before deletion. Deleting a conversation still deletes its transcript;
+the title, branch, relationships, lifecycle and PR/QA metadata survive with its
+usage ledger. Records deleted before this feature cannot be reconstructed. The
+migration rollback drops this audit history, without touching conversations or
+usage. A task remains readable after its conversation is deleted.
+
+### Deployment state and actions
+
+`GET /api/v1/deployments` reads the latest 20 GitHub deployments, their latest status and
+active successful revision per environment, with a 30-second cache. Failed or
+requested deployments never count as the currently published commit. An optional
+configured HTTP(S) health URL is probed with a five-second timeout and no redirects;
+health alone does not prove which commit is deployed.
+
+Configure each project's environment, workflow filename/ID, workflow branch/tag,
+source branch/tag and SHA input name. None of these machine/project choices is
+guessed. Planning a deployment resolves the source revision and CI; dispatching
+it rechecks CI and dispatches the workflow with that immutable SHA input.
+The workflow must accept that input, check out that SHA, perform the project's
+deploy procedure and report deployment status for the configured environment.
+For example its `workflow_dispatch.inputs.revision` is a required string and
+`actions/checkout` uses `ref: ${{ inputs.revision }}`. Configure GitHub environment
+protection and the actual deployment steps in that workflow. Briareus does not
+invent a shell command or change a server registration's SSH permissions.
+
+The workflow must publish its deployment record for the supplied SHA, since an
+automatic environment record can otherwise name the workflow branch revision.
+Projects marked as Briareus itself must be drained in Maintenance before dispatch.
+
+The existing GitHub token needs Actions write access to dispatch. The operator
+must check/acknowledge the previous request before another dispatch, including an
+ambiguous network failure; requests persist across server restarts. A dispatch
+is reported as requested, never deployed, until GitHub reports its outcome.
+See [workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
+and [deployment statuses](https://docs.github.com/en/rest/deployments/statuses).
+
+### Laravel Forge
+
+Forge accounts are kept in the database, added and edited through
+`/api/v1/settings/forge/accounts`: each is an organization (the slug in
+`forge.laravel.com/<organization>/…`), an API token for it, and the projects it
+is available to, so a client working on a project offers that project's
+accounts (`?repo=owner/name`). The token is stored encrypted under
+`CREDENTIALS_KEY` and never sent back. Through
+`/api/v1/forge/accounts/:account`, an admin token lists the account's servers
+and each server's sites, reads a site, and reads or replaces a site's
+deployment script and `.env`; the server makes every call with the account's
+token, so no client holds it. Forge allows 60 calls
+a minute per token; past that the routes answer 429. Replacing a `.env` is
+accepted by Forge and written to the server shortly after; it does not deploy,
+clear the config cache or restart queue workers.
+
+### Laravel Envoyer
+
+Envoyer is reached per account rather than with one server-wide token. An
+admin token keeps the list at `/api/v1/settings/envoyer/accounts`: each account
+is a name, an Envoyer API token and the one project it is available to. The
+token is stored encrypted under `CREDENTIALS_KEY` and never returned. Any token
+of that project lists the accounts it may use (`GET /api/v1/envoyer/accounts`);
+a manage token reads an account's Envoyer projects, their servers and
+deployments, and deploys a branch or tag through
+`/api/v1/envoyer/accounts/:id/projects/…`, always naming the project in `repo`.
+An account another project was given answers 404. Deploying needs the
+`deployments:create` scope on the Envoyer token.
+
+### Mail
+
+Briareus can keep a copy of Gmail and Outlook mailboxes so a client reads them
+through `/api/v1` without talking to Google or Microsoft itself. It only reads:
+the sign-in asks for `gmail.readonly` or `Mail.Read`, and nothing marks, moves,
+sends or deletes a message. All of it is admin-only, since it is the operator's
+own mail.
+
 1. Register an OAuth client and put it in the server's environment (see
    `.env.example`):
    - **Gmail**: in Google Cloud, enable the Gmail API, set up the OAuth consent

@@ -3,19 +3,27 @@ import { gmailMessage, gmailProvider, outlookMessage, outlookProvider } from '..
 
 // Nothing here reaches Google or Microsoft: `request` is a fake that answers
 // from a list of routes and records every call.
+// `inFlight.max` is the most requests that were ever open at once.
 function fakeFetch(routes) {
   const calls = [];
+  const inFlight = { now: 0, max: 0 };
   const request = vi.fn(async (url, init = {}) => {
     calls.push({ url: String(url), init });
-    for (const [match, answer] of routes) {
-      if (typeof match === 'string' ? String(url).startsWith(match) : match.test(String(url))) {
-        const { status = 200, body = {}, headers = {} } = await answer(String(url), init);
-        return new Response(JSON.stringify(body), { status, headers });
+    inFlight.max = Math.max(inFlight.max, ++inFlight.now);
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      for (const [match, answer] of routes) {
+        if (typeof match === 'string' ? String(url).startsWith(match) : match.test(String(url))) {
+          const { status = 200, body = {}, headers = {} } = await answer(String(url), init);
+          return new Response(JSON.stringify(body), { status, headers });
+        }
       }
+      return new Response(JSON.stringify({ error: { message: `no route for ${url}` } }), { status: 404 });
+    } finally {
+      inFlight.now--;
     }
-    return new Response(JSON.stringify({ error: { message: `no route for ${url}` } }), { status: 404 });
   });
-  return { request, calls };
+  return { request, calls, inFlight };
 }
 
 function fakeSink() {
@@ -191,7 +199,7 @@ describe('gmailProvider', () => {
       redirect_uri: 'http://127.0.0.1',
       code_verifier: 'the-verifier',
     });
-    await expect(gmail.exchange('c', 'v')).rejects.toThrow(/tick the Gmail box/);
+    await expect(gmail.exchange('c', 'v')).rejects.toThrow(/gmail\.readonly/);
     await expect(gmail.exchange('c', 'v')).rejects.toThrow(/no refresh token/);
   });
 
@@ -239,15 +247,91 @@ describe('gmailProvider', () => {
     expect(sleep).toHaveBeenCalledWith(3000);
   });
 
-  it('says what the provider answered when it gives up', async () => {
+  it('backs off exponentially on server errors and no answer, then says what the provider answered', async () => {
+    let n = 0;
     const { request } = fakeFetch([
-      [`${GMAIL}/profile`, () => ({ status: 500, body: { error: { message: 'Backend Error', code: 500 } } })],
+      [
+        `${GMAIL}/profile`,
+        () => {
+          n++;
+          if (n === 1) throw new TypeError('fetch failed');
+          if (n === 2) return { status: 504, body: {} };
+          if (n === 3) return { body: { emailAddress: 'me@gmail.com' } };
+          return { status: 500, body: { error: { message: 'Backend Error', code: 500 } } };
+        },
+      ],
     ]);
-    const gmail = gmailProvider(GOOGLE, { request });
+    const sleep = vi.fn(async () => {});
+    const gmail = gmailProvider(GOOGLE, { request, sleep });
+
+    expect(await gmail.profile(gmail.api(token))).toEqual({ email: 'me@gmail.com' });
+    expect(sleep).toHaveBeenCalledTimes(2);
+    sleep.mockClear();
+
     await expect(gmail.profile(gmail.api(token))).rejects.toMatchObject({
       status: 502,
       upstream: 500,
       message: 'Gmail answered 500: Backend Error',
+    });
+    // Five more tries, each wait about twice the last, none past 64 seconds.
+    const waits = sleep.mock.calls.map(([ms]) => ms);
+    expect(waits).toHaveLength(5);
+    waits.forEach((ms, i) => {
+      expect(ms).toBeGreaterThanOrEqual(Math.min(2 ** (i + 1) * 1000, 64_000));
+      expect(ms).toBeLessThanOrEqual(64_000);
+    });
+  });
+
+  it('paces a first pass to stay inside Gmail’s per-minute quota', async () => {
+    let clock = 0;
+    const sleep = vi.fn(async (ms) => {
+      clock += ms;
+    });
+    const ids = Array.from({ length: 300 }, (_, i) => `m${i}`);
+    const { request } = fakeFetch([
+      [`${GMAIL}/labels`, () => ({ body: { labels: [] } })],
+      [`${GMAIL}/profile`, () => ({ body: { historyId: '1' } })],
+      [`${GMAIL}/messages?`, () => ({ body: { messages: ids.map((id) => ({ id })) } })],
+      [/\/messages\/m\d+\?format=full$/, (url) => ({ body: gmailFull(/messages\/(m\d+)/.exec(url)[1]) })],
+    ]);
+    const sent = [];
+    const timed = (url, init) => {
+      sent.push({
+        at: clock,
+        units: /\/(profile|labels)$/.test(url) ? 1 : /\/messages\?/.test(url) ? 5 : 20,
+      });
+      return request(url, init);
+    };
+    const gmail = gmailProvider(GOOGLE, { request: timed, sleep, now: () => clock });
+
+    await gmail.sync({ api: gmail.api(token), state: null, since: SINCE, sink: fakeSink(), email: 'me' });
+
+    expect(sent).toHaveLength(303);
+    expect(clock).toBeGreaterThanOrEqual(60_000);
+    for (const { at } of sent) {
+      const minute = sent.filter((c) => c.at > at - 60_000 && c.at <= at).reduce((n, c) => n + c.units, 0);
+      expect(minute).toBeLessThanOrEqual(5000);
+    }
+  });
+
+  it('fetches a text body Gmail sent as a separate attachment', async () => {
+    const m = gmailFull('d1');
+    m.payload.parts[0].parts[0].body = { attachmentId: 'body-1', size: 9 };
+    const { request } = fakeFetch([
+      [`${GMAIL}/labels`, () => ({ body: { labels: [] } })],
+      [`${GMAIL}/profile`, () => ({ body: { historyId: '1' } })],
+      [`${GMAIL}/messages?`, () => ({ body: { messages: [{ id: 'd1' }] } })],
+      [`${GMAIL}/messages/d1?format=full`, () => ({ body: m })],
+      [`${GMAIL}/messages/d1/attachments/body-1`, () => ({ body: { size: 9, data: b64('Long text') } })],
+    ]);
+    const gmail = gmailProvider(GOOGLE, { request });
+    const sink = fakeSink();
+
+    await gmail.sync({ api: gmail.api(token), state: null, since: SINCE, sink, email: 'me' });
+
+    expect(sink.upserted[0]).toMatchObject({
+      bodyText: 'Long text',
+      attachments: [{ id: 'att-1', name: 'invoice.pdf' }],
     });
   });
 
@@ -287,7 +371,7 @@ describe('gmailProvider', () => {
 
     expect(state).toEqual({ historyId: '900' });
     const list = new URL(calls.find((c) => c.url.startsWith(`${GMAIL}/messages?`)).url);
-    expect(list.searchParams.get('q')).toBe(`after:${Math.floor(SINCE / 1000)} -in:drafts`);
+    expect(list.searchParams.get('q')).toBe(`after:${Math.floor(SINCE / 1000)}`);
     expect(sink.upserted.map((r) => r.id)).toEqual(['a']);
     expect(sink.removed.flatMap((r) => r.ids).sort()).toEqual(['b', 'c', 'gone']);
     expect(sink.pruned).toEqual([null]);
@@ -334,7 +418,8 @@ describe('gmailProvider', () => {
       ],
       [
         `${GMAIL}/messages/restored?format=minimal`,
-        () => ({ body: { id: 'restored', labelIds: ['INBOX'], internalDate: String(NOW) } }),
+        // format=minimal promises the id and the labels, nothing more.
+        () => ({ body: { id: 'restored', labelIds: ['INBOX'] } }),
       ],
     ]);
     const sink = fakeSink();
@@ -475,6 +560,31 @@ describe('outlookProvider', () => {
     expect(new URLSearchParams(web.calls[0].init.body).get('client_secret')).toBe('shh');
   });
 
+  it('takes a grant whose scope is left out or percent-encoded, and marks interaction_required for a new sign-in', async () => {
+    const answers = [
+      { access_token: 'a', refresh_token: 'r', expires_in: 3600 },
+      { access_token: 'a', refresh_token: 'r', scope: 'https%3A%2F%2Fgraph.microsoft.com%2Fmail.read' },
+      { error: 'interaction_required', error_description: 'AADSTS50076: MFA.\r\nTrace ID: x' },
+    ];
+    const { request } = fakeFetch([
+      [
+        'https://login.microsoftonline.com/',
+        () => {
+          const body = answers.shift();
+          return { status: body.error ? 400 : 200, body };
+        },
+      ],
+    ]);
+    const outlook = outlookProvider(MICROSOFT, { request });
+
+    await expect(outlook.exchange('c', 'v')).resolves.toMatchObject({ scope: null });
+    await expect(outlook.exchange('c', 'v')).resolves.toMatchObject({ refreshToken: 'r' });
+    await expect(outlook.refresh('r')).rejects.toMatchObject({
+      reauth: true,
+      message: 'Microsoft refused the sign-in: AADSTS50076: MFA.',
+    });
+  });
+
   it('refuses a grant without Mail.Read', async () => {
     const { request } = fakeFetch([
       [
@@ -491,18 +601,25 @@ describe('outlookProvider', () => {
         { id: 'INBOX-ID', displayName: 'Inbox', childFolderCount: 1 },
         { id: 'TRASH-ID', displayName: 'Deleted Items', childFolderCount: 2 },
         { id: 'ARCH-ID', displayName: 'Archive', childFolderCount: 0 },
+        { '@odata.type': '#microsoft.graph.mailSearchFolder', id: 'SEARCH-ID', displayName: 'Unread' },
       ],
       [`${GRAPH}/mailFolders/INBOX-ID/childFolders?`]: [
         { id: 'SUB-ID', displayName: 'Clients', childFolderCount: 0 },
       ],
     };
-    const { request, calls } = fakeFetch([
+    const { request, calls, inFlight } = fakeFetch([
       [`${GRAPH}/mailFolders/inbox?`, () => ({ body: { id: 'INBOX-ID' } })],
       [`${GRAPH}/mailFolders/deleteditems?`, () => ({ body: { id: 'TRASH-ID' } })],
+      // Graph does not document what a mailbox without one answers.
       [
-        /\/mailFolders\/(junkemail|drafts|outbox|conversationhistory|syncissues|scheduled)\?/,
+        /\/mailFolders\/scheduled\?/,
+        () => ({ status: 400, body: { error: { code: 'ErrorInvalidIdMalformed' } } }),
+      ],
+      [
+        /\/mailFolders\/(junkemail|drafts|outbox|conversationhistory|syncissues|searchfolders)\?/,
         () => ({ status: 404 }),
       ],
+      [`${GRAPH}/messages/partial?`, () => ({ body: graphMessage('partial', 'INBOX-ID', { isRead: true }) })],
       [
         /\/mailFolders\/[\w-]+\/messages\/delta/,
         (url) => {
@@ -520,7 +637,11 @@ describe('outlookProvider', () => {
           if (folder === 'INBOX-ID')
             return {
               body: {
-                value: [{ id: 'moved-away', '@removed': { reason: 'deleted' } }],
+                value: [
+                  { id: 'moved-away', '@removed': { reason: 'deleted' } },
+                  // An update with "at least the updated properties".
+                  { id: 'partial', isRead: true },
+                ],
                 '@odata.deltaLink': `${GRAPH}/mailFolders/INBOX-ID/messages/delta?token=i1`,
               },
             };
@@ -554,6 +675,9 @@ describe('outlookProvider', () => {
     const state = await outlook.sync({ api: outlook.api(token), state: null, since: SINCE, sink });
 
     expect(state.known).toEqual({ inbox: 'INBOX-ID', skip: ['TRASH-ID'] });
+    // Outlook serves four requests at a time per app and mailbox.
+    expect(inFlight.max).toBeLessThanOrEqual(4);
+    expect(calls.some((c) => c.url.includes('SEARCH-ID'))).toBe(false);
     expect(Object.keys(state.deltas)).toEqual(['INBOX-ID', 'ARCH-ID', 'SUB-ID']);
     expect(state.deltas['INBOX-ID']).toContain('token=i1');
     // The trash's own children are never listed.
@@ -562,7 +686,8 @@ describe('outlookProvider', () => {
     expect(delta.searchParams.get('$filter')).toBe(`receivedDateTime ge ${new Date(SINCE).toISOString()}`);
     expect(calls[0].init.headers.Prefer).toContain('IdType="ImmutableId"');
 
-    expect(sink.upserted).toHaveLength(1);
+    expect(sink.upserted.map((r) => r.id)).toEqual(['a', 'partial']);
+    expect(sink.upserted[1]).toMatchObject({ isRead: true, subject: 'Subject partial' });
     expect(sink.upserted[0]).toMatchObject({
       id: 'a',
       inInbox: true,
