@@ -612,6 +612,50 @@ describe('review regressions', () => {
     expect(new URL(server.signInUrl).origin).toBe('http://localhost');
   });
 
+  it.each([false, true])('reconnects using custom resource metadata (restart: %s)', async (restart) => {
+    const metadataUrl = 'https://mcp.example.com/custom/resource';
+    const wellKnown = 'https://mcp.example.com/.well-known/oauth-protected-resource/devtools';
+    const original = remote.fetch.getMockImplementation();
+    remote.fetch.mockImplementation(async (url, init) => {
+      if (String(url) === metadataUrl) return original(wellKnown, init);
+      if (String(url).includes('/.well-known/oauth-protected-resource'))
+        return new Response(null, { status: 404 });
+      const response = await original(url, init);
+      if (String(url) === MCP && response.status === 401)
+        return new Response(null, {
+          status: 401,
+          headers: {
+            'WWW-Authenticate': `Bearer resource_metadata="${metadataUrl}", scope="read manage"`,
+          },
+        });
+      return response;
+    });
+    const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+    if (restart) {
+      service = createMcpService({
+        load: async () => saved,
+        save: async (_name, value) => {
+          saved = value;
+        },
+        fetchImpl: remote.fetch,
+        callbackUrl: () => CALLBACK,
+        now: () => clock,
+      });
+      await service.init();
+    }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const next = await service.connect(server.id, { signIn: true });
+      expect(next).toMatchObject({ status: 'needs-sign-in', error: '' });
+      const url = new URL(next.signInUrl);
+      expect(url.origin + url.pathname).toBe('https://auth.example.com/dialog/oauth');
+      expect(url.searchParams.get('scope')).toBe('read manage');
+      expect(url.searchParams.get('client_id')).toBe('client-1');
+      expect(await signIn(next)).toMatchObject({ signedIn: true, status: 'ready' });
+    }
+    expect(remote.registrations).toBe(1);
+    expect(service.mounts('o/r')).toHaveLength(1);
+  });
+
   it('re-registers dynamic clients for changed scopes and reuses them for the same scope', async () => {
     const scopes = new Map();
     const original = remote.fetch.getMockImplementation();
