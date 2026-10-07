@@ -29,6 +29,7 @@ vi.mock('../lib/codex-session.js', async (original) => ({
 // creates anything. The success path (spawning a session) stays untested on
 // purpose; it is the integration surface.
 const state = vi.hoisted(() => ({
+  workspaceDir: '/tmp/nowhere',
   provider: { id: 1, label: 'Claude entry', binary: 'claude', active: true },
   // The rows beside the session's own, and the group the balancer sees: only
   // the interchangeable-accounts tests set either.
@@ -68,7 +69,7 @@ vi.mock('../lib/config.js', () => ({
     grokBin: '',
     opencodeBin: '',
     githubToken: 'tok',
-    workspaceDir: '/tmp/nowhere',
+    workspaceDir: state.workspaceDir,
     dev: { maxSessions: 3, timeoutMin: 60, autoCompactTokens: 250000 },
     reviewLoop: { maxRounds: 3, lowFindingsUntilRound: 1 },
   }),
@@ -283,6 +284,8 @@ import {
   workspaceCheckoutPlan,
   workspaceGitProbeOptions,
   codexTurnResumes,
+  acquireCloneDir,
+  ensureClone,
 } from '../lib/jobs.js';
 
 beforeEach(() => {
@@ -11486,5 +11489,77 @@ describe('/btw side questions', () => {
     getProviderForJob.mockReturnValue({ id: 3, label: 'Codex', binary: 'codex', active: true });
     expect(() => askDevSessionBtw('btw-session', 'hi')).toThrow('Claude session');
     expect(askClaudeSideQuestion).not.toHaveBeenCalled();
+  });
+});
+
+describe('invalid clone pool slots', () => {
+  it('skips missing .git without touching files and reserves concurrent fresh allocations', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-pool-'));
+    state.workspaceDir = root;
+    try {
+      const invalid = path.join(root, 'acme__app');
+      fs.mkdirSync(invalid);
+      fs.writeFileSync(path.join(invalid, 'unpublished.txt'), 'local work');
+      const first = acquireCloneDir('acme/app', 'worker');
+      const second = acquireCloneDir('acme/app', 'worker');
+      expect(first).toBe(path.join(root, 'acme__app__2'));
+      expect(second).toBe(path.join(root, 'acme__app__3'));
+      expect(fs.readFileSync(path.join(invalid, 'unpublished.txt'), 'utf8')).toBe('local work');
+      expect(fs.readdirSync(invalid)).toEqual(['unpublished.txt']);
+    } finally {
+      state.workspaceDir = '/tmp/nowhere';
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])(
+    'preserves a broken checkout (has .git: %s) even if the replacement clone fails',
+    async (hasGit) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-replacement-'));
+      const dir = path.join(root, 'acme__app');
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'unpublished.txt'), 'local work');
+      if (hasGit) {
+        fs.mkdirSync(path.join(dir, '.git'));
+        fs.writeFileSync(path.join(dir, '.git', 'HEAD'), 'damaged but preserved');
+      }
+      const failedCommand = () => {
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        setImmediate(() => child.emit('close', 1));
+        return child;
+      };
+      if (hasGit) vi.mocked(spawn).mockImplementationOnce(failedCommand);
+      vi.mocked(spawn).mockImplementationOnce(failedCommand);
+      try {
+        const job = { id: `clone-replacement-${hasGit}` };
+        await expect(ensureClone(job, dir, 'acme/app')).rejects.toThrow(/git clone exited with code 1/);
+        const recovery = path.join(root, '.briareus-recovery');
+        expect(fs.readdirSync(recovery)).toHaveLength(1);
+        const backup = path.join(recovery, fs.readdirSync(recovery)[0], 'checkout');
+        expect(fs.readFileSync(path.join(backup, 'unpublished.txt'), 'utf8')).toBe('local work');
+        if (hasGit)
+          expect(fs.readFileSync(path.join(backup, '.git', 'HEAD'), 'utf8')).toBe('damaged but preserved');
+        expect(job.events.some((event) => event.text.includes(backup))).toBe(true);
+        expect(fs.readdirSync(dir)).toEqual([]);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('still refuses to resume a populated checkout missing .git', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-resume-'));
+    try {
+      fs.writeFileSync(path.join(root, 'unpublished.txt'), 'local work');
+      await expect(ensureClone({}, root, 'acme/app', { preserve: true })).rejects.toThrow(
+        `The checkout at ${root} has lost its .git; inspect it before resuming`,
+      );
+      expect(fs.readFileSync(path.join(root, 'unpublished.txt'), 'utf8')).toBe('local work');
+      expect(fs.readdirSync(root)).toEqual(['unpublished.txt']);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
