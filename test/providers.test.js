@@ -1247,9 +1247,13 @@ describe('the claude parser', () => {
     expect(events[0].costUsd).toBeCloseTo(1.5);
     expect(events[1].costUsd).toBeCloseTo(0.5);
     // A total below it means the CLI restored nothing: all of it is this run's.
-    const fresh = { ...newTurn(), costBaseline: 180 };
-    parserFor('claude', fresh).feed({ type: 'result', total_cost_usd: 0.4 });
+    const fresh = { ...newTurn(), costBaseline: 1 };
+    const freshParser = parserFor('claude', fresh);
+    freshParser.feed({ type: 'result', total_cost_usd: 0.4 });
     expect(fresh.costUsd).toBe(0.4);
+    // And stays so once the process has spent past it.
+    freshParser.feed({ type: 'result', total_cost_usd: 1.5 });
+    expect(fresh.costUsd).toBe(1.5);
   });
 
   it('a result with no price keeps the cost of the answers before it', () => {
