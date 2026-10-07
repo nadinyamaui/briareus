@@ -385,6 +385,109 @@ describe('a server that only lets clients it knows sign in', () => {
 });
 
 describe('review regressions', () => {
+  it.each([404, 503, 'malformed', 'network'])(
+    'fails closed when advertised resource metadata is unavailable: %s',
+    async (failure) => {
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation((url, init) => {
+        if (String(url).includes('oauth-protected-resource')) {
+          if (failure === 'network') throw new Error('unavailable');
+          if (failure === 'malformed') return new Response('not json');
+          return json({}, failure);
+        }
+        return original(url, init);
+      });
+      const server = await service.create({
+        name: 'meta',
+        url: MCP,
+        oauthClientId: 'client',
+        oauthClientSecret: 'SECRET',
+      });
+      expect(server).toMatchObject({ status: 'error', signInUrl: null, signedIn: false });
+      expect(server.error).toMatch(/advertised resource metadata.*unavailable/);
+      expect(remote.registrations).toBe(0);
+      expect(remote.tokenRequests).toEqual([]);
+      expect(remote.calls.some((call) => call.url.includes('oauth-authorization-server'))).toBe(false);
+      remote.fetch.mockImplementation(original);
+      expect(await service.connect(server.id)).toMatchObject({ status: 'needs-sign-in' });
+    },
+  );
+
+  it.each(['https://mcp.example.com', 'https://mcp.example.com/'])(
+    'accepts a canonical root resource for %s',
+    async (configuredUrl) => {
+      const root = 'https://mcp.example.com';
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation((url, init) => {
+        if (String(url) === root + '/') return original(MCP, init);
+        if (String(url).includes('oauth-protected-resource'))
+          return json({ resource: root, authorization_servers: ['https://auth.example.com/devtools'] });
+        return original(url, init);
+      });
+      const server = await service.create({ name: 'root', url: configuredUrl });
+      expect(server.status).toBe('needs-sign-in');
+      expect(new URL(server.signInUrl).searchParams.get('resource')).toBe(root);
+      expect(await signIn(server)).toMatchObject({ status: 'ready', signedIn: true });
+      expect(remote.tokenRequests[0].resource).toBe(root);
+      expect((await service.upstream(server.id, 'o/r')).url).toBe(root + '/');
+    },
+  );
+
+  it.each(['client_secret_basic', 'client_secret_post'])(
+    'registers and exchanges tokens using the advertised %s method',
+    async (method) => {
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation(async (url, init) => {
+        if (String(url).includes('oauth-authorization-server')) {
+          const metadata = await (await original(url, init)).json();
+          return json({ ...metadata, token_endpoint_auth_methods_supported: [method] });
+        }
+        if (String(url).endsWith('/register')) {
+          const registration = JSON.parse(init.body);
+          expect(registration.token_endpoint_auth_method).toBe(method);
+          return json({ client_id: 'confidential', client_secret: 'SECRET' }, 201);
+        }
+        if (String(url).endsWith('/token')) {
+          const headers = new Headers(init.headers);
+          const params = new URLSearchParams(String(init.body));
+          expect(headers.get('authorization')).toBe(
+            method === 'client_secret_basic'
+              ? 'Basic ' + Buffer.from('confidential:SECRET').toString('base64')
+              : null,
+          );
+          expect(params.get('client_secret')).toBe(method === 'client_secret_post' ? 'SECRET' : null);
+        }
+        return original(url, init);
+      });
+      const server = await service.create({ name: 'meta', url: MCP });
+      expect(server.status).toBe('needs-sign-in');
+      expect(await signIn(server)).toMatchObject({ status: 'ready', signedIn: true });
+      await service.upstream(server.id, 'o/r', { force: true });
+      expect(remote.tokenRequests.map((r) => r.grant_type)).toEqual(['authorization_code', 'refresh_token']);
+    },
+  );
+
+  it.each([
+    ['client_secret_basic', undefined, /missing.*client secret/],
+    ['client_secret_basic', 'client_secret_post', /unadvertised/],
+    ['none', 'private_key_jwt', /Unsupported OAuth/],
+  ])('rejects invalid registration credentials (%s, %s)', async (advertised, returned, error) => {
+    const original = remote.fetch.getMockImplementation();
+    remote.fetch.mockImplementation(async (url, init) => {
+      if (String(url).includes('oauth-authorization-server')) {
+        const metadata = await (await original(url, init)).json();
+        return json({ ...metadata, token_endpoint_auth_methods_supported: [advertised] });
+      }
+      if (String(url).endsWith('/register'))
+        return json({ client_id: 'client', token_endpoint_auth_method: returned }, 201);
+      return original(url, init);
+    });
+    const server = await service.create({ name: 'meta', url: MCP });
+    expect(server).toMatchObject({ status: 'error', signInUrl: null });
+    expect(server.error).toMatch(error);
+    expect(remote.tokenRequests).toEqual([]);
+  });
+
   it('reads only the Bearer parameters regardless of challenge order', () => {
     expect(
       parseBearerChallenge(
@@ -445,10 +548,14 @@ describe('review regressions', () => {
     },
   );
 
-  it('retains legacy resource-origin endpoints when no authorization server is advertised', async () => {
+  it('retains legacy resource-origin endpoints when no metadata hint is advertised', async () => {
     const original = remote.fetch.getMockImplementation();
     remote.fetch.mockImplementation((url, init) =>
-      String(url).includes('/.well-known/') ? json({}, 404) : original(url, init),
+      String(url) === MCP
+        ? new Response(null, { status: 401, headers: { 'www-authenticate': 'Bearer' } })
+        : String(url).includes('/.well-known/')
+          ? json({}, 404)
+          : original(url, init),
     );
     const server = await service.create({ name: 'legacy', url: MCP, oauthClientId: 'client' });
     expect(server.status).toBe('needs-sign-in');
@@ -668,6 +775,55 @@ describe('review regressions', () => {
     });
     return { waiting, release };
   }
+
+  it.each(['resource', 'authorization', 'registration'])(
+    'preserves rotating refreshes when reconnect %s fails',
+    async (stage) => {
+      const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+      // A new client name requires registration while preserving the current grant.
+      if (stage === 'registration') await service.update(server.id, { oauthClientName: 'New client' });
+      const delayed = delayNext(
+        (url, init) => url.endsWith('/token') && String(init.body).includes('refresh_token'),
+      );
+      const rotating = service.upstream(server.id, 'o/r', { force: true });
+      await delayed.waiting;
+      const original = remote.fetch.getMockImplementation();
+      remote.fetch.mockImplementation((url, init) => {
+        if (
+          (stage === 'resource' && String(url).includes('oauth-protected-resource')) ||
+          (stage === 'authorization' && String(url).includes('auth.example.com/.well-known')) ||
+          (stage === 'registration' && String(url).endsWith('/register'))
+        )
+          return json({}, 503);
+        return original(url, init);
+      });
+      const failed = await service.connect(server.id, { signIn: true });
+      expect(failed).toMatchObject({ status: 'error', signedIn: true, signInUrl: null });
+      delayed.release(json({ access_token: 'ROTATED', refresh_token: 'R2', expires_in: 3600 }));
+      expect((await rotating).headers.Authorization).toBe('Bearer ROTATED');
+      remote.fetch.mockImplementation(original);
+      await service.upstream(server.id, 'o/r', { force: true });
+      expect(remote.tokenRequests.at(-1).refresh_token).toBe('R2');
+      expect(service.list()[0].signedIn).toBe(true);
+    },
+  );
+
+  it('rejects an old refresh once reconnect replaces its grant', async () => {
+    const server = await signIn(await service.create({ name: 'meta', url: MCP }));
+    const delayed = delayNext(
+      (url, init) => url.endsWith('/token') && String(init.body).includes('refresh_token'),
+    );
+    const rotating = service.upstream(server.id, 'o/r', { force: true });
+    const rejected = expect(rotating).rejects.toMatchObject({ status: 409 });
+    await delayed.waiting;
+    expect(await service.connect(server.id, { signIn: true })).toMatchObject({
+      status: 'needs-sign-in',
+      signedIn: false,
+    });
+    delayed.release(json({ access_token: 'STALE', refresh_token: 'STALE' }));
+    await rejected;
+    expect(service.list()[0].signedIn).toBe(false);
+  });
 
   it.each([200, 400, 401])(
     'rejects a stale refresh response (%s) without replacing a newer grant',
