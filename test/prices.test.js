@@ -72,30 +72,32 @@ describe('priceFor', () => {
 describe('cacheShareOf', () => {
   it('measures the share on the unpriced turns that recorded their cache reads', () => {
     const rows = [
-      { inputTokens: 6e6, cachedInputTokens: 5.7e6, costUsd: null },
-      { inputTokens: 4e6, cachedInputTokens: 3.9e6, costUsd: null },
+      { inputTokens: 6e6, cacheMeasured: true, cachedInputTokens: 5.7e6, costUsd: null },
+      { inputTokens: 4e6, cacheMeasured: true, cachedInputTokens: 3.9e6, costUsd: null },
     ];
-    expect(cacheShareOf(rows)).toBeCloseTo(0.96, 6);
+    expect(cacheShareOf(rows, () => priceFor(CATALOG, 'codex', 'gpt-5.6-sol'))).toBeCloseTo(0.96, 6);
   });
   it('keeps the default when there is too little measured input', () => {
-    expect(cacheShareOf([{ inputTokens: 1000, cachedInputTokens: 10, costUsd: null }])).toBe(
-      DEFAULT_CACHE_SHARE,
-    );
+    expect(
+      cacheShareOf([{ inputTokens: 1000, cacheMeasured: true, cachedInputTokens: 10, costUsd: null }], () =>
+        priceFor(CATALOG, 'codex', 'gpt-5.6-sol'),
+      ),
+    ).toBe(DEFAULT_CACHE_SHARE);
   });
   it('does not solve the share from what the priced turns cost', () => {
     // claude's turns bill cache writes above fresh input; read as a Codex cache
     // share, $43.50 here would have said 0.7 and doubled every estimate.
     const rows = [{ provider: 'claude', inputTokens: 10e6, outputTokens: 1e6, costUsd: 43.5 }];
-    expect(cacheShareOf(rows)).toBe(DEFAULT_CACHE_SHARE);
+    expect(cacheShareOf(rows, () => priceFor(CATALOG, 'codex', 'gpt-5.6-sol'))).toBe(DEFAULT_CACHE_SHARE);
   });
   it('skips counts that cannot be a share of the input', () => {
     const rows = [
-      { inputTokens: 10e6, cachedInputTokens: 9e6, costUsd: null },
-      { inputTokens: 10e6, cachedInputTokens: 20e6, costUsd: null },
-      { inputTokens: 10e6, cachedInputTokens: -1, costUsd: null },
+      { inputTokens: 10e6, cacheMeasured: true, cachedInputTokens: 9e6, costUsd: null },
+      { inputTokens: 10e6, cacheMeasured: true, cachedInputTokens: 20e6, costUsd: null },
+      { inputTokens: 10e6, cacheMeasured: true, cachedInputTokens: -1, costUsd: null },
       { inputTokens: 10e6, costUsd: null },
     ];
-    expect(cacheShareOf(rows)).toBeCloseTo(0.9, 6);
+    expect(cacheShareOf(rows, () => priceFor(CATALOG, 'codex', 'gpt-5.6-sol'))).toBeCloseTo(0.9, 6);
   });
 });
 
@@ -109,6 +111,7 @@ describe('withEstimates', () => {
         provider: 'codex',
         model: 'gpt-5.6-sol',
         inputTokens: 10e6,
+        cacheMeasured: true,
         cachedInputTokens: 7e6,
         outputTokens: 0,
         costUsd: null,
@@ -127,6 +130,7 @@ describe('withEstimates', () => {
         provider: 'codex',
         model: 'gpt-5.6-sol',
         inputTokens: 10e6,
+        cacheMeasured: true,
         cachedInputTokens: 9e6,
         outputTokens: 1e6,
         costUsd: null,
@@ -142,12 +146,50 @@ describe('withEstimates', () => {
     const rows = [{ provider: 'codex', model: 'gpt-5.6-sol', inputTokens: 100, costUsd: null }];
     expect(withEstimates(rows, {})[0].costUsd).toBeNull();
   });
+  it('excludes unknown models from dashboard and lifetime calibration', () => {
+    const measured = {
+      provider: 'codex',
+      model: 'gpt-5.6-sol',
+      inputTokens: 1e6,
+      cachedInputTokens: 960000,
+      cacheMeasured: true,
+      costUsd: null,
+    };
+    const unknown = { ...measured, model: 'private-model', inputTokens: 1e9, cachedInputTokens: 0 };
+    const fallback = { ...measured, inputTokens: 10e6, cachedInputTokens: null };
+    expect(withEstimates([measured, unknown, fallback], CATALOG)[2].costUsd).toBeCloseTo(5.44);
+    expect(withEstimates([fallback], CATALOG, [measured, unknown])[0].costUsd).toBeCloseTo(5.44);
+    expect(withEstimates([unknown], CATALOG)[0]).toBe(unknown);
+  });
+  it('excludes inferred and ambiguous cache counts from calibration without repricing them', () => {
+    const measured = {
+      provider: 'codex',
+      model: 'gpt-5.6-sol',
+      inputTokens: 1e6,
+      cachedInputTokens: 960000,
+      cacheMeasured: true,
+      costUsd: null,
+    };
+    const inferred = { ...measured, inputTokens: 1e9, cachedInputTokens: 5e8, cacheMeasured: false };
+    const ambiguous = { ...inferred, cacheMeasured: undefined };
+    const fallback = { ...measured, inputTokens: 10e6, cachedInputTokens: null };
+    expect(withEstimates([measured, inferred, ambiguous, fallback], CATALOG)[3].costUsd).toBeCloseTo(5.44);
+    expect(withEstimates([fallback], CATALOG, [measured, inferred])[0].costUsd).toBeCloseTo(5.44);
+    expect(withEstimates([inferred], CATALOG)[0].costUsd).toBeCloseTo(2200);
+  });
   it('can calibrate requested rows from a separate lifetime aggregate', () => {
     const rows = [
       { provider: 'codex', model: 'gpt-5.6-sol', inputTokens: 10e6, outputTokens: 1e6, costUsd: null },
     ];
     const calibration = [
-      { provider: 'codex', model: 'gpt-5.6-sol', inputTokens: 10e6, cachedInputTokens: 5e6, costUsd: null },
+      {
+        provider: 'codex',
+        model: 'gpt-5.6-sol',
+        inputTokens: 10e6,
+        cacheMeasured: true,
+        cachedInputTokens: 5e6,
+        costUsd: null,
+      },
     ];
     // 10M at 0.5*0.4 + 0.5*4 = $2.20/M, plus 1M of output at $20.
     expect(withEstimates(rows, CATALOG, calibration)[0].costUsd).toBeCloseTo(22 + 20, 6);
