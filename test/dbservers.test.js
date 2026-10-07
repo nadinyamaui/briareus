@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// normalizeServer and findClash are not exported; createDbServer/updateDbServer
-// are the doors to them, so the validation and the clash check are tested
-// through those, with the DB layer handing back whatever it was asked to save.
+// normalizeServer and findClash are not exported, so they are tested through createDbServer
+// and updateDbServer, with the DB layer handing back whatever it was asked to save.
 const state = vi.hoisted(() => ({ rows: [], saved: [], deleted: [], nextId: 1, loadError: null }));
 
 vi.mock('../lib/db.js', () => ({

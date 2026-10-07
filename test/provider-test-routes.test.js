@@ -14,9 +14,8 @@ vi.mock('../lib/db.js', () => ({
 
 import { providerTestRoutes } from '../lib/provider-test-routes.js';
 
-// The Test button against a gateway with no model list route: /models answers
-// 404, so the route falls back to a chat call, and the model in that call is
-// the one under test. The gateway is a real local server, as is the route.
+// The Test button against a gateway with no model list route: /models answers 404, so the
+// route falls back to a chat call with the model under test. Gateway and route are both real.
 describe('POST /api/providers/test on a gateway with no model list', () => {
   const rows = [{ id: 7, binary: 'codex', baseUrl: 'x', apiKey: 'k', models: [], efforts: [] }];
   const cfg = { claudeModel: 'claude-opus-5-5' };

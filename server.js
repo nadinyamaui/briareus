@@ -198,10 +198,8 @@ import { listWorkspaces, resetSetup, cleanWorkspace, startWorkspacePruner } from
 import { githubWebhookUrl, sessionWebhookKey, sessionWebhookUrl } from './lib/webhooksecrets.js';
 import { childEnv } from './lib/childenv.js';
 
-// Before anything else: .env has to be complete. Every setting without a
-// default names something about this machine (its database, its port, its
-// public hostname) and a server that comes up on a guess is worse than one
-// that does not come up at all. One line, then out; not a stack trace.
+// .env must be complete first: settings without a default are machine-specific, and a server
+// that starts on a guess is worse than none. One line, then exit; not a stack trace.
 try {
   getConfig();
 } catch (e) {
@@ -211,15 +209,11 @@ try {
 }
 
 const app = express();
-// The only proxy in front of this is a tunnel/reverse proxy on this machine, so
-// trust exactly that one hop: it is what makes `req.ip` the caller's address
-// rather than the proxy's.
+// Only a local tunnel/reverse proxy sits in front: trust that one hop so `req.ip` is the caller's.
 app.set('trust proxy', 'loopback');
 
-// The API handlers live on a router of their own rather than on the app,
-// because nothing reaches them by their own paths any more. /api/v1 hands a
-// client's request to them once its bearer token has been judged
-// (lib/api-v1.js), and an agent reaches its own under /api/agent/.
+// API handlers live on their own router: /api/v1 dispatches to them once the bearer token is
+// judged (lib/api-v1.js), and an agent reaches its own under /api/agent/.
 const api = express.Router();
 
 // On every response, including the webhooks': nothing here is a page, and the
@@ -237,16 +231,12 @@ const slackService = createSlackService({
 });
 setSlackAccess((repo) => slackService.briefing(repo));
 
-// Webhooks come first, ahead of the JSON body parser: GitHub signs the raw
-// bytes (a re-serialized body verifies against nothing). Each delivery
-// authenticates itself with an HMAC over the raw body. See lib/webhooks.js;
-// Slack's events are signed the same way, with the Slack app's secret.
+// Webhooks go ahead of the JSON body parser: GitHub and Slack sign the raw bytes with an HMAC,
+// and a re-serialized body verifies against nothing (lib/webhooks.js).
 app.use('/webhooks/slack', slackEventsRouter({ service: slackService }));
 app.use('/webhooks', webhookRouter());
 
-// The client API, and the only one: owner-issued tokens (`npm run
-// create-token`, the only place tokens are issued or listed), in front of the
-// handlers below.
+// The only client API: owner-issued tokens (`npm run create-token`) in front of the handlers below.
 const mobileAuth = createMobileAuth();
 app.use(
   apiV1Routes({
@@ -270,31 +260,25 @@ app.use(express.json({ limit: '1mb' }));
 // answered at their own path.
 app.use(agentOnly(api));
 
-// What the built-in pages used to call. Said in JSON, and with where to go,
-// because the caller is a script that would otherwise be handed a 404 page.
+// Retired routes answer in JSON with where to go, since the caller is a script, not a browser.
 app.use('/api', (req, res) =>
   res.status(410).json({ error: 'This route is retired. Call /api/v1 with a token: see docs/api-v1.md' }),
 );
 
-// For the uptime monitor: no auth, and nothing sensitive in the answer. 200 means the app AND
-// its database answer; 503 when MySQL does not, so a paused database shows up
-// on the monitor instead of as silently missing session history.
+// For the uptime monitor (no auth, nothing sensitive). 503 when MySQL is down, so a paused
+// database shows on the monitor rather than as silently missing session history.
 app.get('/healthz', async (req, res) => {
   const db = await dbHealthy();
   res.status(db ? 200 : 503).json({ ok: db, db, uptime: Math.floor(process.uptime()) });
 });
 
-// The scenario videos a test run records. The run copies each .webm here, and
-// a client fetches one through /api/v1 with its token; the links a run leaves
-// on a pull request point there too, unless an R2 bucket serves them instead
-// (lib/prtasks.js).
+// Test-run scenario videos, fetched through /api/v1; PR links point here too unless an R2
+// bucket serves them (lib/prtasks.js).
 fs.mkdirSync(getConfig().testVideosDir, { recursive: true });
 api.use('/videos', express.static(getConfig().testVideosDir));
 
-// The spawned CLI does not share the desktop app's login, so surface its auth
-// state in the UI instead of letting sessions fail cryptically. Every claude
-// entry is a login of its own, kept in its derived config dir: one state per
-// dir.
+// The spawned CLI does not share the desktop app's login, so its auth state is surfaced rather
+// than letting sessions fail cryptically. Each claude entry logs in in its own config dir.
 const claudeAuthByDir = new Map(); // config dir -> { checkedAt, loggedIn, authMethod }
 
 // Runs `claude auth status` with the same env sanitization sessions use, so
@@ -321,23 +305,16 @@ function probeClaudeCli(cfg, configDir, apply) {
   }
 }
 
-// One probe per claude entry, and the same for the other login-backed
-// binaries below. Run at boot (once the providers are loaded), after every
-// provider edit, and on a timer: a login made from a terminal (or a token one
-// of the account's own sessions refreshed) changes nothing the server can see,
-// and the balancer ranks an account it remembers as logged out behind one at
-// its limit, so the memory has to be renewed to stay honest. The timer is
-// inside the balancer's AUTH_TTL_MS, so a probe is always fresh enough to
-// count.
+// Probed at boot, after provider edits and on this timer: a login made outside the server is
+// invisible otherwise, and the balancer ranks a remembered-logged-out account last. Must stay
+// inside the balancer's AUTH_TTL_MS so a probe is always fresh enough to count.
 const AUTH_RECHECK_MS = 5 * 60_000;
 
 function checkClaudeAuth() {
   const cfg = getConfig();
   const checkedAt = new Date().toISOString();
   for (const p of listProviders().filter((r) => r.active && r.binary === 'claude' && !r.apiKey)) {
-    // Materialize the entry's dir from the database, and adopt whatever fresh
-    // login was made in it since the last look, then probe what a session
-    // would actually run with.
+    // Materialize the dir and adopt any fresh login made in it before probing.
     const dir = ensureClaudeHome(p);
     captureProviderAuth(p).catch(() => {});
     // The balancer hears the result too, so a session started before anyone
@@ -354,14 +331,9 @@ function checkClaudeAuth() {
   }
 }
 
-// The other binaries that log in per entry. Their probe is a look for the
-// login file the CLI wrote (probeProviderAuth, codex and grok), so putting
-// them on the same timer costs a stat call per row, and leaving them off it
-// costs correctness: nothing else refreshes their login state, so the
-// balancer's memory of a logged-out codex or grok account expires ten minutes
-// after the last page load and the row ranks as if it were fine again. Rows
-// with a key or a custom endpoint are left out — theirs is a live call to the
-// endpoint, which belongs on a page's request rather than on a timer.
+// Codex and grok entries: the probe is a stat of the CLI's login file, cheap on a timer, and
+// without it the balancer's memory of a logged-out account expires and the row ranks as fine.
+// Key or custom-endpoint rows need a live call, so they are probed per page request instead.
 function checkLoginAuth() {
   const cfg = getConfig();
   for (const p of listProviders().filter(
@@ -375,9 +347,6 @@ function checkLoginAuth() {
   }
 }
 
-// Every login-backed row's auth state, refreshed together: what the settings
-// page shows for a claude entry, and what the balancer ranks on for all of
-// them.
 function checkProviderAuth() {
   checkClaudeAuth();
   checkLoginAuth();
@@ -385,9 +354,7 @@ function checkProviderAuth() {
 
 // ---- projects ----
 //
-// A project is a repository a session can be started against, plus everything
-// the runner needs to prepare and run it: setup steps, PHP version, its
-// session database, the checkout's .env and the ▶ Run commands.
+// A repository sessions start against, plus what the runner needs to prepare and run it.
 
 api.get('/api/projects', (req, res) => {
   res.json({ projects: listProjects(), defaults: PROJECT_DEFAULTS });
@@ -450,14 +417,9 @@ api.post('/api/projects/:id/update', async (req, res) => {
 
 // ---- prompt templates ----
 
-// The wording of everything this app sends out: the PR body it writes and the
-// prompt of every errand. A singleton shaped as a one-row list (id 1) so the
-// settings page reuses the same select/save plumbing.
-//
-// `catalog` is what makes the page editable at all: the label, the hint, the
-// `{{TOKEN}}`s each template may use and the built-in text an empty field falls
-// back on. Sending it means the client never carries a second copy of the
-// prompts.
+// The wording of the PR body and every errand prompt: a singleton shaped as a one-row list (id 1)
+// to reuse the select/save plumbing. `catalog` carries labels, allowed `{{TOKEN}}`s and built-in
+// fallbacks, so the client never holds a second copy of the prompts.
 api.get('/api/templates', (req, res) => {
   res.json({
     templates: [{ id: 1, values: globalTemplates() }],
@@ -477,9 +439,8 @@ api.put('/api/templates/1', async (req, res) => {
 
 // ---- saved prompts ----
 //
-// The composer's kickoff library. With ?repo= it is what that project's
-// Prompts menu offers (its own first, then the shared ones); without, the
-// whole library the settings page edits.
+// The composer's kickoff library: with ?repo=, that project's Prompts menu (its own first, then
+// shared); without, the whole library.
 api.get('/api/dev/prompts', (req, res) => {
   const repo = typeof req.query.repo === 'string' ? req.query.repo : null;
   res.json({ prompts: listSavedPrompts(repo) });
@@ -513,11 +474,9 @@ api.delete('/api/dev/prompts/:id', async (req, res) => {
 
 // ---- project memory ----
 //
-// Two doors to the same rows. A client edits the whole library by id through
-// /api/v1; the agent, through the memory tool during a turn, reaches its own
-// project's memories by name, authorized by the session's bearer token (see
-// agentOnly in lib/auth.js), and never sees a repo parameter:
-// the session decides the project.
+// Clients edit the library by id through /api/v1; the agent's memory tool reaches its own
+// project's memories by name, the session's bearer token deciding the project (agentOnly in
+// lib/auth.js), never a repo parameter.
 
 api.get('/api/memories', (req, res) => {
   const repo = typeof req.query.repo === 'string' ? req.query.repo : null;
@@ -650,12 +609,9 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 
 // ---- orchestrator worker routes ----
 //
-// The worker tools an orchestrator session's turns mount
-// (lib/orchestrator-mcp.js, or curl for the CLIs with no MCP flag headless).
-// Same authorization shape as the memory routes: the bearer token names the
-// session, but only a session created as an orchestrator gets past here, and
-// it only ever reaches its own workers, so the token's whole authority is
-// "this supervisor and its children".
+// The worker tools an orchestrator's turns mount (lib/orchestrator-mcp.js, or curl for CLIs
+// without a headless MCP flag). The bearer token's whole authority is "this orchestrator and
+// its own workers".
 
 function orchestratorSession(req, res) {
   const job = agentSession(req, res);
@@ -680,12 +636,9 @@ api.post('/api/agent/sessions', (req, res) => {
   const orchestrator = orchestratorSession(req, res);
   if (!orchestrator) return;
   try {
-    // `reviewLoop` is the orchestrator's per-task call on whether the work gets
-    // reviewed: armed, every push this worker settles with is reviewed and the
-    // findings come back to it as a fix session (lib/jobs.js), all of it filed
-    // under this orchestration. `qaLoop` queues the test run behind it.
-    // `tooling` is the fix_tooling tool: the worker goes to the project
-    // flagged as the dashboard itself, with the review loop armed regardless.
+    // `reviewLoop` reviews every push the worker settles with and returns findings as a fix
+    // session (lib/jobs.js); `qaLoop` queues the test run behind it. `tooling` (fix_tooling)
+    // targets the dashboard's own project with the review loop armed regardless.
     const { title, prompt, providerId, model, effort, branch, reviewLoop, qaLoop, tooling } = req.body || {};
     const session = spawnWorkerSession(orchestrator, {
       title,
@@ -725,8 +678,7 @@ api.post('/api/agent/sessions/:id/message', (req, res) => {
   const worker = workerOf(req, res, orchestrator);
   if (!worker) return;
   try {
-    // A message to a closed worker reopens it, which is a spawn in
-    // everything but name: the open-worker cap applies to it the same way.
+    // Reopening a closed worker is effectively a spawn, so the open-worker cap applies.
     if (!DEV_OPEN.includes(worker.status)) assertWorkerSlot(orchestrator);
     sendDevMessage(worker.id, String((req.body || {}).text || ''));
     res.json({ session: workerSummary(worker) });
@@ -735,10 +687,8 @@ api.post('/api/agent/sessions/:id/message', (req, res) => {
   }
 });
 
-// The orchestrator's verdicts on the review round its worker's loop is
-// holding (lib/jobs.js, holdForTriage): what it marks fix starts the fix
-// session, the rest is recorded on the pull request. Nothing here spends a
-// worker turn by itself, so the slot gate does not apply.
+// The orchestrator's verdicts on a held review round (lib/jobs.js, holdForTriage): "fix" starts
+// the fix session, the rest is recorded on the PR. Spends no worker turn, so no slot gate.
 api.post('/api/agent/sessions/:id/triage', async (req, res) => {
   const orchestrator = orchestratorSession(req, res);
   if (!orchestrator) return;
@@ -753,13 +703,9 @@ api.post('/api/agent/sessions/:id/triage', async (req, res) => {
   }
 });
 
-// Re-run a review round that could not run: a review whose provider errored
-// (an exhausted account, a non-zero exit) left the loop gated on a commit it
-// has already tried once, and a worker whose work is finished has no push left
-// to open that gate with. An optional provider/model/effort moves the loop off
-// the runtime that failed it. It re-runs a review and never replaces one, so
-// nothing here can approve a push; like triage, it spends no worker turn of
-// its own, and the review it starts is loop spend like every other round's.
+// Re-runs a review round whose provider errored: the loop stays gated on that commit and a
+// finished worker has no push left to reopen it. An optional provider/model/effort moves off the
+// failing runtime. It never replaces a review, so it cannot approve a push; no slot gate.
 api.post('/api/agent/sessions/:id/retry-review', async (req, res) => {
   const orchestrator = orchestratorSession(req, res);
   if (!orchestrator) return;
@@ -789,11 +735,8 @@ api.post('/api/agent/sessions/:id/close', async (req, res) => {
 
 // ---- review findings ----
 //
-// The findings a PR's reviews declared (each summary comment carries a
-// machine-readable block), joined with the stored fix/optional/dismissed
-// verdicts. Deciding "fix" mirrors the set onto the PR as one anchored
-// "Required fixes" checklist comment, which a later review ticks as pushes
-// actually fix items.
+// Findings from a PR's review summaries joined with stored fix/optional/dismissed verdicts.
+// "fix" mirrors onto one anchored "Required fixes" checklist comment that later reviews tick.
 
 function findingsParams(body) {
   const project = getProject(String(body.repo || ''));
@@ -860,8 +803,6 @@ api.post('/api/pr/merge', async (req, res) => {
   }
 });
 
-// Closing an issue is the board's other write besides merging, so it sits
-// beside the merge and answers GitHub's refusals the same way.
 api.post('/api/issues/close', async (req, res) => {
   try {
     const body = req.body || {};
@@ -883,8 +824,7 @@ api.post('/api/issues/close', async (req, res) => {
   }
 });
 
-// One issue read whole, and its timeline a page at a time: what a client opens
-// from the board's issue rows. Answered like the pull request reads beside them.
+// One issue read whole, and its timeline a page at a time.
 function issueParams(query) {
   const project = getProject(String(query.repo || ''));
   if (!project) throw Object.assign(new Error(`Unknown project: ${query.repo || ''}`), { status: 404 });
@@ -909,8 +849,7 @@ api.get('/api/issues/timeline', async (req, res) => {
   }
 });
 
-// One commit of the project's repository, with the files it changed: what a
-// pull request's commit list links to.
+// One commit with the files it changed, as a PR's commit list links to.
 api.get('/api/pr/commit', async (req, res) => {
   try {
     const project = getProject(String(req.query.repo || ''));
@@ -921,8 +860,7 @@ api.get('/api/pr/commit', async (req, res) => {
   }
 });
 
-// The project's repository as a client's file browser reads it: every path at
-// a branch, and one file's text.
+// For a client's file browser: every path at a ref, and one file's text.
 api.get('/api/repo/tree', async (req, res) => {
   try {
     const project = getProject(String(req.query.repo || ''));
@@ -965,17 +903,14 @@ api.post('/api/pr/findings/decision', async (req, res) => {
 
 // ---- database pool ----
 //
-// The database servers sessions can claim: one session per server at a time,
-// each entry a host/port/username/password the operator adds in Settings.
+// Database servers sessions can claim, one session per server at a time.
 
 api.get('/api/dbservers', (req, res) => {
   res.json({ servers: listDbServers(), defaults: DB_SERVER_DEFAULTS });
 });
 
-// Is this entry healthy? Probes the connection as the form holds it, so an entry
-// can be verified before it is saved, and an existing one re-checked without a
-// session having to fail on it first. The pool size rides along: it is what
-// caps how many sessions may be open at once.
+// Probes the connection as the form holds it, so an entry can be verified before saving. The
+// pool size rides along because it caps how many sessions may be open at once.
 api.post('/api/dbservers/test', async (req, res) => {
   try {
     const { id, host, port, username, password } = req.body || {};
@@ -1019,10 +954,8 @@ api.delete('/api/dbservers/:id', async (req, res) => {
 
 // ---- workspace pool ----
 //
-// Read-only health of the clone slots, plus the two things worth doing to an
-// idle one by hand: forgetting its install fingerprints, or dropping its
-// dependency trees outright. lib/workspaces.js refuses both with a 409 while
-// a session holds the slot; the error handler below turns that into the reply.
+// Clone-slot health, plus resetting an idle slot's install fingerprints or dropping its
+// dependency trees. lib/workspaces.js refuses both with a 409 while a session holds the slot.
 api.get('/api/workspaces', async (req, res) => {
   res.json({ workspaces: await listWorkspaces() });
 });
@@ -1037,12 +970,10 @@ api.post('/api/workspaces/:slot/clean', (req, res) => {
 
 // ---- provider settings ----
 //
-// The providers sessions can be started on: each row links a label to one of
-// the hardcoded binaries (claude / codex / grok / opencode) plus its own config: an
-// isolated login dir, a custom endpoint and key, model and effort overrides.
+// Each row binds a label to one of the hardcoded binaries (claude / codex / grok / opencode) with
+// its own login dir, endpoint and key, and model/effort overrides.
 
-// The stored login (auth_data) never leaves the server; the settings page
-// only needs to know whether one is registered, and where it lives.
+// The stored login (auth_data) never leaves the server; clients only see whether one exists.
 function publicProvider(p) {
   const { authData, ...rest } = p;
   return {
@@ -1098,21 +1029,17 @@ api.delete('/api/providers/:id', async (req, res) => {
   }
 });
 
-// Auth + usage for one provider row, exactly as a session would run it:
-// claude entries answer from the cached `claude auth status` probe (plus the
-// account's subscription usage), everything else is probed on demand.
+// Auth + usage for one row as a session would run it: claude logins answer from the cached
+// `claude auth status` probe, everything else is probed on demand.
 async function providerAuthUsage(p, cfg, fresh = false) {
   let auth = null;
   let usage = null;
-  // Every meter goes through lib/balancer.js's cache: the same numbers the
-  // session balancer reads, so page loads keep it warm.
+  // Through lib/balancer.js's cache, so page loads keep the balancer's numbers warm.
   const readUsage = () => providerUsage(p, fresh ? { ttlMs: 0 } : {});
   const zaiKeyUsage = () => (p.apiKey && zaiHost(p.baseUrl) ? readUsage() : null);
   if (p.binary === 'claude') {
     if (p.apiKey) {
-      // Verified with a live call to the endpoint (Anthropic's or the custom
-      // base URL) rather than assumed from the key's presence, as the model
-      // the picker and new sessions default to.
+      // A live call with the default model, not assumed from the key's presence.
       auth = await verifyCustomEndpoint({
         binary: 'claude',
         baseUrl: p.baseUrl,
@@ -1148,24 +1075,20 @@ async function providerAuthUsage(p, cfg, fresh = false) {
     if (p.binary === 'codex' && !p.baseUrl && !p.apiKey && auth?.loggedIn) {
       usage = await readUsage();
     } else if (p.binary === 'grok' && auth?.loggedIn) {
-      // The login dir is the account here: grok's billing is read with the
-      // token `grok login` left in it, exactly as probeProviderAuth found it.
+      // Grok's billing is read with the token `grok login` left in the login dir.
       usage = await readUsage();
     } else {
       usage = await zaiKeyUsage();
     }
   }
-  // Only a probe that answered: a row whose claude login state has not been
-  // read yet must not erase what the boot probe already established. A claude
-  // row's answer is the timer's probe read back, so it keeps that probe's
-  // time rather than passing for a fresh one.
+  // Only a probe that answered, so an unread claude state cannot erase the boot probe's. A
+  // claude answer keeps its probe's time rather than passing for a fresh one.
   if (auth)
     rememberProviderAuth(p.id, auth.loggedIn, auth.checkedAt ? Date.parse(auth.checkedAt) : undefined);
   return { auth, usage };
 }
 
-// The Status section on the settings page: everything known about one entry's
-// connection: account, organization, plan, subscription usage, binary, dir.
+// Everything known about one entry's connection: account, plan, usage, binary, dir.
 api.get('/api/providers/:id/status', async (req, res) => {
   const p = getProvider(Number(req.params.id));
   if (!p) return res.status(404).json({ error: 'Provider not found' });
@@ -1186,9 +1109,8 @@ api.get('/api/providers/:id/status', async (req, res) => {
 
 api.use(providerTestRoutes({ getProvider, getConfig }));
 
-// A login is registered against the row: it lands in the entry's own derived
-// config dir and is mirrored into the database once it arrives (the same
-// adoption a boot does). The watcher picks it up whichever way it lands.
+// A login lands in the entry's config dir; the watcher mirrors it into the database once it
+// arrives (the same adoption a boot does).
 const loginWatchers = new Map(); // provider id -> interval
 
 function watchLogin(providerId) {
@@ -1207,8 +1129,7 @@ function watchLogin(providerId) {
       if (JSON.stringify(updated.authData) !== JSON.stringify(row.authData)) {
         clearInterval(timer);
         loginWatchers.delete(providerId);
-        // A fresh login makes the cached "logged out, no quota" reading wrong
-        // rather than stale: the account is pickable again right now.
+        // A fresh login makes the cached "logged out" reading wrong, not just stale.
         forgetProviderUsage(providerId);
         checkProviderAuth();
       }
@@ -1219,16 +1140,10 @@ function watchLogin(providerId) {
   loginWatchers.set(providerId, timer);
 }
 
-// The codex and grok logins run as device flows: the hidden CLI uses the
-// entry's own home dir, prints an authorization URL and polls until it is
-// approved. The page opens that URL. This deliberately avoids Codex's normal
-// localhost callback, which would be inside the app container rather than the
-// user's browser host. Either way the CLI writes auth.json when the login
-// lands, and the watcher mirrors it into the row.
-// One per binary at a time.
-//
-// opencode has no login flow of any kind: its entries authenticate with a
-// service API key, handed to the CLI from the row.
+// Codex and grok log in by device flow in the entry's home dir, avoiding Codex's localhost
+// callback, which would sit inside the app container rather than the user's browser host. The
+// watcher mirrors the resulting auth.json into the row. One login per binary at a time; opencode
+// has no login flow (its entries use an API key).
 const cliLogins = new Map(); // binary -> the in-flight login child process
 
 api.post('/api/providers/:id/login', async (req, res) => {
@@ -1253,8 +1168,6 @@ api.post('/api/providers/:id/login', async (req, res) => {
     provider.binary === 'codex'
       ? childEnv({ CODEX_HOME: ensureCodexHome(provider) })
       : childEnv({ GROK_HOME: ensureGrokHome(provider) });
-  // Device auth works from Docker and a remote browser alike: no callback port
-  // has to be reachable from the browser.
   const loginArgs = ['login', '--device-auth'];
   let child;
   try {
@@ -1271,17 +1184,13 @@ api.post('/api/providers/:id/login', async (req, res) => {
     const timer = setTimeout(() => resolve(null), 20000);
     const scan = (chunk) => {
       output += chunk;
-      // The CLI formats its output for a terminal, including ANSI reset codes
-      // immediately after the URL. Strip those first; otherwise a browser
-      // treats the reset sequence as part of the device-auth path.
+      // Strip ANSI codes first: a reset right after the URL would become part of its path.
       const plain = output.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
       const m = plain.match(/https:\/\/[^\s\x1B]+/);
       if (m) {
-        // Codex device-auth codes are displayed as ABCD-EFGHI. The CLI is
-        // hidden in this app, so return the code to the settings page too.
+        // The CLI is hidden, so Codex's ABCD-EFGHI code is returned with the URL.
         const deviceCode = plain.match(/\b[A-Z0-9]{4}-[A-Z0-9]{5}\b/)?.[0] || null;
-        // Codex prints its URL before the code. Keep collecting until both
-        // have arrived; Grok has no code field in this UI.
+        // Codex prints the URL before the code, so wait for both; grok has no code.
         if (provider.binary === 'codex' && !deviceCode) return;
         clearTimeout(timer);
         resolve({ url: m[0], deviceCode });
@@ -1314,9 +1223,8 @@ api.post('/api/providers/:id/login', async (req, res) => {
   res.json(login);
 });
 
-// The claude browser login: no console window. The settings page opens the
-// authorization URL in a browser tab, the user approves on claude.ai and
-// pastes the code shown back into the page.
+// The claude login: the user opens the authorization URL, approves on claude.ai and pastes
+// back the code shown.
 const claudeLogins = new Map(); // provider id -> the in-flight flow's PKCE verifier
 
 api.post('/api/providers/:id/login/start', (req, res) => {
@@ -1349,10 +1257,8 @@ api.post('/api/providers/:id/login/finish', async (req, res) => {
   }
 });
 
-// The project list the composer's dropdown is built from: enabled projects
-// only, in the order the settings page put them in; the first is the default.
-// Served on its own so the branch picker can start loading without waiting on
-// the provider auth probes, which block on live gateway calls.
+// Enabled projects in settings order, the first being the default. Separate from the provider
+// list so the branch picker need not wait on auth probes that block on live gateway calls.
 api.get('/api/dev/projects', (req, res) => {
   // A client token limited to some projects (lib/api-v1.js) is shown those.
   const repos = res.locals.apiRepos;
@@ -1362,11 +1268,7 @@ api.get('/api/dev/projects', (req, res) => {
       repo: p.repo,
       label: p.label,
       hasLocal: !!p.localDir,
-      // What the project dashboard starts its errands on: the review runtime
-      // this project was set up with, so the board does not ask again for
-      // something Settings already answered. Its PR author is not here; the
-      // board learns that from the pull request list, which had to apply the
-      // filter anyway.
+      // The review runtime the dashboard starts its errands on, so it does not ask again.
       reviewProviderId: p.reviewProviderId,
       reviewModel: p.reviewModel || '',
       reviewEffort: p.reviewEffort || '',
@@ -1378,9 +1280,8 @@ api.get('/api/dev/projects', (req, res) => {
   });
 });
 
-// The project dashboard: one project's open pull requests, with the labels the
-// review workflow speaks in and the errand each one is asking for, and, on the
-// same payload, the repo's open issues, so the board's tabs cost one call.
+// The project dashboard: open PRs with their review labels and pending errand, plus open issues,
+// so the board's tabs cost one call.
 api.get('/api/dev/pulls', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
@@ -1391,9 +1292,8 @@ api.get('/api/dev/pulls', async (req, res) => {
   }
 });
 
-// The project's GitHub Projects v2 board, filtered and grouped the way its
-// view is, for a client to draw as a tab after the issues. Cached and
-// refreshed the way the pull request board is.
+// The project's GitHub Projects v2 board, filtered and grouped as its view is; cached like the PR
+// board.
 api.get('/api/dev/project-board', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
@@ -1419,19 +1319,15 @@ api.post('/api/dev/project-board/move', async (req, res) => {
   }
 });
 
-// What a project has spent this calendar month, from the per-turn ledger:
-// sessions that ran a turn, tokens in and out, and the cost of the turns whose
-// provider priced them.
+// A project's spend this calendar month, from the per-turn ledger.
 api.get('/api/dev/usage', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
   res.json(await projectUsage(project));
 });
 
-// The same ledger with no project filter: the main dashboard, over one of
-// lib/usage.js's windows. Disabled projects are in the list on purpose: one
-// switched off mid-month still spent what it spent, and leaving it out would
-// make the per-project rows fail to add up to the headline totals.
+// The whole ledger over one of lib/usage.js's windows. Disabled projects are included so the
+// per-project rows still add up to the headline totals.
 api.get('/api/dev/usage/all', async (req, res) => {
   const filter = {};
   for (const key of ['project', 'model', 'provider', 'activity', 'account', 'session', 'from', 'to']) {
@@ -1446,10 +1342,8 @@ api.get('/api/dev/usage/all', async (req, res) => {
   }
 });
 
-// One pull request on its own, in the detail the right-hand panel draws: state,
-// line changes, commits, linked issues, review verdicts and CI checks. It is
-// what the session panel shows for a session's own PR, served here for the
-// board drilled into a pull request, which has no session to read it from.
+// One PR in the session panel's detail (state, commits, reviews, checks), for a board drilled
+// into a PR with no session to read it from.
 api.get('/api/dev/pull', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
@@ -1463,13 +1357,9 @@ api.get('/api/dev/pull', async (req, res) => {
   }
 });
 
-// Which providers a session can be started on, with what models, and whether
-// each is logged in, so a dead provider fails in the banner instead of on the
-// first message. Interchangeable accounts (see providerGroups) come back as
-// one entry: its id is the first member's, and naming it starts the session on
-// whichever member has the most headroom (lib/balancer.js). `accounts` lists
-// the members behind it, with each one's login and quota, so the picker can
-// show where the group stands and warn about one login without hiding the rest.
+// Startable providers with their models and login state, so a dead provider fails in the banner
+// rather than on the first message. Interchangeable accounts (providerGroups) are one entry with
+// the first member's id, balanced by headroom (lib/balancer.js); `accounts` lists each member.
 api.get('/api/dev/providers', async (req, res) => {
   const cfg = getConfig();
   const providers = await Promise.all(
@@ -1483,8 +1373,7 @@ api.get('/api/dev/providers', async (req, res) => {
           return { id: m.id, label: m.label, auth, usage };
         }),
       );
-      // One login out of several keeps the group usable; the group is only
-      // down when every member is.
+      // The group is down only when every member is.
       const known = accounts.filter((a) => a.auth && a.auth.loggedIn != null);
       const auth =
         accounts.length === 1
@@ -1518,18 +1407,15 @@ api.get('/api/dev/providers', async (req, res) => {
   res.set('Cache-Control', 'no-store').json({ providers });
 });
 
-// What a client picks a runtime from: what /api/dev/providers offers, without
-// the accounts behind each entry, plus the project's own default (see
-// runtimeCatalog). Availability goes on the login probes already made rather
-// than probing on every poll.
+// /api/dev/providers without the accounts, plus the project's default (runtimeCatalog).
+// Availability uses cached login probes rather than probing on every poll.
 api.get('/api/dev/runtimes', (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
   res.json(runtimeCatalog(reviewerRuntime(project), getConfig(), (p) => cachedProviderAuth(p.id)));
 });
 
-// The branches of one project, for the composer's branch picker: the default
-// branch first, then the rest alphabetically.
+// The default branch first, then the rest alphabetically.
 api.get('/api/dev/branches', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
@@ -1540,11 +1426,8 @@ api.get('/api/dev/branches', async (req, res) => {
   }
 });
 
-// Attachment upload: one file per request, the raw bytes as the body and the
-// filename in the query. The composer uploads each file as it is attached
-// (picked, pasted or dropped) and sends only the returned ids with the
-// message. The client always posts application/octet-stream, so the global
-// JSON parser never touches these bodies.
+// One file per request: raw bytes as the body, filename in the query; messages carry only the
+// returned ids. Clients post application/octet-stream, so the JSON parser never touches it.
 api.post('/api/dev/uploads', express.raw({ type: () => true, limit: '25mb' }), (req, res) => {
   try {
     if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'Empty file' });
@@ -1554,10 +1437,8 @@ api.post('/api/dev/uploads', express.raw({ type: () => true, limit: '25mb' }), (
   }
 });
 
-// Voice notes: the composer asks once whether the server can transcribe, and
-// posts each recording as the raw body, typed with what the browser recorded
-// (the type is what names the file for OpenAI); OpenAI tells the language
-// itself. The answer is the text only; the recording is not kept.
+// Voice notes: the raw body's content type names the file for OpenAI. Only the text is returned;
+// the recording is not kept.
 api.get('/api/dev/transcribe', (req, res) => {
   res.json({ available: transcribeAvailable() });
 });
@@ -1565,9 +1446,7 @@ api.get('/api/dev/transcribe', (req, res) => {
 api.post('/api/dev/transcribe', express.raw({ type: () => true, limit: '25mb' }), async (req, res) => {
   if (!Buffer.isBuffer(req.body) || !req.body.length)
     return res.status(400).json({ error: 'Empty recording' });
-  // A note the composer dropped (another chat opened meanwhile) closes its
-  // request, and OpenAI's call goes with it rather than billing for text
-  // nobody reads.
+  // A dropped request aborts OpenAI's call rather than billing for text nobody reads.
   const gone = new AbortController();
   res.on('close', () => {
     if (!res.writableEnded) gone.abort();
@@ -1585,27 +1464,20 @@ api.post('/api/dev/transcribe', express.raw({ type: () => true, limit: '25mb' })
 
 // ---- actions ----
 //
-// ⚡ Actions in the sidebar: errands this app has a prompt for, run on a pull
-// request the user names. The list is served so the menu grows with lib/actions.js
-// rather than with a second copy of it in the client.
+// ⚡ Actions: prompted errands run on a named PR. Served so clients never copy lib/actions.js.
 
 api.get('/api/dev/actions', (req, res) => {
   res.json({ actions: listActions() });
 });
 
-// Start an action: look the pull request up (its head branch is what the
-// session checks out), then start an ordinary session with the action's prompt.
-//
-// Where it runs is the action's own call (lib/actions.js): gh-only errands run
-// in the project's local checkout (a fresh clone and a pooled database server
-// would be claimed for nothing) while an action that has to run the app (the
-// test run) gets a workspace clone with the full setup, like a review does.
+// Looks up the PR's head branch, then starts an ordinary session with the action's prompt. gh-only
+// errands run in the local checkout (no clone or pooled database wasted); actions that run the
+// app get a fully set up workspace clone (lib/actions.js).
 api.post('/api/dev/actions', async (req, res) => {
   const { action: actionId, repo, prNumber, provider, model, effort, input } = req.body || {};
   const action = getAction(actionId);
   if (!action) return res.status(400).json({ error: `Unknown action: ${actionId}` });
-  // An action that asks the user something (✍ Give feedback) is nothing without
-  // the answer: starting it empty would send a session off with no errand.
+  // An action with required input (✍ Give feedback) has no errand without it.
   const answer = String(input == null ? '' : input).trim();
   if (action.input && action.input.required && !answer) {
     return res
@@ -1646,10 +1518,8 @@ api.post('/api/dev/actions', async (req, res) => {
       // What the user typed, verbatim; only an action with `input` reads it.
       input: answer,
     };
-    // An action's prompt may need the pull request read first (⚙ Implement
-    // feedback reads its findings), so it is awaited, and a prompt that
-    // refuses (nothing to work on) fails the request instead of starting a
-    // session with an empty errand.
+    // Awaited because a prompt may read the PR first; one that refuses fails the request rather
+    // than starting an empty errand.
     const prompt = await action.prompt(context);
     res.status(201).json({
       session: createDevSession({
@@ -1657,28 +1527,21 @@ api.post('/api/dev/actions', async (req, res) => {
         model,
         effort,
         repo: project.repo,
-        // checkout: false, since the action works on the PR through gh alone, so
-        // the local tree stays on whatever branch the developer has out.
+        // checkout: false leaves the local tree on the developer's branch (gh-only errand).
         branch: action.checkout === false ? undefined : branch,
         local: (action.workspace || 'local') === 'local',
         prompt,
-        // The errand was started from this pull request, so the session is
-        // attached to it straight away instead of waiting to spot its URL.
+        // Attached to the PR now rather than waiting to spot its URL.
         prNumber: number,
-        // …and it is filed under that pull request's branch, whatever branch
-        // the checkout it borrows happens to be on.
+        // Filed under the PR's branch, whatever branch the borrowed checkout is on.
         prBranch: branch,
-        // A one-shot errand that reports on the pull request itself closes when
-        // it is done, freeing its clone and database server (lib/actions.js).
+        // One-shot errands close when done, freeing clone and database (lib/actions.js).
         autoClose: action.autoClose === true,
-        // 🛠 Implement feedback stays open and arms the same review loop the
-        // composer's 🔁 chip does: the fixes it pushes get reviewed, and those
-        // findings come back here. Mutually exclusive with autoClose: the
-        // loop needs a parent that is still around when the review reports.
+        // Arms the 🔁 review loop on pushed fixes. Exclusive with autoClose: the loop needs a
+        // parent still open when the review reports.
         reviewLoop: action.reviewLoop === true,
         title: action.title(context),
-        // The errand's own id files the session's spend under it in the usage
-        // ledger, so the dashboards can say what kind of work the money bought.
+        // Files the session's spend under the errand in the usage ledger.
         activity: action.id,
       }),
     });
@@ -1687,10 +1550,8 @@ api.post('/api/dev/actions', async (req, res) => {
   }
 });
 
-// ▶ Run on a pull-request card: verify the PR and its current head branch on
-// GitHub, then prepare a clean session workspace and serve it without sending
-// an agent turn. The returned session remains available in the sidebar so the
-// user can inspect it, chat in it, or close it to release its resources.
+// ▶ Run on a PR card: verify the PR's head branch, then prepare and serve a clean workspace
+// without an agent turn. The session stays open until the user closes it.
 api.post('/api/dev/pulls/:number/serve', async (req, res) => {
   const { repo, provider, model, effort } = req.body || {};
   const project = getProject(repo || '');
@@ -1743,10 +1604,8 @@ api.post('/api/dev/pulls/:number/serve', async (req, res) => {
   }
 });
 
-// ▶ Run on a branch with no pull request, the default branch unless another is
-// named: what is live, served the same way a pull request is. The branch must
-// exist on origin; the workspace would otherwise cut a new branch of that name
-// off the default one and serve it under the wrong label.
+// ▶ Run on a branch without a PR (default branch unless named). It must exist on origin, or the
+// workspace would cut a new branch of that name off the default and serve it under the wrong label.
 api.post('/api/dev/branches/serve', async (req, res) => {
   const { repo, branch: wanted, provider, model, effort } = req.body || {};
   const project = getProject(repo || '');
@@ -1782,8 +1641,7 @@ async function currentJobUsageEstimates() {
   try {
     return await jobUsageEstimates(plain.map((session) => session.id));
   } catch (e) {
-    // Usage is an enhancement to the in-memory session list, not a reason to
-    // make every conversation disappear when its ledger cannot be read.
+    // An unreadable ledger must not make the session list disappear.
     console.error(`session costs unavailable: ${e.message}`);
     return null;
   }
@@ -1792,39 +1650,21 @@ async function currentJobUsageEstimates() {
 api.get('/api/dev/sessions', async (req, res) => {
   const estimates = await currentJobUsageEstimates();
   const sessions = listDevSessions(estimates);
-  // A project-limited token's own projects, everything for an admin token
-  // (lib/api-v1.js).
+  // A project-limited token sees only its projects (lib/api-v1.js).
   const repos = res.locals.apiRepos;
   res.json({ sessions: repos ? sessions.filter((s) => repos.includes(s.repo)) : sessions });
 });
 
-// What the browser is allowed to file a session's spend under. Everything
-// else names its activity server-side: a board errand passes its own action id
-// and the rest is derived from what the session is (lib/jobs.js). This list is
-// for the kinds of work only the browser knows about, because the derivation
-// cannot see them: ▶ Start on an issue is an ordinary coding session in every
-// respect except what it was started for, and folding its spend into plain
-// chat is what makes "what did working issues cost?" unanswerable. An activity
-// not on the list is dropped rather than rejected: a stale tab must not fail
-// to start a session over a label.
+// Activities only the client can know (▶ Start on an issue looks like plain chat server-side);
+// everything else is derived in lib/jobs.js. Unknown ones are dropped, not rejected, so a stale
+// tab still starts its session.
 const COMPOSER_ACTIVITIES = new Set(['issue']);
 
 api.post('/api/dev/sessions', (req, res) => {
-  // prNumber is the project dashboard's: a review started from a pull request
-  // row already knows which one it is, so the review prompt and the session's
-  // title can say so instead of making the agent find out.
-  // `qa` is the board's 🎬 QA errand: a session of its own that writes the test
-  // sheet and executes it.
-  // `reviewLoop` arms the review loop on a from-scratch session: every push
-  // the session settles with gets an automatic review, whose findings come
-  // back to it as a fix turn (capped; see lib/jobs.js).
-  // `orchestrator` is the composer's 🧭 mode: a chat-only supervisor with no
-  // checkout, whose agent starts and steers worker sessions instead;
-  // `workerRuntime` ({ providerId, model, effort }) is what those workers
-  // default to, when the start picked one (the board's epic dialog does).
-  // `activity` is what the start files its spend under in the usage ledger,
-  // for the starts the server cannot tell apart from a plain chat; see
-  // COMPOSER_ACTIVITIES above.
+  // `prNumber` lets a review started from a PR row name it up front. `qa` is the 🎬 QA errand.
+  // `reviewLoop` reviews every settled push and feeds findings back as a capped fix turn
+  // (lib/jobs.js). `orchestrator` is a checkout-less supervisor that steers worker sessions,
+  // which default to `workerRuntime` when given.
   const {
     provider,
     model,
@@ -1906,10 +1746,8 @@ api.get('/api/dev/sessions/:id/browser/stream', sharedBrowser.stream);
 api.get('/api/dev/sessions/:id/browser/screenshot', sharedBrowser.screenshot);
 api.post('/api/dev/sessions/:id/browser/input', sharedBrowser.input);
 
-// A message mid-turn goes into a claude turn still reading its input, or is
-// queued rather than refused otherwise, and one to a session that
-// let go of its workspace reopens it first, so this only fails on a message
-// the session could not accept at all.
+// Mid-turn messages are injected into a claude turn or queued, and a released session reopens
+// first, so this fails only on a message the session cannot accept at all.
 api.post('/api/dev/sessions/:id/message', (req, res) => {
   try {
     const { text, attachments } = req.body || {};
@@ -1919,8 +1757,7 @@ api.post('/api/dev/sessions/:id/message', (req, res) => {
   }
 });
 
-// /btw: a side question answered beside the conversation, never in it. The
-// answer is waited for here; the transcript gets it too, for every client.
+// /btw: a side question answered beside the conversation, never in it; the transcript gets it too.
 api.post('/api/dev/sessions/:id/btw', async (req, res) => {
   let asked;
   try {
@@ -1989,9 +1826,7 @@ api.delete('/api/dev/sessions/:id/queue/:index', (req, res) => {
   }
 });
 
-// 🔁 Review loop: arm or disarm it on a session that is already running. The
-// composer's chip only speaks for a session that does not exist yet, and
-// wanting the reviews is usually something the work teaches you.
+// 🔁 Review loop: arm or disarm it on a running session.
 api.post('/api/dev/sessions/:id/loop', (req, res) => {
   try {
     const { on } = req.body || {};
@@ -2001,13 +1836,9 @@ api.post('/api/dev/sessions/:id/loop', (req, res) => {
   }
 });
 
-// ⚑ Findings, Complete. On a round of the user's own pull request — a
-// review-loop round, or a hand-started review of their own work — it takes the
-// verdicts: what is marked fix starts an Implement feedback session, the rest
-// is recorded on the pull request, and the screen sends an unmarked finding as
-// optional so it is not offered again. On a review of somebody else's pull
-// request it takes nothing and rules nothing — those findings are that
-// author's to fix — and only clears the card.
+// ⚑ Findings, Complete. On the user's own PR, "fix" verdicts start an Implement feedback session
+// and the rest are recorded on the PR. On somebody else's PR it rules nothing (the findings are
+// that author's) and only clears the card.
 api.post('/api/dev/sessions/:id/triage', async (req, res) => {
   try {
     const { verdicts, note } = req.body || {};
@@ -2019,10 +1850,7 @@ api.post('/api/dev/sessions/:id/triage', async (req, res) => {
   }
 });
 
-// ⚑ Findings, Reply on one finding of a review of somebody else's pull
-// request: the text
-// goes on that finding's own thread on the pull request, where its author
-// answers it. It rules nothing and leaves the finding on the card.
+// ⚑ Findings, Reply on somebody else's PR: posts on the finding's own thread and rules nothing.
 api.post('/api/dev/sessions/:id/findings/reply', async (req, res) => {
   try {
     const { key, text } = req.body || {};
@@ -2032,10 +1860,8 @@ api.post('/api/dev/sessions/:id/findings/reply', async (req, res) => {
   }
 });
 
-// ⚑ Findings, Delete on one finding of a hand-started code review: the finding
-// leaves the review — its inline comment on the pull request and the review's
-// own findings block — rather than only this card. Irreversible on GitHub; the
-// screen asks before calling it.
+// ⚑ Findings, Delete on a hand-started review: removes the finding's inline comment and its
+// entry in the review's findings block on GitHub, irreversibly.
 api.post('/api/dev/sessions/:id/findings/delete', async (req, res) => {
   try {
     const { key } = req.body || {};
@@ -2045,9 +1871,8 @@ api.post('/api/dev/sessions/:id/findings/delete', async (req, res) => {
   }
 });
 
-// ⚑ Findings, Save comments: the verdicts picked and the reasons and note
-// typed so far, kept on the held round and posted on the pull request as one
-// comment. Nothing is ruled; the round goes on waiting for Complete.
+// ⚑ Findings, Save comments: draft verdicts and note kept on the held round and posted as one PR
+// comment. Nothing is ruled; the round still waits for Complete.
 api.post('/api/dev/sessions/:id/triage/save', async (req, res) => {
   try {
     const { verdicts, note } = req.body || {};
@@ -2063,8 +1888,7 @@ api.post('/api/dev/sessions/:id/triage/save', async (req, res) => {
   }
 });
 
-// 🎬 QA loop: the second live chip, queued behind an armed review loop. It is
-// armed independently because not every reviewed task should spend a QA run.
+// 🎬 QA loop: queued behind the review loop, armed separately since not every task needs QA.
 api.post('/api/dev/sessions/:id/qa-loop', (req, res) => {
   try {
     const { on } = req.body || {};
@@ -2084,10 +1908,8 @@ api.post('/api/dev/sessions/:id/reopen', (req, res) => {
   }
 });
 
-// ▶ Run: serve the session's checkout and hand back the URL for a new tab,
-// with one link per tenant host when the run profile names tenants. `profile`
-// picks one of the project's run profiles; without it the session serves the
-// one it served last.
+// ▶ Run: serve the session's checkout, one link per tenant host. Without `profile` the session
+// serves the profile it served last.
 api.post('/api/dev/sessions/:id/serve', async (req, res) => {
   try {
     const profile = req.body && typeof req.body.profile === 'string' ? req.body.profile : null;
@@ -2123,12 +1945,8 @@ api.delete('/api/dev/sessions/:id', async (req, res) => {
   }
 });
 
-// Express 5 forwards a rejected async handler here instead of leaving the
-// request hanging, so the last resort has to answer in the shape every client
-// parses; otherwise a throw nobody caught reaches it as a bare "HTTP 500"
-// instead of what actually went wrong. Malformed request bodies land here too.
-// Anything else that reaches the end matched no route: a JSON 404, not
-// Express's HTML one.
+// Unmatched routes get a JSON 404, not Express's HTML one. Express 5 forwards rejected async
+// handlers and malformed bodies to the error handler, which answers in the JSON clients parse.
 app.use((req, res) =>
   res.status(404).json({ error: 'Not found. The API is at /api/v1: see docs/api-v1.md' }),
 );
@@ -2143,11 +1961,8 @@ const cfg = getConfig();
 const portFlag = process.argv.indexOf('--port');
 const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
 
-// Connect, then load the projects and the stored sessions before serving: both
-// live in the database and nowhere else, so a database that is down is worth
-// one clear line in the log rather than a confusing failure on the first
-// message. The server still comes up: the settings page is how you would find
-// out what is wrong.
+// Load projects and sessions (database-only) before serving. A down database gets one clear log
+// line, and the server still comes up so settings can show what is wrong.
 (async () => {
   try {
     await initDb();
@@ -2163,12 +1978,10 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initMemorySelection();
     await initMemories();
     await initProviders();
-    // Warm the balancer's quota cache so the first session started after boot
-    // already lands on the account with the most headroom.
+    // Warm the quota cache so the first session already lands on the account with most headroom.
     for (const p of listProviders().filter((r) => r.active)) providerUsage(p).catch(() => {});
-    // Each login-backed Codex row has an isolated CODEX_HOME. Refresh those
-    // catalogs before jobs and the composer resolve their available models;
-    // a logged-out account or a network failure leaves its last cache usable.
+    // Refresh each login-backed Codex row's model catalog before models are resolved; a failure
+    // leaves the last cache usable.
     await Promise.all(
       listProviders()
         .filter((p) => p.active && p.binary === 'codex' && !p.baseUrl && !p.apiKey)
@@ -2182,30 +1995,24 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     console.error('Database unavailable:', e.message);
     console.error('  projects and sessions live in the database; neither loads until it is reachable');
   }
-  // Providers come from the database, so the login probes can only run once
-  // the rows are loaded.
+  // Only after the provider rows are loaded.
   checkProviderAuth();
   setInterval(checkProviderAuth, AUTH_RECHECK_MS).unref();
   await initJobs();
-  // `npm run create-token` issues and revokes from a shell, straight into the
-  // database. A token revoked there stops new requests within 15 seconds; an
-  // open stream, which rechecks on its own 15-second tick, within 30.
+  // `npm run create-token` writes the database directly; a revoked token stops new requests
+  // within 15s and open streams within 30s.
   setInterval(() => {
     mobileAuth.refresh().catch((e) => console.error('Could not reload device tokens:', e.message));
   }, 15000).unref();
-  // Clone slots are caches, not session records. Drop every unclaimed slot at
-  // boot and once a day so a project's peak concurrency does not permanently
-  // consume disk; the pruner sees the live session registry and skips claims.
+  // Clone slots are caches: unclaimed ones are dropped at boot and daily so peak concurrency
+  // does not permanently consume disk.
   startWorkspacePruner();
-  // Every project gets (or keeps) a hook pointing at this install's public
-  // hostname, so an open session's pull request panel keeps up with the reviews,
-  // comments and CI runs landing on its branch. Best effort: a repo whose hook
-  // cannot be installed just falls back to the twenty-second sync tick.
+  // Hooks keep session PR panels current; best effort, as a repo without one falls back to the
+  // twenty-second sync tick.
   await installRepoWebhooks(activeProjects(), cfg, githubRest).catch((e) =>
     console.error('Could not install GitHub webhooks:', e.message),
   );
-  // The memory tool the turns spawn phones home here, on the loopback address,
-  // whatever PUBLIC_BASE_URL says, since it runs on this machine.
+  // Agent tools run on this machine, so they call back on loopback, not PUBLIC_BASE_URL.
   setAgentApiBase(`http://127.0.0.1:${port}`);
   app.listen(port, cfg.bindHost, () => {
     const projects = activeProjects();
@@ -2237,13 +2044,9 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   });
 })();
 
-// The last half second of a turn is still on the write queue when a restart
-// arrives, and the database is the only place it can go.
+// On shutdown, flush the write queue: the last moments of a turn exist nowhere else.
 let stopping = false;
-// A crash anywhere (a stream error with no handler, a throw inside a timer)
-// must not take that queue down with it: a session created moments before
-// simply vanishes (its first flush never ran). Write what is queued, then die
-// so pm2 restarts a clean process.
+// On a crash, flush too (or a just-created session vanishes), then die so pm2 restarts clean.
 process.on('uncaughtException', (e) => {
   console.error('Uncaught exception:', e);
   stopAllDevServes();

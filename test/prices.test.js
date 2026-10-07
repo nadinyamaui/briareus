@@ -8,9 +8,8 @@ vi.mock('../lib/config.js', () => ({ getConfig: () => ({}) }));
 const { priceFor, cacheShareOf, withEstimates, loadCatalog, resetCatalog, DEFAULT_CACHE_SHARE } =
   await import('../lib/prices.js');
 
-// A catalog in the shape models.dev publishes, cut down to what the tests ask
-// of it: a vendor, a reseller quoting the same models, and a model only the
-// resellers sell.
+// A models.dev-shaped catalog cut down to a vendor, a reseller quoting the same models, and a
+// model only the resellers sell.
 const CATALOG = {
   anthropic: {
     models: {

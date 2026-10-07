@@ -21,9 +21,8 @@ beforeEach(async () => {
   await service.init();
   const app = express();
   app.use(express.json());
-  // The real app's shape: the operator reaches these through /api/v1 with a
-  // token (a header stands in for one here), an agent's own routes are the
-  // only ones answered at their own path, and the rest of /api is retired.
+  // The real app's shape: the operator comes through /api/v1 with a token (a header here),
+  // only an agent's own routes answer at their own path, and the rest of /api is retired.
   const routes = sshRoutes({
     service,
     getProject: (repo) => (repo === input.repo ? { repo } : null),

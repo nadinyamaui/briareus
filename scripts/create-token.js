@@ -1,29 +1,23 @@
 // @ts-check
-// Issues, lists and revokes tokens for the client API (/api/v1) from the
-// machine itself.
+// Issues, lists and revokes client API (/api/v1) tokens from the machine itself.
 //
 //   npm run create-token -- --label Desktop
 //   npm run create-token -- --label iPhone --permission manage --repo owner/name --days 90
 //   npm run create-token -- --list
 //   npm run create-token -- --revoke <id>
 //
-// This is the only place tokens are issued or listed: the API has no route for
-// it, so a leaked token, admin or not, cannot mint more of itself. A client
-// can still revoke its own token with `DELETE /token`.
+// The API has no route to issue or list tokens, so a leaked token cannot mint more; a
+// client can still revoke its own with `DELETE /token`.
 //
-// It is also how the API comes to be switched on: every token is signed with
-// AUTH_SECRET, and the first run writes a random one into .env when there is
-// none. Delete that line and run this again to revoke every token at once.
+// Tokens are signed with AUTH_SECRET, which the first run writes into .env if missing.
+// Delete that line and rerun to revoke every token at once.
 //
-// The token is printed once and stored as a hash. The change is written under
-// a lock on the token row, so it cannot cross a change the server makes at the
-// same moment, and the running server reloads the list every 15 seconds: no
-// restart, unless this run had to write AUTH_SECRET, which the server only
-// reads at boot.
+// The token is printed once and stored as a hash, written under a lock on the token row
+// so it cannot cross a concurrent server change. The server reloads the list every 15
+// seconds, so no restart is needed unless AUTH_SECRET was just written (read at boot).
 //
-// Uses the same .env the server does, and talks to the database through a pool
-// of its own rather than lib/db.js's, which would apply pending migrations on
-// the way in: issuing a token is not the moment to change the schema.
+// Uses its own pool rather than lib/db.js's, which would apply pending migrations:
+// issuing a token is not the moment to change the schema.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -56,12 +50,10 @@ if (!values.label && !values.list && !values.revoke) {
 const config = getConfig();
 let secret = config.auth.secret;
 let wroteSecret = false;
-// Only issuing needs a secret: listing and revoking work on the stored hashes,
-// and must not switch the API on as a side effect.
+// Only issuing needs a secret: listing and revoking must not switch the API on.
 if (!secret && !values.list && !values.revoke) {
-  // Appended rather than edited in, so every other line of .env (and every
-  // comment) stays exactly where it was. An empty `AUTH_SECRET=` left over
-  // from an older install reads as unset, and this line, coming later, wins.
+  // Appended rather than edited in, so the rest of .env stays untouched. A leftover empty
+  // `AUTH_SECRET=` reads as unset, and this later line wins.
   secret = crypto.randomBytes(32).toString('base64url');
   const envPath = path.join(ROOT, '.env');
   const text = fs.readFileSync(envPath, 'utf8');

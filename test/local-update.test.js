@@ -24,9 +24,8 @@ const project = (over = {}) => ({
   ...over,
 });
 
-// A checkout on `branch`, dirty or not, whose fetch moves HEAD from a1 to b2;
-// shell commands answer with whatever `commands` maps them to (exit 0 when
-// unlisted).
+// A checkout on `branch`, dirty or not, whose fetch moves HEAD from a1 to b2; shell commands
+// answer from `commands` (exit 0 when unlisted).
 function fakeCheckout({ branch = 'main', dirty = '', fetch = 0, merge = 0, commands = {} } = {}) {
   let head = 'a1';
   const calls = [];

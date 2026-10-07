@@ -729,9 +729,9 @@ describe('the contract', () => {
       );
       if (entry.scope === 'session') expect(entry.path, entry.id).toContain(':id');
     }
-    // The routes a project-limited token may call without naming a project
-    // or a session. Each is here because its handler filters by the token's
-    // projects or is about no project at all; a new one has to earn its place.
+    // Routes a project-limited token may call without naming a project or session: each
+    // handler filters by the token's projects or concerns no project. A new one has to earn
+    // its place.
     expect(
       API_V1_ROUTES.filter((e) => e.access !== 'admin' && e.scope === 'any')
         .map((e) => e.id)
@@ -761,15 +761,12 @@ describe('the contract', () => {
     expect(missing).toEqual([]);
   });
 
-  // The other direction: a handler with no route is one nothing can reach,
-  // now that the handlers have no door of their own. One added fails this
-  // until it is given a route in the catalog, or a line in NOT_IN_API saying
-  // why it has none.
+  // The other direction: a handler with no route is unreachable, so a new one fails this until
+  // it gets a catalog route or a NOT_IN_API line saying why not.
   it('leaves no handler without a route', () => {
     const covered = new Set(API_V1_ROUTES.filter((e) => e.to).map((e) => `${e.method} ${e.to}`));
-    // Not a client's: what an agent calls from inside its session, what other
-    // systems deliver, the transports with their own contracts, and the pages
-    // themselves.
+    // Not a client's: agent calls from inside a session, inbound deliveries, transports with
+    // their own contracts, and the pages.
     const elsewhere = (key, file) =>
       / \/api\/agent\//.test(key) ||
       ['lib/webhooks.js', 'lib/api-v1.js'].includes(file) ||

@@ -105,9 +105,8 @@ describe('syncVideos', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  // A manifest written for one bucket says nothing about another: after the
-  // install is pointed elsewhere, "already uploaded" would mean "missing from
-  // the new bucket, forever".
+  // A manifest for one bucket says nothing about another: after a repoint, "already uploaded"
+  // would mean "missing from the new bucket, forever".
   it('starts over when the destination bucket changes', async () => {
     drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm');
     await syncVideos();
@@ -117,10 +116,8 @@ describe('syncVideos', () => {
     expect(String(fetchMock.mock.calls[1][0])).toContain('/qa-videos-2/');
   });
 
-  // Videos recorded before R2 was switched on live under token-free paths
-  // (`slug/pr-12/…`), guessable from the pull request itself, and recorded
-  // when the dashboard's login was the only audience. Publishing them
-  // retroactively is the one thing enabling the bucket must not do.
+  // Videos recorded before R2 was on sit under guessable token-free paths (`slug/pr-12/…`), made
+  // when only the dashboard login saw them; enabling the bucket must never publish them.
   it('never publishes legacy token-free paths', async () => {
     drop('acme__shop/pr-12/1-login.webm');
     drop('acme__shop/stray.webm');
@@ -131,9 +128,8 @@ describe('syncVideos', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  // A bucket that stalls on every connection costs the per-PUT timeout per
-  // pending file; the budget stops one sync from serving the whole pile while
-  // every later turn queues behind it.
+  // A stalling bucket costs the per-PUT timeout per pending file; the budget stops one sync
+  // from working the whole pile while every later turn queues behind it.
   it('defers what the upload budget leaves undone', async () => {
     let now = 0;
     const spy = vi.spyOn(Date, 'now').mockImplementation(() => now);
@@ -166,9 +162,8 @@ describe('syncVideos', () => {
     expect(String(fetchMock.mock.calls[2][0])).toContain('1-login');
   });
 
-  // Ten turns ending against a stalled bucket must not queue ten passes over
-  // the same stuck files: every file on disk when a sync starts is that
-  // sync's to try, so one queued retry serves them all.
+  // Ten turns ending against a stalled bucket must not queue ten passes: every file on disk
+  // when a sync starts is that sync's to try, so one queued retry serves them all.
   it('shares one queued sync among turns that end mid-flight', async () => {
     drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm');
     let release;

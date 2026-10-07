@@ -1,9 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import path from 'node:path';
 
-// config.js reads .env, probes for the claude binary and caches the result all
-// at import time, so every test builds its own module instance over a mocked
-// filesystem rather than sharing one.
+// config.js reads .env, probes for the claude binary and caches it all at import, so each test
+// builds its own module instance over a mocked filesystem.
 const disk = vi.hoisted(() => ({
   env: null, // string contents of .env, or null for "no such file"
   readThrows: null,
@@ -379,9 +378,8 @@ describe('finding the claude binary', () => {
   });
 
   it('lets a machine install outrank the copy bundled in node_modules', async () => {
-    // `npm start` puts the app's own node_modules/.bin first on PATH, and that
-    // copy only moves with `npm ci`; the install the operator updates by hand
-    // is the one that has to win.
+    // `npm start` puts the app's own node_modules/.bin first on PATH, but only `npm ci` moves
+    // that copy; the install the operator updates by hand has to win.
     disk.whichOutput = '/srv/app/node_modules/.bin/claude\n/home/test/.local/bin/claude\n';
     disk.files.add('/srv/app/node_modules/.bin/claude');
     disk.files.add('/home/test/.local/bin/claude');

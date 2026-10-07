@@ -6,12 +6,10 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-// ▶ Run's state machine in jobs.js: the per-session serve queue, a profile
-// switch, the restart when a profile was edited, the keep-running branch when
-// the settings no longer build a recipe, and the links it answers with. The
-// app server is a fake child (spawn is mocked), the port probe always finds
-// the port free (net is mocked), and a publish through the tunnel is whatever
-// `state.publish` answers, so every race can be held open on purpose.
+// ▶ Run's state machine in jobs.js: the per-session serve queue, profile switches and
+// restarts, the keep-running branch when no recipe builds, and the links. spawn, the port
+// probe (net) and the tunnel publish (`state.publish`) are faked, so every race can be held
+// open on purpose.
 const state = vi.hoisted(() => ({
   projects: [],
   database: 'shop',

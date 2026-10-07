@@ -1,9 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import path from 'path';
 
-// Nothing here touches a real clone: fs, git/du and the session registry are
-// all stand-ins, so the tests are about how the module reads them, and about
-// what the two delete actions refuse to do.
+// fs, git/du and the session registry are stand-ins: the tests cover how the module reads them
+// and what the two delete actions refuse to do.
 const state = vi.hoisted(() => ({
   root: '/pool',
   /** @type {Record<string, { dir?: boolean, content?: string, mtimeMs?: number }>} */

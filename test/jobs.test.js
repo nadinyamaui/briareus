@@ -23,15 +23,12 @@ vi.mock('../lib/codex-session.js', async (original) => ({
   compactCodexThread: vi.fn(),
 }));
 
-// jobs.js orchestrates processes, clones and MySQL; none of that runs here.
-// These tests cover what is pure: the event windowing, the public projection
-// of a job, and every validation createDevSession refuses on before it
-// creates anything. The success path (spawning a session) stays untested on
-// purpose; it is the integration surface.
+// jobs.js orchestrates processes, clones and MySQL; none of that runs here. These tests cover
+// the pure parts: event windowing, the public projection, and what createDevSession refuses.
+// The spawn success path is left untested on purpose; it is the integration surface.
 const state = vi.hoisted(() => ({
   provider: { id: 1, label: 'Claude entry', binary: 'claude', active: true },
-  // The rows beside the session's own, and the group the balancer sees: only
-  // the interchangeable-accounts tests set either.
+  // Only the interchangeable-accounts tests set these.
   otherProviders: [],
   group: null,
   // Appended to every group key: what a rewritten model cache does to it.
@@ -39,8 +36,7 @@ const state = vi.hoisted(() => ({
   projects: [],
   claimsServer: false,
   capacity: 3,
-  // What the database hands back to initJobs: the only way to get a session
-  // into the registry here without spawning one.
+  // What initJobs loads: the only way to register a session here without spawning one.
   stored: [],
 }));
 
@@ -49,9 +45,8 @@ vi.mock('child_process', async (importOriginal) => {
   return { ...actual, spawn: vi.fn(actual.spawn) };
 });
 
-// A real child's events and output come back under the async context it was
-// spawned in, which is how a webhook turn tells its own lines apart. A fake's
-// are emitted from the test, so they are put back under that context.
+// A real child's output arrives under the async context it was spawned in, which is how a
+// webhook turn tells its own lines apart; a fake's is put back under that context.
 function spawnedScope(...emitters) {
   const scope = new AsyncResource('fake-child');
   for (const emitter of emitters) {
@@ -115,8 +110,7 @@ vi.mock('../lib/providerstore.js', () => ({
   providerDefaultModel: () => 'claude-fable-5-1',
   providerDefaultEffort: () => 'high',
   captureProviderAuth: vi.fn(),
-  // The real one resolves a runtime against the provider rows; here any row on
-  // the list answers as stored, and an id on none of them is a deleted row.
+  // Any row on the list answers as stored; an id on none of them is a deleted row.
   resolveRuntime: vi.fn((runtime) => {
     const row = [state.provider, ...state.otherProviders].find(
       (p) => runtime && p.id === Number(runtime.providerId),
@@ -296,13 +290,9 @@ beforeEach(() => {
   state.group = null;
 });
 
-// A worker spawned for real goes on to prepare a workspace that is not there,
-// fails on its own time, and tells its orchestrator, which takes the notice as
-// a turn. On a loaded machine that lands blocks later, where the turn runs
-// through whatever fake CLI is installed then and throws its prompt count off
-// (the webhook deliveries). So the block that spawned workers waits until
-// every one has failed, its notice has reached the orchestrator, and the
-// orchestrator has settled.
+// A really spawned worker later fails on its missing workspace and notifies its orchestrator
+// as a turn; on a loaded machine that lands in a later block and throws off that block's fake
+// CLI prompt count. So wait until every worker has failed and the orchestrator has settled.
 async function settleWorkers(orchestratorIds) {
   const busy = (job) => ['preparing', 'running'].includes(job.status);
   await vi.waitFor(
@@ -633,8 +623,7 @@ describe('stepProvider', () => {
   const member = (id) => ({ id, label: `Codex ${id}`, binary: 'codex' });
 
   it("keeps a step on the session's own account when it names the session's group", () => {
-    // Same group, so the step continues the session's conversation instead of
-    // opening a second one on a sibling login.
+    // Same group, so the step continues its conversation, not a new one on a sibling login.
     const sibling = { id: 2, label: 'Claude spare', binary: 'claude' };
     state.otherProviders = [sibling];
     state.group = [state.provider, sibling];
@@ -654,16 +643,14 @@ describe('stepProvider', () => {
 
     expect(stepProvider(job, a).id).toBe(7);
     expect(job.stepProviders).toEqual({ 7: 7 });
-    // The next turn re-picks nothing: the step's conversation lives on the
-    // member the first one chose, whatever the group order says now.
+    // The step's conversation stays on the member first chosen, whatever the group order now.
     state.group = [b, a];
     expect(stepProvider(job, a).id).toBe(7);
   });
 
   it('keeps the pin when the group key moves under it', () => {
-    // The key carries the members' catalogs, and the CLI rewrites those on its
-    // own; a pin filed under the old key would re-balance the step onto an
-    // account that holds none of its conversation.
+    // The key includes the members' catalogs, which the CLI rewrites on its own; a pin under
+    // the old key would re-balance the step onto an account without its conversation.
     const [a, b] = [member(7), member(8)];
     state.otherProviders = [a, b];
     state.group = [b, a];
@@ -877,8 +864,7 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(createDevSession({ ...base }).workerRuntime).toBeNull();
   });
 
-  // What the client API's session start relies on: it passes a named runtime
-  // on as sent (lib/api-v1.js).
+  // The client API's session start passes a named runtime on as sent (lib/api-v1.js).
   it('falls to the provider’s defaults for a model or effort it does not offer, or none at all', () => {
     const picked = createDevSession({ ...base, model: 'claude-fable-5-1', effort: 'low' });
     expect(picked).toMatchObject({ model: 'claude-fable-5-1', effort: 'low' });
@@ -906,9 +892,8 @@ describe('spawnWorkerSession', () => {
     state.stored = [
       row('orch-a', { orchestrator: true }),
       row('orch-b', { orchestrator: true }),
-      // Started with a worker runtime of its own (the epic dialog's pick); its
-      // own effort is the provider's default, so a worker on 'low' proves the
-      // pick was used. orch-gone's pick names a provider row deleted since.
+      // Started with its own worker runtime (the epic dialog's pick), so a worker on 'low'
+      // proves the pick was used. orch-gone's pick names a since-deleted provider row.
       row('orch-c', {
         orchestrator: true,
         effort: 'high',
@@ -1088,8 +1073,7 @@ describe('spawnWorkerSession', () => {
     }
   });
 
-  // A fake claude CLI for the live-input tests: every spawn is recorded with
-  // what was written to its stdin and whether stdin was closed.
+  // Fake claude CLI: records each spawn's stdin writes and whether stdin was closed.
   const fakeClaude = () => {
     getProviderForJob.mockReturnValue(state.provider);
     captureProviderAuth.mockResolvedValue(undefined);
@@ -2309,8 +2293,7 @@ describe('spawnWorkerSession', () => {
       children[0].emit('close', null);
       await vi.advanceTimersByTimeAsync(2000);
       await idle;
-      // What the dead turn was handed is not left to run unannounced at some
-      // later reopen; the transcript says it was not sent again.
+      // The dead turn's input is not left to run unannounced on a later reopen.
       expect(publicJob(job).queued).toEqual([{ text: 'Then fix the lint' }]);
       expect(job.events.filter((e) => e.kind === 'info').at(-1).text).toMatch(
         /never answered 1 message\(s\).*"Also rename the table"/,
@@ -2366,8 +2349,7 @@ describe('spawnWorkerSession', () => {
     expect(workerSessionsFor(getJob('orch-b'))).toEqual([]);
   });
 
-  // Last in this block: these two actually create sessions, so they would show
-  // up in the listing test above.
+  // Last in this block: these create sessions, which would show up in the listing test above.
   it('arms the loops on the worker only when the spawn asked for them', () => {
     const looped = spawnWorkerSession(getJob('orch-a'), {
       title: 'Loop',
@@ -2457,9 +2439,8 @@ describe('spawnWorkerSession: tooling fixes', () => {
   });
 
   it('runs on the dashboard project’s worker runtime, ahead of the orchestration’s own pick', () => {
-    // The shop's runtime says effort high, and so does the pick the
-    // orchestration was started with; the dashboard's says low, and that is
-    // the one a tooling fix resolves.
+    // The shop's runtime and the orchestration's pick say high; the dashboard's says low, and
+    // that is the one a tooling fix resolves.
     getJob('tool-orch').workerRuntime = { providerId: 1, model: 'claude-fable-5-1', effort: 'high' };
     const w = spawnWorkerSession(getJob('tool-orch'), { title: 'Runtime', prompt: 'x', tooling: true });
     expect(resolveRuntime).toHaveBeenCalledWith(
@@ -2674,8 +2655,7 @@ describe('webhook deliveries', () => {
     turns: 1,
     createdAt: '2026-08-29T00:00:00.000Z',
     meta: {},
-    // A conversation the provider can resume, so a turn's prompt is the
-    // message alone and not the briefing in front of it.
+    // Resumable conversation, so a turn's prompt is the message alone, without the briefing.
     chats: { 1: { sessionId: 'resume-id', started: true } },
     ...extra,
   });
@@ -2736,8 +2716,7 @@ describe('webhook deliveries', () => {
     getJob('hk-stop').turnCanceled = true;
   });
 
-  // A provider CLI that answers when the test says so: every turn is one
-  // child, and what it was told is what it read from its stdin.
+  // A provider CLI that answers when the test says: one child per turn, prompt read from stdin.
   let cli;
   function fakeCli(binary = 'codex') {
     getProviderForJob.mockReturnValue({ ...state.provider, binary });
@@ -3479,8 +3458,7 @@ describe('what an orchestration spent', () => {
       }),
       row('bud-poor', { orchestrator: true, costUsd: 0.5 }),
       row('bud-w2', { parentId: 'bud-poor' }),
-      // What a worker's review loop spends on its behalf: the review of its
-      // push and the fix session that implements the findings.
+      // The worker's review-loop spend: the review of its push and the fix session.
       row('bud-rev', {
         loopParentId: 'bud-w1',
         costUsd: 1,
@@ -3489,8 +3467,7 @@ describe('what an orchestration spent', () => {
         durationMs: 10_000,
       }),
       row('bud-fix', { loopFixParentId: 'bud-w1', costUsd: 0.5, inputTokens: 100, durationMs: 5_000 }),
-      // What the worker's QA loop spent; a session that never reported a
-      // cost (a codex run, say) must not turn the total into a zero.
+      // The worker's QA spend; a session with no reported cost (codex) must not zero the total.
       row('bud-qa', { qaParentId: 'bud-w1', costUsd: null, inputTokens: 50, outputTokens: 5 }),
     ];
     await initJobs();
@@ -3528,8 +3505,7 @@ describe('what an orchestration spent', () => {
       outputTokens: 75,
       durationMs: 45_000,
     });
-    // Nothing under it and nothing reported: every measure stays null rather
-    // than reading as a free session.
+    // Nothing reported: every measure stays null rather than reading as free.
     expect(sessionUsage(getJob('bud-w2'))).toEqual({
       sessions: 0,
       costUsd: null,
@@ -3599,8 +3575,7 @@ describe('workerSummary', () => {
       branch: 'dev-w1',
       pr: { number: 7, state: 'open', checks: '✓2 ✗0 ●1' },
     });
-    // The raw prStatus (commit lists, check runs) stays out: it is panel data,
-    // not something a supervisor reads.
+    // The raw prStatus is panel data, not for the supervisor.
     expect(summary).not.toHaveProperty('prStatus');
   });
 
@@ -3735,8 +3710,7 @@ describe('standalone code-review findings', () => {
       queuedReview('mine-fix', [finding('m2', 'Validate the input')], true),
       queuedReview('mine-save', [finding('m3', 'Keep the type')], true),
       queuedReview('stand-dispatch', [finding('k7', 'Rename the flag')]),
-      // A review whose card is already gone: completed from another tab, or
-      // dropped with a pull request that stopped being open.
+      // A review whose card is already gone (completed elsewhere, or its PR closed).
       { ...queuedReview('stand-none', []), reviewTriage: null },
     ];
     await initJobs();
@@ -3771,9 +3745,8 @@ describe('standalone code-review findings', () => {
     });
   });
 
-  // Whose pull request it is decides which card the review leaves, so the hold
-  // is where it is worked out: the author GitHub names, against the account the
-  // app acts as.
+  // Whose pull request it is (GitHub's author vs the account the app acts as) decides the
+  // card, so the hold works it out.
   it('holds a review of somebody else’s pull request as not the user’s own', async () => {
     const found = [finding('theirs', 'Their finding')];
     latestReviewFindings.mockResolvedValueOnce(found);
@@ -3799,9 +3772,8 @@ describe('standalone code-review findings', () => {
     expect(job.reviewTriage).toMatchObject({ author: 'NadinYamaui', mine: true });
   });
 
-  // The token's user is only the fallback: a project that posts as a bot or a
-  // colleague's account names it in its settings, and that is the account whose
-  // pull requests are "mine" for that project.
+  // The token's user is only the fallback: a project that posts as another account names it in
+  // its settings, and that account's pull requests are "mine".
   it('reads the account the app acts as off the project when it names one', async () => {
     const found = [finding('ours', 'Our finding')];
     latestReviewFindings.mockResolvedValueOnce(found);
@@ -3815,8 +3787,8 @@ describe('standalone code-review findings', () => {
     expect(job.reviewTriage).toMatchObject({ author: 'release-bot', mine: true });
   });
 
-  // A pull request whose author cannot be read is somebody else's: the card
-  // that rules nothing and spends nothing is the safe one to be wrong with.
+  // An unreadable author counts as somebody else's: the card that rules and spends nothing is
+  // the safe one to be wrong with.
   it('holds a review as not the user’s own when GitHub will not name the author', async () => {
     const found = [finding('unknown', 'Unknown finding')];
     latestReviewFindings.mockResolvedValueOnce(found);
@@ -3835,9 +3807,8 @@ describe('standalone code-review findings', () => {
     expect(deleteJob).not.toHaveBeenCalledWith('stand-close', null);
   });
 
-  // The card of a review of the user's own work is the one a loop round gets:
-  // verdicts, comments kept here and on the pull request, and a Complete that
-  // sends what was marked fix.
+  // A review of the user's own work gets the loop card: verdicts, kept comments, and a
+  // Complete that sends what was marked fix.
   it('Save comments keeps the drafts of a review of the user’s own pull request', async () => {
     postTriageNotes.mockClear();
 
@@ -3933,8 +3904,7 @@ describe('standalone code-review findings', () => {
     const result = await completeStandaloneReview('stand-complete');
 
     expect(result).toEqual({ completed: true, prNumber: 31, findings: 1 });
-    // What it found is the pull request author's to answer: no verdicts on the
-    // record, no comment, no approval label, and no fix session.
+    // The PR author answers these: no verdicts, comment, approval label or fix session.
     expect(recordTriage).not.toHaveBeenCalled();
     expect(postTriageNotes).not.toHaveBeenCalled();
     expect(addPullRequestLabel).not.toHaveBeenCalled();
@@ -3964,8 +3934,7 @@ describe('standalone code-review findings', () => {
     recordTriage.mockClear();
     recordTriage.mockResolvedValueOnce({ error: null });
     postTriageNotes.mockClear();
-    // As a card that has been saved once looks: the notes comment is on the
-    // pull request and the completion has to take it off.
+    // As a card saved once: the notes comment is on the PR for the completion to remove.
     getJob('mine-dismiss').reviewTriage.drafts = {
       verdicts: {},
       note: 'Ship after the hotfix',
@@ -3984,8 +3953,7 @@ describe('standalone code-review findings', () => {
       [expect.objectContaining({ key: 'm1', decision: 'dismissed' })],
       { by: 'the user', note: 'Ship after the hotfix' },
     );
-    // Completing takes the "so far" notes comment off: the verdicts are on the
-    // Review triage comment now, note included.
+    // Completing removes the "so far" notes comment; the verdicts are on Review triage now.
     expect(postTriageNotes).toHaveBeenCalledWith('acme/standalone', 31, 'mine-dismiss', [], {});
     expect(addPullRequestLabel).toHaveBeenLastCalledWith(
       expect.objectContaining({ githubToken: 'tok' }),
@@ -4005,8 +3973,7 @@ describe('standalone code-review findings', () => {
     expect(getJob('mine-fix').reviewTriage).toMatchObject({ prNumber: 31, mine: true });
   });
 
-  // Verdicts sent on somebody else's pull request (an older tab, a script) do
-  // not turn its card into a gate: nothing is ruled and nothing is approved.
+  // Verdicts sent on somebody else's PR (an old tab, a script) rule and approve nothing.
   it('ignores verdicts sent for a review of somebody else’s pull request', async () => {
     recordTriage.mockClear();
     addPullRequestLabel.mockClear();
@@ -4063,9 +4030,8 @@ describe('deleting a session that was never closed', () => {
 });
 
 describe('closeDevSession folding a deleted loop session’s cost into its parent', () => {
-  // Its own repo, so these restored rows never match the registry sweeps other
-  // describes make. The parents carry no reviewLoop/qaLoop on purpose: the
-  // close-report paths return early, leaving only the cost fold to observe.
+  // Own repo so other describes' registry sweeps never match these. Parents carry no
+  // reviewLoop/qaLoop on purpose, leaving only the cost fold to observe.
   const row = (id, extra) => ({
     id,
     kind: 'devchat',
@@ -4105,8 +4071,7 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
   });
 
   it("a deleted loop review's spend lands on the session it reviewed for", async () => {
-    // Live, the review is already in the parent's rollup; deleting it must
-    // leave that number where it stood.
+    // The review is already in the parent's live rollup; deleting it must not move that number.
     const before = sessionUsage(getJob('cost-par-1'));
     expect(before).toEqual({
       sessions: 1,
@@ -4120,9 +4085,8 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
     const parent = getJob('cost-par-1');
     expect(sessionUsage(parent)).toEqual(before);
     expect(childSessionsOf(parent)).toEqual([]);
-    // Into the absorbed fields, beside the parent's own figures, which stay
-    // what its own turns consumed (codex rewrites them from its thread's
-    // accounting after every turn, so a fold added into them would not last).
+    // Into the absorbed fields: codex rewrites the parent's own figures after every turn, so a
+    // fold added there would not last.
     expect(parent.costUsd).toBe(1.25);
     expect(parent.inputTokens).toBe(1000);
     expect(parent).toMatchObject({
@@ -4132,9 +4096,8 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
       absorbedOutputTokens: 30,
       absorbedDurationMs: 5_000,
     });
-    // The durable copy rides the delete itself: one transaction, so a crash
-    // cannot commit the delete and lose the transfer, and a parent loaded out
-    // of the restore window is still paid.
+    // The durable copy rides the delete's transaction, so a crash cannot lose the transfer and
+    // a parent outside the restore window is still paid.
     expect(deleteJob).toHaveBeenCalledWith('cost-rev-1', {
       intoJobId: 'cost-par-1',
       sessions: 1,
@@ -4202,8 +4165,7 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
   });
 
   it('the hand-delete retry after a refused auto-delete still folds the cost', async () => {
-    // The DELETE route calls deleteJobById directly on the already-closed row;
-    // the fold lives there, so this path pays the parent like the first meant to.
+    // The DELETE route calls deleteJobById on the already-closed row; the fold lives there.
     await deleteJobById('cost-rev-4');
     expect(getJob('cost-rev-4')).toBeNull();
     expect(getJob('cost-par-4').absorbedCostUsd).toBe(0.5);
@@ -4219,9 +4181,8 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
   });
 
   it('a deleted worker hands its orchestrator everything it had absorbed and still had under it', async () => {
-    // bud-w1 (from the spend suite above) already carries a live review, fix
-    // and QA run; deleting the worker moves that whole subtree's spend up in
-    // one fold, so the orchestrator's number does not move.
+    // bud-w1 (spend suite above) has a live review, fix and QA run; deleting the worker folds
+    // that subtree up in one go, so the orchestrator's number holds.
     const orch = getJob('bud-orch');
     const before = sessionUsage(orch);
     getJob('bud-w1').status = 'closed'; // the spend suite flipped it to idle
@@ -4234,18 +4195,15 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
 });
 
 describe('the review loop: what a closing loop review reports back', () => {
-  // Its own repo and PR number, so these restored rows never match the
-  // registry sweeps other describes make over acme/shop.
+  // Own repo and PR number, so other describes' registry sweeps over acme/shop never match.
   const parentRow = (id, reviewId, loop = {}) => ({
     id,
     kind: 'devchat',
     status: 'closed', // flipped to idle after the restore, like the rows above
     repo: 'acme/loop',
     turns: 1,
-    // What startLoopFixSession spawns with. acme/loop is deliberately not in
-    // state.projects, so every spawn attempt fails on "Unknown project" and
-    // leaves its trace as an info event: the attempt is what these tests
-    // observe, the success path stays untested like every other spawn.
+    // acme/loop is not in state.projects, so every spawn fails on "Unknown project" and leaves
+    // an info event: the attempt is what these tests observe.
     providerId: 1,
     branch: 'task/loop',
     startedOnPr: 77,
@@ -4309,8 +4267,7 @@ describe('the review loop: what a closing loop review reports back', () => {
       reviewRow('rev-8', 'par-8', true),
       parentRow('par-9', 'rev-9', { rounds: 2, lastFindings: 'k1' }),
       reviewRow('rev-9', 'par-9', true),
-      // On the last round the cap allows, with a round before it that found
-      // something else, so nothing but the cap can stop it.
+      // The cap's last round, after one that found something else: only the cap stops it.
       parentRow('par-10', 'rev-10', { rounds: 3, lastFindings: 'k0' }),
       reviewRow('rev-10', 'par-10', true),
       // Past round one, which is where lows stop re-opening the loop.
@@ -4330,17 +4287,15 @@ describe('the review loop: what a closing loop review reports back', () => {
       // A third: its read fails the same way, and then its session is closed.
       parentRow('par-17', 'rev-17'),
       reviewRow('rev-17', 'par-17', true),
-      // On its last allowed round, with a round that leaves only what the
-      // loop's own rules would park: the cap has nothing to stand ahead of.
+      // On its last round, with only findings the loop's rules would park: the cap has nothing
+      // to stand ahead of.
       parentRow('par-18', 'rev-18', { rounds: 3, lastFindings: 'k0' }),
       reviewRow('rev-18', 'par-18', true),
       // Its loop is turned off while the round's verdicts are being read.
       parentRow('par-19', 'rev-19'),
       reviewRow('rev-19', 'par-19', true),
-      // Two workers of an orchestrator: their loops' verdicts are its to act
-      // on. It stands on a question of its own, so the updates are held in
-      // its buffer where the tests can read them instead of being spent on
-      // an injected turn.
+      // Two workers whose loop verdicts go to their orchestrator. It stands on its own
+      // question, so the updates stay in its buffer for the tests to read.
       {
         id: 'loop-orch',
         kind: 'devchat',
@@ -4447,9 +4402,8 @@ describe('the review loop: what a closing loop review reports back', () => {
   });
 
   const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
-  // The report a closing review files is fire-and-forget, and a round whose
-  // findings read failed retries inside it, so these wait on the state rather
-  // than on a fixed number of ticks.
+  // A closing review's report is fire-and-forget and retries a failed read inside it, so wait
+  // on state rather than a tick count.
   const waitFor = async (cond) => {
     for (let i = 0; i < 400; i++) {
       if (cond()) return;
@@ -4822,8 +4776,7 @@ describe('the review loop: what a closing loop review reports back', () => {
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
     await closeDevSession('rev-3');
     await new Promise((r) => setTimeout(r, 0));
-    // Nothing is fixed until somebody rules on the round: no fix session, and
-    // no turn fired at the question card.
+    // Nothing is fixed until somebody rules: no fix session, no turn fired at the card.
     expect(parent.reviewLoop.pendingFix).toBeFalsy();
     expect(parent.reviewLoop.fixing).toBeFalsy();
     expect(parent.reviewLoop.triage).toMatchObject({ prNumber: 77, round: 1 });
@@ -4913,8 +4866,7 @@ describe('the review loop: what a closing loop review reports back', () => {
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
     await closeDevSession('rev-8');
     await new Promise((r) => setTimeout(r, 0));
-    // The stall gate runs on what is sent to be fixed, not on what was found:
-    // a round held on the screen has cost nothing yet.
+    // The stall gate counts what is sent to fix, not what was found; a held round cost nothing.
     expect(parent.reviewLoop.stalled).toBeFalsy();
     expect(parent.reviewLoop.triage).toMatchObject({ round: 2 });
     await triageLoopFindings('par-8', { verdicts: [{ key: 'k1', decision: 'fix' }] });
@@ -4939,17 +4891,14 @@ describe('the review loop: what a closing loop review reports back', () => {
     expect(infoTexts(parent).join('\n')).toMatch(/could not start the fix session/); // the spawn was attempted
   });
 
-  // The gate the stall check cannot make: a loop reviewing the code its own
-  // fixes introduced finds something different every round, so it never runs
-  // dry and never repeats itself.
+  // A loop reviewing its own fixes finds something new each round, so neither the stall nor
+  // the repeat check stops it.
   it('stops at the round cap even when the round found something new', async () => {
     const parent = getJob('par-10');
     latestReviewFindings.mockResolvedValueOnce([{ key: 'k9', severity: 'high', title: 'Yet another' }]);
     await closeDevSession('rev-10');
     await new Promise((r) => setTimeout(r, 0));
-    // The final round is held and ruled on like any other: what it found is
-    // recorded on the pull request through the verdicts, and the cap stands
-    // where the fix session would start.
+    // The final round is held and ruled on; the cap stands where the fix session would start.
     expect(parent.reviewLoop.stalled).toBeFalsy();
     expect(parent.reviewLoop.triage).toMatchObject({ round: 3 });
     expect(infoTexts(parent).join('\n')).not.toMatch(/REVIEW_LOOP_MAX_ROUNDS/);
@@ -4970,9 +4919,8 @@ describe('the review loop: what a closing loop review reports back', () => {
     sortFindingsForFix.mockResolvedValueOnce({ kept: [], parked: [{ ...found[0], reason: 'severity' }] });
     await closeDevSession('rev-18');
     await new Promise((r) => setTimeout(r, 0));
-    // The cap counts what the loop itself would have fixed, and that is
-    // nothing here: the round reaches the screen, where a nothing-to-fix
-    // send converges the loop the way a round that fixed nothing always did.
+    // The cap counts what the loop would fix, which is nothing here: the round reaches the
+    // screen, and a nothing-to-fix send converges it.
     expect(parent.reviewLoop.stalled).toBeFalsy();
     expect(parent.reviewLoop.triage).toMatchObject({
       round: 3,
@@ -4993,8 +4941,7 @@ describe('the review loop: what a closing loop review reports back', () => {
     });
     await closeDevSession('rev-19');
     await new Promise((r) => setTimeout(r, 0));
-    // The hold would have landed on the detached loop object: announced in
-    // the log and to nobody's screen.
+    // The hold would otherwise land on the detached loop object, shown to nobody.
     expect(parent.reviewLoop).toBeNull();
     expect(infoTexts(parent).join('\n')).not.toMatch(/⚑ Findings/);
   });
@@ -5014,8 +4961,7 @@ describe('the review loop: what a closing loop review reports back', () => {
     });
     // Still the person's call: the split goes along as advice, not a verdict.
     expect(parent.reviewLoop.fixing).toBeFalsy();
-    // The advice ships with its wording, so the screen reads the same
-    // sentence the orchestrator does without a copy of the table.
+    // The advice carries its wording, so the screen and the orchestrator read the same sentence.
     expect(parent.reviewLoop.triage.findings).toEqual([
       {
         ...found[0],
@@ -5045,9 +4991,8 @@ describe('the review loop: what a closing loop review reports back', () => {
     expect(infoTexts(parent).join('\n')).not.toContain('declared no findings');
   });
 
-  // The failure the loop used to swallow: the review had finished and
-  // published, and one failing GitHub call afterwards dropped the round on the
-  // floor, leaving the loop reading as "waiting for a push" with nobody told.
+  // Regression: one failing GitHub call after a published review dropped the round, leaving
+  // the loop "waiting for a push" with nobody told.
   it('a round whose findings GitHub refuses once still converges', async () => {
     const parent = getJob('par-15');
     latestReviewFindings.mockRejectedValueOnce(new Error('GitHub answered 403 listing PR #77 comments'));
@@ -5065,8 +5010,8 @@ describe('the review loop: what a closing loop review reports back', () => {
     }
     await closeDevSession('rev-16');
     await waitFor(() => !!parent.reviewLoop.pendingResult && parent.reviewLoop.pendingResult.said);
-    // The review's own outcome is on record: the round did happen, it is not
-    // reopened by a new review, and it is not a loop waiting for a push.
+    // The round is on record: it happened, a new review does not reopen it, and the loop is
+    // not waiting for a push.
     expect(parent.reviewLoop.pendingResult).toMatchObject({ prNumber: 77, round: 1 });
     expect(parent.reviewLoop.done).toBeFalsy(); // restored rows carry no flag until one is set
     expect(parent.reviewLoop.reviewing).toBe(false);
@@ -5099,8 +5044,7 @@ describe('the review loop: what a closing loop review reports back', () => {
   });
 
   it('a plain session’s converged loop is nobody else’s business', async () => {
-    // par-2 converged above and files under no orchestrator: nothing was
-    // queued anywhere (the buffer only ever exists on a parent).
+    // par-2 converged above under no orchestrator, so nothing was queued anywhere.
     expect(getJob('par-2').pendingWorkerNotices).toBeUndefined();
   });
 
@@ -5156,13 +5100,11 @@ describe('the review loop: what a closing loop review reports back', () => {
   });
 });
 
-// The way out of a pending round: a read that fails for a rate limit comes
-// back within the minute, but a rotated token, a lost scope or a deleted pull
-// request never does, and the round must not hold the loop for good.
+// A rate-limited read recovers within the minute, but a rotated token, lost scope or deleted
+// PR never does; the round must not hold the loop for good.
 describe('the review loop: a pending round that is past giving up on', () => {
-  // A worker restored mid-outage: the round finished, published, and its
-  // findings have not been readable since. `pending` says how long that has
-  // been going on and which pull request it is on.
+  // Restored mid-outage: the round published but its findings have been unreadable since;
+  // `pending` says for how long and on which PR.
   const workerRow = (id, prNumber, pending) => ({
     id,
     kind: 'devchat',
@@ -5244,8 +5186,7 @@ describe('the review loop: a pending round that is past giving up on', () => {
     throw new Error('the loop never reached the expected state');
   };
 
-  // The sync tick's own path into the round: the branch event mirrors the pull
-  // request, and the settle behind it drains the pending round.
+  // The sync tick's path: the branch event mirrors the PR, and the settle drains the round.
   const nudge = (prNumber) => syncSessionsOn('acme/stuck', `task/stuck-${prNumber}`);
   const refuse = (n, message = 'GitHub answered 401 listing PR comments') => {
     for (let i = 0; i < n; i++) latestReviewFindings.mockRejectedValueOnce(new Error(message));
@@ -5256,8 +5197,7 @@ describe('the review loop: a pending round that is past giving up on', () => {
     refuse(3); // every attempt inside the one resolve
     nudge(79);
     await waitFor(() => parent.reviewLoop.stalled);
-    // The round is no longer the loop's next step, so a later push starts a
-    // fresh one instead of finding the loop wedged here.
+    // A later push starts a fresh round instead of finding the loop wedged here.
     expect(parent.reviewLoop.pendingResult).toBeNull();
     const text = infoTexts(parent).join('\n');
     expect(text).toMatch(/could not be read off PR #79 for 30 minutes/);
@@ -5269,10 +5209,8 @@ describe('the review loop: a pending round that is past giving up on', () => {
     expect(notice.text).toMatch(/judge it by hand/);
   });
 
-  // The deadline is judged on a read that just failed, never on the clock
-  // alone: a round pending across a restart (markInterrupted) or a failed turn
-  // has nothing retrying it in the meantime, and the read GitHub would now
-  // answer must be made before the round is given up on.
+  // The deadline is judged on a read that just failed, not the clock alone: a round pending
+  // across a restart or failed turn had nothing retrying it meanwhile.
   it('asks GitHub once more before it gives up on a round', async () => {
     const parent = getJob('stuck-2');
     nudge(80); // the default mock answers: no findings
@@ -5288,8 +5226,6 @@ describe('the review loop: a pending round that is past giving up on', () => {
     ).toBe(false);
   });
 
-  // Nothing is owed to a pull request that was merged or closed during the
-  // outage: no round to judge, so no stall and no orchestrator turn.
   it('drops the round quietly when the pull request is no longer open', async () => {
     const parent = getJob('stuck-3');
     refuse(3);
@@ -5300,10 +5236,8 @@ describe('the review loop: a pending round that is past giving up on', () => {
     expect(getJob('stuck-orch').pendingWorkerNotices.some((n) => n.workerId === 'stuck-3')).toBe(false);
   });
 
-  // The failure this whole pending state exists for: GitHub's core budget
-  // resets on a fixed hourly window, so its cooldown routinely outlasts the
-  // 30-minute deadline. Those attempts never reach the network, so they cost
-  // the round neither an attempt nor a minute of its deadline.
+  // GitHub's hourly rate-limit reset routinely outlasts the 30-minute deadline. Attempts blocked
+  // locally never reach the network, so they cost no attempt and no deadline time.
   it('parks on the rate limit’s own reset without spending the deadline', async () => {
     const parent = getJob('stuck-4');
     const retryAt = Date.now() + 50 * 60_000; // past the deadline, as a core reset can be
@@ -5319,8 +5253,7 @@ describe('the review loop: a pending round that is past giving up on', () => {
     expect(pending).toMatchObject({ prNumber: 82, round: 1 });
     expect(parent.reviewLoop.stalled).toBeFalsy();
     expect(pending.nextRetryAt).toBe(new Date(retryAt).toISOString());
-    // Not counted: no attempt spent on the backoff, and the deadline's clock
-    // pushed forward by the wait, so the round survives the whole cooldown.
+    // No attempt spent on the backoff, and the deadline pushed forward by the wait.
     expect(pending.attempts).toBe(9);
     expect(Date.parse(pending.failingSince) - Date.parse(recent)).toBeGreaterThan(45 * 60_000);
     // And a local cooldown is not retried twice more inside the same resolve.
@@ -5330,11 +5263,8 @@ describe('the review loop: a pending round that is past giving up on', () => {
   const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
 });
 
-// The failure a rate-limit backoff used to not survive: the process that owns
-// the retry (the sync tick) restarts mid-backoff, and restoreFromDb marks the
-// session `interrupted` rather than leaving it `idle`. The read needs none of
-// the session's own resources, only the persisted round on the pull request,
-// so the retry must not depend on the session looking like a live one.
+// Regression: a restart mid-backoff leaves the session `interrupted`, not `idle`. The read
+// needs only the round persisted on the PR, so its retry must not need a live session.
 describe('the review loop: a pending round outlives the process that started its backoff', () => {
   it('resumes a pending round on an interrupted (restarted) session, not just an idle one', async () => {
     vi.useFakeTimers();
@@ -5343,9 +5273,8 @@ describe('the review loop: a pending round outlives the process that started its
       {
         id: 'restart-par-1',
         kind: 'devchat',
-        // idle, not closed: restoreFromDb only marks a session interrupted
-        // (holdsResources) when it was still holding its clone/database claim,
-        // exactly the restart this loop must survive.
+        // idle, not closed: restoreFromDb only marks interrupted a session still holding its
+        // clone/database claim, the restart this must survive.
         status: 'idle',
         repo: 'acme/restart',
         turns: 1,
@@ -5373,9 +5302,7 @@ describe('the review loop: a pending round outlives the process that started its
     latestReviewFindings.mockResolvedValueOnce([]);
     await initJobs();
     const parent = getJob('restart-par-1');
-    // The real restart transition (restoreFromDb -> markInterrupted), not a
-    // hand-set status: it is what actually clears the database claim and
-    // leaves the session `interrupted`.
+    // The real restart transition (restoreFromDb -> markInterrupted), not a hand-set status.
     expect(parent.status).toBe('interrupted');
     expect(parent.dbServerId).toBeNull();
     expect(parent.error).toBeTruthy();
@@ -5416,8 +5343,7 @@ describe('the review loop: a pending round outlives the process that started its
     ];
     await initJobs();
     const parent = getJob('restart-par-2');
-    // Left as the restore found it: genuinely closed, so nobody is owed this
-    // round and the tick must not spend a GitHub call retrying it.
+    // Genuinely closed: nobody is owed this round, so the tick spends no GitHub call on it.
     await vi.advanceTimersByTimeAsync(20_000);
     expect(latestReviewFindings).not.toHaveBeenCalled();
     expect(parent.reviewLoop.pendingResult).not.toBeNull();
@@ -5425,11 +5351,8 @@ describe('the review loop: a pending round outlives the process that started its
   });
 });
 
-// Retrying a round/verdict read across interrupted/failed (rather than
-// dropping it the moment DEV_OPEN no longer covers the session) opens a
-// window: the read can still be in flight when the session is deleted out
-// from under it. deleteJobById must be the one thing a resurrecting save()
-// cannot outrun.
+// Retrying reads across interrupted/failed means one can still be in flight when the session
+// is deleted; deleteJobById must win against a resurrecting save().
 describe('deleting a session with a round read in flight', () => {
   it('does not let a pending round’s save resurrect a job deleted while the read was in flight', async () => {
     vi.useFakeTimers();
@@ -5477,27 +5400,21 @@ describe('deleting a session with a round read in flight', () => {
       );
       await initJobs();
 
-      // The sync tick starts the round's read; it is left in flight (the
-      // findings promise above is not resolved yet).
+      // The sync tick starts the round's read, left in flight (findings unresolved).
       await vi.advanceTimersByTimeAsync(20_000);
       expect(latestReviewFindings).toHaveBeenCalledWith('acme/race', 95, { since: null });
 
-      // The session is deleted while that read is still outstanding. This runs
-      // synchronously up to its own first await (dropSessionDatabase, held open
-      // above), so the job is still in the registry and the delete is
-      // mid-flight when the read resolves below.
+      // Runs synchronously to its first await (dropSessionDatabase, held open above), so the
+      // job is still registered and the delete mid-flight when the read resolves.
       const deleted = deleteJobById('race-par-1');
 
-      // The read resolves with no findings, which drives resolveLoopRound
-      // straight through to `save(parent)` with no further await in between.
+      // No findings drives resolveLoopRound straight to save(parent) with no await between.
       resolveFindings([]);
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
 
-      // A flush tick fires while deleteJobById is still paused on
-      // dropSessionDatabase: the row must not be written back now that the
-      // session is being deleted.
+      // A flush tick while the delete is paused must not write the row back.
       await vi.advanceTimersByTimeAsync(600);
       expect(saveJob).not.toHaveBeenCalled();
 
@@ -5614,8 +5531,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       workerRow('tri-9', 'tri-orch'),
       // Merged under the hold, before the sync dropped the round.
       { ...workerRow('tri-10', 'tri-orch'), prStatus: { number: 79, state: 'merged' } },
-      // Save comments is written and read back on these two: one live, one
-      // left closed so the guard on a retired session is exercised.
+      // Save comments round-trips on these: one live, one closed for the retired-session guard.
       workerRow('tri-save', 'tri-orch'),
       workerRow('tri-save-closed', 'tri-orch'),
       // A free orchestrator with a triage update for a worker no longer holding one.
@@ -5850,8 +5766,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
     await closeDevSession('tri-5-fix'); // the worker's next settle
     await new Promise((r) => setTimeout(r, 0));
     const worker = getJob('tri-5');
-    // The decision it waits for is a person's; nothing here makes it, and
-    // nothing re-sorts or re-reviews a round already on the screen.
+    // The decision is a person's; nothing re-sorts or re-reviews a round already on screen.
     expect(worker.reviewLoop.triage).toEqual(held());
     expect(worker.reviewLoop.fixing).toBe(false);
     expect(worker.reviewLoop.reviewing).toBeFalsy();
@@ -5885,10 +5800,8 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
         { key: 'k2', decision: 'optional' },
       ],
     });
-    // Not the failure shape: the round is closed and a review was attempted
-    // on the new head. It failed to spawn here (the repo being unknown, which
-    // is the trace it leaves), so `reviewing` is false; and the session is
-    // idle, so nothing was deferred either, and the log says why instead.
+    // Not the failure shape: the round closed and a review was attempted on the new head. It
+    // failed to spawn (unknown repo), so `reviewing` is false, and nothing was deferred.
     expect(result).toEqual({ fixing: false, converged: false, reviewing: false, deferred: false });
     expect(worker.reviewLoop.triage).toBeNull();
     expect(worker.reviewLoop.done).toBeFalsy();
@@ -6141,8 +6054,7 @@ describe('the review loop: arming and disarming a session already underway', () 
     });
     await new Promise((r) => setTimeout(r, 0)); // the first round is offered off the call
     expect(infoTexts(getJob('arm-1')).join('\n')).toMatch(/Review loop armed/);
-    // Nothing to review against yet, so the loop says what it is waiting for
-    // rather than starting a round.
+    // Nothing to review against yet, so the loop says what it waits for, starting no round.
     expect(infoTexts(getJob('arm-1')).join('\n')).toMatch(/once this session has an open pull request/);
   });
 
@@ -6167,11 +6079,9 @@ describe('the review loop: arming and disarming a session already underway', () 
   it('re-arming adopts a review the disarmed loop left running instead of starting a second one', async () => {
     setReviewLoop('arm-8', false);
     const session = setReviewLoop('arm-8', true);
-    // Counted as the round it is, and pointed at again, so its close reports
-    // back here and no second review of the same pull request starts.
+    // Counted and pointed at, so its close reports here and no second review starts.
     expect(session.reviewLoop).toMatchObject({ rounds: 1, reviewing: true, reviewSessionId: 'arm-8-rev' });
-    // And the head it is reading, so the round it holds can be told stale
-    // and a nothing-to-fix send converges instead of reviewing it again.
+    // Its head too, so the held round can be told stale and a nothing-to-fix send converges.
     expect(getJob('arm-8').reviewLoop.lastSha).toBe('head8');
     expect(infoTexts(getJob('arm-8')).join('\n')).toMatch(/already running is its first round/);
     await new Promise((r) => setTimeout(r, 0));
@@ -6232,8 +6142,7 @@ describe('the QA loop: reporting a finished QA run', () => {
         qaLoop: { running: true, sessionId: null, staleSessionId: 'qa-run-4', done: false },
       },
       qaRow('qa-run-4', 'qa-par-4', true),
-      // A worker's QA verdict goes to its orchestrator too; held in the buffer
-      // by the orchestrator's own open question, so the test can read it.
+      // A worker's QA verdict also goes to its orchestrator, buffered by its open question.
       {
         id: 'qa-orch',
         kind: 'devchat',
@@ -6411,18 +6320,16 @@ describe('the QA loop: reporting a finished QA run', () => {
     vi.useRealTimers();
   });
 
-  // The same restart that used to strand a review loop's pending round strands
-  // a QA verdict read the same way: `interrupted`, not `idle`, is what a
-  // restored session actually is, and the tick must retry it there too.
+  // A restored session is `interrupted`, not `idle`; a pending QA verdict read must be retried
+  // there too, like the review loop's round.
   it('resumes a pending verdict from an interrupted (restarted) session, not just an idle one', async () => {
     vi.useFakeTimers();
     latestTestFailures.mockClear();
     state.stored = [
       {
         ...parentRow('qa-restart-2', 'qa-restart-run-2'),
-        // idle, not closed: restoreFromDb only marks a session interrupted
-        // (holdsResources) when it was still holding its clone/database claim,
-        // exactly the restart this loop must survive.
+        // idle, not closed: restoreFromDb only marks interrupted a session still holding its
+        // clone/database claim, the restart this must survive.
         status: 'idle',
         dbServerId: 9,
         dbHost: 'db-host',
@@ -6439,8 +6346,7 @@ describe('the QA loop: reporting a finished QA run', () => {
     latestTestFailures.mockResolvedValueOnce([]);
     await initJobs();
     const parent = getJob('qa-restart-2');
-    // The real restart transition (restoreFromDb -> markInterrupted), not a
-    // hand-set status.
+    // The real restart transition (restoreFromDb -> markInterrupted), not a hand-set status.
     expect(parent.status).toBe('interrupted');
     expect(parent.dbServerId).toBeNull();
     expect(parent.error).toBeTruthy();
@@ -6554,8 +6460,7 @@ describe('spottedPrIsThisSession', () => {
 });
 
 describe('attachPrForBranch', () => {
-  // Only the two calls this describe cares about answer; everything else the
-  // sync reaches for (reviews, commits, checks) reports "not ok" and is skipped.
+  // Only these two calls answer; the rest of the sync reports not ok and is skipped.
   const github = (prs, pr) => {
     githubRest.mockImplementation(async (_cfg, _method, url) => {
       if (url.startsWith('/repos/acme/shop/pulls?')) return { ok: true, json: async () => prs, url };
@@ -6563,9 +6468,8 @@ describe('attachPrForBranch', () => {
       return { ok: false, status: 404, json: async () => ({}) };
     });
   };
-  // A fresh id per session: the cooldown that keeps the sync tick off GitHub is
-  // keyed by session id and lives at module level, so a reused id would carry
-  // one test's "nothing open on that branch" into the next.
+  // A fresh id per session: the sync tick's GitHub cooldown is keyed by session id at module
+  // level, so a reused id would carry one test's "nothing open" into the next.
   let n = 0;
   const session = (over = {}) => ({
     id: `att-${++n}`,
@@ -6598,11 +6502,9 @@ describe('attachPrForBranch', () => {
     const job = session();
     expect(await attachPrForBranch(job)).toBe(51);
     expect(job.prStatus.number).toBe(51);
-    // Nobody pointed this session at #51, which is what keeps a merge of it
-    // from closing the session out from under its user.
+    // Nobody pointed this session at #51, so its merge will not close the session on its user.
     expect(job.prAttachedByBranch).toBe(true);
-    // Asked by exact head ref: the one lookup that cannot latch onto a pull
-    // request this session has nothing to do with.
+    // Asked by exact head ref, so it cannot latch onto an unrelated pull request.
     expect(githubRest.mock.calls[0][2]).toContain('head=acme:dev-95c1bae2');
     expect(githubRest.mock.calls[0][2]).toContain('state=open');
   });
@@ -6614,8 +6516,7 @@ describe('attachPrForBranch', () => {
       head: { ref: 'dev-95c1bae2', sha: 'sha51' },
       base: { ref: 'main' },
     });
-    // A review holds a clone and a database server for work the merge makes
-    // pointless, so the merge must still end it.
+    // A review holds a clone and a database server the merge makes pointless, so it still ends.
     const job = session({ reviewBranch: 'dev-95c1bae2', prAttachedByBranch: false });
     expect(await attachPrForBranch(job)).toBe(51);
     expect(job.prAttachedByBranch).toBe(false);
@@ -6664,8 +6565,7 @@ describe('attachPrForBranch', () => {
     expect(await attachPrForBranch(job)).toBeNull();
     expect(await attachPrForBranch(job)).toBeNull();
     expect(githubRest).toHaveBeenCalledTimes(1); // the tick asks all day; GitHub hears it once
-    // A turn that just ended is the moment a pull request appears, so that one
-    // asks anyway.
+    // A turn that just ended is when a pull request appears, so that one asks anyway.
     expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
     expect(githubRest).toHaveBeenCalledTimes(2);
   });
@@ -6867,8 +6767,7 @@ describe('attachPrForBranch', () => {
     expect(job.reviewLoop.discoveryError).toBe('GitHub returned 403');
     expect(await attachPrForBranch(job, { fresh: true })).toBe(52);
     expect(job.reviewLoop.discoveryError).toBeNull();
-    // A successful second idle check attaches the existing PR; it does not
-    // create another association or require another branch push.
+    // A second idle check attaches the existing PR without another association or push.
     expect(await attachPrForBranch(job, { fresh: true })).toBe(52);
     expect(
       githubRest.mock.calls.filter((call) => call[2].startsWith('/repos/acme/shop/pulls?')),
@@ -7046,8 +6945,7 @@ describe('manual session metadata', () => {
 });
 
 describe('a merge closing the sessions on a pull request', () => {
-  // Its own repo and PR number, so the registry sweep here touches nothing the
-  // other describes restored.
+  // Own repo and PR number, so the registry sweep here matches nothing the others restored.
   const row = (id, attachedByBranch) => ({
     id,
     kind: 'devchat',
@@ -7123,8 +7021,7 @@ describe('a merge closing the sessions on a pull request', () => {
 });
 
 describe('a push by hand landing under a held round', () => {
-  // Its own repo and PR number, so the sync here matches nothing the other
-  // describes restored.
+  // Own repo and PR number, so the sync here matches nothing the others restored.
   beforeAll(async () => {
     state.stored = [
       {
@@ -7174,9 +7071,8 @@ describe('a push by hand landing under a held round', () => {
 
   it('fetches the branch into the clone before deciding whether the round is stale', async () => {
     await vi.waitFor(() => expect(getJob('hand-1').reviewLoop.triage.stale).toBe(true));
-    // The stale check reads the clone's remote-tracking ref, which a push made
-    // anywhere else never moves: the sync fetches first, or the card would
-    // stay fresh over commits no round has read.
+    // The stale check reads the clone's remote-tracking ref, which an outside push never
+    // moves, so the sync must fetch first.
     const fetch = spawn.mock.calls.find(
       ([cmd, args]) => cmd === 'git' && args.join(' ') === '-C /tmp/nowhere/acme-hand fetch origin dev-hand',
     );
@@ -7186,10 +7082,8 @@ describe('a push by hand landing under a held round', () => {
 });
 
 describe('the CI verdict a worker hands its orchestrator', () => {
-  // Its own repo and PR numbers, like the describes above, so the sync here
-  // matches none of the sessions they restored. The orchestrator stands on a
-  // question, which parks every update in its buffer where a test can read it
-  // instead of spending an injected turn on it.
+  // Own repo and PR numbers, like the describes above. The orchestrator stands on a question,
+  // so every update parks in its buffer for the tests to read.
   const run = (name, conclusion) => ({
     name,
     status: 'completed',
@@ -7215,8 +7109,7 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     },
     ...over,
   });
-  // Per pull request number, what the details query answers instead of the
-  // green/red default below.
+  // Per PR number, a details answer overriding the green/red default below.
   const answers = new Map();
   const failOnce = (number, then) => {
     let calls = 0;
@@ -7261,11 +7154,9 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       worker('ci-green', 201),
       worker('ci-red', 202),
       worker('ci-loop', 203, { reviewLoop: { rounds: 2, done: false } }),
-      // Nothing mirrored yet: this sync is the pull request's first, the one
-      // that must stay quiet.
+      // Nothing mirrored yet: the PR's first sync, which must stay quiet.
       worker('ci-first', 204, { prStatus: null }),
-      // A head the last sync saw moments ago, before its CI had registered:
-      // a run nobody saw pending is still one this session is waiting on.
+      // Head seen moments ago, before its CI registered: an unseen pending run is still awaited.
       worker('ci-fresh', 207, {
         prStatus: {
           number: 207,
@@ -7299,9 +7190,8 @@ describe('the CI verdict a worker hands its orchestrator', () => {
           syncedAt: '2026-08-25T13:00:00.000Z',
         },
       }),
-      // Attached to a pull request whose CI finished long ago, and the first
-      // details read falls short: the read that then succeeds is still the
-      // first this session mirrored, and says nothing.
+      // CI finished long ago and the first details read falls short: the later successful read
+      // is still this session's first mirror, and says nothing.
       worker('ci-attach', 210, { prStatus: null }),
       // A push this session saw land, whose first details read falls short:
       // the verdict is still owed once a read goes through.
@@ -7550,9 +7440,8 @@ describe('the CI verdict a worker hands its orchestrator', () => {
   });
 });
 
-// The sync tick's budget. Every sync used to cost five GitHub calls on every
-// session whose status was idle, its pull request merged or not, and a few
-// dozen of those spent the whole hourly budget on their own.
+// Each sync once cost five GitHub calls per idle session, merged or not, so a few dozen
+// sessions spent the whole hourly budget.
 describe('the sync tick and the GitHub budget', () => {
   const row = (id, over = {}) => ({
     id,
@@ -7651,10 +7540,8 @@ describe('the sync tick and the GitHub budget', () => {
       return { ok: false, status: 404, json: async () => ({}) };
     });
     githubGraphql.mockResolvedValue({ repository: { pullRequest: {} } });
-    // Back to the fixture's state and a confirmed read: an earlier test's sync
-    // may have mirrored a merge (and closed the session) or left a read
-    // unconfirmed. The restored record is the fixture object itself, so the
-    // states are spelled out here.
+    // Reset to the fixture's state and a confirmed read: an earlier test may have mirrored a
+    // merge or left a read unconfirmed, and the restored record is the fixture object itself.
     const fixtureState = { 'budget-closed': 'closed', 'budget-open': 'open', 'budget-hooked': 'open' };
     for (const j of state.stored) {
       getJob(j.id).status = j.id === 'budget-running' ? 'running' : 'idle';
@@ -7901,9 +7788,8 @@ describe('the sync tick and the GitHub budget', () => {
       expect(githubGraphql.mock.calls.filter(([, , v]) => v.number === 13)).toHaveLength(1),
     );
     await vi.waitFor(() => expect(job.prStatus.etag).toBe('"e13"'));
-    // A read under a tag this session had not seen is not yet the last word
-    // (GraphQL can answer from just before the change): the next sync, which
-    // has seen the tag, reads once more and that read is the one that counts.
+    // A read under an unseen tag may predate the change (GraphQL lag), so the next sync reads
+    // once more and that read is the one that counts.
     expect(job.prStatus.detailsReadAt).toBeNull();
     job.prStatus.syncedAt = '2026-08-25T13:00:00.000Z';
     await vi.advanceTimersByTimeAsync(20_000);
@@ -8419,12 +8305,9 @@ describe('syncSessionsOn', () => {
   });
 });
 
-// A loop's reviews run on the reviewer the project was set up with; its fix
-// sessions and its QA run are the worker's work continued, so those run where
-// the worker runs. The rounds here all fail to start on purpose (an unknown
-// provider row, a provider family with no member left, a repo no project
-// claims): what the attempt asked for is what these tests read, out of the
-// info line the loop leaves behind, and no session is ever spawned.
+// Reviews run on the project's configured reviewer; fix sessions and QA continue the worker's
+// work, so they run where it runs. Every round here fails to start on purpose (unknown provider,
+// empty family, unclaimed repo); tests read the attempt off the loop's info line.
 describe('the review loop: what a round runs on, and re-running one that could not', () => {
   const rows = [
     {
@@ -8432,8 +8315,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
       kind: 'devchat',
       status: 'closed',
       repo: 'acme/rt',
-      // A provider row that no longer exists, which is what makes the attempt
-      // name the runtime it asked for instead of spawning anything.
+      // A deleted provider row, so the attempt names its runtime instead of spawning.
       providerId: 99,
       model: 'claude-fable-5-1',
       effort: 'high',
@@ -8467,8 +8349,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
       reviewLoop: { rounds: 1, reviewing: true, reviewSessionId: 'rt-rev' },
     },
     {
-      // An orchestrator needs no clone to reopen, which keeps this focused on
-      // retry_review's recovery guard rather than workspace preparation.
+      // Needs no clone to reopen, keeping this on retry_review's recovery guard.
       id: 'rt-interrupted',
       kind: 'devchat',
       status: 'closed',
@@ -8487,8 +8368,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
       },
     },
     {
-      // On the project that configured a reviewer of its own, and on a
-      // provider row that is nothing like it.
+      // On the project with a reviewer of its own, and a provider row unlike it.
       id: 'rt-project',
       kind: 'devchat',
       status: 'closed',
@@ -8502,8 +8382,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
       reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
     },
     {
-      // The same project, and a retry that has already moved this loop
-      // somewhere else: two answers to "what reviews this", one of which wins.
+      // Same project, a retry having moved the loop: two answers to "what reviews this".
       id: 'rt-both',
       kind: 'devchat',
       status: 'closed',
@@ -8521,8 +8400,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
       },
     },
     {
-      // The same project, retried with nothing but a model: what the failure
-      // notice invites when an account is out of quota.
+      // Same project, retried with only a model, as the out-of-quota notice invites.
       id: 'rt-model-only',
       kind: 'devchat',
       status: 'closed',
@@ -8537,9 +8415,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
       reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
     },
     {
-      // A project whose reviewer resolves and cannot run: its CLI is not on
-      // this machine. The session's own provider is one that can, so the round
-      // has somewhere to fall back to.
+      // The project's reviewer resolves but its CLI is not installed; the session's own
+      // provider can run, so the round can fall back.
       id: 'rt-uninstalled',
       kind: 'devchat',
       status: 'closed',
@@ -8554,9 +8431,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
       reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
     },
     {
-      // The orchestrator of the restarted worker below: it stands on a
-      // question of its own, so what the loop tells it stays in its buffer
-      // where the test can read it instead of being spent on a turn.
+      // Stands on its own question, so loop notices stay in its buffer for the test to read.
       id: 'rt-orch',
       kind: 'devchat',
       // Not closed when the records are restored: the round is failed there,
@@ -8569,9 +8444,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
       awaitingAnswer: true,
     },
     {
-      // A round that was riding on the project's reviewer when the process
-      // died: reconcileRestartedLoopJobs fails the round, which is not the
-      // reviewer failing at anything.
+      // Riding the project's reviewer when the process died: reconcileRestartedLoopJobs fails
+      // the round, which is not the reviewer's failure.
       id: 'rt-restarted',
       kind: 'devchat',
       status: 'interrupted',
@@ -8601,9 +8475,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
       loopParentId: 'rt-restarted',
     },
     {
-      // A loop a partial retry moved onto the project's own reviewer without
-      // the caller ever naming it: a review override that is the reviewer, on
-      // the project whose reviewer runs a CLI this machine does not have.
+      // A partial retry moved this loop onto the project's reviewer without naming it, on a
+      // project whose reviewer CLI is not installed.
       id: 'rt-override-reviewer',
       kind: 'devchat',
       status: 'closed',
@@ -8622,10 +8495,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
       },
     },
     {
-      // The same project, reached the other way: a retry that named that
-      // reviewer outright, so the loop-wide override the fix sessions and the
-      // QA run read (loopSessionRuntime) points at a CLI this machine has not
-      // got either.
+      // Same project, but a retry named that reviewer outright, so the loop-wide override fix
+      // and QA read (loopSessionRuntime) points at the missing CLI too.
       id: 'rt-pinned',
       kind: 'devchat',
       status: 'closed',
@@ -8644,15 +8515,13 @@ describe('the review loop: what a round runs on, and re-running one that could n
       },
     },
     {
-      // The same shape, on a project whose reviewer is fine: what a retry that
-      // named only a model leaves behind, with a finished review of its own to
-      // close so the fix session it hands the findings to can be watched.
+      // Same shape on a project whose reviewer is fine, as a model-only retry leaves it, with
+      // a finished review to close so its fix session can be watched.
       id: 'rt-fix',
       kind: 'devchat',
       status: 'closed',
       repo: 'acme/rt-rev',
-      // Deleted since, so every spawn attempt names it and fails: the attempt
-      // is what says which runtime the fix session was given.
+      // Deleted since, so each spawn attempt fails naming it, showing the fix session runtime.
       providerId: 99,
       provider: 'Session provider',
       model: 'session-model',
@@ -8696,9 +8565,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
       reviewLoop: { rounds: 1, lastSha: 'sha-rt', reviewerFailed: true },
     },
     {
-      // A loop a partial retry left with the project's reviewer of the day
-      // frozen into its review override: nobody named that provider, the
-      // fill-in did (retryLoopRound).
+      // A partial retry froze the project's then-reviewer into the review override; nobody
+      // named it, the fill-in did (retryLoopRound).
       id: 'rt-repointed',
       kind: 'devchat',
       status: 'closed',
@@ -8718,9 +8586,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
       },
     },
     {
-      // The same shape, kept apart so a second partial retry can be run over
-      // it: what the loop looks like when the notice for the round the first
-      // retry re-ran invites another one.
+      // The same shape, kept apart for a second partial retry, as the re-run notice invites.
       id: 'rt-refrozen',
       kind: 'devchat',
       status: 'closed',
@@ -8740,8 +8606,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
       },
     },
     {
-      // And the same again, for the line the retry pushes: the override here
-      // is the one loopReviewChoice passes over once Settings is repointed.
+      // Again, for the retry line: loopReviewChoice skips this override once Settings moves.
       id: 'rt-passed-over',
       kind: 'devchat',
       status: 'closed',
@@ -8761,9 +8626,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
       },
     },
     {
-      // On the project with a reviewer of its own, and a session runtime
-      // nothing like it: what a retry that names a provider has to keep for
-      // the fix sessions and the QA run it takes with it.
+      // Own reviewer, and a session runtime unlike it: what a provider-naming retry must keep
+      // for the fix sessions and QA run.
       id: 'rt-moved',
       kind: 'devchat',
       status: 'closed',
@@ -8778,9 +8642,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
       reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
     },
     {
-      // The same project again, with a reviewer this loop gave up and an
-      // operator who has since repaired it: what a retry naming it outright
-      // has to leave the reviews reading.
+      // Same project, with a reviewer this loop gave up and that has since been repaired: what
+      // a retry naming it must leave the reviews on.
       id: 'rt-back',
       kind: 'devchat',
       status: 'closed',
@@ -8795,9 +8658,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
       reviewLoop: { rounds: 1, lastSha: 'sha-rt', reviewerFailed: true },
     },
     {
-      // A loop a retry has already moved once, onto a provider of another
-      // family: what the next retry has to not carry forward. The project
-      // names no reviewer, so nothing but the two overrides is in play.
+      // Already moved once onto another family's provider, which the next retry must not carry
+      // forward. No project reviewer, so only the two overrides are in play.
       id: 'rt-again',
       kind: 'devchat',
       status: 'closed',
@@ -8853,8 +8715,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
       },
       // The same setting, naming a provider row that has been deleted since.
       { repo: 'acme/rt-gone', label: 'RT gone', localDir: '', reviewProviderId: 97 },
-      // And one naming a row that is there, active, and runs a CLI this
-      // machine does not have.
+      // A row that is there and active, but whose CLI is not on this machine.
       { repo: 'acme/rt-cli', label: 'RT cli', localDir: '', reviewProviderId: 3 },
     ];
     state.otherProviders = [
@@ -8867,8 +8728,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
 
   it('a round runs on the project’s reviewer, not on the session it reviews for', async () => {
     const job = getJob('rt-project');
-    // Nothing spawns here either: the reviewer resolves, and the round stops
-    // one step later, on a provider family with no member left to run it.
+    // The reviewer resolves; the round stops one step later on a family with no member left.
     state.group = [];
 
     const outcome = await retryLoopRound('rt-project');
@@ -8889,8 +8749,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
 
     // acme/rt names no reviewer, so the round is the session's own provider 99.
     expect(infoTexts(job).join('\n')).toMatch(/could not start the code review: Unknown provider: 99/);
-    // The round that could not start gives its number back, as every failed
-    // start does, so the next one is still round 2.
+    // A failed start gives its round number back, so the next is still round 2.
     expect(outcome).toEqual({ started: false, round: 1 });
   });
 
@@ -8902,18 +8761,16 @@ describe('the review loop: what a round runs on, and re-running one that could n
     expect(infoTexts(job).join('\n')).toMatch(/the reviewer this project was set up with is gone/);
     expect(infoTexts(job).join('\n')).toMatch(/could not start the code review: Unknown provider: 99/);
 
-    // The row stays deleted, so every later round takes the same fallback. The
-    // notice is a standing condition, said once like the loop's others, not a
-    // line per push for the life of the session.
+    // The row stays deleted, so later rounds take the same fallback; the notice is said once,
+    // not per push.
     await retryLoopRound('rt-gone');
     expect(infoTexts(job).filter((t) => /is gone, so the review runs on/.test(t))).toHaveLength(1);
   });
 
   it('falls back to the session when the project’s reviewer cannot run at all', async () => {
     const job = getJob('rt-uninstalled');
-    // Resolving says nothing about being able to start: this row is active and
-    // its CLI is not installed here, which createDevSession only finds out
-    // when it tries. The round must not die on that.
+    // This row is active but its CLI is not installed, which only createDevSession finds out;
+    // the round must not die on that.
     const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue(null);
     // With a QA loop queued behind this one, the way out this notice points at
     // costs it: turning the 🔁 chip off drops the QA loop too (setReviewLoop).
@@ -8931,8 +8788,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
     expect(infoTexts(job).join('\n')).toMatch(
       /the reviewer this project was set up with cannot run \(Uninstalled reviewer: the Codex CLI was not found on this machine\), so this round and the ones after it run on Claude entry instead/,
     );
-    // The round happened, on the session's own provider, and the reviewer is
-    // given up rather than retried into the same wall on every later round.
+    // The round ran on the session's provider, and the reviewer is given up for good.
     expect(infoTexts(job).join('\n')).toMatch(/started code review round 2 of PR #63/);
     expect(job.reviewLoop).toMatchObject({ reviewing: true, reviewerFailed: true, reviewerRound: false });
     expect(getJob(job.reviewLoop.reviewSessionId).providerId).toBe(1);
@@ -8941,10 +8797,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
 
   it('a round a server restart interrupted keeps the project’s reviewer', async () => {
     const job = getJob('rt-restarted');
-    // The round was reported failed while the records were restored, before
-    // any of this ran. A restart is this process dying, not the reviewer the
-    // round was riding: only a failure that came out of the provider is
-    // evidence about it, so the reviewer is not given up here.
+    // The round was failed during restore. A restart says nothing about the reviewer, so it is
+    // not given up.
     expect(job.reviewLoop.reviewerFailed).toBeFalsy();
     expect(job.reviewLoop.reviewerRound).toBe(false);
     expect(infoTexts(job).join('\n')).not.toMatch(/The reviewer this project was set up with is what failed/);
@@ -8960,11 +8814,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
 
   it('an override that is the project’s reviewer falls back and is given up like one', async () => {
     const job = getJob('rt-override-reviewer');
-    // A retry that named only a model had its provider filled in from the
-    // reviewer, so this loop rides the project's reviewer through an override
-    // nobody chose. It must still be treated as the project's: the reviewer's
-    // CLI is not on this machine, and the round has to fall back rather than
-    // fail for good.
+    // A model-only retry filled the provider in from the reviewer, so this override is still the
+    // project's reviewer: its CLI is missing, so the round must fall back, not fail for good.
     const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue(null);
     try {
       await retryLoopRound('rt-override-reviewer');
@@ -8977,9 +8828,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
       expect(getJob(job.reviewLoop.reviewSessionId).providerId).toBe(1);
       closeDevSession(job.reviewLoop.reviewSessionId);
 
-      // And the override does not bring that reviewer back on the next round:
-      // it names the provider this loop has just given up, so it is dropped
-      // with the setting it was filled in from.
+      // Nor does the override bring the given-up reviewer back next round; it is dropped with
+      // the setting it came from.
       state.group = [];
       job.reviewLoop.reviewing = false;
       await retryLoopRound('rt-override-reviewer');
@@ -8994,20 +8844,17 @@ describe('the review loop: what a round runs on, and re-running one that could n
 
   it('giving the reviewer up drops the retry that pinned the whole loop to it', async () => {
     const job = getJob('rt-pinned');
-    // A retry named this provider outright, so it is the loop-wide override:
-    // what loopSessionRuntime hands to every fix session and to the QA run.
-    // The review falls back off it here, and leaving the fix sessions on it
-    // would publish findings that nothing could ever implement.
+    // A retry named this provider outright, so it is the loop-wide override fix and QA read
+    // (loopSessionRuntime). Falling back for the review only would publish findings nothing
+    // could implement.
     const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue(null);
     try {
       await retryLoopRound('rt-pinned');
 
       expect(job.reviewLoop.reviewerFailed).toBe(true);
       expect(job.reviewLoop.runtime).toBeNull();
-      // Dropping it is a move somebody made being undone: the fix sessions and
-      // the QA run go back to the session's own provider, which may be the
-      // account that retry escaped, so the give-up says so rather than sending
-      // them back in silence.
+      // Dropping it undoes a move somebody made, and the session's own provider may be the
+      // account that retry escaped, so the give-up says so.
       expect(infoTexts(job).join('\n')).toMatch(
         /The retry that had moved this loop onto Uninstalled reviewer goes with it, so its fix sessions and its QA run are back on Claude entry/,
       );
@@ -9030,10 +8877,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
   });
 
   it('refuses a retry whose model the provider it names does not run', async () => {
-    // resolveRuntime swaps a model the provider does not run for that
-    // provider's default, which would leave the retry running on the very
-    // model it was moved off. The mock above answers whatever it is given, so
-    // the swap is staged here.
+    // resolveRuntime swaps an unsupported model for the provider's default, leaving the retry on
+    // the model it was moved off; the mock passes anything through, so the swap is staged here.
     const real = resolveRuntime.getMockImplementation();
     resolveRuntime.mockImplementation((runtime) => {
       const out = real(runtime);
@@ -9054,17 +8899,15 @@ describe('the review loop: what a round runs on, and re-running one that could n
 
     await retryLoopRound('rt-model-only', { model: 'claude-fable-5-1' });
 
-    // Filled in from what the reviews already run on: the model asked for
-    // belongs to the reviewer, so defaulting the provider to the session's
-    // would have dropped it and pinned every later round to provider 99.
+    // Filled in from the reviews' runtime: the model belongs to the reviewer, and defaulting
+    // to the session's provider would pin every later round to 99.
     expect(job.reviewLoop.reviewRuntime).toEqual({
       providerId: 2,
       model: 'claude-fable-5-1',
       effort: 'low',
     });
-    // The reviews only: the retry named a model for the round it re-runs and
-    // nothing for the work, so the loop-wide override the fix sessions and the
-    // QA run read (loopSessionRuntime) is left alone.
+    // Reviews only: the retry named nothing for the work, so the loop-wide override
+    // (loopSessionRuntime) is untouched.
     expect(job.reviewLoop.runtime).toBeFalsy();
     expect(infoTexts(job).join('\n')).toMatch(
       /could not start the code review: Project reviewer: this provider is inactive/,
@@ -9081,9 +8924,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
     }
     await triageLoopFindings('rt-fix', { verdicts: [{ key: 'k1', decision: 'fix' }] });
 
-    // The loop rides the project's reviewer (provider 2) for its reviews, and
-    // the fix session that implements what one found is still the session's
-    // own work: it is attempted on provider 99, not on the reviewer.
+    // Reviews ride the project's reviewer (provider 2), but the fix session is the session's
+    // own work, attempted on 99.
     expect(infoTexts(job).join('\n')).toMatch(/could not start the fix session: Unknown provider: 99/);
     expect(infoTexts(job).join('\n')).not.toMatch(/Project reviewer/);
   });
@@ -9092,9 +8934,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
     const job = getJob('rt-repaired');
     state.group = [];
 
-    // reviewerFailed is this loop's record that the reviewer could not review
-    // anything. An operator naming it outright is saying it is repaired — the
-    // account rolled over, the CLI is installed — so the round rides it again.
+    // Naming the given-up reviewer outright says it is repaired, so the round rides it again.
     await retryLoopRound('rt-repaired', { providerId: 2 });
 
     expect(job.reviewLoop.reviewerFailed).toBe(false);
@@ -9106,9 +8946,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
 
   it('a partial retry’s frozen reviewer follows the project when Settings repoints it', async () => {
     const job = getJob('rt-repointed');
-    // The override names provider 2 because that is what ⌕ Code review said
-    // when the retry filled the provider in; the operator has since repointed
-    // the setting at another one, which is what the give-up messages ask for.
+    // The override froze provider 2 from ⌕ Code review at retry time; the operator has since
+    // repointed the setting, as the give-up messages ask.
     state.projects = state.projects.map((p) =>
       p.repo === 'acme/rt-rev' ? { ...p, reviewProviderId: 3, reviewModel: null, reviewEffort: null } : p,
     );
@@ -9116,9 +8955,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
 
     await retryLoopRound('rt-repointed');
 
-    // So the round rides the reviewer the project names now. Left frozen, it
-    // would review on a row nothing names, with the give-up and the
-    // start-refusal fallback both switched off for being an override.
+    // So the round follows the setting. Left frozen, it would ride a row nothing names, with
+    // the give-up and start-refusal fallback disabled for being an override.
     expect(infoTexts(job).join('\n')).toMatch(
       /could not start the code review: Uninstalled reviewer: this provider is inactive/,
     );
@@ -9129,10 +8967,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
     const job = getJob('rt-refrozen');
     state.group = [];
 
-    // The round the first retry re-ran failed again, and its notice invites
-    // another partial retry. Still nobody has named a provider — the fill-in
-    // read it off ⌕ Code review both times — so the row stays marked as the
-    // setting's answer rather than being unmarked by the retry that re-reads it.
+    // The re-run round failed again, inviting another partial retry. Nobody has named a
+    // provider yet, so the row stays marked as the setting's answer.
     await retryLoopRound('rt-refrozen', { effort: 'high' });
 
     expect(job.reviewLoop.reviewRuntime).toEqual({
@@ -9142,9 +8978,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
     });
     expect(job.reviewLoop.reviewRuntimeFromProject).toBe(true);
 
-    // So repointing the setting still moves the reviews with it, one retry
-    // later. Unmarked, the round would ride provider 2 as an override for
-    // good, with the give-up and the start-refusal fallback both switched off.
+    // So repointing the setting still moves the reviews. Unmarked, provider 2 would stick as
+    // an override with the give-up and the fallback disabled.
     state.projects = state.projects.map((p) =>
       p.repo === 'acme/rt-rev' ? { ...p, reviewProviderId: 3 } : p,
     );
@@ -9154,8 +8989,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
     expect(infoTexts(job).slice(said).join('\n')).toMatch(
       /could not start the code review: Uninstalled reviewer: this provider is inactive/,
     );
-    // (the round before it is named in the retry line as the one that failed,
-    // so only the attempt itself says which provider this round asked for)
+    // The retry line names the prior failed round; only the attempt shows this one's provider.
     expect(infoTexts(job).slice(said).join('\n')).not.toMatch(
       /could not start the code review: Project reviewer/,
     );
@@ -9163,9 +8997,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
 
   it('the retry line names the model the round opens on, not the pin passed over', async () => {
     const job = getJob('rt-passed-over');
-    // The review override froze provider 2 in from the setting, and Settings
-    // names another reviewer now, so loopReviewChoice passes that override
-    // over. This line is the operator's only word on the runtime.
+    // Settings names another reviewer now, so loopReviewChoice passes the frozen override
+    // over; this line is the operator's only word on the runtime.
     state.projects = state.projects.map((p) =>
       p.repo === 'acme/rt-rev' ? { ...p, reviewProviderId: 3, reviewModel: 'codex-model' } : p,
     );
@@ -9181,11 +9014,9 @@ describe('the review loop: what a round runs on, and re-running one that could n
     const job = getJob('rt-moved');
     state.group = [];
 
-    // A provider named outright moves the whole loop, so what it settles is
-    // what the fix sessions and the QA run open on (loopSessionRuntime).
-    // Filling its gaps in from the reviews would put them on the reviewer's
-    // model and effort — claude-fable-5-1 / low here — which the caller never
-    // named and which is nobody's answer for code-writing turns.
+    // A named provider moves the whole loop, so it settles what fix sessions and QA open on.
+    // Filling gaps from the reviews would give them the reviewer's model and effort
+    // (claude-fable-5-1 / low), which nobody named for code-writing turns.
     await retryLoopRound('rt-moved', { providerId: 2 });
 
     expect(job.reviewLoop.runtime).toEqual({
@@ -9199,10 +9030,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
     const job = getJob('rt-back');
     state.group = [];
 
-    // Naming the reviewer this loop gave up says it is repaired, so the rounds
-    // ride it again. What the call left out is the setting's answer for those
-    // rounds, not the session's: filled in from the work this retry moves, the
-    // reviews would run on the model that wrote the code (session-model /
+    // Naming the given-up reviewer says it is repaired. Its gaps come from the setting, not
+    // the session; otherwise reviews would run on the code-writing model (session-model /
     // high) and outrank ⌕ Code review for the rest of the loop.
     await retryLoopRound('rt-back', { providerId: 2 });
 
@@ -9212,8 +9041,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
       model: 'claude-fable-5-1',
       effort: 'low',
     });
-    // The fix sessions and the QA run this retry moves keep the session's own
-    // model and effort, as they always have.
+    // Fix sessions and QA keep the session's own model and effort.
     expect(job.reviewLoop.runtime).toEqual({
       providerId: 2,
       model: 'session-model',
@@ -9227,13 +9055,9 @@ describe('the review loop: what a round runs on, and re-running one that could n
     const job = getJob('rt-again');
     state.group = [];
 
-    // The first retry moved this loop onto provider 3, which runs models of
-    // another family; this one names the session's own row again, the call the
-    // failure notice invites once that provider runs dry too. Filled in from
-    // the override it replaces, the model would be the other family's — which
-    // provider 1 does not run, so resolveRuntime would swap it for provider
-    // 1's default, and the fix sessions and the QA run would open for the rest
-    // of the loop on a model neither the session nor the caller ever named.
+    // The first retry moved the loop to provider 3 (another model family); this one names the
+    // session's row again. Filling gaps from the replaced override would give provider 1 a
+    // model it does not run, which resolveRuntime would swap for a default nobody named.
     await retryLoopRound('rt-again', { providerId: 1 });
 
     expect(job.reviewLoop.runtime).toEqual({
@@ -9244,12 +9068,9 @@ describe('the review loop: what a round runs on, and re-running one that could n
   });
 
   it('a round nothing but a restart ended is not a provider to move off', async () => {
-    // reconcileRestartedLoopJobs failed rt-restarted's round while the records
-    // were restored. The orchestrator is the one party that acts on this, and
-    // what it is told to do — retry_review on another provider_id — moves the
-    // loop's reviews, its fix sessions and its QA run off the project's
-    // reviewer for good, so it must not be told that for a round the provider
-    // never turned away.
+    // rt-restarted's round was failed on restore. Telling the orchestrator to retry_review
+    // elsewhere would move reviews, fix and QA off the project's reviewer for good, so it must
+    // not hear that for a round the provider never refused.
     const notice = getJob('rt-orch').pendingWorkerNotices.find((n) => n.workerId === 'rt-restarted');
     expect(notice.kind).toBe('loop');
     expect(notice.text).toMatch(/interrupted rather than turned away by the provider/);
@@ -9263,9 +9084,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
 
     await retryLoopRound('rt-both');
 
-    // Provider 1 is what the retry moved this loop onto, and it is what moved
-    // it off a provider that failed it: the project's reviewer does not undo
-    // that on the next round.
+    // The retry moved the loop onto provider 1 to escape a failing one; the project's reviewer
+    // does not undo that next round.
     expect(infoTexts(job).join('\n')).toMatch(
       /could not start the code review: Claude entry: this provider is inactive/,
     );
@@ -9282,8 +9102,7 @@ describe('the review loop: what a round runs on, and re-running one that could n
       model: 'claude-fable-5-1',
       effort: 'high',
     });
-    // Past the provider the session itself is stuck on, so far past it that
-    // the only thing left to fail on is the repo no project claims.
+    // Past the session's own stuck provider, failing only on the repo no project claims.
     expect(infoTexts(job).join('\n')).toMatch(
       /could not start the code review: Unknown project: acme\/rt-none/,
     );
@@ -9323,9 +9142,8 @@ describe('the review loop: what a round runs on, and re-running one that could n
 
     await expect(retryLoopRound('rt-interrupted')).resolves.toEqual({ started: false, round: 1 });
 
-    // reopenDevSession runs asynchronously. It reaches an idle workspace and
-    // attempts the queued retry. A refused reviewer must leave its failed
-    // round visible, rather than silently clearing the restart failure.
+    // reopenDevSession runs async and attempts the queued retry; a refused reviewer must leave
+    // the failed round visible, not silently clear the restart failure.
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(job.status).toBe('idle');
     expect(job.reviewLoop).toMatchObject({
@@ -10800,9 +10618,8 @@ describe('the shared browser in a session', () => {
     browserState.endpoint = null;
   });
 
-  // One claude turn on a stand-in CLI: what it was started with, the MCP
-  // servers its config file mounts, and the first message it was sent. The
-  // turn answers at once and exits, unless `hold` leaves it to the test.
+  // One claude turn on a stand-in CLI: its args, the MCP servers its config mounts, and its
+  // first message. It answers and exits at once unless `hold`.
   async function turn(job, text, { hold = false } = {}) {
     job.status = 'idle';
     getProviderForJob.mockReturnValue(state.provider);

@@ -1,9 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// github.js keeps the rate-limit buckets and the branch cache at module level,
-// so every test imports a fresh copy rather than inheriting the last one's
-// cooldown. execFile is mocked for the ls-remote fallback; fetch is stubbed per
-// test.
+// github.js keeps the rate-limit buckets and branch cache at module level, so every test
+// imports a fresh copy. execFile is mocked for ls-remote; fetch is stubbed per test.
 const execState = vi.hoisted(() => ({ impl: null, calls: [] }));
 
 vi.mock('child_process', () => ({
@@ -117,10 +115,8 @@ describe('rate limiting', () => {
     });
   });
 
-  // The message used to spell the deadline with toLocaleTimeString(), a bare
-  // wall-clock time with no date and no timezone, unreadable next to a UTC
-  // log or from a session in another timezone. It must be an absolute,
-  // self-describing instant instead.
+  // The deadline was once a locale wall-clock time with no date or zone, unreadable beside a
+  // UTC log or from another timezone.
   it('spells the backoff deadline as an ISO 8601 UTC instant, not a locale wall-clock time', async () => {
     const { githubRest } = await freshGithub();
     const retryAfterSeconds = 60;

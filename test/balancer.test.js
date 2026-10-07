@@ -161,9 +161,8 @@ describe('pickLeastUsedProvider', () => {
   });
 
   it('prefers the free session window to the emptier week', () => {
-    // Account 1 has 15 points of a 5-hour window left, which one long review
-    // turn spends; account 2 has its whole session window and days before its
-    // week is what it runs into, so it is where the session goes.
+    // Account 1's 15 points of a 5-hour window go in one long review turn; account 2 has its
+    // whole session window and days before its week runs out, so the session goes there.
     const usage = { 1: windows(85, 30), 2: windows(20, 90), 3: windows(95, 95) };
     expect(pickLeastUsedProvider(row(1), { usageOf: (p) => usage[p.id] }).id).toBe(2);
   });
@@ -200,9 +199,8 @@ describe('pickLeastUsedProvider', () => {
   });
 
   it('stops trusting a probe older than the auth TTL', () => {
-    // Nothing re-affirmed the logged-out reading for longer than the probes
-    // run apart, so it is stale, and stale reads as unknown rather than as
-    // still logged out: the account may well have been logged back in.
+    // A logged-out reading not re-affirmed within the probe interval is stale, and stale reads
+    // as unknown, not logged out: the account may have been logged back in.
     const usage = { 1: windows(0), 2: windows(50), 3: windows(90) };
     rememberProviderAuth(1, false, Date.now() - AUTH_TTL_MS - 1);
     expect(cachedProviderAuth(1)).toBe(null);
@@ -263,9 +261,8 @@ describe('pickLeastUsedProvider', () => {
 
 describe('rememberProviderAuth', () => {
   it('keeps the newest probe when an older one is written back after it', () => {
-    // /api/dev/providers reads the claude state, awaits the usage, and only
-    // then writes: the timer's probe can land in between, and the revoked
-    // login it found must not be undone by the page's older reading.
+    // /api/dev/providers reads claude state, awaits usage, then writes; the timer's probe can
+    // land in between, and its revoked login must not be undone by the older reading.
     const now = Date.now();
     rememberProviderAuth(1, false, now);
     rememberProviderAuth(1, true, now - 60_000);

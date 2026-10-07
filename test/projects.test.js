@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// normalizeProject is not exported; createProject and updateProject are the
-// doors to it, so the validation is tested through those, with the DB layer
-// mocked to hand back whatever it was asked to save.
+// normalizeProject is not exported, so validation is tested through createProject and
+// updateProject, with the DB layer mocked to hand back whatever it was asked to save.
 const state = vi.hoisted(() => ({
   rows: [],
   saved: [],
@@ -445,12 +444,9 @@ describe('the project that is the dashboard itself', () => {
 });
 
 describe('the SQL seam', () => {
-  // lib/db.js is mocked in this suite, so nothing here exercises the real
-  // column mapping — which is exactly how the worker fields once shipped
-  // normalized but never persisted. The crude guard: every project field must
-  // at least be NAMED in db.js (rowToProject maps each as `key:`), so a field
-  // added to PROJECT_DEFAULTS without touching the persistence layer fails
-  // loudly here instead of silently dropping what the form saved.
+  // lib/db.js is mocked here, so the real column mapping is untested; that is how the worker
+  // fields once shipped normalized but never persisted. Crude guard: every project field must
+  // be named in db.js (rowToProject maps each as `key:`).
   it('names every project field in lib/db.js', async () => {
     const fs = await import('fs');
     const src = fs.readFileSync(new URL('../lib/db.js', import.meta.url), 'utf8');
