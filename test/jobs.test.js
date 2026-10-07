@@ -192,7 +192,7 @@ vi.mock('../lib/usage.js', () => ({
 
 import { deleteJob, jobEventMaxSeqs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
-import { dropSessionDatabase } from '../lib/dbpool.js';
+import { acquireInstance, dropSessionDatabase } from '../lib/dbpool.js';
 import {
   latestReviewFindings,
   latestTestFailures,
@@ -11493,6 +11493,63 @@ describe('/btw side questions', () => {
 });
 
 describe('invalid clone pool slots', () => {
+  it('automatic review children skip invalid slots and reserve separate checkouts before preparation', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'review-clone-pool-'));
+    state.workspaceDir = root;
+    const children = [];
+    const invalid = path.join(root, 'acme__shop__5');
+    try {
+      for (let i = 1; i <= 5; i++) {
+        fs.mkdirSync(path.join(root, i === 1 ? 'acme__shop' : `acme__shop__${i}`));
+      }
+      fs.mkdirSync(path.join(invalid, 'build-find'));
+      fs.writeFileSync(path.join(invalid, 'build-find', 'artifact'), 'preserved output');
+      fs.chmodSync(path.join(invalid, 'build-find'), 0o555);
+      fs.mkdirSync(path.join(invalid, 'res', 'third_party'), { recursive: true });
+      fs.writeFileSync(path.join(invalid, 'res', 'third_party', 'local-work'), 'preserved source');
+      const backup = `${invalid}.recovery-backup-fixture`;
+      fs.mkdirSync(backup);
+      fs.writeFileSync(path.join(backup, 'work'), 'preserved backup');
+      // Stop after allocation, before Git, database or provider work; the
+      // automatic loop uses this exact review/autoClose/loopParentId spec.
+      vi.mocked(acquireInstance).mockRejectedValueOnce(new Error('fixture: allocation observed'));
+      vi.mocked(acquireInstance).mockRejectedValueOnce(new Error('fixture: allocation observed'));
+      const spec = {
+        provider: 1,
+        repo: 'acme/shop',
+        branch: 'worker-branch',
+        review: true,
+        autoClose: true,
+        loopParentId: 'fixture-review-parent',
+      };
+      children.push(createDevSession(spec), createDevSession(spec));
+      expect(children.map((child) => child.workDir)).toEqual([
+        path.join(root, 'acme__shop__6'),
+        path.join(root, 'acme__shop__7'),
+      ]);
+      await vi.waitFor(() => {
+        for (const child of children) {
+          expect(getJob(child.id).status).toBe('failed');
+          expect(getJob(child.id).error).toBe('fixture: allocation observed');
+        }
+      });
+      expect(fs.readFileSync(path.join(invalid, 'build-find', 'artifact'), 'utf8')).toBe('preserved output');
+      expect(fs.readFileSync(path.join(invalid, 'res', 'third_party', 'local-work'), 'utf8')).toBe(
+        'preserved source',
+      );
+      expect(fs.readFileSync(path.join(backup, 'work'), 'utf8')).toBe('preserved backup');
+      expect(fs.readdirSync(invalid).sort()).toEqual(['build-find', 'res']);
+      expect(fs.statSync(path.join(invalid, 'build-find')).mode & 0o777).toBe(0o555);
+    } finally {
+      await vi.waitFor(() => {
+        for (const child of children) expect(getJob(child.id).status).toBe('failed');
+      });
+      state.workspaceDir = '/tmp/nowhere';
+      fs.chmodSync(path.join(invalid, 'build-find'), 0o755);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('skips missing .git without touching files and reserves concurrent fresh allocations', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-pool-'));
     state.workspaceDir = root;
