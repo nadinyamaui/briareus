@@ -233,16 +233,9 @@ describe('the operator Slack inbox', () => {
       unfurl_media: false,
     });
     expect(ctx.s.pending()).toEqual([]);
-    expect(ctx.stored.slack_conversations).toEqual([
-      {
-        workspaceId: ctx.w.id,
-        channel: 'D1',
-        ts: '1700000002.000001',
-        threadTs: MESSAGE.ts,
-        jobId: null,
-        at: expect.any(Number),
-      },
-    ]);
+    // This DM has no agent mapping to supersede: human sends must not
+    // allocate routing entries for an unrelated conversation.
+    expect(ctx.stored.slack_conversations).toBeUndefined();
     const read = await ctx.request(`${ctx.at}/conversations/D1/read`, {
       method: 'POST',
       body: { ts: MESSAGE.ts },
@@ -388,6 +381,27 @@ describe('the operator Slack inbox', () => {
 });
 
 describe('live Slack inbox events', () => {
+  it.each([429, 502])(
+    'recovers history by reconnecting after an access check fails with %s',
+    async (status) => {
+      const ctx = await setup();
+      const events = await stream(ctx);
+      ctx.api.mockRejectedValueOnce(Object.assign(new Error('Temporary Slack failure'), { status }));
+      const missed = { ...MESSAGE, channel: 'C1' };
+      expect(receive(ctx, missed, { authorizations: [] }).status).toBe(200);
+      expect((await events.next()).name).toBe('workspace.changed');
+      expect(await events.next()).toBeNull();
+      // Retried webhooks remain deduplicated; reconnect/history recovers the gap.
+      const replacement = await stream(ctx);
+      const before = ctx.api.mock.calls.length;
+      receive(ctx, missed, { authorizations: [] });
+      expect(ctx.api.mock.calls).toHaveLength(before);
+      expect((await ctx.json(`${ctx.at}/conversations/C1/messages`)).messages).toEqual([MESSAGE]);
+      receive(ctx, missed, { eventId: 'recovered', authorizations: [] });
+      expect((await replacement.next()).data.eventId).toBe('recovered');
+    },
+  );
+
   it('checks connected-account access when the reported installation belongs to another user', async () => {
     const ctx = await setup();
     const listener = vi.fn();

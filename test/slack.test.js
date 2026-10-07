@@ -418,6 +418,31 @@ describe('replies through the Events API', () => {
     expect(deliver).toHaveBeenCalledTimes(3);
   });
 
+  it('keeps agent thread mappings through unrelated and repeated human inbox sends', async () => {
+    const { s, w, slack, stored, deliver } = await service({ project: { permissionMode: 'allow' } });
+    const original = slack.api.getMockImplementation();
+    slack.api.mockImplementation((token, method, params) =>
+      method === 'conversations.open'
+        ? Promise.resolve({ channel: { id: 'D1' } })
+        : original(token, method, params),
+    );
+    await s.request(job(), { to: 'U1', text: 'Agent question' });
+    for (const channel of ['C9', 'D9', 'D1'])
+      for (let i = 0; i < 500; i++) await s.inbox.send(w.id, channel, { text: 'Human message' });
+    expect(stored.slack_conversations.filter((c) => c.jobId)).toHaveLength(1);
+    expect(stored.slack_conversations.filter((c) => !c.jobId)).toHaveLength(1);
+    await s.init();
+    const reply = (id, thread_ts) =>
+      signed(
+        event({ channel: 'D1', channel_type: 'im', user: 'U1', text: 'Answer', ts: '1.2', thread_ts }, id),
+      );
+    const human = reply('human');
+    expect(s.receive(String(w.id), human.raw, human.headers).then).toBeUndefined();
+    const thread = reply('thread', '1700000000.000100');
+    await s.receive(String(w.id), thread.raw, thread.headers).then();
+    expect(deliver).toHaveBeenCalledOnce();
+  });
+
   it('routes a thread reply in a channel, and nothing else said there', async () => {
     const { s, w, deliver } = await sentTo('#dev');
     const elsewhere = signed(
