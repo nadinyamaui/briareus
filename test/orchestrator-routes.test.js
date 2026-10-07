@@ -75,6 +75,14 @@ describe('the scoped worker QA toggle', () => {
       qaSessionId: 'qa-child',
     });
   });
+  it('reports the active QA child after a newer push moves its ID', async () => {
+    worker.qaLoop = { running: true, sessionId: null, staleSessionId: 'qa-before-push' };
+    expect(await (await post({ on: false })).json()).toMatchObject({
+      session: { qaLoop: null },
+      qaStillRunning: true,
+      qaSessionId: 'qa-before-push',
+    });
+  });
   it.each([400, 503])('surfaces a state or maintenance refusal (%s)', async (status) => {
     setQaLoop.mockImplementation(() => {
       throw Object.assign(new Error('refused'), { status });
