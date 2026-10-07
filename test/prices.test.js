@@ -70,40 +70,52 @@ describe('priceFor', () => {
 });
 
 describe('cacheShareOf', () => {
-  const price = { input: 5, output: 25, cacheRead: 0.5 };
-  const priceOf = () => price;
-  it('solves the share out of what the priced turns actually cost', () => {
-    // 10M input at a 70% cache share is 10 * (0.7*0.5 + 0.3*5) = $18.50, plus
-    // 1M output at $25.
-    const rows = [{ inputTokens: 10e6, outputTokens: 1e6, costUsd: 18.5 + 25 }];
-    expect(cacheShareOf(rows, priceOf)).toBeCloseTo(0.7, 6);
-  });
-  it('keeps the default when there is too little priced input to measure', () => {
-    const rows = [{ inputTokens: 1000, outputTokens: 10, costUsd: 0.01 }];
-    expect(cacheShareOf(rows, priceOf)).toBe(DEFAULT_CACHE_SHARE);
-  });
-  it('ignores the free turns, which would otherwise read as all cache', () => {
+  it('measures the share on the unpriced turns that recorded their cache reads', () => {
     const rows = [
-      { inputTokens: 10e6, outputTokens: 1e6, costUsd: 18.5 + 25 },
-      { inputTokens: 50e6, outputTokens: 1e6, costUsd: 0 },
+      { inputTokens: 6e6, cachedInputTokens: 5.7e6, costUsd: null },
+      { inputTokens: 4e6, cachedInputTokens: 3.9e6, costUsd: null },
     ];
-    expect(cacheShareOf(rows, priceOf)).toBeCloseTo(0.7, 6);
+    expect(cacheShareOf(rows)).toBeCloseTo(0.96, 6);
   });
-  it('stays inside 0..1 when the reported cost is nothing the list price explains', () => {
-    expect(cacheShareOf([{ inputTokens: 10e6, outputTokens: 0, costUsd: 500 }], priceOf)).toBe(0);
-    expect(cacheShareOf([{ inputTokens: 10e6, outputTokens: 0, costUsd: 0.01 }], priceOf)).toBe(1);
+  it('keeps the default when there is too little measured input', () => {
+    expect(cacheShareOf([{ inputTokens: 1000, cachedInputTokens: 10, costUsd: null }])).toBe(
+      DEFAULT_CACHE_SHARE,
+    );
+  });
+  it('does not solve the share from what the priced turns cost', () => {
+    // claude's turns bill cache writes above fresh input; read as a Codex cache
+    // share, $43.50 here would have said 0.7 and doubled every estimate.
+    const rows = [{ provider: 'claude', inputTokens: 10e6, outputTokens: 1e6, costUsd: 43.5 }];
+    expect(cacheShareOf(rows)).toBe(DEFAULT_CACHE_SHARE);
+  });
+  it('skips counts that cannot be a share of the input', () => {
+    const rows = [
+      { inputTokens: 10e6, cachedInputTokens: 9e6, costUsd: null },
+      { inputTokens: 10e6, cachedInputTokens: 20e6, costUsd: null },
+      { inputTokens: 10e6, cachedInputTokens: -1, costUsd: null },
+      { inputTokens: 10e6, costUsd: null },
+    ];
+    expect(cacheShareOf(rows)).toBeCloseTo(0.9, 6);
   });
 });
 
 describe('withEstimates', () => {
   it('prices the turns nobody priced and marks them as estimates', () => {
     const rows = [
-      // The claude turns are what the share is measured from: 10M input and 1M
-      // output for $43.50 is a 70% cache share.
       { provider: 'claude', model: 'claude-opus-5', inputTokens: 10e6, outputTokens: 1e6, costUsd: 43.5 },
+      // The share is measured from this turn, which recorded its cache reads:
+      // 70% of 10M.
+      {
+        provider: 'codex',
+        model: 'gpt-5.6-sol',
+        inputTokens: 10e6,
+        cachedInputTokens: 7e6,
+        outputTokens: 0,
+        costUsd: null,
+      },
       { provider: 'codex', model: 'gpt-5.6-sol', inputTokens: 10e6, outputTokens: 1e6, costUsd: null },
     ];
-    const [claude, codex] = withEstimates(rows, CATALOG);
+    const [claude, , codex] = withEstimates(rows, CATALOG);
     expect(claude).toBe(rows[0]); // a reported cost is never touched
     expect(codex.costEstimated).toBe(true);
     // 10M at 0.7*0.4 + 0.3*4 = $1.48/M, plus 1M of output at $20.
@@ -135,9 +147,10 @@ describe('withEstimates', () => {
       { provider: 'codex', model: 'gpt-5.6-sol', inputTokens: 10e6, outputTokens: 1e6, costUsd: null },
     ];
     const calibration = [
-      { provider: 'codex', model: 'gpt-5.6-sol', inputTokens: 10e6, outputTokens: 1e6, costUsd: 32.6 },
+      { provider: 'codex', model: 'gpt-5.6-sol', inputTokens: 10e6, cachedInputTokens: 5e6, costUsd: null },
     ];
-    expect(withEstimates(rows, CATALOG, calibration)[0].costUsd).toBeCloseTo(32.6, 6);
+    // 10M at 0.5*0.4 + 0.5*4 = $2.20/M, plus 1M of output at $20.
+    expect(withEstimates(rows, CATALOG, calibration)[0].costUsd).toBeCloseTo(22 + 20, 6);
   });
 });
 
