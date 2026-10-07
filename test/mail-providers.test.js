@@ -754,6 +754,12 @@ describe('outlookProvider', () => {
     // Outlook serves four requests at a time per app and mailbox.
     expect(inFlight.max).toBeLessThanOrEqual(4);
     expect(calls.some((c) => c.url.includes('SEARCH-ID'))).toBe(false);
+    // Hidden folders are listed too, at the root and below it.
+    const listings = calls.filter((c) => /\/mailFolders(\/[\w-]+\/childFolders)?\?/.test(c.url));
+    expect(listings.map((c) => new URL(c.url).searchParams.get('includeHiddenFolders'))).toEqual([
+      'true',
+      'true',
+    ]);
     expect(Object.keys(state.deltas)).toEqual(['INBOX-ID', 'ARCH-ID', 'SUB-ID']);
     expect(state.deltas['INBOX-ID']).toContain('token=i1');
     // The trash's own children are never listed.
@@ -887,6 +893,58 @@ describe('outlookProvider', () => {
     expect(sink.upserted[2]).toMatchObject({ folderId: 'INBOX-ID', isRead: true });
     // Across pages: `later` is still there and is kept; `gone` is not.
     expect(sink.removed).toEqual([{ ids: ['gone'], folderId: 'INBOX-ID' }]);
+    expect(state.deltas['INBOX-ID']).toContain('token=i');
+  });
+
+  it('reads again a message its folder’s delta names present twice, whichever version comes last', async () => {
+    const { request, calls } = fakeFetch([
+      [`${GRAPH}/mailFolders?`, () => ({ body: { value: [{ id: 'INBOX-ID', displayName: 'Inbox' }] } })],
+      // Read now, both are read.
+      [`${GRAPH}/messages/across?`, () => ({ body: graphMessage('across', 'INBOX-ID', { isRead: true }) })],
+      [`${GRAPH}/messages/twice?`, () => ({ body: graphMessage('twice', 'INBOX-ID', { isRead: true }) })],
+      [
+        `${GRAPH}/mailFolders/INBOX-ID/messages/delta`,
+        (url) =>
+          url.includes('page=2')
+            ? {
+                body: {
+                  // The older version of `across`, after the newer one.
+                  value: [graphMessage('across', 'INBOX-ID')],
+                  '@odata.deltaLink': `${GRAPH}/mailFolders/INBOX-ID/messages/delta?token=i`,
+                },
+              }
+            : {
+                body: {
+                  value: [
+                    graphMessage('across', 'INBOX-ID', { isRead: true }),
+                    graphMessage('twice', 'INBOX-ID', { isRead: true }),
+                    graphMessage('twice', 'INBOX-ID'),
+                    graphMessage('once', 'INBOX-ID'),
+                  ],
+                  '@odata.nextLink': `${GRAPH}/mailFolders/INBOX-ID/messages/delta?page=2`,
+                },
+              },
+      ],
+    ]);
+    const outlook = outlookProvider(MICROSOFT, { request });
+    const sink = fakeSink();
+
+    const state = await outlook.sync({
+      api: outlook.api(token),
+      state: { known: { inbox: 'INBOX-ID', skip: [] }, deltas: {} },
+      since: SINCE,
+      sink,
+    });
+
+    const reads = calls.filter((c) => c.url.startsWith(`${GRAPH}/messages/`)).map((c) => c.url.split('?')[0]);
+    expect(reads).toEqual([`${GRAPH}/messages/twice`, `${GRAPH}/messages/across`]);
+    expect(sink.upserted.map((r) => [r.id, r.isRead])).toEqual([
+      ['across', true],
+      ['once', false],
+      ['twice', true],
+      ['across', true],
+    ]);
+    expect(sink.removed).toEqual([]);
     expect(state.deltas['INBOX-ID']).toContain('token=i');
   });
 

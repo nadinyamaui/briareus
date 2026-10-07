@@ -33,7 +33,7 @@ export async function up({ context: p }) {
     recipients LONGTEXT NOT NULL,
     subject TEXT NOT NULL,
     snippet TEXT NOT NULL,
-    labels TEXT NOT NULL,
+    labels LONGTEXT NOT NULL,
     in_inbox TINYINT(1) NOT NULL DEFAULT 0,
     is_read TINYINT(1) NOT NULL DEFAULT 0,
     is_starred TINYINT(1) NOT NULL DEFAULT 0,

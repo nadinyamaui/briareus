@@ -57,6 +57,26 @@ describe('parseAddressList', () => {
     expect(parseAddressList('"Say \\"hi\\"" <a@b.c>')).toEqual([{ name: 'Say "hi"', address: 'a@b.c' }]);
   });
 
+  it('leaves comments out of addresses and names, and does not split on a comma in one', () => {
+    expect(
+      parseAddressList(
+        'john@example.com (John, boss), Alice <a@example.com> (team), Ann (Sales) <ann@x.com>, ' +
+          '"Smith (Jr)" <s@x.com>, b@x.com (a (nested) \\) one), c@x.com (it\'s "quoted, really")',
+      ),
+    ).toEqual([
+      { name: '', address: 'john@example.com' },
+      { name: 'Alice', address: 'a@example.com' },
+      { name: 'Ann', address: 'ann@x.com' },
+      { name: 'Smith (Jr)', address: 's@x.com' },
+      { name: '', address: 'b@x.com' },
+      { name: '', address: 'c@x.com' },
+    ]);
+    expect(parseAddressList('Team (internal): a@x.com, b@x.com;')).toEqual([
+      { name: '', address: 'a@x.com' },
+      { name: '', address: 'b@x.com' },
+    ]);
+  });
+
   it('takes the members of a group', () => {
     expect(parseAddressList('Team: a@x.com, b@x.com;')).toEqual([
       { name: '', address: 'a@x.com' },
@@ -97,6 +117,13 @@ describe('htmlToText', () => {
     expect(htmlToText("<img alt='a > b' src=x>after")).toBe('after');
     // A quote opens a value only right after the `=`.
     expect(htmlToText('<a href=x"y>link</a> and "more"')).toBe('link and "more"');
+  });
+
+  it('keeps its place after text whose lowercase is longer', () => {
+    // `İ` lowercases to two code units.
+    expect(htmlToText('<p>İstanbul</p><P>Hello</P><STYLE>secret</STYLE><script>x</script>')).toBe(
+      'İstanbul\nHello',
+    );
   });
 
   it('drops an unclosed hidden element or comment to the end', () => {
