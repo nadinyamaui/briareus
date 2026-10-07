@@ -67,19 +67,29 @@ describe('workspace quarantine', () => {
         fs.chmodSync(path.join(dir,'build'),0o555);
         return dir;
       }
+      const native=slot('native'); let nativeError;
+      try { fs.rmSync(native,{recursive:true,force:true}); } catch(e) { nativeError=e.code; }
       const old=slot('old'); let error;
-      try { fs.rmSync(old,{recursive:true,force:true}); } catch(e) { error=e.code; }
+      // Native remove_all visitation order differs between filesystems. Force
+      // the dangerous legal order for the historical cleanup reproduction,
+      // still using actual recursive removal and non-root filesystem checks.
+      try {
+        for (const entry of ['.git','build'])
+          fs.rmSync(path.join(old,entry),{recursive:true,force:true});
+      } catch(e) { error=e.code; }
       const dir=slot('acme__app'); const backup=quarantineWorkspace(dir);
       const blocked=slot('blocked'); fs.chmodSync(root,0o555); let failure;
       try { quarantineWorkspace(blocked); } catch(e) { failure=e.message; }
       fs.chmodSync(root,0o777);
-      const result={uid:process.getuid(),error,oldGit:fs.existsSync(path.join(old,'.git')),
+      const result={uid:process.getuid(),nativeError,
+        nativeArtifact:fs.existsSync(path.join(native,'build','output')),
+        error,oldGit:fs.existsSync(path.join(old,'.git')),
         oldArtifact:fs.existsSync(path.join(old,'build','output')),
         head:fs.readFileSync(path.join(backup,'.git','HEAD'),'utf8'),
         artifact:fs.readFileSync(path.join(backup,'build','output'),'utf8'),
         sourceGone:!fs.existsSync(dir),failure,
         blockedHead:fs.readFileSync(path.join(blocked,'.git','HEAD'),'utf8')};
-      for (const tree of [old,backup,blocked]) fs.chmodSync(path.join(tree,'build'),0o755);
+      for (const tree of [native,old,backup,blocked]) fs.chmodSync(path.join(tree,'build'),0o755);
       console.log(JSON.stringify(result));
     `,
         ],
@@ -88,6 +98,8 @@ describe('workspace quarantine', () => {
       expect(child.status, child.stderr).toBe(0);
       const result = JSON.parse(child.stdout);
       expect(result.uid).not.toBe(0);
+      expect(result.nativeError).toMatch(/EACCES|EPERM/);
+      expect(result.nativeArtifact).toBe(true);
       expect(result.error).toMatch(/EACCES|EPERM/);
       expect(result.oldGit).toBe(false);
       expect(result.oldArtifact).toBe(true);
