@@ -495,7 +495,15 @@ describe('gmailProvider', () => {
       email: 'me',
     });
 
-    // In one go, so two names swapped do not run into each other.
+    const labels = {
+      INBOX: 'INBOX',
+      Label_1: 'Clients/Acme',
+      Label_2: 'Done',
+      Label_3: 'Later',
+      Label_4: 'Now',
+    };
+    // In one go, so two names swapped do not run into each other, and with
+    // the names they lead to, to be saved with them.
     expect(sink.renameLabels.mock.calls).toEqual([
       [
         [
@@ -503,15 +511,10 @@ describe('gmailProvider', () => {
           ['Now', 'Later'],
           ['Later', 'Now'],
         ],
+        labels,
       ],
     ]);
-    expect(state.labels).toEqual({
-      INBOX: 'INBOX',
-      Label_1: 'Clients/Acme',
-      Label_2: 'Done',
-      Label_3: 'Later',
-      Label_4: 'Now',
-    });
+    expect(state.labels).toEqual(labels);
   });
 
   it('falls back to a first pass when Gmail no longer has the cursor', async () => {
@@ -826,6 +829,59 @@ describe('outlookProvider', () => {
         isRead: true,
       }),
     ]);
+  });
+
+  it('reads again a message its folder’s delta names both removed and present, on one page or across pages', async () => {
+    const { request, calls } = fakeFetch([
+      [`${GRAPH}/mailFolders?`, () => ({ body: { value: [{ id: 'INBOX-ID', displayName: 'Inbox' }] } })],
+      // Moved out and back: both are in the inbox now.
+      [`${GRAPH}/messages/back?`, () => ({ body: graphMessage('back', 'INBOX-ID', { isRead: true }) })],
+      [`${GRAPH}/messages/later?`, () => ({ body: graphMessage('later', 'INBOX-ID') })],
+      // Moved out and deleted.
+      [`${GRAPH}/messages/gone?`, () => ({ status: 404, body: { error: { code: 'ErrorItemNotFound' } } })],
+      [
+        `${GRAPH}/mailFolders/INBOX-ID/messages/delta`,
+        (url) =>
+          url.includes('page=2')
+            ? {
+                body: {
+                  value: [
+                    { id: 'later', '@removed': { reason: 'deleted' } },
+                    { id: 'gone', '@removed': { reason: 'deleted' } },
+                  ],
+                  '@odata.deltaLink': `${GRAPH}/mailFolders/INBOX-ID/messages/delta?token=i`,
+                },
+              }
+            : {
+                body: {
+                  value: [
+                    graphMessage('back', 'INBOX-ID', { isRead: true }),
+                    { id: 'back', '@removed': { reason: 'deleted' } },
+                    graphMessage('later', 'INBOX-ID'),
+                    graphMessage('gone', 'INBOX-ID'),
+                  ],
+                  '@odata.nextLink': `${GRAPH}/mailFolders/INBOX-ID/messages/delta?page=2`,
+                },
+              },
+      ],
+    ]);
+    const outlook = outlookProvider(MICROSOFT, { request });
+    const sink = fakeSink();
+
+    const state = await outlook.sync({
+      api: outlook.api(token),
+      state: { known: { inbox: 'INBOX-ID', skip: [] }, deltas: {} },
+      since: SINCE,
+      sink,
+    });
+
+    // `back` is read again once, and kept rather than removed.
+    expect(calls.filter((c) => c.url.startsWith(`${GRAPH}/messages/back?`))).toHaveLength(1);
+    expect(sink.upserted.map((r) => r.id)).toEqual(['later', 'gone', 'back', 'later']);
+    expect(sink.upserted[2]).toMatchObject({ folderId: 'INBOX-ID', isRead: true });
+    // Across pages: `later` is still there and is kept; `gone` is not.
+    expect(sink.removed).toEqual([{ ids: ['gone'], folderId: 'INBOX-ID' }]);
+    expect(state.deltas['INBOX-ID']).toContain('token=i');
   });
 
   it('relabels the messages of a folder renamed since the last pass, and of no other', async () => {

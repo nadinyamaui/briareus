@@ -92,6 +92,13 @@ describe('htmlToText', () => {
     expect(htmlToText('a < b, c <= d, <3 and x<<b>y</b>')).toBe('a < b, c <= d, <3 and x<y');
   });
 
+  it('ends a tag at its first `>` outside a quoted attribute value', () => {
+    expect(htmlToText('<p><a title="Balance > 0">Pay now</a></p>')).toBe('Pay now');
+    expect(htmlToText("<img alt='a > b' src=x>after")).toBe('after');
+    // A quote opens a value only right after the `=`.
+    expect(htmlToText('<a href=x"y>link</a> and "more"')).toBe('link and "more"');
+  });
+
   it('drops an unclosed hidden element or comment to the end', () => {
     expect(htmlToText('before<style>p{}')).toBe('before');
     expect(htmlToText('before<!-- never closed')).toBe('before');
@@ -99,7 +106,8 @@ describe('htmlToText', () => {
   });
 
   it('stays linear on input built to make a backtracking pass stall', () => {
-    const hostile = '<style'.repeat(100_000) + '<!--'.repeat(100_000) + '<b'.repeat(100_000);
+    const hostile =
+      '<style'.repeat(100_000) + '<!--'.repeat(100_000) + '<b'.repeat(100_000) + '<i x=\t'.repeat(100_000);
     const started = Date.now();
     htmlToText(hostile);
     expect(Date.now() - started).toBeLessThan(2000);

@@ -89,9 +89,10 @@ function memoryStore() {
       ),
     keepFolders: async (accountId, folderIds) =>
       drop((m) => m.accountId === accountId && !folderIds.includes(m.folderId)),
-    renameLabels: async (accountId, renames) => {
+    renameLabels: async (accountId, renames, changes) => {
       const names = new Map(renames);
       for (const m of ofAccount(accountId)) m.labels = m.labels.map((l) => (names.has(l) ? names.get(l) : l));
+      Object.assign(accounts.get(accountId), changes);
     },
     renameFolder: async (accountId, folderId, name) => {
       for (const m of ofAccount(accountId)) if (m.folderId === folderId) m.labels[0] = name;
@@ -162,7 +163,10 @@ function fakeGmail(mailbox) {
     if (url.startsWith(`${GMAIL}/labels`)) return reply({ labels: mailbox.labels || [] });
     if (url.startsWith(`${GMAIL}/messages?`))
       return reply({ messages: Object.keys(mailbox.messages).map((id) => ({ id })) });
-    if (url.startsWith(`${GMAIL}/history?`)) return reply({ historyId: '11' });
+    if (url.startsWith(`${GMAIL}/history?`))
+      return mailbox.historyFails
+        ? reply({ error: { code: 400, message: 'Invalid startHistoryId' } }, 400)
+        : reply({ historyId: '11' });
     const full = /messages\/([^?]+)\?format=full/.exec(url);
     if (full && mailbox.messages[full[1]]) {
       const id = full[1];
@@ -466,6 +470,42 @@ describe('syncing', () => {
     expect(store.accounts.get(account.id).syncState).toEqual({
       historyId: '11',
       labels: { Label_1: 'Clients/Acme' },
+    });
+  });
+
+  it('renames once, when the pass that renamed fails after it and runs again', async () => {
+    mailbox.labels = [
+      { id: 'Label_1', name: 'Acme' },
+      { id: 'Label_2', name: 'Globex' },
+    ];
+    mailbox.messages.a.labels = ['Label_1'];
+    mailbox.messages.b.labels = ['Label_2'];
+    const account = await connect();
+    await settled();
+
+    // The two names swapped, and the history read after the rename fails.
+    mailbox.labels = [
+      { id: 'Label_1', name: 'Globex' },
+      { id: 'Label_2', name: 'Acme' },
+    ];
+    mailbox.historyFails = true;
+    await service.sync(account.id);
+    await settled();
+    expect(store.accounts.get(account.id).lastSyncError).toMatch(/Invalid startHistoryId/);
+    expect(store.accounts.get(account.id).syncState).toEqual({
+      historyId: '10',
+      labels: { Label_1: 'Globex', Label_2: 'Acme' },
+    });
+
+    mailbox.historyFails = false;
+    await service.sync(account.id);
+    await settled();
+
+    expect(store.messages.get(`${account.id}:a`).labels).toEqual(['INBOX', 'Globex']);
+    expect(store.messages.get(`${account.id}:b`).labels).toEqual(['INBOX', 'Acme']);
+    expect(store.accounts.get(account.id)).toMatchObject({
+      lastSyncError: null,
+      syncState: { historyId: '11', labels: { Label_1: 'Globex', Label_2: 'Acme' } },
     });
   });
 
