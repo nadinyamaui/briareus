@@ -892,7 +892,7 @@ describe('outlookProvider', () => {
     expect(sink.upserted.map((r) => r.id)).toEqual(['later', 'gone', 'back', 'later']);
     expect(sink.upserted[2]).toMatchObject({ folderId: 'INBOX-ID', isRead: true });
     // Across pages: `later` is still there and is kept; `gone` is not.
-    expect(sink.removed).toEqual([{ ids: ['gone'], folderId: 'INBOX-ID' }]);
+    expect(sink.removed).toEqual([{ ids: ['gone'], folderId: null }]);
     expect(state.deltas['INBOX-ID']).toContain('token=i');
   });
 
@@ -1013,6 +1013,70 @@ describe('outlookProvider', () => {
       'ARCH-ID': `${GRAPH}/mailFolders/ARCH-ID/messages/delta?token=a`,
       'INBOX-ID': `${GRAPH}/mailFolders/INBOX-ID/messages/delta?token=i`,
     });
+  });
+
+  it('removes a canonically missing message from any cached folder, keeping raw tombstones scoped', async () => {
+    let pass = 0;
+    const { request, calls } = fakeFetch([
+      [
+        `${GRAPH}/mailFolders?`,
+        () => ({
+          body: {
+            value: [
+              { id: 'ARCH-ID', displayName: 'Archive' },
+              { id: 'INBOX-ID', displayName: 'Inbox' },
+            ],
+          },
+        }),
+      ],
+      [`${GRAPH}/messages/gone?`, () => ({ status: 404, body: { error: { code: 'ErrorItemNotFound' } } })],
+      [
+        `${GRAPH}/mailFolders/ARCH-ID/messages/delta`,
+        () => ({
+          body: {
+            value: pass === 0 ? [graphMessage('gone', 'ARCH-ID')] : [],
+            '@odata.deltaLink': `${GRAPH}/mailFolders/ARCH-ID/messages/delta?token=a`,
+          },
+        }),
+      ],
+      [
+        `${GRAPH}/mailFolders/INBOX-ID/messages/delta`,
+        () => ({
+          body: {
+            value:
+              pass === 0
+                ? [
+                    { id: 'gone', '@removed': { reason: 'deleted' } },
+                    { id: 'moved', '@removed': { reason: 'deleted' } },
+                  ]
+                : [],
+            '@odata.deltaLink': `${GRAPH}/mailFolders/INBOX-ID/messages/delta?token=i`,
+          },
+        }),
+      ],
+    ]);
+    const outlook = outlookProvider(MICROSOFT, { request });
+    const sink = fakeSink();
+    // Match the store's folder predicate: an old source tombstone must not
+    // delete a message already cached in its destination.
+    const cached = new Map([['moved', { id: 'moved', folderId: 'ARCH-ID' }]]);
+    sink.upsert.mockImplementation(async (rows) => {
+      for (const row of rows) cached.set(row.id, row);
+    });
+    sink.remove.mockImplementation(async (ids, folderId = null) => {
+      for (const id of ids) if (folderId == null || cached.get(id)?.folderId === folderId) cached.delete(id);
+    });
+    let state = { known: { inbox: 'INBOX-ID', skip: [] }, deltas: {} };
+    for (; pass < 3; pass++) {
+      state = await outlook.sync({ api: outlook.api(token), state, since: SINCE, sink });
+      expect([...cached.keys()]).toEqual(['moved']);
+      expect(state.deltas).toEqual({
+        'ARCH-ID': `${GRAPH}/mailFolders/ARCH-ID/messages/delta?token=a`,
+        'INBOX-ID': `${GRAPH}/mailFolders/INBOX-ID/messages/delta?token=i`,
+      });
+    }
+    expect(calls.filter((c) => c.url.startsWith(`${GRAPH}/messages/gone?`))).toHaveLength(1);
+    expect(calls.filter((c) => c.url.startsWith(`${GRAPH}/messages/moved?`))).toHaveLength(0);
   });
 
   it('relabels the messages of a folder renamed since the last pass, and of no other', async () => {
