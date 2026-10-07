@@ -948,6 +948,73 @@ describe('outlookProvider', () => {
     expect(state.deltas['INBOX-ID']).toContain('token=i');
   });
 
+  it('reads again a message two folders’ deltas both name, whichever folder is read last', async () => {
+    const { request, calls } = fakeFetch([
+      [
+        `${GRAPH}/mailFolders?`,
+        () => ({
+          body: {
+            value: [
+              { id: 'ARCH-ID', displayName: 'Archive' },
+              { id: 'INBOX-ID', displayName: 'Inbox' },
+            ],
+          },
+        }),
+      ],
+      // Both were moved from the inbox to the archive, and are there now.
+      [`${GRAPH}/messages/m?`, () => ({ body: graphMessage('m', 'ARCH-ID', { isRead: true }) })],
+      [`${GRAPH}/messages/moved?`, () => ({ body: graphMessage('moved', 'ARCH-ID') })],
+      [
+        `${GRAPH}/mailFolders/ARCH-ID/messages/delta`,
+        () => ({
+          body: {
+            value: [
+              graphMessage('m', 'ARCH-ID', { isRead: true }),
+              graphMessage('moved', 'ARCH-ID'),
+              graphMessage('once', 'ARCH-ID'),
+            ],
+            '@odata.deltaLink': `${GRAPH}/mailFolders/ARCH-ID/messages/delta?token=a`,
+          },
+        }),
+      ],
+      [
+        `${GRAPH}/mailFolders/INBOX-ID/messages/delta`,
+        () => ({
+          body: {
+            // The inbox's older version of `m`, read after the archive's.
+            value: [graphMessage('m', 'INBOX-ID'), { id: 'moved', '@removed': { reason: 'deleted' } }],
+            '@odata.deltaLink': `${GRAPH}/mailFolders/INBOX-ID/messages/delta?token=i`,
+          },
+        }),
+      ],
+    ]);
+    const outlook = outlookProvider(MICROSOFT, { request });
+    const sink = fakeSink();
+
+    const state = await outlook.sync({
+      api: outlook.api(token),
+      state: { known: { inbox: 'INBOX-ID', skip: [] }, deltas: {} },
+      since: SINCE,
+      sink,
+    });
+
+    const reads = calls.filter((c) => c.url.startsWith(`${GRAPH}/messages/`)).map((c) => c.url.split('?')[0]);
+    expect(reads).toEqual([`${GRAPH}/messages/m`, `${GRAPH}/messages/moved`]);
+    expect(sink.upserted.map((r) => [r.id, r.folderId, r.isRead])).toEqual([
+      ['m', 'ARCH-ID', true],
+      ['moved', 'ARCH-ID', false],
+      ['once', 'ARCH-ID', false],
+      ['m', 'ARCH-ID', true],
+      ['moved', 'ARCH-ID', false],
+    ]);
+    expect(sink.upserted[3].labels).toEqual(['Archive', 'Red']);
+    expect(sink.removed).toEqual([]);
+    expect(state.deltas).toEqual({
+      'ARCH-ID': `${GRAPH}/mailFolders/ARCH-ID/messages/delta?token=a`,
+      'INBOX-ID': `${GRAPH}/mailFolders/INBOX-ID/messages/delta?token=i`,
+    });
+  });
+
   it('relabels the messages of a folder renamed since the last pass, and of no other', async () => {
     const { request } = fakeFetch([
       [
