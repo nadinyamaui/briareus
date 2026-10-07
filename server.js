@@ -36,6 +36,7 @@ import { execFile, spawn } from 'child_process';
 import { getConfig } from './lib/config.js';
 import { maintenanceState } from './lib/recovery.js';
 import { workerTranscript } from './lib/worker-transcript.js';
+import { orchestratorRoutes } from './lib/orchestrator-routes.js';
 import { initDb, dbHealthy, loadTaskSessions, loadJobTurnUsage } from './lib/db.js';
 import {
   initJobs,
@@ -657,24 +658,9 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 // it only ever reaches its own workers, so the token's whole authority is
 // "this supervisor and its children".
 
-function orchestratorSession(req, res) {
-  const job = agentSession(req, res);
-  if (!job) return null;
-  if (!job.orchestrator) {
-    res.status(403).json({ error: 'Only an orchestrator session can manage worker sessions' });
-    return null;
-  }
-  return job;
-}
-
-function workerOf(req, res, orchestrator) {
-  const worker = workerSessionsFor(orchestrator).find((j) => j.id === req.params.id);
-  if (!worker) {
-    res.status(404).json({ error: `No worker session ${req.params.id} under this orchestrator` });
-    return null;
-  }
-  return worker;
-}
+const workerRoutes = orchestratorRoutes({ agentSession, workerSessionsFor, setQaLoop, workerSummary });
+const { orchestratorSession, workerOf } = workerRoutes;
+api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
 
 api.post('/api/agent/sessions', (req, res) => {
   const orchestrator = orchestratorSession(req, res);
