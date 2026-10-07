@@ -11607,12 +11607,12 @@ describe('invalid clone pool slots', () => {
   );
 
   it.each([false, true])(
-    'retries an empty clone directory at full quarantine capacity (preserve: %s)',
+    'recreates a read-only empty clone directory at full quarantine capacity (preserve: %s)',
     async (preserve) => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-empty-retry-'));
       const dir = path.join(root, 'acme__app');
       const recovery = path.join(root, '.briareus-recovery');
-      fs.mkdirSync(dir);
+      fs.mkdirSync(dir, { mode: 0o555 });
       for (let i = 0; i < 100; i++) {
         const checkout = path.join(recovery, `backup-${i}`, 'checkout');
         fs.mkdirSync(checkout, { recursive: true });
@@ -11622,6 +11622,7 @@ describe('invalid clone pool slots', () => {
         const child = new EventEmitter();
         child.stdout = new PassThrough();
         child.stderr = new PassThrough();
+        expect(fs.statSync(dir).mode & 0o700).toBe(0o700);
         fs.mkdirSync(path.join(dir, '.git'));
         fs.writeFileSync(path.join(dir, '.git', 'config'), '[core]\n autocrlf = false\n');
         setImmediate(() => child.emit('close', 0));
@@ -11647,6 +11648,7 @@ describe('invalid clone pool slots', () => {
           expect(fs.readFileSync(path.join(recovery, entry, 'checkout', 'work'), 'utf8')).toBe('retained');
         expect(job.events.some((event) => event.text.includes('Preserved'))).toBe(false);
       } finally {
+        fs.chmodSync(dir, 0o755);
         fs.rmSync(root, { recursive: true, force: true });
       }
     },
