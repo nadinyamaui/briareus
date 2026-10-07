@@ -113,17 +113,50 @@ describe('workspace quarantine', () => {
     },
   );
 
+  it('restores capacity after operators remove the logged checkout paths', () => {
+    const root = fixture();
+    const dir = path.join(root, 'acme__app');
+    for (let i = 0; i <= QUARANTINE_LIMIT; i++) {
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'work'), 'preserve');
+      const backup = quarantineWorkspace(dir);
+      expect(fs.readFileSync(path.join(backup, 'work'), 'utf8')).toBe('preserve');
+      fs.rmSync(backup, { recursive: true });
+    }
+    expect(fs.readdirSync(path.join(root, QUARANTINE_NAME))).toHaveLength(1);
+  });
+
+  it.skipIf(process.platform === 'win32')('does not retire symlink reservations', () => {
+    const root = fixture();
+    const outside = fixture();
+    const recovery = path.join(root, QUARANTINE_NAME);
+    fs.mkdirSync(recovery);
+    const link = path.join(recovery, 'symlink');
+    fs.symlinkSync(outside, link);
+    const dir = path.join(root, 'acme__app');
+    fs.mkdirSync(dir);
+    quarantineWorkspace(dir);
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
   it('refuses at the retention bound without altering the source or old backups', () => {
     const root = fixture();
     const recovery = path.join(root, QUARANTINE_NAME);
     fs.mkdirSync(recovery);
-    for (let i = 0; i < QUARANTINE_LIMIT; i++) fs.mkdirSync(path.join(recovery, `backup-${i}`));
+    for (let i = 0; i < QUARANTINE_LIMIT; i++) {
+      const checkout = path.join(recovery, `backup-${i}`, 'checkout');
+      fs.mkdirSync(checkout, { recursive: true });
+      fs.writeFileSync(path.join(checkout, 'work'), 'retained');
+    }
     const dir = path.join(root, 'acme__app');
     fs.mkdirSync(dir);
     fs.writeFileSync(path.join(dir, 'work'), 'preserve');
     expect(() => quarantineWorkspace(dir)).toThrow(/Recovery limit.*recover or move preserved work/);
     expect(fs.readFileSync(path.join(dir, 'work'), 'utf8')).toBe('preserve');
     expect(fs.readdirSync(recovery)).toHaveLength(QUARANTINE_LIMIT);
+    for (const entry of fs.readdirSync(recovery))
+      expect(fs.readFileSync(path.join(recovery, entry, 'checkout', 'work'), 'utf8')).toBe('retained');
   });
 
   it.skipIf(process.platform === 'win32')(

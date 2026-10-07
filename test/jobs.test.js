@@ -11606,6 +11606,52 @@ describe('invalid clone pool slots', () => {
     },
   );
 
+  it.each([false, true])(
+    'retries an empty clone directory at full quarantine capacity (preserve: %s)',
+    async (preserve) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-empty-retry-'));
+      const dir = path.join(root, 'acme__app');
+      const recovery = path.join(root, '.briareus-recovery');
+      fs.mkdirSync(dir);
+      for (let i = 0; i < 100; i++) {
+        const checkout = path.join(recovery, `backup-${i}`, 'checkout');
+        fs.mkdirSync(checkout, { recursive: true });
+        fs.writeFileSync(path.join(checkout, 'work'), 'retained');
+      }
+      vi.mocked(spawn).mockImplementationOnce(() => {
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        fs.mkdirSync(path.join(dir, '.git'));
+        fs.writeFileSync(path.join(dir, '.git', 'config'), '[core]\n autocrlf = false\n');
+        setImmediate(() => child.emit('close', 0));
+        return child;
+      });
+      try {
+        const job = { id: `clone-empty-retry-${preserve}` };
+        await expect(ensureClone(job, dir, 'acme/app', { preserve })).resolves.toBe(true);
+        expect(spawn).toHaveBeenCalledWith(
+          'git',
+          [
+            'clone',
+            '--filter=blob:none',
+            '--no-checkout',
+            '--progress',
+            'https://github.com/acme/app.git',
+            dir,
+          ],
+          expect.any(Object),
+        );
+        expect(fs.readdirSync(recovery)).toHaveLength(100);
+        for (const entry of fs.readdirSync(recovery))
+          expect(fs.readFileSync(path.join(recovery, entry, 'checkout', 'work'), 'utf8')).toBe('retained');
+        expect(job.events.some((event) => event.text.includes('Preserved'))).toBe(false);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('still refuses to resume a populated checkout missing .git', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-resume-'));
     try {

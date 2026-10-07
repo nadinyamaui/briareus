@@ -117,6 +117,17 @@ describe('parseSlotName / slotDir', () => {
     expect(parseSlotName('acme__my-app__12')).toEqual({ repo: 'acme/my-app', index: 12 });
   });
 
+  it('retains valid repository names containing the recovery marker', async () => {
+    const name = 'acme__app.recovery-backup-prod';
+    const dir = slot(name);
+    expect(parseSlotName(name)).toEqual({ repo: 'acme/app.recovery-backup-prod', index: 1 });
+    expect(parseSlotName(`${name}__2`)).toEqual({ repo: 'acme/app.recovery-backup-prod', index: 2 });
+    expect(slotDir(name)).toBe(dir);
+    expect(await listWorkspaces()).toMatchObject([{ slot: name, repo: 'acme/app.recovery-backup-prod' }]);
+    expect(resetSetup(name)).toEqual({ slot: name });
+    expect(cleanWorkspace(name)).toEqual({ slot: name, removed: ['vendor', 'node_modules'] });
+  });
+
   it('ignores what is not a slot', () => {
     expect(parseSlotName('README.md')).toBeNull();
     expect(parseSlotName('__x')).toBeNull();
