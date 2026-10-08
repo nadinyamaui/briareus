@@ -1384,6 +1384,35 @@ describe('claiming a server', () => {
     );
     expect(claimHolder(1)).toBeNull();
   });
+
+  it.each(['closing', 'closed', 'canceled'])(
+    'returns an in-flight preparation claim when the session is %s',
+    async (status) => {
+      const j = { ...job(), status: 'preparing' };
+      const { promise, resolve } = Promise.withResolvers();
+      state.mysqlHold = { on: /CREATE DATABASE/, until: promise };
+      const events = [];
+      const pending = acquire(j, 'r/r', (text) => events.push(text));
+      expect(claimHolder(1)).toBe(j.id);
+      expect(j.dbServerId).toBe(1);
+      if (status === 'closing') j.closing = true;
+      else j.status = status;
+      const releasing = releaseInstance(j); // close waits for the in-flight preparation
+      const rejected = expect(pending).rejects.toThrow('canceled');
+      resolve();
+      try {
+        await rejected;
+        await releasing;
+        expect(claimHolder(1)).toBeNull();
+        expect(j.dbServerId).toBeNull();
+        expect(events.some((text) => text.startsWith('Claimed database server'))).toBe(false);
+        expect(await acquire(job('replacement'))).toBe(1);
+      } finally {
+        // Keep the pool usable even when this regression fails against old code.
+        await releaseInstance(j);
+      }
+    },
+  );
 });
 
 describe('restoring the project dump into the claimed database', () => {
