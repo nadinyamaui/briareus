@@ -39,10 +39,20 @@ change `WAHA_IMAGE` in the private file to a reviewed image tag/digest and run
 
 To switch to NOWEB when browser-engine pairing codes fail, set
 `WAHA_ENGINE=NOWEB` in the private installation’s `.env` and run
-`docker compose --project-directory ~/.config/briareus/waha up -d`.
-NOWEB fetches the current WhatsApp protocol version on startup by default
-(`WAHA_NOWEB_WA_VERSION=auto-web`); override that setting in the private `.env`
-if a fixed version is required. The core enables NOWEB’s history store and
+`npm run install:waha` from the updated checkout. For a custom installation
+directory, set `WAHA_INSTALL_DIR` to that same directory. This refreshes the
+installed Compose template while retaining the saved image, key and volumes.
+NOWEB protocol auto-updates (`WAHA_NOWEB_WA_VERSION=auto-web`) require WAHA
+2026.8.1 or newer. If the saved image is older, first update `WAHA_IMAGE` in the
+private `.env` to a reviewed tag/digest for a supported version, following the
+upgrade instructions above; rerunning the installer preserves the saved image.
+On supported versions, NOWEB fetches the current WhatsApp protocol version on
+startup by default. Override `WAHA_NOWEB_WA_VERSION` in the private `.env` if a
+fixed version is required; also set `WAHA_NOWEB_WA_VERSION_FORCE=True` to use a
+version lower than WAHA’s built-in version. The force flag defaults to `False`.
+After changing these protocol settings, rerun `npm run install:waha` to apply
+them. See the [NOWEB configuration guide](https://waha.devlike.pro/docs/engines/noweb/#configuration).
+The core enables NOWEB’s history store and
 full sync when creating an account, so chat/history endpoints remain usable.
 For an existing NOWEB account created outside Briareus, enable its store
 before linking a phone, following the [NOWEB guide](https://waha.devlike.pro/docs/engines/noweb/#enable-store).
