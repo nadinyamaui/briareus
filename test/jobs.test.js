@@ -186,7 +186,7 @@ vi.mock('../lib/usage.js', () => ({
 
 import { deleteJob, jobEventMaxSeqs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
-import { acquireInstance, dropSessionDatabase } from '../lib/dbpool.js';
+import { acquireInstance, dropSessionDatabase, releaseInstance } from '../lib/dbpool.js';
 import {
   latestReviewFindings,
   latestTestFailures,
@@ -10249,6 +10249,170 @@ describe('Codex turn usage', () => {
       } finally {
         reader.mockRestore();
         scan.destroy();
+      }
+    },
+  );
+
+  it.each(['manual', 'auto'])(
+    'awaits %s compaction scan and ledger accounting before deleting a child',
+    async (mode) => {
+      state.stored[0] = { ...state.stored[0], autoClose: true, parentId: 'compact-parent' };
+      state.stored.push({ id: 'compact-parent', kind: 'devchat', status: 'idle', repo: 'acme/shop' });
+      await initJobs();
+      const job = getJob('codex-usage');
+      job.status = 'idle';
+      const baseline = { input_tokens: 500000, cached_input_tokens: 450000, output_tokens: 20000 };
+      const total = { input_tokens: 800000, cached_input_tokens: 730000, output_tokens: 21000 };
+      writeRollout(baseline);
+      const scan = new PassThrough();
+      let reader;
+      let finishAccounting;
+      let pending;
+      const ledger = new Map();
+      compactCodexThread.mockImplementationOnce(async (opts) => {
+        // Install the deferred reader only after the provider turn has finished.
+        reader = vi.spyOn(fs, 'createReadStream').mockReturnValueOnce(scan);
+        opts.onUsage({ inputTokens: 800000, cachedInputTokens: 730000, outputTokens: 21000 });
+        recordTurnUsage.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finishAccounting = () => {
+                ledger.set(job.id, { estimatedCostUsd: 0.2625, estimatedTurns: 1 });
+                resolve();
+              };
+            }),
+        );
+      });
+      jobUsageEstimates.mockImplementationOnce(async () => ledger);
+      deleteJob.mockClear();
+      dropSessionDatabase.mockClear();
+      releaseInstance.mockClear();
+      try {
+        if (mode === 'manual') pending = compactDevSession(job.id);
+        else {
+          setDevSessionAutoCompact(job.id, true);
+          sendDevMessage(job.id, 'Next');
+          const file = path.join(
+            home,
+            '.codex-provider-2',
+            'sessions',
+            '2026',
+            '09',
+            '30',
+            'rollout-2026-09-30T00-00-00-thread-1.jsonl',
+          );
+          fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('40000', '400000'));
+          const child = children.at(-1);
+          child.stdout.end(`${JSON.stringify({ type: 'turn.completed', usage: baseline })}\n`);
+          child.emit('close', 0);
+        }
+        await vi.waitFor(() => expect(reader).toHaveBeenCalledOnce());
+        const closing = closeDevSession(job.id);
+        const duplicate = closeDevSession(job.id);
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(dropSessionDatabase).not.toHaveBeenCalled();
+        expect(releaseInstance).not.toHaveBeenCalled();
+        expect(deleteJob).not.toHaveBeenCalled();
+        scan.end(
+          `${JSON.stringify({
+            type: 'event_msg',
+            payload: {
+              type: 'token_count',
+              info: {
+                total_token_usage: total,
+                last_token_usage: { input_tokens: 300000, cached_input_tokens: 280000, output_tokens: 1000 },
+              },
+            },
+          })}\n`,
+        );
+        await vi.waitFor(() => expect(finishAccounting).toBeTypeOf('function'));
+        expect(dropSessionDatabase).not.toHaveBeenCalled();
+        expect(deleteJob).not.toHaveBeenCalled();
+        expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({ longInputTokens: 300000 });
+        finishAccounting();
+        await Promise.all([closing, duplicate, pending]);
+        expect(releaseInstance).toHaveBeenCalledOnce();
+        // Close drops with logging; deletion makes its existing final cleanup call.
+        expect(dropSessionDatabase.mock.calls).toEqual([[job, expect.any(Function)], [job]]);
+        expect(deleteJob).toHaveBeenCalledOnce();
+        expect(getJob(job.id)).toBeNull();
+        expect(getJob('compact-parent')).toMatchObject({
+          absorbedEstimatedCostUsd: 0.2625,
+          absorbedEstimatedTurns: 1,
+        });
+      } finally {
+        reader?.mockRestore();
+        scan.destroy();
+        compactCodexThread.mockReset();
+      }
+    },
+  );
+
+  it.each(['loopParentId', 'qaParentId', 'loopFixParentId'])(
+    'does not complete a canceled first turn (%s) or close it twice',
+    async (parentField) => {
+      const local = fs.mkdtempSync(path.join(home, 'first-turn-'));
+      fs.mkdirSync(path.join(local, '.git'));
+      state.projects[0].localDir = local;
+      // Local preparation avoids external Git and setup work; the first-turn
+      // continuation and loop-close callbacks are the real production paths.
+      const session = createDevSession({
+        provider: 2,
+        repo: 'acme/shop',
+        local: true,
+        prompt: 'Review this change',
+      });
+      const job = getJob(session.id);
+      await vi.waitFor(() => expect(job.proc).toBeTruthy());
+      job[parentField] = 'missing-parent';
+      job.reviewBranch = 'feature';
+      job.autoClose = true;
+      let finishAccounting;
+      recordTurnUsage.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishAccounting = resolve;
+          }),
+      );
+      let finishRelease;
+      releaseInstance.mockClear();
+      releaseInstance.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishRelease = resolve;
+          }),
+      );
+      dropSessionDatabase.mockClear();
+      deleteJob.mockClear();
+      const closedEvents = [];
+      const onJob = (event) => {
+        if (event.id === job.id && event.status === 'closed') closedEvents.push(event);
+      };
+      bus.on('job', onJob);
+      try {
+        const closing = closeDevSession(job.id);
+        children.at(-1).emit('close', 0);
+        await vi.waitFor(() => expect(finishAccounting).toBeTypeOf('function'));
+        finishAccounting();
+        await vi.waitFor(() => expect(finishRelease).toBeTypeOf('function'));
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(job.closing).toBe(true);
+        expect(job.status).toBe('running');
+        expect(job.loopReviewDone).toBeFalsy();
+        expect(job.qaLoopDone).toBeFalsy();
+        expect(job.loopFixDone).toBeFalsy();
+        expect(children).toHaveLength(1); // no publish turn
+        const duplicate = closeDevSession(job.id);
+        finishRelease();
+        await Promise.all([closing, duplicate]);
+        expect(releaseInstance).toHaveBeenCalledOnce();
+        // Close drops with logging; deletion makes its existing final cleanup call.
+        expect(dropSessionDatabase.mock.calls).toEqual([[job, expect.any(Function)], [job]]);
+        expect(deleteJob).toHaveBeenCalledOnce();
+        expect(closedEvents).toHaveLength(1);
+      } finally {
+        finishRelease?.();
+        bus.off('job', onJob);
       }
     },
   );
