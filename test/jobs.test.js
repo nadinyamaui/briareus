@@ -10348,6 +10348,48 @@ describe('Codex turn usage', () => {
     },
   );
 
+  it.each(['success', 'failure'])(
+    'keeps manual compaction %s from accepting work during closing cleanup',
+    async (outcome) => {
+      const job = getJob('codex-usage');
+      let finishCompaction;
+      compactCodexThread.mockImplementationOnce(
+        () =>
+          new Promise((resolve, reject) => {
+            finishCompaction = () =>
+              outcome === 'success' ? resolve() : reject(new Error('Compaction canceled'));
+          }),
+      );
+      let finishDrop;
+      dropSessionDatabase.mockImplementationOnce(() => new Promise((resolve) => (finishDrop = resolve)));
+      const pending = compactDevSession(job.id);
+      const result = pending.catch((error) => error);
+      const closing = closeDevSession(job.id);
+      try {
+        finishCompaction();
+        if (outcome === 'failure') expect(await result).toMatchObject({ message: 'Compaction canceled' });
+        else await result;
+        await vi.waitFor(() => expect(finishDrop).toBeTypeOf('function'));
+        expect(publicJob(job)).toMatchObject({ status: 'running', compacting: false });
+        expect(job.closing).toBe(true);
+        expect(job.turnCanceled).toBe(true);
+        sendDevMessage(job.id, 'Work during cleanup');
+        expect(children).toHaveLength(0);
+        expect(job.proc).toBeNull();
+        expect(job.turnCanceled).toBe(true);
+        finishDrop();
+        await closing;
+        expect(job.status).toBe('closed');
+        expect(job.proc).toBeNull();
+        expect(children).toHaveLength(0);
+      } finally {
+        finishDrop?.();
+        await closing;
+        compactCodexThread.mockReset();
+      }
+    },
+  );
+
   it.each(['loopParentId', 'qaParentId', 'loopFixParentId'])(
     'preserves closing state after canceled follow-up accounting (%s)',
     async (parentField) => {
