@@ -11390,11 +11390,14 @@ describe('the shared browser', () => {
     browserState.endpoint = null;
   });
 
-  it('tells a turn nothing when it is off, or on and not up', () => {
+  it('tells a turn nothing when it is off, and retains the browser policy when on and not up', () => {
     browserState.endpoint = 'http://127.0.0.1:41234';
     expect(sharedBrowserNote({ id: 'b1', browser: false }, 'claude')).toBe('');
     browserState.endpoint = null;
-    expect(sharedBrowserNote({ id: 'b1', browser: true }, 'claude')).toBe('');
+    const note = sharedBrowserNote({ id: 'b1', browser: true }, 'claude');
+    expect(note).toContain('currently unavailable');
+    expect(note).toContain('leave browser work blocked instead of falling back to another browser');
+    expect(note).not.toContain('http://127.0.0.1:41234');
   });
 
   it('points claude and codex at the MCP tools, and the rest at connectOverCDP', () => {
@@ -11580,6 +11583,8 @@ describe('the shared browser in a session', () => {
     await settled;
     expect(seen.spawned).toBe(true);
     expect(seen.mcp).not.toHaveProperty('browser');
+    expect(seen.prompt).toContain('currently unavailable');
+    expect(seen.prompt).toContain('leave browser work blocked instead of falling back to another browser');
     expect(
       job.events.some((e) => e.text === 'Shared browser could not start: No Chromium on this server'),
     ).toBe(true);

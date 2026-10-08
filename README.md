@@ -320,6 +320,13 @@ to carry on from there. The browser outlives every turn and the profile
 outlives a close, so a login stays logged in until the session is deleted.
 [docs/api-v1.md](docs/api-v1.md#the-shared-browser) has the routes.
 
+While enabled, every turn instructs the agent to use only the shared browser,
+show login pages and QR codes there, and verify the content loaded before
+saying it is open. If the browser cannot start, the instruction still applies:
+the agent must report the problem and leave browser work blocked. These are
+agent instructions, not a sandbox restriction on launching other browsers
+through the shell. Open the session's Browser panel to watch its current page.
+
 Chromium is found by itself when Playwright has downloaded one (any QA run
 does) or one is on PATH; `BROWSER_BIN` overrides it.
 
