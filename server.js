@@ -639,9 +639,20 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 // without a headless MCP flag). The bearer token's whole authority is "this orchestrator and
 // its own workers".
 
-const workerRoutes = orchestratorRoutes({ agentSession, workerSessionsFor, setQaLoop, workerSummary });
+const workerRoutes = orchestratorRoutes({
+  agentSession,
+  workerSessionsFor,
+  setQaLoop,
+  workerSummary,
+  getJob,
+  workerTranscript,
+  jobEventsFor,
+  sendDevMessage,
+});
 const { orchestratorSession, workerOf } = workerRoutes;
 api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
+api.get('/api/agent/sessions/:id/question', workerRoutes.readQuestion);
+api.post('/api/agent/sessions/:id/question', workerRoutes.answerQuestion);
 
 api.post('/api/agent/sessions', (req, res) => {
   const orchestrator = orchestratorSession(req, res);

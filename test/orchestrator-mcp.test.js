@@ -102,7 +102,7 @@ describe('the JSON-RPC frame', () => {
     expect(res.result.serverInfo).toEqual({ name: 'reviewer-workers', version: '1.0.0' });
   });
 
-  it('lists the nine worker tools, with the two spawns requiring title and prompt', async () => {
+  it('lists the worker tools, with the two spawns requiring title and prompt', async () => {
     const s = await boot();
 
     const [res] = await s.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
@@ -112,6 +112,8 @@ describe('the JSON-RPC frame', () => {
       'fix_tooling',
       'list_workers',
       'read_worker',
+      'read_worker_question',
+      'answer_worker_question',
       'send_to_worker',
       'triage_findings',
       'retry_review',
@@ -645,5 +647,63 @@ describe('set_worker_qa_loop', () => {
     const [res] = await s.send(callTool('set_worker_qa_loop', { id: 'w1', on: true }));
     expect(res.result.isError).toBe(true);
     expect(res.result.content[0].text).toContain('turn the review loop on first');
+  });
+});
+
+describe('review/fix question tools', () => {
+  it('lists a paused fix with a usable parent-scoped recovery command', async () => {
+    stubFetch(
+      reply({
+        body: {
+          sessions: [
+            worker({
+              reviewLoop: { rounds: 4, fixing: true },
+              pendingWorkerQuestion: {
+                childId: 'f1',
+                role: 'fix',
+                status: 'idle',
+                questionSeq: 9,
+                answerable: true,
+              },
+            }),
+          ],
+        },
+      }),
+    );
+    const s = await boot();
+    const [res] = await s.send(callTool('list_workers', {}));
+    expect(res.result.content[0].text).toContain('review/fix paused on a question');
+    expect(res.result.content[0].text).toContain("read_worker_question({id: 'w1'})");
+    expect(res.result.content[0].text).not.toContain('fixing findings');
+  });
+  it('reads and answers using parent id and exact child question token', async () => {
+    const fetched = stubFetch(
+      reply({
+        body: {
+          question: { role: 'fix', childId: 'f1', questionSeq: 9, status: 'idle', answerable: true },
+          events: [{ kind: 'ask', question: 'Which option?' }],
+        },
+      }),
+      reply({ body: { session: worker() } }),
+    );
+    const s = await boot();
+    const [res] = await s.send(callTool('read_worker_question', { id: 'w1', tail: 4, full_text: true }));
+    expect(fetched.mock.calls[0][0]).toBe(`${URL_BASE}/api/agent/sessions/w1/question?tail=4&full_text=true`);
+    expect(res.result.content[0].text).toContain('child_id=f1, question_seq=9');
+    expect(res.result.content[0].text).toContain('Which option?');
+    await s.send(
+      callTool('answer_worker_question', {
+        id: 'w1',
+        child_id: 'f1',
+        question_seq: 9,
+        message: 'Option one',
+      }),
+    );
+    expect(fetched.mock.calls[1][0]).toBe(`${URL_BASE}/api/agent/sessions/w1/question`);
+    expect(JSON.parse(fetched.mock.calls[1][1].body)).toEqual({
+      childId: 'f1',
+      questionSeq: 9,
+      text: 'Option one',
+    });
   });
 });
