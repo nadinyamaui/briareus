@@ -1807,9 +1807,13 @@ describe('spawnWorkerSession', () => {
     ['fix', true],
     ['review', false],
     ['fix', false],
+    ['review', true, 'fresh', 'failed'],
+    ['fix', true, 'fresh', 'failed'],
+    ['review', true, undefined, 'closed'],
+    ['fix', true, undefined, 'closed'],
   ])(
-    'forwards a follow-up %s question only from the current child (%s; stale=%s)',
-    async (kind, current, stale) => {
+    'forwards a follow-up %s question only from the current child (%s; stale=%s; worker=%s)',
+    async (kind, current, stale, workerStatus = 'idle') => {
       const orchestrator = getJob('question-orch');
       const worker = getJob('question-worker');
       const job = getJob('question-child');
@@ -1820,7 +1824,7 @@ describe('spawnWorkerSession', () => {
         unattendedTurns: 0,
       });
       Object.assign(worker, {
-        status: 'idle',
+        status: workerStatus,
         reviewLoop: {
           rounds: 1,
           reviewing: kind === 'review',
@@ -1855,9 +1859,9 @@ describe('spawnWorkerSession', () => {
         expect(job.askText).toBe('Seed it too?');
         expect(worker.reviewLoop[kind === 'review' ? 'reviewing' : 'fixing']).toBe(true);
         const events = worker.events.slice(eventCount).filter((e) => e.text?.includes('stopped to ask'));
-        expect(events).toHaveLength(current ? 1 : 0);
-        expect(orchestrator.pendingWorkerNotices).toHaveLength(current ? 1 : 0);
-        if (current) {
+        expect(events).toHaveLength(current && workerStatus === 'idle' ? 1 : 0);
+        expect(orchestrator.pendingWorkerNotices).toHaveLength(current && workerStatus !== 'closed' ? 1 : 0);
+        if (current && workerStatus !== 'closed') {
           expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
             workerId: worker.id,
             kind: 'child-question',
@@ -1901,6 +1905,70 @@ describe('spawnWorkerSession', () => {
       }
     },
   );
+
+  it.each(
+    ['review', 'fix'].flatMap((kind) =>
+      [false, true].flatMap((asking) => [false, true].map((current) => [kind, asking, current])),
+    ),
+  )('recovers a failed %s answer (asking=%s; current=%s)', async (kind, asking, current) => {
+    const orchestrator = getJob('question-orch');
+    const worker = getJob('question-worker');
+    const job = getJob('question-child');
+    const active = kind === 'review' ? 'reviewing' : 'fixing';
+    const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
+    Object.assign(orchestrator, {
+      status: 'idle',
+      awaitingAnswer: true,
+      pendingWorkerNotices: [],
+    });
+    Object.assign(worker, {
+      status: 'idle',
+      reviewLoop: { rounds: 1, [active]: true, [childId]: current ? job.id : 'replacement' },
+    });
+    Object.assign(job, {
+      status: 'idle',
+      awaitingAnswer: true,
+      autoClose: true,
+      loopParentId: kind === 'review' ? worker.id : null,
+      loopFixParentId: kind === 'fix' ? worker.id : null,
+    });
+    const { children, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
+      children[0].emitLines(init, replay('Postgres'));
+      if (asking) children[0].emitLines(said('<ask-user>\nSeed it too?\n</ask-user>'));
+      children[0].emit('close', 1);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      expect(job.error).toBeTruthy();
+      expect(job.awaitingAnswer).toBe(asking);
+      expect(worker.reviewLoop[active]).toBe(!current || asking);
+      expect(orchestrator.pendingWorkerNotices).toHaveLength(current ? 1 : 0);
+      if (current && asking) {
+        expect(worker.reviewLoop.failure).toBeUndefined();
+        expect(worker.reviewLoop[childId]).toBe(job.id);
+        expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
+          kind: 'child-question',
+          childId: job.id,
+          questionSeq: job.questionSeq,
+        });
+      } else if (current) {
+        expect(worker.reviewLoop.failure).toMatchObject({ round: 1, reason: job.error });
+        expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
+          workerId: worker.id,
+          kind: 'loop',
+          text: expect.stringContaining('retry_review'),
+        });
+        worker.status = 'running'; // Leave the retry armed without starting another real round.
+        await expect(retryLoopRound(worker.id)).resolves.toMatchObject({ started: false });
+      } else {
+        expect(worker.reviewLoop.failure).toBeUndefined();
+        expect(worker.reviewLoop[childId]).toBe('replacement');
+      }
+    } finally {
+      job.status = worker.status = orchestrator.status = 'closed';
+      restore();
+    }
+  });
 
   it('rejects answers while an idle asking session is releasing its database', async () => {
     const job = getJob('question-child');
