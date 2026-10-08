@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   sessions: [],
   registryComplete: true,
   removed: [],
+  quarantineError: null,
 }));
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ workspaceDir: state.root }) }));
@@ -21,6 +22,15 @@ vi.mock('../lib/jobs.js', () => ({
   DEV_OPEN: ['queued', 'preparing', 'running', 'idle'],
   listDevSessions: () => state.sessions,
   sessionRegistryComplete: () => state.registryComplete,
+}));
+
+vi.mock('../lib/workspace-quarantine.js', () => ({
+  quarantineWorkspace: (p) => {
+    if (state.quarantineError) throw state.quarantineError;
+    state.removed.push(p);
+    delete state.files[p];
+    return `${state.root}/.briareus-recovery/${path.basename(p)}/checkout`;
+  },
 }));
 
 vi.mock('fs', () => {
@@ -97,6 +107,7 @@ beforeEach(() => {
   state.sessions = [];
   state.registryComplete = true;
   state.removed = [];
+  state.quarantineError = null;
 });
 
 describe('parseSlotName / slotDir', () => {
@@ -106,10 +117,23 @@ describe('parseSlotName / slotDir', () => {
     expect(parseSlotName('acme__my-app__12')).toEqual({ repo: 'acme/my-app', index: 12 });
   });
 
+  it('retains valid repository names containing the recovery marker', async () => {
+    const name = 'acme__app.recovery-backup-prod';
+    const dir = slot(name);
+    expect(parseSlotName(name)).toEqual({ repo: 'acme/app.recovery-backup-prod', index: 1 });
+    expect(parseSlotName(`${name}__2`)).toEqual({ repo: 'acme/app.recovery-backup-prod', index: 2 });
+    expect(slotDir(name)).toBe(dir);
+    expect(await listWorkspaces()).toMatchObject([{ slot: name, repo: 'acme/app.recovery-backup-prod' }]);
+    expect(resetSetup(name)).toEqual({ slot: name });
+    expect(cleanWorkspace(name)).toEqual({ slot: name, removed: ['vendor', 'node_modules'] });
+  });
+
   it('ignores what is not a slot', () => {
     expect(parseSlotName('README.md')).toBeNull();
     expect(parseSlotName('__x')).toBeNull();
     expect(parseSlotName('.git')).toBeNull();
+    expect(parseSlotName('acme__app__3.recovery-backup-20261007T221639Z')).toBeNull();
+    expect(parseSlotName('.briareus-recovery')).toBeNull();
   });
 
   it('never resolves outside the pool', () => {
@@ -223,10 +247,29 @@ describe('actions', () => {
     state.files[path.join(state.root, 'acme__app__3')] = { dir: false };
     state.sessions = [{ id: 's2', status: 'idle', workDir: claimed }];
 
-    expect(pruneUnusedWorkspaces()).toEqual({ removed: ['acme__app'], errors: [] });
+    expect(pruneUnusedWorkspaces()).toMatchObject({ removed: ['acme__app'], errors: [] });
     expect(state.removed).toEqual([idle]);
     expect(state.files[claimed]).toBeDefined();
     expect(state.files[path.join(state.root, 'notes')]).toBeDefined();
+  });
+
+  it('leaves a failed quarantine in place and reports the error without deleting files', () => {
+    const dir = slot('acme__app');
+    state.quarantineError = new Error('Could not quarantine: permission denied; inspect permissions');
+    const result = pruneUnusedWorkspaces();
+    expect(result.removed).toEqual([]);
+    expect(result.preserved).toEqual([]);
+    expect(result.errors).toEqual([{ slot: 'acme__app', error: state.quarantineError.message }]);
+    expect(state.files[dir]).toBeDefined();
+    expect(state.removed).toEqual([]);
+  });
+
+  it('never prunes recovery-backup siblings', () => {
+    const backup = path.join(state.root, 'acme__app__3.recovery-backup-20261007T221639Z');
+    state.files[backup] = { dir: true };
+    expect(pruneUnusedWorkspaces().removed).toEqual([]);
+    expect(state.files[backup]).toBeDefined();
+    expect(state.removed).toEqual([]);
   });
 
   it('keeps a slot an interrupted or failed session left work in', () => {
@@ -282,7 +325,7 @@ describe('actions', () => {
     state.files[path.join(unknown, '.git', 'briareus-owner')] = { content: 's9' };
     state.sessions = [{ id: 's1', status: 'closed', workDir: known }];
 
-    expect(pruneUnusedWorkspaces()).toEqual({ removed: ['acme__app'], errors: [] });
+    expect(pruneUnusedWorkspaces()).toMatchObject({ removed: ['acme__app'], errors: [] });
     expect(state.removed).toEqual([known]);
     expect(state.files[unknown]).toBeDefined();
     expect(state.files[unmarked]).toBeDefined();

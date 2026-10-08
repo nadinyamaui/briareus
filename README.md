@@ -35,8 +35,15 @@ push a feature branch / open a PR when asked.
    database is created on the claimed server if it does not exist yet. A
    session that already knows its branch prefers the idle slot that is still
    on that branch: the one whose dependencies, build output and framework
-   caches are already the right ones. Idle slots are removed when Briareus
-   starts and once every 24 hours; slots claimed by open sessions are skipped.
+   caches are already the right ones. Idle slots are quarantined when Briareus
+   starts and once every 24 hours; slots claimed by open or recoverable sessions
+   are skipped. Whole checkouts move into `WORKSPACE_DIR/.briareus-recovery/`
+   without deleting files, so Docker-owned artifacts cannot cause partial
+   cleanup or destroy Git history. Logs name each preserved checkout; recover
+   any unpushed work before manually removing it. Quarantine stops at 100
+   preserved checkouts and reports an actionable error rather than deleting
+   old backups. New sessions skip slots missing `.git`; reopening such a slot
+   still requires inspection.
    The pool itself is listed at `GET /api/v1/settings/workspaces`: every slot's
    branch, HEAD, dirty state, size, dependency trees and which open session
    holds it, with two actions for idle slots: _Reset setup_ forgets the
