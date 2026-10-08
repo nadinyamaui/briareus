@@ -152,6 +152,7 @@ describe('the WhatsApp core inbox', () => {
     expect(ctx.calls.find((c) => c.path === '/api/sessions' && c.method === 'POST').body).toEqual({
       name: 'default',
       start: true,
+      config: { noweb: { store: { enabled: true, fullSync: true } } },
     });
     expect(await (await ctx.request('/default/qr')).json()).toEqual({
       mimetype: 'image/png',
