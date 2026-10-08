@@ -82,9 +82,8 @@ describe('migrator', () => {
     const pool = fakePool();
     expect(await rollbackLastBatch(pool)).toEqual([]);
     await createMigrator(pool).umzug.up();
-    // One batch holds every migration, so the Codex usage backfill, which
-    // cannot be undone either, is the first to refuse.
-    await expect(rollbackLastBatch(pool)).rejects.toThrow(/Codex usage backfill cannot be rolled back/);
+    // The latest data reconciliation is irreversible and refuses first.
+    await expect(rollbackLastBatch(pool)).rejects.toThrow(/Measured-cache pricing cannot be rolled back/);
     const baseline = await import('../migrations/2026_08_27_000000_baseline.js');
     await expect(baseline.down()).rejects.toThrow(/baseline migration cannot be rolled back/);
   });
