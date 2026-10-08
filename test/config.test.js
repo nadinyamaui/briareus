@@ -4,6 +4,7 @@ import path from 'node:path';
 // config.js reads .env, probes for the claude binary and caches it all at import, so each test
 // builds its own module instance over a mocked filesystem.
 const disk = vi.hoisted(() => ({
+  privateFiles: new Map(),
   env: null, // string contents of .env, or null for "no such file"
   readThrows: null,
   files: new Set(), // paths that exist and are files
@@ -20,7 +21,8 @@ vi.mock('fs', () => {
         if (disk.statThrows.has(p)) throw new Error('permission denied');
         return exists(p);
       },
-      readFileSync: () => {
+      readFileSync: (p) => {
+        if (disk.privateFiles.has(p)) return disk.privateFiles.get(p);
         if (disk.readThrows) throw disk.readThrows;
         return disk.env;
       },
@@ -72,6 +74,7 @@ const complete = (over = {}) => envText({ ...COMPLETE, ...over });
 let savedEnv;
 beforeEach(() => {
   disk.env = null;
+  disk.privateFiles = new Map();
   disk.readThrows = null;
   disk.files = new Set();
   disk.dirs = new Set();
@@ -79,7 +82,11 @@ beforeEach(() => {
   disk.whichOutput = null;
   savedEnv = { ...process.env };
   for (const k of Object.keys(process.env))
-    if (/^(R2_|CLOUDFLARE_|OPENAI_TRANSCRIBE_|PREVIEW_ACCESS_CLIENT_|GOOGLE_OAUTH_|MICROSOFT_OAUTH_)/.test(k))
+    if (
+      /^(R2_|CLOUDFLARE_|OPENAI_TRANSCRIBE_|PREVIEW_ACCESS_CLIENT_|GOOGLE_OAUTH_|MICROSOFT_OAUTH_|WAHA_)/.test(
+        k,
+      )
+    )
       delete process.env[k];
 });
 
@@ -837,5 +844,29 @@ describe('reading a .env file', () => {
     expect(
       parseEnvFile(['export AUTH_USER=me', 'AUTH_PASSWORD=abc #123', 'DB_PASSWORD="se#cret"'].join('\n')),
     ).toEqual({ AUTH_USER: 'me', AUTH_PASSWORD: 'abc #123', DB_PASSWORD: 'se#cret' });
+  });
+});
+
+describe('WhatsApp configuration', () => {
+  it('is optional and requires both the URL and key when enabled', async () => {
+    const disabled = await loadConfig(complete());
+    expect(disabled.getConfig().whatsapp).toBeNull();
+    const partial = await loadConfig(complete({ WAHA_URL: 'http://127.0.0.1:8203' }));
+    expect(() => partial.getConfig()).toThrow(/WAHA_API_KEY/);
+  });
+  it('reads the installer’s private file, with process environment taking precedence', async () => {
+    disk.privateFiles.set(
+      '/private/waha.env',
+      'WAHA_URL=http://127.0.0.1:8203/\nWAHA_API_KEY=installed-secret',
+    );
+    process.env.WAHA_API_KEY = 'rotated-secret';
+    const cfg = await loadConfig(complete({ WAHA_CONFIG_FILE: '/private/waha.env' }));
+    expect(cfg.getConfig().whatsapp).toEqual({ url: 'http://127.0.0.1:8203', apiKey: 'rotated-secret' });
+  });
+  it('rejects unsafe URL schemes and embedded credentials', async () => {
+    for (const url of ['file:///private', 'http://user:secret@localhost', 'http://localhost?apiKey=secret']) {
+      const cfg = await loadConfig(complete({ WAHA_URL: url, WAHA_API_KEY: 'key' }));
+      expect(() => cfg.getConfig()).toThrow(/WAHA_URL/);
+    }
   });
 });

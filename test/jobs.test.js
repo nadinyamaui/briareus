@@ -912,6 +912,9 @@ describe('spawnWorkerSession', () => {
       row('w-a1', { parentId: 'orch-a', day: 2 }),
       row('w-a2', { parentId: 'orch-a', day: 3 }),
       row('bg-claude', {}),
+      row('question-orch', { orchestrator: true }),
+      row('question-worker', { parentId: 'question-orch' }),
+      row('question-child', {}),
     ];
     await initJobs();
     getJob('orch-a').status = 'idle';
@@ -1790,6 +1793,482 @@ describe('spawnWorkerSession', () => {
     } finally {
       restore();
     }
+  });
+
+  it.each([
+    ...['review', 'fix'].flatMap((kind) =>
+      ['answered', 'disarmed', 'replaced', 'new-question', 'closing', 'fresh'].map((stale) => [
+        kind,
+        true,
+        stale,
+      ]),
+    ),
+    ['review', true],
+    ['fix', true],
+    ['review', false],
+    ['fix', false],
+    ['review', true, 'fresh', 'failed'],
+    ['fix', true, 'fresh', 'failed'],
+    ['review', true, undefined, 'closed'],
+    ['fix', true, undefined, 'closed'],
+  ])(
+    'forwards a follow-up %s question only from the current child (%s; stale=%s; worker=%s)',
+    async (kind, current, stale, workerStatus = 'idle') => {
+      const orchestrator = getJob('question-orch');
+      const worker = getJob('question-worker');
+      const job = getJob('question-child');
+      Object.assign(orchestrator, {
+        status: 'idle',
+        awaitingAnswer: true,
+        pendingWorkerNotices: [],
+        unattendedTurns: 0,
+      });
+      Object.assign(worker, {
+        status: workerStatus,
+        reviewLoop: {
+          rounds: 1,
+          reviewing: kind === 'review',
+          fixing: kind === 'fix',
+          [kind === 'review' ? 'reviewSessionId' : 'fixSessionId']: current ? job.id : 'replaced-child',
+        },
+      });
+      Object.assign(job, {
+        status: 'idle',
+        awaitingAnswer: true,
+        askText: 'Which DB?',
+        autoClose: true,
+        loopParentId: kind === 'review' ? worker.id : null,
+        loopFixParentId: kind === 'fix' ? worker.id : null,
+      });
+      const eventCount = worker.events.length;
+      const { children, settled, restore } = fakeClaude();
+      try {
+        const done = settled(job);
+        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
+        children[0].emitLines(
+          init,
+          replay('Postgres'),
+          said('<ask-user>\nSeed it too?\n</ask-user>'),
+          result('Asked.'),
+        );
+        await vi.waitFor(() => expect(children[0].ended).toBe(true));
+        children[0].emit('close', 0);
+        await done;
+        expect(job.status).toBe('idle');
+        expect(job.awaitingAnswer).toBe(true);
+        expect(job.askText).toBe('Seed it too?');
+        expect(worker.reviewLoop[kind === 'review' ? 'reviewing' : 'fixing']).toBe(true);
+        const events = worker.events.slice(eventCount).filter((e) => e.text?.includes('stopped to ask'));
+        expect(events).toHaveLength(current && workerStatus === 'idle' ? 1 : 0);
+        expect(orchestrator.pendingWorkerNotices).toHaveLength(current && workerStatus !== 'closed' ? 1 : 0);
+        if (current && workerStatus !== 'closed') {
+          expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
+            workerId: worker.id,
+            kind: 'child-question',
+            childId: job.id,
+            questionSeq: job.questionSeq,
+            text: expect.stringContaining(`the ${kind} is paused on a question`),
+          });
+          expect(orchestrator.pendingWorkerNotices[0].text).toContain(
+            `read_worker_question({id: '${worker.id}'})`,
+          );
+        }
+        if (stale) {
+          if (stale === 'answered') job.awaitingAnswer = false;
+          if (stale === 'disarmed') worker.reviewLoop = null;
+          if (stale === 'replaced')
+            worker.reviewLoop[kind === 'review' ? 'reviewSessionId' : 'fixSessionId'] = 'new-child';
+          if (stale === 'new-question') job.questionSeq++;
+          if (stale === 'closing') job.closing = true;
+          const before = orchestrator.events.length;
+          orchestrator.awaitingAnswer = false;
+          deliverWorkerNotices(orchestrator);
+          expect(orchestrator.pendingWorkerNotices).toHaveLength(0);
+          const fresh = stale === 'fresh';
+          expect(orchestrator.events.slice(before).filter((e) => e.kind === 'user')).toHaveLength(
+            fresh ? 1 : 0,
+          );
+          expect(orchestrator.unattendedTurns).toBe(fresh ? 1 : 0);
+          expect(children).toHaveLength(fresh ? 2 : 1);
+          if (fresh) {
+            const done = settled(orchestrator);
+            children[1].emitLines(init, result('Noted.'));
+            await vi.waitFor(() => expect(children[1].ended).toBe(true));
+            children[1].emit('close', 0);
+            await done;
+          }
+        }
+      } finally {
+        delete job.closing;
+        job.status = worker.status = orchestrator.status = 'closed';
+        restore();
+      }
+    },
+  );
+
+  it.each(
+    ['review', 'fix'].flatMap((kind) =>
+      [false, true].flatMap((asking) =>
+        [false, true].flatMap((current) =>
+          [false, true].flatMap((autoClose) =>
+            ['idle', 'failed', 'closed'].map((workerStatus) => [
+              kind,
+              asking,
+              current,
+              autoClose,
+              workerStatus,
+            ]),
+          ),
+        ),
+      ),
+    ),
+  )(
+    'recovers a failed %s answer (asking=%s; current=%s; autoClose=%s; workerStatus=%s)',
+    async (kind, asking, current, autoClose, workerStatus) => {
+      const orchestrator = getJob('question-orch');
+      const worker = getJob('question-worker');
+      const job = getJob('question-child');
+      const active = kind === 'review' ? 'reviewing' : 'fixing';
+      const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
+      Object.assign(orchestrator, {
+        status: 'idle',
+        awaitingAnswer: true,
+        pendingWorkerNotices: [],
+      });
+      Object.assign(worker, {
+        status: workerStatus,
+        reviewLoop: { rounds: 1, [active]: true, [childId]: current ? job.id : 'replacement' },
+      });
+      Object.assign(job, {
+        status: 'idle',
+        awaitingAnswer: true,
+        autoClose,
+        loopParentId: kind === 'review' ? worker.id : null,
+        loopFixParentId: kind === 'fix' ? worker.id : null,
+      });
+      const { children, restore } = fakeClaude();
+      try {
+        releaseInstance.mockClear();
+        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
+        children[0].emitLines(init, replay('Postgres'));
+        if (asking) children[0].emitLines(said('<ask-user>\nSeed it too?\n</ask-user>'));
+        children[0].emit('close', 1);
+        const released = current && !asking && autoClose;
+        await vi.waitFor(() => expect(job.status).toBe(released ? 'failed' : 'idle'));
+        await vi.waitFor(() => expect(worker.reviewLoop[active]).toBe(!current || asking));
+        if (released) expect(releaseInstance).toHaveBeenCalledWith(job);
+        else expect(releaseInstance).not.toHaveBeenCalled();
+        expect(getJob(job.id)).toBe(job); // Failed transcript/work remain recoverable.
+        expect(job.error).toBeTruthy();
+        expect(job.awaitingAnswer).toBe(asking);
+        expect(worker.reviewLoop[active]).toBe(!current || asking);
+        expect(orchestrator.pendingWorkerNotices).toHaveLength(current && workerStatus !== 'closed' ? 1 : 0);
+        if (current && asking) {
+          expect(worker.reviewLoop.failure).toBeUndefined();
+          expect(worker.reviewLoop[childId]).toBe(job.id);
+          if (workerStatus !== 'closed')
+            expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
+              kind: 'child-question',
+              childId: job.id,
+              questionSeq: job.questionSeq,
+            });
+        } else if (current && !asking) {
+          expect(worker.reviewLoop.failure).toMatchObject({ round: 1, reason: job.error });
+          if (workerStatus !== 'closed')
+            expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
+              workerId: worker.id,
+              kind: 'loop',
+              text: expect.stringContaining('retry_review'),
+            });
+          if (workerStatus === 'failed') {
+            const notice = orchestrator.pendingWorkerNotices[0].text;
+            expect(notice).toContain('send_to_worker');
+            expect(notice).toContain('before retrying');
+          }
+          worker.status = 'running'; // Leave the retry armed without starting another real round.
+          await expect(retryLoopRound(worker.id)).resolves.toMatchObject({ started: false });
+        } else if (!current) {
+          expect(worker.reviewLoop.failure).toBeUndefined();
+          expect(worker.reviewLoop[childId]).toBe('replacement');
+        }
+      } finally {
+        job.status = worker.status = orchestrator.status = 'closed';
+        restore();
+      }
+    },
+  );
+
+  it.each(['review', 'fix'].flatMap((kind) => [false, true].map((replace) => [kind, replace])))(
+    'releases failed %s resources before retry guidance (replacement=%s)',
+    async (kind, replace) => {
+      const orchestrator = getJob('question-orch');
+      const worker = getJob('question-worker');
+      const job = getJob('question-child');
+      const active = kind === 'review' ? 'reviewing' : 'fixing';
+      const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
+      Object.assign(orchestrator, { status: 'idle', awaitingAnswer: true, pendingWorkerNotices: [] });
+      Object.assign(worker, {
+        status: 'idle',
+        reviewLoop: { rounds: 1, [active]: true, [childId]: job.id },
+      });
+      Object.assign(job, {
+        status: 'idle',
+        awaitingAnswer: true,
+        autoClose: true,
+        loopParentId: kind === 'review' ? worker.id : null,
+        loopFixParentId: kind === 'fix' ? worker.id : null,
+      });
+      let finishRelease;
+      delete job.failureUnreported;
+      releaseInstance.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishRelease = resolve;
+          }),
+      );
+      const { children, restore } = fakeClaude();
+      const capacity = state.capacity;
+      try {
+        state.claimsServer = true;
+        state.capacity = 1000;
+        state.capacity -= devSessionSlots(worker.repo); // Fill the pool with the existing sessions.
+        expect(devSessionSlots(worker.repo)).toBe(0);
+        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
+        children[0].emitLines(init, replay('Postgres'));
+        children[0].emit('close', 1);
+        await vi.waitFor(() => expect(finishRelease).toBeTypeOf('function'));
+        expect(worker.reviewLoop[active]).toBe(true);
+        expect(orchestrator.pendingWorkerNotices).toHaveLength(0);
+        if (replace) worker.reviewLoop[childId] = 'replacement';
+        finishRelease();
+        await vi.waitFor(() => {
+          if (replace) expect(job.failureUnreported).toBe(true);
+          else expect(orchestrator.pendingWorkerNotices).toHaveLength(1);
+        });
+        expect(devSessionSlots(worker.repo)).toBe(1);
+        expect(getJob(job.id)).toBe(job);
+        expect(job.events.some((e) => e.kind === 'stderr')).toBe(true);
+        expect(worker.reviewLoop[active]).toBe(replace);
+        expect(worker.reviewLoop.pendingResult).toBeUndefined();
+        if (replace) {
+          expect(worker.reviewLoop[childId]).toBe('replacement');
+          expect(worker.reviewLoop.failure).toBeUndefined();
+          expect(orchestrator.pendingWorkerNotices).toHaveLength(0);
+        } else {
+          expect(worker.reviewLoop.failure).toMatchObject({ round: 1, reason: job.error });
+        }
+      } finally {
+        finishRelease?.();
+        job.status = worker.status = orchestrator.status = 'closed';
+        state.claimsServer = false;
+        state.capacity = capacity;
+        restore();
+      }
+    },
+  );
+
+  it.each(['review', 'fix'])(
+    'blocks both recovery paths until failed %s cleanup and notification finish',
+    async (kind) => {
+      const orchestrator = getJob('question-orch');
+      const worker = getJob('question-worker');
+      const job = getJob('question-child');
+      const originalWorkDir = job.workDir;
+      const active = kind === 'review' ? 'reviewing' : 'fixing';
+      const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
+      Object.assign(orchestrator, { status: 'idle', awaitingAnswer: true, pendingWorkerNotices: [] });
+      Object.assign(worker, {
+        status: 'idle',
+        reviewLoop: { rounds: 1, [active]: true, [childId]: job.id },
+      });
+      Object.assign(job, {
+        status: 'idle',
+        awaitingAnswer: true,
+        autoClose: true,
+        loopParentId: kind === 'review' ? worker.id : null,
+        loopFixParentId: kind === 'fix' ? worker.id : null,
+      });
+      let finishRelease;
+      releaseInstance.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishRelease = resolve;
+          }),
+      );
+      const { children, settled, restore } = fakeClaude();
+      try {
+        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
+        children[0].emitLines(init, replay('Postgres'));
+        children[0].emit('close', 1);
+        await vi.waitFor(() => expect(finishRelease).toBeTypeOf('function'));
+        const workDir = job.workDir;
+        const dbServerId = job.dbServerId;
+        const allocations = acquireInstance.mock.calls.length;
+        const events = job.events.length;
+        expect(job.status).toBe('failed');
+        expect(() => reopenDevSession(job.id)).toThrow(/finish.*cleanup/);
+        expect(() => sendDevMessage(job.id, 'Recover')).toThrow(/finish.*cleanup/);
+        expect(job.workDir).toBe(workDir);
+        expect(job.dbServerId).toBe(dbServerId);
+        expect(acquireInstance.mock.calls).toHaveLength(allocations);
+        expect(job.events).toHaveLength(events);
+        expect(children).toHaveLength(1);
+        expect(worker.reviewLoop[active]).toBe(true);
+        expect(orchestrator.pendingWorkerNotices).toHaveLength(0);
+        // An unrelated owner turn must not discard the child while cleanup waits.
+        const ownerDone = settled(worker);
+        sendDevMessage(worker.id, 'Report progress');
+        children[1].emitLines(
+          init,
+          replay('Report progress'),
+          said('<ask-user>\nContinue?\n</ask-user>'),
+          result('Asked.'),
+        );
+        await vi.waitFor(() => expect(children[1].ended).toBe(true));
+        children[1].emit('close', 0);
+        await ownerDone;
+        expect(worker.reviewLoop[active]).toBe(true);
+        expect(worker.reviewLoop[childId]).toBe(job.id);
+        orchestrator.pendingWorkerNotices = []; // Ignore the unrelated owner question.
+        finishRelease();
+        await vi.waitFor(() => expect(worker.reviewLoop[active]).toBe(false));
+        expect(worker.reviewLoop.failure).toMatchObject({ reason: job.error });
+        expect(orchestrator.pendingWorkerNotices).toHaveLength(1);
+        // Recovery after retirement may allocate; no old failure callback can
+        // clear that recovering lifecycle or release its newly acquired resources.
+        let finishAcquire;
+        acquireInstance.mockImplementationOnce(
+          () =>
+            new Promise((resolve, reject) => {
+              finishAcquire = reject;
+            }),
+        );
+        expect(() => reopenDevSession(job.id)).not.toThrow();
+        await vi.waitFor(() => expect(finishAcquire).toBeTypeOf('function'));
+        expect(job.status).toBe('preparing');
+        expect(acquireInstance.mock.calls).toHaveLength(allocations + 1);
+        const releases = releaseInstance.mock.calls.length;
+        // Stop before workspace preparation so this remains a process-free test.
+        finishAcquire(new Error('fixture: stop before workspace preparation'));
+        await vi.waitFor(() => expect(releaseInstance.mock.calls).toHaveLength(releases + 1));
+      } finally {
+        finishRelease?.();
+        job.status = worker.status = orchestrator.status = 'closed';
+        job.workDir = originalWorkDir;
+        restore();
+      }
+    },
+  );
+
+  it.each(['review', 'fix'])(
+    'rejects reopening a failed %s child when its close outlasts retirement',
+    async (kind) => {
+      const orchestrator = getJob('question-orch');
+      const worker = getJob('question-worker');
+      const job = getJob('question-child');
+      const originalWorkDir = job.workDir;
+      const active = kind === 'review' ? 'reviewing' : 'fixing';
+      const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
+      Object.assign(orchestrator, { status: 'idle', awaitingAnswer: true, pendingWorkerNotices: [] });
+      Object.assign(worker, {
+        status: 'idle',
+        reviewLoop: { rounds: 1, [active]: true, [childId]: job.id },
+      });
+      Object.assign(job, {
+        status: 'idle',
+        awaitingAnswer: true,
+        autoClose: true,
+        loopParentId: kind === 'review' ? worker.id : null,
+        loopFixParentId: kind === 'fix' ? worker.id : null,
+      });
+      let finishRelease;
+      let finishDrop;
+      let closing;
+      releaseInstance.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishRelease = resolve;
+          }),
+      );
+      dropSessionDatabase.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishDrop = resolve;
+          }),
+      );
+      const { children, restore } = fakeClaude();
+      try {
+        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
+        children[0].emitLines(init, replay('Postgres'));
+        children[0].emit('close', 1);
+        await vi.waitFor(() => expect(finishRelease).toBeTypeOf('function'));
+        expect(job.status).toBe('failed');
+        closing = closeDevSession(job.id);
+        await vi.waitFor(() => expect(finishDrop).toBeTypeOf('function'));
+        finishRelease();
+        await vi.waitFor(() => expect(orchestrator.pendingWorkerNotices).toHaveLength(1));
+        expect(worker.reviewLoop[active]).toBe(false);
+        expect(job.closing).toBe(true);
+        expect(job.status).toBe('failed');
+        const allocations = acquireInstance.mock.calls.length;
+        const workDir = job.workDir;
+        const dbServerId = job.dbServerId;
+        const events = job.events.length;
+        expect(() => reopenDevSession(job.id)).toThrow(/finish closing/);
+        expect(acquireInstance.mock.calls).toHaveLength(allocations);
+        expect(job.workDir).toBe(workDir);
+        expect(job.dbServerId).toBe(dbServerId);
+        expect(job.events).toHaveLength(events);
+        expect(job.status).toBe('failed');
+        expect(children).toHaveLength(1);
+      } finally {
+        finishRelease?.();
+        // Keep the shared fixture's record for the remaining question tests.
+        job.autoClose = false;
+        finishDrop?.();
+        await closing;
+        job.status = worker.status = orchestrator.status = 'closed';
+        job.workDir = originalWorkDir;
+        restore();
+      }
+      expect(job.closing).toBeUndefined();
+      expect(job.status).toBe('closed');
+    },
+  );
+
+  it('rejects answers while an idle asking session is releasing its database', async () => {
+    const job = getJob('question-child');
+    Object.assign(job, {
+      status: 'idle',
+      awaitingAnswer: true,
+      autoClose: false,
+      loopParentId: null,
+      loopFixParentId: null,
+    });
+    let finishDrop;
+    dropSessionDatabase.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishDrop = resolve;
+        }),
+    );
+    const { children, restore } = fakeClaude();
+    const closing = closeDevSession(job.id);
+    try {
+      await vi.waitFor(() => expect(finishDrop).toBeTypeOf('function'));
+      expect(job.closing).toBe(true);
+      expect(job.status).toBe('idle');
+      expect(() => sendDevMessage(job.id, 'Use Postgres', undefined, { instruction: true })).toThrow(
+        /finish closing/,
+      );
+      expect(job.awaitingAnswer).toBe(true);
+      expect(children).toHaveLength(0);
+    } finally {
+      finishDrop();
+      await closing;
+      restore();
+    }
+    expect(job.status).toBe('closed');
   });
 
   it('marks a cut in the questions the inbox shows rather than dropping the rest unseen', async () => {
@@ -5994,6 +6473,21 @@ describe('the review loop: what a closing fix session reports back', () => {
   });
 
   const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
+
+  it('projects the current fix question without pretending the task worker itself asked', () => {
+    const parent = getJob('fixpar-1');
+    const fix = getJob('fix-1');
+    Object.assign(fix, { awaitingAnswer: true, questionSeq: 23 });
+    expect(workerSummary(parent)).toMatchObject({
+      awaitingAnswer: false,
+      pendingWorkerQuestion: { childId: fix.id, role: 'fix', questionSeq: 23, answerable: true },
+    });
+    fix.status = 'closed';
+    expect(workerSummary(parent).pendingWorkerQuestion).toBeNull();
+    fix.status = 'idle';
+    fix.awaitingAnswer = false;
+    expect(workerSummary(parent).pendingWorkerQuestion).toBeNull();
+  });
 
   it('a finished fix session releases the loop and offers the next round', async () => {
     await closeDevSession('fix-1');
@@ -10373,7 +10867,7 @@ describe('Codex turn usage', () => {
         expect(publicJob(job)).toMatchObject({ status: 'running', compacting: false });
         expect(job.closing).toBe(true);
         expect(job.turnCanceled).toBe(true);
-        sendDevMessage(job.id, 'Work during cleanup');
+        expect(() => sendDevMessage(job.id, 'Work during cleanup')).toThrow(/finish closing/);
         expect(children).toHaveLength(0);
         expect(job.proc).toBeNull();
         expect(job.turnCanceled).toBe(true);

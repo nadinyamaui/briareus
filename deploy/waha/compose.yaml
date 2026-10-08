@@ -1,0 +1,28 @@
+# Bare-metal core: scripts/install-waha.sh writes the private .env and copies
+# this file to ~/.config/briareus/waha, outside disposable session worktrees.
+name: briareus-whatsapp
+services:
+  waha:
+    image: ${WAHA_IMAGE:-devlikeapro/waha:latest}
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:${WAHA_PORT:-8203}:3000'
+    environment:
+      WAHA_API_KEY: ${WAHA_API_KEY:?WAHA_API_KEY is required}
+      WHATSAPP_DEFAULT_ENGINE: WEBJS
+      WHATSAPP_FILES_FOLDER: /app/.media
+      WAHA_PRINT_QR: 'false'
+      WAHA_DASHBOARD_ENABLED: 'false'
+      WHATSAPP_SWAGGER_ENABLED: 'false'
+    volumes:
+      - sessions:/app/.sessions
+      - media:/app/.media
+    shm_size: 512mb
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+volumes:
+  sessions:
+  media:

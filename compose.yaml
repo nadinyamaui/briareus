@@ -25,6 +25,8 @@ services:
       # test run leaves on a pull request both start with it.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:4300}
       GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required, the board is empty without it}
+      WAHA_URL: ${WAHA_URL:-}
+      WAHA_API_KEY: ${WAHA_API_KEY:-}
       CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-5-5}
       CLAUDE_EFFORT: ${CLAUDE_EFFORT:-high}
       DB_HOST: db
