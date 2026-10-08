@@ -5995,6 +5995,21 @@ describe('the review loop: what a closing fix session reports back', () => {
 
   const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
 
+  it('projects the current fix question without pretending the task worker itself asked', () => {
+    const parent = getJob('fixpar-1');
+    const fix = getJob('fix-1');
+    Object.assign(fix, { awaitingAnswer: true, questionSeq: 23 });
+    expect(workerSummary(parent)).toMatchObject({
+      awaitingAnswer: false,
+      pendingWorkerQuestion: { childId: fix.id, role: 'fix', questionSeq: 23, answerable: true },
+    });
+    fix.status = 'closed';
+    expect(workerSummary(parent).pendingWorkerQuestion).toBeNull();
+    fix.status = 'idle';
+    fix.awaitingAnswer = false;
+    expect(workerSummary(parent).pendingWorkerQuestion).toBeNull();
+  });
+
   it('a finished fix session releases the loop and offers the next round', async () => {
     await closeDevSession('fix-1');
     await new Promise((r) => setTimeout(r, 0)); // the report is fire-and-forget
