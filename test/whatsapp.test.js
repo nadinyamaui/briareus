@@ -316,6 +316,91 @@ describe('the WhatsApp core inbox', () => {
     expect((await service.messages('default', CHAT, { offset: '100000' })).nextOffset).toBeNull();
   });
 
+  it('preserves quote context without treating a stanza ID as a full message ID', async () => {
+    const quoted = {
+      ...RAW_MESSAGE,
+      id: `true_${CHAT}_REPLY`,
+      fromMe: true,
+      replyTo: {
+        id: 'ABC123',
+        participant: CHAT,
+        body: 'Hello',
+        hasMedia: false,
+        media: { url: 'http://private/api/files/quote' },
+        _data: { secret: KEY },
+      },
+    };
+    const service = createWhatsAppService({
+      config: () => ({ url: 'http://waha', apiKey: KEY }),
+      fetcher: async (url) =>
+        Response.json(
+          String(url).includes('/overview')
+            ? [{ id: CHAT, lastMessage: quoted }]
+            : [quoted, RAW_MESSAGE, { ...quoted, replyTo: { body: 'Older caption', hasMedia: true } }],
+        ),
+    });
+    const history = await service.messages('default', CHAT);
+    expect(history.messages[0].replyTo).toEqual({
+      id: 'ABC123',
+      participant: CHAT,
+      text: history.messages[1].text,
+      hasMedia: false,
+    });
+    expect(history.messages[0].replyTo.id).not.toBe(history.messages[1].id);
+    expect(history.messages[1].replyTo).toBeNull();
+    expect(history.messages[2].replyTo).toEqual({
+      id: null,
+      participant: '',
+      text: 'Older caption',
+      hasMedia: true,
+    });
+    const chats = await service.conversations('default');
+    expect(chats.conversations[0].lastMessage.replyTo).toEqual(history.messages[0].replyTo);
+    expect(JSON.stringify({ history, chats })).not.toContain(KEY);
+    expect(JSON.stringify({ history, chats })).not.toContain('http://private');
+  });
+
+  it.each(['/proxy/waha', '/api'])(
+    'rebases attachments under %s while retaining file-path and origin protections',
+    async (prefix) => {
+      let location;
+      const upstream = express();
+      upstream.get(`${prefix}/api/default/chats/:chat/messages/:message`, (req, res) => {
+        expect(req.headers['x-api-key']).toBe(KEY);
+        res.json({ hasMedia: true, media: { url: location } });
+      });
+      upstream.get(`${prefix}/api/files/default/test`, (req, res) => {
+        expect(req.headers['x-api-key']).toBe(KEY);
+        res.send('attachment');
+      });
+      const origin = await serve(upstream);
+      const service = createWhatsAppService({
+        config: () => ({ url: `${origin}${prefix}`, apiKey: KEY }),
+      });
+      for (const url of [
+        `${origin}${prefix}/api/files/default/test`,
+        `${prefix}/api/files/default/test`,
+        '/api/files/default/test',
+        `https://untrusted.invalid${prefix}/api/files/default/test`,
+      ]) {
+        location = url;
+        expect(await (await service.media('default', CHAT, MID)).text()).toBe('attachment');
+      }
+      for (const url of [
+        `${prefix}-other/api/files/default/test`,
+        `${prefix}/api/sessions`,
+        `${prefix}/api/files/../sessions`,
+        `${prefix}/api/files/%2fsecret`,
+        `${prefix}/api/files/%5csecret`,
+        `${prefix}/api/files/%2e%2fsecret`,
+        'https://untrusted.invalid/private',
+      ]) {
+        location = url;
+        await expect(service.media('default', CHAT, MID)).rejects.toMatchObject({ status: 502 });
+      }
+    },
+  );
+
   it('streams a healthy attachment longer than the header deadline', async () => {
     const service = await mediaService((_req, res) => {
       res.type('audio/ogg').write('start');

@@ -97,6 +97,13 @@ WAHA can filter out protocol records after paging. It has no reliable end-of-his
 indicator; message `nextOffset` becomes null at the supported offset bound.
 New arrivals can shift offsets, so discard cached page positions on a full refresh.
 
+Message `replyTo` is null or quoted context `{ id, participant, text, hasMedia }`.
+Use that context to display a quote even when the original is outside loaded
+history. Its `id` is WAHA's engine quote identifier (often a raw stanza ID),
+which can differ from the full message `id` and is null when unavailable.
+For outgoing quoted replies, pass the original full message `id` from history
+as the POST body's `replyTo`, rather than this quote identifier.
+
 Never automatically retry a failed send: WAHA may have accepted the message
 before a connection or receipt failed. Check the conversation first. Errors
 are 503 when disabled, 404 for missing accounts/messages, 409 for refused

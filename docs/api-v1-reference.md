@@ -2740,19 +2740,30 @@ A phone linked to the operator’s WAHA server, independent of projects and agen
 
 A WhatsApp message, with engine internals and private media URLs omitted.
 
+| Field         | Type             |                                                                              |
+| ------------- | ---------------- | ---------------------------------------------------------------------------- |
+| `id`          | `string`         | Opaque message ID; merge refreshed history by this ID                        |
+| `timestamp`   | `number`         | Unix timestamp in seconds                                                    |
+| `from`        | `string`         | Sender chat ID                                                               |
+| `to`          | `string`         | Recipient chat ID                                                            |
+| `fromMe`      | `boolean`        | Sent by the linked account                                                   |
+| `participant` | `string`         | Author in a group chat, when available                                       |
+| `text`        | `string`         | Text or media caption                                                        |
+| `hasMedia`    | `boolean`        | Has a downloadable attachment                                                |
+| `media`       | `object?`        | Attachment { mimetype, filename }; download through the media endpoint       |
+| `ack`         | `number?`        | Delivery state: -1 error, 0 pending, 1 server, 2 delivered, 3 read, 4 played |
+| `replyTo`     | `WhatsAppQuote?` | Quoted context, or null when absent                                          |
+
+### WhatsAppQuote
+
+Quoted context for display even when the original is outside loaded history. Its engine identifier may be a raw stanza ID, not a full WhatsAppMessage.id; do not pass it as the outgoing replyTo. Use a full message ID from history to send a quoted reply.
+
 | Field         | Type      |                                                                              |
 | ------------- | --------- | ---------------------------------------------------------------------------- |
-| `id`          | `string`  | Opaque message ID; merge refreshed history by this ID                        |
-| `timestamp`   | `number`  | Unix timestamp in seconds                                                    |
-| `from`        | `string`  | Sender chat ID                                                               |
-| `to`          | `string`  | Recipient chat ID                                                            |
-| `fromMe`      | `boolean` | Sent by the linked account                                                   |
-| `participant` | `string`  | Author in a group chat, when available                                       |
-| `text`        | `string`  | Text or media caption                                                        |
-| `hasMedia`    | `boolean` | Has a downloadable attachment                                                |
-| `media`       | `object?` | Attachment { mimetype, filename }; download through the media endpoint       |
-| `ack`         | `number?` | Delivery state: -1 error, 0 pending, 1 server, 2 delivered, 3 read, 4 played |
-| `replyTo`     | `string?` | Quoted message ID, when available                                            |
+| `id`          | `string?` | Engine quote identifier, when available; may differ from the full message ID |
+| `participant` | `string`  | Quoted author, when available                                                |
+| `text`        | `string`  | Quoted text or media caption, when available                                 |
+| `hasMedia`    | `boolean` | Quoted message contains media; private media URLs are omitted                |
 
 ### SlackWorkspace
 
