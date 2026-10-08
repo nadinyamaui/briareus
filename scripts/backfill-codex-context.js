@@ -61,6 +61,7 @@ async function scan(file) {
         ended = false;
         model = null;
         mixedModel = false;
+        at = undefined;
       }
       if (event.type === 'turn_context') {
         if (model && model !== p.model) mixedModel = true;
@@ -71,7 +72,9 @@ async function scan(file) {
         previous = p.info.total_token_usage;
         at = Date.parse(event.timestamp);
       }
-      if (p.type === 'task_complete') {
+      if (p.type === 'task_complete' || p.type === 'turn_aborted') {
+        // The ledger is booked at process close, after any final tool wait.
+        at = Date.parse(event.timestamp);
         finish();
         ended = true;
       }
@@ -120,18 +123,20 @@ try {
   for (const row of rows) {
     if (fields.some((k) => row[k] == null) || !row.repo) continue;
     const model = String(row.model || '').replace(/ \(\d+k\)$/, '');
-    const repo = String(row.repo)
-      .split('/')
-      .pop()
-      .toLowerCase()
-      .replace(/[^a-z0-9-]/g, '-');
+    const repo = String(row.repo).toLowerCase().split('/');
+    if (repo.length !== 2 || repo.some((part) => !part)) continue;
+    const worktree = repo.join('__');
     const candidates = (segments.get(key(row)) || []).filter(
       (s) =>
         s.model === model &&
         s.cwd
           .toLowerCase()
-          .replace(/[^a-z0-9/-]/g, '-')
-          .includes(repo) &&
+          .split(path.sep)
+          .some(
+            (part) =>
+              part === worktree ||
+              (part.startsWith(`${worktree}__`) && /^\d+$/.test(part.slice(worktree.length + 2))),
+          ) &&
         Number(row.at) >= s.at - 5000 &&
         Number(row.at) <= s.at + 300000,
     );
