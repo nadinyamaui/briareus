@@ -1065,6 +1065,87 @@ Approve or deny an SSH command. Needs `admin`.
 
 **Returns** `{ request: object }`
 
+### `GET /whatsapp/accounts`
+
+List linked WhatsApp accounts. Needs `admin`.
+
+**Returns** `{ configured: boolean, accounts: WhatsAppAccount[] }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. When disabled, returns { configured: false, accounts: [] }.
+
+### `GET /whatsapp/accounts/{id}`
+
+Read a WhatsApp account’s connection status. Needs `admin`.
+
+**Returns** `{ account: WhatsAppAccount }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+
+### `POST /whatsapp/accounts/{id}/start`
+
+Start or reconnect an account; create default when absent. Needs `admin`.
+
+**Returns** `{ account: WhatsAppAccount }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+
+### `GET /whatsapp/accounts/{id}/qr`
+
+Get the pairing QR code as a base64 PNG. Needs `admin`.
+
+**Returns** `{ mimetype: string, data: string }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Available in SCAN_QR_CODE; refresh periodically until WORKING. Scan from WhatsApp → Linked devices → Link a device. Do not store QR codes.
+
+### `POST /whatsapp/accounts/{id}/logout`
+
+Unlink the phone from WAHA. Needs `admin`.
+
+**Returns** `{ ok: boolean }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+
+### `GET /whatsapp/accounts/{id}/conversations`
+
+List WhatsApp chats, newest activity first. Needs `admin`.
+
+**Query**
+
+| Field    | Type      |                                                                   |
+| -------- | --------- | ----------------------------------------------------------------- |
+| `limit`  | `integer` | Page size, 1–100; 50 by default                                   |
+| `offset` | `integer` | The previous page’s nextOffset, 0–100000; omit for the first page |
+
+**Returns** `{ conversations: object[], nextOffset: integer? }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Each chat is { id, name, unreadCount, lastMessage: WhatsAppMessage|null }; unreadCount may be null when the engine omits it.
+
+### `GET /whatsapp/accounts/{id}/conversations/{chat}/messages`
+
+Read WhatsApp history, newest first. Needs `admin`.
+
+**Query**
+
+| Field    | Type      |                                                                   |
+| -------- | --------- | ----------------------------------------------------------------- |
+| `limit`  | `integer` | Page size, 1–100; 50 by default                                   |
+| `offset` | `integer` | The previous page’s nextOffset, 0–100000; omit for the first page |
+
+**Returns** `{ messages: WhatsAppMessage[], nextOffset: integer? }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Offset pagination can overlap when new messages arrive; deduplicate by ID. null nextOffset ends pagination.
+
+### `POST /whatsapp/accounts/{id}/conversations/{chat}/messages`
+
+Send a text message or quoted reply as the operator. Needs `admin`.
+
+**Body**
+
+| Field               | Type     |                                           |
+| ------------------- | -------- | ----------------------------------------- |
+| `text` **required** | `string` | Message text, 1–8000 characters           |
+| `replyTo`           | `string` | Optional quoted message ID from this chat |
+
+**Returns** 201 `{ message: WhatsAppMessage }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+
+### `POST /whatsapp/accounts/{id}/conversations/{chat}/read`
+
+Mark unread WhatsApp messages as read. Needs `admin`.
+
+**Returns** `{ ok: boolean }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+
+### `GET /whatsapp/accounts/{id}/conversations/{chat}/messages/{message}/media`
+
+Download a message attachment through the core. Needs `admin`.
+
+**Returns** the file. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Downloads only WAHA local file storage; the API key never reaches clients. Returns the attachment’s media type and Content-Disposition: attachment. Availability depends on the WAHA edition/engine; 501 for unsupported operations.
+
 ### `GET /slack/workspaces`
 
 List the workspaces available to the operator’s Slack inbox. Needs `admin`.
@@ -2645,6 +2726,34 @@ A server an agent may run commands on, with approval.
 | `dbPassword`       | `string`     | That user’s password. Write-only, stored encrypted; left out, the stored one stays                                   |
 | `hasDbCredentials` | `boolean`    | Whether a database login is stored; set by the server                                                                |
 
+### WhatsAppAccount
+
+A phone linked to the operator’s WAHA server, independent of projects and agent sessions.
+
+| Field    | Type      |                                                                                      |
+| -------- | --------- | ------------------------------------------------------------------------------------ |
+| `id`     | `string`  | The WAHA session name; default for the free Core edition                             |
+| `status` | `string`  | WAHA connection state, including STOPPED, STARTING, SCAN_QR_CODE, WORKING and FAILED |
+| `me`     | `object?` | Linked identity { id, name }, or null before pairing                                 |
+
+### WhatsAppMessage
+
+A WhatsApp message, with engine internals and private media URLs omitted.
+
+| Field         | Type      |                                                                              |
+| ------------- | --------- | ---------------------------------------------------------------------------- |
+| `id`          | `string`  | Opaque message ID; merge refreshed history by this ID                        |
+| `timestamp`   | `number`  | Unix timestamp in seconds                                                    |
+| `from`        | `string`  | Sender chat ID                                                               |
+| `to`          | `string`  | Recipient chat ID                                                            |
+| `fromMe`      | `boolean` | Sent by the linked account                                                   |
+| `participant` | `string`  | Author in a group chat, when available                                       |
+| `text`        | `string`  | Text or media caption                                                        |
+| `hasMedia`    | `boolean` | Has a downloadable attachment                                                |
+| `media`       | `object?` | Attachment { mimetype, filename }; download through the media endpoint       |
+| `ack`         | `number?` | Delivery state: -1 error, 0 pending, 1 server, 2 delivered, 3 read, 4 played |
+| `replyTo`     | `string?` | Quoted message ID, when available                                            |
+
 ### SlackWorkspace
 
 A Slack workspace the operator reads and replies in through the core inbox, plus optional access for project sessions; messages go out as the user who installed the Slack app.
@@ -2871,6 +2980,16 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/operations/maintenance`                                               | `POST /maintenance`                                                             |
 | `GET /api/ssh/requests`                                                          | `GET /ssh/requests`                                                             |
 | `POST /api/ssh/requests/:id/decision`                                            | `POST /ssh/requests/{id}/decision`                                              |
+| `GET /api/whatsapp/accounts`                                                     | `GET /whatsapp/accounts`                                                        |
+| `GET /api/whatsapp/accounts/:id`                                                 | `GET /whatsapp/accounts/{id}`                                                   |
+| `POST /api/whatsapp/accounts/:id/start`                                          | `POST /whatsapp/accounts/{id}/start`                                            |
+| `GET /api/whatsapp/accounts/:id/qr`                                              | `GET /whatsapp/accounts/{id}/qr`                                                |
+| `POST /api/whatsapp/accounts/:id/logout`                                         | `POST /whatsapp/accounts/{id}/logout`                                           |
+| `GET /api/whatsapp/accounts/:id/conversations`                                   | `GET /whatsapp/accounts/{id}/conversations`                                     |
+| `GET /api/whatsapp/accounts/:id/conversations/:chat/messages`                    | `GET /whatsapp/accounts/{id}/conversations/{chat}/messages`                     |
+| `POST /api/whatsapp/accounts/:id/conversations/:chat/messages`                   | `POST /whatsapp/accounts/{id}/conversations/{chat}/messages`                    |
+| `POST /api/whatsapp/accounts/:id/conversations/:chat/read`                       | `POST /whatsapp/accounts/{id}/conversations/{chat}/read`                        |
+| `GET /api/whatsapp/accounts/:id/conversations/:chat/messages/:message/media`     | `GET /whatsapp/accounts/{id}/conversations/{chat}/messages/{message}/media`     |
 | `GET /api/slack/inbox/workspaces`                                                | `GET /slack/workspaces`                                                         |
 | `GET /api/slack/inbox/:id/conversations`                                         | `GET /slack/workspaces/{id}/conversations`                                      |
 | `GET /api/slack/inbox/:id/conversations/:channel`                                | `GET /slack/workspaces/{id}/conversations/{channel}`                            |

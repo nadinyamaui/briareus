@@ -26,6 +26,16 @@ push a feature branch / open a PR when asked.
 > [Reaching it from anywhere](#reaching-it-from-anywhere) and
 > [SECURITY.md](SECURITY.md).
 
+## WhatsApp inbox
+
+The core’s operator inbox can read and reply to WhatsApp through a locally
+installed WAHA service, independently of coding sessions. Run
+`npm run install:waha` on the core machine, set the printed `WAHA_CONFIG_FILE`
+path, and restart the core after deploying the integration. Account linking,
+chat history, text replies, read receipts and attachment downloads are exposed
+through admin-only `/api/v1/whatsapp` endpoints for clients to use; client inbox
+screens are separate work. See [WhatsApp setup and client flow](docs/whatsapp.md).
+
 ## How a session runs
 
 1. **Claim resources.** The session takes an idle workspace clone from the
