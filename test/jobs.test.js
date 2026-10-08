@@ -186,7 +186,7 @@ vi.mock('../lib/usage.js', () => ({
 
 import { deleteJob, jobEventMaxSeqs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
-import { acquireInstance, dropSessionDatabase } from '../lib/dbpool.js';
+import { acquireInstance, releaseInstance, dropSessionDatabase } from '../lib/dbpool.js';
 import {
   latestReviewFindings,
   latestTestFailures,
@@ -1908,67 +1908,149 @@ describe('spawnWorkerSession', () => {
 
   it.each(
     ['review', 'fix'].flatMap((kind) =>
-      [false, true].flatMap((asking) => [false, true].map((current) => [kind, asking, current])),
+      [false, true].flatMap((asking) =>
+        [false, true].flatMap((current) =>
+          [false, true].map((autoClose) => [kind, asking, current, autoClose]),
+        ),
+      ),
     ),
-  )('recovers a failed %s answer (asking=%s; current=%s)', async (kind, asking, current) => {
-    const orchestrator = getJob('question-orch');
-    const worker = getJob('question-worker');
-    const job = getJob('question-child');
-    const active = kind === 'review' ? 'reviewing' : 'fixing';
-    const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
-    Object.assign(orchestrator, {
-      status: 'idle',
-      awaitingAnswer: true,
-      pendingWorkerNotices: [],
-    });
-    Object.assign(worker, {
-      status: 'idle',
-      reviewLoop: { rounds: 1, [active]: true, [childId]: current ? job.id : 'replacement' },
-    });
-    Object.assign(job, {
-      status: 'idle',
-      awaitingAnswer: true,
-      autoClose: true,
-      loopParentId: kind === 'review' ? worker.id : null,
-      loopFixParentId: kind === 'fix' ? worker.id : null,
-    });
-    const { children, restore } = fakeClaude();
-    try {
-      sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
-      children[0].emitLines(init, replay('Postgres'));
-      if (asking) children[0].emitLines(said('<ask-user>\nSeed it too?\n</ask-user>'));
-      children[0].emit('close', 1);
-      await vi.waitFor(() => expect(job.status).toBe('idle'));
-      expect(job.error).toBeTruthy();
-      expect(job.awaitingAnswer).toBe(asking);
-      expect(worker.reviewLoop[active]).toBe(!current || asking);
-      expect(orchestrator.pendingWorkerNotices).toHaveLength(current ? 1 : 0);
-      if (current && asking) {
-        expect(worker.reviewLoop.failure).toBeUndefined();
-        expect(worker.reviewLoop[childId]).toBe(job.id);
-        expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
-          kind: 'child-question',
-          childId: job.id,
-          questionSeq: job.questionSeq,
-        });
-      } else if (current) {
-        expect(worker.reviewLoop.failure).toMatchObject({ round: 1, reason: job.error });
-        expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
-          workerId: worker.id,
-          kind: 'loop',
-          text: expect.stringContaining('retry_review'),
-        });
-        worker.status = 'running'; // Leave the retry armed without starting another real round.
-        await expect(retryLoopRound(worker.id)).resolves.toMatchObject({ started: false });
-      } else {
-        expect(worker.reviewLoop.failure).toBeUndefined();
-        expect(worker.reviewLoop[childId]).toBe('replacement');
+  )(
+    'recovers a failed %s answer (asking=%s; current=%s; autoClose=%s)',
+    async (kind, asking, current, autoClose) => {
+      const orchestrator = getJob('question-orch');
+      const worker = getJob('question-worker');
+      const job = getJob('question-child');
+      const active = kind === 'review' ? 'reviewing' : 'fixing';
+      const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
+      Object.assign(orchestrator, {
+        status: 'idle',
+        awaitingAnswer: true,
+        pendingWorkerNotices: [],
+      });
+      Object.assign(worker, {
+        status: 'idle',
+        reviewLoop: { rounds: 1, [active]: true, [childId]: current ? job.id : 'replacement' },
+      });
+      Object.assign(job, {
+        status: 'idle',
+        awaitingAnswer: true,
+        autoClose,
+        loopParentId: kind === 'review' ? worker.id : null,
+        loopFixParentId: kind === 'fix' ? worker.id : null,
+      });
+      const { children, restore } = fakeClaude();
+      try {
+        releaseInstance.mockClear();
+        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
+        children[0].emitLines(init, replay('Postgres'));
+        if (asking) children[0].emitLines(said('<ask-user>\nSeed it too?\n</ask-user>'));
+        children[0].emit('close', 1);
+        const released = current && !asking && autoClose;
+        await vi.waitFor(() => expect(job.status).toBe(released ? 'failed' : 'idle'));
+        await vi.waitFor(() => expect(worker.reviewLoop[active]).toBe(!current || asking));
+        if (released) expect(releaseInstance).toHaveBeenCalledWith(job);
+        else expect(releaseInstance).not.toHaveBeenCalled();
+        expect(getJob(job.id)).toBe(job); // Failed transcript/work remain recoverable.
+        expect(job.error).toBeTruthy();
+        expect(job.awaitingAnswer).toBe(asking);
+        expect(worker.reviewLoop[active]).toBe(!current || asking);
+        expect(orchestrator.pendingWorkerNotices).toHaveLength(current ? 1 : 0);
+        if (current && asking) {
+          expect(worker.reviewLoop.failure).toBeUndefined();
+          expect(worker.reviewLoop[childId]).toBe(job.id);
+          expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
+            kind: 'child-question',
+            childId: job.id,
+            questionSeq: job.questionSeq,
+          });
+        } else if (current) {
+          expect(worker.reviewLoop.failure).toMatchObject({ round: 1, reason: job.error });
+          expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
+            workerId: worker.id,
+            kind: 'loop',
+            text: expect.stringContaining('retry_review'),
+          });
+          worker.status = 'running'; // Leave the retry armed without starting another real round.
+          await expect(retryLoopRound(worker.id)).resolves.toMatchObject({ started: false });
+        } else {
+          expect(worker.reviewLoop.failure).toBeUndefined();
+          expect(worker.reviewLoop[childId]).toBe('replacement');
+        }
+      } finally {
+        job.status = worker.status = orchestrator.status = 'closed';
+        restore();
       }
-    } finally {
-      job.status = worker.status = orchestrator.status = 'closed';
-      restore();
-    }
-  });
+    },
+  );
+
+  it.each(['review', 'fix'].flatMap((kind) => [false, true].map((replace) => [kind, replace])))(
+    'releases failed %s resources before retry guidance (replacement=%s)',
+    async (kind, replace) => {
+      const orchestrator = getJob('question-orch');
+      const worker = getJob('question-worker');
+      const job = getJob('question-child');
+      const active = kind === 'review' ? 'reviewing' : 'fixing';
+      const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
+      Object.assign(orchestrator, { status: 'idle', awaitingAnswer: true, pendingWorkerNotices: [] });
+      Object.assign(worker, {
+        status: 'idle',
+        reviewLoop: { rounds: 1, [active]: true, [childId]: job.id },
+      });
+      Object.assign(job, {
+        status: 'idle',
+        awaitingAnswer: true,
+        autoClose: true,
+        loopParentId: kind === 'review' ? worker.id : null,
+        loopFixParentId: kind === 'fix' ? worker.id : null,
+      });
+      let finishRelease;
+      delete job.failureUnreported;
+      releaseInstance.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishRelease = resolve;
+          }),
+      );
+      const { children, restore } = fakeClaude();
+      const capacity = state.capacity;
+      try {
+        state.claimsServer = true;
+        state.capacity = 1000;
+        state.capacity -= devSessionSlots(worker.repo); // Fill the pool with the existing sessions.
+        expect(devSessionSlots(worker.repo)).toBe(0);
+        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
+        children[0].emitLines(init, replay('Postgres'));
+        children[0].emit('close', 1);
+        await vi.waitFor(() => expect(finishRelease).toBeTypeOf('function'));
+        expect(worker.reviewLoop[active]).toBe(true);
+        expect(orchestrator.pendingWorkerNotices).toHaveLength(0);
+        if (replace) worker.reviewLoop[childId] = 'replacement';
+        finishRelease();
+        await vi.waitFor(() => {
+          if (replace) expect(job.failureUnreported).toBe(true);
+          else expect(orchestrator.pendingWorkerNotices).toHaveLength(1);
+        });
+        expect(devSessionSlots(worker.repo)).toBe(1);
+        expect(getJob(job.id)).toBe(job);
+        expect(job.events.some((e) => e.kind === 'stderr')).toBe(true);
+        expect(worker.reviewLoop[active]).toBe(replace);
+        expect(worker.reviewLoop.pendingResult).toBeUndefined();
+        if (replace) {
+          expect(worker.reviewLoop[childId]).toBe('replacement');
+          expect(worker.reviewLoop.failure).toBeUndefined();
+          expect(orchestrator.pendingWorkerNotices).toHaveLength(0);
+        } else {
+          expect(worker.reviewLoop.failure).toMatchObject({ round: 1, reason: job.error });
+        }
+      } finally {
+        finishRelease?.();
+        job.status = worker.status = orchestrator.status = 'closed';
+        state.claimsServer = false;
+        state.capacity = capacity;
+        restore();
+      }
+    },
+  );
 
   it('rejects answers while an idle asking session is releasing its database', async () => {
     const job = getJob('question-child');
