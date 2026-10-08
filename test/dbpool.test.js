@@ -20,6 +20,8 @@ const state = vi.hoisted(() => ({
   spawnError: null, // makes the child emit 'error' instead of running
   files: new Set(), // what fs.existsSync says yes to
   dumpError: null, // makes the dump read stream fail
+  restoreSpawn: null,
+  psqlSpawn: null,
   stdinError: null, // makes the write into mysql's stdin fail
 }));
 
@@ -40,14 +42,20 @@ vi.mock('mysql2/promise', () => ({
     createConnection: async (opts) => {
       if (state.mysqlConnectError) throw state.mysqlConnectError;
       return {
-        query: async (sql) => {
+        query: async (query) => {
+          const sql = typeof query === 'string' ? query : query.sql;
           if (state.mysqlHold && state.mysqlHold.on.test(sql)) await state.mysqlHold.until;
-          state.mysqlQueries.push({ opts, sql });
+          state.mysqlQueries.push({
+            opts,
+            sql,
+            ...(typeof query === 'object' ? { timeout: query.timeout } : {}),
+          });
           if (state.mysqlFailOn && state.mysqlFailOn.test(sql)) throw new Error('ER_DB_DROP_EXISTS');
           if (/VERSION\(\)/.test(sql)) return [[{ version: state.mysqlVersion }]];
           if (/SHOW DATABASES/.test(sql)) return [state.mysqlDatabases];
           return [[]];
         },
+        destroy: vi.fn(),
         // Always rejected: the callers .catch(() => {}) it, and a close that
         // fails must not be what surfaces to the session.
         end: async () => {
@@ -73,7 +81,9 @@ vi.mock('node:fs', () => ({
 
 vi.mock('node:child_process', () => ({
   spawn: (bin, args, opts) => {
-    state.psqlCalls.push({ bin, args, env: opts.env });
+    state.psqlCalls.push({ bin, args, env: opts.env, ...(opts.timeout ? { timeout: opts.timeout } : {}) });
+    if (bin === 'mysql' && state.restoreSpawn) return state.restoreSpawn(opts);
+    if (bin === 'psql' && state.psqlSpawn) return state.psqlSpawn(args, opts);
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -99,6 +109,8 @@ vi.mock('node:child_process', () => ({
 const {
   ensureSessionDatabase,
   acquireInstance,
+  reclaimInstance,
+  stopDatabaseProcesses,
   releaseInstance,
   claimHolder,
   sessionCapacity,
@@ -173,11 +185,428 @@ beforeEach(() => {
   state.spawnError = null;
   state.dumpError = null;
   state.stdinError = null;
+  state.restoreSpawn = null;
+  state.psqlSpawn = null;
   state.files = new Set();
   state.servers = [];
   state.otherProjects = [];
   state.config = config();
   state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: PG_TEMPLATE };
+});
+
+describe('database preparation shutdown', () => {
+  it.each(['lookup', 'database', 'extension'])(
+    'suspends unpooled PostgreSQL %s preparation when shutdown kills the command',
+    async (stage) => {
+      state.project.dbExtensions = ['pg_trgm'];
+      let active;
+      state.psqlSpawn = (args) => {
+        const child = new EventEmitter();
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        child.kill = vi.fn();
+        const sql = args.at(-1);
+        if (
+          (stage === 'lookup' && sql.startsWith('SELECT')) ||
+          (stage === 'database' && sql.startsWith('CREATE DATABASE')) ||
+          (stage === 'extension' && sql.includes('pg_trgm'))
+        )
+          active = child;
+        else setTimeout(() => child.emit('close', 0), 0);
+        return child;
+      };
+      const session = { ...job(), status: 'preparing', recoveryTurn: { completed: false } };
+      const events = vi.fn();
+      const settled = vi.fn();
+      ensureSessionDatabase(session, 'acme/app', events).then(settled, settled);
+      await vi.waitFor(() => expect(active).toBeDefined());
+      const calls = state.psqlCalls.length;
+      const stopping = stopDatabaseProcesses();
+      expect(active.kill).toHaveBeenCalledWith('SIGKILL');
+      active.emit('close', null, 'SIGKILL');
+      await stopping;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(settled).not.toHaveBeenCalled();
+      expect(events).not.toHaveBeenCalled();
+      expect(state.psqlCalls).toHaveLength(calls);
+      expect(session).toMatchObject({ status: 'preparing', recoveryTurn: { completed: false } });
+      expect(session.sessionDb).toBeUndefined();
+      _resetForTests();
+      state.psqlSpawn = null;
+      expect(await ensureSessionDatabase(session, 'acme/app', events)).toBe('casos_abc123');
+    },
+  );
+
+  it('suspends unpooled preparation when its final PostgreSQL command exits successfully during shutdown', async () => {
+    state.project.dbExtensions = ['pg_trgm'];
+    let active;
+    state.psqlSpawn = (args) => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = vi.fn();
+      if (args.at(-1).includes('pg_trgm')) active = child;
+      else setTimeout(() => child.emit('close', 0), 0);
+      return child;
+    };
+    const session = job();
+    const events = vi.fn();
+    const settled = vi.fn();
+    ensureSessionDatabase(session, 'acme/app', events).then(settled, settled);
+    await vi.waitFor(() => expect(active).toBeDefined());
+    const stopping = stopDatabaseProcesses();
+    active.emit('close', 0);
+    await stopping;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).not.toHaveBeenCalled();
+    expect(events).not.toHaveBeenCalled();
+    expect(session.sessionDb).toBeUndefined();
+  });
+
+  it.each(['lookup', 'database', 'extension'])(
+    'awaits the PostgreSQL %s process and starts no later DDL during shutdown',
+    async (stage) => {
+      state.project = {
+        dbPoolEnabled: true,
+        dbPoolDatabase: 'app',
+        dbExtensions: ['pg_trgm', 'vector'],
+      };
+      state.servers = [server({ engine: 'pgsql', port: 5432 })];
+      let active;
+      state.psqlSpawn = (args) => {
+        const child = new EventEmitter();
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        child.kill = vi.fn();
+        const sql = args.at(-1);
+        if (
+          (stage === 'lookup' && sql.startsWith('SELECT')) ||
+          (stage === 'database' && sql.startsWith('CREATE DATABASE')) ||
+          (stage === 'extension' && sql.includes('pg_trgm'))
+        )
+          active = child;
+        else setTimeout(() => child.emit('close', 0), 0);
+        return child;
+      };
+      const session = { ...job(), repo: 'acme/app' };
+      let settled = false;
+      acquireInstance(session, session.repo, vi.fn()).finally(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => expect(active).toBeDefined());
+      const callCount = state.psqlCalls.length;
+      let stopped = false;
+      const stopping = stopDatabaseProcesses().then(() => {
+        stopped = true;
+      });
+      await Promise.resolve();
+      expect(active.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(stopped).toBe(false);
+      // A successful exit can race with the kill: its continuation must still
+      // suspend before creating a database or the next extension.
+      active.emit('close', 0);
+      await stopping;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(state.psqlCalls).toHaveLength(callCount);
+      expect(session).toMatchObject({ dbServerId: 1, dbPreparing: true });
+      expect(claimHolder(1)).toBe(session.id);
+      expect(settled).toBe(false);
+      const recovered = { ...session };
+      _resetForTests();
+      await releaseInstance(session);
+      state.psqlSpawn = null;
+      reclaimInstance(recovered, 1);
+      await acquireInstance(recovered, recovered.repo, vi.fn());
+      expect(recovered.dbPreparing).toBe(false);
+      await releaseInstance(recovered);
+    },
+  );
+
+  it('retains a preparing claim until a concurrent close finishes database cleanup', async () => {
+    let allowQuery;
+    const query = new Promise((resolve) => {
+      allowQuery = resolve;
+    });
+    state.mysqlHold = { on: /^CREATE DATABASE/, until: query };
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+    state.servers = [server()];
+    state.files.add('/seed.sql');
+    const session = { ...job(), status: 'preparing' };
+    const preparation = acquireInstance(session, 'acme/app', vi.fn()).catch((e) => e);
+    expect(session.dbServerId).toBe(1);
+    session.status = 'closed';
+    let released = false;
+    const closing = releaseInstance(session).then(() => {
+      released = true;
+    });
+    expect(claimHolder(1)).toBe(session.id);
+    await Promise.resolve();
+    expect(released).toBe(false);
+    allowQuery();
+    expect((await preparation).message).toContain('canceled');
+    await closing;
+    expect(claimHolder(1)).toBeNull();
+    expect(session.dbPreparing).toBe(false);
+    expect(state.psqlCalls).toEqual([]);
+  });
+
+  it('kills and awaits a real PostgreSQL extension process before preparation can recover', async () => {
+    const { spawn: actualSpawn } = await vi.importActual('node:child_process');
+    const { default: actualFs } = await vi.importActual('node:fs');
+    const { default: os } = await vi.importActual('node:os');
+    const { default: path } = await vi.importActual('node:path');
+    const root = actualFs.mkdtempSync(path.join(os.tmpdir(), 'db-psql-shutdown-'));
+    const ready = path.join(root, 'ready');
+    const late = path.join(root, 'late');
+    let ddl;
+    state.project = {
+      dbPoolEnabled: true,
+      dbPoolDatabase: 'app',
+      dbExtensions: ['pg_trgm', 'vector'],
+    };
+    state.servers = [server({ engine: 'pgsql', port: 5432 })];
+    state.psqlSpawn = (args, opts) => {
+      const sql = args.at(-1);
+      const script = sql.includes('pg_trgm')
+        ? `require('fs').writeFileSync(${JSON.stringify(ready)}, 'ready'); setTimeout(() => require('fs').writeFileSync(${JSON.stringify(late)}, 'late DDL'), 800); setInterval(() => {}, 1000);`
+        : 'console.log(1)';
+      const child = actualSpawn(process.execPath, ['-e', script], opts);
+      if (sql.includes('pg_trgm')) ddl = child;
+      return child;
+    };
+    const session = { ...job(), repo: 'acme/app' };
+    let settled = false;
+    acquireInstance(session, session.repo, vi.fn()).finally(() => {
+      settled = true;
+    });
+    try {
+      await vi.waitFor(() => expect(actualFs.existsSync(ready)).toBe(true));
+      await stopDatabaseProcesses();
+      expect(ddl.signalCode).toBe('SIGKILL');
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      expect(actualFs.existsSync(late)).toBe(false);
+      expect(state.psqlCalls.some((c) => c.args.at(-1).includes('vector'))).toBe(false);
+      expect(session).toMatchObject({ dbServerId: 1, dbPreparing: true });
+      expect(settled).toBe(false);
+    } finally {
+      ddl?.kill('SIGKILL');
+      _resetForTests();
+      await releaseInstance(session);
+      actualFs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('kills and awaits a real seed importer, preserving the incomplete claim for recovery', async () => {
+    const { spawn: actualSpawn } = await vi.importActual('node:child_process');
+    const { default: actualFs } = await vi.importActual('node:fs');
+    const { default: os } = await vi.importActual('node:os');
+    const { default: path } = await vi.importActual('node:path');
+    const root = actualFs.mkdtempSync(path.join(os.tmpdir(), 'db-import-shutdown-'));
+    const ready = path.join(root, 'ready');
+    const late = path.join(root, 'late');
+    let importer;
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+    state.servers = [server()];
+    state.files.add('/seed.sql');
+    state.restoreSpawn = (opts) => {
+      importer = actualSpawn(
+        process.execPath,
+        [
+          '-e',
+          `require('fs').writeFileSync(${JSON.stringify(ready)}, 'ready'); setTimeout(() => require('fs').writeFileSync(${JSON.stringify(late)}, 'buffered SQL write'), 800); setInterval(() => {}, 1000);`,
+        ],
+        opts,
+      );
+      return importer;
+    };
+    const session = { ...job(), repo: 'acme/app' };
+    const onClaim = vi.fn(() => {
+      expect(session).toMatchObject({ dbServerId: 1, dbPreparing: true });
+      expect(state.mysqlQueries).toEqual([]);
+    });
+    let settled = false;
+    acquireInstance(session, session.repo, vi.fn(), onClaim).finally(() => {
+      settled = true;
+    });
+    try {
+      await vi.waitFor(() => expect(actualFs.existsSync(ready)).toBe(true));
+      expect(onClaim).toHaveBeenCalledOnce();
+      await stopDatabaseProcesses();
+      expect(importer.signalCode).toBe('SIGKILL');
+      expect(session).toMatchObject({ dbServerId: 1, dbPreparing: true });
+      expect(claimHolder(1)).toBe(session.id);
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      expect(actualFs.existsSync(late)).toBe(false);
+      expect(settled).toBe(false);
+      const recovered = { ...session };
+      _resetForTests();
+      await releaseInstance(session);
+      state.restoreSpawn = null;
+      reclaimInstance(recovered, recovered.dbServerId);
+      await acquireInstance(recovered, recovered.repo, vi.fn());
+      expect(recovered.dbPreparing).toBe(false);
+      expect(state.psqlCalls.filter((c) => c.bin === 'mysql')).toHaveLength(2);
+      expect(state.mysqlQueries.some((q) => q.sql === 'SELECT 1')).toBe(true);
+      await releaseInstance(recovered);
+    } finally {
+      importer?.kill('SIGKILL');
+      _resetForTests();
+      await releaseInstance(session);
+      actualFs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('restart database claims', () => {
+  it.each([null, 0])(
+    'suspends a reclaimed PostgreSQL probe that closes during shutdown (exit %s)',
+    async (code) => {
+      state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+      state.servers = [server({ engine: 'pgsql', port: 5432 })];
+      let active;
+      state.psqlSpawn = () => {
+        active = new EventEmitter();
+        active.stdout = new EventEmitter();
+        active.stderr = new EventEmitter();
+        active.kill = vi.fn();
+        return active;
+      };
+      const session = { ...job(), repo: 'acme/app', recoveryTurn: { completed: false } };
+      reclaimInstance(session, 1);
+      claimed.push(session);
+      const settled = vi.fn();
+      acquireInstance(session, session.repo, vi.fn()).then(settled, settled);
+      expect(state.psqlCalls).toHaveLength(1);
+      expect(state.psqlCalls[0].args.at(-1)).toBe('SELECT 1');
+      const stopping = stopDatabaseProcesses();
+      expect(active.kill).toHaveBeenCalledWith('SIGKILL');
+      active.emit('close', code, code === null ? 'SIGKILL' : null);
+      await stopping;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(settled).not.toHaveBeenCalled();
+      expect(claimHolder(1)).toBe(session.id);
+      expect(session).toMatchObject({ dbServerId: 1, recoveryTurn: { completed: false } });
+      expect(state.psqlCalls).toHaveLength(1);
+      expect(state.mysqlQueries).toEqual([]);
+
+      // The next boot can reclaim and probe the original server without reseeding.
+      _resetForTests();
+      state.psqlSpawn = null;
+      reclaimInstance(session, 1);
+      expect(await acquireInstance(session, session.repo, vi.fn())).toBe(1);
+      expect(state.psqlCalls).toHaveLength(2);
+      expect(state.psqlCalls[1].args.at(-1)).toBe('SELECT 1');
+      expect(claimHolder(1)).toBe(session.id);
+    },
+  );
+
+  it.each(['project', 'global'])(
+    'retains the original database claim after %s pooling is disabled',
+    async (mode) => {
+      state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+      state.servers = [server({ id: 7 }), server({ id: 8, port: 3307 })];
+      state.files.add('/seed.sql');
+      const session = { ...job('recovered'), repo: 'acme/app' };
+      if (mode === 'project') state.project.dbPoolEnabled = false;
+      else state.config.dbPool.enabled = false;
+      reclaimInstance(session, 7);
+      claimed.push(session);
+      expect(claimHolder(7)).toBe(session.id);
+      expect(await acquireInstance(session, session.repo, vi.fn())).toBe(7);
+      expect(await ensureSessionDatabase(session, session.repo, vi.fn())).toBeNull();
+      expect(session.sessionDb).toBeNull();
+      expect(instanceEnv(session)).toMatchObject({
+        DB_HOST: '127.0.0.1',
+        DB_PORT: '3306',
+        DB_DATABASE: 'app',
+      });
+      expect(state.mysqlQueries.map((q) => q.sql)).toEqual(['SELECT 1']);
+      expect(state.psqlCalls).toEqual([]);
+
+      // New pooled work must use a different server until this session closes.
+      state.project.dbPoolEnabled = true;
+      state.config.dbPool.enabled = true;
+      const other = job('other');
+      expect(await acquire(other)).toBe(8);
+      expect(claimHolder(7)).toBe(session.id);
+      expect(state.mysqlQueries.filter((q) => /CREATE DATABASE/.test(q.sql)).map((q) => q.opts.port)).toEqual(
+        [3307],
+      );
+      expect(
+        state.psqlCalls.filter((c) => c.bin === 'mysql').map((c) => c.args[c.args.indexOf('--port') + 1]),
+      ).toEqual(['3307']);
+      await releaseInstance(session);
+      expect(claimHolder(7)).toBeNull();
+    },
+  );
+
+  it('reuses the original server without dropping profile databases or restoring seed SQL', async () => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+    state.servers = [server({ id: 1 }), server({ id: 2, port: 3307 })];
+    const session = { ...job(), repo: 'acme/app' };
+    reclaimInstance(session, 2);
+    expect(claimHolder(2)).toBe(session.id);
+    expect(session).toMatchObject({ dbServerId: 2, dbHost: '127.0.0.1', dbPort: 3307 });
+    expect(await acquireInstance(session, session.repo, vi.fn())).toBe(2);
+    expect(state.mysqlQueries).toEqual([
+      {
+        opts: { host: '127.0.0.1', port: 3307, user: 'root', password: 'pw', connectTimeout: 5000 },
+        sql: 'SELECT 1',
+        timeout: 5000,
+      },
+    ]);
+    expect(state.psqlCalls).toEqual([]);
+    await releaseInstance(session);
+    expect(claimHolder(2)).toBeNull();
+  });
+
+  it('fails reclaimed acquisition when MySQL cannot be reached, retaining the claim until cleanup', async () => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+    state.servers = [server()];
+    const session = { ...job(), repo: 'acme/app' };
+    reclaimInstance(session, 1);
+    claimed.push(session);
+    state.mysqlConnectError = new Error('ECONNREFUSED');
+    await expect(acquireInstance(session, session.repo, vi.fn())).rejects.toThrow(
+      /previous database server.*ECONNREFUSED/,
+    );
+    expect(claimHolder(1)).toBe(session.id);
+    expect(state.mysqlQueries).toEqual([]);
+    expect(state.psqlCalls).toEqual([]);
+  });
+
+  it.each([0, 1])('probes a reclaimed Postgres server without DDL or restores (exit %s)', async (code) => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+    state.servers = [server({ engine: 'pgsql', port: 5432 })];
+    const session = { ...job(), repo: 'acme/app' };
+    reclaimInstance(session, 1);
+    claimed.push(session);
+    state.psqlResults = [{ code, stderr: code ? 'connection refused' : '', stdout: '1' }];
+    const acquisition = acquireInstance(session, session.repo, vi.fn());
+    if (code) await expect(acquisition).rejects.toThrow(/previous database server.*connection refused/);
+    else expect(await acquisition).toBe(1);
+    expect(state.psqlCalls).toHaveLength(1);
+    expect(state.psqlCalls[0]).toMatchObject({
+      bin: 'psql',
+      args: expect.arrayContaining(['SELECT 1']),
+      timeout: 5000,
+    });
+    expect(state.mysqlQueries).toEqual([]);
+  });
+
+  it('refuses a missing or conflicting server instead of moving the session onto seed data', async () => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app' };
+    state.servers = [server()];
+    const first = { ...job('first'), repo: 'acme/app' };
+    const second = { ...job('second'), repo: 'acme/app' };
+    reclaimInstance(first, 1);
+    expect(() => reclaimInstance(second, 1)).toThrow(/previous database server.*unavailable/);
+    expect(() => reclaimInstance(second, 99)).toThrow(/previous database server.*unavailable/);
+    expect(claimHolder(1)).toBe('first');
+    expect(second.dbServerId).toBeUndefined();
+    expect(state.mysqlQueries).toEqual([]);
+    await releaseInstance(first);
+  });
 });
 
 describe('ensureSessionDatabase', () => {

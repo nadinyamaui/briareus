@@ -46,6 +46,7 @@ import { orchestratorRoutes } from './lib/orchestrator-routes.js';
 import { initDb, dbHealthy, loadTaskSessions, loadJobTurnUsage } from './lib/db.js';
 import {
   initJobs,
+  resumeRestartedSessions,
   setAgentApiBase,
   jobForAgentToken,
   getJob,
@@ -77,6 +78,7 @@ import {
   startBranchPreview,
   flushJobs,
   stopAllDevServes,
+  stopAllJobProcesses,
   openSessionBrowser,
   closeSessionBrowser,
   spawnWorkerSession,
@@ -2062,15 +2064,12 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   // Only after the provider rows are loaded.
   checkProviderAuth();
   setInterval(checkProviderAuth, AUTH_RECHECK_MS).unref();
-  await initJobs();
+  await initJobs({ deferPolling: true });
   // `npm run create-token` writes the database directly; a revoked token stops new requests
   // within 15s and open streams within 30s.
   setInterval(() => {
     mobileAuth.refresh().catch((e) => console.error('Could not reload device tokens:', e.message));
   }, 15000).unref();
-  // Clone slots are caches: unclaimed ones are dropped at boot and daily so peak concurrency
-  // does not permanently consume disk.
-  startWorkspacePruner();
   // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
   // a client reads its mail from the database rather than from the provider.
   mailService.start();
@@ -2084,6 +2083,9 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   // Agent tools run on this machine, so they call back on loopback, not PUBLIC_BASE_URL.
   setAgentApiBase(`http://127.0.0.1:${port}`);
   app.listen(port, cfg.bindHost, () => {
+    resumeRestartedSessions();
+    // Recovered sessions must claim their slots before pruning unused clones.
+    startWorkspacePruner();
     const projects = activeProjects();
     console.log(`Briareus running at http://localhost:${port}`);
     console.log(
@@ -2120,8 +2122,9 @@ process.on('uncaughtException', (e) => {
   console.error('Uncaught exception:', e);
   stopAllDevServes();
   stopAllBrowsers();
-  const giveUp = setTimeout(() => process.exit(1), 3000);
-  flushJobs()
+  const giveUp = setTimeout(() => process.exit(1), 5000);
+  stopAllJobProcesses()
+    .finally(() => flushJobs())
     .catch(() => {})
     .finally(() => {
       clearTimeout(giveUp);
@@ -2134,8 +2137,9 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     stopping = true;
     stopAllDevServes();
     stopAllBrowsers();
-    flushJobs()
-      .catch((e) => console.error('Could not write the last sessions on shutdown:', e.message))
+    stopAllJobProcesses()
+      .finally(() => flushJobs())
+      .catch((e) => console.error('Could not finish session shutdown:', e.message))
       .finally(() => process.exit(0));
   });
 }

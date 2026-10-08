@@ -184,7 +184,7 @@ is waiting for you and that the task is not done, and it does not rule on the
 round itself unless you ask it to (`triage_findings` is there for that).
 
 A round that could not run at all — its provider exited non-zero or was out of
-quota, a server restart interrupted its review or fix session, or its
+quota, automatic recovery after a server restart failed, or its
 review closed having published nothing — is not a review that found nothing:
 the loop records the round as failed and approves nothing.
 Turning the 🔁 chip off and on again re-runs it, and an orchestrator retries its
@@ -915,8 +915,20 @@ its place: the first gets a different clone, the others fail the reopen until
 someone inspects them. The clone pool does not hand out, and the daily workspace
 cleanup does not delete, a slot a failed session, or one a restart interrupted
 mid-turn, left work in (except loop review, fix and QA children, which their
-parent retries, and sessions whose agent never started). A session that was
-idle at the restart reserves nothing and reopens like a closed one.
+parent retries, and sessions whose agent never started).
+
+After a server restart, sessions that were open recover automatically once the
+API is listening. Active turns continue in their saved provider conversation,
+queued instructions are retained, and review, publishing and QA steps continue
+from their saved stage. Completed turns are skipped. Idle sessions reopen their
+workspaces without starting a turn, and standing questions still wait for the
+operator's answer. Recovery reserves workspace slots and reclaims each session's
+previous database server without restoring seed SQL or dropping profile
+databases. If that server is unavailable, recovery fails visibly instead of
+moving the session onto different data. Sessions already closed, failed or
+interrupted before this restart stay as they were.
+An explicit Stop stays stopped, including when the canceled process was still
+exiting at shutdown.
 
 `POST /api/v1/maintenance` drains work: new top-level sessions, messages that would start
 a turn on a settled session, reopening, compaction, arming the review or QA
