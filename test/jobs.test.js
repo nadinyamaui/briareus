@@ -10156,6 +10156,103 @@ describe('Codex turn usage', () => {
     });
   });
 
+  it.each([true, false])(
+    'awaits the rollout scan and final ledger write before close/delete (autoClose=%s)',
+    async (autoClose) => {
+      state.stored[0] = { ...state.stored[0], autoClose, parentId: 'codex-usage-parent' };
+      state.stored.push({
+        id: 'codex-usage-parent',
+        kind: 'devchat',
+        status: 'idle',
+        repo: 'acme/shop',
+        providerId: 2,
+      });
+      await initJobs();
+      const job = getJob('codex-usage');
+      job.status = 'idle';
+      const total = { input_tokens: 800000, cached_input_tokens: 730000, output_tokens: 21000 };
+      writeRollout(total);
+      sendDevMessage(job.id, 'Next');
+      const scan = new PassThrough();
+      const reader = vi.spyOn(fs, 'createReadStream').mockReturnValueOnce(scan);
+      let finishAccounting;
+      const ledger = new Map();
+      recordTurnUsage.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishAccounting = () => {
+              ledger.set(job.id, { estimatedCostUsd: 0.2625, estimatedTurns: 1 });
+              resolve();
+            };
+          }),
+      );
+      jobUsageEstimates.mockImplementationOnce(async () => ledger);
+      deleteJob.mockClear();
+      dropSessionDatabase.mockClear();
+      try {
+        const child = children.at(-1);
+        child.stdout.end(`${JSON.stringify({ type: 'turn.completed', usage: total })}\n`);
+        child.emit('close', 0);
+        await vi.waitFor(() => expect(reader).toHaveBeenCalledOnce());
+        let closed = false;
+        const closing = closeDevSession(job.id).then(() => {
+          closed = true;
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(closed).toBe(false);
+        expect(dropSessionDatabase).not.toHaveBeenCalled();
+        expect(deleteJob).not.toHaveBeenCalled();
+        expect(recordTurnUsage).not.toHaveBeenCalled();
+        scan.end(
+          `${JSON.stringify({
+            type: 'event_msg',
+            payload: {
+              type: 'token_count',
+              info: {
+                total_token_usage: total,
+                last_token_usage: { input_tokens: 300000, cached_input_tokens: 280000, output_tokens: 1000 },
+              },
+            },
+          })}\n`,
+        );
+        await vi.waitFor(() => expect(finishAccounting).toBeTypeOf('function'));
+        expect(closed).toBe(false);
+        expect(dropSessionDatabase).not.toHaveBeenCalled();
+        expect(deleteJob).not.toHaveBeenCalled();
+        expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+          inputTokens: 300000,
+          cachedInputTokens: 280000,
+          outputTokens: 1000,
+          longInputTokens: 300000,
+          longCachedInputTokens: 280000,
+          longOutputTokens: 1000,
+        });
+        finishAccounting();
+        await closing;
+        if (!autoClose) {
+          expect(getJob(job.id).status).toBe('closed');
+          await deleteJobById(job.id);
+        }
+        expect(getJob(job.id)).toBeNull();
+        expect(deleteJob).toHaveBeenCalledWith(
+          job.id,
+          expect.objectContaining({
+            intoJobId: 'codex-usage-parent',
+            estimatedCostUsd: 0.2625,
+            estimatedTurns: 1,
+          }),
+        );
+        expect(getJob('codex-usage-parent')).toMatchObject({
+          absorbedEstimatedCostUsd: 0.2625,
+          absorbedEstimatedTurns: 1,
+        });
+      } finally {
+        reader.mockRestore();
+        scan.destroy();
+      }
+    },
+  );
+
   it('books a resumed turn as what it added to the thread, reading the rollout once', async () => {
     const job = getJob('codex-usage');
     // The last reading on the record is another chat's (a step's, say).
