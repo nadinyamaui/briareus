@@ -630,6 +630,16 @@ describe('buildArgs', () => {
     expect(plain.args.join(' ')).not.toContain('mcp_servers');
   });
 
+  it('codex takes a remote server by its URL and headers', () => {
+    const mcp = [
+      { name: 'meta', url: 'http://127.0.0.1:4300/api/agent/mcp/7', headers: { Authorization: 'Bearer t' } },
+    ];
+    const { args } = BINARIES.codex.buildArgs({ model: 'gpt', effort: 'high', sessionId: 't', mcp });
+    expect(args).toContain('mcp_servers.meta.url="http://127.0.0.1:4300/api/agent/mcp/7"');
+    expect(args).toContain('mcp_servers.meta.http_headers={ "Authorization" = "Bearer t" }');
+    expect(args.join(' ')).not.toContain('mcp_servers.meta.command');
+  });
+
   it('grok takes the prompt from a file: argv survives neither newlines nor long messages', () => {
     const built = BINARIES.grok.buildArgs({
       model: 'grok-4.6',
@@ -1230,6 +1240,26 @@ describe('the claude parser', () => {
     expect(first).toMatchObject({ costUsd: 0.1, durationMs: 1000, inputTokens: 100, outputTokens: 5 });
     expect(second).toMatchObject({ durationMs: 500, inputTokens: 200, outputTokens: 7 });
     expect(second.costUsd).toBeCloseTo(0.15);
+  });
+
+  it('takes what a resumed conversation had already spent off its running total', () => {
+    const turn = { ...newTurn(), costBaseline: 180 };
+    const parser = parserFor('claude', turn);
+    const events = [
+      { type: 'result', total_cost_usd: 181.5, duration_ms: 1000 },
+      { type: 'result', total_cost_usd: 182, duration_ms: 500 },
+    ].flatMap((m) => parser.feed(m));
+    expect(turn.costUsd).toBeCloseTo(2);
+    expect(events[0].costUsd).toBeCloseTo(1.5);
+    expect(events[1].costUsd).toBeCloseTo(0.5);
+    // A total below it means the CLI restored nothing: all of it is this run's.
+    const fresh = { ...newTurn(), costBaseline: 1 };
+    const freshParser = parserFor('claude', fresh);
+    freshParser.feed({ type: 'result', total_cost_usd: 0.4 });
+    expect(fresh.costUsd).toBe(0.4);
+    // And stays so once the process has spent past it.
+    freshParser.feed({ type: 'result', total_cost_usd: 1.5 });
+    expect(fresh.costUsd).toBe(1.5);
   });
 
   it('a result with no price keeps the cost of the answers before it', () => {

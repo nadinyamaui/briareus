@@ -6,10 +6,63 @@ import os from 'os';
 import path from 'path';
 import {
   askClaudeSideQuestion,
+  claudeCostBaseline,
   compactClaudeSession,
   claudeQuotaFailure,
   transferClaudeSession,
 } from '../lib/claude-session.js';
+
+// A config dir holding one conversation transcript with these lines.
+function transcript(lines, sessionId = 'sess-1') {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-cost-'));
+  fs.mkdirSync(path.join(configDir, 'projects', '-tmp-work'), { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, 'projects', '-tmp-work', `${sessionId}.jsonl`),
+    lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n') + '\n',
+  );
+  return configDir;
+}
+
+describe('Claude cost baseline', () => {
+  it('reads the latest cost state the CLI saved in the conversation', () => {
+    const configDir = transcript([
+      { type: 'user', message: { content: 'hi' } },
+      { type: 'cost-state', sessionId: 'sess-1', totalCostUSD: 0.5 },
+      { type: 'assistant', message: { content: [] } },
+      { type: 'cost-state', sessionId: 'sess-1', totalCostUSD: 1.25 },
+      { type: 'last-prompt', text: 'mentions "cost-state" but is not one' },
+    ]);
+    try {
+      expect(claudeCostBaseline(configDir, 'sess-1')).toBe(1.25);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it('finds it far back in a long transcript, across read boundaries', () => {
+    const filler = { type: 'assistant', message: { content: [{ type: 'text', text: 'é'.repeat(5000) }] } };
+    const configDir = transcript([
+      { type: 'cost-state', sessionId: 'sess-1', totalCostUSD: 7.5 },
+      ...Array.from({ length: 200 }, () => filler),
+    ]);
+    try {
+      expect(claudeCostBaseline(configDir, 'sess-1')).toBe(7.5);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it('is nothing when the conversation or its cost state cannot be found', () => {
+    const configDir = transcript([{ type: 'user', message: { content: 'hi' } }]);
+    try {
+      expect(claudeCostBaseline(configDir, 'sess-1')).toBe(0);
+      expect(claudeCostBaseline(configDir, 'sess-2')).toBe(0);
+      expect(claudeCostBaseline(path.join(configDir, 'missing'), 'sess-1')).toBe(0);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('Claude account transfer', () => {
   it('copies only the selected conversation and updates an older destination copy', () => {
@@ -169,6 +222,17 @@ describe('Claude headless compaction', () => {
     ]);
   });
 
+  it('reports only what the summary cost, not the conversation it resumed', async () => {
+    const configDir = transcript([{ type: 'cost-state', sessionId: 'sess-1', totalCostUSD: 12 }]);
+    try {
+      const { promise, finish } = run({ env: { CLAUDE_CONFIG_DIR: configDir } });
+      finish({ type: 'result', subtype: 'success', is_error: false, result: '', total_cost_usd: 12.25 });
+      expect((await promise).costUsd).toBeCloseTo(0.25);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
   it('passes instructions as the argument of /compact', async () => {
     const { promise, calls, finish } = run({ instructions: 'Keep the review findings' });
     finish({ type: 'result', subtype: 'success', is_error: false, result: '' });
@@ -228,6 +292,61 @@ function ask(opts = {}) {
 }
 
 describe('Claude side questions (/btw)', () => {
+  it('pins the resumed transcript and baseline while the main turn saves a newer cost state', async () => {
+    const configDir = transcript([{ type: 'cost-state', sessionId: 'sess-1', totalCostUSD: 3 }]);
+    try {
+      const { promise, calls, finish } = ask({ env: { CLAUDE_CONFIG_DIR: configDir } });
+      const snapshot = calls[0].args[calls[0].args.indexOf('--resume') + 1];
+      expect(path.isAbsolute(snapshot)).toBe(true);
+      const original = path.join(configDir, 'projects', '-tmp-work', 'sess-1.jsonl');
+      // Main turn exits before the child loads --resume.
+      fs.appendFileSync(original, JSON.stringify({ type: 'cost-state', totalCostUSD: 3.5 }) + '\n');
+      const restored = JSON.parse(fs.readFileSync(snapshot, 'utf8').trim()).totalCostUSD;
+      expect(restored).toBe(3);
+      finish({ type: 'result', subtype: 'success', result: 'ok', total_cost_usd: restored + 0.02 });
+      expect((await promise).costUsd).toBeCloseTo(0.02);
+      expect(claudeCostBaseline(configDir, 'sess-1')).toBe(3.5);
+      expect(fs.existsSync(path.dirname(snapshot))).toBe(false);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['error', 'timeout', 'spawn failure'])(
+    'removes the private transcript after %s',
+    async (failure) => {
+      const configDir = transcript([{ type: 'cost-state', sessionId: 'sess-1', totalCostUSD: 3 }]);
+      let snapshot;
+      try {
+        const opts = { env: { CLAUDE_CONFIG_DIR: configDir }, timeoutMs: failure === 'timeout' ? 5 : 300000 };
+        if (failure === 'spawn failure') {
+          opts.spawnProcess = (_bin, args) => {
+            snapshot = args[args.indexOf('--resume') + 1];
+            throw new Error('spawn failed');
+          };
+        }
+        const { promise, calls, finish } = ask(opts);
+        if (failure !== 'spawn failure') snapshot = calls[0].args[calls[0].args.indexOf('--resume') + 1];
+        if (failure === 'error') finish({ subtype: 'error', is_error: true, result: 'failed' }, 1);
+        await expect(promise).rejects.toThrow(failure === 'timeout' ? 'timed out' : 'failed');
+        expect(fs.existsSync(path.dirname(snapshot))).toBe(false);
+      } finally {
+        fs.rmSync(configDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('reports only what the answer cost, not the conversation it forked', async () => {
+    const configDir = transcript([{ type: 'cost-state', sessionId: 'sess-1', totalCostUSD: 3 }]);
+    try {
+      const { promise, finish } = ask({ env: { CLAUDE_CONFIG_DIR: configDir } });
+      finish({ type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 3.02 });
+      expect((await promise).costUsd).toBeCloseTo(0.02);
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
   it('asks an unsaved fork with tools, MCP servers and inherited hooks disabled, over stdin', async () => {
     const { promise, calls, finish, stdin } = ask();
     finish({

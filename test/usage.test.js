@@ -836,7 +836,9 @@ describe('session cost estimates', () => {
       { jobId: 'a', costUsd: null, inputTokens: 30, at: 3 },
       { jobId: 'b', costUsd: 1, costEstimated: true, inputTokens: 40, at: 4 },
     ];
-    db.calibration = [{ provider: 'claude', model: 'm', costUsd: 3, inputTokens: 1_000_000 }];
+    db.calibration = [
+      { provider: 'codex', model: 'm', costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 960_000 },
+    ];
     const estimates = await jobUsageEstimates(['a', 'b'], 123);
     expect(loadJobTurnUsage).toHaveBeenCalledWith(['a', 'b']);
     expect(loadTurnUsageCalibration).toHaveBeenCalledTimes(1);
@@ -861,13 +863,15 @@ describe('session cost estimates', () => {
     expect(loadTurnUsageCalibration).not.toHaveBeenCalled();
   });
 
-  it('does not double-count a priced write already visible to an overlapping calibration load', async () => {
+  it('does not double-count a measured write already visible to an overlapping calibration load', async () => {
     resetUsageCalibration();
     loadJobTurnUsage.mockClear();
     loadTurnUsageCalibration.mockClear();
     saveTurnUsage.mockClear();
     db.jobs = [{ jobId: 'a', costUsd: null, inputTokens: 30, at: 3 }];
-    const committed = [{ provider: 'claude', model: 'm', costUsd: 0.25, inputTokens: 25 }];
+    const committed = [
+      { provider: 'codex', model: 'm', costUsd: null, inputTokens: 25, cachedInputTokens: 20 },
+    ];
     db.calibration = committed;
     let finishLoad;
     loadTurnUsageCalibration.mockImplementationOnce(
@@ -888,8 +892,8 @@ describe('session cost estimates', () => {
     await vi.waitFor(() => expect(loadTurnUsageCalibration).toHaveBeenCalledTimes(1));
     const write = recordTurnUsage(
       { id: 'a', projectId: 7, repo: 'o/r' },
-      { inputTokens: 25, outputTokens: 5, costUsd: 0.25 },
-      { binary: 'claude' },
+      { inputTokens: 25, cachedInputTokens: 20, outputTokens: 5, costUsd: null },
+      { binary: 'codex' },
       'm',
     );
     await vi.waitFor(() => expect(saveTurnUsage).toHaveBeenCalledTimes(1));

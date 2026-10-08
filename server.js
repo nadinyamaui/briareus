@@ -7,6 +7,8 @@ import { forgeRoutes } from './lib/forge-routes.js';
 import { createEnvoyerService } from './lib/envoyer.js';
 import { envoyerRoutes } from './lib/envoyer-routes.js';
 import { createForgeAccounts } from './lib/forge-accounts.js';
+import { createMailService } from './lib/mail.js';
+import { mailRoutes, mailCallbackRoutes } from './lib/mail-routes.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
 import { estimateCosts } from './lib/prices.js';
 import { previewFeedbackRoutes } from './lib/preview-feedback.js';
@@ -19,6 +21,8 @@ import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
 import { createSlackService } from './lib/slack.js';
 import { slackRoutes, slackEventsRouter } from './lib/slack-routes.js';
+import { createMcpService, MCP_OAUTH_CALLBACK_PATH } from './lib/mcp-servers.js';
+import { mcpRoutes, mcpProxyRouter, mcpOAuthCallbackRouter } from './lib/mcp-routes.js';
 import { sessionWebhookRoutes } from './lib/webhook-routes.js';
 import { sessionTranscriptRoutes } from './lib/transcript-routes.js';
 import { providerTestRoutes } from './lib/provider-test-routes.js';
@@ -36,6 +40,7 @@ import { execFile, spawn } from 'child_process';
 import { getConfig } from './lib/config.js';
 import { maintenanceState } from './lib/recovery.js';
 import { workerTranscript } from './lib/worker-transcript.js';
+import { orchestratorRoutes } from './lib/orchestrator-routes.js';
 import { initDb, dbHealthy, loadTaskSessions, loadJobTurnUsage } from './lib/db.js';
 import {
   initJobs,
@@ -89,6 +94,7 @@ import {
   noteSession,
   webhookUnfit,
   setSlackAccess,
+  setExternalMcp,
   DEV_OPEN,
 } from './lib/jobs.js';
 import {
@@ -182,7 +188,7 @@ import {
   updatePullRequestBranch,
 } from './lib/prviewer.js';
 import { issueTimeline, issueView } from './lib/issueviewer.js';
-import { repoFile, repoTree } from './lib/repofiles.js';
+import { repoArchive, repoFile, repoTree } from './lib/repofiles.js';
 import { boardInScope, moveBoardItem, projectBoard } from './lib/projectboard.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
@@ -220,7 +226,7 @@ const api = express.Router();
 // headers say so (lib/security.js).
 app.use(securityHeaders);
 
-// Slack for sessions (lib/slack.js): created here because its events route
+// Slack inbox and session replies (lib/slack.js): created here because its events route
 // is a webhook, and webhooks come before everything else.
 const slackService = createSlackService({
   getJob,
@@ -234,6 +240,16 @@ setSlackAccess((repo) => slackService.briefing(repo));
 // Webhooks go ahead of the JSON body parser: GitHub and Slack sign the raw bytes with an HMAC,
 // and a re-serialized body verifies against nothing (lib/webhooks.js).
 app.use('/webhooks/slack', slackEventsRouter({ service: slackService }));
+
+// The operator's MCP servers (lib/mcp-servers.js). The provider's redirect
+// after a sign-in is no webhook, but it rides the same Access bypass, and the
+// proxy sessions reach their remote servers through wants the body as bytes.
+const mcpService = createMcpService({
+  callbackUrl: () => `${getConfig().publicBaseUrl}${MCP_OAUTH_CALLBACK_PATH}`,
+});
+setExternalMcp((repo) => mcpService.mounts(repo));
+app.use(mcpOAuthCallbackRouter({ service: mcpService }));
+app.use(mcpProxyRouter({ service: mcpService, agentSession }));
 app.use('/webhooks', webhookRouter());
 
 // The only client API: owner-issued tokens (`npm run create-token`) in front of the handlers below.
@@ -272,8 +288,16 @@ app.get('/healthz', async (req, res) => {
   res.status(db ? 200 : 503).json({ ok: db, db, uptime: Math.floor(process.uptime()) });
 });
 
-// Test-run scenario videos, fetched through /api/v1; PR links point here too unless an R2
-// bucket serves them (lib/prtasks.js).
+// Where a mailbox's sign-in ends when its redirect URI is this server's own
+// (lib/mail-routes.js). The mail service is created here for it, and the
+// API's mail routes below share it.
+const mailService = createMailService();
+app.use(mailCallbackRoutes({ service: mailService }));
+
+// The scenario videos a test run records. The run copies each .webm here, and
+// a client fetches one through /api/v1 with its token; the links a run leaves
+// on a pull request point there too, unless an R2 bucket serves them instead
+// (lib/prtasks.js).
 fs.mkdirSync(getConfig().testVideosDir, { recursive: true });
 api.use('/videos', express.static(getConfig().testVideosDir));
 
@@ -524,6 +548,7 @@ function agentSession(req, res) {
 const sshService = createSshService({ getJob });
 api.use(sshRoutes({ service: sshService, agentSession, getProject }));
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
+api.use(mcpRoutes({ service: mcpService, getProject }));
 api.use(
   operationsRoutes({
     listSessions: devSessionRecords,
@@ -562,6 +587,7 @@ api.use(
     getProject,
   }),
 );
+api.use(mailRoutes({ service: mailService }));
 
 api.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
@@ -613,24 +639,9 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 // without a headless MCP flag). The bearer token's whole authority is "this orchestrator and
 // its own workers".
 
-function orchestratorSession(req, res) {
-  const job = agentSession(req, res);
-  if (!job) return null;
-  if (!job.orchestrator) {
-    res.status(403).json({ error: 'Only an orchestrator session can manage worker sessions' });
-    return null;
-  }
-  return job;
-}
-
-function workerOf(req, res, orchestrator) {
-  const worker = workerSessionsFor(orchestrator).find((j) => j.id === req.params.id);
-  if (!worker) {
-    res.status(404).json({ error: `No worker session ${req.params.id} under this orchestrator` });
-    return null;
-  }
-  return worker;
-}
+const workerRoutes = orchestratorRoutes({ agentSession, workerSessionsFor, setQaLoop, workerSummary });
+const { orchestratorSession, workerOf } = workerRoutes;
+api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
 
 api.post('/api/agent/sessions', (req, res) => {
   const orchestrator = orchestratorSession(req, res);
@@ -878,6 +889,32 @@ api.get('/api/repo/file', async (req, res) => {
     const ref = req.query.ref ? String(req.query.ref) : undefined;
     res.json(await repoFile({ repo: project.repo }, ref, String(req.query.path || '')));
   } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
+
+api.get('/api/repo/archive', async (req, res) => {
+  const controller = new AbortController();
+  res.once('close', () => controller.abort());
+  try {
+    const project = getProject(String(req.query.repo || ''));
+    if (!project) throw Object.assign(new Error(`Unknown project: ${req.query.repo || ''}`), { status: 404 });
+    const { stream, size } = await repoArchive({ repo: project.repo }, String(req.query.ref || ''), {
+      signal: controller.signal,
+    });
+    res.once('close', () => stream.destroy());
+    // The client may have disconnected while GitHub was sending headers.
+    if (res.destroyed) {
+      stream.destroy();
+      return;
+    }
+    res.setHeader('Content-Type', 'application/gzip');
+    if (size) res.setHeader('Content-Length', String(size));
+    // A failure once bytes have gone out can only cut the response short.
+    stream.on('error', () => res.destroy());
+    stream.pipe(res);
+  } catch (e) {
+    if (res.destroyed) return;
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
   }
 });
@@ -1288,6 +1325,17 @@ api.get('/api/dev/pulls', async (req, res) => {
   try {
     res.json(await projectPulls(project, { fresh: req.query.fresh === '1' }));
   } catch (e) {
+    // A spent GitHub allowance is a 429 that says when to come back, so a
+    // client can tell "try again at 15:41" from a server fault. Anything else
+    // stays a 502: a GraphQL error carries the 200 it arrived with, and that
+    // must not reach the client as a success.
+    if (e && e.rateLimited) {
+      const retryAt = Number(e.retryAt) || null;
+      if (retryAt) res.set('Retry-After', String(Math.max(1, Math.ceil((retryAt - Date.now()) / 1000))));
+      return res
+        .status(429)
+        .json({ error: e.message, retryAt: retryAt ? new Date(retryAt).toISOString() : null });
+    }
     res.status(502).json({ error: e.message });
   }
 });
@@ -1971,8 +2019,10 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initDbServers();
     await sshService.init();
     await slackService.init();
+    await mcpService.init();
     await envoyerService.init();
     await forgeAccounts.init();
+    await mailService.init();
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
@@ -2007,8 +2057,13 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   // Clone slots are caches: unclaimed ones are dropped at boot and daily so peak concurrency
   // does not permanently consume disk.
   startWorkspacePruner();
-  // Hooks keep session PR panels current; best effort, as a repo without one falls back to the
-  // twenty-second sync tick.
+  // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
+  // a client reads its mail from the database rather than from the provider.
+  mailService.start();
+  // Every project gets (or keeps) a hook pointing at this install's public
+  // hostname, so an open session's pull request panel keeps up with the reviews,
+  // comments and CI runs landing on its branch. Best effort: a repo whose hook
+  // cannot be installed just falls back to the twenty-second sync tick.
   await installRepoWebhooks(activeProjects(), cfg, githubRest).catch((e) =>
     console.error('Could not install GitHub webhooks:', e.message),
   );

@@ -199,6 +199,28 @@ describe('rate limiting', () => {
     await expect(githubGraphql(cfg, 'query {}', {})).resolves.toEqual({ ok: true });
   });
 
+  it('backs off a GraphQL 200 whose error says RATE_LIMITED, until the reset the headers named', async () => {
+    const { githubGraphql } = await freshGithub();
+    const reset = Math.floor(Date.now() / 1000) + 600;
+    const fetchMock = stubFetch(
+      reply({
+        headers: {
+          'x-ratelimit-resource': 'graphql',
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': String(reset),
+        },
+        body: { data: null, errors: [{ type: 'RATE_LIMITED', message: 'API rate limit exceeded' }] },
+      }),
+    );
+
+    const caught = await githubGraphql(cfg, 'query {}', {}).catch((e) => e);
+    expect(caught).toMatchObject({ rateLimited: true, status: 429, resource: 'graphql' });
+    expect(caught.retryAt).toBe(reset * 1000 + 5000);
+    // And the next call waits out the cooldown without reaching the network.
+    await expect(githubGraphql(cfg, 'query {}', {})).rejects.toMatchObject({ rateLimited: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('believes the resource the response names over the one assumed', async () => {
     const { githubRest } = await freshGithub();
     stubFetch(reply({ headers: { 'x-ratelimit-resource': 'graphql', 'retry-after': '60' }, status: 403 }));

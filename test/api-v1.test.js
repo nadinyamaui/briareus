@@ -433,8 +433,12 @@ describe('handing a request to the dashboard’s handler', () => {
       path: '/api/repo/file',
       query: { repo, ref: 'abc', path: 'src/a.js' },
     });
+    expect(await json(`/repo/archive?repo=${repo}&ref=abc`, { token: tokens.read })).toMatchObject({
+      path: '/api/repo/archive',
+      query: { repo, ref: 'abc' },
+    });
     handler.mockClear();
-    for (const route of ['/repo/tree', '/repo/file?path=a.js']) {
+    for (const route of ['/repo/tree', '/repo/file?path=a.js', '/repo/archive?ref=abc']) {
       const join = route.includes('?') ? '&' : '?';
       expect((await request(`${route}${join}repo=other/project`, { token: tokens.read })).status).toBe(403);
       expect((await request(route, { token: tokens.read })).status).toBe(403);
@@ -606,6 +610,25 @@ describe('the event streams', () => {
       ).rejects.toThrow();
     }
   });
+
+  it.each(['revoked', 'expired', 'API disabled'])('ends an open binary archive when %s', async (reason) => {
+    handler.mockImplementation((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/gzip' });
+      res.write('gz');
+    });
+    const response = await request(`/repo/archive?repo=${repo}&ref=abc`, { token: tokens.read });
+    expect(response.headers.get('content-type')).toBe('application/gzip');
+    const reader = response.body.getReader();
+    await reader.read();
+    if (reason === 'revoked') await auth.revoke(auth.list().find((d) => d.label === 'read client').id);
+    else if (reason === 'expired') clock += 31 * 24 * 60 * 60 * 1000;
+    else apiOn = false;
+    await expect(
+      (async () => {
+        for (;;) if ((await reader.read()).done) return 'ended';
+      })(),
+    ).rejects.toThrow();
+  });
 });
 
 describe('tokens', () => {
@@ -687,6 +710,16 @@ describe('the contract', () => {
     // Every reference in the document points at a schema that is there.
     for (const [, name] of JSON.stringify(doc).matchAll(/#\/components\/schemas\/(\w+)/g))
       expect(doc.components.schemas, name).toHaveProperty(name);
+  });
+
+  it('documents the binary archive limit and truncated-transfer behavior', () => {
+    const response = apiV1OpenApi().paths['/repo/archive'].get.responses[200];
+    expect(response.content['*/*'].schema).toEqual({ type: 'string', format: 'binary' });
+    for (const text of [response.description, apiV1Reference()]) {
+      expect(text).toContain('300 MiB (314,572,800 bytes)');
+      expect(text).toContain('413 before the download');
+      expect(text).toContain('truncated archive after response headers');
+    }
   });
 
   it('writes catalog types as JSON Schema', () => {
@@ -788,6 +821,7 @@ describe('the contract', () => {
     const { DB_SERVER_DEFAULTS } = await import('../lib/dbservers.js');
     const { SSH_DEFAULTS } = await import('../lib/ssh.js');
     const { WEBHOOK_DEFAULTS } = await import('../lib/deliveries.js');
+    const { MAIL_ACCOUNT_DEFAULTS } = await import('../lib/mail.js');
     const fields = (name) => Object.keys(OBJECTS[name].fields);
     for (const key of Object.keys(PROJECT_DEFAULTS)) expect(fields('Project'), key).toContain(key);
     // The stored login is the one provider field that never leaves the server.
@@ -797,6 +831,7 @@ describe('the contract', () => {
     for (const key of Object.keys(SSH_DEFAULTS)) expect(fields('SshServer'), key).toContain(key);
     for (const key of Object.keys(WEBHOOK_DEFAULTS).filter((k) => k !== 'epoch'))
       expect(fields('Webhook'), key).toContain(key);
+    for (const key of Object.keys(MAIL_ACCOUNT_DEFAULTS)) expect(fields('MailAccount'), key).toContain(key);
   });
 
   it('has a reference on disk that is what the catalog would write', async () => {

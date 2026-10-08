@@ -27,6 +27,7 @@ vi.mock('../lib/codex-session.js', async (original) => ({
 // the pure parts: event windowing, the public projection, and what createDevSession refuses.
 // The spawn success path is left untested on purpose; it is the integration surface.
 const state = vi.hoisted(() => ({
+  workspaceDir: '/tmp/nowhere',
   provider: { id: 1, label: 'Claude entry', binary: 'claude', active: true },
   // Only the interchangeable-accounts tests set these.
   otherProviders: [],
@@ -63,7 +64,7 @@ vi.mock('../lib/config.js', () => ({
     grokBin: '',
     opencodeBin: '',
     githubToken: 'tok',
-    workspaceDir: '/tmp/nowhere',
+    workspaceDir: state.workspaceDir,
     dev: { maxSessions: 3, timeoutMin: 60, autoCompactTokens: 250000 },
     reviewLoop: { maxRounds: 3, lowFindingsUntilRound: 1 },
   }),
@@ -185,7 +186,7 @@ vi.mock('../lib/usage.js', () => ({
 
 import { deleteJob, jobEventMaxSeqs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
-import { dropSessionDatabase } from '../lib/dbpool.js';
+import { acquireInstance, dropSessionDatabase } from '../lib/dbpool.js';
 import {
   latestReviewFindings,
   latestTestFailures,
@@ -251,6 +252,7 @@ import {
   flushDeliveries,
   setSessionWebhook,
   setSlackAccess,
+  setExternalMcp,
   slackProtocol,
   pushProtocol,
   rotateSessionWebhook,
@@ -277,6 +279,8 @@ import {
   workspaceCheckoutPlan,
   workspaceGitProbeOptions,
   codexTurnResumes,
+  acquireCloneDir,
+  ensureClone,
 } from '../lib/jobs.js';
 
 beforeEach(() => {
@@ -6381,6 +6385,51 @@ describe('the QA loop: arming and disarming', () => {
     });
   });
 
+  it.each([false, true])(
+    'disarms QA (running: %s) without changing reviews, findings, fixes or CI',
+    (running) => {
+      const job = getJob('qa-arm-1');
+      job.reviewLoop = {
+        rounds: 2,
+        done: false,
+        reviewing: true,
+        fixing: true,
+        triage: { findings: [{ key: 'keep' }] },
+        pendingFix: { keys: ['keep'] },
+      };
+      job.prStatus = { number: 88, checks: { passed: 1, pending: 2 } };
+      job.qaLoop = { running, sessionId: running ? 'active-qa' : null };
+      const review = structuredClone(job.reviewLoop);
+      const ci = structuredClone(job.prStatus);
+      setQaLoop(job.id, false);
+      expect(job.qaLoop).toBeNull();
+      expect(job.reviewLoop).toEqual(review);
+      expect(job.prStatus).toEqual(ci);
+      expect(jobEventsSince(job, 0).at(-1).text).toContain('QA loop turned off');
+      if (running) expect(jobEventsSince(job, 0).at(-1).text).toContain('already running finishes');
+      setQaLoop(job.id, false);
+      expect(job.reviewLoop).toEqual(review);
+    },
+  );
+
+  it('keeps an already armed QA loop when armed again', () => {
+    const job = getJob('qa-arm-1');
+    job.qaLoop = { running: true, sessionId: 'active-qa' };
+    const qa = job.qaLoop;
+    setQaLoop(job.id, true);
+    expect(job.qaLoop).toBe(qa);
+  });
+
+  it('retains the open-task eligibility rules', () => {
+    const job = getJob('qa-arm-1');
+    job.status = 'closed';
+    expect(() => setQaLoop(job.id, false)).toThrow(/open session/);
+    job.status = 'idle';
+    job.qaBranch = 'qa';
+    expect(() => setQaLoop(job.id, false)).toThrow(/started from scratch/);
+    job.qaBranch = null;
+  });
+
   it('turning the review loop off cancels the QA run queued behind it', () => {
     setReviewLoop('qa-arm-1', false);
     expect(getJob('qa-arm-1').reviewLoop).toBeNull();
@@ -10749,6 +10798,38 @@ describe('the shared browser in a session', () => {
     ).toBe(true);
   });
 
+  it('mounts the project’s own MCP servers: a remote one through the proxy, behind the session token', async () => {
+    const job = getJob('br-turn');
+    job.browser = false;
+    const asked = [];
+    setExternalMcp((repo) => {
+      asked.push(repo);
+      return [
+        { id: 7, name: 'meta', transport: 'http' },
+        { id: 8, name: 'local', transport: 'stdio', command: 'npx', args: ['-y', 'x'], env: { K: 'v' } },
+        { id: 9, name: '__proto__', transport: 'stdio', command: 'node', args: [], env: {} },
+      ];
+    });
+    try {
+      const { seen, settled } = await turn(job, 'List my apps');
+      await settled;
+      expect(asked).toContain('acme/shop');
+      expect(seen.mcp.meta).toEqual({
+        type: 'http',
+        url: expect.stringMatching(/\/api\/agent\/mcp\/7$/),
+        headers: { Authorization: expect.stringMatching(/^Bearer [0-9a-f]{48}$/) },
+      });
+      expect(seen.mcp.meta.headers.Authorization).toBe(
+        `Bearer ${seen.mcp.reviewer_memory.env.REVIEWER_MEMORY_TOKEN}`,
+      );
+      expect(seen.mcp.local).toEqual({ command: 'npx', args: ['-y', 'x'], env: { K: 'v' } });
+      expect(Object.hasOwn(seen.mcp, '__proto__')).toBe(true);
+      expect(seen.mcp.__proto__).toEqual({ command: 'node', args: [], env: {} });
+    } finally {
+      setExternalMcp(() => []);
+    }
+  });
+
   it('does not take a Stop of the previous turn as a Stop of this one', async () => {
     const job = getJob('br-turn');
     job.browser = true;
@@ -11258,5 +11339,182 @@ describe('/btw side questions', () => {
     getProviderForJob.mockReturnValue({ id: 3, label: 'Codex', binary: 'codex', active: true });
     expect(() => askDevSessionBtw('btw-session', 'hi')).toThrow('Claude session');
     expect(askClaudeSideQuestion).not.toHaveBeenCalled();
+  });
+});
+
+describe('invalid clone pool slots', () => {
+  it('automatic review children skip invalid slots and reserve separate checkouts before preparation', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'review-clone-pool-'));
+    state.workspaceDir = root;
+    const children = [];
+    const invalid = path.join(root, 'acme__shop__5');
+    try {
+      for (let i = 1; i <= 5; i++) {
+        fs.mkdirSync(path.join(root, i === 1 ? 'acme__shop' : `acme__shop__${i}`));
+      }
+      fs.mkdirSync(path.join(invalid, 'build-find'));
+      fs.writeFileSync(path.join(invalid, 'build-find', 'artifact'), 'preserved output');
+      fs.chmodSync(path.join(invalid, 'build-find'), 0o555);
+      fs.mkdirSync(path.join(invalid, 'res', 'third_party'), { recursive: true });
+      fs.writeFileSync(path.join(invalid, 'res', 'third_party', 'local-work'), 'preserved source');
+      const backup = `${invalid}.recovery-backup-fixture`;
+      fs.mkdirSync(backup);
+      fs.writeFileSync(path.join(backup, 'work'), 'preserved backup');
+      // Stop after allocation, before Git, database or provider work; the
+      // automatic loop uses this exact review/autoClose/loopParentId spec.
+      vi.mocked(acquireInstance).mockRejectedValueOnce(new Error('fixture: allocation observed'));
+      vi.mocked(acquireInstance).mockRejectedValueOnce(new Error('fixture: allocation observed'));
+      const spec = {
+        provider: 1,
+        repo: 'acme/shop',
+        branch: 'worker-branch',
+        review: true,
+        autoClose: true,
+        loopParentId: 'fixture-review-parent',
+      };
+      children.push(createDevSession(spec), createDevSession(spec));
+      expect(children.map((child) => child.workDir)).toEqual([
+        path.join(root, 'acme__shop__6'),
+        path.join(root, 'acme__shop__7'),
+      ]);
+      await vi.waitFor(() => {
+        for (const child of children) {
+          expect(getJob(child.id).status).toBe('failed');
+          expect(getJob(child.id).error).toBe('fixture: allocation observed');
+        }
+      });
+      expect(fs.readFileSync(path.join(invalid, 'build-find', 'artifact'), 'utf8')).toBe('preserved output');
+      expect(fs.readFileSync(path.join(invalid, 'res', 'third_party', 'local-work'), 'utf8')).toBe(
+        'preserved source',
+      );
+      expect(fs.readFileSync(path.join(backup, 'work'), 'utf8')).toBe('preserved backup');
+      expect(fs.readdirSync(invalid).sort()).toEqual(['build-find', 'res']);
+      expect(fs.statSync(path.join(invalid, 'build-find')).mode & 0o777).toBe(0o555);
+    } finally {
+      await vi.waitFor(() => {
+        for (const child of children) expect(getJob(child.id).status).toBe('failed');
+      });
+      state.workspaceDir = '/tmp/nowhere';
+      fs.chmodSync(path.join(invalid, 'build-find'), 0o755);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('skips missing .git without touching files and reserves concurrent fresh allocations', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-pool-'));
+    state.workspaceDir = root;
+    try {
+      const invalid = path.join(root, 'acme__app');
+      fs.mkdirSync(invalid);
+      fs.writeFileSync(path.join(invalid, 'unpublished.txt'), 'local work');
+      const first = acquireCloneDir('acme/app', 'worker');
+      const second = acquireCloneDir('acme/app', 'worker');
+      expect(first).toBe(path.join(root, 'acme__app__2'));
+      expect(second).toBe(path.join(root, 'acme__app__3'));
+      expect(fs.readFileSync(path.join(invalid, 'unpublished.txt'), 'utf8')).toBe('local work');
+      expect(fs.readdirSync(invalid)).toEqual(['unpublished.txt']);
+    } finally {
+      state.workspaceDir = '/tmp/nowhere';
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])(
+    'preserves a broken checkout (has .git: %s) even if the replacement clone fails',
+    async (hasGit) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-replacement-'));
+      const dir = path.join(root, 'acme__app');
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'unpublished.txt'), 'local work');
+      if (hasGit) {
+        fs.mkdirSync(path.join(dir, '.git'));
+        fs.writeFileSync(path.join(dir, '.git', 'HEAD'), 'damaged but preserved');
+      }
+      const failedCommand = () => {
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        setImmediate(() => child.emit('close', 1));
+        return child;
+      };
+      if (hasGit) vi.mocked(spawn).mockImplementationOnce(failedCommand);
+      vi.mocked(spawn).mockImplementationOnce(failedCommand);
+      try {
+        const job = { id: `clone-replacement-${hasGit}` };
+        await expect(ensureClone(job, dir, 'acme/app')).rejects.toThrow(/git clone exited with code 1/);
+        const recovery = path.join(root, '.briareus-recovery');
+        expect(fs.readdirSync(recovery)).toHaveLength(1);
+        const backup = path.join(recovery, fs.readdirSync(recovery)[0], 'checkout');
+        expect(fs.readFileSync(path.join(backup, 'unpublished.txt'), 'utf8')).toBe('local work');
+        if (hasGit)
+          expect(fs.readFileSync(path.join(backup, '.git', 'HEAD'), 'utf8')).toBe('damaged but preserved');
+        expect(job.events.some((event) => event.text.includes(backup))).toBe(true);
+        expect(fs.readdirSync(dir)).toEqual([]);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'recreates a read-only empty clone directory at full quarantine capacity (preserve: %s)',
+    async (preserve) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-empty-retry-'));
+      const dir = path.join(root, 'acme__app');
+      const recovery = path.join(root, '.briareus-recovery');
+      fs.mkdirSync(dir, { mode: 0o555 });
+      for (let i = 0; i < 100; i++) {
+        const checkout = path.join(recovery, `backup-${i}`, 'checkout');
+        fs.mkdirSync(checkout, { recursive: true });
+        fs.writeFileSync(path.join(checkout, 'work'), 'retained');
+      }
+      vi.mocked(spawn).mockImplementationOnce(() => {
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        expect(fs.statSync(dir).mode & 0o700).toBe(0o700);
+        fs.mkdirSync(path.join(dir, '.git'));
+        fs.writeFileSync(path.join(dir, '.git', 'config'), '[core]\n autocrlf = false\n');
+        setImmediate(() => child.emit('close', 0));
+        return child;
+      });
+      try {
+        const job = { id: `clone-empty-retry-${preserve}` };
+        await expect(ensureClone(job, dir, 'acme/app', { preserve })).resolves.toBe(true);
+        expect(spawn).toHaveBeenCalledWith(
+          'git',
+          [
+            'clone',
+            '--filter=blob:none',
+            '--no-checkout',
+            '--progress',
+            'https://github.com/acme/app.git',
+            dir,
+          ],
+          expect.any(Object),
+        );
+        expect(fs.readdirSync(recovery)).toHaveLength(100);
+        for (const entry of fs.readdirSync(recovery))
+          expect(fs.readFileSync(path.join(recovery, entry, 'checkout', 'work'), 'utf8')).toBe('retained');
+        expect(job.events.some((event) => event.text.includes('Preserved'))).toBe(false);
+      } finally {
+        fs.chmodSync(dir, 0o755);
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('still refuses to resume a populated checkout missing .git', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-resume-'));
+    try {
+      fs.writeFileSync(path.join(root, 'unpublished.txt'), 'local work');
+      await expect(ensureClone({}, root, 'acme/app', { preserve: true })).rejects.toThrow(
+        `The checkout at ${root} has lost its .git; inspect it before resuming`,
+      );
+      expect(fs.readFileSync(path.join(root, 'unpublished.txt'), 'utf8')).toBe('local work');
+      expect(fs.readdirSync(root)).toEqual(['unpublished.txt']);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
