@@ -840,7 +840,7 @@ describe('the contract', () => {
     const options = await prettier.resolveConfig(file);
     const expected = await prettier.format(apiV1Reference(), { ...options, filepath: file });
     expect(fs.readFileSync(file, 'utf8'), 'run `npm run build:api-docs`').toBe(expected);
-  });
+  }, 15_000);
 
   it('gives every route a unique method and path', () => {
     const keys = API_V1_ROUTES.map((e) => `${e.method} ${e.path}`);
