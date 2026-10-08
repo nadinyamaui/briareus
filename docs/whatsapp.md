@@ -31,10 +31,23 @@ printed by the installer, then restart the core after deploying the code:
 WAHA_CONFIG_FILE=/home/your-user/.config/briareus/waha/.env
 ```
 
-The installer accepts `WAHA_INSTALL_DIR`, `WAHA_PORT` and `WAHA_IMAGE` on its
-first run. An existing install keeps its saved configuration. To upgrade,
+The installer accepts `WAHA_INSTALL_DIR`, `WAHA_PORT`, `WAHA_IMAGE` and
+`WAHA_ENGINE` on its first run (the engine defaults to `WEBJS`).
+An existing install keeps its saved configuration. To upgrade,
 change `WAHA_IMAGE` in the private file to a reviewed image tag/digest and run
 `docker compose --project-directory ~/.config/briareus/waha up -d`.
+
+To switch to NOWEB when browser-engine pairing codes fail, set
+`WAHA_ENGINE=NOWEB` in the private installation’s `.env` and run
+`docker compose --project-directory ~/.config/briareus/waha up -d`.
+NOWEB fetches the current WhatsApp protocol version on startup by default
+(`WAHA_NOWEB_WA_VERSION=auto-web`); override that setting in the private `.env`
+if a fixed version is required. The core enables NOWEB’s history store and
+full sync when creating an account, so chat/history endpoints remain usable.
+For an existing NOWEB account created outside Briareus, enable its store
+before linking a phone, following the [NOWEB guide](https://waha.devlike.pro/docs/engines/noweb/#enable-store).
+Engines keep authentication in separate storage namespaces, so switching can
+require linking the phone again; existing session volumes are retained.
 
 For a core running in Docker, pass `WAHA_URL` and `WAHA_API_KEY` in the app’s
 environment instead. `127.0.0.1` inside that app container is the container

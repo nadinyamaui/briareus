@@ -38,7 +38,7 @@ const saved = Object.fromEntries(fs.readFileSync(envFile, 'utf8').trim().split('
   return [line.slice(0, split), line.slice(split + 1)];
 }));
 // Compose gives exported variables priority over the selected env file.
-const effective = Object.fromEntries(['WAHA_IMAGE', 'WAHA_PORT', 'WAHA_API_KEY'].map((key) => [key, process.env[key] ?? saved[key]]));
+const effective = Object.fromEntries(['WAHA_IMAGE', 'WAHA_ENGINE', 'WAHA_PORT', 'WAHA_API_KEY'].map((key) => [key, process.env[key] ?? saved[key]]));
 fs.writeFileSync(process.env.WAHA_TEST_LOG, JSON.stringify(effective));
 `,
       { mode: 0o700 },
@@ -52,6 +52,7 @@ fs.writeFileSync(process.env.WAHA_TEST_LOG, JSON.stringify(effective));
       WAHA_INSTALL_DIR: installDir,
       WAHA_TEST_LOG: log,
       WAHA_IMAGE: 'custom/waha:latest',
+      WAHA_ENGINE: 'NOWEB',
       WAHA_PORT: port,
       WAHA_API_KEY: 'ambient-key',
     };
@@ -62,16 +63,24 @@ fs.writeFileSync(process.env.WAHA_TEST_LOG, JSON.stringify(effective));
     expect(key).not.toBe(env.WAHA_API_KEY);
     expect(JSON.parse(await readFile(log, 'utf8'))).toEqual({
       WAHA_IMAGE: digest,
+      WAHA_ENGINE: 'NOWEB',
       WAHA_PORT: port,
       WAHA_API_KEY: key,
     });
     await run('bash', [installer], {
-      env: { ...env, WAHA_IMAGE: 'other/waha:latest', WAHA_PORT: '8303', WAHA_API_KEY: 'other-key' },
+      env: {
+        ...env,
+        WAHA_IMAGE: 'other/waha:latest',
+        WAHA_ENGINE: 'WEBJS',
+        WAHA_PORT: '8303',
+        WAHA_API_KEY: 'other-key',
+      },
       cwd: scratch,
     });
     expect(await readFile(join(installDir, '.env'), 'utf8')).toBe(original);
     expect(JSON.parse(await readFile(log, 'utf8'))).toEqual({
       WAHA_IMAGE: digest,
+      WAHA_ENGINE: 'NOWEB',
       WAHA_PORT: port,
       WAHA_API_KEY: key,
     });
