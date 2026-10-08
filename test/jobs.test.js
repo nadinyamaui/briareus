@@ -10348,6 +10348,34 @@ describe('Codex turn usage', () => {
     },
   );
 
+  it('drains accepted corrections after Stop cancels the initial turn', async () => {
+    const local = fs.mkdtempSync(path.join(home, 'first-turn-correction-'));
+    fs.mkdirSync(path.join(local, '.git'));
+    state.projects[0].localDir = local;
+    const session = createDevSession({
+      provider: 2,
+      repo: 'acme/shop',
+      local: true,
+      prompt: 'Start the change',
+    });
+    const job = getJob(session.id);
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
+    expect(sendDevMessage(job.id, 'Use the corrected approach').queued).toEqual([
+      { text: 'Use the corrected approach' },
+    ]);
+    cancelDevTurn(job.id);
+    children[0].emit('close', null);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(job.status).toBe('running');
+    expect(publicJob(job).queued).toBeUndefined();
+    expect(job.events.filter((event) => event.kind === 'user').at(-1).text).toBe(
+      'Use the corrected approach',
+    );
+    children[1].emit('close', 0);
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    await closeDevSession(job.id);
+  });
+
   it.each(['loopParentId', 'qaParentId', 'loopFixParentId'])(
     'does not complete a canceled first turn (%s) or close it twice',
     async (parentField) => {
