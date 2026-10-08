@@ -228,6 +228,46 @@ async function connect(input = {}, code = 'code-1') {
 const settled = async () =>
   vi.waitFor(async () => expect((await service.list()).every((a) => !a.syncing)).toBe(true));
 
+describe('Outlook connection validation', () => {
+  it.each([false, true])(
+    'does not save inaccessible guest credentials (reconnect: %s)',
+    async (reconnect) => {
+      cfg.mail.microsoft = {
+        clientId: 'mid',
+        clientSecret: '',
+        tenant: 'common',
+        redirectUri: 'http://127.0.0.1',
+      };
+      const email = 'me_outlook.com#EXT#@tenant.onmicrosoft.com';
+      const credentials = seal(JSON.stringify({ accessToken: 'old', refreshToken: 'old-refresh' }));
+      const existing = reconnect
+        ? await store.insertAccount({
+            provider: 'outlook',
+            email,
+            label: '',
+            credentials,
+            enabled: false,
+            status: 'connected',
+            syncDays: 30,
+          })
+        : null;
+      const request = vi.fn(async (url) => {
+        if (String(url).includes('/token'))
+          return new Response(JSON.stringify({ access_token: 'new', refresh_token: 'new-refresh' }));
+        if (String(url).includes('/mailFolders/')) return new Response('{}', { status: 401 });
+        return new Response(JSON.stringify({ userPrincipalName: email }));
+      });
+      service = createMailService({ store, request, now: () => clock, sleep: async () => {} });
+      await service.init();
+      await expect(
+        connect({ provider: 'outlook', enabled: false, ...(existing ? { accountId: existing.id } : {}) }),
+      ).rejects.toMatchObject({ status: 400, message: expect.stringContaining('guest') });
+      expect(store.accounts.size).toBe(reconnect ? 1 : 0);
+      if (existing) expect(store.accounts.get(existing.id).credentials).toBe(credentials);
+    },
+  );
+});
+
 describe('Outlook expired continuations', () => {
   it.each([
     [410, false],
