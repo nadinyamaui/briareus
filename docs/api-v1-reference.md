@@ -135,7 +135,7 @@ Read a project’s board: its open pull requests and open issues. Needs `read`, 
 | `repo` **required** | `string` | A project, as `owner/name`                         |
 | `fresh`             | `0\|1`   | `1` skips the server’s short cache and reads again |
 
-**Returns** `{ repo: string, pulls: object[], issues: object[], stacks: object, syncedAt: string }`. A pull request row carries `number`, `title`, `url`, `draft`, `author`, `assignees`, `reviewers`, `issues`, `branch`, `baseBranch`, `updatedAt`, `labels`, `mergeable`, `checks`, `reviewDecision`, `recommended` and `stack`. An issue row carries `number`, `title`, `url`, `author`, `assignees`, `labels`, `comments`, `milestone`, `createdAt`, `updatedAt` and the `pulls` that close it.
+**Returns** `{ repo: string, pulls: object[], issues: object[], stacks: object, syncedAt: string }`. A pull request row carries `number`, `title`, `url`, `draft`, `author`, `assignees`, `reviewers`, `issues`, `branch`, `baseBranch`, `updatedAt`, `labels`, `mergeable`, `checks`, `reviewDecision`, `recommended` and `stack`. An issue row carries `number`, `title`, `url`, `author`, `assignees`, `labels`, `comments`, `milestone`, `createdAt`, `updatedAt` and the `pulls` that close it. The board is cached for two minutes per repository, and `fresh=1` is served from that cache while it is under 15 seconds old. When GitHub’s allowance is spent the answer is 429 with `retryAt` (ISO 8601) and a `Retry-After` header; any other GitHub failure is 502.
 
 ### `GET /pulls/{number}`
 

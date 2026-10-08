@@ -1382,6 +1382,17 @@ api.get('/api/dev/pulls', async (req, res) => {
   try {
     res.json(await projectPulls(project, { fresh: req.query.fresh === '1' }));
   } catch (e) {
+    // A spent GitHub allowance is a 429 that says when to come back, so a
+    // client can tell "try again at 15:41" from a server fault. Anything else
+    // stays a 502: a GraphQL error carries the 200 it arrived with, and that
+    // must not reach the client as a success.
+    if (e && e.rateLimited) {
+      const retryAt = Number(e.retryAt) || null;
+      if (retryAt) res.set('Retry-After', String(Math.max(1, Math.ceil((retryAt - Date.now()) / 1000))));
+      return res
+        .status(429)
+        .json({ error: e.message, retryAt: retryAt ? new Date(retryAt).toISOString() : null });
+    }
     res.status(502).json({ error: e.message });
   }
 });
