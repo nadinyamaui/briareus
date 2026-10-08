@@ -669,6 +669,69 @@ describe('outlookProvider', () => {
     await expect(outlookProvider(MICROSOFT, { request }).exchange('c', 'v')).rejects.toThrow(/Mail\.Read/);
   });
 
+  it('checks mailbox access before accepting a personal or work account', async () => {
+    const call = vi.fn(async (url) =>
+      url.includes('/mailFolders/')
+        ? { id: 'inbox' }
+        : { mail: 'me@outlook.com', userPrincipalName: 'me@outlook.com' },
+    );
+    await expect(outlookProvider(MICROSOFT).profile(call)).resolves.toEqual({ email: 'me@outlook.com' });
+    expect(call.mock.calls.map(([url]) => url)).toEqual([
+      `${GRAPH}?$select=mail,userPrincipalName`,
+      `${GRAPH}/mailFolders/inbox?$select=id`,
+    ]);
+  });
+
+  it('explains how to recover a personal account authenticated as a guest without a mailbox', async () => {
+    const { request } = fakeFetch([
+      [`${GRAPH}?`, () => ({ body: { userPrincipalName: 'me_outlook.com#EXT#@tenant.onmicrosoft.com' } })],
+      [`${GRAPH}/mailFolders/inbox?`, () => ({ status: 401 })],
+    ]);
+    const tokens = vi.fn(async () => 'access');
+    const outlook = outlookProvider(MICROSOFT, { request });
+    await expect(outlook.profile(outlook.api(tokens))).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringMatching(/guest.*MICROSOFT_OAUTH_TENANT=consumers.*Connect Outlook/),
+    });
+    // A token refresh has already been tried; repeating it cannot fix the identity.
+    expect(tokens.mock.calls.map(([force]) => force)).toEqual([false, false, true]);
+  });
+
+  it('allows a guest whose mailbox is accessible and preserves other mailbox errors', async () => {
+    const refused = Object.assign(new Error('Outlook did not answer'), { status: 502 });
+    let failure = null;
+    const call = vi.fn(async (url) => {
+      if (url.includes('/mailFolders/')) {
+        if (failure) throw failure;
+        return { id: 'inbox' };
+      }
+      return { mail: 'me@work.test', userPrincipalName: 'me_work.test#EXT#@tenant.onmicrosoft.com' };
+    });
+    const outlook = outlookProvider(MICROSOFT);
+    await expect(outlook.profile(call)).resolves.toEqual({ email: 'me@work.test' });
+    failure = refused;
+    await expect(outlook.profile(call)).rejects.toBe(refused);
+  });
+
+  it('uses the personal account authority consistently for sign-in, exchange and refresh', async () => {
+    const { request, calls } = fakeFetch([
+      [
+        'https://login.microsoftonline.com/consumers/',
+        () => ({ body: { access_token: 'a', refresh_token: 'r' } }),
+      ],
+    ]);
+    const outlook = outlookProvider({ ...MICROSOFT, tenant: 'consumers' }, { request });
+    expect(new URL(outlook.authorizeUrl({ state: 's', challenge: 'c' })).pathname).toBe(
+      '/consumers/oauth2/v2.0/authorize',
+    );
+    await outlook.exchange('code', 'verifier');
+    await outlook.refresh('refresh');
+    expect(calls.map((c) => c.url)).toEqual([
+      'https://login.microsoftonline.com/consumers/oauth2/v2.0/token',
+      'https://login.microsoftonline.com/consumers/oauth2/v2.0/token',
+    ]);
+  });
+
   it('follows every folder but the skipped ones, through each folder’s delta', async () => {
     const folderPages = {
       [`${GRAPH}/mailFolders?`]: [

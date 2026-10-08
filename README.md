@@ -1064,6 +1064,14 @@ sign-in as the browser arrives there, whatever device signed in.
      `consumers` for personal accounts only, or your tenant's id or domain for
      a single-tenant app.
 
+     If a personal Outlook account connects as `...#EXT#@...onmicrosoft.com`
+     and sync answers 401, it signed in as an organization's guest rather
+     than the mailbox owner: enable personal Microsoft accounts in the app
+     registration and use `consumers` (or `common` for work accounts too),
+     reload the server configuration, then use **Connect Outlook** to connect
+     the personal account afresh; **Sign in again** on the guest entry still
+     targets that guest identity.
+
    `CREDENTIALS_KEY` must be set too: the tokens are stored encrypted with it.
    Behind Cloudflare Access, give `/oauth/mail/callback` the same _Bypass_ as
    `/api/v1`, so a browser that has not passed Access still reaches it; the
