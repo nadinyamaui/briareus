@@ -2052,6 +2052,84 @@ describe('spawnWorkerSession', () => {
     },
   );
 
+  it.each(['review', 'fix'])(
+    'blocks both recovery paths until failed %s cleanup and notification finish',
+    async (kind) => {
+      const orchestrator = getJob('question-orch');
+      const worker = getJob('question-worker');
+      const job = getJob('question-child');
+      const originalWorkDir = job.workDir;
+      const active = kind === 'review' ? 'reviewing' : 'fixing';
+      const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
+      Object.assign(orchestrator, { status: 'idle', awaitingAnswer: true, pendingWorkerNotices: [] });
+      Object.assign(worker, {
+        status: 'idle',
+        reviewLoop: { rounds: 1, [active]: true, [childId]: job.id },
+      });
+      Object.assign(job, {
+        status: 'idle',
+        awaitingAnswer: true,
+        autoClose: true,
+        loopParentId: kind === 'review' ? worker.id : null,
+        loopFixParentId: kind === 'fix' ? worker.id : null,
+      });
+      let finishRelease;
+      releaseInstance.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishRelease = resolve;
+          }),
+      );
+      const { children, restore } = fakeClaude();
+      try {
+        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
+        children[0].emitLines(init, replay('Postgres'));
+        children[0].emit('close', 1);
+        await vi.waitFor(() => expect(finishRelease).toBeTypeOf('function'));
+        const workDir = job.workDir;
+        const dbServerId = job.dbServerId;
+        const allocations = acquireInstance.mock.calls.length;
+        const events = job.events.length;
+        expect(job.status).toBe('failed');
+        expect(() => reopenDevSession(job.id)).toThrow(/finish.*cleanup/);
+        expect(() => sendDevMessage(job.id, 'Recover')).toThrow(/finish.*cleanup/);
+        expect(job.workDir).toBe(workDir);
+        expect(job.dbServerId).toBe(dbServerId);
+        expect(acquireInstance.mock.calls).toHaveLength(allocations);
+        expect(job.events).toHaveLength(events);
+        expect(children).toHaveLength(1);
+        expect(worker.reviewLoop[active]).toBe(true);
+        expect(orchestrator.pendingWorkerNotices).toHaveLength(0);
+        finishRelease();
+        await vi.waitFor(() => expect(worker.reviewLoop[active]).toBe(false));
+        expect(worker.reviewLoop.failure).toMatchObject({ reason: job.error });
+        expect(orchestrator.pendingWorkerNotices).toHaveLength(1);
+        // Recovery after retirement may allocate; no old failure callback can
+        // clear that recovering lifecycle or release its newly acquired resources.
+        let finishAcquire;
+        acquireInstance.mockImplementationOnce(
+          () =>
+            new Promise((resolve, reject) => {
+              finishAcquire = reject;
+            }),
+        );
+        expect(() => reopenDevSession(job.id)).not.toThrow();
+        await vi.waitFor(() => expect(finishAcquire).toBeTypeOf('function'));
+        expect(job.status).toBe('preparing');
+        expect(acquireInstance.mock.calls).toHaveLength(allocations + 1);
+        const releases = releaseInstance.mock.calls.length;
+        // Stop before workspace preparation so this remains a process-free test.
+        finishAcquire(new Error('fixture: stop before workspace preparation'));
+        await vi.waitFor(() => expect(releaseInstance.mock.calls).toHaveLength(releases + 1));
+      } finally {
+        finishRelease?.();
+        job.status = worker.status = orchestrator.status = 'closed';
+        job.workDir = originalWorkDir;
+        restore();
+      }
+    },
+  );
+
   it('rejects answers while an idle asking session is releasing its database', async () => {
     const job = getJob('question-child');
     Object.assign(job, {
