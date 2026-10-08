@@ -805,25 +805,38 @@ operating-system sandbox restricting every possible way to reach a server.
 
 ### Slack
 
-A session can send a Slack message when you tell it to ("send this to Andres"),
-and what Andres answers comes back into that session. Messages go out **as you**:
-the workspace is a Slack user token, not a bot.
+The core has a Slack inbox for native clients, independent of coding agents:
+list channels and DMs, read history and threads, reply, and mark conversations
+read through `/api/v1/slack/workspaces`. New messages, edits and deletions arrive
+on a live event stream, including messages nobody has previously contacted
+from an agent session. Messages go out **as you**: the workspace is a Slack
+user token, not a bot. The core serves the API; clients build their inbox UI
+on [the client integration guide](docs/api-v1.md#slack-inbox).
 
 1. Create a Slack app at api.slack.com/apps. Under _OAuth & Permissions_, give it these
    **user token** scopes: `chat:write`, `users:read`, `channels:read`, `groups:read`,
-   `im:write`, `im:history`, `channels:history` and `groups:history`. Install it to the
+   `im:read`, `mpim:read`, `im:write`, `mpim:write`, `im:history`, `mpim:history`,
+   `channels:history` and `groups:history`; to sync read positions also grant
+   `channels:write` and `groups:write`. Install it to the
    workspace and copy the _User OAuth Token_ (`xoxp-…`).
 2. Add the workspace (`POST /api/v1/settings/slack/workspaces`) with that `token`, the
-   app's `signingSecret` (from _Basic Information_), and the `projects` that may use it,
+   app's `signingSecret` (from _Basic Information_), and optionally the `projects` whose sessions may use it,
    each `{ repo, channels, directMessages, permissionMode }`. The token is checked with
    Slack and stored encrypted under `CREDENTIALS_KEY`, as is the secret. A project sends
-   through one workspace at most.
-3. For replies, turn on the app's _Event Subscriptions_ with the workspace's `eventsUrl`
+   through one workspace at most. Use `projects: []` for an operator-only inbox.
+   Existing installations need the added scopes and a reinstall for the new inbox calls.
+3. For live messages and session replies, turn on the app's _Event Subscriptions_ with the workspace's `eventsUrl`
    (`PUBLIC_BASE_URL/webhooks/slack/<id>`) as the Request URL, and subscribe **on behalf of
-   users** to `message.im`, `message.channels` and `message.groups`. Like the other webhooks,
+   users** to `message.im`, `message.mpim`, `message.channels` and `message.groups`. Like the other webhooks,
    that path must bypass Cloudflare Access.
 
-Sessions whose project has a workspace receive the `slack_destinations`, `slack_find_people`,
+The inbox requires an admin API token because it contains the connected account's
+business conversations, including private messages outside any project. It
+reads history directly from Slack and streams signed Slack events; on reconnect,
+clients reload history to recover missed updates. Sending from the inbox is a
+human action and takes effect immediately, without launching an agent or an approval.
+
+Separately, sessions whose project has a workspace receive the `slack_destinations`, `slack_find_people`,
 `slack_send` and `slack_result` MCP tools; reviews, QA, loop sessions and workers do not.
 A project may post only to the channels it lists, and to people only with `directMessages`.
 In **ask** mode (the default) each message waits in `GET /api/v1/slack/requests` and the
