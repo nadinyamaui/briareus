@@ -101,6 +101,37 @@ describe('cacheShareOf', () => {
 });
 
 describe('withEstimates', () => {
+  it('applies the long-context premium only to measured requests, independent of window suffix', () => {
+    const base = {
+      provider: 'codex',
+      model: 'gpt-5.6-sol',
+      inputTokens: 1000000,
+      cachedInputTokens: 900000,
+      outputTokens: 10000,
+      costUsd: null,
+      longInputTokens: 600000,
+      longCachedInputTokens: 550000,
+      longOutputTokens: 6000,
+    };
+    const rows = withEstimates(
+      [
+        base,
+        { ...base, model: 'gpt-5.6-sol (872k)' },
+        { ...base, longInputTokens: null },
+        { ...base, longCachedInputTokens: 650000 },
+        { ...base, costUsd: 3 },
+      ],
+      CATALOG,
+    );
+    // Base: .1M*4 + .9M*.4 + .01M*20 = .96.
+    // Premium: .05M*4 + .55M*.4 + .006M*20*.5 = .48.
+    expect(rows[0].costUsd).toBeCloseTo(1.44);
+    expect(rows[1].costUsd).toBeCloseTo(1.44);
+    expect(rows[2].costUsd).toBeCloseTo(0.96);
+    expect(rows[3].costUsd).toBeCloseTo(0.96);
+    expect(rows[4].costUsd).toBe(3);
+    expect(rows[0].costEstimated).toBe(true);
+  });
   it('prices the turns nobody priced and marks them as estimates', () => {
     const rows = [
       { provider: 'claude', model: 'claude-opus-5', inputTokens: 10e6, outputTokens: 1e6, costUsd: 43.5 },

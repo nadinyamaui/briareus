@@ -10119,6 +10119,43 @@ describe('Codex turn usage', () => {
   };
   const walks = (spy) => spy.mock.calls.filter(([dir]) => String(dir).includes('.codex-provider-2')).length;
 
+  it('persists the measured long-request counts while excluding the resumed thread prefix', async () => {
+    const job = getJob('codex-usage');
+    // No cached path at spawn: the pricing reader must skip old requests.
+    writeRollout({ input_tokens: 500000, cached_input_tokens: 450000, output_tokens: 20000 });
+    const file = path.join(
+      home,
+      '.codex-provider-2',
+      'sessions',
+      '2026',
+      '09',
+      '30',
+      'rollout-2026-09-30T00-00-00-thread-1.jsonl',
+    );
+    const total = { input_tokens: 800000, cached_input_tokens: 730000, output_tokens: 21000 };
+    fs.appendFileSync(
+      file,
+      `${JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: total,
+            last_token_usage: { input_tokens: 300000, cached_input_tokens: 280000, output_tokens: 1000 },
+          },
+        },
+      })}\n`,
+    );
+    expect(await turn(job, 'Next', total)).toMatchObject({
+      inputTokens: 300000,
+      cachedInputTokens: 280000,
+      outputTokens: 1000,
+      longInputTokens: 300000,
+      longCachedInputTokens: 280000,
+      longOutputTokens: 1000,
+    });
+  });
+
   it('books a resumed turn as what it added to the thread, reading the rollout once', async () => {
     const job = getJob('codex-usage');
     // The last reading on the record is another chat's (a step's, say).
