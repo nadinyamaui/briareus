@@ -850,6 +850,35 @@ the last 14 days, or in the thread of a message the session sent. It arrives as 
 under the session's webhook caps (or their defaults), without the webhook having to be armed.
 Nothing else that happens in the workspace reaches any session.
 
+### MCP servers
+
+Claude and Codex sessions can use MCP servers you add, beside Briareus's own tools
+(`POST /api/v1/settings/mcp/servers`). A server is either remote (`transport: http`, a
+Streamable HTTP `url`) or a command run beside each session (`transport: stdio`, with
+`command`, `args` and `env`). `repos` limits it to some projects; empty means every project.
+Headers, env, OAuth clients and tokens are stored encrypted under `CREDENTIALS_KEY`.
+
+Signing in is part of adding a server. Briareus checks a remote server at once. If the server
+answers 401 with OAuth details, Briareus follows the MCP authorization spec: it reads the
+protected resource and authorization server metadata, registers itself as a client, and replies
+with `status: needs-sign-in` and a `signInUrl`. Open that link on any device and sign in. The
+provider sends the browser to `PUBLIC_BASE_URL/webhooks/mcp-oauth/callback`, which completes
+the setup. Like the other webhooks, that path must bypass Cloudflare Access. If a server does
+not let clients register themselves, create an OAuth app with it, give its `oauthClientId` (and
+`oauthClientSecret`), and register that callback URL as the app's redirect. Some servers only let clients they already know register, and only with a loopback redirect.
+Meta's is one: it accepts names starting with `Claude Code`. For those, set `oauthClientName`
+(for example `Claude Code (Briareus)`) and `oauthRedirect: loopback`. The sign-in then ends on
+a `http://127.0.0.1:<port>/callback?code=…` page that won't load (`signInNeedsPaste` is true).
+Copy that address and send it to `POST …/servers/:id/finish-sign-in` as `url` to complete the
+setup. A server that takes an API key gets it as `headers` instead. `POST …/servers/:id/connect` checks a server again
+(`{ "signIn": true }` starts a new sign-in, for example to use another account).
+
+One sign-in covers every provider account. Sessions never see a remote server's credentials:
+a turn reaches the server through `/api/agent/mcp/<id>` with its own session token, and Briareus
+adds the server's token there, refreshing it when it is about to expire. Remote servers that
+still need a sign-in are not mounted. Grok and opencode sessions don't get these servers,
+because they take no MCP configuration headless.
+
 ### Operator attention
 
 `GET /api/v1/attention` is the operator's inbox: unanswered agent

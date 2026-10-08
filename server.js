@@ -21,6 +21,8 @@ import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
 import { createSlackService } from './lib/slack.js';
 import { slackRoutes, slackEventsRouter } from './lib/slack-routes.js';
+import { createMcpService, MCP_OAUTH_CALLBACK_PATH } from './lib/mcp-servers.js';
+import { mcpRoutes, mcpProxyRouter, mcpOAuthCallbackRouter } from './lib/mcp-routes.js';
 import { sessionWebhookRoutes } from './lib/webhook-routes.js';
 import { sessionTranscriptRoutes } from './lib/transcript-routes.js';
 import { providerTestRoutes } from './lib/provider-test-routes.js';
@@ -92,6 +94,7 @@ import {
   noteSession,
   webhookUnfit,
   setSlackAccess,
+  setExternalMcp,
   DEV_OPEN,
 } from './lib/jobs.js';
 import {
@@ -245,6 +248,16 @@ setSlackAccess((repo) => slackService.briefing(repo));
 // authenticates itself with an HMAC over the raw body. See lib/webhooks.js;
 // Slack's events are signed the same way, with the Slack app's secret.
 app.use('/webhooks/slack', slackEventsRouter({ service: slackService }));
+
+// The operator's MCP servers (lib/mcp-servers.js). The provider's redirect
+// after a sign-in is no webhook, but it rides the same Access bypass, and the
+// proxy sessions reach their remote servers through wants the body as bytes.
+const mcpService = createMcpService({
+  callbackUrl: () => `${getConfig().publicBaseUrl}${MCP_OAUTH_CALLBACK_PATH}`,
+});
+setExternalMcp((repo) => mcpService.mounts(repo));
+app.use(mcpOAuthCallbackRouter({ service: mcpService }));
+app.use(mcpProxyRouter({ service: mcpService, agentSession }));
 app.use('/webhooks', webhookRouter());
 
 // The client API, and the only one: owner-issued tokens (`npm run
@@ -574,6 +587,7 @@ function agentSession(req, res) {
 const sshService = createSshService({ getJob });
 api.use(sshRoutes({ service: sshService, agentSession, getProject }));
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
+api.use(mcpRoutes({ service: mcpService, getProject }));
 api.use(
   operationsRoutes({
     listSessions: devSessionRecords,
@@ -2162,6 +2176,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initDbServers();
     await sshService.init();
     await slackService.init();
+    await mcpService.init();
     await envoyerService.init();
     await forgeAccounts.init();
     await mailService.init();

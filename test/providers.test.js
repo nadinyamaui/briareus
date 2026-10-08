@@ -631,6 +631,16 @@ describe('buildArgs', () => {
     expect(plain.args.join(' ')).not.toContain('mcp_servers');
   });
 
+  it('codex takes a remote server by its URL and headers', () => {
+    const mcp = [
+      { name: 'meta', url: 'http://127.0.0.1:4300/api/agent/mcp/7', headers: { Authorization: 'Bearer t' } },
+    ];
+    const { args } = BINARIES.codex.buildArgs({ model: 'gpt', effort: 'high', sessionId: 't', mcp });
+    expect(args).toContain('mcp_servers.meta.url="http://127.0.0.1:4300/api/agent/mcp/7"');
+    expect(args).toContain('mcp_servers.meta.http_headers={ "Authorization" = "Bearer t" }');
+    expect(args.join(' ')).not.toContain('mcp_servers.meta.command');
+  });
+
   it('grok takes the prompt from a file: argv survives neither newlines nor long messages', () => {
     const built = BINARIES.grok.buildArgs({
       model: 'grok-4.6',
