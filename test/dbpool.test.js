@@ -99,6 +99,7 @@ vi.mock('node:child_process', () => ({
 const {
   ensureSessionDatabase,
   acquireInstance,
+  reclaimInstance,
   releaseInstance,
   claimHolder,
   sessionCapacity,
@@ -178,6 +179,36 @@ beforeEach(() => {
   state.otherProjects = [];
   state.config = config();
   state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: PG_TEMPLATE };
+});
+
+describe('restart database claims', () => {
+  it('reuses the original server without dropping profile databases or restoring seed SQL', async () => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+    state.servers = [server({ id: 1 }), server({ id: 2, port: 3307 })];
+    const session = { ...job(), repo: 'acme/app' };
+    reclaimInstance(session, 2);
+    expect(claimHolder(2)).toBe(session.id);
+    expect(session).toMatchObject({ dbServerId: 2, dbHost: '127.0.0.1', dbPort: 3307 });
+    expect(await acquireInstance(session, session.repo, vi.fn())).toBe(2);
+    expect(state.mysqlQueries).toEqual([]);
+    expect(state.psqlCalls).toEqual([]);
+    await releaseInstance(session);
+    expect(claimHolder(2)).toBeNull();
+  });
+
+  it('refuses a missing or conflicting server instead of moving the session onto seed data', async () => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app' };
+    state.servers = [server()];
+    const first = { ...job('first'), repo: 'acme/app' };
+    const second = { ...job('second'), repo: 'acme/app' };
+    reclaimInstance(first, 1);
+    expect(() => reclaimInstance(second, 1)).toThrow(/previous database server.*unavailable/);
+    expect(() => reclaimInstance(second, 99)).toThrow(/previous database server.*unavailable/);
+    expect(claimHolder(1)).toBe('first');
+    expect(second.dbServerId).toBeUndefined();
+    expect(state.mysqlQueries).toEqual([]);
+    await releaseInstance(first);
+  });
 });
 
 describe('ensureSessionDatabase', () => {

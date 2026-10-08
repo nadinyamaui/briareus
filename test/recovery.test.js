@@ -193,6 +193,18 @@ describe('recovery', () => {
     expect(holdsRecoverableWork({ ...s, qaParentId: 'p' })).toBe(false);
     expect(holdsRecoverableWork({ ...s, loopParentId: 'p', failureUnreported: true })).toBe(true);
   });
+  it('reserves idle and loop-child slots while automatic restart recovery is pending', () => {
+    const session = {
+      status: 'interrupted',
+      interruptedFrom: 'idle',
+      workDir: '/pool/x',
+      restartPending: true,
+    };
+    expect(holdsRecoverableWork(session)).toBe(true);
+    expect(holdsRecoverableWork({ ...session, loopParentId: 'parent' })).toBe(true);
+    expect(holdsRecoverableWork({ ...session, qaParentId: 'parent' })).toBe(true);
+    expect(holdsRecoverableWork({ ...session, restartPending: false })).toBe(false);
+  });
   it('lets a recovery hold lapse a while after the session ended', () => {
     const at = Date.parse('2026-09-27T12:00:00Z');
     const ago = (ms) => new Date(at - ms).toISOString();

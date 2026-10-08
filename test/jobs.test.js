@@ -91,6 +91,7 @@ vi.mock('../lib/github.js', () => ({
 
 vi.mock('../lib/dbpool.js', () => ({
   acquireInstance: vi.fn(),
+  reclaimInstance: vi.fn(),
   releaseInstance: vi.fn(),
   ensureSessionDatabase: vi.fn(),
   dropSessionDatabase: vi.fn(),
@@ -186,7 +187,7 @@ vi.mock('../lib/usage.js', () => ({
 
 import { deleteJob, jobEventMaxSeqs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
-import { acquireInstance, releaseInstance, dropSessionDatabase } from '../lib/dbpool.js';
+import { acquireInstance, reclaimInstance, releaseInstance, dropSessionDatabase } from '../lib/dbpool.js';
 import {
   latestReviewFindings,
   latestTestFailures,
@@ -209,7 +210,9 @@ import { resolveRuntime, getProviderForJob, captureProviderAuth } from '../lib/p
 import { stepRuntime } from '../lib/projects.js';
 import {
   bus,
+  DEV_OPEN,
   initJobs,
+  resumeRestartedSessions,
   sweepExpiredPreviews,
   PREVIEW_TTL_MS,
   closeDevSession,
@@ -10774,6 +10777,16 @@ describe('Codex turn usage', () => {
     expect(codexTurnResumes('codex', { resume: false, native: false, sessionId: 't' })).toBe(false);
     expect(codexTurnResumes('claude', { resume: true, native: false, sessionId: 't' })).toBe(false);
   });
+  it('keeps the usage baseline when restart recovery resumes a review thread', () => {
+    expect(
+      codexTurnResumes('codex', {
+        resume: true,
+        native: true,
+        resumeReview: true,
+        sessionId: 'review-thread',
+      }),
+    ).toBe(true);
+  });
 });
 
 describe('auto-compaction while the context probe is out', () => {
@@ -12010,5 +12023,342 @@ describe('invalid clone pool slots', () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('automatic recovery after a server restart', () => {
+  let root;
+  let children;
+  let homeSpy;
+  let bin;
+  let counter = 0;
+  const row = (extra = {}) => ({
+    id: `auto-restart-${++counter}`,
+    kind: 'devchat',
+    status: 'running',
+    repo: 'acme/restart',
+    providerId: 2,
+    model: 'gpt-6.1-sol',
+    effort: 'high',
+    orchestrator: true,
+    createdAt: '2026-10-08T00:00:00Z',
+    providerSessionId: 'saved-thread',
+    chatStarted: true,
+    turns: 1,
+    chats: { 2: { sessionId: 'saved-thread', started: true } },
+    recoveryTurn: { prompt: 'Finish the requested change', opts: {}, phase: 'followup', completed: false },
+    ...extra,
+  });
+  beforeEach(() => {
+    // Other suites restore fixtures in this same registry without starting boot
+    // recovery. Only this suite's rows should run against the fake CLI.
+    for (const job of devSessionRecords()) job.restartPending = false;
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'jobs-auto-restart-'));
+    state.workspaceDir = root;
+    state.otherProviders = [
+      { id: 2, binary: 'codex', label: 'Codex', active: true },
+      { id: 3, binary: 'codex', label: 'QA provider', active: true, baseUrl: 'https://qa.example' },
+    ];
+    state.projects = [
+      {
+        id: 1,
+        repo: 'acme/restart',
+        reviewPublishInstructions: 'PUBLISH THE REVIEW',
+        reviewTestRun: true,
+      },
+    ];
+    getProviderForJob.mockImplementation((job) => state.otherProviders.find((p) => p.id === job.providerId));
+    captureProviderAuth.mockResolvedValue(undefined);
+    homeSpy = vi.spyOn(providerTools, 'ensureCodexHome').mockReturnValue(path.join(root, 'codex-home'));
+    bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/restart-agent', source: 'test' });
+    children = [];
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, args, opts) => {
+      if (cmd !== '/mock/restart-agent') return realSpawn(cmd, args, opts);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.args = args;
+      child.prompt = '';
+      child.cwd = opts.cwd;
+      child.stdin.on('data', (chunk) => {
+        child.prompt += chunk.toString();
+      });
+      spawnedScope(child, child.stdout, child.stderr);
+      children.push(child);
+      return child;
+    });
+  });
+  afterEach(async () => {
+    for (const job of devSessionRecords().filter(
+      (j) => j.repo === 'acme/restart' && DEV_OPEN.includes(j.status),
+    )) {
+      await closeDevSession(job.id);
+    }
+    homeSpy.mockRestore();
+    bin.mockRestore();
+    spawn.mockReset();
+    getProviderForJob.mockReset();
+    captureProviderAuth.mockReset();
+    stepRuntime.mockReset();
+    stepRuntime.mockReturnValue(null);
+    loadJobEvents.mockReset();
+    loadJobEvents.mockResolvedValue([]);
+    state.projects = [];
+    state.otherProviders = [];
+    state.workspaceDir = '/tmp/nowhere';
+    fs.rmSync(root, { recursive: true, force: true });
+    reclaimInstance.mockReset();
+  });
+  const finish = (child) => {
+    child.stdout.write(
+      JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\n',
+    );
+    child.emit('close', 0);
+  };
+
+  it('resumes the saved conversation, preserves dirty files and delivers queued instructions', async () => {
+    const checkout = path.join(root, 'checkout');
+    fs.mkdirSync(checkout);
+    spawnSync('git', ['-C', checkout, 'init', '-b', 'feature'], { stdio: 'ignore' });
+    fs.writeFileSync(path.join(checkout, 'unfinished.txt'), 'keep this work');
+    state.projects[0].localDir = checkout;
+    const saved = row({
+      orchestrator: false,
+      local: true,
+      workDir: checkout,
+      branch: 'feature',
+      recoveryQueue: [{ prompt: 'Then check the result', shown: 'Then check the result', files: [] }],
+    });
+    state.stored = [saved];
+    await initJobs();
+    expect(children).toHaveLength(0);
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].args.slice(0, 3)).toEqual(['exec', 'resume', 'saved-thread']);
+    expect(children[0].prompt).toContain('server restarted');
+    expect(children[0].prompt).toContain('Finish the requested change');
+    expect(children[0].cwd).toBe(checkout);
+    expect(fs.readFileSync(path.join(checkout, 'unfinished.txt'), 'utf8')).toBe('keep this work');
+    expect(resumeRestartedSessions()).toBe(0);
+    finish(children[0]);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(children[1].prompt).toBe('Then check the result');
+    finish(children[1]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+    expect(saved.events.filter((e) => e.kind === 'user').map((e) => e.text)).toEqual([
+      'Then check the result',
+    ]);
+    expect(publicJob(saved)).not.toHaveProperty('recoveryTurn');
+    await vi.waitFor(() =>
+      expect(saveJob.mock.calls.findLast(([j]) => j.id === saved.id)?.[0]).toMatchObject({
+        recoveryTurn: { prompt: 'Then check the result', completed: true },
+        recoveryQueue: [],
+        restartPending: false,
+      }),
+    );
+  });
+
+  it('reopens waiting questions without inventing answers and leaves previously failed or closed sessions alone', async () => {
+    const asking = row({ status: 'idle', awaitingAnswer: true });
+    const failed = row({ status: 'failed' });
+    const closed = row({ status: 'closed' });
+    const oldInterrupted = row({ status: 'interrupted' });
+    state.stored = [asking, failed, closed, oldInterrupted];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(asking.status).toBe('idle'));
+    expect(asking.awaitingAnswer).toBe(true);
+    expect(children).toHaveLength(0);
+    expect(failed.status).toBe('failed');
+    expect(closed.status).toBe('closed');
+    expect(oldInterrupted.status).toBe('interrupted');
+  });
+
+  it('restarts preparation with the original first prompt when the conversation never started', async () => {
+    const saved = row({
+      status: 'preparing',
+      turns: 0,
+      chatStarted: false,
+      chats: {},
+      recoveryTurn: { prompt: 'Original first request', opts: {}, phase: 'initial', completed: false },
+    });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].args).not.toContain('resume');
+    expect(children[0].prompt).toContain('Original first request');
+    expect(children[0].prompt).not.toContain('server restarted');
+    children[0].stdout.write(
+      JSON.stringify({ type: 'thread.started', thread_id: 'first-turn-thread' }) + '\n',
+    );
+    expect(saved.turns).toBe(0);
+    await vi.waitFor(() =>
+      expect(saveJob.mock.calls.findLast(([j]) => j.id === saved.id)?.[0]).toMatchObject({
+        providerSessionId: 'first-turn-thread',
+        chatStarted: true,
+        chats: { 2: { sessionId: 'first-turn-thread', started: true } },
+      }),
+    );
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+  });
+
+  it('keeps a review round in flight and resumes publishing without repeating the review', async () => {
+    const parent = row({ status: 'idle', recoveryTurn: null });
+    const review = row({
+      reviewBranch: 'feature',
+      autoClose: true,
+      loopParentId: parent.id,
+      recoveryTurn: { prompt: 'Publish existing findings', opts: {}, phase: 'publish', completed: false },
+    });
+    parent.reviewLoop = { rounds: 1, reviewing: true, reviewSessionId: review.id };
+    state.stored = [parent, review];
+    await initJobs();
+    expect(parent.reviewLoop.reviewing).toBe(true);
+    expect(parent.reviewLoop.failure).toBeUndefined();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('Publish existing findings');
+    finish(children[0]);
+    await vi.waitFor(() => expect(review.status).toBe('closed'));
+    expect(children).toHaveLength(1);
+  });
+
+  it('continues after a completed discovery turn without running discovery again', async () => {
+    const saved = row({
+      reviewBranch: 'feature',
+      autoClose: true,
+      recoveryTurn: {
+        prompt: 'Already completed discovery',
+        opts: { review: true },
+        phase: 'initial',
+        completed: true,
+      },
+    });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('PUBLISH THE REVIEW');
+    expect(children[0].prompt).not.toContain('Already completed discovery');
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('closed'));
+  });
+
+  it('resumes QA on the configured step provider and thread without starting the sheet again', async () => {
+    const saved = row({
+      qaBranch: 'feature',
+      autoClose: true,
+      chats: {
+        2: { sessionId: 'saved-thread', started: true },
+        3: { sessionId: 'qa-thread', started: true },
+      },
+      recoveryTurn: {
+        prompt: 'Execute the test sheet',
+        opts: { step: 'testRun' },
+        phase: 'testRun',
+        completed: false,
+      },
+    });
+    stepRuntime.mockReturnValue({ providerId: 3, model: 'qa-model', effort: 'low' });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].args.slice(0, 3)).toEqual(['exec', 'resume', 'qa-thread']);
+    expect(children[0].args[children[0].args.indexOf('-m') + 1]).toBe('qa-model');
+    expect(stepRuntime).toHaveBeenCalledWith(state.projects[0], 'testRun');
+    expect(children[0].prompt).toContain('Execute the test sheet');
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('closed'));
+    expect(children).toHaveLength(1);
+  });
+
+  it('recovers a legacy running session from its stored user prompt', async () => {
+    const saved = row({ recoveryTurn: undefined });
+    loadJobEvents.mockResolvedValue([{ kind: 'user', text: 'The legacy request', seq: 1 }]);
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('The legacy request');
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+  });
+
+  it('recovers a second restart during the gap between restore and listening', async () => {
+    const saved = row({
+      status: 'interrupted',
+      interruptedFrom: 'running',
+      restartPending: true,
+      restartDbServerId: 7,
+    });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+  });
+
+  it('reports an unavailable original database without blocking other sessions', async () => {
+    const failed = row({ dbServerId: 7 });
+    const running = row();
+    reclaimInstance.mockImplementation((job) => {
+      if (job.id === failed.id) throw new Error('Previous database server is unavailable');
+    });
+    state.stored = [failed, running];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(1);
+    expect(failed).toMatchObject({ status: 'failed', error: 'Previous database server is unavailable' });
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    finish(children[0]);
+    await vi.waitFor(() => expect(running.status).toBe('idle'));
+  });
+
+  it('holds background deliveries until boot recovery has reclaimed the workspace', async () => {
+    const saved = row({
+      pendingDeliveries: [{ text: 'A background delivery', via: 'slack' }],
+    });
+    state.stored = [saved];
+    await initJobs({ deferPolling: true });
+    expect(flushDeliveries(saved)).toBe(false);
+    expect(saved.pendingDeliveries).toHaveLength(1);
+    expect(children).toHaveLength(0);
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('Finish the requested change');
+    finish(children[0]);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(children[1].prompt).toContain('A background delivery');
+    finish(children[1]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+  });
+
+  it('honors Stop across a restart, including while the canceled process was still exiting', async () => {
+    const canceledTurn = {
+      prompt: 'Stopped request',
+      opts: {},
+      phase: 'followup',
+      completed: true,
+      canceled: true,
+    };
+    const exiting = row({ recoveryTurn: { ...canceledTurn, completed: false } });
+    const idle = row({
+      status: 'idle',
+      recoveryTurn: canceledTurn,
+      pendingDeliveries: [{ text: 'Must wait for the operator', via: 'slack' }],
+    });
+    state.stored = [exiting, idle];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(idle.status).toBe('idle'));
+    expect(exiting.status).toBe('interrupted');
+    expect(idle.turnCanceled).toBe(true);
+    expect(flushDeliveries(idle)).toBe(false);
+    expect(children).toHaveLength(0);
   });
 });
