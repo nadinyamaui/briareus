@@ -2124,7 +2124,7 @@ process.on('uncaughtException', (e) => {
   stopAllBrowsers();
   const giveUp = setTimeout(() => process.exit(1), 5000);
   stopAllJobProcesses()
-    .then(() => flushJobs())
+    .finally(() => flushJobs())
     .catch(() => {})
     .finally(() => {
       clearTimeout(giveUp);
@@ -2138,7 +2138,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     stopAllDevServes();
     stopAllBrowsers();
     stopAllJobProcesses()
-      .then(() => flushJobs())
+      .finally(() => flushJobs())
       .catch((e) => console.error('Could not finish session shutdown:', e.message))
       .finally(() => process.exit(0));
   });

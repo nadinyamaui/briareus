@@ -20,6 +20,7 @@ const state = vi.hoisted(() => ({
   spawnError: null, // makes the child emit 'error' instead of running
   files: new Set(), // what fs.existsSync says yes to
   dumpError: null, // makes the dump read stream fail
+  restoreSpawn: null,
   stdinError: null, // makes the write into mysql's stdin fail
 }));
 
@@ -80,6 +81,7 @@ vi.mock('node:fs', () => ({
 vi.mock('node:child_process', () => ({
   spawn: (bin, args, opts) => {
     state.psqlCalls.push({ bin, args, env: opts.env, ...(opts.timeout ? { timeout: opts.timeout } : {}) });
+    if (bin === 'mysql' && state.restoreSpawn) return state.restoreSpawn(opts);
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -106,6 +108,7 @@ const {
   ensureSessionDatabase,
   acquireInstance,
   reclaimInstance,
+  stopDatabaseProcesses,
   releaseInstance,
   claimHolder,
   sessionCapacity,
@@ -180,11 +183,102 @@ beforeEach(() => {
   state.spawnError = null;
   state.dumpError = null;
   state.stdinError = null;
+  state.restoreSpawn = null;
   state.files = new Set();
   state.servers = [];
   state.otherProjects = [];
   state.config = config();
   state.project = { dbPoolEnabled: false, dbPoolDatabase: 'casos', envTemplate: PG_TEMPLATE };
+});
+
+describe('database preparation shutdown', () => {
+  it('retains a preparing claim until a concurrent close finishes database cleanup', async () => {
+    let allowQuery;
+    const query = new Promise((resolve) => {
+      allowQuery = resolve;
+    });
+    state.mysqlHold = { on: /^CREATE DATABASE/, until: query };
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+    state.servers = [server()];
+    state.files.add('/seed.sql');
+    const session = { ...job(), status: 'preparing' };
+    const preparation = acquireInstance(session, 'acme/app', vi.fn()).catch((e) => e);
+    expect(session.dbServerId).toBe(1);
+    session.status = 'closed';
+    let released = false;
+    const closing = releaseInstance(session).then(() => {
+      released = true;
+    });
+    expect(claimHolder(1)).toBe(session.id);
+    await Promise.resolve();
+    expect(released).toBe(false);
+    allowQuery();
+    expect((await preparation).message).toContain('canceled');
+    await closing;
+    expect(claimHolder(1)).toBeNull();
+    expect(session.dbPreparing).toBe(false);
+    expect(state.psqlCalls).toEqual([]);
+  });
+
+  it('kills and awaits a real seed importer, preserving the incomplete claim for recovery', async () => {
+    const { spawn: actualSpawn } = await vi.importActual('node:child_process');
+    const { default: actualFs } = await vi.importActual('node:fs');
+    const { default: os } = await vi.importActual('node:os');
+    const { default: path } = await vi.importActual('node:path');
+    const root = actualFs.mkdtempSync(path.join(os.tmpdir(), 'db-import-shutdown-'));
+    const ready = path.join(root, 'ready');
+    const late = path.join(root, 'late');
+    let importer;
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+    state.servers = [server()];
+    state.files.add('/seed.sql');
+    state.restoreSpawn = (opts) => {
+      importer = actualSpawn(
+        process.execPath,
+        [
+          '-e',
+          `require('fs').writeFileSync(${JSON.stringify(ready)}, 'ready'); setTimeout(() => require('fs').writeFileSync(${JSON.stringify(late)}, 'buffered SQL write'), 800); setInterval(() => {}, 1000);`,
+        ],
+        opts,
+      );
+      return importer;
+    };
+    const session = { ...job(), repo: 'acme/app' };
+    const onClaim = vi.fn(() => {
+      expect(session).toMatchObject({ dbServerId: 1, dbPreparing: true });
+      expect(state.mysqlQueries).toEqual([]);
+    });
+    let settled = false;
+    acquireInstance(session, session.repo, vi.fn(), onClaim).finally(() => {
+      settled = true;
+    });
+    try {
+      await vi.waitFor(() => expect(actualFs.existsSync(ready)).toBe(true));
+      expect(onClaim).toHaveBeenCalledOnce();
+      await stopDatabaseProcesses();
+      expect(importer.signalCode).toBe('SIGKILL');
+      expect(session).toMatchObject({ dbServerId: 1, dbPreparing: true });
+      expect(claimHolder(1)).toBe(session.id);
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      expect(actualFs.existsSync(late)).toBe(false);
+      expect(settled).toBe(false);
+      const recovered = { ...session };
+      _resetForTests();
+      await releaseInstance(session);
+      state.restoreSpawn = null;
+      reclaimInstance(recovered, recovered.dbServerId);
+      await acquireInstance(recovered, recovered.repo, vi.fn());
+      expect(recovered.dbPreparing).toBe(false);
+      expect(state.psqlCalls.filter((c) => c.bin === 'mysql')).toHaveLength(2);
+      expect(state.mysqlQueries.some((q) => q.sql === 'SELECT 1')).toBe(true);
+      await releaseInstance(recovered);
+    } finally {
+      importer?.kill('SIGKILL');
+      _resetForTests();
+      await releaseInstance(session);
+      actualFs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('restart database claims', () => {

@@ -92,6 +92,7 @@ vi.mock('../lib/github.js', () => ({
 vi.mock('../lib/dbpool.js', () => ({
   acquireInstance: vi.fn(),
   reclaimInstance: vi.fn(),
+  stopDatabaseProcesses: vi.fn(async () => {}),
   releaseInstance: vi.fn(),
   ensureSessionDatabase: vi.fn(),
   ensureProfileDatabase: vi.fn(),
@@ -12069,6 +12070,7 @@ describe('automatic recovery after a server restart', () => {
         repo: 'acme/restart',
         reviewPublishInstructions: 'PUBLISH THE REVIEW',
         reviewTestRun: true,
+        promptTemplates: { testRun: 'RUN' },
       },
     ];
     getProviderForJob.mockImplementation((job) => state.otherProviders.find((p) => p.id === job.providerId));
@@ -12219,6 +12221,199 @@ describe('automatic recovery after a server restart', () => {
       finish(children[1]);
       await vi.waitFor(() => expect(child.status).toBe('closed'));
       expect(children).toHaveLength(2);
+    },
+  );
+
+  it.each(['review', 'qa', 'fix'])('settles the %s child after a recovered queued answer', async (kind) => {
+    const parent = row({ status: 'idle', recoveryTurn: null });
+    const child = row({
+      awaitingAnswer: true,
+      autoClose: true,
+      recoveryQueue: [{ prompt: 'Queued operator answer', shown: 'Queued operator answer', files: [] }],
+      recoveryTurn: { prompt: 'Initial request', opts: { review: kind === 'review' }, phase: 'initial' },
+      ...(kind === 'review'
+        ? { reviewBranch: 'feature', loopParentId: parent.id }
+        : kind === 'qa'
+          ? { qaBranch: 'feature', qaParentId: parent.id }
+          : { loopFixParentId: parent.id }),
+    });
+    if (kind === 'review') parent.reviewLoop = { rounds: 1, reviewing: true, reviewSessionId: child.id };
+    else if (kind === 'fix') parent.reviewLoop = { rounds: 1, fixing: true, fixSessionId: child.id };
+    else parent.qaLoop = { running: true, sessionId: child.id };
+    state.stored = [parent, child];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toBe('Queued operator answer');
+    finish(children[0]);
+    if (kind !== 'fix') {
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
+      finish(children[1]);
+    }
+    await vi.waitFor(() => expect(child.status).toBe('closed'));
+    expect(child[kind === 'review' ? 'loopReviewDone' : kind === 'fix' ? 'loopFixDone' : 'qaLoopDone']).toBe(
+      true,
+    );
+    expect(
+      (kind === 'qa' ? parent.qaLoop : parent.reviewLoop)[
+        kind === 'review' ? 'reviewing' : kind === 'fix' ? 'fixing' : 'running'
+      ],
+    ).toBe(false);
+  });
+
+  it.each(['review', 'qa'])('keeps legacy %s discovery active through operator answers', async (kind) => {
+    const child = row({
+      recoveryTurn: undefined,
+      ...(kind === 'review'
+        ? { reviewBranch: 'feature', reviewPrompt: 'Original review' }
+        : { qaBranch: 'feature' }),
+    });
+    loadJobEvents.mockResolvedValue([
+      { kind: 'user', text: 'Original review', seq: 1 },
+      { kind: 'user', text: 'Operator answer', seq: 2 },
+    ]);
+    state.stored = [child];
+    await initJobs();
+    expect(child.recoveryTurn.phase).toBe('initial');
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('Operator answer');
+    finish(children[0]);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
+    finish(children[1]);
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+  });
+
+  it.each(['review', 'qa'])('preserves the legacy %s stage for an idle standing question', async (kind) => {
+    const child = row({
+      status: 'idle',
+      awaitingAnswer: true,
+      recoveryTurn: undefined,
+      ...(kind === 'review' ? { reviewBranch: 'feature' } : { qaBranch: 'feature' }),
+    });
+    loadJobEvents.mockResolvedValue([{ kind: 'user', text: 'Initial request', seq: 1 }]);
+    state.stored = [child];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+    expect(children).toHaveLength(0);
+    expect(child.recoveryTurn.phase).toBe('initial');
+    sendDevMessage(child.id, 'Operator answer');
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    finish(children[0]);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
+    finish(children[1]);
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+  });
+
+  it.each(['review', 'qa'])('recognizes a legacy %s stage prompt before an answer', async (kind) => {
+    const child = row({
+      recoveryTurn: undefined,
+      ...(kind === 'review' ? { reviewBranch: 'feature' } : { qaBranch: 'feature' }),
+    });
+    const publication =
+      "Apply the project's publishing instructions below using the independently verified findings and their fix-value assessments: only confirmed findings with worthFixing: true count as blocking feedback or requested changes; confirmed optional findings do not block approval. If verification was incomplete, do not approve, add code-approved, move to QA, or describe the review as clean. Preserve all author-specific restrictions on approval and board moves.\n\nPUBLISH THE REVIEW";
+    loadJobEvents.mockResolvedValue([
+      { kind: 'user', text: 'Original review', seq: 1 },
+      { kind: 'user', text: kind === 'review' ? publication : 'RUN', seq: 2 },
+      { kind: 'user', text: 'Operator answer', seq: 3 },
+    ]);
+    state.stored = [child];
+    await initJobs();
+    expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    finish(children[0]);
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+    expect(children).toHaveLength(1);
+  });
+
+  it('recognizes a legacy QA run despite changed port and recording paths', async () => {
+    const { testRunPrompt: actualRunPrompt } = await vi.importActual('../lib/prtasks.js');
+    state.projects[0].promptTemplates = {};
+    state.projects[0].runCommands = ['serve --port {port}'];
+    const child = row({ qaBranch: 'feature', recoveryTurn: undefined });
+    const originalRun = actualRunPrompt({
+      repo: child.repo,
+      branch: child.qaBranch,
+      prNumber: 132,
+      portHint: 8105,
+      project: state.projects[0],
+      database: 'previous_database',
+    });
+    loadJobEvents.mockResolvedValue([
+      { kind: 'user', text: 'Write a sheet', seq: 1 },
+      { kind: 'user', text: originalRun, seq: 2 },
+      { kind: 'user', text: 'Operator answer', seq: 3 },
+    ]);
+    state.stored = [child];
+    await initJobs();
+    expect(child.recoveryTurn.phase).toBe('testRun');
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    finish(children[0]);
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+    expect(children).toHaveLength(1);
+  });
+
+  it.each([
+    ['idle', undefined],
+    ['running', undefined],
+    ['preparing', true],
+    ['preparing', false],
+  ])(
+    'preserves completed setup and finishes incomplete setup (%s, prepared: %s)',
+    async (status, prepared) => {
+      const checkout = path.join(root, 'acme__restart');
+      fs.mkdirSync(checkout);
+      const git = (args) => {
+        const result = spawnSync('git', args, { encoding: 'utf8' });
+        expect(result.status, result.stderr).toBe(0);
+      };
+      git(['-C', checkout, 'init', '-b', 'feature']);
+      git([
+        '-C',
+        checkout,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'fixture',
+      ]);
+      const remote = path.join(root, 'remote.git');
+      git(['clone', '--bare', checkout, remote]);
+      git(['-C', checkout, 'remote', 'add', 'origin', remote]);
+      state.projects[0].setupCommands = ['printf reset > session-data'];
+      state.projects[0].envTemplate = '';
+      fs.writeFileSync(path.join(checkout, 'session-data'), 'operator data');
+      const child = row({
+        status,
+        orchestrator: false,
+        workDir: checkout,
+        branch: 'feature',
+        ...(prepared !== undefined ? { workspacePrepared: prepared } : {}),
+      });
+      state.stored = [child];
+      await initJobs();
+      resumeRestartedSessions();
+      if (status !== 'idle') {
+        await vi.waitFor(() => expect(children, child.error).toHaveLength(1));
+        finish(children[0]);
+      }
+      await vi.waitFor(() => expect(child.status, child.error).toBe('idle'));
+      expect(fs.readFileSync(path.join(checkout, 'session-data'), 'utf8')).toBe(
+        prepared === false ? 'reset' : 'operator data',
+      );
+      expect(child.workspacePrepared).toBe(true);
+      expect(child.events.some((e) => e.kind === 'cmd' && e.text.includes('printf reset'))).toBe(
+        prepared === false,
+      );
     },
   );
 
@@ -12458,6 +12653,22 @@ describe('automatic recovery after a server restart', () => {
     expect(flushDeliveries(idle)).toBe(false);
     expect(children).toHaveLength(0);
   });
+  it('delivers a queued replacement without resuming the canceled request', async () => {
+    const child = row({
+      recoveryTurn: { prompt: 'Canceled request', phase: 'followup', canceled: true, completed: false },
+      recoveryQueue: [{ prompt: 'Do this instead', shown: 'Do this instead', files: [] }],
+    });
+    state.stored = [child];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toBe('Do this instead');
+    expect(child.turnCanceled).toBe(false);
+    finish(children[0]);
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+    expect(children).toHaveLength(1);
+  });
+
   it.each([false, true])(
     'kills a detached provider group and preserves its checkpoint (leader exited: %s)',
     async (leaderExits) => {
