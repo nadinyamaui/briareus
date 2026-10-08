@@ -2130,6 +2130,82 @@ describe('spawnWorkerSession', () => {
     },
   );
 
+  it.each(['review', 'fix'])(
+    'rejects reopening a failed %s child when its close outlasts retirement',
+    async (kind) => {
+      const orchestrator = getJob('question-orch');
+      const worker = getJob('question-worker');
+      const job = getJob('question-child');
+      const originalWorkDir = job.workDir;
+      const active = kind === 'review' ? 'reviewing' : 'fixing';
+      const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
+      Object.assign(orchestrator, { status: 'idle', awaitingAnswer: true, pendingWorkerNotices: [] });
+      Object.assign(worker, {
+        status: 'idle',
+        reviewLoop: { rounds: 1, [active]: true, [childId]: job.id },
+      });
+      Object.assign(job, {
+        status: 'idle',
+        awaitingAnswer: true,
+        autoClose: true,
+        loopParentId: kind === 'review' ? worker.id : null,
+        loopFixParentId: kind === 'fix' ? worker.id : null,
+      });
+      let finishRelease;
+      let finishDrop;
+      let closing;
+      releaseInstance.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishRelease = resolve;
+          }),
+      );
+      dropSessionDatabase.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishDrop = resolve;
+          }),
+      );
+      const { children, restore } = fakeClaude();
+      try {
+        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
+        children[0].emitLines(init, replay('Postgres'));
+        children[0].emit('close', 1);
+        await vi.waitFor(() => expect(finishRelease).toBeTypeOf('function'));
+        expect(job.status).toBe('failed');
+        closing = closeDevSession(job.id);
+        await vi.waitFor(() => expect(finishDrop).toBeTypeOf('function'));
+        finishRelease();
+        await vi.waitFor(() => expect(orchestrator.pendingWorkerNotices).toHaveLength(1));
+        expect(worker.reviewLoop[active]).toBe(false);
+        expect(job.closing).toBe(true);
+        expect(job.status).toBe('failed');
+        const allocations = acquireInstance.mock.calls.length;
+        const workDir = job.workDir;
+        const dbServerId = job.dbServerId;
+        const events = job.events.length;
+        expect(() => reopenDevSession(job.id)).toThrow(/finish closing/);
+        expect(acquireInstance.mock.calls).toHaveLength(allocations);
+        expect(job.workDir).toBe(workDir);
+        expect(job.dbServerId).toBe(dbServerId);
+        expect(job.events).toHaveLength(events);
+        expect(job.status).toBe('failed');
+        expect(children).toHaveLength(1);
+      } finally {
+        finishRelease?.();
+        // Keep the shared fixture's record for the remaining question tests.
+        job.autoClose = false;
+        finishDrop?.();
+        await closing;
+        job.status = worker.status = orchestrator.status = 'closed';
+        job.workDir = originalWorkDir;
+        restore();
+      }
+      expect(job.closing).toBeUndefined();
+      expect(job.status).toBe('closed');
+    },
+  );
+
   it('rejects answers while an idle asking session is releasing its database', async () => {
     const job = getJob('question-child');
     Object.assign(job, {
