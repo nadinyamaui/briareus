@@ -40,7 +40,7 @@
 //    token counts came from the CLI's own thread totals, not from these rows,
 //    and are left alone.
 
-import { loadCatalog, withEstimates } from '../lib/prices.js';
+import { loadCatalog, priceFor, withEstimates } from '../lib/prices.js';
 import { codexTurnUsage } from '../lib/providers.js';
 
 /**
@@ -214,6 +214,30 @@ export function codexResultRewrites(rows, deltas, events) {
   return out;
 }
 
+// The cache share the absorbed estimates were priced with when this was
+// written: solved from what the provider-priced rows cost. lib/prices.js has
+// since moved to measuring it from Codex's own cache counts, but these figures
+// were frozen at the old share, so they are reproduced with a copy of it.
+/** @param {any[]} calibration @param {object} catalog */
+function pricedCacheShare(calibration, catalog) {
+  let reported = 0;
+  let atFullPrice = 0;
+  let spread = 0;
+  let tokens = 0;
+  for (const r of calibration) {
+    if (!(r.costUsd > 0)) continue;
+    const price = priceFor(catalog, r.provider, r.model);
+    const input = r.inputTokens || 0;
+    if (!price || !input) continue;
+    reported += r.costUsd - ((r.outputTokens || 0) * price.output) / 1e6;
+    atFullPrice += (input * price.input) / 1e6;
+    spread += (input * (price.cacheRead - price.input)) / 1e6;
+    tokens += input;
+  }
+  if (tokens < 1e6 || spread >= 0) return 0.7;
+  return Math.min(1, Math.max(0, (reported - atFullPrice) / spread));
+}
+
 /**
  * What to take off each living parent's absorbedEstimatedCostUsd: the old
  * rows' estimate minus the new rows', over the rows of deleted sessions that
@@ -229,6 +253,7 @@ export function codexResultRewrites(rows, deltas, events) {
  * @returns {Map<string, number>}
  */
 export function absorbedCorrections(rows, deltas, owners, held, catalog, calibration = []) {
+  const share = pricedCacheShare(calibration, catalog);
   const mine = rows.filter((row) => owners.has(row.jobId) && row.costUsd == null && deltas.has(row.id));
   /** @param {LegacyRow} row @param {{ inputTokens: number | null, outputTokens: number | null }} usage */
   const priced = (row, { inputTokens, outputTokens }) => ({
@@ -241,12 +266,14 @@ export function absorbedCorrections(rows, deltas, owners, held, catalog, calibra
   const before = withEstimates(
     mine.map((row) => priced(row, row)),
     catalog,
-    calibration,
+    [],
+    share,
   );
   const after = withEstimates(
     mine.map((row) => priced(row, /** @type {Usage} */ (deltas.get(row.id)))),
     catalog,
-    calibration,
+    [],
+    share,
   );
   /** @type {Map<string, { old: number, less: number }>} */
   const sums = new Map();

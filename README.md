@@ -35,8 +35,15 @@ push a feature branch / open a PR when asked.
    database is created on the claimed server if it does not exist yet. A
    session that already knows its branch prefers the idle slot that is still
    on that branch: the one whose dependencies, build output and framework
-   caches are already the right ones. Idle slots are removed when Briareus
-   starts and once every 24 hours; slots claimed by open sessions are skipped.
+   caches are already the right ones. Idle slots are quarantined when Briareus
+   starts and once every 24 hours; slots claimed by open or recoverable sessions
+   are skipped. Whole checkouts move into `WORKSPACE_DIR/.briareus-recovery/`
+   without deleting files, so Docker-owned artifacts cannot cause partial
+   cleanup or destroy Git history. Logs name each preserved checkout; recover
+   any unpushed work before manually removing it. Quarantine stops at 100
+   preserved checkouts and reports an actionable error rather than deleting
+   old backups. New sessions skip slots missing `.git`; reopening such a slot
+   still requires inspection.
    The pool itself is listed at `GET /api/v1/settings/workspaces`: every slot's
    branch, HEAD, dirty state, size, dependency trees and which open session
    holds it, with two actions for idle slots: _Reset setup_ forgets the
@@ -226,6 +233,14 @@ the evidence. If every executed scenario passes, the QA loop stops. Failed
 scenarios are reported back to the task session as QA feedback, and the loop
 stops there too, since acting on that feedback stays a human decision for now.
 Turning the review loop off also cancels the QA run waiting behind it.
+An orchestrator can toggle QA on its own open task workers independently with
+`set_worker_qa_loop({ id, on })`, or `POST /api/agent/sessions/:id/qa-loop`
+with `{ "on": false }` using its session bearer token; `on` must be a boolean.
+This preserves reviews, findings, fixes and CI and follows the existing QA
+eligibility rules (arming requires an armed review loop).
+Disarming removes queued QA; an active QA session finishes on its own and
+reports nothing back. The response includes `session`, `qaStillRunning` and
+`qaSessionId` so an active run is not mistaken for a cancelled one.
 If the QA provider fails or its session is interrupted, the run is shown as
 failed/interrupted and **not running**, never as queued. For an orchestrated
 worker, `send_to_worker` with a follow-up retries QA after that worker turn
@@ -790,25 +805,38 @@ operating-system sandbox restricting every possible way to reach a server.
 
 ### Slack
 
-A session can send a Slack message when you tell it to ("send this to Andres"),
-and what Andres answers comes back into that session. Messages go out **as you**:
-the workspace is a Slack user token, not a bot.
+The core has a Slack inbox for native clients, independent of coding agents:
+list channels and DMs, read history and threads, reply, and mark conversations
+read through `/api/v1/slack/workspaces`. New messages, edits and deletions arrive
+on a live event stream, including messages nobody has previously contacted
+from an agent session. Messages go out **as you**: the workspace is a Slack
+user token, not a bot. The core serves the API; clients build their inbox UI
+on [the client integration guide](docs/api-v1.md#slack-inbox).
 
 1. Create a Slack app at api.slack.com/apps. Under _OAuth & Permissions_, give it these
    **user token** scopes: `chat:write`, `users:read`, `channels:read`, `groups:read`,
-   `im:write`, `im:history`, `channels:history` and `groups:history`. Install it to the
+   `im:read`, `mpim:read`, `im:write`, `mpim:write`, `im:history`, `mpim:history`,
+   `channels:history` and `groups:history`; to sync read positions also grant
+   `channels:write` and `groups:write`. Install it to the
    workspace and copy the _User OAuth Token_ (`xoxp-…`).
 2. Add the workspace (`POST /api/v1/settings/slack/workspaces`) with that `token`, the
-   app's `signingSecret` (from _Basic Information_), and the `projects` that may use it,
+   app's `signingSecret` (from _Basic Information_), and optionally the `projects` whose sessions may use it,
    each `{ repo, channels, directMessages, permissionMode }`. The token is checked with
    Slack and stored encrypted under `CREDENTIALS_KEY`, as is the secret. A project sends
-   through one workspace at most.
-3. For replies, turn on the app's _Event Subscriptions_ with the workspace's `eventsUrl`
+   through one workspace at most. Use `projects: []` for an operator-only inbox.
+   Existing installations need the added scopes and a reinstall for the new inbox calls.
+3. For live messages and session replies, turn on the app's _Event Subscriptions_ with the workspace's `eventsUrl`
    (`PUBLIC_BASE_URL/webhooks/slack/<id>`) as the Request URL, and subscribe **on behalf of
-   users** to `message.im`, `message.channels` and `message.groups`. Like the other webhooks,
+   users** to `message.im`, `message.mpim`, `message.channels` and `message.groups`. Like the other webhooks,
    that path must bypass Cloudflare Access.
 
-Sessions whose project has a workspace receive the `slack_destinations`, `slack_find_people`,
+The inbox requires an admin API token because it contains the connected account's
+business conversations, including private messages outside any project. It
+reads history directly from Slack and streams signed Slack events; on reconnect,
+clients reload history to recover missed updates. Sending from the inbox is a
+human action and takes effect immediately, without launching an agent or an approval.
+
+Separately, sessions whose project has a workspace receive the `slack_destinations`, `slack_find_people`,
 `slack_send` and `slack_result` MCP tools; reviews, QA, loop sessions and workers do not.
 A project may post only to the channels it lists, and to people only with `directMessages`.
 In **ask** mode (the default) each message waits in `GET /api/v1/slack/requests` and the
@@ -821,6 +849,35 @@ the last 14 days, or in the thread of a message the session sent. It arrives as 
 ("Slack reply", between marked lines): the other person's word, never yours. It starts a turn
 under the session's webhook caps (or their defaults), without the webhook having to be armed.
 Nothing else that happens in the workspace reaches any session.
+
+### MCP servers
+
+Claude and Codex sessions can use MCP servers you add, beside Briareus's own tools
+(`POST /api/v1/settings/mcp/servers`). A server is either remote (`transport: http`, a
+Streamable HTTP `url`) or a command run beside each session (`transport: stdio`, with
+`command`, `args` and `env`). `repos` limits it to some projects; empty means every project.
+Headers, env, OAuth clients and tokens are stored encrypted under `CREDENTIALS_KEY`.
+
+Signing in is part of adding a server. Briareus checks a remote server at once. If the server
+answers 401 with OAuth details, Briareus follows the MCP authorization spec: it reads the
+protected resource and authorization server metadata, registers itself as a client, and replies
+with `status: needs-sign-in` and a `signInUrl`. Open that link on any device and sign in. The
+provider sends the browser to `PUBLIC_BASE_URL/webhooks/mcp-oauth/callback`, which completes
+the setup. Like the other webhooks, that path must bypass Cloudflare Access. If a server does
+not let clients register themselves, create an OAuth app with it, give its `oauthClientId` (and
+`oauthClientSecret`), and register that callback URL as the app's redirect. Some servers only let clients they already know register, and only with a loopback redirect.
+Meta's is one: it accepts names starting with `Claude Code`. For those, set `oauthClientName`
+(for example `Claude Code (Briareus)`) and `oauthRedirect: loopback`. The sign-in then ends on
+a `http://127.0.0.1:<port>/callback?code=…` page that won't load (`signInNeedsPaste` is true).
+Copy that address and send it to `POST …/servers/:id/finish-sign-in` as `url` to complete the
+setup. A server that takes an API key gets it as `headers` instead. `POST …/servers/:id/connect` checks a server again
+(`{ "signIn": true }` starts a new sign-in, for example to use another account).
+
+One sign-in covers every provider account. Sessions never see a remote server's credentials:
+a turn reaches the server through `/api/agent/mcp/<id>` with its own session token, and Briareus
+adds the server's token there, refreshing it when it is about to expire. Remote servers that
+still need a sign-in are not mounted. Grok and opencode sessions don't get these servers,
+because they take no MCP configuration headless.
 
 ### Operator attention
 
@@ -954,3 +1011,88 @@ deployments, and deploys a branch or tag through
 `/api/v1/envoyer/accounts/:id/projects/…`, always naming the project in `repo`.
 An account another project was given answers 404. Deploying needs the
 `deployments:create` scope on the Envoyer token.
+
+### Mail
+
+Briareus can keep a copy of Gmail and Outlook mailboxes so a client reads them
+through `/api/v1` without talking to Google or Microsoft itself. It only reads:
+the sign-in asks for `gmail.readonly` or `Mail.Read`, and nothing marks, moves,
+sends or deletes a message. All of it is admin-only, since it is the operator's
+own mail.
+
+The sign-in is the providers' own OAuth flow with PKCE. Its simplest form ends
+on this server: register `PUBLIC_BASE_URL/oauth/mail/callback` (an https
+address) as the OAuth client's redirect URI and the server finishes the
+sign-in as the browser arrives there, whatever device signed in.
+
+1. Register an OAuth client and put it in the server's environment (see
+   `.env.example`):
+   - **Gmail**: in Google Cloud, enable the Gmail API, set up the OAuth consent
+     screen with the `gmail.readonly` scope, and create an OAuth client of type
+     _Web application_ whose authorized redirect URI is exactly
+     `PUBLIC_BASE_URL/oauth/mail/callback`. Set `GOOGLE_OAUTH_CLIENT_ID`,
+     `GOOGLE_OAUTH_CLIENT_SECRET` and `GOOGLE_OAUTH_REDIRECT_URI` (that same
+     address). The consent screen decides how long a connection lasts:
+     - in _Testing_ (an external one), Google expires refresh tokens after 7
+       days, so the mailbox has to be connected again every week;
+     - in _Production_ without verification, sign-in shows Google's
+       unverified-app warning and at most 100 users can connect, which is
+       enough for your own mailboxes;
+     - _Internal_ needs a project owned by a Google Workspace organization, and
+       only that organization's accounts can connect.
+
+     A Gmail token also stops working when the account's password changes, or
+     after six months without use.
+
+   - **Outlook**: in Microsoft Entra, register an app with the delegated Graph
+     permissions `Mail.Read`, `User.Read` and `offline_access`, add a _Web_
+     platform with the redirect URI `PUBLIC_BASE_URL/oauth/mail/callback`, and
+     create a client secret. Set `MICROSOFT_OAUTH_CLIENT_ID`,
+     `MICROSOFT_OAUTH_CLIENT_SECRET` and `MICROSOFT_OAUTH_REDIRECT_URI`. Match
+     `MICROSOFT_OAUTH_TENANT` to the registration's supported account types:
+     `common` (the default) for any organization plus personal accounts,
+     `consumers` for personal accounts only, or your tenant's id or domain for
+     a single-tenant app.
+
+   `CREDENTIALS_KEY` must be set too: the tokens are stored encrypted with it.
+   Behind Cloudflare Access, give `/oauth/mail/callback` the same _Bypass_ as
+   `/api/v1`, so a browser that has not passed Access still reaches it; the
+   route takes nothing but a pending sign-in's single-use `state`.
+
+2. `POST /api/v1/settings/mail/accounts/connect` with `{ "provider": "gmail" }`
+   (or `outlook`) answers with a `url`. Open it in a browser (Google refuses
+   sign-ins in an embedded web view) and sign in. The browser ends on the
+   callback, which says which mailbox it connected, and the first sync starts
+   right away.
+3. Read with `GET /api/v1/mail/messages` (newest first, filtered by `account`,
+   `q`, `unread`, `inbox`, `starred`, `label` or `thread`, paged with
+   `cursor`) and `GET /api/v1/mail/accounts/{account}/messages/{id}` for one
+   message with its body.
+
+A client can also receive the redirect itself, with a redirect URI of its own
+registered instead: a loopback listener on a Google _Desktop app_ client's
+`http://127.0.0.1:<port>`, or a web view watching Microsoft's
+`https://login.microsoftonline.com/common/oauth2/nativeclient` (a _Mobile and
+desktop_ platform, with no secret). It then sends the address it landed on to
+`POST …/connect/finish` as `{ "url": "…" }`, at once: a Microsoft code lasts
+about a minute.
+
+Every enabled mailbox is synced every `MAIL_SYNC_MINUTES` (5 by default; `0`
+leaves it to `POST …/settings/mail/accounts/{id}/sync`). The server keeps the
+last `syncDays` days (30 by default, up to 365).
+
+- **Gmail** syncs everything except trash, spam and drafts, through its
+  history. A first pass takes the newest 2,000 messages in the window, paced
+  to Gmail's quota of 6,000 units a minute per user (a message read costs 20),
+  so it takes up to about eight minutes.
+- **Outlook** syncs every folder except Deleted Items, Junk Email, Drafts,
+  Outbox, search folders and their subfolders, through Graph's per-folder
+  delta, at most four requests at a time. A folder's first pass takes at most
+  5,000 messages, Graph's limit for a filtered delta.
+
+Bodies are kept up to 500,000 characters. Attachments are listed but their
+content is not synced. When a provider stops honouring a sign-in (revoked,
+expired, password changed, new consent required), the account shows
+`status: "reauth"` and stops syncing until it is connected again with its
+`accountId`. Removing an account deletes its tokens and messages here; also
+remove the app's access at Google or Microsoft.

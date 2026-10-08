@@ -110,13 +110,95 @@ What is there, by area:
 | Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops; `/preview/access`                                                                                                  | read / manage |
 | Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                                                                                                  | read to admin |
 | Memory                   | `/memories`, `/memories/health`                                                                                                                                                                      | read / admin  |
+| Slack inbox              | `/slack/workspaces`, `/slack/workspaces/{id}/conversations`, `people`, `direct-messages`, `events`; conversation history, threads, replies and read positions                                        | admin         |
 | Operations               | `/attention`, `/maintenance`, `/deployments`, `/ssh/requests`, `/slack/requests`, `/tasks`, `/videos`                                                                                                | admin         |
-| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `slack/workspaces`, `templates`                                                                                        | admin         |
+| Mail                     | `/mail/messages`, `/mail/accounts/{account}/messages/{id}`                                                                                                                                           | admin         |
+| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `slack/workspaces`, `mail/accounts`, `templates`                                                                       | admin         |
 
 Everything the removed dashboard could do has a route, except its browser push
 notifications, which went with it. The reference ends with a table from each of
 the dashboard's retired routes to the one that replaces it, for porting a page. `npm test` fails if a handler is added without a route
 here, since a handler with no route is one nothing can reach.
+
+## Slack inbox
+
+Slack is a core business inbox, independent of agent sessions: no Claude run,
+project association or session token is needed to read or reply. All inbox
+routes require an **admin** API token, since a workspace includes private DMs
+unrelated to project access. The existing session tools and their approvals
+are separate; inbox sends are human-authored and send immediately as the
+connected Slack user.
+
+Connect a workspace through `POST /api/v1/settings/slack/workspaces` with
+`{ "token": "xoxp-…", "signingSecret": "…", "projects": [] }`. The scopes and
+Events API setup are in [the README](../README.md#slack). Workspaces shared
+with agent sessions can also be used by the inbox; those sessions keep their
+project restrictions. Credentials stay encrypted and are never returned.
+
+Use these routes under `/api/v1`:
+
+| Route                                                             | Purpose                                                              |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `GET /slack/workspaces`                                           | List connected workspaces and their IDs                              |
+| `GET /slack/workspaces/{id}/conversations`                        | List public/private channels, DMs and group DMs                      |
+| `GET /slack/workspaces/{id}/people`                               | Resolve authors and choose DM recipients                             |
+| `POST /slack/workspaces/{id}/direct-messages`                     | Open a DM with `{ "userId": "U…" }`                                  |
+| `GET /slack/workspaces/{id}/conversations/{channel}`              | Load details, including read/unread fields where Slack provides them |
+| `GET /slack/workspaces/{id}/conversations/{channel}/messages`     | Load history                                                         |
+| `GET /slack/workspaces/{id}/conversations/{channel}/threads/{ts}` | Load a thread's parent and replies                                   |
+| `POST /slack/workspaces/{id}/conversations/{channel}/messages`    | Send `{ "text": "…" }`, optionally with `threadTs`                   |
+| `POST /slack/workspaces/{id}/conversations/{channel}/read`        | Mark read through `{ "ts": "…" }`                                    |
+| `GET /slack/workspaces/{id}/events`                               | Follow incoming messages, edits and deletions via SSE                |
+
+Directory responses contain `nextCursor`; message pages also contain `hasMore`.
+Pass the next cursor as `cursor`, including after an empty page. `limit` accepts
+1–200, defaults to 100 for directories and 15 for message pages, and Slack may
+return fewer. History and thread routes accept exclusive `oldest` / `latest`
+Slack timestamp bounds. Timestamps remain strings. Slack objects, including
+mrkdwn, blocks, file metadata and thread fields, are returned as Slack shapes
+them. File bytes are not proxied by these routes. Optional `types` on the
+conversation list selects a comma-separated subset of `public_channel`,
+`private_channel`, `im`, `mpim` (all four by default).
+
+For a live native inbox:
+
+1. Connect the workspace's `/events` stream with the admin bearer token; it
+   starts with `ready { workspaceId, userId, refresh: true }`.
+2. After **every** `ready`, reload the conversation list, visible history and
+   open thread from Slack while buffering live events; then apply the buffer.
+   The stream has no replay or durable event cursor, so this also recovers
+   changes missed while disconnected or while the core was restarting.
+3. Merge `message`, `message.changed` and `message.deleted` events, each
+   `{ workspaceId, eventId, event }`, by `(channel, message ts)` rather than
+   append order. Edits and thread-parent updates (`message_replied`) arrive as
+   `message.changed` and carry `event.message`; deletes carry `event.deleted_ts`.
+   Include the operator's own messages and bots; a thread reply is a `message`
+   carrying `thread_ts`. Deduplicate any initial-history/live overlap by ts.
+4. Use the returned message from a successful send for immediate display and
+   merge its eventual live event by ts. Debounce read updates per conversation;
+   `conversation.read { workspaceId, channel, ts }` syncs Briareus clients after
+   a successful mark. Read changes made in Slack itself require a details reload.
+5. On `workspace.changed` or `workspace.removed`, the stream closes: reload
+   workspaces before reconnecting, and stop if the workspace was removed. A
+   revoked/expired client token closes an open stream within 15 seconds.
+
+No signing secret returns 409 on `/events`; enable Slack's signed Event
+Subscriptions on behalf of users with `message.im`, `message.mpim`,
+`message.channels` and `message.groups` at the workspace's `eventsUrl`.
+Setting a secret does not itself subscribe the Slack app. History and sends
+can work without a stream. All events are signature-checked, team-matched and
+deduplicated on Slack retries; general inbox messages are never routed into
+an agent session. The existing replies to agent-sent messages still follow
+the session reply rules.
+
+A Slack rate limit returns 429 and a `Retry-After` header; schedule a retry
+after that interval. Slack remains the source of truth, so use events for
+live updates instead of polling history. Missing scopes and refused Slack
+tokens return 502 with an actionable error; an unknown workspace returns 404.
+Do not automatically retry a send when a timeout makes its outcome unknown.
+See Slack's [message retrieval](https://docs.slack.dev/messaging/retrieving-messages/),
+[Events API](https://docs.slack.dev/apis/events-api/) and
+[rate limits](https://docs.slack.dev/apis/web-api/rate-limits/) references.
 
 ## Autonomous review loops
 
@@ -262,7 +344,10 @@ Add an Access application for **`/api/v1` and `/api/v1/*`** with a **Bypass →
 Everyone** policy: a native client cannot complete Access's browser sign-in.
 Briareus still requires its token on every route. GitHub's deliveries need
 the same for **`/webhooks/*`**, since they authenticate themselves with an
-HMAC. Nothing else needs exempting: every other path answers 404 or 410.
+HMAC, and so does **`/oauth/mail/callback`** when a mailbox's sign-in ends on
+this server: the browser that signed in brings it a single-use `state`, which
+is all it accepts. Nothing else needs exempting: every other path answers 404
+or 410.
 
 ## What is not in this API
 
@@ -275,6 +360,8 @@ HMAC. Nothing else needs exempting: every other path answers 404 or 410.
 - `/webhooks/*`: deliveries from GitHub and from systems that wake a session.
 - `/healthz` is public and outside the prefix: 200 when the server and its
   database answer.
+- `/oauth/mail/callback` is where a Gmail or Outlook sign-in ends when its
+  redirect URI is this server's own; it answers the browser in plain text.
 
 Anything else under `/api` answers 410, and any other path a JSON 404.
 
