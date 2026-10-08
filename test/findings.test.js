@@ -1,14 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TEST_SHEET_ANCHOR, FIXES_ANCHOR } from '../lib/markers.js';
 
-// What the GitHub mock serves, per test: the PR's issue comments, and a log of
-// every write the module makes back.
-// `fail` makes writes of one method come back refused, for the paths that have
-// to survive GitHub saying no.
-// `files` is the PR's changed paths, or null for a GitHub that will not say,
-// which is the case the out-of-diff rule has to fail open on.
-// `reviewComments` are the inline ones on the diff, a different endpoint from
-// the PR's issue comments and the only place a finding can be deleted from.
+// The GitHub mock, per test: the PR's issue comments and a log of every write back. `fail`
+// refuses writes of one method. `files` is the PR's changed paths, or null when GitHub will
+// not say (the out-of-diff rule must fail open). `reviewComments` are the inline diff
+// comments, the only place a finding can be deleted from.
 const gh = vi.hoisted(() => ({
   comments: [],
   reviewComments: [],
@@ -391,9 +387,8 @@ describe('queueFindingsForFix', () => {
   });
 });
 
-// The two rules that keep a review loop from feeding on its own fixes: what a
-// later round is allowed to send back to be implemented, and what it only
-// records. See lib/jobs.js for where the floor comes from.
+// The two rules that keep a review loop from feeding on its own fixes: what a later round may
+// send to be fixed, and what it only records. The floor comes from lib/jobs.js.
 describe('sortFindingsForFix: the split as advice, nothing written', () => {
   it('parks a confirmed finding whose fix is not worthwhile, regardless of severity', async () => {
     const finding = {

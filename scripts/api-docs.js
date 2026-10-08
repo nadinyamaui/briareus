@@ -1,7 +1,5 @@
-// Writes docs/api-v1-reference.md from the client API's catalog
-// (lib/api-v1-catalog.js). Run it after changing a route: `npm run
-// build:api-docs`. test/api-v1.test.js fails while the file on disk is not
-// what this would write.
+// Writes docs/api-v1-reference.md from lib/api-v1-catalog.js; run `npm run
+// build:api-docs` after changing a route. test/api-v1.test.js fails while the file is stale.
 import fs from 'node:fs';
 import path from 'node:path';
 import prettier from 'prettier';

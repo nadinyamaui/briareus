@@ -128,9 +128,8 @@ function issueNode({
   };
 }
 
-// The board asks for the pull request rows, a wider page carrying only what the
-// stack walk reads, and the open issues, all in the one query. The two pull
-// request pages are the same list unless a test says so.
+// The board's one query fetches the PR rows, a wider page for the stack walk, and the open
+// issues. The two PR pages are the same list unless a test says so.
 function serve(nodes, defaultBranch = 'main', hasNextPage = false, refs = nodes, issues = []) {
   gh.graphql.mockResolvedValue({
     repository: {
@@ -360,9 +359,8 @@ describe('projectPulls', () => {
   });
 
   it('lists every author and names the one the board opens on', async () => {
-    // The narrowing is the board's, not this function's: it hands back the
-    // repo's whole open list plus the configured author for the picker to start
-    // on, so that pick can be widened without a round trip to GitHub.
+    // The board narrows by author, not this function: it returns the whole open list plus the
+    // configured author, so the picker can widen without a round trip to GitHub.
     serve([prNode({ number: 1, author: 'TheBot' }), prNode({ number: 2, author: 'someone-else' })]);
     const { pulls, author } = await projectPulls(project({ reviewAuthor: 'thebot' }));
     expect(author).toBe('thebot');
@@ -502,10 +500,9 @@ describe('projectPulls', () => {
     });
 
     it('keeps the board when the token may not read the issues', async () => {
-      // GraphQL answers a field the token cannot read with an error *and* the
-      // rest of the data. A token set up the way .env.example describes has no
-      // say over issues, and losing the whole board over a tab it never asked
-      // for is not an acceptable upgrade.
+      // GraphQL answers a field the token cannot read with an error *and* the rest of the
+      // data. A token set up per .env.example cannot read issues, and must not lose the board
+      // over that tab.
       const pr = prNode({ number: 1 });
       const denied = Object.assign(new Error('Resource not accessible by personal access token'), {
         errors: [
@@ -542,9 +539,7 @@ describe('projectPulls', () => {
     });
 
     it('still fails the board when something other than the issues failed', async () => {
-      // A resolver or permission error under stackRefs leaves the pull requests
-      // half-read. Forgiving it would cache that half and report nothing worse
-      // than a missing tab.
+      // An error under stackRefs leaves the PRs half-read; forgiving it would cache that half.
       const pr = prNode({ number: 1 });
       const broken = Object.assign(new Error('Something went wrong while executing your query'), {
         errors: [{ path: ['repository', 'stackRefs'], message: 'Something went wrong' }],
@@ -707,9 +702,8 @@ describe('projectPulls', () => {
     });
 
     it('pages a pull request’s closing references before linking them', async () => {
-      // A pull request closing more than the five references the board asks for
-      // up front: the sixth issue is still that pull request's work, and reading
-      // only the first page would put it on the tab as nobody's.
+      // A PR closing more than the five references fetched up front: reading only the first
+      // page would show the sixth issue as nobody's.
       const pr = prNode({
         number: 4,
         issues: [{ number: 9, title: 'One', url: 'u', state: 'OPEN', labels: { nodes: [] } }],

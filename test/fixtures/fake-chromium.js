@@ -1,16 +1,11 @@
 #!/usr/bin/env node
-// A stand-in for Chromium that lib/browser.js can launch: it announces a
-// DevTools endpoint on stderr the way Chromium does, and answers the Chrome
-// DevTools Protocol over a WebSocket with a small model of tabs, so the
-// launch, the screencast, the tabs and the input can be tested without a
-// browser on the machine.
+// A stand-in for Chromium that lib/browser.js can launch: it announces a DevTools endpoint on
+// stderr as Chromium does and answers CDP over a WebSocket with a small model of tabs.
 //
-// A test reaches it on the same endpoint: `Test.calls` returns every call the
-// module made, `Test.emit` sends a message to every other connection (an
-// event the module should react to), and `Test.hang` stops answering a method.
+// Tests reach it on the same endpoint: `Test.calls` returns the module's calls, `Test.emit`
+// sends an event to every other connection, and `Test.hang` stops answering a method.
 //
-// FAKE_CHROMIUM_MODE=exit makes it die before it is ready, `idle` makes it
-// just sit there (a process holding a profile, nothing more).
+// FAKE_CHROMIUM_MODE=exit makes it die before it is ready; `idle` makes it just hold a profile.
 
 import crypto from 'crypto';
 import http from 'http';

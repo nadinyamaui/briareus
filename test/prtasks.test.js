@@ -90,12 +90,10 @@ describe('testSheetPrompt', () => {
     );
   });
 
-  // 📋 Test sheet is a `checkout: false` action (lib/actions.js): it runs in the
-  // project's local checkout without switching its branch, so the tree it stands
-  // in is usually on someone else's work. A gh command with no number resolves
-  // the pull request from that branch, which is how a sheet derived from one
-  // PR's diff once landed on another PR entirely. Every gh call in this prompt
-  // must therefore name both the number and the repository.
+  // 📋 Test sheet runs in the project's local checkout without switching branch
+  // (lib/actions.js), so gh with no number infers the PR from whatever branch is out; a sheet
+  // once landed on the wrong PR that way. Every gh call in this prompt must name both number
+  // and repository.
   describe('pins the pull request rather than letting gh infer it', () => {
     // `gh pr <cmd>` followed by anything but the number: a digit when the caller
     // knew it, `<number>` when it is the placeholder step 1 resolves first.
@@ -323,9 +321,8 @@ describe('implementFeedbackPrompt', () => {
 });
 
 describe('customFeedbackPrompt', () => {
-  // The feedback is the whole prompt: no frame, no instructions of ours around
-  // it, only the surrounding whitespace trimmed. Equality is the point of the
-  // test: `toContain` would pass with a frame back around the words.
+  // The feedback is the whole prompt, only trimmed. Equality is the point: `toContain` would
+  // pass with a frame back around the words.
   it('sends the feedback and nothing else', () => {
     const prompt = customFeedbackPrompt({ ...base, feedback: '  404 not 422, please\nand add a test  ' });
     expect(prompt).toBe('404 not 422, please\nand add a test');

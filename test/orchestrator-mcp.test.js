@@ -1,11 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { workerTranscript } from '../lib/worker-transcript.js';
 
-// orchestrator-mcp.js is a stdio server like memory-mcp.js: it exports nothing
-// and wires itself to stdin at import, so these tests drive it the same way
-// that suite does: mock readline to capture the line handler, feed it JSON-RPC
-// frames, and read the replies off a stubbed stdout. BASE and TOKEN are read
-// at import time, so every test imports a fresh copy.
+// A stdio server wired to stdin at import, driven like memory-mcp.js: mock readline to capture
+// the line handler, feed it JSON-RPC frames, read replies off a stubbed stdout. BASE and TOKEN
+// are read at import, so every test imports a fresh copy.
 const rl = vi.hoisted(() => ({ handlers: {} }));
 
 vi.mock('readline', () => ({

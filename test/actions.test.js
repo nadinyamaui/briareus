@@ -45,12 +45,10 @@ describe('the actions list', () => {
     }
   });
 
-  // An errand that says everything it has on the pull request itself is read
-  // there, not in its thread, so its session hands the clone and the database
-  // server back (and its own record with them) the moment the turn ends. The
-  // ones left open are the ones with something to come back to: a test run's
-  // videos, feedback the user typed and may want to argue with, and
-  // 🛠 Implement feedback, which stays for the review loop that follows its push.
+  // An errand whose whole answer lands on the PR hands its clone, database server and record
+  // back when the turn ends. Those left open have something to come back to: a test run's
+  // videos, typed feedback, and 🛠 Implement feedback, which stays for the review loop after
+  // its push.
   it('closes the errands whose answer lands on the pull request', () => {
     const closing = ACTIONS.filter((a) => a.autoClose).map((a) => a.id);
     expect(closing).toEqual([
@@ -67,9 +65,8 @@ describe('the actions list', () => {
     ]);
   });
 
-  // The review loop needs a parent that is still around when the review
-  // reports back, and a workspace clone to start that review in, so an
-  // action that arms it cannot also auto-close or run locally.
+  // The review loop needs a parent still around when the review reports, and a workspace clone
+  // to review in, so an action that arms it cannot auto-close or run locally.
   it('an action that arms the review loop stays open in a worktree for it', () => {
     const looping = ACTIONS.filter((a) => a.reviewLoop);
     expect(looping.map((a) => a.id)).toEqual(['implement-feedback']);
@@ -101,10 +98,8 @@ describe('the actions list', () => {
 describe('test-sheet', () => {
   const action = getAction('test-sheet');
 
-  // The errand works on the pull request through gh alone, so the shared local
-  // checkout is left on whatever branch the developer has out. That is only
-  // safe while the prompt names the pull request itself; the facts below are
-  // the ones that keep the sheet off the branch that happens to be checked out.
+  // The errand works on the PR through gh alone, leaving the shared checkout on whatever branch
+  // is out; that is only safe while the prompt names the PR, as the facts below ensure.
   it('runs in the local checkout without switching its branch', () => {
     expect(action.workspace).toBe('local');
     expect(action.checkout).toBe(false);

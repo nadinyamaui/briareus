@@ -343,9 +343,8 @@ describe('usageWindow', () => {
       to: new Date(2026, 0, 1).getTime(),
     });
   });
-  // Recut on every call rather than once per pane: a dashboard left open across
-  // midnight on the 1st asks again on its next refresh and gets the window the
-  // picker now means, instead of sitting on the one it was opened in.
+  // Recut on every call, so a dashboard left open across the month boundary gets the window
+  // the picker now means on its next refresh.
   it('recuts both month windows when the calendar rolls over', () => {
     const before = new Date(2026, 0, 31, 23, 59).getTime();
     const after = new Date(2026, 1, 1, 0, 1).getTime();
@@ -440,9 +439,8 @@ describe('projectBreakdown', () => {
   });
 
   it('gives a repository re-added to Settings the history of the row it replaced', () => {
-    // Project 1 was deleted and set up again as project 5 on the same repo. The
-    // turns were spent on that repository either way, so they belong to the one
-    // live row for it rather than to a greyed-out twin beside it.
+    // Project 1 was deleted and re-added as project 5 on the same repo; its turns belong to
+    // the one live row, not a greyed-out twin.
     const readded = [{ id: 5, repo: 'o/one', label: 'One' }];
     const rows = [
       { projectId: 1, repo: 'o/one', jobId: 'a', inputTokens: 10, outputTokens: 0, costUsd: 1 },

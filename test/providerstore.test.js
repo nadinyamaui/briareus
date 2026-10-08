@@ -1,9 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// normalizeProvider and adoptLogins are not exported; createProvider,
-// updateProvider and initProviders are the doors to them. lib/providers.js is
-// mocked down to the surface this module actually uses: the binary registry and
-// the six config-dir/login helpers, all of which touch disk in the real thing.
+// normalizeProvider and adoptLogins are not exported, so they are reached through
+// createProvider, updateProvider and initProviders. lib/providers.js is mocked down to the
+// binary registry and the six config-dir/login helpers, which touch disk in the real thing.
 const state = vi.hoisted(() => ({
   rows: [],
   saved: [],
@@ -261,9 +260,8 @@ describe('adopting a login at boot', () => {
   });
 
   it('leaves a row on a binary this build no longer has alone', async () => {
-    // normalizeProvider cannot write one, but a row saved before a binary was
-    // dropped is still in the table, so it gets no config dir rather than a crash
-    // at boot.
+    // normalizeProvider cannot write one, but a row saved before its binary was dropped gets
+    // no config dir rather than crashing boot.
     await seed([row({ id: 1, binary: 'retired' })]);
 
     expect(listProviders()).toHaveLength(1);
@@ -823,9 +821,8 @@ describe('interchangeable accounts', () => {
       row({ id: 2, binary: 'codex', sortOrder: 2 }),
     ]);
     expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([1, 2]);
-    // What the codex CLI rewriting a member's model cache mid-session amounts
-    // to: the catalog the row resolves to changes under a key already handed
-    // out. The group holds until the rows are reloaded by a write.
+    // The codex CLI rewriting a member's model cache mid-session changes the catalog under a
+    // key already handed out; the group holds until a write reloads the rows.
     getProvider(2).models = ['gpt-b'];
     expect(providerGroup(getProvider(1)).map((p) => p.id)).toEqual([1, 2]);
     await updateProvider(2, { models: ['gpt-b'] });

@@ -2,9 +2,8 @@ import express from 'express';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { sessionBrowserRoutes } from '../lib/browser-routes.js';
 
-// The shared browser's routes with lib/browser.js and lib/jobs.js stood in for:
-// what is under test is the HTTP side (which session, which status, what the
-// stream sends) rather than Chromium.
+// The shared browser's routes with lib/browser.js and lib/jobs.js stubbed: the HTTP side is
+// under test (which session, which status, what the stream sends), not Chromium.
 let server, base, deps, listener, running;
 
 beforeEach(async () => {

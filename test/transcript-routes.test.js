@@ -3,9 +3,8 @@ import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sessionTranscriptRoutes } from '../lib/transcript-routes.js';
 
-// The routes over a session's transcript, with lib/jobs.js's side stood in
-// for: which lines are hidden is a set here, and what is under test is where
-// the routes apply it and where they do not.
+// The transcript routes with lib/jobs.js stubbed (hidden lines are a set here): under test is
+// where the routes apply the hiding and where they do not.
 let server, base, routes, job, log, hidden, bus, clearDevTranscript;
 const ev = (seq, text) => ({ seq, kind: 'text', text });
 

@@ -133,9 +133,8 @@ describe('templateCatalog', () => {
       for (const v of entry.vars) {
         expect(v.name).toMatch(/^[A-Z0-9_]+$/);
         expect(v.hint).toBeTruthy();
-        // Every advertised token must actually do something in the built-in
-        // text or be provided by lib/prtasks.js; at minimum it must be
-        // well-formed enough for fill() to match it.
+        // Every advertised token must be used by the built-in text or provided by
+        // lib/prtasks.js; at minimum fill() must match it.
         expect(fill(`{{${v.name}}}`, { [v.name]: 'x' })).toBe('x');
       }
     }

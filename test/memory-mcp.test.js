@@ -1,9 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// memory-mcp.js is a stdio server, not a module: it exports nothing and wires
-// itself to stdin at import. The tests drive it the way a provider CLI does:
-// mock readline to capture the line handler, feed it JSON-RPC frames, and read
-// the replies off a stubbed stdout. BASE and TOKEN are read at import time, so
+// memory-mcp.js is a stdio server that exports nothing and wires itself to stdin at import.
+// The tests drive it like a provider CLI: mock readline to capture the line handler, feed it
+// JSON-RPC frames, read replies off a stubbed stdout. BASE and TOKEN are read at import, so
 // every test imports a fresh copy.
 const rl = vi.hoisted(() => ({ handlers: {} }));
 

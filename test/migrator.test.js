@@ -8,9 +8,8 @@ import {
   MIGRATIONS_DIR,
 } from '../lib/migrator.js';
 
-// A stand-in for the mysql2 pool: answers the handful of statements the
-// `migrations` table storage issues, and records every other query so a test
-// can see which migration bodies ran, in which order.
+// A mysql2 pool stand-in: answers the `migrations` table statements and records every other
+// query, so a test sees which migration bodies ran and in what order.
 function fakePool() {
   const rows = [];
   const queries = [];

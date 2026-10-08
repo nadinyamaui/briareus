@@ -3,10 +3,8 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-// lib/browser.js against a stand-in Chromium (test/fixtures/fake-chromium.js)
-// that speaks the DevTools Protocol over a real WebSocket: the launch, the
-// tabs, the screencast, the input and the ways a browser stops, with every
-// call the module makes recorded on the other side.
+// lib/browser.js against a stand-in Chromium (test/fixtures/fake-chromium.js) that speaks the
+// DevTools Protocol over a real WebSocket and records every call the module makes.
 const FAKE = path.resolve(import.meta.dirname, 'fixtures', 'fake-chromium.js');
 vi.mock('../lib/config.js', () => ({
   getConfig: () => ({ browserBin: path.resolve(import.meta.dirname, 'fixtures', 'fake-chromium.js') }),

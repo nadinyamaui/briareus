@@ -238,9 +238,8 @@ describe('the auth probe for a custom codex endpoint', () => {
     home = null;
   });
 
-  // The endpoint publishes no model list, so the probe falls back to a chat
-  // call: the model in that call is the one under test. Each row gets its own
-  // key, since a verdict is cached per endpoint, model and key.
+  // No model list, so the probe falls back to a chat call with the model under test. Each row
+  // gets its own key, since a verdict is cached per endpoint, model and key.
   let row = 0;
   async function probedModel(provider) {
     home = home || fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-probe-'));
@@ -686,10 +685,8 @@ describe('buildArgs', () => {
   });
 
   it('a session id opencode never issued is not a resume, it is a fresh conversation', () => {
-    // A first turn killed before the CLI printed an id of its own leaves the
-    // UUID the session was created with. Resuming that would start a new
-    // conversation anyway; what matters is that the caller knows, since an
-    // unbriefed conversation is one that does not know where it is working.
+    // A first turn killed before the CLI printed its own id leaves the creation UUID. Resuming
+    // starts a new conversation anyway, but the caller must know: that one is unbriefed.
     expect(canResume('opencode', 'ses_abc')).toBe(true);
     expect(canResume('opencode', '0f9d1e7a-9f3a-4a41-8f5f-0c4b8c9a1d22')).toBe(false);
     expect(canResume('opencode', '')).toBe(false);
@@ -745,10 +742,9 @@ describe('buildArgs', () => {
   });
 
   it('an opencode entry always offers its own model, cache or no cache', () => {
-    // No models.dev cache exists for a service nobody has run yet, and a
-    // stale one would drop the configured model just as readily, leaving
-    // providerDefaultModel to run some other model, which is the one thing
-    // that could never refresh the cache.
+    // No models.dev cache exists for a service never run, and a stale one would drop the
+    // configured model too, leaving providerDefaultModel on another model that could never
+    // refresh the cache.
     const entry = { defaultModel: 'google/gemini-2.5-pro', models: [], apiKey: 'k' };
     expect(BINARIES.opencode.models({}, entry)).toContain('google/gemini-2.5-pro');
     // An entry that names nothing at all falls back to the binary's own default.

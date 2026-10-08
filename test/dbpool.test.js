@@ -1,10 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 
-// Neither a MySQL nor a Postgres server exists here: mysql2, spawn and fs are
-// mocked, and what is asserted is which of them was reached and with what. The
-// pool itself (activeDbServers, the config) is driven from `state` so the same
-// module can be walked through an empty pool, a contended one and a healthy one.
+// No database server here: mysql2, spawn and fs are mocked, and tests assert what was reached
+// with what. The pool (activeDbServers, config) is driven from `state` so one module can be
+// walked through an empty, a contended and a healthy pool.
 const state = vi.hoisted(() => ({
   project: null,
   otherProjects: [], // what listProjects answers beside `project`
@@ -149,9 +148,8 @@ const config = (over = {}) => ({
   dev: { maxSessions: 3, ...(over.dev || {}) },
 });
 
-// Claims live in a module-level Map that outlives a test, and a leaked one
-// makes the next test wait for a server that will never free up. Every claim
-// goes through here so afterEach can hand them all back.
+// Claims live in a module-level Map that outlives a test, and a leaked one makes the next test
+// wait forever, so every claim goes through here for afterEach to hand back.
 const claimed = [];
 async function acquire(j, repo = 'r/r', onEvent = () => {}) {
   const id = await acquireInstance(j, repo, onEvent);
@@ -1086,9 +1084,8 @@ describe('restoring the project dump into the claimed database', () => {
   });
 
   it('swallows the broken pipe when mysql aborts mid-dump', async () => {
-    // mysql aborts on any SQL error and the pipe then writes into a closed
-    // stdin. Unhandled, that EPIPE is an uncaught exception taking the whole
-    // server down, and with it every session not yet flushed to the database.
+    // mysql aborts on any SQL error and the pipe then writes into a closed stdin; an unhandled
+    // EPIPE would take the server down with every session not yet flushed.
     state.stdinError = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
     state.psqlResults = [{ code: 1, stderr: 'ERROR 1146: table does not exist' }];
 
