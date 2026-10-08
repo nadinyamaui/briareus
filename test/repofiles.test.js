@@ -4,7 +4,7 @@ const cfg = vi.hoisted(() => ({ githubToken: 'token' }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
 vi.mock('../lib/github.js', () => ({ githubRest: vi.fn() }));
 import { githubRest } from '../lib/github.js';
-import { MAX_FILE_BYTES, repoFile, repoTree } from '../lib/repofiles.js';
+import { MAX_ARCHIVE_BYTES, MAX_FILE_BYTES, repoArchive, repoFile, repoTree } from '../lib/repofiles.js';
 
 const project = { repo: 'owner/repo' };
 const ok = (data) => ({ ok: true, status: 200, json: async () => structuredClone(data) });
@@ -190,5 +190,93 @@ describe('a repository’s file', () => {
       await expect(repoFile(project, 'main', path)).rejects.toMatchObject({ status: 400 });
     respond = () => status(404);
     await expect(repoFile(project, 'main', 'gone.js')).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('a repository’s archive', () => {
+  const tarball = (bytes, length) => ({
+    ok: true,
+    status: 200,
+    headers: new Headers(length === undefined ? {} : { 'content-length': String(length) }),
+    body: new Blob([bytes]).stream(),
+  });
+  const read = async (stream) => {
+    const chunks = [];
+    for await (const c of stream) chunks.push(c);
+    return Buffer.concat(chunks);
+  };
+
+  it('streams GitHub’s tarball at the commit asked for', async () => {
+    respond = (path) => {
+      expect(path).toBe('/repos/owner/repo/tarball/c0ffee');
+      return tarball(Buffer.from('gz'), 2);
+    };
+    const { stream, size } = await repoArchive(project, 'c0ffee');
+    expect(size).toBe(2);
+    expect(String(await read(stream))).toBe('gz');
+  });
+
+  it('refuses one GitHub says is too large, and needs a ref', async () => {
+    const cancel = vi.fn();
+    respond = () => ({
+      ...tarball(Buffer.from('x'), MAX_ARCHIVE_BYTES + 1),
+      body: new ReadableStream({ cancel }),
+    });
+    await expect(repoArchive(project, 'main')).rejects.toMatchObject({ status: 413 });
+    expect(cancel).toHaveBeenCalledOnce();
+    await expect(repoArchive(project, '')).rejects.toMatchObject({ status: 400 });
+    respond = () => status(404);
+    await expect(repoArchive(project, 'gone')).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('forwards an upstream failure to the returned stream', async () => {
+    let controller;
+    const body = new ReadableStream({
+      start(c) {
+        controller = c;
+        c.enqueue(Buffer.from('gz'));
+      },
+    });
+    respond = () => ({ ...tarball(Buffer.from('')), body });
+    const { stream } = await repoArchive(project, 'main');
+    const reading = read(stream);
+    const failure = new Error('upstream reset');
+    const rejected = expect(reading).rejects.toThrow(failure);
+    controller.error(failure);
+    await rejected;
+    expect(stream.destroyed).toBe(true);
+  });
+
+  it('cancels the upstream body when the caller destroys the stream', async () => {
+    const cancel = vi.fn();
+    respond = () => ({
+      ...tarball(Buffer.from('')),
+      body: new ReadableStream({ cancel }),
+    });
+    const { stream } = await repoArchive(project, 'main');
+    stream.destroy();
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+  });
+
+  it('cancels an archive with no stated size when the streaming limit fails', async () => {
+    const cancel = vi.fn();
+    const chunk = Buffer.alloc(1024 * 1024);
+    respond = () => ({
+      ...tarball(Buffer.from('')),
+      body: new ReadableStream({
+        pull(controller) {
+          controller.enqueue(chunk);
+        },
+        cancel,
+      }),
+    });
+    const { stream } = await repoArchive(project, 'main');
+    // Consume without buffering the 300 MiB fixture.
+    await expect(
+      (async () => {
+        for await (const chunk of stream) expect(chunk.length).toBe(1024 * 1024);
+      })(),
+    ).rejects.toMatchObject({ status: 413 });
+    expect(cancel).toHaveBeenCalledOnce();
   });
 });

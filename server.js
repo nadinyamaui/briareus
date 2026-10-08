@@ -188,7 +188,7 @@ import {
   updatePullRequestBranch,
 } from './lib/prviewer.js';
 import { issueTimeline, issueView } from './lib/issueviewer.js';
-import { repoFile, repoTree } from './lib/repofiles.js';
+import { repoArchive, repoFile, repoTree } from './lib/repofiles.js';
 import { boardInScope, moveBoardItem, projectBoard } from './lib/projectboard.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
@@ -949,6 +949,32 @@ api.get('/api/repo/file', async (req, res) => {
     const ref = req.query.ref ? String(req.query.ref) : undefined;
     res.json(await repoFile({ repo: project.repo }, ref, String(req.query.path || '')));
   } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
+
+api.get('/api/repo/archive', async (req, res) => {
+  const controller = new AbortController();
+  res.once('close', () => controller.abort());
+  try {
+    const project = getProject(String(req.query.repo || ''));
+    if (!project) throw Object.assign(new Error(`Unknown project: ${req.query.repo || ''}`), { status: 404 });
+    const { stream, size } = await repoArchive({ repo: project.repo }, String(req.query.ref || ''), {
+      signal: controller.signal,
+    });
+    res.once('close', () => stream.destroy());
+    // The client may have disconnected while GitHub was sending headers.
+    if (res.destroyed) {
+      stream.destroy();
+      return;
+    }
+    res.setHeader('Content-Type', 'application/gzip');
+    if (size) res.setHeader('Content-Length', String(size));
+    // A failure once bytes have gone out can only cut the response short.
+    stream.on('error', () => res.destroy());
+    stream.pipe(res);
+  } catch (e) {
+    if (res.destroyed) return;
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
   }
 });
