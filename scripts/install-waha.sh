@@ -30,7 +30,7 @@ if [[ ! -f "$install_dir/.env" ]]; then
 fi
 chmod 600 "$install_dir/.env"
 cp "$repo_root/deploy/waha/compose.yaml" "$install_dir/compose.yaml"
-env -u WAHA_IMAGE -u WAHA_ENGINE -u WAHA_NOWEB_WA_VERSION -u WAHA_PORT -u WAHA_API_KEY docker compose --env-file "$install_dir/.env" --project-directory "$install_dir" -f "$install_dir/compose.yaml" up -d
+env -u WAHA_IMAGE -u WAHA_ENGINE -u WAHA_NOWEB_WA_VERSION -u WAHA_NOWEB_WA_VERSION_FORCE -u WAHA_PORT -u WAHA_API_KEY docker compose --env-file "$install_dir/.env" --project-directory "$install_dir" -f "$install_dir/compose.yaml" up -d
 node --input-type=module - "$install_dir/.env" <<'JS'
 import fs from 'node:fs';
 const text = fs.readFileSync(process.argv[2], 'utf8');
