@@ -1910,13 +1910,21 @@ describe('spawnWorkerSession', () => {
     ['review', 'fix'].flatMap((kind) =>
       [false, true].flatMap((asking) =>
         [false, true].flatMap((current) =>
-          [false, true].map((autoClose) => [kind, asking, current, autoClose]),
+          [false, true].flatMap((autoClose) =>
+            ['idle', 'failed', 'closed'].map((workerStatus) => [
+              kind,
+              asking,
+              current,
+              autoClose,
+              workerStatus,
+            ]),
+          ),
         ),
       ),
     ),
   )(
-    'recovers a failed %s answer (asking=%s; current=%s; autoClose=%s)',
-    async (kind, asking, current, autoClose) => {
+    'recovers a failed %s answer (asking=%s; current=%s; autoClose=%s; workerStatus=%s)',
+    async (kind, asking, current, autoClose, workerStatus) => {
       const orchestrator = getJob('question-orch');
       const worker = getJob('question-worker');
       const job = getJob('question-child');
@@ -1928,7 +1936,7 @@ describe('spawnWorkerSession', () => {
         pendingWorkerNotices: [],
       });
       Object.assign(worker, {
-        status: 'idle',
+        status: workerStatus,
         reviewLoop: { rounds: 1, [active]: true, [childId]: current ? job.id : 'replacement' },
       });
       Object.assign(job, {
@@ -1954,25 +1962,32 @@ describe('spawnWorkerSession', () => {
         expect(job.error).toBeTruthy();
         expect(job.awaitingAnswer).toBe(asking);
         expect(worker.reviewLoop[active]).toBe(!current || asking);
-        expect(orchestrator.pendingWorkerNotices).toHaveLength(current ? 1 : 0);
+        expect(orchestrator.pendingWorkerNotices).toHaveLength(current && workerStatus !== 'closed' ? 1 : 0);
         if (current && asking) {
           expect(worker.reviewLoop.failure).toBeUndefined();
           expect(worker.reviewLoop[childId]).toBe(job.id);
-          expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
-            kind: 'child-question',
-            childId: job.id,
-            questionSeq: job.questionSeq,
-          });
-        } else if (current) {
+          if (workerStatus !== 'closed')
+            expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
+              kind: 'child-question',
+              childId: job.id,
+              questionSeq: job.questionSeq,
+            });
+        } else if (current && !asking) {
           expect(worker.reviewLoop.failure).toMatchObject({ round: 1, reason: job.error });
-          expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
-            workerId: worker.id,
-            kind: 'loop',
-            text: expect.stringContaining('retry_review'),
-          });
+          if (workerStatus !== 'closed')
+            expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
+              workerId: worker.id,
+              kind: 'loop',
+              text: expect.stringContaining('retry_review'),
+            });
+          if (workerStatus === 'failed') {
+            const notice = orchestrator.pendingWorkerNotices[0].text;
+            expect(notice).toContain('send_to_worker');
+            expect(notice).toContain('before retrying');
+          }
           worker.status = 'running'; // Leave the retry armed without starting another real round.
           await expect(retryLoopRound(worker.id)).resolves.toMatchObject({ started: false });
-        } else {
+        } else if (!current) {
           expect(worker.reviewLoop.failure).toBeUndefined();
           expect(worker.reviewLoop[childId]).toBe('replacement');
         }
@@ -2080,7 +2095,7 @@ describe('spawnWorkerSession', () => {
             finishRelease = resolve;
           }),
       );
-      const { children, restore } = fakeClaude();
+      const { children, settled, restore } = fakeClaude();
       try {
         sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
         children[0].emitLines(init, replay('Postgres'));
@@ -2100,6 +2115,21 @@ describe('spawnWorkerSession', () => {
         expect(children).toHaveLength(1);
         expect(worker.reviewLoop[active]).toBe(true);
         expect(orchestrator.pendingWorkerNotices).toHaveLength(0);
+        // An unrelated owner turn must not discard the child while cleanup waits.
+        const ownerDone = settled(worker);
+        sendDevMessage(worker.id, 'Report progress');
+        children[1].emitLines(
+          init,
+          replay('Report progress'),
+          said('<ask-user>\nContinue?\n</ask-user>'),
+          result('Asked.'),
+        );
+        await vi.waitFor(() => expect(children[1].ended).toBe(true));
+        children[1].emit('close', 0);
+        await ownerDone;
+        expect(worker.reviewLoop[active]).toBe(true);
+        expect(worker.reviewLoop[childId]).toBe(job.id);
+        orchestrator.pendingWorkerNotices = []; // Ignore the unrelated owner question.
         finishRelease();
         await vi.waitFor(() => expect(worker.reviewLoop[active]).toBe(false));
         expect(worker.reviewLoop.failure).toMatchObject({ reason: job.error });
