@@ -478,6 +478,41 @@ describe('▶ Run: the links it answers with', () => {
     warn.mockRestore();
   });
 
+  it('reports stdout failures when run commands exit during startup', async () => {
+    const job = session();
+    const starting = startDevServe(job.id);
+    const rejected = expect(starting).rejects.toThrow(
+      'The run commands exited immediately: The domain cannot be registered for this tenant.',
+    );
+    while (!state.procs.length) await tick();
+    const proc = state.procs[0];
+    proc.stdout.write('The domain cannot be registered for this tenant.\n');
+    proc.exitCode = 1;
+    proc.emit('exit', 1);
+
+    await rejected;
+    expect(
+      job.events.some(
+        (e) => e.text === 'App server died (exit 1): The domain cannot be registered for this tenant.',
+      ),
+    ).toBe(true);
+  });
+
+  it('retains bounded output from both streams when a running server fails', async () => {
+    const job = session();
+    await startDevServe(job.id);
+    const proc = state.procs[0];
+    proc.stdout.write('x'.repeat(3000));
+    proc.stderr.write('\nDatabase unavailable');
+    proc.stdout.write('\nServer stopped\n');
+    proc.exitCode = 1;
+    proc.emit('exit', 1);
+
+    const failure = job.events.findLast((e) => e.text?.startsWith('App server died'));
+    expect(failure.text).toContain('Database unavailable\nServer stopped');
+    expect(failure.text.length).toBeLessThanOrEqual('App server died (exit 1): '.length + 2000);
+  });
+
   it('leaves no unhandled rejection when the run commands exit at once', async () => {
     const unhandled = vi.fn();
     process.on('unhandledRejection', unhandled);
