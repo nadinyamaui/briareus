@@ -10938,6 +10938,57 @@ describe('auto-compaction while the context probe is out', () => {
     expect(job.status).toBe('closed');
   });
 
+  it('preserves queued work when shutdown interrupts automatic compaction', async () => {
+    sendDevMessage(job.id, 'Go');
+    await endTurn();
+    answer(children[1], report('400k'));
+    await vi.waitFor(() => expect(children).toHaveLength(3));
+    expect(job.proc).toBe(children[2]);
+    sendDevMessage(job.id, 'Then check the result');
+    children[2].pid = 123456789;
+    const kill = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      expect(pid).toBe(-children[2].pid);
+      expect(signal).toBe('SIGKILL');
+      children[2].emit('close', null, signal);
+      return true;
+    });
+    try {
+      await stopAllJobProcesses();
+      await vi.waitFor(() => expect(publicJob(job).compacting).toBe(false));
+      // Let the turn's continuation reach its queue drain before the final flush.
+      await new Promise((resolve) => setImmediate(resolve));
+      await flushJobs();
+      expect(job.recoveryTurn).toMatchObject({ prompt: 'Go', completed: true });
+      expect(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)?.[0]).toMatchObject({
+        recoveryTurn: { prompt: 'Go', completed: true },
+        recoveryQueue: [expect.objectContaining({ prompt: 'Then check the result' })],
+      });
+      expect(children).toHaveLength(3);
+      expect(job.status).toBe('running');
+    } finally {
+      kill.mockRestore();
+      setDraining(false);
+    }
+  });
+
+  it('does not spawn automatic compaction after shutdown while a context probe is pending', async () => {
+    sendDevMessage(job.id, 'Go');
+    await endTurn();
+    expect(job.proc).toBeNull();
+    await stopAllJobProcesses();
+    const flushed = flushJobs();
+    answer(children[1], report('400k'));
+    try {
+      await flushed;
+      expect(job.contextUsage.tokens).toBe(400000);
+      expect(children).toHaveLength(2);
+      expect(job.recoveryTurn).toMatchObject({ prompt: 'Go', completed: true });
+      expect(job.status).toBe('running');
+    } finally {
+      setDraining(false);
+    }
+  });
+
   it('and so does switching it off meanwhile', async () => {
     sendDevMessage(job.id, 'Go');
     await endTurn();
@@ -12260,6 +12311,53 @@ describe('automatic recovery after a server restart', () => {
         kind === 'review' ? 'reviewing' : kind === 'fix' ? 'fixing' : 'running'
       ],
     ).toBe(false);
+  });
+
+  it.each(['review', 'qa', 'fix'])(
+    'finishes interrupted auto-close for a completed %s child without queued work',
+    async (kind) => {
+      const parent = row({ status: 'idle', recoveryTurn: null });
+      const child = row({
+        status: 'idle',
+        autoClose: true,
+        recoveryQueue: [],
+        recoveryTurn: { prompt: 'Completed workflow', phase: 'followup', completed: true },
+        ...(kind === 'review'
+          ? { reviewBranch: 'feature', loopParentId: parent.id, loopReviewDone: true }
+          : kind === 'qa'
+            ? { qaBranch: 'feature', qaParentId: parent.id, qaLoopDone: true }
+            : { loopFixParentId: parent.id, loopFixDone: true }),
+      });
+      if (kind === 'review') parent.reviewLoop = { reviewing: true, reviewSessionId: child.id };
+      else if (kind === 'fix') parent.reviewLoop = { fixing: true, fixSessionId: child.id };
+      else parent.qaLoop = { running: true, sessionId: child.id };
+      state.stored = [parent, child];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(child.status).toBe('closed'));
+      expect(children).toHaveLength(0);
+      expect(
+        (kind === 'qa' ? parent.qaLoop : parent.reviewLoop)[
+          kind === 'review' ? 'reviewing' : kind === 'fix' ? 'fixing' : 'running'
+        ],
+      ).toBe(false);
+      expect(dropSessionDatabase).toHaveBeenCalledWith(child, expect.any(Function));
+    },
+  );
+
+  it('delivers saved work after interrupted compaction without repeating the completed request', async () => {
+    const saved = row({
+      recoveryTurn: { prompt: 'Finished request', phase: 'followup', completed: true },
+      recoveryQueue: [{ prompt: 'Then check the result', shown: 'Then check the result', files: [] }],
+    });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toBe('Then check the result');
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+    expect(children).toHaveLength(1);
   });
 
   it.each(['review', 'qa'])('keeps legacy %s discovery active through operator answers', async (kind) => {
