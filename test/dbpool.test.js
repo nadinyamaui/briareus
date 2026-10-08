@@ -458,6 +458,48 @@ describe('database preparation shutdown', () => {
 });
 
 describe('restart database claims', () => {
+  it.each([null, 0])(
+    'suspends a reclaimed PostgreSQL probe that closes during shutdown (exit %s)',
+    async (code) => {
+      state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+      state.servers = [server({ engine: 'pgsql', port: 5432 })];
+      let active;
+      state.psqlSpawn = () => {
+        active = new EventEmitter();
+        active.stdout = new EventEmitter();
+        active.stderr = new EventEmitter();
+        active.kill = vi.fn();
+        return active;
+      };
+      const session = { ...job(), repo: 'acme/app', recoveryTurn: { completed: false } };
+      reclaimInstance(session, 1);
+      claimed.push(session);
+      const settled = vi.fn();
+      acquireInstance(session, session.repo, vi.fn()).then(settled, settled);
+      expect(state.psqlCalls).toHaveLength(1);
+      expect(state.psqlCalls[0].args.at(-1)).toBe('SELECT 1');
+      const stopping = stopDatabaseProcesses();
+      expect(active.kill).toHaveBeenCalledWith('SIGKILL');
+      active.emit('close', code, code === null ? 'SIGKILL' : null);
+      await stopping;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(settled).not.toHaveBeenCalled();
+      expect(claimHolder(1)).toBe(session.id);
+      expect(session).toMatchObject({ dbServerId: 1, recoveryTurn: { completed: false } });
+      expect(state.psqlCalls).toHaveLength(1);
+      expect(state.mysqlQueries).toEqual([]);
+
+      // The next boot can reclaim and probe the original server without reseeding.
+      _resetForTests();
+      state.psqlSpawn = null;
+      reclaimInstance(session, 1);
+      expect(await acquireInstance(session, session.repo, vi.fn())).toBe(1);
+      expect(state.psqlCalls).toHaveLength(2);
+      expect(state.psqlCalls[1].args.at(-1)).toBe('SELECT 1');
+      expect(claimHolder(1)).toBe(session.id);
+    },
+  );
+
   it.each(['project', 'global'])(
     'retains the original database claim after %s pooling is disabled',
     async (mode) => {
