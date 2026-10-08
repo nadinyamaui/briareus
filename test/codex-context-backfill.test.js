@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   commit: vi.fn(),
   rollback: vi.fn(),
   affected: 1,
+  connections: [],
 }));
 vi.mock('node:os', async (original) => ({
   default: { ...(await original()).default, homedir: () => mocks.home },
@@ -54,6 +55,7 @@ async function run({
   otherRows = [],
   apply = false,
   reverse = false,
+  serverStopped = true,
 } = {}) {
   const events = [
     event(0, 'session_meta', { cwd }),
@@ -85,7 +87,10 @@ async function run({
   ];
   mocks.rows.push(...otherRows);
   if (reverse) mocks.rows.reverse();
-  if (apply) process.argv.push('--apply');
+  if (apply) {
+    process.argv.push('--apply');
+    if (serverStopped) process.argv.push('--server-stopped');
+  }
   await import('../scripts/backfill-codex-context.js');
   return console.log.mock.calls[0][0];
 }
@@ -101,8 +106,10 @@ beforeEach(() => {
   mocks.jobs = [];
   mocks.tasks = [];
   mocks.affected = 1;
+  mocks.connections = [];
   vi.clearAllMocks();
   mocks.query.mockImplementation(async (sql) => {
+    if (sql.includes('information_schema.PROCESSLIST')) return [mocks.connections];
     if (sql.includes('FROM turn_usage')) return [mocks.rows];
     if (sql.includes('FROM jobs')) return [mocks.jobs];
     if (sql.includes('FROM task_sessions')) return [mocks.tasks];
@@ -184,6 +191,23 @@ function snapshot(meta = parentMeta) {
   ];
 }
 describe('Codex backfill ownership and absorbed snapshots', () => {
+  it('refuses apply without acknowledging the stop/backfill/restart workflow', async () => {
+    snapshot();
+    await expect(run({ apply: true, serverStopped: false })).rejects.toThrow(
+      '--apply requires --server-stopped',
+    );
+    expect(mocks.query).not.toHaveBeenCalled();
+    expect(mocks.beginTransaction).not.toHaveBeenCalled();
+  });
+  it('refuses apply while another database connection remains, even with acknowledgement', async () => {
+    snapshot();
+    mocks.connections = [{ ID: 42 }];
+    await expect(run({ apply: true })).rejects.toThrow('Other connections to this database remain');
+    expect(mocks.query).toHaveBeenCalledOnce();
+    expect(mocks.beginTransaction).not.toHaveBeenCalled();
+    expect(mocks.commit).not.toHaveBeenCalled();
+    expect(mocks.end).toHaveBeenCalledOnce();
+  });
   it.each([null, 1])('rejects competing owners including reported rows (cost %s)', async (cost) => {
     expect(await run({ otherRows: [{ ...competitor, cost_usd: cost }] })).toMatchObject({
       matched: 0,

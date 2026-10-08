@@ -1,5 +1,9 @@
 // Recover request tiers without replacing reported dollars or token totals.
-// Usage: node scripts/backfill-codex-context.js [--env=/path/.env] [--apply]
+// Dry run: node scripts/backfill-codex-context.js [--env=/path/.env]
+// Apply: stop ALL servers using this database, disable automatic restarts, then
+// run with --apply --server-stopped. Keep servers stopped until this exits and
+// start fresh processes afterwards so loaded absorbed estimates are reloaded.
+// --server-stopped acknowledges this prerequisite; it does not stop the server.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,6 +18,11 @@ const args = process.argv.slice(2);
 const envFile = args.find((a) => a.startsWith('--env='))?.slice(6) || '.env';
 const env = parseEnvFile(fs.readFileSync(envFile, 'utf8'));
 const apply = args.includes('--apply');
+if (apply && !args.includes('--server-stopped')) {
+  throw new Error(
+    '--apply requires --server-stopped: stop every server using this database and disable automatic restarts; keep them stopped until the backfill exits, then start fresh processes to reload absorbed estimates.',
+  );
+}
 const fields = ['input_tokens', 'cached_input_tokens', 'output_tokens'];
 const key = (row) => fields.map((k) => Number(row[k])).join('/');
 const segments = new Map();
@@ -117,6 +126,15 @@ const connection = await mysql.createConnection({
 });
 try {
   if (apply) {
+    // Catch connected servers (including idle pools) before any writes. MySQL
+    // may show only this user's connections; the offline acknowledgement is
+    // still required for other users/hosts and to prevent restarts during apply.
+    const [connections] = await connection.query(
+      'SELECT ID FROM information_schema.PROCESSLIST WHERE DB = DATABASE() AND ID <> CONNECTION_ID()',
+    );
+    if (connections.length) {
+      throw new Error('Other connections to this database remain; stop them before applying the backfill.');
+    }
     await connection.query(`CREATE TABLE IF NOT EXISTS turn_usage_context_fix_20261008 (
       id BIGINT UNSIGNED PRIMARY KEY, original LONGTEXT NOT NULL, source_file TEXT NOT NULL, fixed_at BIGINT UNSIGNED NOT NULL)`);
     await connection.beginTransaction();
