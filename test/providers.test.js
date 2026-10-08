@@ -573,6 +573,18 @@ describe('buildArgs', () => {
     }
   });
 
+  it('restart recovery resumes the Codex review thread with delegation enabled', () => {
+    const built = BINARIES.codex.buildReviewArgs({
+      model: 'gpt-6.1-sol',
+      effort: 'high',
+      resume: true,
+      resumeReview: true,
+      sessionId: 'review-thread',
+    });
+    expect(built.args.slice(0, 3)).toEqual(['exec', 'resume', 'review-thread']);
+    expect(built.args).toEqual(expect.arrayContaining(['--enable', 'multi_agent']));
+  });
+
   it('codex reviews use a fresh exec turn with independent delegation enabled', () => {
     const built = BINARIES.codex.buildReviewArgs({
       model: 'gpt-6.1-sol',

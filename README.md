@@ -184,7 +184,7 @@ is waiting for you and that the task is not done, and it does not rule on the
 round itself unless you ask it to (`triage_findings` is there for that).
 
 A round that could not run at all — its provider exited non-zero or was out of
-quota, a server restart interrupted its review or fix session, or its
+quota, automatic recovery after a server restart failed, or its
 review closed having published nothing — is not a review that found nothing:
 the loop records the round as failed and approves nothing.
 Turning the 🔁 chip off and on again re-runs it, and an orchestrator retries its
@@ -319,6 +319,13 @@ follow the agent through a flow, log in for it, or do a step by hand and tell it
 to carry on from there. The browser outlives every turn and the profile
 outlives a close, so a login stays logged in until the session is deleted.
 [docs/api-v1.md](docs/api-v1.md#the-shared-browser) has the routes.
+
+While enabled, every turn instructs the agent to use only the shared browser,
+show login pages and QR codes there, and verify the content loaded before
+saying it is open. If the browser cannot start, the instruction still applies:
+the agent must report the problem and leave browser work blocked. These are
+agent instructions, not a sandbox restriction on launching other browsers
+through the shell. Open the session's Browser panel to watch its current page.
 
 Chromium is found by itself when Playwright has downloaded one (any QA run
 does) or one is on PATH; `BROWSER_BIN` overrides it.
@@ -915,8 +922,20 @@ its place: the first gets a different clone, the others fail the reopen until
 someone inspects them. The clone pool does not hand out, and the daily workspace
 cleanup does not delete, a slot a failed session, or one a restart interrupted
 mid-turn, left work in (except loop review, fix and QA children, which their
-parent retries, and sessions whose agent never started). A session that was
-idle at the restart reserves nothing and reopens like a closed one.
+parent retries, and sessions whose agent never started).
+
+After a server restart, sessions that were open recover automatically once the
+API is listening. Active turns continue in their saved provider conversation,
+queued instructions are retained, and review, publishing and QA steps continue
+from their saved stage. Completed turns are skipped. Idle sessions reopen their
+workspaces without starting a turn, and standing questions still wait for the
+operator's answer. Recovery reserves workspace slots and reclaims each session's
+previous database server without restoring seed SQL or dropping profile
+databases. If that server is unavailable, recovery fails visibly instead of
+moving the session onto different data. Sessions already closed, failed or
+interrupted before this restart stay as they were.
+An explicit Stop stays stopped, including when the canceled process was still
+exiting at shutdown.
 
 `POST /api/v1/maintenance` drains work: new top-level sessions, messages that would start
 a turn on a settled session, reopening, compaction, arming the review or QA
@@ -1063,6 +1082,14 @@ sign-in as the browser arrives there, whatever device signed in.
      `common` (the default) for any organization plus personal accounts,
      `consumers` for personal accounts only, or your tenant's id or domain for
      a single-tenant app.
+
+     If a personal Outlook account connects as `...#EXT#@...onmicrosoft.com`
+     and sync answers 401, it signed in as an organization's guest rather
+     than the mailbox owner: enable personal Microsoft accounts in the app
+     registration and use `consumers` (or `common` for work accounts too),
+     reload the server configuration, then use **Connect Outlook** to connect
+     the personal account afresh; **Sign in again** on the guest entry still
+     targets that guest identity.
 
    `CREDENTIALS_KEY` must be set too: the tokens are stored encrypted with it.
    Behind Cloudflare Access, give `/oauth/mail/callback` the same _Bypass_ as

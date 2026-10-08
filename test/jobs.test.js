@@ -17,7 +17,7 @@ vi.mock('../lib/claude-session.js', async (original) => ({
   askClaudeSideQuestion: vi.fn(),
 }));
 import { recordTurnUsage } from '../lib/usage.js';
-import { maintenanceState, setDraining } from '../lib/recovery.js';
+import { claimSlot, maintenanceState, setDraining } from '../lib/recovery.js';
 vi.mock('../lib/codex-session.js', async (original) => ({
   ...(await original()),
   compactCodexThread: vi.fn(),
@@ -91,8 +91,13 @@ vi.mock('../lib/github.js', () => ({
 
 vi.mock('../lib/dbpool.js', () => ({
   acquireInstance: vi.fn(),
+  reclaimInstance: vi.fn(),
+  stopDatabaseProcesses: vi.fn(async () => {}),
   releaseInstance: vi.fn(),
   ensureSessionDatabase: vi.fn(),
+  ensureProfileDatabase: vi.fn(),
+  profileDbElsewhere: vi.fn(() => false),
+  sessionDatabaseName: vi.fn(() => 'app'),
   dropSessionDatabase: vi.fn(),
   instanceEnv: vi.fn(() => ({})),
   instanceAppPort: vi.fn(() => 8101),
@@ -184,9 +189,9 @@ vi.mock('../lib/usage.js', () => ({
   recordTurnUsage: vi.fn(),
 }));
 
-import { deleteJob, jobEventMaxSeqs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
+import { deleteJob, jobEventMaxSeqs, loadJobs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
-import { acquireInstance, dropSessionDatabase, releaseInstance } from '../lib/dbpool.js';
+import { acquireInstance, reclaimInstance, releaseInstance, dropSessionDatabase } from '../lib/dbpool.js';
 import {
   latestReviewFindings,
   latestTestFailures,
@@ -209,7 +214,10 @@ import { resolveRuntime, getProviderForJob, captureProviderAuth } from '../lib/p
 import { stepRuntime } from '../lib/projects.js';
 import {
   bus,
+  DEV_OPEN,
   initJobs,
+  resumeRestartedSessions,
+  stopAllJobProcesses,
   sweepExpiredPreviews,
   PREVIEW_TTL_MS,
   closeDevSession,
@@ -1163,6 +1171,11 @@ describe('spawnWorkerSession', () => {
         children[0].emit('close', 0);
         await vi.waitFor(() => expect(children).toHaveLength(2));
         expect(job.providerId).toBe(3);
+        expect(job.recoveryTurn.runtime).toMatchObject({
+          providerId: 3,
+          model: job.model,
+          effort: job.effort,
+        });
         expect(job.chats[3]).toEqual({ sessionId: 'bg-sid', started: true });
         expect(transferClaudeSession).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -11222,6 +11235,16 @@ describe('Codex turn usage', () => {
     expect(codexTurnResumes('codex', { resume: false, native: false, sessionId: 't' })).toBe(false);
     expect(codexTurnResumes('claude', { resume: true, native: false, sessionId: 't' })).toBe(false);
   });
+  it('keeps the usage baseline when restart recovery resumes a review thread', () => {
+    expect(
+      codexTurnResumes('codex', {
+        resume: true,
+        native: true,
+        resumeReview: true,
+        sessionId: 'review-thread',
+      }),
+    ).toBe(true);
+  });
 });
 
 describe('auto-compaction while the context probe is out', () => {
@@ -11366,6 +11389,276 @@ describe('auto-compaction while the context probe is out', () => {
     await vi.waitFor(() => expect(job.contextUsage?.tokens).toBe(400000));
     expect(children).toHaveLength(2);
     expect(job.status).toBe('closed');
+  });
+
+  it('preserves queued work when shutdown interrupts automatic compaction', async () => {
+    sendDevMessage(job.id, 'Go');
+    await endTurn();
+    answer(children[1], report('400k'));
+    await vi.waitFor(() => expect(children).toHaveLength(3));
+    expect(job.proc).toBe(children[2]);
+    sendDevMessage(job.id, 'Then check the result');
+    children[2].pid = 123456789;
+    const kill = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      expect(pid).toBe(-children[2].pid);
+      expect(signal).toBe('SIGKILL');
+      children[2].emit('close', null, signal);
+      return true;
+    });
+    try {
+      await stopAllJobProcesses();
+      await vi.waitFor(() => expect(publicJob(job).compacting).toBe(false));
+      // Let the turn's continuation reach its queue drain before the final flush.
+      await new Promise((resolve) => setImmediate(resolve));
+      await flushJobs();
+      expect(job.recoveryTurn).toMatchObject({ prompt: 'Go', completed: true });
+      expect(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)?.[0]).toMatchObject({
+        recoveryTurn: { prompt: 'Go', completed: true },
+        recoveryQueue: [expect.objectContaining({ prompt: 'Then check the result' })],
+      });
+      expect(children).toHaveLength(3);
+      expect(job.status).toBe('running');
+    } finally {
+      kill.mockRestore();
+      setDraining(false);
+    }
+  });
+
+  it('does not resend a final live answer when shutdown precedes provider exit', async () => {
+    job.orchestrator = true;
+    job.autoCompact = false;
+    sendDevMessage(job.id, 'Publish the original request');
+    children[0].stdout.write(
+      JSON.stringify({ type: 'result', subtype: 'success', result: 'Published' }) + '\n',
+    );
+    await vi.waitFor(() => expect(children[0].stdin.writableEnded).toBe(true));
+    children[0].pid = 123456789;
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      children[0].emit('close', null, 'SIGKILL');
+      return true;
+    });
+    let snapshot;
+    try {
+      await stopAllJobProcesses();
+      await flushJobs();
+      snapshot = structuredClone(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0]);
+    } finally {
+      kill.mockRestore();
+      setDraining(false);
+    }
+    expect(snapshot.recoveryTurn).toMatchObject({ completed: true, liveCompleted: true });
+    expect(snapshot.recoveryQueue).toEqual([]);
+    for (const session of devSessionRecords()) session.restartPending = false;
+    state.stored = [snapshot];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(getJob(job.id).status).toBe('idle'));
+    expect(children).toHaveLength(1);
+  });
+
+  it('recovers only outstanding live messages after the original request was answered', async () => {
+    job.orchestrator = true;
+    job.autoCompact = false;
+    const emit = (child, ...messages) => {
+      for (const message of messages) child.stdout.write(JSON.stringify(message) + '\n');
+    };
+    const replay = (content) => ({ type: 'user', message: { role: 'user', content }, isReplay: true });
+    const result = (text) => ({ type: 'result', subtype: 'success', result: text });
+    try {
+      sendDevMessage(job.id, 'Publish the original request');
+      emit(children[0], replay('Publish the original request'));
+      sendDevMessage(job.id, 'Update the resource');
+      sendDevMessage(job.id, 'Then verify it');
+      emit(children[0], result('Published'));
+      await vi.waitFor(() => expect(job.recoveryTurn.completed).toBe(true));
+      children[0].pid = 123456789;
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+        children[0].emit('close', null, 'SIGKILL');
+        return true;
+      });
+      let snapshot;
+      try {
+        await stopAllJobProcesses();
+        await flushJobs();
+        snapshot = structuredClone(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0]);
+      } finally {
+        kill.mockRestore();
+        setDraining(false);
+      }
+      expect(snapshot.recoveryTurn).toMatchObject({ completed: true, liveCompleted: true });
+      expect(snapshot.recoveryQueue.map((entry) => entry.prompt)).toEqual([
+        'Update the resource',
+        'Then verify it',
+      ]);
+      for (const session of devSessionRecords()) session.restartPending = false;
+      state.stored = [snapshot];
+      const writes = [];
+      const realSpawn = spawn.getMockImplementation();
+      spawn.mockImplementation((cmd, ...args) => {
+        const child = realSpawn(cmd, ...args);
+        if (cmd === '/mock/agent')
+          child.stdin.on('data', (chunk) => {
+            for (const line of chunk.toString().split('\n').filter(Boolean))
+              writes.push(JSON.parse(line).message.content);
+          });
+        return child;
+      });
+      await initJobs();
+      job = getJob(job.id);
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(writes).toEqual(['Update the resource', 'Then verify it']);
+      emit(children[1], replay('Update the resource\nThen verify it'), result('Updated and verified'));
+      children[1].emit('close', 0);
+      await vi.waitFor(() => expect(children).toHaveLength(3));
+      expect(children[2].args).toContain('/context');
+      answer(children[2], report('30k'));
+      await settled();
+      await flushJobs();
+      expect(children).toHaveLength(3);
+    } finally {
+      setDraining(false);
+    }
+  });
+
+  it.each([0, 1])('saves the exit outcome before waiting for streamed accounting (code %s)', async (code) => {
+    let land;
+    recordTurnUsage.mockImplementationOnce(() => new Promise((resolve) => (land = resolve)));
+    try {
+      sendDevMessage(job.id, 'Go');
+      children[0].stdout.write(
+        JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: 'Done',
+          total_cost_usd: 0.1,
+        }) + '\n',
+      );
+      await vi.waitFor(() => expect(land).toBeTypeOf('function'));
+      children[0].emit('close', code);
+      expect(job.proc).toBeNull();
+      await stopAllJobProcesses();
+      const flushed = flushJobs();
+      land(true);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      answer(children[1], report('30k'));
+      await flushed;
+      expect(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0].recoveryTurn).toMatchObject({
+        prompt: 'Go',
+        completed: code === 0,
+      });
+      expect(job.recoveryTurn.completed).toBe(code === 0);
+    } finally {
+      land?.(true);
+      setDraining(false);
+    }
+  });
+
+  it.each(['block', 'tool'])(
+    'persists a held %s question before the successful shutdown checkpoint',
+    async (kind) => {
+      let land;
+      recordTurnUsage.mockImplementationOnce(() => new Promise((resolve) => (land = resolve)));
+      const published = [];
+      const onEvent = (id, event) => {
+        if (id === job.id) published.push(event);
+      };
+      bus.on('event', onEvent);
+      let snapshot;
+      try {
+        job.orchestrator = true;
+        sendDevMessage(job.id, 'Go');
+        job.reviewBranch = 'feature';
+        job.recoveryTurn.phase = 'initial';
+        const result = {
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: 'Done',
+          total_cost_usd: 0.1,
+        };
+        children[0].stdout.write(JSON.stringify(result) + '\n');
+        await vi.waitFor(() => expect(land).toBeTypeOf('function'));
+        children[0].stdout.write(
+          JSON.stringify({
+            type: 'assistant',
+            message: {
+              content: [
+                kind === 'block'
+                  ? { type: 'text', text: '<ask-user>Which plan?\n- A\n- B\n</ask-user>' }
+                  : {
+                      type: 'tool_use',
+                      name: 'AskUserQuestion',
+                      input: {
+                        questions: [{ question: 'Which plan?', options: [{ label: 'A' }, { label: 'B' }] }],
+                      },
+                    },
+              ],
+            },
+          }) + '\n',
+        );
+        children[0].stdout.write(JSON.stringify({ ...result, total_cost_usd: 0.2 }) + '\n');
+        children[0].emit('close', 0);
+        await stopAllJobProcesses();
+        let flushed = false;
+        const flushing = flushJobs().then(() => (flushed = true));
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(flushed).toBe(false);
+        expect(job.recoveryTurn.completed).toBe(false);
+        expect(published.some((e) => e.kind === 'result' || e.kind === 'ask')).toBe(false);
+        land(true);
+        await vi.waitFor(() => expect(children).toHaveLength(2));
+        answer(children[1], report('30k'));
+        await flushing;
+        snapshot = structuredClone(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0]);
+        expect(snapshot).toMatchObject({
+          awaitingAnswer: true,
+          askText: 'Which plan?\nOptions: A | B',
+          recoveryTurn: { prompt: 'Go', phase: 'initial', completed: true },
+        });
+        expect(snapshot.questionSeq).toBeGreaterThan(0);
+        expect(published.filter((e) => e.kind === 'result' || e.kind === 'ask').map((e) => e.kind)).toEqual([
+          'result',
+          'ask',
+          'result',
+        ]);
+        expect(
+          saveJobEvents.mock.calls.flatMap(([id, events]) => (id === job.id ? events : [])),
+        ).toContainEqual(
+          expect.objectContaining({ kind: 'ask', question: 'Which plan?', seq: snapshot.questionSeq }),
+        );
+      } finally {
+        land?.(true);
+        bus.off('event', onEvent);
+        setDraining(false);
+      }
+      for (const session of devSessionRecords()) session.restartPending = false;
+      state.stored = [snapshot];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(getJob(job.id).status).toBe('idle'));
+      expect(getJob(job.id).awaitingAnswer).toBe(true);
+      expect(children).toHaveLength(2); // No repeated request or review publication without the answer.
+    },
+  );
+
+  it('does not spawn automatic compaction after shutdown while a context probe is pending', async () => {
+    sendDevMessage(job.id, 'Go');
+    await endTurn();
+    expect(job.proc).toBeNull();
+    await stopAllJobProcesses();
+    const flushed = flushJobs();
+    answer(children[1], report('400k'));
+    try {
+      await flushed;
+      expect(job.contextUsage.tokens).toBe(400000);
+      expect(children).toHaveLength(2);
+      expect(job.recoveryTurn).toMatchObject({ prompt: 'Go', completed: true });
+      expect(job.status).toBe('running');
+    } finally {
+      setDraining(false);
+    }
   });
 
   it('and so does switching it off meanwhile', async () => {
@@ -11545,11 +11838,14 @@ describe('the shared browser', () => {
     browserState.endpoint = null;
   });
 
-  it('tells a turn nothing when it is off, or on and not up', () => {
+  it('tells a turn nothing when it is off, and retains the browser policy when on and not up', () => {
     browserState.endpoint = 'http://127.0.0.1:41234';
     expect(sharedBrowserNote({ id: 'b1', browser: false }, 'claude')).toBe('');
     browserState.endpoint = null;
-    expect(sharedBrowserNote({ id: 'b1', browser: true }, 'claude')).toBe('');
+    const note = sharedBrowserNote({ id: 'b1', browser: true }, 'claude');
+    expect(note).toContain('currently unavailable');
+    expect(note).toContain('leave browser work blocked instead of falling back to another browser');
+    expect(note).not.toContain('http://127.0.0.1:41234');
   });
 
   it('points claude and codex at the MCP tools, and the rest at connectOverCDP', () => {
@@ -11735,6 +12031,8 @@ describe('the shared browser in a session', () => {
     await settled;
     expect(seen.spawned).toBe(true);
     expect(seen.mcp).not.toHaveProperty('browser');
+    expect(seen.prompt).toContain('currently unavailable');
+    expect(seen.prompt).toContain('leave browser work blocked instead of falling back to another browser');
     expect(
       job.events.some((e) => e.text === 'Shared browser could not start: No Chromium on this server'),
     ).toBe(true);
@@ -12459,4 +12757,1348 @@ describe('invalid clone pool slots', () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+});
+
+describe('automatic recovery after a server restart', () => {
+  let root;
+  let children;
+  let homeSpy;
+  let bin;
+  let counter = 0;
+  const row = (extra = {}) => ({
+    id: `auto-restart-${++counter}`,
+    kind: 'devchat',
+    status: 'running',
+    repo: 'acme/restart',
+    providerId: 2,
+    model: 'gpt-6.1-sol',
+    effort: 'high',
+    orchestrator: true,
+    createdAt: '2026-10-08T00:00:00Z',
+    providerSessionId: 'saved-thread',
+    chatStarted: true,
+    turns: 1,
+    chats: { 2: { sessionId: 'saved-thread', started: true } },
+    recoveryTurn: { prompt: 'Finish the requested change', opts: {}, phase: 'followup', completed: false },
+    ...extra,
+  });
+  beforeEach(() => {
+    // Other suites restore fixtures in this same registry without starting boot
+    // recovery. Only this suite's rows should run against the fake CLI.
+    for (const job of devSessionRecords()) job.restartPending = false;
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'jobs-auto-restart-'));
+    state.workspaceDir = root;
+    state.otherProviders = [
+      { id: 2, binary: 'codex', label: 'Codex', active: true },
+      { id: 3, binary: 'codex', label: 'QA provider', active: true, baseUrl: 'https://qa.example' },
+    ];
+    state.projects = [
+      {
+        id: 1,
+        repo: 'acme/restart',
+        reviewPublishInstructions: 'PUBLISH THE REVIEW',
+        reviewTestRun: true,
+        promptTemplates: { testRun: 'RUN' },
+      },
+    ];
+    getProviderForJob.mockImplementation((job) => state.otherProviders.find((p) => p.id === job.providerId));
+    captureProviderAuth.mockResolvedValue(undefined);
+    homeSpy = vi.spyOn(providerTools, 'ensureCodexHome').mockReturnValue(path.join(root, 'codex-home'));
+    bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/restart-agent', source: 'test' });
+    children = [];
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, args, opts) => {
+      if (cmd !== '/mock/restart-agent') return realSpawn(cmd, args, opts);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.args = args;
+      child.prompt = '';
+      child.cwd = opts.cwd;
+      child.stdin.on('data', (chunk) => {
+        child.prompt += chunk.toString();
+      });
+      spawnedScope(child, child.stdout, child.stderr);
+      children.push(child);
+      return child;
+    });
+  });
+  afterEach(async () => {
+    for (const job of devSessionRecords().filter(
+      (j) => j.repo === 'acme/restart' && DEV_OPEN.includes(j.status),
+    )) {
+      await closeDevSession(job.id);
+    }
+    homeSpy.mockRestore();
+    bin.mockRestore();
+    spawn.mockReset();
+    getProviderForJob.mockReset();
+    captureProviderAuth.mockReset();
+    stepRuntime.mockReset();
+    stepRuntime.mockReturnValue(null);
+    loadJobEvents.mockReset();
+    loadJobEvents.mockResolvedValue([]);
+    state.projects = [];
+    state.otherProviders = [];
+    state.workspaceDir = '/tmp/nowhere';
+    fs.rmSync(root, { recursive: true, force: true });
+    reclaimInstance.mockReset();
+  });
+  const finish = (child) => {
+    child.stdout.write(
+      JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\n',
+    );
+    child.emit('close', 0);
+  };
+
+  it('resumes the saved conversation, preserves dirty files and delivers queued instructions', async () => {
+    const checkout = path.join(root, 'checkout');
+    fs.mkdirSync(checkout);
+    spawnSync('git', ['-C', checkout, 'init', '-b', 'feature'], { stdio: 'ignore' });
+    fs.writeFileSync(path.join(checkout, 'unfinished.txt'), 'keep this work');
+    state.projects[0].localDir = checkout;
+    const saved = row({
+      orchestrator: false,
+      local: true,
+      workDir: checkout,
+      branch: 'feature',
+      recoveryQueue: [{ prompt: 'Then check the result', shown: 'Then check the result', files: [] }],
+    });
+    state.stored = [saved];
+    await initJobs();
+    expect(children).toHaveLength(0);
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].args.slice(0, 3)).toEqual(['exec', 'resume', 'saved-thread']);
+    expect(children[0].prompt).toContain('server restarted');
+    expect(children[0].prompt).toContain('Finish the requested change');
+    expect(children[0].cwd).toBe(checkout);
+    expect(fs.readFileSync(path.join(checkout, 'unfinished.txt'), 'utf8')).toBe('keep this work');
+    expect(resumeRestartedSessions()).toBe(0);
+    finish(children[0]);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(children[1].prompt).toBe('Then check the result');
+    finish(children[1]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+    expect(saved.events.filter((e) => e.kind === 'user').map((e) => e.text)).toEqual([
+      'Then check the result',
+    ]);
+    expect(publicJob(saved)).not.toHaveProperty('recoveryTurn');
+    await vi.waitFor(() =>
+      expect(saveJob.mock.calls.findLast(([j]) => j.id === saved.id)?.[0]).toMatchObject({
+        recoveryTurn: { prompt: 'Then check the result', completed: true },
+        recoveryQueue: [],
+        restartPending: false,
+      }),
+    );
+  });
+
+  it('reopens waiting questions without inventing answers and leaves previously failed or closed sessions alone', async () => {
+    const asking = row({ status: 'idle', awaitingAnswer: true });
+    const failed = row({ status: 'failed' });
+    const closed = row({ status: 'closed' });
+    const oldInterrupted = row({ status: 'interrupted' });
+    state.stored = [asking, failed, closed, oldInterrupted];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(asking.status).toBe('idle'));
+    expect(asking.awaitingAnswer).toBe(true);
+    expect(children).toHaveLength(0);
+    expect(failed.status).toBe('failed');
+    expect(closed.status).toBe('closed');
+    expect(oldInterrupted.status).toBe('interrupted');
+  });
+
+  it.each(['review', 'qa'])(
+    'continues the suspended %s sequence only after the question is answered',
+    async (kind) => {
+      const parent = row({ status: 'idle', recoveryTurn: null });
+      const child = row({
+        awaitingAnswer: true,
+        autoClose: true,
+        ...(kind === 'review'
+          ? { reviewBranch: 'feature', loopParentId: parent.id }
+          : { qaBranch: 'feature', qaParentId: parent.id }),
+        recoveryTurn: {
+          prompt: 'Initial request',
+          opts: { review: kind === 'review' },
+          phase: 'initial',
+          completed: false,
+        },
+      });
+      if (kind === 'review') parent.reviewLoop = { rounds: 1, reviewing: true, reviewSessionId: child.id };
+      else parent.qaLoop = { running: true, sessionId: child.id };
+      state.stored = [parent, child];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(child.status).toBe('idle'));
+      expect(children).toHaveLength(0);
+      expect(child.awaitingAnswer).toBe(true);
+      expect(child.recoveryTurn.phase).toBe('initial');
+      sendDevMessage(child.id, 'The operator answer');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(children[0].prompt).toContain('The operator answer');
+      expect(child.recoveryTurn.phase).toBe('initial');
+      finish(children[0]);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(child.status).toBe('running');
+      expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
+      if (kind === 'review') expect(children[1].prompt).toContain('PUBLISH THE REVIEW');
+      else expect(stepRuntime).toHaveBeenCalledWith(state.projects[0], 'testRun');
+      finish(children[1]);
+      await vi.waitFor(() => expect(child.status).toBe('closed'));
+      expect(children).toHaveLength(2);
+    },
+  );
+
+  it.each(['review', 'qa', 'fix'])('settles the %s child after a recovered queued answer', async (kind) => {
+    const parent = row({ status: 'idle', recoveryTurn: null });
+    const child = row({
+      awaitingAnswer: true,
+      autoClose: true,
+      recoveryQueue: [{ prompt: 'Queued operator answer', shown: 'Queued operator answer', files: [] }],
+      recoveryTurn: { prompt: 'Initial request', opts: { review: kind === 'review' }, phase: 'initial' },
+      ...(kind === 'review'
+        ? { reviewBranch: 'feature', loopParentId: parent.id }
+        : kind === 'qa'
+          ? { qaBranch: 'feature', qaParentId: parent.id }
+          : { loopFixParentId: parent.id }),
+    });
+    if (kind === 'review') parent.reviewLoop = { rounds: 1, reviewing: true, reviewSessionId: child.id };
+    else if (kind === 'fix') parent.reviewLoop = { rounds: 1, fixing: true, fixSessionId: child.id };
+    else parent.qaLoop = { running: true, sessionId: child.id };
+    state.stored = [parent, child];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toBe('Queued operator answer');
+    finish(children[0]);
+    if (kind !== 'fix') {
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
+      finish(children[1]);
+    }
+    await vi.waitFor(() => expect(child.status).toBe('closed'));
+    expect(child[kind === 'review' ? 'loopReviewDone' : kind === 'fix' ? 'loopFixDone' : 'qaLoopDone']).toBe(
+      true,
+    );
+    expect(
+      (kind === 'qa' ? parent.qaLoop : parent.reviewLoop)[
+        kind === 'review' ? 'reviewing' : kind === 'fix' ? 'fixing' : 'running'
+      ],
+    ).toBe(false);
+  });
+
+  it.each(['review', 'qa', 'fix'])(
+    'finishes interrupted auto-close for a completed %s child without queued work',
+    async (kind) => {
+      const parent = row({ status: 'idle', recoveryTurn: null });
+      const child = row({
+        status: 'idle',
+        autoClose: true,
+        recoveryQueue: [],
+        recoveryTurn: { prompt: 'Completed workflow', phase: 'followup', completed: true },
+        ...(kind === 'review'
+          ? { reviewBranch: 'feature', loopParentId: parent.id, loopReviewDone: true }
+          : kind === 'qa'
+            ? { qaBranch: 'feature', qaParentId: parent.id, qaLoopDone: true }
+            : { loopFixParentId: parent.id, loopFixDone: true }),
+      });
+      if (kind === 'review') parent.reviewLoop = { reviewing: true, reviewSessionId: child.id };
+      else if (kind === 'fix') parent.reviewLoop = { fixing: true, fixSessionId: child.id };
+      else parent.qaLoop = { running: true, sessionId: child.id };
+      state.stored = [parent, child];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(child.status).toBe('closed'));
+      expect(children).toHaveLength(0);
+      expect(
+        (kind === 'qa' ? parent.qaLoop : parent.reviewLoop)[
+          kind === 'review' ? 'reviewing' : kind === 'fix' ? 'fixing' : 'running'
+        ],
+      ).toBe(false);
+      expect(dropSessionDatabase).toHaveBeenCalledWith(child, expect.any(Function));
+    },
+  );
+
+  it('delivers saved work after interrupted compaction without repeating the completed request', async () => {
+    const saved = row({
+      recoveryTurn: { prompt: 'Finished request', phase: 'followup', completed: true },
+      recoveryQueue: [{ prompt: 'Then check the result', shown: 'Then check the result', files: [] }],
+    });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toBe('Then check the result');
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+    expect(children).toHaveLength(1);
+  });
+
+  it('persists a successful provider exit while close-time accounting is still pending', async () => {
+    const saved = row({ status: 'idle' });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+    let land;
+    recordTurnUsage.mockImplementationOnce(() => new Promise((resolve) => (land = resolve)));
+    let snapshot;
+    try {
+      sendDevMessage(saved.id, 'Publish the completed work');
+      finish(children[0]);
+      await vi.waitFor(() => expect(land).toBeTypeOf('function'));
+      expect(saved.proc).toBeNull();
+      await stopAllJobProcesses();
+      // Other lifecycle fixtures leave context probes pending in this registry;
+      // await this row's persistence rather than the global shutdown flush.
+      await vi.waitFor(() => {
+        snapshot = structuredClone(saveJob.mock.calls.findLast(([j]) => j.id === saved.id)?.[0]);
+        expect(snapshot?.recoveryTurn.completed).toBe(true);
+      });
+      expect(snapshot.recoveryTurn).toMatchObject({
+        prompt: 'Publish the completed work',
+        completed: true,
+      });
+    } finally {
+      land?.();
+      await new Promise((resolve) => setImmediate(resolve));
+      setDraining(false);
+    }
+    state.stored = [snapshot];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(getJob(saved.id).status).toBe('idle'));
+    expect(children).toHaveLength(1);
+  });
+
+  it.each(['current', 'stale', 'replaced', 'asking'])(
+    'handles failed deferred QA execution after an answer (%s child)',
+    async (tracking) => {
+      const parent = row({ status: 'idle', recoveryTurn: null });
+      const child = row({
+        awaitingAnswer: true,
+        autoClose: true,
+        qaBranch: 'feature',
+        qaParentId: parent.id,
+        recoveryTurn: { prompt: 'Write the sheet', phase: 'initial', completed: true },
+      });
+      parent.qaLoop = { running: true, sessionId: child.id };
+      state.stored = [parent, child];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(child.status).toBe('idle'));
+      if (tracking === 'stale') {
+        parent.qaLoop.sessionId = null;
+        parent.qaLoop.staleSessionId = child.id;
+      } else if (tracking === 'replaced') parent.qaLoop.sessionId = 'replacement-qa';
+      let release;
+      const releases = releaseInstance.mock.calls.length;
+      if (tracking === 'current' || tracking === 'stale') {
+        releaseInstance.mockImplementationOnce(() => new Promise((resolve) => (release = resolve)));
+      }
+      try {
+        sendDevMessage(child.id, 'The operator answer');
+        finish(children[0]);
+        await vi.waitFor(() => expect(children).toHaveLength(2));
+        expect(child.recoveryTurn.phase).toBe('testRun');
+        if (tracking === 'asking') {
+          children[1].stdout.write(
+            JSON.stringify({
+              type: 'item.completed',
+              item: { type: 'agent_message', text: '<ask-user>Retry QA?</ask-user>' },
+            }) + '\n',
+          );
+        }
+        children[1].emit('close', 1);
+        if (tracking === 'current' || tracking === 'stale') {
+          await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+          expect(child.status).toBe('failed');
+          expect(parent.qaLoop.running).toBe(true);
+          expect(parent.qaLoop.failure).toBeUndefined();
+          expect(child.workDir).toBeTruthy();
+          expect(() => reopenDevSession(child.id)).toThrow(/finish.*cleanup/);
+          expect(() => sendDevMessage(child.id, 'Retry')).toThrow(/finish.*cleanup/);
+          // A parent settling during cleanup must not retire this child early.
+          sendDevMessage(parent.id, 'Report progress');
+          finish(children[2]);
+          await vi.waitFor(() => expect(parent.status).toBe('idle'));
+          expect(parent.qaLoop.running).toBe(true);
+          release();
+          await vi.waitFor(() => expect(parent.qaLoop.running).toBe(false));
+          expect(releaseInstance.mock.calls.slice(releases)).toEqual([[child]]);
+          expect(child.qaLoopDone).not.toBe(true);
+          if (tracking === 'current') {
+            expect(parent.qaLoop.failure).toMatchObject({ kind: 'failed', reason: child.error });
+          } else expect(parent.qaLoop.staleSessionId).toBeNull();
+        } else {
+          await vi.waitFor(() => expect(child.status).toBe('idle'));
+          await new Promise((resolve) => setImmediate(resolve));
+          expect(releaseInstance.mock.calls).toHaveLength(releases);
+          expect(parent.qaLoop.running).toBe(true);
+          expect(parent.qaLoop.failure).toBeUndefined();
+          if (tracking === 'asking') {
+            expect(child.awaitingAnswer).toBe(true);
+            expect(parent.events.some((e) => /QA session stopped to ask/.test(e.text || ''))).toBe(true);
+          } else expect(parent.qaLoop.sessionId).toBe('replacement-qa');
+        }
+      } finally {
+        release?.();
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    },
+  );
+
+  it.each([true, false])('settles a published standalone review (findings: %s)', async (hasFindings) => {
+    const saved = row({
+      status: 'idle',
+      reviewBranch: 'feature',
+      startedOnPr: 132,
+      autoClose: true,
+      recoveryTurn: { prompt: 'Published review', phase: 'publish', completed: true },
+    });
+    const findings = hasFindings ? [{ key: 'fresh', severity: 'medium', title: 'Fresh finding' }] : [];
+    latestReviewFindings.mockResolvedValueOnce(findings);
+    state.stored = [saved];
+    await initJobs();
+    const readsBefore = latestReviewFindings.mock.calls.length;
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(saved.status).toBe('closed'));
+    expect(latestReviewFindings.mock.calls.slice(readsBefore)).toEqual([
+      ['acme/restart', 132, { since: saved.createdAt }],
+    ]);
+    expect(children).toHaveLength(0);
+    expect(dropSessionDatabase).toHaveBeenCalledWith(saved, expect.any(Function));
+    if (hasFindings) {
+      expect(getJob(saved.id).reviewTriage).toMatchObject({
+        standalone: true,
+        findings: [{ key: 'fresh' }],
+      });
+    } else expect(getJob(saved.id)).toBeNull();
+  });
+
+  it.each(['asking', 'unfinished'])(
+    'leaves a standalone review open when publication is %s',
+    async (stateOfReview) => {
+      const saved = row({
+        status: 'idle',
+        reviewBranch: 'feature',
+        autoClose: true,
+        awaitingAnswer: stateOfReview === 'asking',
+        recoveryTurn: {
+          prompt: 'Publication',
+          phase: 'publish',
+          completed: stateOfReview !== 'unfinished',
+        },
+      });
+      state.stored = [saved];
+      await initJobs();
+      const readsBefore = latestReviewFindings.mock.calls.length;
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(saved.status).toBe('idle'));
+      expect(children).toHaveLength(0);
+      expect(latestReviewFindings.mock.calls).toHaveLength(readsBefore);
+    },
+  );
+
+  it.each([
+    ['preparing', 'release'],
+    ['running', 'drop'],
+  ])('recovers explicit Close during %s resource cleanup', async (status, cleanupStep) => {
+    const saved = row({
+      status,
+      dbServerId: 7,
+      recoveryQueue: [{ prompt: 'Queued replacement', shown: 'Queued replacement', files: [] }],
+    });
+    state.stored = [saved];
+    await initJobs();
+    // The checkpoint now represents an open session on the current server.
+    saved.status = status;
+    saved.dbServerId = 7;
+    saved.restartPending = false;
+    const cleanup = cleanupStep === 'release' ? releaseInstance : dropSessionDatabase;
+    let allowCleanup;
+    cleanup.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          allowCleanup = resolve;
+        }),
+    );
+    const closing = closeDevSession(saved.id);
+    let snapshot;
+    try {
+      await vi.waitFor(() => expect(allowCleanup).toBeTypeOf('function'));
+      await vi.waitFor(() => {
+        snapshot = structuredClone(saveJob.mock.calls.findLast(([j]) => j.id === saved.id)?.[0]);
+        expect(snapshot).toMatchObject({ closePending: true });
+      });
+      expect(snapshot).toMatchObject({ status, closePending: true, recoveryQueue: [] });
+      expect(publicJob(saved)).not.toHaveProperty('closePending');
+      expect(saved.closing).toBe(true);
+    } finally {
+      allowCleanup();
+      await closing;
+    }
+    state.stored = [snapshot];
+    await initJobs();
+    const acquiresBefore = acquireInstance.mock.calls.length;
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(snapshot.status).toBe('closed'));
+    expect(reclaimInstance).toHaveBeenCalledWith(snapshot, 7);
+    expect(acquireInstance.mock.calls).toHaveLength(acquiresBefore);
+    expect(children).toHaveLength(0);
+    expect(snapshot.closePending).toBe(false);
+    expect(snapshot.restartPending).toBe(false);
+    expect(publicJob(snapshot).queued).toBeUndefined();
+  });
+
+  it.each(['review', 'qa'])('keeps legacy %s discovery active through operator answers', async (kind) => {
+    const child = row({
+      recoveryTurn: undefined,
+      ...(kind === 'review'
+        ? { reviewBranch: 'feature', reviewPrompt: 'Original review' }
+        : { qaBranch: 'feature' }),
+    });
+    loadJobEvents.mockResolvedValue([
+      { kind: 'user', text: 'Original review', seq: 1 },
+      { kind: 'user', text: 'Operator answer', seq: 2 },
+    ]);
+    state.stored = [child];
+    await initJobs();
+    expect(child.recoveryTurn.phase).toBe('initial');
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('Operator answer');
+    finish(children[0]);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
+    finish(children[1]);
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+  });
+
+  it.each([7, null])('finishes Close after a second restart (remaining database: %s)', async (dbServerId) => {
+    const saved = row({
+      status: 'interrupted',
+      interruptedFrom: 'preparing',
+      closePending: true,
+      restartPending: false,
+      restartDbServerId: null,
+      dbServerId,
+    });
+    state.stored = [saved];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(saved.status).toBe('closed'));
+    expect(reclaimInstance).toHaveBeenCalledWith(saved, dbServerId);
+    expect(children).toHaveLength(0);
+    expect(saved.closePending).toBe(false);
+  });
+
+  it.each(['review', 'qa'])('preserves the legacy %s stage for an idle standing question', async (kind) => {
+    const child = row({
+      status: 'idle',
+      awaitingAnswer: true,
+      recoveryTurn: undefined,
+      ...(kind === 'review' ? { reviewBranch: 'feature' } : { qaBranch: 'feature' }),
+    });
+    loadJobEvents.mockResolvedValue([{ kind: 'user', text: 'Initial request', seq: 1 }]);
+    state.stored = [child];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+    expect(children).toHaveLength(0);
+    expect(child.recoveryTurn.phase).toBe('initial');
+    sendDevMessage(child.id, 'Operator answer');
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    finish(children[0]);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
+    finish(children[1]);
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+  });
+
+  it.each(['review', 'qa'])('recognizes a legacy %s stage prompt before an answer', async (kind) => {
+    const child = row({
+      recoveryTurn: undefined,
+      ...(kind === 'review' ? { reviewBranch: 'feature' } : { qaBranch: 'feature' }),
+    });
+    const publication =
+      "Apply the project's publishing instructions below using the independently verified findings and their fix-value assessments: only confirmed findings with worthFixing: true count as blocking feedback or requested changes; confirmed optional findings do not block approval. If verification was incomplete, do not approve, add code-approved, move to QA, or describe the review as clean. Preserve all author-specific restrictions on approval and board moves.\n\nPUBLISH THE REVIEW";
+    loadJobEvents.mockResolvedValue([
+      { kind: 'user', text: 'Original review', seq: 1 },
+      { kind: 'user', text: kind === 'review' ? publication : 'RUN', seq: 2 },
+      { kind: 'ask', question: 'How should I continue?', seq: 3 },
+      { kind: 'user', text: 'Operator answer', seq: 4 },
+    ]);
+    state.stored = [child];
+    await initJobs();
+    expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    finish(children[0]);
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+    expect(children).toHaveLength(1);
+  });
+
+  it('recognizes a legacy QA run despite changed port and recording paths', async () => {
+    const { testRunPrompt: actualRunPrompt } = await vi.importActual('../lib/prtasks.js');
+    state.projects[0].promptTemplates = {};
+    state.projects[0].runCommands = ['serve --port {port}'];
+    const child = row({ qaBranch: 'feature', recoveryTurn: undefined });
+    const originalRun = actualRunPrompt({
+      repo: child.repo,
+      branch: child.qaBranch,
+      prNumber: 132,
+      portHint: 8105,
+      project: state.projects[0],
+      database: 'previous_database',
+    });
+    loadJobEvents.mockResolvedValue([
+      { kind: 'user', text: 'Write a sheet', seq: 1 },
+      { kind: 'user', text: originalRun, seq: 2 },
+      { kind: 'ask', question: 'How should I continue?', seq: 3 },
+      { kind: 'user', text: 'Operator answer', seq: 4 },
+    ]);
+    state.stored = [child];
+    await initJobs();
+    expect(child.recoveryTurn.phase).toBe('testRun');
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    finish(children[0]);
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+    expect(children).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    'resumes a later legacy QA follow-up in its primary conversation (idle boundary: %s)',
+    async (idleBoundary) => {
+      const saved = row({
+        qaBranch: 'feature',
+        recoveryTurn: undefined,
+        chats: {
+          2: { sessionId: 'saved-thread', started: true },
+          3: { sessionId: 'qa-thread', started: true },
+        },
+      });
+      stepRuntime.mockReturnValue({ providerId: 3, model: 'qa-model', effort: 'low' });
+      loadJobEvents.mockResolvedValue([
+        { kind: 'user', text: 'Write a sheet', seq: 1 },
+        { kind: 'user', text: 'RUN', seq: 2 },
+        ...(idleBoundary ? [{ kind: 'status', status: 'idle', seq: 3 }] : []),
+        { kind: 'user', text: 'Explain the architecture', seq: 4 },
+      ]);
+      state.stored = [saved];
+      await initJobs();
+      expect(saved.recoveryTurn.phase).toBe('followup');
+      expect(saved.recoveryTurn.opts.step).toBeUndefined();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(children[0].args.slice(0, 3)).toEqual(['exec', 'resume', 'saved-thread']);
+      expect(children[0].prompt).toContain('Explain the architecture');
+      finish(children[0]);
+      await vi.waitFor(() => expect(saved.status).toBe('idle'));
+      expect(children).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ['idle', undefined],
+    ['running', undefined],
+    ['preparing', true],
+    ['preparing', false],
+  ])(
+    'preserves completed setup and finishes incomplete setup (%s, prepared: %s)',
+    async (status, prepared) => {
+      const checkout = path.join(root, 'acme__restart');
+      fs.mkdirSync(checkout);
+      const git = (args) => {
+        const result = spawnSync('git', args, { encoding: 'utf8' });
+        expect(result.status, result.stderr).toBe(0);
+      };
+      git(['-C', checkout, 'init', '-b', 'feature']);
+      git([
+        '-C',
+        checkout,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'fixture',
+      ]);
+      const remote = path.join(root, 'remote.git');
+      git(['clone', '--bare', checkout, remote]);
+      git(['-C', checkout, 'remote', 'add', 'origin', remote]);
+      state.projects[0].setupCommands = [
+        'printf reset > session-data',
+        'printf "APP_KEY=fresh-generated\\n" > .env',
+      ];
+      state.projects[0].envTemplate = 'APP_KEY=\n';
+      fs.writeFileSync(path.join(checkout, 'session-data'), 'operator data');
+      fs.writeFileSync(path.join(checkout, '.env'), 'APP_KEY=existing-generated\n');
+      const child = row({
+        status,
+        orchestrator: false,
+        workDir: checkout,
+        branch: 'feature',
+        ...(prepared !== undefined ? { workspacePrepared: prepared } : {}),
+      });
+      state.stored = [child];
+      await initJobs();
+      resumeRestartedSessions();
+      if (status !== 'idle') {
+        await vi.waitFor(() => expect(children, child.error).toHaveLength(1));
+        finish(children[0]);
+      }
+      await vi.waitFor(() => expect(child.status, child.error).toBe('idle'));
+      expect(fs.readFileSync(path.join(checkout, 'session-data'), 'utf8')).toBe(
+        prepared === false ? 'reset' : 'operator data',
+      );
+      expect(child.workspacePrepared).toBe(true);
+      expect(fs.readFileSync(path.join(checkout, '.env'), 'utf8')).toBe(
+        prepared === false ? 'APP_KEY=fresh-generated\n' : 'APP_KEY=existing-generated\n',
+      );
+      expect(child.events.some((e) => e.kind === 'cmd' && e.text.includes('printf reset'))).toBe(
+        prepared === false,
+      );
+    },
+  );
+
+  it.each(['idle', 'running', 'preparing'])(
+    'keeps the prepared revision and dependencies together during %s recovery',
+    async (status) => {
+      const checkout = path.join(root, 'acme__restart');
+      fs.mkdirSync(checkout);
+      const git = (...args) => {
+        const result = spawnSync('git', args, { encoding: 'utf8' });
+        expect(result.status, result.stderr).toBe(0);
+        return result.stdout.trim();
+      };
+      const commit = (dir, message) =>
+        git('-C', dir, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-am', message);
+      git('-C', checkout, 'init', '-b', 'feature');
+      fs.writeFileSync(path.join(checkout, 'package.json'), '{"dependencies":{"old":"1.0.0"}}\n');
+      fs.writeFileSync(path.join(checkout, '.gitignore'), 'node_modules/\nsession-data\n');
+      git('-C', checkout, 'add', '.');
+      commit(checkout, 'prepared manifest');
+      const preparedHead = git('-C', checkout, 'rev-parse', 'HEAD');
+      const remote = path.join(root, 'remote.git');
+      git('clone', '--bare', checkout, remote);
+      git('-C', checkout, 'remote', 'add', 'origin', remote);
+      const upstream = path.join(root, 'upstream');
+      git('clone', remote, upstream);
+      const newManifest = '{"dependencies":{"new":"1.0.0"}}\n';
+      fs.writeFileSync(path.join(upstream, 'package.json'), newManifest);
+      commit(upstream, 'new dependency');
+      git('-C', upstream, 'push', 'origin', 'feature');
+      const remoteHead = git('-C', upstream, 'rev-parse', 'HEAD');
+      fs.mkdirSync(path.join(checkout, 'node_modules'));
+      fs.copyFileSync(path.join(checkout, 'package.json'), path.join(checkout, 'node_modules', 'manifest'));
+      fs.writeFileSync(path.join(checkout, 'session-data'), 'operator data');
+      state.projects[0].envTemplate = '';
+      state.projects[0].setupCommands = [
+        'mkdir -p node_modules && cp package.json node_modules/manifest',
+        'printf reset > session-data',
+      ];
+      const child = row({
+        status,
+        orchestrator: false,
+        workDir: checkout,
+        branch: 'feature',
+        workspacePrepared: status !== 'preparing',
+      });
+      state.stored = [child];
+      await initJobs();
+      resumeRestartedSessions();
+      if (status !== 'idle') {
+        await vi.waitFor(() => expect(children, child.error).toHaveLength(1));
+        finish(children[0]);
+      }
+      await vi.waitFor(() => expect(child.status, child.error).toBe('idle'));
+      const incomplete = status === 'preparing';
+      expect(git('-C', checkout, 'rev-parse', 'HEAD')).toBe(incomplete ? remoteHead : preparedHead);
+      expect(git('-C', checkout, 'rev-parse', 'origin/feature')).toBe(remoteHead);
+      expect(fs.readFileSync(path.join(checkout, 'node_modules', 'manifest'), 'utf8')).toBe(
+        fs.readFileSync(path.join(checkout, 'package.json'), 'utf8'),
+      );
+      expect(fs.readFileSync(path.join(checkout, 'session-data'), 'utf8')).toBe(
+        incomplete ? 'reset' : 'operator data',
+      );
+      if (!incomplete) {
+        expect(
+          child.events.some(
+            (e) => e.kind === 'info' && e.text.includes('Integrate origin/feature before you push'),
+          ),
+        ).toBe(true);
+        expect(child.events.some((e) => e.kind === 'cmd' && e.text.includes('cp package.json'))).toBe(false);
+      }
+    },
+  );
+
+  it.each([
+    ['idle', false],
+    ['running', false],
+    ['idle', true],
+    ['running', true],
+  ])('preserves the current local branch (%s, launch branch renamed: %s)', async (status, renamed) => {
+    const checkout = path.join(root, 'checkout');
+    fs.mkdirSync(checkout);
+    const git = (...args) => {
+      const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    git('init', '-b', 'launch');
+    fs.writeFileSync(path.join(checkout, 'work'), 'original');
+    git('add', '.');
+    git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture');
+    if (renamed) git('branch', '-m', 'current');
+    else git('checkout', '-b', 'current');
+    const currentHead = git('rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(checkout, 'work'), 'unfinished work');
+    git('add', 'work');
+    state.projects[0].localDir = checkout;
+    const child = row({
+      status,
+      orchestrator: false,
+      local: true,
+      workDir: checkout,
+      startBranch: 'launch',
+      branch: 'launch',
+    });
+    state.stored = [child];
+    await initJobs();
+    resumeRestartedSessions();
+    if (status !== 'idle') {
+      await vi.waitFor(() => expect(children, child.error).toHaveLength(1));
+      finish(children[0]);
+    }
+    await vi.waitFor(() => expect(child.status, child.error).toBe('idle'));
+    expect(git('branch', '--show-current')).toBe('current');
+    expect(child.branch).toBe('current');
+    expect(git('rev-parse', 'HEAD')).toBe(currentHead);
+    expect(git('show', ':work')).toBe('unfinished work');
+    expect(fs.readFileSync(path.join(checkout, 'work'), 'utf8')).toBe('unfinished work');
+    expect(child.events.some((e) => e.kind === 'cmd' && e.text.includes('checkout launch'))).toBe(false);
+  });
+
+  it.each(['idle', 'running', 'detached'])(
+    'refreshes an owned prepared clone after a branch rename (%s)',
+    async (status) => {
+      const checkout = path.join(root, 'acme__restart');
+      fs.mkdirSync(checkout);
+      const git = (...args) => {
+        const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
+        expect(result.status, result.stderr).toBe(0);
+        return result.stdout.trim();
+      };
+      git('init', '-b', 'original');
+      fs.writeFileSync(path.join(checkout, 'work'), 'original');
+      git('add', '.');
+      git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture');
+      const remote = path.join(root, 'remote.git');
+      expect(spawnSync('git', ['clone', '--bare', checkout, remote]).status).toBe(0);
+      git('remote', 'add', 'origin', remote);
+      git('branch', '-m', 'renamed');
+      const head = git('rev-parse', 'HEAD');
+      if (status === 'detached') git('checkout', '--detach');
+      fs.writeFileSync(path.join(checkout, 'work'), 'unfinished work');
+      git('add', 'work');
+      const saved = row({
+        status: status === 'detached' ? 'running' : status,
+        orchestrator: false,
+        workDir: checkout,
+        branch: 'original',
+        workspacePrepared: true,
+      });
+      claimSlot(checkout, saved.id, { prepared: true });
+      state.stored = [saved];
+      await initJobs();
+      resumeRestartedSessions();
+      if (status === 'detached') {
+        await vi.waitFor(() => expect(saved.status).toBe('failed'));
+        expect(saved.error).toContain('detached HEAD');
+        expect(saved.branch).toBe('original');
+        expect(children).toHaveLength(0);
+      } else {
+        if (status === 'running') {
+          await vi.waitFor(() => expect(children, saved.error).toHaveLength(1));
+          finish(children[0]);
+        }
+        await vi.waitFor(() => expect(saved.status, saved.error).toBe('idle'));
+        expect(saved.branch).toBe('renamed');
+        expect(git('branch', '--show-current')).toBe('renamed');
+      }
+      expect(git('rev-parse', 'HEAD')).toBe(head);
+      expect(git('show', ':work')).toBe('unfinished work');
+      expect(fs.readFileSync(path.join(checkout, 'work'), 'utf8')).toBe('unfinished work');
+    },
+  );
+
+  it.each(['unacquired', 'legacy', 'incomplete', 'completed'])(
+    'recovers the launch branch selection of %s local preparation',
+    async (preparation) => {
+      const checkout = path.join(root, 'checkout');
+      fs.mkdirSync(checkout);
+      const git = (...args) => {
+        const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
+        expect(result.status, result.stderr).toBe(0);
+      };
+      git('init', '-b', 'launch');
+      git(
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'fixture',
+      );
+      git('checkout', '-b', 'current');
+      state.projects[0].localDir = checkout;
+      const child = row({
+        status: 'preparing',
+        orchestrator: false,
+        local: true,
+        workDir: preparation === 'unacquired' ? null : checkout,
+        ...(preparation === 'incomplete' || preparation === 'completed'
+          ? { workspacePrepared: preparation === 'completed' }
+          : {}),
+        startBranch: 'launch',
+        turns: 0,
+        chatStarted: false,
+        chats: {},
+        recoveryTurn: { prompt: 'First request', opts: {}, phase: 'initial', completed: false },
+      });
+      state.stored = [child];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(children, child.error).toHaveLength(1));
+      finish(children[0]);
+      await vi.waitFor(() => expect(child.status, child.error).toBe('idle'));
+      const expected = preparation === 'completed' ? 'current' : 'launch';
+      expect(child.branch).toBe(expected);
+      expect(
+        spawnSync('git', ['-C', checkout, 'branch', '--show-current'], { encoding: 'utf8' }).stdout.trim(),
+      ).toBe(expected);
+      expect(child.workspacePrepared).toBe(true);
+      await vi.waitFor(() =>
+        expect(saveJob.mock.calls.findLast(([j]) => j.id === child.id)?.[0].workspacePrepared).toBe(true),
+      );
+    },
+  );
+
+  it.each(['review', 'fix', 'qa'])(
+    'notifies the %s parent after automatic reopen resource cleanup fails',
+    async (kind) => {
+      const parent = row({ status: 'idle', recoveryTurn: null });
+      const child = row({
+        status: 'idle',
+        awaitingAnswer: true,
+        [kind === 'review' ? 'loopParentId' : kind === 'fix' ? 'loopFixParentId' : 'qaParentId']: parent.id,
+      });
+      if (kind === 'review')
+        parent.reviewLoop = { rounds: 1, reviewing: true, reviewerRound: true, reviewSessionId: child.id };
+      else if (kind === 'fix') parent.reviewLoop = { rounds: 1, fixing: true, fixSessionId: child.id };
+      else parent.qaLoop = { running: true, sessionId: child.id };
+      const originalAcquire = acquireInstance.getMockImplementation();
+      const originalRelease = releaseInstance.getMockImplementation();
+      let allowRelease;
+      const cleanup = new Promise((resolve) => {
+        allowRelease = resolve;
+      });
+      acquireInstance.mockImplementation(async (job) => {
+        if (job.id === child.id) throw new Error('Database recovery failed');
+        return originalAcquire?.(job);
+      });
+      releaseInstance.mockImplementation(async (job) => {
+        if (job.id === child.id) await cleanup;
+        return originalRelease?.(job);
+      });
+      // Exercise the pooled path rather than the orchestrator's scratch directory.
+      child.orchestrator = false;
+      state.stored = [parent, child];
+      try {
+        await initJobs();
+        resumeRestartedSessions();
+        await vi.waitFor(() => expect(child.status).toBe('failed'));
+        const loop = kind === 'qa' ? parent.qaLoop : parent.reviewLoop;
+        expect(loop[kind === 'review' ? 'reviewing' : kind === 'fix' ? 'fixing' : 'running']).toBe(true);
+        allowRelease();
+        await vi.waitFor(() =>
+          expect(loop[kind === 'review' ? 'reviewing' : kind === 'fix' ? 'fixing' : 'running']).toBe(false),
+        );
+        expect(loop.failure.reason).toBe('Database recovery failed');
+        if (kind === 'review') expect(loop.reviewerFailed).not.toBe(true);
+        expect(children).toHaveLength(0);
+      } finally {
+        allowRelease();
+        acquireInstance.mockImplementation(originalAcquire);
+        releaseInstance.mockImplementation(originalRelease);
+      }
+    },
+  );
+
+  it('restarts preparation with the original first prompt when the conversation never started', async () => {
+    const saved = row({
+      status: 'preparing',
+      turns: 0,
+      chatStarted: false,
+      chats: {},
+      recoveryTurn: { prompt: 'Original first request', opts: {}, phase: 'initial', completed: false },
+    });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].args).not.toContain('resume');
+    expect(children[0].prompt).toContain('Original first request');
+    expect(children[0].prompt).not.toContain('server restarted');
+    children[0].stdout.write(
+      JSON.stringify({ type: 'thread.started', thread_id: 'first-turn-thread' }) + '\n',
+    );
+    expect(saved.turns).toBe(0);
+    await vi.waitFor(() =>
+      expect(saveJob.mock.calls.findLast(([j]) => j.id === saved.id)?.[0]).toMatchObject({
+        providerSessionId: 'first-turn-thread',
+        chatStarted: true,
+        chats: { 2: { sessionId: 'first-turn-thread', started: true } },
+      }),
+    );
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+  });
+
+  it('keeps a review round in flight and resumes publishing without repeating the review', async () => {
+    const parent = row({ status: 'idle', recoveryTurn: null });
+    const review = row({
+      reviewBranch: 'feature',
+      autoClose: true,
+      loopParentId: parent.id,
+      recoveryTurn: { prompt: 'Publish existing findings', opts: {}, phase: 'publish', completed: false },
+    });
+    parent.reviewLoop = { rounds: 1, reviewing: true, reviewSessionId: review.id };
+    state.stored = [parent, review];
+    await initJobs();
+    expect(parent.reviewLoop.reviewing).toBe(true);
+    expect(parent.reviewLoop.failure).toBeUndefined();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('Publish existing findings');
+    finish(children[0]);
+    await vi.waitFor(() => expect(review.status).toBe('closed'));
+    expect(children).toHaveLength(1);
+  });
+
+  it('continues after a completed discovery turn without running discovery again', async () => {
+    const saved = row({
+      reviewBranch: 'feature',
+      autoClose: true,
+      recoveryTurn: {
+        prompt: 'Already completed discovery',
+        opts: { review: true },
+        phase: 'initial',
+        completed: true,
+      },
+    });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('PUBLISH THE REVIEW');
+    expect(children[0].prompt).not.toContain('Already completed discovery');
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('closed'));
+  });
+
+  it('resumes QA on the configured step provider and thread without starting the sheet again', async () => {
+    const saved = row({
+      qaBranch: 'feature',
+      autoClose: true,
+      chats: {
+        2: { sessionId: 'saved-thread', started: true },
+        3: { sessionId: 'qa-thread', started: true },
+      },
+      recoveryTurn: {
+        prompt: 'Execute the test sheet',
+        opts: { step: 'testRun' },
+        phase: 'testRun',
+        completed: false,
+      },
+    });
+    stepRuntime.mockReturnValue({ providerId: 3, model: 'qa-model', effort: 'low' });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].args.slice(0, 3)).toEqual(['exec', 'resume', 'qa-thread']);
+    expect(children[0].args[children[0].args.indexOf('-m') + 1]).toBe('qa-model');
+    expect(stepRuntime).toHaveBeenCalledWith(state.projects[0], 'testRun');
+    expect(children[0].prompt).toContain('Execute the test sheet');
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('closed'));
+    expect(children).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    'keeps the saved QA runtime when step settings change before recovery (awaiting answer: %s)',
+    async (awaitingAnswer) => {
+      const saved = row({
+        qaBranch: 'feature',
+        awaitingAnswer,
+        autoClose: true,
+        recoveryTurn: {
+          prompt: 'Continue the in-flight QA',
+          opts: { step: 'testRun' },
+          phase: 'testRun',
+          completed: false,
+          runtime: { providerId: 2, model: 'original-model', effort: 'high' },
+        },
+      });
+      stepRuntime.mockReturnValue({ providerId: 3, model: 'new-model', effort: 'low' });
+      const parent = row({
+        status: 'idle',
+        recoveryTurn: null,
+        qaLoop: { running: true, sessionId: saved.id },
+      });
+      saved.qaParentId = parent.id;
+      state.stored = [parent, saved];
+      await initJobs();
+      resumeRestartedSessions();
+      if (awaitingAnswer) {
+        await vi.waitFor(() => expect(saved.status).toBe('idle'));
+        expect(children).toHaveLength(0);
+        sendDevMessage(saved.id, 'Use the original QA plan');
+      }
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(children[0].args.slice(0, 3)).toEqual(['exec', 'resume', 'saved-thread']);
+      expect(children[0].args[children[0].args.indexOf('-m') + 1]).toBe('original-model');
+      expect(children[0].args.join(' ')).toContain('model_reasoning_effort="high"');
+      expect(stepRuntime).not.toHaveBeenCalled();
+      expect(saved.recoveryTurn.runtime).toEqual({ providerId: 2, model: 'original-model', effort: 'high' });
+      finish(children[0]);
+      await vi.waitFor(() => expect(saved.status).toBe('closed'));
+    },
+  );
+
+  it('recovers a legacy running session from its stored user prompt', async () => {
+    const saved = row({ recoveryTurn: undefined });
+    loadJobEvents.mockResolvedValue([{ kind: 'user', text: 'The legacy request', seq: 1 }]);
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('The legacy request');
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+  });
+
+  it('recovers a second restart during the gap between restore and listening', async () => {
+    const saved = row({
+      status: 'interrupted',
+      interruptedFrom: 'running',
+      restartPending: true,
+      restartDbServerId: 7,
+    });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+  });
+
+  it('reclaims an older owner beyond 2000 rows before allocating a new database', async () => {
+    const checkout = path.join(root, 'checkout');
+    fs.mkdirSync(checkout);
+    spawnSync('git', ['-C', checkout, 'init', '-b', 'feature'], { stdio: 'ignore' });
+    spawnSync(
+      'git',
+      [
+        '-C',
+        checkout,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'Initial',
+      ],
+      { stdio: 'ignore' },
+    );
+    spawnSync('git', ['-C', checkout, 'remote', 'add', 'origin', checkout], { stdio: 'ignore' });
+    const newer = row({ orchestrator: false, workDir: checkout, branch: 'feature', workspacePrepared: true });
+    const owner = row({ status: 'idle', dbServerId: 7 });
+    state.stored = [newer, ...Array.from({ length: 1999 }, () => row({ status: 'closed' })), owner];
+    loadJobs.mockImplementationOnce(async (limit) =>
+      limit == null ? state.stored : state.stored.slice(0, limit),
+    );
+    const claims = new Map();
+    const data = new Map([
+      [7, 'unfinished session data'],
+      [8, 'seed'],
+    ]);
+    reclaimInstance.mockImplementation((job, serverId) => {
+      if (serverId != null) {
+        claims.set(serverId, job.id);
+        job.dbServerId = serverId;
+      }
+    });
+    acquireInstance.mockImplementation(async (job) => {
+      if (job.dbServerId != null) return job.dbServerId;
+      const free = [7, 8].find((id) => !claims.has(id));
+      claims.set(free, job.id);
+      data.set(free, 'restored seed');
+      job.dbServerId = free;
+      return free;
+    });
+    try {
+      await initJobs();
+      expect(resumeRestartedSessions()).toBe(2);
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(claims.get(7)).toBe(owner.id);
+      expect(newer.dbServerId).toBe(8);
+      expect(data.get(7)).toBe('unfinished session data');
+      finish(children[0]);
+      await vi.waitFor(() => expect(newer.status).toBe('idle'));
+    } finally {
+      acquireInstance.mockReset();
+    }
+  });
+
+  it('reports an unavailable original database without blocking other sessions', async () => {
+    const failed = row({ dbServerId: 7 });
+    const running = row();
+    reclaimInstance.mockImplementation((job) => {
+      if (job.id === failed.id) throw new Error('Previous database server is unavailable');
+    });
+    state.stored = [failed, running];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(1);
+    expect(failed).toMatchObject({ status: 'failed', error: 'Previous database server is unavailable' });
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    finish(children[0]);
+    await vi.waitFor(() => expect(running.status).toBe('idle'));
+  });
+
+  it('holds background deliveries until boot recovery has reclaimed the workspace', async () => {
+    const saved = row({
+      pendingDeliveries: [{ text: 'A background delivery', via: 'slack' }],
+    });
+    state.stored = [saved];
+    await initJobs({ deferPolling: true });
+    expect(flushDeliveries(saved)).toBe(false);
+    expect(saved.pendingDeliveries).toHaveLength(1);
+    expect(children).toHaveLength(0);
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('Finish the requested change');
+    finish(children[0]);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(children[1].prompt).toContain('A background delivery');
+    finish(children[1]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+  });
+
+  it('honors Stop across a restart, including while the canceled process was still exiting', async () => {
+    const canceledTurn = {
+      prompt: 'Stopped request',
+      opts: {},
+      phase: 'followup',
+      completed: true,
+      canceled: true,
+    };
+    const exiting = row({ recoveryTurn: { ...canceledTurn, completed: false } });
+    const idle = row({
+      status: 'idle',
+      recoveryTurn: canceledTurn,
+      pendingDeliveries: [{ text: 'Must wait for the operator', via: 'slack' }],
+    });
+    state.stored = [exiting, idle];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(idle.status).toBe('idle'));
+    expect(exiting.status).toBe('interrupted');
+    expect(idle.turnCanceled).toBe(true);
+    expect(flushDeliveries(idle)).toBe(false);
+    expect(children).toHaveLength(0);
+  });
+  it('delivers a queued replacement without resuming the canceled request', async () => {
+    const child = row({
+      recoveryTurn: { prompt: 'Canceled request', phase: 'followup', canceled: true, completed: false },
+      recoveryQueue: [{ prompt: 'Do this instead', shown: 'Do this instead', files: [] }],
+    });
+    state.stored = [child];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toBe('Do this instead');
+    expect(child.turnCanceled).toBe(false);
+    finish(children[0]);
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+    expect(children).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    'kills a detached provider group and preserves its checkpoint (leader exited: %s)',
+    async (leaderExits) => {
+      const actual = await vi.importActual('child_process');
+      const ready = path.join(root, 'tool-ready');
+      const late = path.join(root, 'tool-late-write');
+      let provider;
+      const toolScript = `require('fs').writeFileSync(${JSON.stringify(ready)}, String(process.pid)); setTimeout(() => require('fs').writeFileSync(${JSON.stringify(late)}, 'old tool edit'), 800); setInterval(() => {}, 1000);`;
+      const providerScript = `require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(toolScript)}], {stdio: 'inherit'}).unref(); ${leaderExits ? '' : 'setInterval(() => {}, 1000);'}`;
+      spawn.mockImplementation((cmd, args, opts) => {
+        if (cmd === '/mock/restart-agent') {
+          provider = actual.spawn(process.execPath, ['-e', providerScript], opts);
+          return provider;
+        }
+        return actual.spawn(cmd, args, opts);
+      });
+      const saved = row({ recoveryQueue: [{ prompt: 'Then check', shown: 'Then check', files: [] }] });
+      state.stored = [saved];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(fs.existsSync(ready)).toBe(true));
+      const toolPid = Number(fs.readFileSync(ready, 'utf8'));
+      const checkpoint = structuredClone(saved.recoveryTurn);
+      if (leaderExits) await vi.waitFor(() => expect(provider.exitCode).toBe(0));
+      saveJob.mockClear();
+      try {
+        await stopAllJobProcesses();
+        await vi.waitFor(() =>
+          expect(saveJob.mock.calls.findLast(([j]) => j.id === saved.id)?.[0]).toMatchObject({
+            status: 'running',
+            recoveryTurn: checkpoint,
+          }),
+        );
+        if (!leaderExits) expect(provider.signalCode).toBe('SIGKILL');
+        expect(saved.status).toBe('running');
+        expect(saved.recoveryTurn).toEqual(checkpoint);
+        expect(saved.recoveryTurn.completed).toBe(false);
+        expect(saved.recoveryTurn.canceled).toBeUndefined();
+        expect(saved.recoveryQueue).toHaveLength(1);
+        // A killed orphan may be a zombie until init reaps it; it can no longer edit.
+        if (fs.existsSync(`/proc/${toolPid}/stat`))
+          expect(fs.readFileSync(`/proc/${toolPid}/stat`, 'utf8')).toMatch(/\) Z /);
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        expect(fs.existsSync(late)).toBe(false);
+        expect(saved.status).toBe('running');
+      } finally {
+        try {
+          process.kill(-provider.pid, 'SIGKILL');
+        } catch {
+          /* already reaped */
+        }
+        setDraining(false);
+      }
+    },
+  );
 });
