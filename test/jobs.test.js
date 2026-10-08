@@ -10989,21 +10989,109 @@ describe('auto-compaction while the context probe is out', () => {
       children[0].emit('close', code);
       expect(job.proc).toBeNull();
       await stopAllJobProcesses();
-      await flushJobs();
+      const flushed = flushJobs();
+      land(true);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      answer(children[1], report('30k'));
+      await flushed;
       expect(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0].recoveryTurn).toMatchObject({
         prompt: 'Go',
         completed: code === 0,
       });
-      land(true);
-      await vi.waitFor(() => expect(children).toHaveLength(2));
-      answer(children[1], report('30k'));
-      await flushJobs();
       expect(job.recoveryTurn.completed).toBe(code === 0);
     } finally {
       land?.(true);
       setDraining(false);
     }
   });
+
+  it.each(['block', 'tool'])(
+    'persists a held %s question before the successful shutdown checkpoint',
+    async (kind) => {
+      let land;
+      recordTurnUsage.mockImplementationOnce(() => new Promise((resolve) => (land = resolve)));
+      const published = [];
+      const onEvent = (id, event) => {
+        if (id === job.id) published.push(event);
+      };
+      bus.on('event', onEvent);
+      let snapshot;
+      try {
+        job.orchestrator = true;
+        sendDevMessage(job.id, 'Go');
+        job.reviewBranch = 'feature';
+        job.recoveryTurn.phase = 'initial';
+        const result = {
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: 'Done',
+          total_cost_usd: 0.1,
+        };
+        children[0].stdout.write(JSON.stringify(result) + '\n');
+        await vi.waitFor(() => expect(land).toBeTypeOf('function'));
+        children[0].stdout.write(
+          JSON.stringify({
+            type: 'assistant',
+            message: {
+              content: [
+                kind === 'block'
+                  ? { type: 'text', text: '<ask-user>Which plan?\n- A\n- B\n</ask-user>' }
+                  : {
+                      type: 'tool_use',
+                      name: 'AskUserQuestion',
+                      input: {
+                        questions: [{ question: 'Which plan?', options: [{ label: 'A' }, { label: 'B' }] }],
+                      },
+                    },
+              ],
+            },
+          }) + '\n',
+        );
+        children[0].stdout.write(JSON.stringify({ ...result, total_cost_usd: 0.2 }) + '\n');
+        children[0].emit('close', 0);
+        await stopAllJobProcesses();
+        let flushed = false;
+        const flushing = flushJobs().then(() => (flushed = true));
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(flushed).toBe(false);
+        expect(job.recoveryTurn.completed).toBe(false);
+        expect(published.some((e) => e.kind === 'result' || e.kind === 'ask')).toBe(false);
+        land(true);
+        await vi.waitFor(() => expect(children).toHaveLength(2));
+        answer(children[1], report('30k'));
+        await flushing;
+        snapshot = structuredClone(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0]);
+        expect(snapshot).toMatchObject({
+          awaitingAnswer: true,
+          askText: 'Which plan?\nOptions: A | B',
+          recoveryTurn: { prompt: 'Go', phase: 'initial', completed: true },
+        });
+        expect(snapshot.questionSeq).toBeGreaterThan(0);
+        expect(published.filter((e) => e.kind === 'result' || e.kind === 'ask').map((e) => e.kind)).toEqual([
+          'result',
+          'ask',
+          'result',
+        ]);
+        expect(
+          saveJobEvents.mock.calls.flatMap(([id, events]) => (id === job.id ? events : [])),
+        ).toContainEqual(
+          expect.objectContaining({ kind: 'ask', question: 'Which plan?', seq: snapshot.questionSeq }),
+        );
+      } finally {
+        land?.(true);
+        bus.off('event', onEvent);
+        setDraining(false);
+      }
+      for (const session of devSessionRecords()) session.restartPending = false;
+      state.stored = [snapshot];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(getJob(job.id).status).toBe('idle'));
+      expect(getJob(job.id).awaitingAnswer).toBe(true);
+      expect(children).toHaveLength(2); // No repeated request or review publication without the answer.
+    },
+  );
 
   it('does not spawn automatic compaction after shutdown while a context probe is pending', async () => {
     sendDevMessage(job.id, 'Go');
