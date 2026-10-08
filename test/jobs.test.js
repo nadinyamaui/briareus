@@ -12389,9 +12389,13 @@ describe('automatic recovery after a server restart', () => {
       const remote = path.join(root, 'remote.git');
       git(['clone', '--bare', checkout, remote]);
       git(['-C', checkout, 'remote', 'add', 'origin', remote]);
-      state.projects[0].setupCommands = ['printf reset > session-data'];
-      state.projects[0].envTemplate = '';
+      state.projects[0].setupCommands = [
+        'printf reset > session-data',
+        'printf "APP_KEY=fresh-generated\\n" > .env',
+      ];
+      state.projects[0].envTemplate = 'APP_KEY=\n';
       fs.writeFileSync(path.join(checkout, 'session-data'), 'operator data');
+      fs.writeFileSync(path.join(checkout, '.env'), 'APP_KEY=existing-generated\n');
       const child = row({
         status,
         orchestrator: false,
@@ -12411,11 +12415,172 @@ describe('automatic recovery after a server restart', () => {
         prepared === false ? 'reset' : 'operator data',
       );
       expect(child.workspacePrepared).toBe(true);
+      expect(fs.readFileSync(path.join(checkout, '.env'), 'utf8')).toBe(
+        prepared === false ? 'APP_KEY=fresh-generated\n' : 'APP_KEY=existing-generated\n',
+      );
       expect(child.events.some((e) => e.kind === 'cmd' && e.text.includes('printf reset'))).toBe(
         prepared === false,
       );
     },
   );
+
+  it.each(['idle', 'running', 'preparing'])(
+    'keeps the prepared revision and dependencies together during %s recovery',
+    async (status) => {
+      const checkout = path.join(root, 'acme__restart');
+      fs.mkdirSync(checkout);
+      const git = (...args) => {
+        const result = spawnSync('git', args, { encoding: 'utf8' });
+        expect(result.status, result.stderr).toBe(0);
+        return result.stdout.trim();
+      };
+      const commit = (dir, message) =>
+        git('-C', dir, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-am', message);
+      git('-C', checkout, 'init', '-b', 'feature');
+      fs.writeFileSync(path.join(checkout, 'package.json'), '{"dependencies":{"old":"1.0.0"}}\n');
+      fs.writeFileSync(path.join(checkout, '.gitignore'), 'node_modules/\nsession-data\n');
+      git('-C', checkout, 'add', '.');
+      commit(checkout, 'prepared manifest');
+      const preparedHead = git('-C', checkout, 'rev-parse', 'HEAD');
+      const remote = path.join(root, 'remote.git');
+      git('clone', '--bare', checkout, remote);
+      git('-C', checkout, 'remote', 'add', 'origin', remote);
+      const upstream = path.join(root, 'upstream');
+      git('clone', remote, upstream);
+      const newManifest = '{"dependencies":{"new":"1.0.0"}}\n';
+      fs.writeFileSync(path.join(upstream, 'package.json'), newManifest);
+      commit(upstream, 'new dependency');
+      git('-C', upstream, 'push', 'origin', 'feature');
+      const remoteHead = git('-C', upstream, 'rev-parse', 'HEAD');
+      fs.mkdirSync(path.join(checkout, 'node_modules'));
+      fs.copyFileSync(path.join(checkout, 'package.json'), path.join(checkout, 'node_modules', 'manifest'));
+      fs.writeFileSync(path.join(checkout, 'session-data'), 'operator data');
+      state.projects[0].envTemplate = '';
+      state.projects[0].setupCommands = [
+        'mkdir -p node_modules && cp package.json node_modules/manifest',
+        'printf reset > session-data',
+      ];
+      const child = row({
+        status,
+        orchestrator: false,
+        workDir: checkout,
+        branch: 'feature',
+        workspacePrepared: status !== 'preparing',
+      });
+      state.stored = [child];
+      await initJobs();
+      resumeRestartedSessions();
+      if (status !== 'idle') {
+        await vi.waitFor(() => expect(children, child.error).toHaveLength(1));
+        finish(children[0]);
+      }
+      await vi.waitFor(() => expect(child.status, child.error).toBe('idle'));
+      const incomplete = status === 'preparing';
+      expect(git('-C', checkout, 'rev-parse', 'HEAD')).toBe(incomplete ? remoteHead : preparedHead);
+      expect(git('-C', checkout, 'rev-parse', 'origin/feature')).toBe(remoteHead);
+      expect(fs.readFileSync(path.join(checkout, 'node_modules', 'manifest'), 'utf8')).toBe(
+        fs.readFileSync(path.join(checkout, 'package.json'), 'utf8'),
+      );
+      expect(fs.readFileSync(path.join(checkout, 'session-data'), 'utf8')).toBe(
+        incomplete ? 'reset' : 'operator data',
+      );
+      if (!incomplete) {
+        expect(
+          child.events.some(
+            (e) => e.kind === 'info' && e.text.includes('Integrate origin/feature before you push'),
+          ),
+        ).toBe(true);
+        expect(child.events.some((e) => e.kind === 'cmd' && e.text.includes('cp package.json'))).toBe(false);
+      }
+    },
+  );
+
+  it.each([
+    ['idle', false],
+    ['running', false],
+    ['idle', true],
+    ['running', true],
+  ])('preserves the current local branch (%s, launch branch renamed: %s)', async (status, renamed) => {
+    const checkout = path.join(root, 'checkout');
+    fs.mkdirSync(checkout);
+    const git = (...args) => {
+      const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    git('init', '-b', 'launch');
+    fs.writeFileSync(path.join(checkout, 'work'), 'original');
+    git('add', '.');
+    git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture');
+    if (renamed) git('branch', '-m', 'current');
+    else git('checkout', '-b', 'current');
+    const currentHead = git('rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(checkout, 'work'), 'unfinished work');
+    git('add', 'work');
+    state.projects[0].localDir = checkout;
+    const child = row({
+      status,
+      orchestrator: false,
+      local: true,
+      workDir: checkout,
+      startBranch: 'launch',
+      branch: 'launch',
+    });
+    state.stored = [child];
+    await initJobs();
+    resumeRestartedSessions();
+    if (status !== 'idle') {
+      await vi.waitFor(() => expect(children, child.error).toHaveLength(1));
+      finish(children[0]);
+    }
+    await vi.waitFor(() => expect(child.status, child.error).toBe('idle'));
+    expect(git('branch', '--show-current')).toBe('current');
+    expect(child.branch).toBe('current');
+    expect(git('rev-parse', 'HEAD')).toBe(currentHead);
+    expect(git('show', ':work')).toBe('unfinished work');
+    expect(fs.readFileSync(path.join(checkout, 'work'), 'utf8')).toBe('unfinished work');
+    expect(child.events.some((e) => e.kind === 'cmd' && e.text.includes('checkout launch'))).toBe(false);
+  });
+
+  it('selects the launch branch when recovering local preparation that had not acquired a checkout', async () => {
+    const checkout = path.join(root, 'checkout');
+    fs.mkdirSync(checkout);
+    const git = (...args) => {
+      const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git('init', '-b', 'launch');
+    git(
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'fixture',
+    );
+    git('checkout', '-b', 'current');
+    state.projects[0].localDir = checkout;
+    const child = row({
+      status: 'preparing',
+      orchestrator: false,
+      local: true,
+      workDir: null,
+      startBranch: 'launch',
+      turns: 0,
+      chatStarted: false,
+      chats: {},
+      recoveryTurn: { prompt: 'First request', opts: {}, phase: 'initial', completed: false },
+    });
+    state.stored = [child];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children, child.error).toHaveLength(1));
+    finish(children[0]);
+    await vi.waitFor(() => expect(child.status, child.error).toBe('idle'));
+    expect(child.branch).toBe('launch');
+  });
 
   it.each(['review', 'fix', 'qa'])(
     'notifies the %s parent after automatic reopen resource cleanup fails',
