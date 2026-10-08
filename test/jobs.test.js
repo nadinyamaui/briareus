@@ -17,7 +17,7 @@ vi.mock('../lib/claude-session.js', async (original) => ({
   askClaudeSideQuestion: vi.fn(),
 }));
 import { recordTurnUsage } from '../lib/usage.js';
-import { maintenanceState, setDraining } from '../lib/recovery.js';
+import { claimSlot, maintenanceState, setDraining } from '../lib/recovery.js';
 vi.mock('../lib/codex-session.js', async (original) => ({
   ...(await original()),
   compactCodexThread: vi.fn(),
@@ -12360,6 +12360,109 @@ describe('automatic recovery after a server restart', () => {
     expect(children).toHaveLength(1);
   });
 
+  it.each([true, false])('settles a published standalone review (findings: %s)', async (hasFindings) => {
+    const saved = row({
+      status: 'idle',
+      reviewBranch: 'feature',
+      startedOnPr: 132,
+      autoClose: true,
+      recoveryTurn: { prompt: 'Published review', phase: 'publish', completed: true },
+    });
+    const findings = hasFindings ? [{ key: 'fresh', severity: 'medium', title: 'Fresh finding' }] : [];
+    latestReviewFindings.mockResolvedValueOnce(findings);
+    state.stored = [saved];
+    await initJobs();
+    const readsBefore = latestReviewFindings.mock.calls.length;
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(saved.status).toBe('closed'));
+    expect(latestReviewFindings.mock.calls.slice(readsBefore)).toEqual([
+      ['acme/restart', 132, { since: saved.createdAt }],
+    ]);
+    expect(children).toHaveLength(0);
+    expect(dropSessionDatabase).toHaveBeenCalledWith(saved, expect.any(Function));
+    if (hasFindings) {
+      expect(getJob(saved.id).reviewTriage).toMatchObject({
+        standalone: true,
+        findings: [{ key: 'fresh' }],
+      });
+    } else expect(getJob(saved.id)).toBeNull();
+  });
+
+  it.each(['asking', 'unfinished'])(
+    'leaves a standalone review open when publication is %s',
+    async (stateOfReview) => {
+      const saved = row({
+        status: 'idle',
+        reviewBranch: 'feature',
+        autoClose: true,
+        awaitingAnswer: stateOfReview === 'asking',
+        recoveryTurn: {
+          prompt: 'Publication',
+          phase: 'publish',
+          completed: stateOfReview !== 'unfinished',
+        },
+      });
+      state.stored = [saved];
+      await initJobs();
+      const readsBefore = latestReviewFindings.mock.calls.length;
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(saved.status).toBe('idle'));
+      expect(children).toHaveLength(0);
+      expect(latestReviewFindings.mock.calls).toHaveLength(readsBefore);
+    },
+  );
+
+  it.each([
+    ['preparing', 'release'],
+    ['running', 'drop'],
+  ])('recovers explicit Close during %s resource cleanup', async (status, cleanupStep) => {
+    const saved = row({
+      status,
+      dbServerId: 7,
+      recoveryQueue: [{ prompt: 'Queued replacement', shown: 'Queued replacement', files: [] }],
+    });
+    state.stored = [saved];
+    await initJobs();
+    // The checkpoint now represents an open session on the current server.
+    saved.status = status;
+    saved.dbServerId = 7;
+    saved.restartPending = false;
+    const cleanup = cleanupStep === 'release' ? releaseInstance : dropSessionDatabase;
+    let allowCleanup;
+    cleanup.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          allowCleanup = resolve;
+        }),
+    );
+    const closing = closeDevSession(saved.id);
+    let snapshot;
+    try {
+      await vi.waitFor(() => expect(allowCleanup).toBeTypeOf('function'));
+      await vi.waitFor(() => {
+        snapshot = structuredClone(saveJob.mock.calls.findLast(([j]) => j.id === saved.id)?.[0]);
+        expect(snapshot).toMatchObject({ closePending: true });
+      });
+      expect(snapshot).toMatchObject({ status, closePending: true, recoveryQueue: [] });
+      expect(publicJob(saved)).not.toHaveProperty('closePending');
+      expect(saved.closing).toBe(true);
+    } finally {
+      allowCleanup();
+      await closing;
+    }
+    state.stored = [snapshot];
+    await initJobs();
+    const acquiresBefore = acquireInstance.mock.calls.length;
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(snapshot.status).toBe('closed'));
+    expect(reclaimInstance).toHaveBeenCalledWith(snapshot, 7);
+    expect(acquireInstance.mock.calls).toHaveLength(acquiresBefore);
+    expect(children).toHaveLength(0);
+    expect(snapshot.closePending).toBe(false);
+    expect(snapshot.restartPending).toBe(false);
+    expect(publicJob(snapshot).queued).toBeUndefined();
+  });
+
   it.each(['review', 'qa'])('keeps legacy %s discovery active through operator answers', async (kind) => {
     const child = row({
       recoveryTurn: undefined,
@@ -12382,6 +12485,24 @@ describe('automatic recovery after a server restart', () => {
     expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
     finish(children[1]);
     await vi.waitFor(() => expect(child.status).toBe('idle'));
+  });
+
+  it.each([7, null])('finishes Close after a second restart (remaining database: %s)', async (dbServerId) => {
+    const saved = row({
+      status: 'interrupted',
+      interruptedFrom: 'preparing',
+      closePending: true,
+      restartPending: false,
+      restartDbServerId: null,
+      dbServerId,
+    });
+    state.stored = [saved];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(saved.status).toBe('closed'));
+    expect(reclaimInstance).toHaveBeenCalledWith(saved, dbServerId);
+    expect(children).toHaveLength(0);
+    expect(saved.closePending).toBe(false);
   });
 
   it.each(['review', 'qa'])('preserves the legacy %s stage for an idle standing question', async (kind) => {
@@ -12417,7 +12538,8 @@ describe('automatic recovery after a server restart', () => {
     loadJobEvents.mockResolvedValue([
       { kind: 'user', text: 'Original review', seq: 1 },
       { kind: 'user', text: kind === 'review' ? publication : 'RUN', seq: 2 },
-      { kind: 'user', text: 'Operator answer', seq: 3 },
+      { kind: 'ask', question: 'How should I continue?', seq: 3 },
+      { kind: 'user', text: 'Operator answer', seq: 4 },
     ]);
     state.stored = [child];
     await initJobs();
@@ -12445,7 +12567,8 @@ describe('automatic recovery after a server restart', () => {
     loadJobEvents.mockResolvedValue([
       { kind: 'user', text: 'Write a sheet', seq: 1 },
       { kind: 'user', text: originalRun, seq: 2 },
-      { kind: 'user', text: 'Operator answer', seq: 3 },
+      { kind: 'ask', question: 'How should I continue?', seq: 3 },
+      { kind: 'user', text: 'Operator answer', seq: 4 },
     ]);
     state.stored = [child];
     await initJobs();
@@ -12456,6 +12579,38 @@ describe('automatic recovery after a server restart', () => {
     await vi.waitFor(() => expect(child.status).toBe('idle'));
     expect(children).toHaveLength(1);
   });
+
+  it.each([false, true])(
+    'resumes a later legacy QA follow-up in its primary conversation (idle boundary: %s)',
+    async (idleBoundary) => {
+      const saved = row({
+        qaBranch: 'feature',
+        recoveryTurn: undefined,
+        chats: {
+          2: { sessionId: 'saved-thread', started: true },
+          3: { sessionId: 'qa-thread', started: true },
+        },
+      });
+      stepRuntime.mockReturnValue({ providerId: 3, model: 'qa-model', effort: 'low' });
+      loadJobEvents.mockResolvedValue([
+        { kind: 'user', text: 'Write a sheet', seq: 1 },
+        { kind: 'user', text: 'RUN', seq: 2 },
+        ...(idleBoundary ? [{ kind: 'status', status: 'idle', seq: 3 }] : []),
+        { kind: 'user', text: 'Explain the architecture', seq: 4 },
+      ]);
+      state.stored = [saved];
+      await initJobs();
+      expect(saved.recoveryTurn.phase).toBe('followup');
+      expect(saved.recoveryTurn.opts.step).toBeUndefined();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(children[0].args.slice(0, 3)).toEqual(['exec', 'resume', 'saved-thread']);
+      expect(children[0].prompt).toContain('Explain the architecture');
+      finish(children[0]);
+      await vi.waitFor(() => expect(saved.status).toBe('idle'));
+      expect(children).toHaveLength(1);
+    },
+  );
 
   it.each([
     ['idle', undefined],
@@ -12639,6 +12794,59 @@ describe('automatic recovery after a server restart', () => {
     expect(fs.readFileSync(path.join(checkout, 'work'), 'utf8')).toBe('unfinished work');
     expect(child.events.some((e) => e.kind === 'cmd' && e.text.includes('checkout launch'))).toBe(false);
   });
+
+  it.each(['idle', 'running', 'detached'])(
+    'refreshes an owned prepared clone after a branch rename (%s)',
+    async (status) => {
+      const checkout = path.join(root, 'acme__restart');
+      fs.mkdirSync(checkout);
+      const git = (...args) => {
+        const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
+        expect(result.status, result.stderr).toBe(0);
+        return result.stdout.trim();
+      };
+      git('init', '-b', 'original');
+      fs.writeFileSync(path.join(checkout, 'work'), 'original');
+      git('add', '.');
+      git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture');
+      const remote = path.join(root, 'remote.git');
+      expect(spawnSync('git', ['clone', '--bare', checkout, remote]).status).toBe(0);
+      git('remote', 'add', 'origin', remote);
+      git('branch', '-m', 'renamed');
+      const head = git('rev-parse', 'HEAD');
+      if (status === 'detached') git('checkout', '--detach');
+      fs.writeFileSync(path.join(checkout, 'work'), 'unfinished work');
+      git('add', 'work');
+      const saved = row({
+        status: status === 'detached' ? 'running' : status,
+        orchestrator: false,
+        workDir: checkout,
+        branch: 'original',
+        workspacePrepared: true,
+      });
+      claimSlot(checkout, saved.id, { prepared: true });
+      state.stored = [saved];
+      await initJobs();
+      resumeRestartedSessions();
+      if (status === 'detached') {
+        await vi.waitFor(() => expect(saved.status).toBe('failed'));
+        expect(saved.error).toContain('detached HEAD');
+        expect(saved.branch).toBe('original');
+        expect(children).toHaveLength(0);
+      } else {
+        if (status === 'running') {
+          await vi.waitFor(() => expect(children, saved.error).toHaveLength(1));
+          finish(children[0]);
+        }
+        await vi.waitFor(() => expect(saved.status, saved.error).toBe('idle'));
+        expect(saved.branch).toBe('renamed');
+        expect(git('branch', '--show-current')).toBe('renamed');
+      }
+      expect(git('rev-parse', 'HEAD')).toBe(head);
+      expect(git('show', ':work')).toBe('unfinished work');
+      expect(fs.readFileSync(path.join(checkout, 'work'), 'utf8')).toBe('unfinished work');
+    },
+  );
 
   it('selects the launch branch when recovering local preparation that had not acquired a checkout', async () => {
     const checkout = path.join(root, 'checkout');
