@@ -8,6 +8,7 @@ import mysql from 'mysql2/promise';
 import { parseEnvFile } from '../lib/config.js';
 import { codexPricingCounter } from '../lib/codex-pricing.js';
 import { loadCatalog, withEstimates } from '../lib/prices.js';
+import { absorbedOwners } from '../migrations/2026_10_07_200000_measured_cache_pricing.js';
 
 const args = process.argv.slice(2);
 const envFile = args.find((a) => a.startsWith('--env='))?.slice(6) || '.env';
@@ -115,9 +116,19 @@ const connection = await mysql.createConnection({
   database: env.DB_DATABASE,
 });
 try {
-  const [rows] = await connection.query(
-    "SELECT * FROM turn_usage WHERE provider = 'codex' AND cost_usd IS NULL",
-  );
+  if (apply) {
+    await connection.query(`CREATE TABLE IF NOT EXISTS turn_usage_context_fix_20261008 (
+      id BIGINT UNSIGNED PRIMARY KEY, original LONGTEXT NOT NULL, source_file TEXT NOT NULL, fixed_at BIGINT UNSIGNED NOT NULL)`);
+    await connection.beginTransaction();
+  }
+  // Include unchanged and reported rows: they can compete for rollout ownership
+  // and are needed to reproduce complete absorbed snapshots.
+  const [ledger] = await connection.query(`SELECT * FROM turn_usage${apply ? ' FOR UPDATE' : ''}`);
+  const rows = ledger.filter((row) => row.provider === 'codex');
+  const matches = new Map();
+  const ownersOfSegment = new Map();
+  const segmentKey = (s) =>
+    JSON.stringify([s.model, s.cwd, s.at, s.longInputTokens, s.longCachedInputTokens, s.longOutputTokens]);
   const changes = [];
   let ambiguous = 0;
   for (const row of rows) {
@@ -140,6 +151,19 @@ try {
         Number(row.at) >= s.at - 5000 &&
         Number(row.at) <= s.at + 300000,
     );
+    matches.set(row, candidates);
+    for (const s of candidates) {
+      const k = segmentKey(s);
+      if (!ownersOfSegment.has(k)) ownersOfSegment.set(k, new Set());
+      ownersOfSegment.get(k).add(row);
+    }
+  }
+  for (const [row, candidates] of matches) {
+    if (row.cost_usd != null) continue;
+    if (candidates.some((s) => ownersOfSegment.get(segmentKey(s)).size > 1)) {
+      ambiguous++;
+      continue;
+    }
     // An account transfer may copy a rollout verbatim; identical copies agree.
     const unique = new Map(
       candidates.map((s) => [
@@ -173,10 +197,12 @@ try {
   const asUsage = (row) => ({
     provider: row.provider,
     model: row.model,
-    costUsd: null,
-    inputTokens: Number(row.input_tokens),
-    cachedInputTokens: Number(row.cached_input_tokens),
-    outputTokens: Number(row.output_tokens),
+    jobId: row.job_id,
+    costUsd: row.cost_usd == null ? null : Number(row.cost_usd),
+    cacheMeasured: row.cache_measured === 1,
+    inputTokens: row.input_tokens == null ? null : Number(row.input_tokens),
+    cachedInputTokens: row.cached_input_tokens == null ? null : Number(row.cached_input_tokens),
+    outputTokens: row.output_tokens == null ? null : Number(row.output_tokens),
     longInputTokens: row.long_input_tokens == null ? null : Number(row.long_input_tokens),
     longCachedInputTokens: row.long_cached_input_tokens == null ? null : Number(row.long_cached_input_tokens),
     longOutputTokens: row.long_output_tokens == null ? null : Number(row.long_output_tokens),
@@ -199,41 +225,100 @@ try {
     octoberMatched: october.length,
     octoberAdditionalApiEstimateUsd: october.reduce((sum, d) => sum + d.dollars, 0),
   });
-  if (apply && changes.length) {
-    // Originals and attribution survive reruns; snapshots cover only changed rows.
-    await connection.query(`CREATE TABLE IF NOT EXISTS turn_usage_context_fix_20261008 (
-      id BIGINT UNSIGNED PRIMARY KEY, original LONGTEXT NOT NULL, source_file TEXT NOT NULL, fixed_at BIGINT UNSIGNED NOT NULL)`);
-    await connection.beginTransaction();
+  const [stored] = await connection.query(`SELECT id, meta FROM jobs${apply ? ' FOR UPDATE' : ''}`);
+  const [tasks] = await connection.query(`SELECT id, meta FROM task_sessions${apply ? ' FOR UPDATE' : ''}`);
+  const parents = new Map();
+  const parentOf = new Map();
+  for (const row of stored) {
     try {
-      for (const { row, s } of changes) {
-        await connection.query('INSERT IGNORE INTO turn_usage_context_fix_20261008 VALUES (?, ?, ?, ?)', [
-          row.id,
-          JSON.stringify(row),
-          s.file,
-          Date.now(),
-        ]);
-        const [result] = await connection.query(
-          `UPDATE turn_usage
-          SET long_input_tokens=?, long_cached_input_tokens=?, long_output_tokens=?
-          WHERE id=? AND input_tokens=? AND cached_input_tokens=? AND output_tokens=? AND cost_usd IS NULL`,
-          [
-            s.longInputTokens,
-            s.longCachedInputTokens,
-            s.longOutputTokens,
-            row.id,
-            row.input_tokens,
-            row.cached_input_tokens,
-            row.output_tokens,
-          ],
-        );
-        if (result.affectedRows !== 1) throw new Error(`Concurrent change on row ${row.id}`);
-      }
-      await connection.commit();
-    } catch (error) {
-      await connection.rollback();
-      throw error;
+      parents.set(row.id, JSON.parse(row.meta));
+    } catch {
+      /* no proven snapshot */
     }
   }
+  for (const task of tasks) {
+    try {
+      const parent = JSON.parse(task.meta)?.parentId;
+      if (typeof parent === 'string' && parent) parentOf.set(task.id, parent);
+    } catch {
+      /* no proven ancestry */
+    }
+  }
+  const owners = absorbedOwners(new Set(ledger.map((r) => r.job_id)), new Set(parents.keys()), parentOf);
+  const replacements = new Map(changes.map(({ row, s }) => [row.id, s]));
+  const completeBefore = withEstimates(ledger.map(asUsage), catalog);
+  const completeAfter = withEstimates(
+    ledger.map((row) => ({ ...asUsage(row), ...replacements.get(row.id) })),
+    catalog,
+  );
+  const totals = new Map();
+  ledger.forEach((row, i) => {
+    const owner = owners.get(row.job_id);
+    if (!owner || row.cost_usd != null) return;
+    const total = totals.get(owner) || { before: 0, after: 0, turns: 0, incomplete: false, changed: false };
+    total.changed ||= replacements.has(row.id);
+    if (!completeBefore[i].costEstimated || !completeAfter[i].costEstimated) total.incomplete = true;
+    else {
+      total.before += completeBefore[i].costUsd;
+      total.after += completeAfter[i].costUsd;
+      total.turns++;
+    }
+    totals.set(owner, total);
+  });
+  const absorbed = stored.filter(({ id }) => {
+    const total = totals.get(id);
+    const meta = parents.get(id);
+    return (
+      total?.changed &&
+      !total.incomplete &&
+      typeof meta?.absorbedEstimatedCostUsd === 'number' &&
+      total.turns === meta.absorbedEstimatedTurns &&
+      !meta.absorbedUnpricedTurns &&
+      Math.abs(total.before - meta.absorbedEstimatedCostUsd) <= 0.0001
+    );
+  });
+  console.log({
+    absorbedReconciled: absorbed.length,
+    absorbedUnproven: [...totals.values()].filter((t) => t.changed).length - absorbed.length,
+  });
+  if (apply && changes.length) {
+    // Originals and attribution survive reruns; snapshots cover only changed rows.
+    for (const { row, s } of changes) {
+      await connection.query('INSERT IGNORE INTO turn_usage_context_fix_20261008 VALUES (?, ?, ?, ?)', [
+        row.id,
+        JSON.stringify(row),
+        s.file,
+        Date.now(),
+      ]);
+      const [result] = await connection.query(
+        `UPDATE turn_usage
+          SET long_input_tokens=?, long_cached_input_tokens=?, long_output_tokens=?
+          WHERE id=? AND input_tokens=? AND cached_input_tokens=? AND output_tokens=? AND cost_usd IS NULL`,
+        [
+          s.longInputTokens,
+          s.longCachedInputTokens,
+          s.longOutputTokens,
+          row.id,
+          row.input_tokens,
+          row.cached_input_tokens,
+          row.output_tokens,
+        ],
+      );
+      if (result.affectedRows !== 1) throw new Error(`Concurrent change on row ${row.id}`);
+    }
+    for (const { id, meta } of absorbed) {
+      const [result] = await connection.query(
+        `UPDATE jobs SET meta = JSON_SET(meta, '$.absorbedEstimatedCostUsd', ?)
+           WHERE id = ? AND meta = ?`,
+        [totals.get(id).after, id, meta],
+      );
+      if (result.affectedRows !== 1) throw new Error(`Concurrent change on absorbed snapshot ${id}`);
+    }
+  }
+  if (apply) await connection.commit();
+} catch (error) {
+  if (apply) await connection.rollback();
+  throw error;
 } finally {
   await connection.end();
 }
