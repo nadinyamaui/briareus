@@ -1119,7 +1119,7 @@ Read WhatsApp history, newest first. Needs `admin`.
 | `limit`  | `integer` | Page size, 1–100; 50 by default                                   |
 | `offset` | `integer` | The previous page’s nextOffset, 0–100000; omit for the first page |
 
-**Returns** `{ messages: WhatsAppMessage[], nextOffset: integer? }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Offset pagination can overlap when new messages arrive; deduplicate by ID. null nextOffset ends pagination.
+**Returns** `{ messages: WhatsAppMessage[], nextOffset: integer? }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Offset pagination can overlap when new messages arrive; deduplicate by ID. nextOffset advances by the requested limit even for short or empty pages, because WAHA filters protocol records after paging. There is no reliable end-of-history indicator; null nextOffset marks the supported offset bound.
 
 ### `POST /whatsapp/accounts/{id}/conversations/{chat}/messages`
 

@@ -35,6 +35,16 @@ async function serve(app) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
+async function mediaService(fileHandler, timeoutMs = 150) {
+  const upstream = express();
+  upstream.get('/api/default/chats/:chat/messages/:message', (_req, res) =>
+    res.json({ hasMedia: true, media: { url: '/api/files/default/test' } }),
+  );
+  upstream.get('/api/files/default/test', fileHandler);
+  const url = await serve(upstream);
+  return createWhatsAppService({ config: () => ({ url, apiKey: KEY }), timeoutMs });
+}
+
 async function setup() {
   const calls = [];
   let current = null;
@@ -168,7 +178,7 @@ describe('the WhatsApp core inbox', () => {
     const history = await (
       await ctx.request(`/default/conversations/${CHAT}/messages?limit=2&offset=1`)
     ).json();
-    expect(history.nextOffset).toBeNull();
+    expect(history.nextOffset).toBe(3);
     expect(history.messages[0]).toMatchObject({ id: MID, text: 'Hello', ack: 3, media: null });
     expect(history.messages[0]).not.toHaveProperty('_data');
     const send = await ctx.request(`/default/conversations/${CHAT}/messages`, {
@@ -280,6 +290,97 @@ describe('the WhatsApp core inbox', () => {
       expect((await ctx.request(path)).status).toBe(502);
       expect(ctx.calls.at(-1).path).toBe(`/api/default/chats/${CHAT}/messages/${MID}`);
     }
+  });
+
+  it('advances history by raw WAHA windows even after short or empty filtered pages', async () => {
+    const history = [RAW_MESSAGE, null, null, null, { ...RAW_MESSAGE, id: 'older' }];
+    const fetcher = vi.fn(async (url) => {
+      const query = new URL(url).searchParams;
+      const offset = +query.get('offset');
+      const limit = +query.get('limit');
+      return Response.json(history.slice(offset, offset + limit).filter(Boolean));
+    });
+    const service = createWhatsAppService({
+      config: () => ({ url: 'http://waha', apiKey: KEY }),
+      fetcher,
+    });
+    const first = await service.messages('default', CHAT, { limit: '2' });
+    expect(first.messages.map((m) => m.id)).toEqual([MID]);
+    expect(first.nextOffset).toBe(2);
+    const empty = await service.messages('default', CHAT, { limit: '2', offset: String(first.nextOffset) });
+    expect(empty.messages).toEqual([]);
+    expect(empty.nextOffset).toBe(4);
+    const older = await service.messages('default', CHAT, { limit: '2', offset: String(empty.nextOffset) });
+    expect(older.messages.map((m) => m.id)).toEqual(['older']);
+    expect(older.nextOffset).toBe(6);
+    expect((await service.messages('default', CHAT, { offset: '100000' })).nextOffset).toBeNull();
+  });
+
+  it('streams a healthy attachment longer than the header deadline', async () => {
+    const service = await mediaService((_req, res) => {
+      res.type('audio/ogg').write('start');
+      let chunks = 0;
+      const timer = setInterval(() => {
+        res.write('.');
+        if (++chunks === 6) res.end('end');
+      }, 60);
+      res.on('close', () => clearInterval(timer));
+    }, 250);
+    const response = await service.media('default', CHAT, MID);
+    expect(response.headers.get('content-type')).toContain('audio/ogg');
+    expect(await response.text()).toBe('start......end');
+  });
+
+  it('does not count consumer backpressure as an upstream stall', async () => {
+    let upstream;
+    const service = await mediaService((_req, res) => {
+      upstream = res;
+      res.write('start');
+    });
+    const response = await service.media('default', CHAT, MID);
+    const reader = response.body.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe('start');
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    upstream.end('end');
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe('end');
+    expect((await reader.read()).done).toBe(true);
+  });
+
+  it('still bounds attachment headers and stalled upstream body reads', async () => {
+    const noHeaders = await mediaService(() => {});
+    await expect(noHeaders.media('default', CHAT, MID)).rejects.toMatchObject({ status: 502 });
+    const closed = Promise.withResolvers();
+    const stalled = await mediaService((_req, res) => {
+      res.write('start');
+      res.on('close', () => closed.resolve());
+    });
+    const response = await stalled.media('default', CHAT, MID);
+    await expect(response.text()).rejects.toThrow();
+    await closed.promise;
+  });
+
+  it.each(['metadata', 'file'])('forwards disconnect cancellation during the %s fetch', async (phase) => {
+    const reached = Promise.withResolvers();
+    const closed = Promise.withResolvers();
+    const upstream = express();
+    upstream.use((req, res) => {
+      if (phase === 'metadata' || req.path.startsWith('/api/files/')) {
+        res.on('close', () => closed.resolve());
+        if (phase === 'file') res.write('start');
+        reached.resolve();
+      } else res.json({ hasMedia: true, media: { url: '/api/files/default/test' } });
+    });
+    const url = await serve(upstream);
+    const service = createWhatsAppService({ config: () => ({ url, apiKey: KEY }) });
+    const controller = new AbortController();
+    const download = service.media('default', CHAT, MID, controller.signal);
+    // Attach the rejection handler before cancelling the in-flight request.
+    const result = phase === 'file' ? (await download).text() : download;
+    const rejected = expect(result).rejects.toThrow();
+    await reached.promise;
+    controller.abort();
+    await rejected;
+    await closed.promise;
   });
 
   it('reconnects a stopped account and deduplicates concurrent starts', async () => {

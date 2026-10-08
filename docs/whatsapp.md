@@ -91,8 +91,11 @@ lastMessage }`; `unreadCount` can be null when WAHA omits it.
 Refresh connection status, chats and the visible chat’s first history page
 every five seconds while the inbox is visible, and reload after reconnecting.
 Merge refreshed messages by `id`. History and chat pagination accept `limit`
-(1–100) and `offset` (0–100000); `nextOffset: null` ends pagination. New arrivals
-can shift offsets, so discard cached page positions on a full refresh.
+(1–100) and `offset` (0–100000); `nextOffset: null` ends pagination. Message
+history advances by the requested limit even for short or empty pages, because
+WAHA can filter out protocol records after paging. It has no reliable end-of-history
+indicator; message `nextOffset` becomes null at the supported offset bound.
+New arrivals can shift offsets, so discard cached page positions on a full refresh.
 
 Never automatically retry a failed send: WAHA may have accepted the message
 before a connection or receipt failed. Check the conversation first. Errors
