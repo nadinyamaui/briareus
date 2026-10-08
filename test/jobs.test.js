@@ -1171,6 +1171,11 @@ describe('spawnWorkerSession', () => {
         children[0].emit('close', 0);
         await vi.waitFor(() => expect(children).toHaveLength(2));
         expect(job.providerId).toBe(3);
+        expect(job.recoveryTurn.runtime).toMatchObject({
+          providerId: 3,
+          model: job.model,
+          effort: job.effort,
+        });
         expect(job.chats[3]).toEqual({ sessionId: 'bg-sid', started: true });
         expect(transferClaudeSession).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -10971,6 +10976,71 @@ describe('auto-compaction while the context probe is out', () => {
     }
   });
 
+  it('recovers only outstanding live messages after the original request was answered', async () => {
+    job.orchestrator = true;
+    job.autoCompact = false;
+    const emit = (child, ...messages) => {
+      for (const message of messages) child.stdout.write(JSON.stringify(message) + '\n');
+    };
+    const replay = (content) => ({ type: 'user', message: { role: 'user', content }, isReplay: true });
+    const result = (text) => ({ type: 'result', subtype: 'success', result: text });
+    try {
+      sendDevMessage(job.id, 'Publish the original request');
+      emit(children[0], replay('Publish the original request'));
+      sendDevMessage(job.id, 'Update the resource');
+      sendDevMessage(job.id, 'Then verify it');
+      emit(children[0], result('Published'));
+      await vi.waitFor(() => expect(job.recoveryTurn.completed).toBe(true));
+      children[0].pid = 123456789;
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+        children[0].emit('close', null, 'SIGKILL');
+        return true;
+      });
+      let snapshot;
+      try {
+        await stopAllJobProcesses();
+        await flushJobs();
+        snapshot = structuredClone(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0]);
+      } finally {
+        kill.mockRestore();
+        setDraining(false);
+      }
+      expect(snapshot.recoveryTurn).toMatchObject({ completed: true, liveCompleted: true });
+      expect(snapshot.recoveryQueue.map((entry) => entry.prompt)).toEqual([
+        'Update the resource',
+        'Then verify it',
+      ]);
+      for (const session of devSessionRecords()) session.restartPending = false;
+      state.stored = [snapshot];
+      const writes = [];
+      const realSpawn = spawn.getMockImplementation();
+      spawn.mockImplementation((cmd, ...args) => {
+        const child = realSpawn(cmd, ...args);
+        if (cmd === '/mock/agent')
+          child.stdin.on('data', (chunk) => {
+            for (const line of chunk.toString().split('\n').filter(Boolean))
+              writes.push(JSON.parse(line).message.content);
+          });
+        return child;
+      });
+      await initJobs();
+      job = getJob(job.id);
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(writes).toEqual(['Update the resource', 'Then verify it']);
+      emit(children[1], replay('Update the resource\nThen verify it'), result('Updated and verified'));
+      children[1].emit('close', 0);
+      await vi.waitFor(() => expect(children).toHaveLength(3));
+      expect(children[2].args).toContain('/context');
+      answer(children[2], report('30k'));
+      await settled();
+      await flushJobs();
+      expect(children).toHaveLength(3);
+    } finally {
+      setDraining(false);
+    }
+  });
+
   it.each([0, 1])('saves the exit outcome before waiting for streamed accounting (code %s)', async (code) => {
     let land;
     recordTurnUsage.mockImplementationOnce(() => new Promise((resolve) => (land = resolve)));
@@ -13289,6 +13359,47 @@ describe('automatic recovery after a server restart', () => {
     await vi.waitFor(() => expect(saved.status).toBe('closed'));
     expect(children).toHaveLength(1);
   });
+
+  it.each([false, true])(
+    'keeps the saved QA runtime when step settings change before recovery (awaiting answer: %s)',
+    async (awaitingAnswer) => {
+      const saved = row({
+        qaBranch: 'feature',
+        awaitingAnswer,
+        autoClose: true,
+        recoveryTurn: {
+          prompt: 'Continue the in-flight QA',
+          opts: { step: 'testRun' },
+          phase: 'testRun',
+          completed: false,
+          runtime: { providerId: 2, model: 'original-model', effort: 'high' },
+        },
+      });
+      stepRuntime.mockReturnValue({ providerId: 3, model: 'new-model', effort: 'low' });
+      const parent = row({
+        status: 'idle',
+        recoveryTurn: null,
+        qaLoop: { running: true, sessionId: saved.id },
+      });
+      saved.qaParentId = parent.id;
+      state.stored = [parent, saved];
+      await initJobs();
+      resumeRestartedSessions();
+      if (awaitingAnswer) {
+        await vi.waitFor(() => expect(saved.status).toBe('idle'));
+        expect(children).toHaveLength(0);
+        sendDevMessage(saved.id, 'Use the original QA plan');
+      }
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(children[0].args.slice(0, 3)).toEqual(['exec', 'resume', 'saved-thread']);
+      expect(children[0].args[children[0].args.indexOf('-m') + 1]).toBe('original-model');
+      expect(children[0].args.join(' ')).toContain('model_reasoning_effort="high"');
+      expect(stepRuntime).not.toHaveBeenCalled();
+      expect(saved.recoveryTurn.runtime).toEqual({ providerId: 2, model: 'original-model', effort: 'high' });
+      finish(children[0]);
+      await vi.waitFor(() => expect(saved.status).toBe('closed'));
+    },
+  );
 
   it('recovers a legacy running session from its stored user prompt', async () => {
     const saved = row({ recoveryTurn: undefined });
