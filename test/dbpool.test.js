@@ -21,6 +21,7 @@ const state = vi.hoisted(() => ({
   files: new Set(), // what fs.existsSync says yes to
   dumpError: null, // makes the dump read stream fail
   restoreSpawn: null,
+  psqlSpawn: null,
   stdinError: null, // makes the write into mysql's stdin fail
 }));
 
@@ -82,6 +83,7 @@ vi.mock('node:child_process', () => ({
   spawn: (bin, args, opts) => {
     state.psqlCalls.push({ bin, args, env: opts.env, ...(opts.timeout ? { timeout: opts.timeout } : {}) });
     if (bin === 'mysql' && state.restoreSpawn) return state.restoreSpawn(opts);
+    if (bin === 'psql' && state.psqlSpawn) return state.psqlSpawn(args, opts);
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -184,6 +186,7 @@ beforeEach(() => {
   state.dumpError = null;
   state.stdinError = null;
   state.restoreSpawn = null;
+  state.psqlSpawn = null;
   state.files = new Set();
   state.servers = [];
   state.otherProjects = [];
@@ -192,6 +195,65 @@ beforeEach(() => {
 });
 
 describe('database preparation shutdown', () => {
+  it.each(['lookup', 'database', 'extension'])(
+    'awaits the PostgreSQL %s process and starts no later DDL during shutdown',
+    async (stage) => {
+      state.project = {
+        dbPoolEnabled: true,
+        dbPoolDatabase: 'app',
+        dbExtensions: ['pg_trgm', 'vector'],
+      };
+      state.servers = [server({ engine: 'pgsql', port: 5432 })];
+      let active;
+      state.psqlSpawn = (args) => {
+        const child = new EventEmitter();
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        child.kill = vi.fn();
+        const sql = args.at(-1);
+        if (
+          (stage === 'lookup' && sql.startsWith('SELECT')) ||
+          (stage === 'database' && sql.startsWith('CREATE DATABASE')) ||
+          (stage === 'extension' && sql.includes('pg_trgm'))
+        )
+          active = child;
+        else setTimeout(() => child.emit('close', 0), 0);
+        return child;
+      };
+      const session = { ...job(), repo: 'acme/app' };
+      let settled = false;
+      acquireInstance(session, session.repo, vi.fn()).finally(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => expect(active).toBeDefined());
+      const callCount = state.psqlCalls.length;
+      let stopped = false;
+      const stopping = stopDatabaseProcesses().then(() => {
+        stopped = true;
+      });
+      await Promise.resolve();
+      expect(active.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(stopped).toBe(false);
+      // A successful exit can race with the kill: its continuation must still
+      // suspend before creating a database or the next extension.
+      active.emit('close', 0);
+      await stopping;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(state.psqlCalls).toHaveLength(callCount);
+      expect(session).toMatchObject({ dbServerId: 1, dbPreparing: true });
+      expect(claimHolder(1)).toBe(session.id);
+      expect(settled).toBe(false);
+      const recovered = { ...session };
+      _resetForTests();
+      await releaseInstance(session);
+      state.psqlSpawn = null;
+      reclaimInstance(recovered, 1);
+      await acquireInstance(recovered, recovered.repo, vi.fn());
+      expect(recovered.dbPreparing).toBe(false);
+      await releaseInstance(recovered);
+    },
+  );
+
   it('retains a preparing claim until a concurrent close finishes database cleanup', async () => {
     let allowQuery;
     const query = new Promise((resolve) => {
@@ -218,6 +280,52 @@ describe('database preparation shutdown', () => {
     expect(claimHolder(1)).toBeNull();
     expect(session.dbPreparing).toBe(false);
     expect(state.psqlCalls).toEqual([]);
+  });
+
+  it('kills and awaits a real PostgreSQL extension process before preparation can recover', async () => {
+    const { spawn: actualSpawn } = await vi.importActual('node:child_process');
+    const { default: actualFs } = await vi.importActual('node:fs');
+    const { default: os } = await vi.importActual('node:os');
+    const { default: path } = await vi.importActual('node:path');
+    const root = actualFs.mkdtempSync(path.join(os.tmpdir(), 'db-psql-shutdown-'));
+    const ready = path.join(root, 'ready');
+    const late = path.join(root, 'late');
+    let ddl;
+    state.project = {
+      dbPoolEnabled: true,
+      dbPoolDatabase: 'app',
+      dbExtensions: ['pg_trgm', 'vector'],
+    };
+    state.servers = [server({ engine: 'pgsql', port: 5432 })];
+    state.psqlSpawn = (args, opts) => {
+      const sql = args.at(-1);
+      const script = sql.includes('pg_trgm')
+        ? `require('fs').writeFileSync(${JSON.stringify(ready)}, 'ready'); setTimeout(() => require('fs').writeFileSync(${JSON.stringify(late)}, 'late DDL'), 800); setInterval(() => {}, 1000);`
+        : 'console.log(1)';
+      const child = actualSpawn(process.execPath, ['-e', script], opts);
+      if (sql.includes('pg_trgm')) ddl = child;
+      return child;
+    };
+    const session = { ...job(), repo: 'acme/app' };
+    let settled = false;
+    acquireInstance(session, session.repo, vi.fn()).finally(() => {
+      settled = true;
+    });
+    try {
+      await vi.waitFor(() => expect(actualFs.existsSync(ready)).toBe(true));
+      await stopDatabaseProcesses();
+      expect(ddl.signalCode).toBe('SIGKILL');
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      expect(actualFs.existsSync(late)).toBe(false);
+      expect(state.psqlCalls.some((c) => c.args.at(-1).includes('vector'))).toBe(false);
+      expect(session).toMatchObject({ dbServerId: 1, dbPreparing: true });
+      expect(settled).toBe(false);
+    } finally {
+      ddl?.kill('SIGKILL');
+      _resetForTests();
+      await releaseInstance(session);
+      actualFs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('kills and awaits a real seed importer, preserving the incomplete claim for recovery', async () => {

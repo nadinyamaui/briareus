@@ -12848,45 +12848,59 @@ describe('automatic recovery after a server restart', () => {
     },
   );
 
-  it('selects the launch branch when recovering local preparation that had not acquired a checkout', async () => {
-    const checkout = path.join(root, 'checkout');
-    fs.mkdirSync(checkout);
-    const git = (...args) => {
-      const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
-      expect(result.status, result.stderr).toBe(0);
-    };
-    git('init', '-b', 'launch');
-    git(
-      '-c',
-      'user.name=Test',
-      '-c',
-      'user.email=test@example.com',
-      'commit',
-      '--allow-empty',
-      '-m',
-      'fixture',
-    );
-    git('checkout', '-b', 'current');
-    state.projects[0].localDir = checkout;
-    const child = row({
-      status: 'preparing',
-      orchestrator: false,
-      local: true,
-      workDir: null,
-      startBranch: 'launch',
-      turns: 0,
-      chatStarted: false,
-      chats: {},
-      recoveryTurn: { prompt: 'First request', opts: {}, phase: 'initial', completed: false },
-    });
-    state.stored = [child];
-    await initJobs();
-    resumeRestartedSessions();
-    await vi.waitFor(() => expect(children, child.error).toHaveLength(1));
-    finish(children[0]);
-    await vi.waitFor(() => expect(child.status, child.error).toBe('idle'));
-    expect(child.branch).toBe('launch');
-  });
+  it.each(['unacquired', 'legacy', 'incomplete', 'completed'])(
+    'recovers the launch branch selection of %s local preparation',
+    async (preparation) => {
+      const checkout = path.join(root, 'checkout');
+      fs.mkdirSync(checkout);
+      const git = (...args) => {
+        const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
+        expect(result.status, result.stderr).toBe(0);
+      };
+      git('init', '-b', 'launch');
+      git(
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'fixture',
+      );
+      git('checkout', '-b', 'current');
+      state.projects[0].localDir = checkout;
+      const child = row({
+        status: 'preparing',
+        orchestrator: false,
+        local: true,
+        workDir: preparation === 'unacquired' ? null : checkout,
+        ...(preparation === 'incomplete' || preparation === 'completed'
+          ? { workspacePrepared: preparation === 'completed' }
+          : {}),
+        startBranch: 'launch',
+        turns: 0,
+        chatStarted: false,
+        chats: {},
+        recoveryTurn: { prompt: 'First request', opts: {}, phase: 'initial', completed: false },
+      });
+      state.stored = [child];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(children, child.error).toHaveLength(1));
+      finish(children[0]);
+      await vi.waitFor(() => expect(child.status, child.error).toBe('idle'));
+      const expected = preparation === 'completed' ? 'current' : 'launch';
+      expect(child.branch).toBe(expected);
+      expect(
+        spawnSync('git', ['-C', checkout, 'branch', '--show-current'], { encoding: 'utf8' }).stdout.trim(),
+      ).toBe(expected);
+      expect(child.workspacePrepared).toBe(true);
+      await vi.waitFor(() =>
+        expect(saveJob.mock.calls.findLast(([j]) => j.id === child.id)?.[0].workspacePrepared).toBe(true),
+      );
+    },
+  );
 
   it.each(['review', 'fix', 'qa'])(
     'notifies the %s parent after automatic reopen resource cleanup fails',
