@@ -10971,6 +10971,40 @@ describe('auto-compaction while the context probe is out', () => {
     }
   });
 
+  it.each([0, 1])('saves the exit outcome before waiting for streamed accounting (code %s)', async (code) => {
+    let land;
+    recordTurnUsage.mockImplementationOnce(() => new Promise((resolve) => (land = resolve)));
+    try {
+      sendDevMessage(job.id, 'Go');
+      children[0].stdout.write(
+        JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: 'Done',
+          total_cost_usd: 0.1,
+        }) + '\n',
+      );
+      await vi.waitFor(() => expect(land).toBeTypeOf('function'));
+      children[0].emit('close', code);
+      expect(job.proc).toBeNull();
+      await stopAllJobProcesses();
+      await flushJobs();
+      expect(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0].recoveryTurn).toMatchObject({
+        prompt: 'Go',
+        completed: code === 0,
+      });
+      land(true);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      answer(children[1], report('30k'));
+      await flushJobs();
+      expect(job.recoveryTurn.completed).toBe(code === 0);
+    } finally {
+      land?.(true);
+      setDraining(false);
+    }
+  });
+
   it('does not spawn automatic compaction after shutdown while a context probe is pending', async () => {
     sendDevMessage(job.id, 'Go');
     await endTurn();
@@ -12359,6 +12393,120 @@ describe('automatic recovery after a server restart', () => {
     await vi.waitFor(() => expect(saved.status).toBe('idle'));
     expect(children).toHaveLength(1);
   });
+
+  it('persists a successful provider exit while close-time accounting is still pending', async () => {
+    const saved = row({ status: 'idle' });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+    let land;
+    recordTurnUsage.mockImplementationOnce(() => new Promise((resolve) => (land = resolve)));
+    let snapshot;
+    try {
+      sendDevMessage(saved.id, 'Publish the completed work');
+      finish(children[0]);
+      await vi.waitFor(() => expect(land).toBeTypeOf('function'));
+      expect(saved.proc).toBeNull();
+      await stopAllJobProcesses();
+      // Other lifecycle fixtures leave context probes pending in this registry;
+      // await this row's persistence rather than the global shutdown flush.
+      await vi.waitFor(() => {
+        snapshot = structuredClone(saveJob.mock.calls.findLast(([j]) => j.id === saved.id)?.[0]);
+        expect(snapshot?.recoveryTurn.completed).toBe(true);
+      });
+      expect(snapshot.recoveryTurn).toMatchObject({
+        prompt: 'Publish the completed work',
+        completed: true,
+      });
+    } finally {
+      land?.();
+      await new Promise((resolve) => setImmediate(resolve));
+      setDraining(false);
+    }
+    state.stored = [snapshot];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(getJob(saved.id).status).toBe('idle'));
+    expect(children).toHaveLength(1);
+  });
+
+  it.each(['current', 'stale', 'replaced', 'asking'])(
+    'handles failed deferred QA execution after an answer (%s child)',
+    async (tracking) => {
+      const parent = row({ status: 'idle', recoveryTurn: null });
+      const child = row({
+        awaitingAnswer: true,
+        autoClose: true,
+        qaBranch: 'feature',
+        qaParentId: parent.id,
+        recoveryTurn: { prompt: 'Write the sheet', phase: 'initial', completed: true },
+      });
+      parent.qaLoop = { running: true, sessionId: child.id };
+      state.stored = [parent, child];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(child.status).toBe('idle'));
+      if (tracking === 'stale') {
+        parent.qaLoop.sessionId = null;
+        parent.qaLoop.staleSessionId = child.id;
+      } else if (tracking === 'replaced') parent.qaLoop.sessionId = 'replacement-qa';
+      let release;
+      const releases = releaseInstance.mock.calls.length;
+      if (tracking === 'current' || tracking === 'stale') {
+        releaseInstance.mockImplementationOnce(() => new Promise((resolve) => (release = resolve)));
+      }
+      try {
+        sendDevMessage(child.id, 'The operator answer');
+        finish(children[0]);
+        await vi.waitFor(() => expect(children).toHaveLength(2));
+        expect(child.recoveryTurn.phase).toBe('testRun');
+        if (tracking === 'asking') {
+          children[1].stdout.write(
+            JSON.stringify({
+              type: 'item.completed',
+              item: { type: 'agent_message', text: '<ask-user>Retry QA?</ask-user>' },
+            }) + '\n',
+          );
+        }
+        children[1].emit('close', 1);
+        if (tracking === 'current' || tracking === 'stale') {
+          await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+          expect(child.status).toBe('failed');
+          expect(parent.qaLoop.running).toBe(true);
+          expect(parent.qaLoop.failure).toBeUndefined();
+          expect(child.workDir).toBeTruthy();
+          expect(() => reopenDevSession(child.id)).toThrow(/finish.*cleanup/);
+          expect(() => sendDevMessage(child.id, 'Retry')).toThrow(/finish.*cleanup/);
+          // A parent settling during cleanup must not retire this child early.
+          sendDevMessage(parent.id, 'Report progress');
+          finish(children[2]);
+          await vi.waitFor(() => expect(parent.status).toBe('idle'));
+          expect(parent.qaLoop.running).toBe(true);
+          release();
+          await vi.waitFor(() => expect(parent.qaLoop.running).toBe(false));
+          expect(releaseInstance.mock.calls.slice(releases)).toEqual([[child]]);
+          expect(child.qaLoopDone).not.toBe(true);
+          if (tracking === 'current') {
+            expect(parent.qaLoop.failure).toMatchObject({ kind: 'failed', reason: child.error });
+          } else expect(parent.qaLoop.staleSessionId).toBeNull();
+        } else {
+          await vi.waitFor(() => expect(child.status).toBe('idle'));
+          await new Promise((resolve) => setImmediate(resolve));
+          expect(releaseInstance.mock.calls).toHaveLength(releases);
+          expect(parent.qaLoop.running).toBe(true);
+          expect(parent.qaLoop.failure).toBeUndefined();
+          if (tracking === 'asking') {
+            expect(child.awaitingAnswer).toBe(true);
+            expect(parent.events.some((e) => /QA session stopped to ask/.test(e.text || ''))).toBe(true);
+          } else expect(parent.qaLoop.sessionId).toBe('replacement-qa');
+        }
+      } finally {
+        release?.();
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    },
+  );
 
   it.each([true, false])('settles a published standalone review (findings: %s)', async (hasFindings) => {
     const saved = row({
