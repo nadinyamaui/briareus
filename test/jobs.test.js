@@ -10348,6 +10348,86 @@ describe('Codex turn usage', () => {
     },
   );
 
+  it.each(['loopParentId', 'qaParentId', 'loopFixParentId'])(
+    'preserves closing state after canceled follow-up accounting (%s)',
+    async (parentField) => {
+      const job = getJob('codex-usage');
+      job[parentField] = 'missing-parent';
+      job.autoClose = true;
+      let finishAccounting;
+      recordTurnUsage.mockImplementationOnce(() => new Promise((resolve) => (finishAccounting = resolve)));
+      let finishDrop;
+      dropSessionDatabase.mockClear();
+      dropSessionDatabase.mockImplementationOnce(() => new Promise((resolve) => (finishDrop = resolve)));
+      releaseInstance.mockClear();
+      deleteJob.mockClear();
+      try {
+        sendDevMessage(job.id, 'Answer the question');
+        const closing = closeDevSession(job.id);
+        children.at(-1).emit('close', 0);
+        await vi.waitFor(() => expect(finishAccounting).toBeTypeOf('function'));
+        finishAccounting();
+        await vi.waitFor(() => expect(finishDrop).toBeTypeOf('function'));
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(job.closing).toBe(true);
+        expect(job.status).toBe('running');
+        expect(job.loopReviewDone).toBeFalsy();
+        expect(job.qaLoopDone).toBeFalsy();
+        expect(job.loopFixDone).toBeFalsy();
+        expect(deleteJob).not.toHaveBeenCalled();
+        finishDrop();
+        await closing;
+        expect(releaseInstance).toHaveBeenCalledOnce();
+        expect(deleteJob).toHaveBeenCalledOnce();
+        expect(
+          job.events.filter((event) => event.kind === 'status' && event.status === 'closed'),
+        ).toHaveLength(1);
+      } finally {
+        finishDrop?.();
+      }
+    },
+  );
+
+  it.each(['loopParentId', 'qaParentId', 'loopFixParentId'])(
+    'does not complete a stopped follow-up turn (%s)',
+    async (parentField) => {
+      const job = getJob('codex-usage');
+      job[parentField] = 'missing-parent';
+      job.autoClose = true;
+      deleteJob.mockClear();
+      sendDevMessage(job.id, 'Answer the question');
+      cancelDevTurn(job.id);
+      children.at(-1).emit('close', 0);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      expect(job.turnCanceled).toBe(true);
+      expect(job.loopReviewDone).toBeFalsy();
+      expect(job.qaLoopDone).toBeFalsy();
+      expect(job.loopFixDone).toBeFalsy();
+      expect(deleteJob).not.toHaveBeenCalled();
+      await closeDevSession(job.id);
+    },
+  );
+
+  it('drains accepted corrections after Stop cancels a follow-up turn', async () => {
+    const job = getJob('codex-usage');
+    sendDevMessage(job.id, 'Start the next change');
+    expect(sendDevMessage(job.id, 'Use the corrected approach').queued).toEqual([
+      { text: 'Use the corrected approach' },
+    ]);
+    cancelDevTurn(job.id);
+    children[0].emit('close', null);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(job.status).toBe('running');
+    expect(publicJob(job).queued).toBeUndefined();
+    expect(job.events.filter((event) => event.kind === 'user').at(-1).text).toBe(
+      'Use the corrected approach',
+    );
+    children[1].emit('close', 0);
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    expect(job.turnCanceled).toBe(false);
+    await closeDevSession(job.id);
+  });
+
   it('drains accepted corrections after Stop cancels the initial turn', async () => {
     const local = fs.mkdtempSync(path.join(home, 'first-turn-correction-'));
     fs.mkdirSync(path.join(local, '.git'));
