@@ -189,7 +189,7 @@ vi.mock('../lib/usage.js', () => ({
   recordTurnUsage: vi.fn(),
 }));
 
-import { deleteJob, jobEventMaxSeqs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
+import { deleteJob, jobEventMaxSeqs, loadJobs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
 import { acquireInstance, reclaimInstance, releaseInstance, dropSessionDatabase } from '../lib/dbpool.js';
 import {
@@ -10976,6 +10976,38 @@ describe('auto-compaction while the context probe is out', () => {
     }
   });
 
+  it('does not resend a final live answer when shutdown precedes provider exit', async () => {
+    job.orchestrator = true;
+    job.autoCompact = false;
+    sendDevMessage(job.id, 'Publish the original request');
+    children[0].stdout.write(
+      JSON.stringify({ type: 'result', subtype: 'success', result: 'Published' }) + '\n',
+    );
+    await vi.waitFor(() => expect(children[0].stdin.writableEnded).toBe(true));
+    children[0].pid = 123456789;
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      children[0].emit('close', null, 'SIGKILL');
+      return true;
+    });
+    let snapshot;
+    try {
+      await stopAllJobProcesses();
+      await flushJobs();
+      snapshot = structuredClone(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0]);
+    } finally {
+      kill.mockRestore();
+      setDraining(false);
+    }
+    expect(snapshot.recoveryTurn).toMatchObject({ completed: true, liveCompleted: true });
+    expect(snapshot.recoveryQueue).toEqual([]);
+    for (const session of devSessionRecords()) session.restartPending = false;
+    state.stored = [snapshot];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(getJob(job.id).status).toBe('idle'));
+    expect(children).toHaveLength(1);
+  });
+
   it('recovers only outstanding live messages after the original request was answered', async () => {
     job.orchestrator = true;
     job.autoCompact = false;
@@ -13426,6 +13458,66 @@ describe('automatic recovery after a server restart', () => {
     await vi.waitFor(() => expect(children).toHaveLength(1));
     finish(children[0]);
     await vi.waitFor(() => expect(saved.status).toBe('idle'));
+  });
+
+  it('reclaims an older owner beyond 2000 rows before allocating a new database', async () => {
+    const checkout = path.join(root, 'checkout');
+    fs.mkdirSync(checkout);
+    spawnSync('git', ['-C', checkout, 'init', '-b', 'feature'], { stdio: 'ignore' });
+    spawnSync(
+      'git',
+      [
+        '-C',
+        checkout,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'Initial',
+      ],
+      { stdio: 'ignore' },
+    );
+    spawnSync('git', ['-C', checkout, 'remote', 'add', 'origin', checkout], { stdio: 'ignore' });
+    const newer = row({ orchestrator: false, workDir: checkout, branch: 'feature', workspacePrepared: true });
+    const owner = row({ status: 'idle', dbServerId: 7 });
+    state.stored = [newer, ...Array.from({ length: 1999 }, () => row({ status: 'closed' })), owner];
+    loadJobs.mockImplementationOnce(async (limit) =>
+      limit == null ? state.stored : state.stored.slice(0, limit),
+    );
+    const claims = new Map();
+    const data = new Map([
+      [7, 'unfinished session data'],
+      [8, 'seed'],
+    ]);
+    reclaimInstance.mockImplementation((job, serverId) => {
+      if (serverId != null) {
+        claims.set(serverId, job.id);
+        job.dbServerId = serverId;
+      }
+    });
+    acquireInstance.mockImplementation(async (job) => {
+      if (job.dbServerId != null) return job.dbServerId;
+      const free = [7, 8].find((id) => !claims.has(id));
+      claims.set(free, job.id);
+      data.set(free, 'restored seed');
+      job.dbServerId = free;
+      return free;
+    });
+    try {
+      await initJobs();
+      expect(resumeRestartedSessions()).toBe(2);
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(claims.get(7)).toBe(owner.id);
+      expect(newer.dbServerId).toBe(8);
+      expect(data.get(7)).toBe('unfinished session data');
+      finish(children[0]);
+      await vi.waitFor(() => expect(newer.status).toBe('idle'));
+    } finally {
+      acquireInstance.mockReset();
+    }
   });
 
   it('reports an unavailable original database without blocking other sessions', async () => {
