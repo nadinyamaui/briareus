@@ -7,6 +7,8 @@ import { forgeRoutes } from './lib/forge-routes.js';
 import { createEnvoyerService } from './lib/envoyer.js';
 import { envoyerRoutes } from './lib/envoyer-routes.js';
 import { createForgeAccounts } from './lib/forge-accounts.js';
+import { createMailService } from './lib/mail.js';
+import { mailRoutes, mailCallbackRoutes } from './lib/mail-routes.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
 import { estimateCosts } from './lib/prices.js';
 import { previewFeedbackRoutes } from './lib/preview-feedback.js';
@@ -284,6 +286,12 @@ app.get('/healthz', async (req, res) => {
   const db = await dbHealthy();
   res.status(db ? 200 : 503).json({ ok: db, db, uptime: Math.floor(process.uptime()) });
 });
+
+// Where a mailbox's sign-in ends when its redirect URI is this server's own
+// (lib/mail-routes.js). The mail service is created here for it, and the
+// API's mail routes below share it.
+const mailService = createMailService();
+app.use(mailCallbackRoutes({ service: mailService }));
 
 // The scenario videos a test run records. The run copies each .webm here, and
 // a client fetches one through /api/v1 with its token; the links a run leaves
@@ -604,6 +612,7 @@ api.use(
     getProject,
   }),
 );
+api.use(mailRoutes({ service: mailService }));
 
 api.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
@@ -2144,6 +2153,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await slackService.init();
     await envoyerService.init();
     await forgeAccounts.init();
+    await mailService.init();
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
@@ -2183,6 +2193,9 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   // boot and once a day so a project's peak concurrency does not permanently
   // consume disk; the pruner sees the live session registry and skips claims.
   startWorkspacePruner();
+  // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
+  // a client reads its mail from the database rather than from the provider.
+  mailService.start();
   // Every project gets (or keeps) a hook pointing at this install's public
   // hostname, so an open session's pull request panel keeps up with the reviews,
   // comments and CI runs landing on its branch. Best effort: a repo whose hook

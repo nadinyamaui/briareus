@@ -969,3 +969,88 @@ deployments, and deploys a branch or tag through
 `/api/v1/envoyer/accounts/:id/projects/…`, always naming the project in `repo`.
 An account another project was given answers 404. Deploying needs the
 `deployments:create` scope on the Envoyer token.
+
+### Mail
+
+Briareus can keep a copy of Gmail and Outlook mailboxes so a client reads them
+through `/api/v1` without talking to Google or Microsoft itself. It only reads:
+the sign-in asks for `gmail.readonly` or `Mail.Read`, and nothing marks, moves,
+sends or deletes a message. All of it is admin-only, since it is the operator's
+own mail.
+
+The sign-in is the providers' own OAuth flow with PKCE. Its simplest form ends
+on this server: register `PUBLIC_BASE_URL/oauth/mail/callback` (an https
+address) as the OAuth client's redirect URI and the server finishes the
+sign-in as the browser arrives there, whatever device signed in.
+
+1. Register an OAuth client and put it in the server's environment (see
+   `.env.example`):
+   - **Gmail**: in Google Cloud, enable the Gmail API, set up the OAuth consent
+     screen with the `gmail.readonly` scope, and create an OAuth client of type
+     _Web application_ whose authorized redirect URI is exactly
+     `PUBLIC_BASE_URL/oauth/mail/callback`. Set `GOOGLE_OAUTH_CLIENT_ID`,
+     `GOOGLE_OAUTH_CLIENT_SECRET` and `GOOGLE_OAUTH_REDIRECT_URI` (that same
+     address). The consent screen decides how long a connection lasts:
+     - in _Testing_ (an external one), Google expires refresh tokens after 7
+       days, so the mailbox has to be connected again every week;
+     - in _Production_ without verification, sign-in shows Google's
+       unverified-app warning and at most 100 users can connect, which is
+       enough for your own mailboxes;
+     - _Internal_ needs a project owned by a Google Workspace organization, and
+       only that organization's accounts can connect.
+
+     A Gmail token also stops working when the account's password changes, or
+     after six months without use.
+
+   - **Outlook**: in Microsoft Entra, register an app with the delegated Graph
+     permissions `Mail.Read`, `User.Read` and `offline_access`, add a _Web_
+     platform with the redirect URI `PUBLIC_BASE_URL/oauth/mail/callback`, and
+     create a client secret. Set `MICROSOFT_OAUTH_CLIENT_ID`,
+     `MICROSOFT_OAUTH_CLIENT_SECRET` and `MICROSOFT_OAUTH_REDIRECT_URI`. Match
+     `MICROSOFT_OAUTH_TENANT` to the registration's supported account types:
+     `common` (the default) for any organization plus personal accounts,
+     `consumers` for personal accounts only, or your tenant's id or domain for
+     a single-tenant app.
+
+   `CREDENTIALS_KEY` must be set too: the tokens are stored encrypted with it.
+   Behind Cloudflare Access, give `/oauth/mail/callback` the same _Bypass_ as
+   `/api/v1`, so a browser that has not passed Access still reaches it; the
+   route takes nothing but a pending sign-in's single-use `state`.
+
+2. `POST /api/v1/settings/mail/accounts/connect` with `{ "provider": "gmail" }`
+   (or `outlook`) answers with a `url`. Open it in a browser (Google refuses
+   sign-ins in an embedded web view) and sign in. The browser ends on the
+   callback, which says which mailbox it connected, and the first sync starts
+   right away.
+3. Read with `GET /api/v1/mail/messages` (newest first, filtered by `account`,
+   `q`, `unread`, `inbox`, `starred`, `label` or `thread`, paged with
+   `cursor`) and `GET /api/v1/mail/accounts/{account}/messages/{id}` for one
+   message with its body.
+
+A client can also receive the redirect itself, with a redirect URI of its own
+registered instead: a loopback listener on a Google _Desktop app_ client's
+`http://127.0.0.1:<port>`, or a web view watching Microsoft's
+`https://login.microsoftonline.com/common/oauth2/nativeclient` (a _Mobile and
+desktop_ platform, with no secret). It then sends the address it landed on to
+`POST …/connect/finish` as `{ "url": "…" }`, at once: a Microsoft code lasts
+about a minute.
+
+Every enabled mailbox is synced every `MAIL_SYNC_MINUTES` (5 by default; `0`
+leaves it to `POST …/settings/mail/accounts/{id}/sync`). The server keeps the
+last `syncDays` days (30 by default, up to 365).
+
+- **Gmail** syncs everything except trash, spam and drafts, through its
+  history. A first pass takes the newest 2,000 messages in the window, paced
+  to Gmail's quota of 6,000 units a minute per user (a message read costs 20),
+  so it takes up to about eight minutes.
+- **Outlook** syncs every folder except Deleted Items, Junk Email, Drafts,
+  Outbox, search folders and their subfolders, through Graph's per-folder
+  delta, at most four requests at a time. A folder's first pass takes at most
+  5,000 messages, Graph's limit for a filtered delta.
+
+Bodies are kept up to 500,000 characters. Attachments are listed but their
+content is not synced. When a provider stops honouring a sign-in (revoked,
+expired, password changed, new consent required), the account shows
+`status: "reauth"` and stops syncing until it is connected again with its
+`accountId`. Removing an account deletes its tokens and messages here; also
+remove the app's access at Google or Microsoft.

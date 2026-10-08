@@ -1323,6 +1323,34 @@ Deploy an Envoyer project. Needs `manage`, held to `repo`.
 
 **Returns** `{ ok: boolean }`. Runs as the account, which must be available to `repo`; 404 when it is not. 502 when Envoyer refuses the account’s token, 429 when it is rate limiting it. Envoyer’s objects come back as Envoyer shapes them. `ok` means Envoyer queued it; the deployments list shows it run. The account’s token needs the `deployments:create` scope.
 
+## Mail
+
+### `GET /mail/messages`
+
+List the synced mail, newest first, of every connected mailbox or one. Needs `admin`.
+
+**Query**
+
+| Field     | Type      |                                                                                  |
+| --------- | --------- | -------------------------------------------------------------------------------- |
+| `account` | `integer` | Only this `MailAccount`; every one when absent                                   |
+| `q`       | `string`  | Only messages whose subject, sender or snippet contains this, case-insensitively |
+| `unread`  | `0\|1`    | `1` only unread messages, `0` only read ones                                     |
+| `inbox`   | `0\|1`    | `1` only what is in the inbox, `0` only what is not                              |
+| `starred` | `0\|1`    | `1` only starred (Gmail) or flagged (Outlook) messages                           |
+| `label`   | `string`  | Only messages carrying this label or folder name exactly, as `labels` lists it   |
+| `thread`  | `string`  | Only this conversation, a `threadId`                                             |
+| `cursor`  | `string`  | The `nextCursor` of the page before; the newest page when absent                 |
+| `limit`   | `integer` | How many to a page, 1–100; 50 when absent                                        |
+
+**Returns** `{ messages: MailMessageSummary[], nextCursor: string? }`. Read from the server’s copy, not the provider: what the last sync saw, at most `MAIL_SYNC_MINUTES` old. `nextCursor` is null on the last page. Nothing here changes the mailbox; reading a message does not mark it read.
+
+### `GET /mail/accounts/{account}/messages/{id}`
+
+Read one synced message with its body. Needs `admin`.
+
+**Returns** `{ message: MailMessage }`. URL-encode the message’s `id`: an Outlook id may hold `/`, `+` and `=`. 404 when the account or the message is not there, which a message deleted or moved to the trash is from the next sync on.
+
 ## Settings
 
 ### `PUT /settings/projects/order`
@@ -1639,6 +1667,68 @@ Change a workspace. Needs `admin`.
 Remove a workspace. Needs `admin`.
 
 **Returns** `{ ok: boolean }`
+
+### `GET /settings/mail/accounts`
+
+List the connected mailboxes, which providers this server can connect, and the values a new one starts from. Needs `admin`.
+
+**Returns** `{ accounts: MailAccount[], providers: string[], callbackUrl: string, defaults: object }`. `providers` holds `gmail` when the server has a Google OAuth client (`GOOGLE_OAUTH_*`) and `outlook` when it has a Microsoft one (`MICROSOFT_OAUTH_*`). `callbackUrl` is this server’s own sign-in callback (`PUBLIC_BASE_URL/oauth/mail/callback`): register it as the OAuth client’s redirect URI and set it as `*_OAUTH_REDIRECT_URI` for sign-ins the server finishes itself. `defaults` is `{ label, enabled, syncDays }`.
+
+### `POST /settings/mail/accounts/connect`
+
+Start connecting a mailbox: where to sign in. Needs `admin`.
+
+**Body**
+
+| Field                   | Type             |                                                                                                 |
+| ----------------------- | ---------------- | ----------------------------------------------------------------------------------------------- |
+| `provider` **required** | `gmail\|outlook` | Where the mailbox is                                                                            |
+| `accountId`             | `integer`        | A connected `MailAccount` to sign in to again (one in `reauth`, say); a new mailbox when absent |
+| `label`                 | `string`         | A name to show                                                                                  |
+| `enabled`               | `boolean`        | Whether the periodic sync includes it; true when absent                                         |
+| `syncDays`              | `integer`        | How many days back to keep, 1–365; 30 when absent                                               |
+
+**Returns** `{ url: string, state: string, redirectUri: string, finishesOnServer: boolean, expiresAt: integer }`. Open `url` in a browser and sign in; the provider then sends the browser to `redirectUri` with `code` and `state` in its query. With `finishesOnServer` (the redirect is this server’s `callbackUrl`) the server finishes the sign-in as the browser arrives, and the client only waits for the account to appear in the list. Otherwise the client receives the redirect itself (a loopback listener of its own on a Google Desktop client’s `http://127.0.0.1:<port>`, or a web view it embeds on Microsoft’s nativeclient page) and sends the address to `…/connect/finish` at once: a Microsoft code typically lasts about a minute, and the start itself expires at `expiresAt` (15 minutes). Google’s sign-in must open in a browser, not an embedded web view. The sign-in asks to read mail only. 503 when this server has no OAuth client for `provider`; 400 until `CREDENTIALS_KEY` is set, since the tokens are stored encrypted with it.
+
+### `POST /settings/mail/accounts/connect/finish`
+
+Finish connecting a mailbox with the address its sign-in ended on. Needs `admin`.
+
+**Body**
+
+| Field   | Type     |                                        |
+| ------- | -------- | -------------------------------------- |
+| `url`   | `string` | The whole address the sign-in ended on |
+| `state` | `string` | Instead of `url`: its `state`          |
+| `code`  | `string` | Instead of `url`: its `code`           |
+
+**Returns** 201 `{ account: MailAccount }`. For a client that received the redirect itself; a sign-in that ends on the server’s `callbackUrl` is finished there. Each start finishes once, whether or not it succeeds. Signing in to a mailbox that is already connected connects it again (new tokens, the same messages); a start with `accountId` answers 409 when the sign-in was to another mailbox. The first sync starts at once: follow `syncing` and `lastSyncAt`. A Gmail mailbox’s first pass takes the newest 2,000 messages of its window and is paced to Gmail’s per-user quota, so it takes about eight minutes at most; an Outlook folder’s first pass takes at most 5,000 messages, Graph’s limit for a filtered delta.
+
+### `PUT /settings/mail/accounts/{id}`
+
+Change a mailbox’s label, switch or window. Needs `admin`.
+
+**Body**
+
+| Field      | Type      |                                   |
+| ---------- | --------- | --------------------------------- |
+| `label`    | `string`  | A name to show                    |
+| `enabled`  | `boolean` | Switched on or not                |
+| `syncDays` | `integer` | How many days back to keep, 1–365 |
+
+**Returns** `{ account: MailAccount }`. A new `syncDays` starts its sync over with a first pass.
+
+### `DELETE /settings/mail/accounts/{id}`
+
+Remove a mailbox, its tokens and every message synced from it. Needs `admin`.
+
+**Returns** `{ ok: boolean }`. The provider lists the app as having access until it is removed there too: myaccount.google.com/permissions, or myapps.microsoft.com.
+
+### `POST /settings/mail/accounts/{id}/sync`
+
+Sync a mailbox now. Needs `admin`.
+
+**Returns** 202 `{ account: MailAccount }`. Answers as the pass starts, with `syncing` true; read the account again for `lastSyncAt` or `lastSyncError`. A pass already running is not started twice. 409 for an account in `reauth`.
 
 ### `GET /settings/envoyer/accounts`
 
@@ -2258,6 +2348,105 @@ A Laravel Envoyer account, and the one project whose clients may use it.
 | `repo`  | `string`  | The project it is available to                                                                                      |
 | `token` | `string`  | Its Envoyer API token. Write-only: stored encrypted and never returned; left out of an update, the stored one stays |
 
+### MailAccount
+
+A mailbox connected with its provider’s own sign-in, whose messages the server keeps synced. Its tokens are stored encrypted and never sent back.
+
+| Field           | Type                |                                                                                                                                       |
+| --------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`            | `integer`           | Its id; set by the server                                                                                                             |
+| `provider`      | `gmail\|outlook`    | Where the mailbox is                                                                                                                  |
+| `email`         | `string`            | Its address, as the provider names it                                                                                                 |
+| `label`         | `string`            | A name to show; empty for none                                                                                                        |
+| `enabled`       | `boolean`           | Whether the periodic sync includes it                                                                                                 |
+| `syncDays`      | `integer`           | How many days back its messages are kept, 1–365                                                                                       |
+| `status`        | `connected\|reauth` | `reauth` once the provider stopped honouring its sign-in (revoked, expired, a password change): connect it again with its `accountId` |
+| `syncing`       | `boolean`           | Whether a sync pass is running now                                                                                                    |
+| `lastSyncAt`    | `integer?`          | When the last pass that succeeded finished, epoch milliseconds                                                                        |
+| `lastSyncError` | `string?`           | Why the last pass failed; null once one succeeds                                                                                      |
+| `messages`      | `integer`           | How many of its messages are synced                                                                                                   |
+| `unread`        | `integer`           | How many of those are unread in the inbox                                                                                             |
+| `createdAt`     | `integer`           | Epoch milliseconds                                                                                                                    |
+| `updatedAt`     | `integer`           | Epoch milliseconds                                                                                                                    |
+
+### MailAddress
+
+A sender or a recipient.
+
+| Field     | Type     |                                            |
+| --------- | -------- | ------------------------------------------ |
+| `name`    | `string` | The display name; empty when there is none |
+| `address` | `string` | The address                                |
+
+### MailAttachment
+
+An attachment, described: its content is not synced.
+
+| Field      | Type      |                                               |
+| ---------- | --------- | --------------------------------------------- |
+| `id`       | `string?` | The provider’s id for it                      |
+| `name`     | `string`  | Its file name                                 |
+| `mimeType` | `string`  | Its type                                      |
+| `size`     | `integer` | Its size in bytes, as the provider reports it |
+
+### MailMessageSummary
+
+A synced message as a list shows it, without its body.
+
+| Field         | Type               |                                                                                                                                            |
+| ------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `accountId`   | `integer`          | The `MailAccount` it was synced from                                                                                                       |
+| `id`          | `string`           | The provider’s id for it; URL-encode it in a path, since an Outlook id may hold `/`, `+` and `=`                                           |
+| `threadId`    | `string`           | Its conversation: Gmail’s thread, Outlook’s conversation                                                                                   |
+| `receivedAt`  | `integer`          | When it arrived, epoch milliseconds                                                                                                        |
+| `from`        | `MailAddress`      | Who sent it                                                                                                                                |
+| `to`          | `MailAddress[]`    |                                                                                                                                            |
+| `cc`          | `MailAddress[]`    |                                                                                                                                            |
+| `replyTo`     | `MailAddress[]`    | Where replies go, when not to the sender                                                                                                   |
+| `subject`     | `string`           | Its subject                                                                                                                                |
+| `snippet`     | `string`           | The start of its text, as the provider previews it                                                                                         |
+| `labels`      | `string[]`         | Gmail: its labels by name (`INBOX`, `SENT`, `IMPORTANT`, `CATEGORY_UPDATES`, your own, …). Outlook: its folder’s name, then its categories |
+| `inInbox`     | `boolean`          | Whether it is in the inbox                                                                                                                 |
+| `isRead`      | `boolean`          |                                                                                                                                            |
+| `isStarred`   | `boolean`          | Starred on Gmail, flagged on Outlook                                                                                                       |
+| `attachments` | `MailAttachment[]` |                                                                                                                                            |
+| `webUrl`      | `string?`          | Where the provider’s own web app opens it                                                                                                  |
+
+### MailMessage
+
+One synced message, with its body.
+
+| Field         | Type               |                                      |
+| ------------- | ------------------ | ------------------------------------ |
+| `accountId`   | `integer`          | The `MailAccount` it was synced from |
+| `id`          | `string`           | The provider’s id for it             |
+| `threadId`    | `string`           | Its conversation                     |
+| `receivedAt`  | `integer`          | When it arrived, epoch milliseconds  |
+| `from`        | `MailAddress`      | Who sent it                          |
+| `to`          | `MailAddress[]`    |                                      |
+| `cc`          | `MailAddress[]`    |                                      |
+| `replyTo`     | `MailAddress[]`    |                                      |
+| `subject`     | `string`           | Its subject                          |
+| `snippet`     | `string`           | The start of its text                |
+| `labels`      | `string[]`         | As on `MailMessageSummary`           |
+| `inInbox`     | `boolean`          |                                      |
+| `isRead`      | `boolean`          |                                      |
+| `isStarred`   | `boolean`          |                                      |
+| `attachments` | `MailAttachment[]` |                                      |
+| `webUrl`      | `string?`          |                                      |
+| `messageId`   | `string?`          | Its `Message-ID` header              |
+| `body`        | `MailBody`         | What it says                         |
+
+### MailBody
+
+A message’s content, as synced.
+
+| Field       | Type      |                                                                                                            |
+| ----------- | --------- | ---------------------------------------------------------------------------------------------------------- |
+| `text`      | `string?` | The plain-text part; for a message sent as HTML only, that HTML rendered as text. Null when it has neither |
+| `html`      | `string?` | The HTML part exactly as the sender wrote it: render it sandboxed, with scripts and remote content blocked |
+| `truncated` | `boolean` | Whether `text` or `html` was cut at 500,000 characters                                                     |
+
 ### SshServer
 
 A server an agent may run commands on, with approval.
@@ -2492,6 +2681,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/envoyer/accounts/:id/projects/:project/deployments`                    | `GET /envoyer/accounts/{id}/projects/{project}/deployments`                     |
 | `GET /api/envoyer/accounts/:id/projects/:project/deployments/:deployment`        | `GET /envoyer/accounts/{id}/projects/{project}/deployments/{deployment}`        |
 | `POST /api/envoyer/accounts/:id/projects/:project/deployments`                   | `POST /envoyer/accounts/{id}/projects/{project}/deployments`                    |
+| `GET /api/mail/messages`                                                         | `GET /mail/messages`                                                            |
+| `GET /api/mail/accounts/:account/messages/:id`                                   | `GET /mail/accounts/{account}/messages/{id}`                                    |
 | `GET /videos/*file`                                                              | `GET /videos/{file}`                                                            |
 | `PUT /api/projects/order`                                                        | `PUT /settings/projects/order`                                                  |
 | `GET /api/projects`                                                              | `GET /settings/projects`                                                        |
@@ -2532,6 +2723,12 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/slack/workspaces`                                                     | `POST /settings/slack/workspaces`                                               |
 | `PUT /api/slack/workspaces/:id`                                                  | `PUT /settings/slack/workspaces/{id}`                                           |
 | `DELETE /api/slack/workspaces/:id`                                               | `DELETE /settings/slack/workspaces/{id}`                                        |
+| `GET /api/mail/accounts`                                                         | `GET /settings/mail/accounts`                                                   |
+| `POST /api/mail/connect`                                                         | `POST /settings/mail/accounts/connect`                                          |
+| `POST /api/mail/connect/finish`                                                  | `POST /settings/mail/accounts/connect/finish`                                   |
+| `PUT /api/mail/accounts/:id`                                                     | `PUT /settings/mail/accounts/{id}`                                              |
+| `DELETE /api/mail/accounts/:id`                                                  | `DELETE /settings/mail/accounts/{id}`                                           |
+| `POST /api/mail/accounts/:id/sync`                                               | `POST /settings/mail/accounts/{id}/sync`                                        |
 | `GET /api/envoyer/accounts`                                                      | `GET /settings/envoyer/accounts`                                                |
 | `POST /api/envoyer/accounts`                                                     | `POST /settings/envoyer/accounts`                                               |
 | `PUT /api/envoyer/accounts/:id`                                                  | `PUT /settings/envoyer/accounts/{id}`                                           |

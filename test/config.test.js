@@ -80,7 +80,8 @@ beforeEach(() => {
   disk.whichOutput = null;
   savedEnv = { ...process.env };
   for (const k of Object.keys(process.env))
-    if (/^(R2_|CLOUDFLARE_|OPENAI_TRANSCRIBE_|PREVIEW_ACCESS_CLIENT_)/.test(k)) delete process.env[k];
+    if (/^(R2_|CLOUDFLARE_|OPENAI_TRANSCRIBE_|PREVIEW_ACCESS_CLIENT_|GOOGLE_OAUTH_|MICROSOFT_OAUTH_)/.test(k))
+      delete process.env[k];
 });
 
 afterEach(() => {
@@ -716,6 +717,92 @@ describe('voice note transcription', () => {
     const { getConfig } = await loadConfig(complete({ OPENAI_TRANSCRIBE_MODEL: 'gpt-4o-transcribe' }));
 
     expect(getConfig().transcribe.apiKey).toBe('from-env');
+  });
+});
+
+describe('mail sync', () => {
+  const GOOGLE = {
+    GOOGLE_OAUTH_CLIENT_ID: 'gid',
+    GOOGLE_OAUTH_CLIENT_SECRET: 'gsecret',
+    GOOGLE_OAUTH_REDIRECT_URI: 'http://127.0.0.1',
+  };
+
+  it('is off for both providers when nothing is set, and syncs every five minutes', async () => {
+    const { getConfig } = await loadConfig(complete());
+
+    expect(getConfig().mail).toEqual({ syncMinutes: 5, google: null, microsoft: null });
+  });
+
+  it('reads a Google client', async () => {
+    const { getConfig } = await loadConfig(complete({ ...GOOGLE, MAIL_SYNC_MINUTES: '0' }));
+
+    expect(getConfig().mail).toMatchObject({
+      syncMinutes: 0,
+      google: { clientId: 'gid', clientSecret: 'gsecret', redirectUri: 'http://127.0.0.1' },
+    });
+  });
+
+  it('refuses a sync interval that is not 0 to 1440 minutes', async () => {
+    // 43200 minutes is past Node's timer range, which would run it every millisecond.
+    for (const value of ['43200', 'Infinity', '-1', 'often']) {
+      const { getConfig } = await loadConfig(complete({ MAIL_SYNC_MINUTES: value }));
+      expect(() => getConfig()).toThrow(`MAIL_SYNC_MINUTES (0 to 1440 minutes: ${value})`);
+    }
+    const { getConfig } = await loadConfig(complete({ MAIL_SYNC_MINUTES: '1440' }));
+    expect(getConfig().mail.syncMinutes).toBe(1440);
+  });
+
+  it('refuses half a Google client, and a redirect that is not a URL', async () => {
+    const half = await loadConfig(complete({ GOOGLE_OAUTH_CLIENT_ID: 'gid' }));
+    expect(() => half.getConfig()).toThrow(/GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI/);
+
+    const bad = await loadConfig(complete({ ...GOOGLE, GOOGLE_OAUTH_REDIRECT_URI: 'myapp:/callback' }));
+    expect(() => bad.getConfig()).toThrow(/GOOGLE_OAUTH_REDIRECT_URI \(not an http\(s\) URL/);
+  });
+
+  it('takes a Microsoft public client with no secret, on the common tenant', async () => {
+    const { getConfig } = await loadConfig(
+      complete({
+        MICROSOFT_OAUTH_CLIENT_ID: 'mid',
+        MICROSOFT_OAUTH_REDIRECT_URI: 'https://login.microsoftonline.com/common/oauth2/nativeclient',
+      }),
+    );
+
+    expect(getConfig().mail.microsoft).toEqual({
+      clientId: 'mid',
+      clientSecret: '',
+      tenant: 'common',
+      redirectUri: 'https://login.microsoftonline.com/common/oauth2/nativeclient',
+    });
+  });
+
+  it('wants a client id and redirect once any Microsoft key is set, and a sane tenant', async () => {
+    const tenantOnly = await loadConfig(complete({ MICROSOFT_OAUTH_TENANT: 'contoso.onmicrosoft.com' }));
+    expect(() => tenantOnly.getConfig()).toThrow(/MICROSOFT_OAUTH_CLIENT_ID, MICROSOFT_OAUTH_REDIRECT_URI/);
+
+    const bad = await loadConfig(
+      complete({
+        MICROSOFT_OAUTH_CLIENT_ID: 'mid',
+        MICROSOFT_OAUTH_REDIRECT_URI: 'http://localhost',
+        MICROSOFT_OAUTH_TENANT: '../evil',
+      }),
+    );
+    expect(() => bad.getConfig()).toThrow(/MICROSOFT_OAUTH_TENANT/);
+  });
+
+  it('takes the secrets from the process environment over the file', async () => {
+    process.env.GOOGLE_OAUTH_CLIENT_SECRET = 'from-env';
+    process.env.MICROSOFT_OAUTH_CLIENT_SECRET = 'ms-from-env';
+    const { getConfig } = await loadConfig(
+      complete({
+        ...GOOGLE,
+        MICROSOFT_OAUTH_CLIENT_ID: 'mid',
+        MICROSOFT_OAUTH_REDIRECT_URI: 'http://localhost',
+      }),
+    );
+
+    expect(getConfig().mail.google.clientSecret).toBe('from-env');
+    expect(getConfig().mail.microsoft.clientSecret).toBe('ms-from-env');
   });
 });
 
