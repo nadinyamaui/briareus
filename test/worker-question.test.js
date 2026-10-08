@@ -40,6 +40,9 @@ describe('current worker review/fix question ownership', () => {
   ])('does not expose unrelated or unavailable children: %s', (change) => {
     expect(question(worker, { ...child, ...change })).toBeNull();
   });
+  it('does not authorize answers while the child is closing', () => {
+    expect(question(worker, { ...child, closing: true })).toMatchObject({ answerable: false });
+  });
   it('does not expose children of a disarmed loop', () => {
     expect(question({ ...worker, reviewLoop: null })).toBeNull();
   });

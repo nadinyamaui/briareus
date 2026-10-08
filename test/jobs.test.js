@@ -1796,67 +1796,145 @@ describe('spawnWorkerSession', () => {
   });
 
   it.each([
+    ...['review', 'fix'].flatMap((kind) =>
+      ['answered', 'disarmed', 'replaced', 'new-question', 'closing', 'fresh'].map((stale) => [
+        kind,
+        true,
+        stale,
+      ]),
+    ),
     ['review', true],
     ['fix', true],
     ['review', false],
     ['fix', false],
-  ])('forwards a follow-up %s question only from the current child (%s)', async (kind, current) => {
-    const orchestrator = getJob('question-orch');
-    const worker = getJob('question-worker');
+  ])(
+    'forwards a follow-up %s question only from the current child (%s; stale=%s)',
+    async (kind, current, stale) => {
+      const orchestrator = getJob('question-orch');
+      const worker = getJob('question-worker');
+      const job = getJob('question-child');
+      Object.assign(orchestrator, {
+        status: 'idle',
+        awaitingAnswer: true,
+        pendingWorkerNotices: [],
+        unattendedTurns: 0,
+      });
+      Object.assign(worker, {
+        status: 'idle',
+        reviewLoop: {
+          rounds: 1,
+          reviewing: kind === 'review',
+          fixing: kind === 'fix',
+          [kind === 'review' ? 'reviewSessionId' : 'fixSessionId']: current ? job.id : 'replaced-child',
+        },
+      });
+      Object.assign(job, {
+        status: 'idle',
+        awaitingAnswer: true,
+        askText: 'Which DB?',
+        autoClose: true,
+        loopParentId: kind === 'review' ? worker.id : null,
+        loopFixParentId: kind === 'fix' ? worker.id : null,
+      });
+      const eventCount = worker.events.length;
+      const { children, settled, restore } = fakeClaude();
+      try {
+        const done = settled(job);
+        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
+        children[0].emitLines(
+          init,
+          replay('Postgres'),
+          said('<ask-user>\nSeed it too?\n</ask-user>'),
+          result('Asked.'),
+        );
+        await vi.waitFor(() => expect(children[0].ended).toBe(true));
+        children[0].emit('close', 0);
+        await done;
+        expect(job.status).toBe('idle');
+        expect(job.awaitingAnswer).toBe(true);
+        expect(job.askText).toBe('Seed it too?');
+        expect(worker.reviewLoop[kind === 'review' ? 'reviewing' : 'fixing']).toBe(true);
+        const events = worker.events.slice(eventCount).filter((e) => e.text?.includes('stopped to ask'));
+        expect(events).toHaveLength(current ? 1 : 0);
+        expect(orchestrator.pendingWorkerNotices).toHaveLength(current ? 1 : 0);
+        if (current) {
+          expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
+            workerId: worker.id,
+            kind: 'child-question',
+            childId: job.id,
+            questionSeq: job.questionSeq,
+            text: expect.stringContaining(`the ${kind} is paused on a question`),
+          });
+          expect(orchestrator.pendingWorkerNotices[0].text).toContain(
+            `read_worker_question({id: '${worker.id}'})`,
+          );
+        }
+        if (stale) {
+          if (stale === 'answered') job.awaitingAnswer = false;
+          if (stale === 'disarmed') worker.reviewLoop = null;
+          if (stale === 'replaced')
+            worker.reviewLoop[kind === 'review' ? 'reviewSessionId' : 'fixSessionId'] = 'new-child';
+          if (stale === 'new-question') job.questionSeq++;
+          if (stale === 'closing') job.closing = true;
+          const before = orchestrator.events.length;
+          orchestrator.awaitingAnswer = false;
+          deliverWorkerNotices(orchestrator);
+          expect(orchestrator.pendingWorkerNotices).toHaveLength(0);
+          const fresh = stale === 'fresh';
+          expect(orchestrator.events.slice(before).filter((e) => e.kind === 'user')).toHaveLength(
+            fresh ? 1 : 0,
+          );
+          expect(orchestrator.unattendedTurns).toBe(fresh ? 1 : 0);
+          expect(children).toHaveLength(fresh ? 2 : 1);
+          if (fresh) {
+            const done = settled(orchestrator);
+            children[1].emitLines(init, result('Noted.'));
+            await vi.waitFor(() => expect(children[1].ended).toBe(true));
+            children[1].emit('close', 0);
+            await done;
+          }
+        }
+      } finally {
+        delete job.closing;
+        job.status = worker.status = orchestrator.status = 'closed';
+        restore();
+      }
+    },
+  );
+
+  it('rejects answers while an idle asking session is releasing its database', async () => {
     const job = getJob('question-child');
-    Object.assign(orchestrator, { status: 'idle', awaitingAnswer: true, pendingWorkerNotices: [] });
-    Object.assign(worker, {
-      status: 'idle',
-      reviewLoop: {
-        rounds: 1,
-        reviewing: kind === 'review',
-        fixing: kind === 'fix',
-        [kind === 'review' ? 'reviewSessionId' : 'fixSessionId']: current ? job.id : 'replaced-child',
-      },
-    });
     Object.assign(job, {
       status: 'idle',
       awaitingAnswer: true,
-      askText: 'Which DB?',
-      autoClose: true,
-      loopParentId: kind === 'review' ? worker.id : null,
-      loopFixParentId: kind === 'fix' ? worker.id : null,
+      autoClose: false,
+      loopParentId: null,
+      loopFixParentId: null,
     });
-    const eventCount = worker.events.length;
-    const { children, settled, restore } = fakeClaude();
+    let finishDrop;
+    dropSessionDatabase.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishDrop = resolve;
+        }),
+    );
+    const { children, restore } = fakeClaude();
+    const closing = closeDevSession(job.id);
     try {
-      const done = settled(job);
-      sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
-      children[0].emitLines(
-        init,
-        replay('Postgres'),
-        said('<ask-user>\nSeed it too?\n</ask-user>'),
-        result('Asked.'),
-      );
-      await vi.waitFor(() => expect(children[0].ended).toBe(true));
-      children[0].emit('close', 0);
-      await done;
+      await vi.waitFor(() => expect(finishDrop).toBeTypeOf('function'));
+      expect(job.closing).toBe(true);
       expect(job.status).toBe('idle');
+      expect(() => sendDevMessage(job.id, 'Use Postgres', undefined, { instruction: true })).toThrow(
+        /finish closing/,
+      );
       expect(job.awaitingAnswer).toBe(true);
-      expect(job.askText).toBe('Seed it too?');
-      expect(worker.reviewLoop[kind === 'review' ? 'reviewing' : 'fixing']).toBe(true);
-      const events = worker.events.slice(eventCount).filter((e) => e.text?.includes('stopped to ask'));
-      expect(events).toHaveLength(current ? 1 : 0);
-      expect(orchestrator.pendingWorkerNotices).toHaveLength(current ? 1 : 0);
-      if (current) {
-        expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
-          workerId: worker.id,
-          kind: 'loop',
-          text: expect.stringContaining(`the ${kind} is paused on a question`),
-        });
-        expect(orchestrator.pendingWorkerNotices[0].text).toContain(
-          `read_worker_question({id: '${worker.id}'})`,
-        );
-      }
+      expect(children).toHaveLength(0);
     } finally {
-      job.status = worker.status = orchestrator.status = 'closed';
+      finishDrop();
+      await closing;
       restore();
     }
+    expect(job.status).toBe('closed');
   });
 
   it('marks a cut in the questions the inbox shows rather than dropping the rest unseen', async () => {

@@ -177,6 +177,12 @@ describe('owning worker question proxy', () => {
       expect(sendDevMessage).not.toHaveBeenCalled();
     },
   );
+  it('reads a closing child as non-answerable and rejects its answer', async () => {
+    child.closing = true;
+    expect(await (await readQuestion()).json()).toMatchObject({ question: { answerable: false } });
+    expect((await answerQuestion()).status).toBe(409);
+    expect(sendDevMessage).not.toHaveBeenCalled();
+  });
   it('refuses a question replaced during transcript loading', async () => {
     jobEventsFor.mockImplementation(async () => {
       child.questionSeq++;
