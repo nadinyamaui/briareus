@@ -78,6 +78,7 @@ import {
   startBranchPreview,
   flushJobs,
   stopAllDevServes,
+  stopAllJobProcesses,
   openSessionBrowser,
   closeSessionBrowser,
   spawnWorkerSession,
@@ -2121,8 +2122,9 @@ process.on('uncaughtException', (e) => {
   console.error('Uncaught exception:', e);
   stopAllDevServes();
   stopAllBrowsers();
-  const giveUp = setTimeout(() => process.exit(1), 3000);
-  flushJobs()
+  const giveUp = setTimeout(() => process.exit(1), 5000);
+  stopAllJobProcesses()
+    .then(() => flushJobs())
     .catch(() => {})
     .finally(() => {
       clearTimeout(giveUp);
@@ -2135,8 +2137,9 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     stopping = true;
     stopAllDevServes();
     stopAllBrowsers();
-    flushJobs()
-      .catch((e) => console.error('Could not write the last sessions on shutdown:', e.message))
+    stopAllJobProcesses()
+      .then(() => flushJobs())
+      .catch((e) => console.error('Could not finish session shutdown:', e.message))
       .finally(() => process.exit(0));
   });
 }

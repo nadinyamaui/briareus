@@ -40,14 +40,20 @@ vi.mock('mysql2/promise', () => ({
     createConnection: async (opts) => {
       if (state.mysqlConnectError) throw state.mysqlConnectError;
       return {
-        query: async (sql) => {
+        query: async (query) => {
+          const sql = typeof query === 'string' ? query : query.sql;
           if (state.mysqlHold && state.mysqlHold.on.test(sql)) await state.mysqlHold.until;
-          state.mysqlQueries.push({ opts, sql });
+          state.mysqlQueries.push({
+            opts,
+            sql,
+            ...(typeof query === 'object' ? { timeout: query.timeout } : {}),
+          });
           if (state.mysqlFailOn && state.mysqlFailOn.test(sql)) throw new Error('ER_DB_DROP_EXISTS');
           if (/VERSION\(\)/.test(sql)) return [[{ version: state.mysqlVersion }]];
           if (/SHOW DATABASES/.test(sql)) return [state.mysqlDatabases];
           return [[]];
         },
+        destroy: vi.fn(),
         // Always rejected: the callers .catch(() => {}) it, and a close that
         // fails must not be what surfaces to the session.
         end: async () => {
@@ -73,7 +79,7 @@ vi.mock('node:fs', () => ({
 
 vi.mock('node:child_process', () => ({
   spawn: (bin, args, opts) => {
-    state.psqlCalls.push({ bin, args, env: opts.env });
+    state.psqlCalls.push({ bin, args, env: opts.env, ...(opts.timeout ? { timeout: opts.timeout } : {}) });
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -190,10 +196,50 @@ describe('restart database claims', () => {
     expect(claimHolder(2)).toBe(session.id);
     expect(session).toMatchObject({ dbServerId: 2, dbHost: '127.0.0.1', dbPort: 3307 });
     expect(await acquireInstance(session, session.repo, vi.fn())).toBe(2);
-    expect(state.mysqlQueries).toEqual([]);
+    expect(state.mysqlQueries).toEqual([
+      {
+        opts: { host: '127.0.0.1', port: 3307, user: 'root', password: 'pw', connectTimeout: 5000 },
+        sql: 'SELECT 1',
+        timeout: 5000,
+      },
+    ]);
     expect(state.psqlCalls).toEqual([]);
     await releaseInstance(session);
     expect(claimHolder(2)).toBeNull();
+  });
+
+  it('fails reclaimed acquisition when MySQL cannot be reached, retaining the claim until cleanup', async () => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+    state.servers = [server()];
+    const session = { ...job(), repo: 'acme/app' };
+    reclaimInstance(session, 1);
+    claimed.push(session);
+    state.mysqlConnectError = new Error('ECONNREFUSED');
+    await expect(acquireInstance(session, session.repo, vi.fn())).rejects.toThrow(
+      /previous database server.*ECONNREFUSED/,
+    );
+    expect(claimHolder(1)).toBe(session.id);
+    expect(state.mysqlQueries).toEqual([]);
+    expect(state.psqlCalls).toEqual([]);
+  });
+
+  it.each([0, 1])('probes a reclaimed Postgres server without DDL or restores (exit %s)', async (code) => {
+    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+    state.servers = [server({ engine: 'pgsql', port: 5432 })];
+    const session = { ...job(), repo: 'acme/app' };
+    reclaimInstance(session, 1);
+    claimed.push(session);
+    state.psqlResults = [{ code, stderr: code ? 'connection refused' : '', stdout: '1' }];
+    const acquisition = acquireInstance(session, session.repo, vi.fn());
+    if (code) await expect(acquisition).rejects.toThrow(/previous database server.*connection refused/);
+    else expect(await acquisition).toBe(1);
+    expect(state.psqlCalls).toHaveLength(1);
+    expect(state.psqlCalls[0]).toMatchObject({
+      bin: 'psql',
+      args: expect.arrayContaining(['SELECT 1']),
+      timeout: 5000,
+    });
+    expect(state.mysqlQueries).toEqual([]);
   });
 
   it('refuses a missing or conflicting server instead of moving the session onto seed data', async () => {

@@ -94,6 +94,9 @@ vi.mock('../lib/dbpool.js', () => ({
   reclaimInstance: vi.fn(),
   releaseInstance: vi.fn(),
   ensureSessionDatabase: vi.fn(),
+  ensureProfileDatabase: vi.fn(),
+  profileDbElsewhere: vi.fn(() => false),
+  sessionDatabaseName: vi.fn(() => 'app'),
   dropSessionDatabase: vi.fn(),
   instanceEnv: vi.fn(() => ({})),
   instanceAppPort: vi.fn(() => 8101),
@@ -213,6 +216,7 @@ import {
   DEV_OPEN,
   initJobs,
   resumeRestartedSessions,
+  stopAllJobProcesses,
   sweepExpiredPreviews,
   PREVIEW_TTL_MS,
   closeDevSession,
@@ -12176,6 +12180,99 @@ describe('automatic recovery after a server restart', () => {
     expect(oldInterrupted.status).toBe('interrupted');
   });
 
+  it.each(['review', 'qa'])(
+    'continues the suspended %s sequence only after the question is answered',
+    async (kind) => {
+      const parent = row({ status: 'idle', recoveryTurn: null });
+      const child = row({
+        awaitingAnswer: true,
+        autoClose: true,
+        ...(kind === 'review'
+          ? { reviewBranch: 'feature', loopParentId: parent.id }
+          : { qaBranch: 'feature', qaParentId: parent.id }),
+        recoveryTurn: {
+          prompt: 'Initial request',
+          opts: { review: kind === 'review' },
+          phase: 'initial',
+          completed: false,
+        },
+      });
+      if (kind === 'review') parent.reviewLoop = { rounds: 1, reviewing: true, reviewSessionId: child.id };
+      else parent.qaLoop = { running: true, sessionId: child.id };
+      state.stored = [parent, child];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(child.status).toBe('idle'));
+      expect(children).toHaveLength(0);
+      expect(child.awaitingAnswer).toBe(true);
+      expect(child.recoveryTurn.phase).toBe('initial');
+      sendDevMessage(child.id, 'The operator answer');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(children[0].prompt).toContain('The operator answer');
+      expect(child.recoveryTurn.phase).toBe('initial');
+      finish(children[0]);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(child.status).toBe('running');
+      expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
+      if (kind === 'review') expect(children[1].prompt).toContain('PUBLISH THE REVIEW');
+      else expect(stepRuntime).toHaveBeenCalledWith(state.projects[0], 'testRun');
+      finish(children[1]);
+      await vi.waitFor(() => expect(child.status).toBe('closed'));
+      expect(children).toHaveLength(2);
+    },
+  );
+
+  it.each(['review', 'fix', 'qa'])(
+    'notifies the %s parent after automatic reopen resource cleanup fails',
+    async (kind) => {
+      const parent = row({ status: 'idle', recoveryTurn: null });
+      const child = row({
+        status: 'idle',
+        awaitingAnswer: true,
+        [kind === 'review' ? 'loopParentId' : kind === 'fix' ? 'loopFixParentId' : 'qaParentId']: parent.id,
+      });
+      if (kind === 'review')
+        parent.reviewLoop = { rounds: 1, reviewing: true, reviewerRound: true, reviewSessionId: child.id };
+      else if (kind === 'fix') parent.reviewLoop = { rounds: 1, fixing: true, fixSessionId: child.id };
+      else parent.qaLoop = { running: true, sessionId: child.id };
+      const originalAcquire = acquireInstance.getMockImplementation();
+      const originalRelease = releaseInstance.getMockImplementation();
+      let allowRelease;
+      const cleanup = new Promise((resolve) => {
+        allowRelease = resolve;
+      });
+      acquireInstance.mockImplementation(async (job) => {
+        if (job.id === child.id) throw new Error('Database recovery failed');
+        return originalAcquire?.(job);
+      });
+      releaseInstance.mockImplementation(async (job) => {
+        if (job.id === child.id) await cleanup;
+        return originalRelease?.(job);
+      });
+      // Exercise the pooled path rather than the orchestrator's scratch directory.
+      child.orchestrator = false;
+      state.stored = [parent, child];
+      try {
+        await initJobs();
+        resumeRestartedSessions();
+        await vi.waitFor(() => expect(child.status).toBe('failed'));
+        const loop = kind === 'qa' ? parent.qaLoop : parent.reviewLoop;
+        expect(loop[kind === 'review' ? 'reviewing' : kind === 'fix' ? 'fixing' : 'running']).toBe(true);
+        allowRelease();
+        await vi.waitFor(() =>
+          expect(loop[kind === 'review' ? 'reviewing' : kind === 'fix' ? 'fixing' : 'running']).toBe(false),
+        );
+        expect(loop.failure.reason).toBe('Database recovery failed');
+        if (kind === 'review') expect(loop.reviewerFailed).not.toBe(true);
+        expect(children).toHaveLength(0);
+      } finally {
+        allowRelease();
+        acquireInstance.mockImplementation(originalAcquire);
+        releaseInstance.mockImplementation(originalRelease);
+      }
+    },
+  );
+
   it('restarts preparation with the original first prompt when the conversation never started', async () => {
     const saved = row({
       status: 'preparing',
@@ -12361,4 +12458,59 @@ describe('automatic recovery after a server restart', () => {
     expect(flushDeliveries(idle)).toBe(false);
     expect(children).toHaveLength(0);
   });
+  it.each([false, true])(
+    'kills a detached provider group and preserves its checkpoint (leader exited: %s)',
+    async (leaderExits) => {
+      const actual = await vi.importActual('child_process');
+      const ready = path.join(root, 'tool-ready');
+      const late = path.join(root, 'tool-late-write');
+      let provider;
+      const toolScript = `require('fs').writeFileSync(${JSON.stringify(ready)}, String(process.pid)); setTimeout(() => require('fs').writeFileSync(${JSON.stringify(late)}, 'old tool edit'), 800); setInterval(() => {}, 1000);`;
+      const providerScript = `require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(toolScript)}], {stdio: 'inherit'}).unref(); ${leaderExits ? '' : 'setInterval(() => {}, 1000);'}`;
+      spawn.mockImplementation((cmd, args, opts) => {
+        if (cmd === '/mock/restart-agent') {
+          provider = actual.spawn(process.execPath, ['-e', providerScript], opts);
+          return provider;
+        }
+        return actual.spawn(cmd, args, opts);
+      });
+      const saved = row({ recoveryQueue: [{ prompt: 'Then check', shown: 'Then check', files: [] }] });
+      state.stored = [saved];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(fs.existsSync(ready)).toBe(true));
+      const toolPid = Number(fs.readFileSync(ready, 'utf8'));
+      const checkpoint = structuredClone(saved.recoveryTurn);
+      if (leaderExits) await vi.waitFor(() => expect(provider.exitCode).toBe(0));
+      saveJob.mockClear();
+      try {
+        await stopAllJobProcesses();
+        await vi.waitFor(() =>
+          expect(saveJob.mock.calls.findLast(([j]) => j.id === saved.id)?.[0]).toMatchObject({
+            status: 'running',
+            recoveryTurn: checkpoint,
+          }),
+        );
+        if (!leaderExits) expect(provider.signalCode).toBe('SIGKILL');
+        expect(saved.status).toBe('running');
+        expect(saved.recoveryTurn).toEqual(checkpoint);
+        expect(saved.recoveryTurn.completed).toBe(false);
+        expect(saved.recoveryTurn.canceled).toBeUndefined();
+        expect(saved.recoveryQueue).toHaveLength(1);
+        // A killed orphan may be a zombie until init reaps it; it can no longer edit.
+        if (fs.existsSync(`/proc/${toolPid}/stat`))
+          expect(fs.readFileSync(`/proc/${toolPid}/stat`, 'utf8')).toMatch(/\) Z /);
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        expect(fs.existsSync(late)).toBe(false);
+        expect(saved.status).toBe('running');
+      } finally {
+        try {
+          process.kill(-provider.pid, 'SIGKILL');
+        } catch {
+          /* already reaped */
+        }
+        setDraining(false);
+      }
+    },
+  );
 });
