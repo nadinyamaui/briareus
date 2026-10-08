@@ -53,6 +53,11 @@ describe('getBinary / BINARIES', () => {
     expect(BINARIES.claude.models()).toContain('claude-opus-5-5');
   });
 
+  it('offers Grok 4.7 as the Grok default', () => {
+    expect(BINARIES.grok.models()).toEqual(['grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5']);
+    expect(BINARIES.grok.defaultModel()).toBe('grok-4.7');
+  });
+
   it('offers the GPT-6 family when no Codex model cache exists', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-fallback-'));
     try {
@@ -642,7 +647,7 @@ describe('buildArgs', () => {
 
   it('grok takes the prompt from a file: argv survives neither newlines nor long messages', () => {
     const built = BINARIES.grok.buildArgs({
-      model: 'grok-4.6',
+      model: 'grok-4.7',
       effort: 'low',
       sessionId: 's',
       promptFile: '/tmp/p',
@@ -854,7 +859,7 @@ describe('parseContextReport', () => {
 
 describe('contextWindowFor', () => {
   it("grok's whole catalog ships 500k windows", () => {
-    expect(contextWindowFor('grok', 'grok-4.6')).toBe(500000);
+    expect(contextWindowFor('grok', 'grok-4.7')).toBe(500000);
   });
 
   it('claude states its window in the stream, so no fallback exists', () => {
