@@ -12038,6 +12038,23 @@ describe('the shared browser in a session', () => {
     ).toBe(true);
   });
 
+  it('mounts internal mail tools with the session token only for interactive chats', async () => {
+    const job = getJob('br-turn');
+    job.browser = false;
+    const { seen, settled } = await turn(job, 'Read my email');
+    await settled;
+    expect(seen.mcp.reviewer_mail.args[0]).toMatch(/mail-mcp\.js$/);
+    expect(seen.mcp.reviewer_mail.env).toEqual(seen.mcp.reviewer_memory.env);
+    job.readOnly = true;
+    try {
+      const next = await turn(job, 'Analyze this code');
+      await next.settled;
+      expect(next.seen.mcp).not.toHaveProperty('reviewer_mail');
+    } finally {
+      job.readOnly = false;
+    }
+  });
+
   it('mounts the project’s own MCP servers: a remote one through the proxy, behind the session token', async () => {
     const job = getJob('br-turn');
     job.browser = false;

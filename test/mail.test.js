@@ -155,9 +155,13 @@ function fakeGmail(mailbox) {
         access_token: `access-${tokenCalls.length}`,
         refresh_token: form.grant_type === 'authorization_code' ? `refresh-${form.code}` : undefined,
         expires_in: 3600,
-        scope: 'https://www.googleapis.com/auth/gmail.readonly',
+        scope: mailbox.manage
+          ? 'https://www.googleapis.com/auth/gmail.modify'
+          : 'https://www.googleapis.com/auth/gmail.readonly',
       });
     }
+    if (url.endsWith('/messages/send') && init.method === 'POST')
+      return reply({ id: 'sent', threadId: 'sent-thread' });
     if (gate.wait) await gate.wait;
     if (url.startsWith(`${GMAIL}/profile`)) return reply({ emailAddress: mailbox.email, historyId: '10' });
     if (url.startsWith(`${GMAIL}/labels`)) return reply({ labels: mailbox.labels || [] });
@@ -810,5 +814,60 @@ describe('reading', () => {
       body: { text: 'Body of m0', html: null, truncated: false },
     });
     await expect(service.message(account.id, 'nope')).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('mail management access', () => {
+  it('keeps existing grants read-only and refuses actions without touching the provider', async () => {
+    const account = await connect();
+    await settled();
+    expect((await service.list())[0].access).toBe('read');
+    const before = gmail.request.mock.calls.length;
+    await expect(
+      service.action(account.id, { action: 'send', to: ['you@example.com'], subject: 's', text: 'body' }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(gmail.request.mock.calls.length).toBe(before);
+  });
+  it('stores management access sealed and preserves it across refresh and reconnect', async () => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    expect(account.access).toBe('manage');
+    expect(account).not.toHaveProperty('credentials');
+    expect(JSON.parse(open(store.accounts.get(account.id).credentials)).access).toBe('manage');
+    clock += 3600_000;
+    await service.sync(account.id);
+    await settled();
+    expect(JSON.parse(open(store.accounts.get(account.id).credentials)).access).toBe('manage');
+    mailbox.manage = false;
+    const reconnected = await connect({ accountId: account.id, access: 'read' });
+    await settled();
+    expect(reconnected.access).toBe('read');
+    await expect(service.action(account.id, { action: 'archive', id: 'a' })).rejects.toMatchObject({
+      status: 403,
+    });
+  });
+  it('sends using the sealed grant and starts an authoritative sync afterward', async () => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    clock += 1000;
+    const result = await service.action(account.id, {
+      action: 'send',
+      to: ['you@example.com'],
+      subject: 'Hello',
+      text: 'Body',
+    });
+    expect(result).toEqual({ status: 'accepted', action: 'send', id: 'sent', threadId: 'sent-thread' });
+    const sent = gmail.request.mock.calls.find(([url]) => url.endsWith('/messages/send'));
+    expect(sent[1].headers.Authorization).toBe('Bearer access-1');
+    await settled();
+    expect((await service.list())[0].lastSyncAt).toBe(clock);
+    expect(errors).toEqual([]);
+  });
+  it('rejects invalid or refused management consent without saving a grant', async () => {
+    expect(() => service.connectStart({ provider: 'gmail', access: 'admin' })).toThrow(/Choose/);
+    await expect(connect({ access: 'manage' })).rejects.toThrow(/did not grant/);
+    expect(await service.list()).toEqual([]);
   });
 });
