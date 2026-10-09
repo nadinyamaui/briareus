@@ -951,6 +951,66 @@ describe('mail management access', () => {
     expect((await service.list())[0].lastSyncAt).toBe(clock);
     expect(errors).toEqual([]);
   });
+  it.each(['lost response', 'server error', 'failed sync', 'running sync'])(
+    'refreshes uncertain sends before returning reconciliation guidance: %s',
+    async (scenario) => {
+      cfg.mail.syncMinutes = 0;
+      mailbox.manage = true;
+      const account = await connect({ access: 'manage' });
+      await settled();
+      const original = gmail.request.getMockImplementation();
+      let release;
+      const gate = new Promise((resolve) => (release = resolve));
+      let paused = false;
+      let wrote = false;
+      let finished = false;
+      gmail.request.mockImplementation(async (url, opts) => {
+        if (url.endsWith('/messages/send')) {
+          wrote = true;
+          mailbox.messages.sent = { at: clock, labels: ['SENT'] };
+          if (scenario === 'server error') return Response.json({}, { status: 503 });
+          throw new Error('response lost');
+        }
+        if (scenario === 'failed sync') return Response.json({}, { status: 403 });
+        if (url.includes('/history?')) return Response.json({}, { status: 404 });
+        const response = await original(url, opts);
+        if (scenario === 'running sync' && url.includes('/messages?') && !paused) {
+          paused = true;
+          await gate;
+        }
+        return response;
+      });
+      if (scenario === 'running sync') {
+        await service.sync(account.id);
+        await vi.waitFor(() => expect(paused).toBe(true));
+      }
+      const action = service
+        .action(account.id, { action: 'send', to: ['you@example.com'], subject: 's', text: 'b' })
+        .catch((error) => {
+          finished = true;
+          return error;
+        });
+      await vi.waitFor(() => expect(wrote).toBe(true));
+      if (scenario === 'running sync') {
+        expect(finished).toBe(false);
+        release();
+      }
+      const error = await action;
+      expect(error).toMatchObject({ uncertain: true, syncCompleted: scenario !== 'failed sync' });
+      expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/messages/send'))).toHaveLength(1);
+      if (scenario === 'failed sync') {
+        expect(error.message).toMatch(/cached absence from Sent cannot justify a retry/);
+        expect((await service.list())[0].lastSyncError).toBeTruthy();
+      } else {
+        expect(error.message).toMatch(/fresh mailbox sync completed/);
+        expect(
+          (await service.messages({ account: account.id })).messages.some(
+            (m) => m.id === 'sent' && m.labels.includes('SENT'),
+          ),
+        ).toBe(true);
+      }
+    },
+  );
   it('rejects invalid or refused management consent without saving a grant', async () => {
     expect(() => service.connectStart({ provider: 'gmail', access: 'admin' })).toThrow(/Choose/);
     await expect(connect({ access: 'manage' })).rejects.toThrow(/did not grant/);

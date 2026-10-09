@@ -13,6 +13,62 @@ const make = (provider = 'gmail', ...responses) => {
 };
 
 describe('email actions', () => {
+  it('folds multi-recipient Gmail headers and preserves every recipient', async () => {
+    const { run, request } = make();
+    const to = Array.from({ length: 50 }, (_, i) => `recipient.number.${i}@company.example.com`);
+    await run({ action: 'send', to, subject: 'Hello', text: 'Body' });
+    const mime = Buffer.from(JSON.parse(request.mock.calls[0][1].body).raw, 'base64url').toString();
+    const recipient = mime.match(/To: ([^\r]*(?:\r\n [^\r]*)*)/)[1];
+    expect(recipient.replace(/\r\n /g, ' ').split(', ')).toEqual(to);
+    for (const line of mime.split('\r\n')) expect(Buffer.byteLength(line)).toBeLessThanOrEqual(998);
+  });
+
+  it('rejects a recipient that cannot fit a MIME header before sending', async () => {
+    const { run, request } = make();
+    await expect(
+      run({ action: 'send', to: ['a'.repeat(986) + '@example.com'], subject: 's', text: 'b' }),
+    ).rejects.toThrow(/too long/);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each(['gmail', 'outlook'])(
+    'preserves uncertain %s send/reply server errors without retrying',
+    async (provider) => {
+      for (const action of ['send', 'reply']) {
+        for (const status of [500, 502, 503, 504]) {
+          const r = make(provider);
+          r.request.mockImplementation(async (_url, options) =>
+            options.method === 'GET'
+              ? Response.json({
+                  payload: {
+                    headers: [
+                      { name: 'From', value: 'you@example.com' },
+                      { name: 'Subject', value: 's' },
+                      { name: 'Message-ID', value: '<id@example.com>' },
+                    ],
+                  },
+                })
+              : new Response('{}', { status }),
+          );
+          await expect(
+            r.run({ action, id: 'abc', to: ['you@example.com'], subject: 's', text: 'b' }),
+          ).rejects.toMatchObject({
+            uncertain: true,
+            status: 502,
+            message: expect.stringMatching(/may have succeeded.*successful fresh mailbox sync/),
+          });
+          expect(r.request.mock.calls.filter(([, options]) => options.method === 'POST')).toHaveLength(1);
+        }
+      }
+    },
+  );
+
+  it('keeps explicit send refusals definite', async () => {
+    const { run } = make('gmail', new Response('{}', { status: 403 }));
+    await expect(
+      run({ action: 'send', to: ['you@example.com'], subject: 's', text: 'b' }),
+    ).rejects.toMatchObject({ status: 403, message: expect.stringMatching(/refused/) });
+  });
   it('sends UTF-8 Gmail MIME with explicit recipients', async () => {
     const { run, request } = make();
     expect(
