@@ -36,6 +36,14 @@ chat history, text replies, read receipts and attachment downloads are exposed
 through admin-only `/api/v1/whatsapp` endpoints for clients to use; client inbox
 screens are separate work. See [WhatsApp setup and client flow](docs/whatsapp.md).
 
+## Email in agent sessions
+
+Chat with Claude to read, search, reply to, send and archive Gmail or Outlook
+email through the internal mail MCP in projects with `mailToolsEnabled: true`
+(off by default). Existing connections stay read-only until
+you reconnect them with management permissions. See [Email from a session](docs/email-mcp.md)
+for setup and access details.
+
 ## How a session runs
 
 1. **Claim resources.** The session takes an idle workspace clone from the

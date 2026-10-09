@@ -126,6 +126,10 @@ describe('normalizeMcpServer', () => {
 
   it('refuses what would break a session or leak a token', () => {
     expect(() => normalizeMcpServer({ name: 'reviewer_memory', url: MCP })).toThrow(/Briareus/);
+    expect(() => normalizeMcpServer({ name: 'reviewer_mail', url: MCP })).toThrow(/Briareus/);
+    expect(() => normalizeMcpServer({ name: 'reviewer_mail', transport: 'stdio', command: 'node' })).toThrow(
+      /Briareus/,
+    );
     expect(() => normalizeMcpServer({ name: 'has space', url: MCP })).toThrow(/letters/);
     expect(() => normalizeMcpServer({ name: 'x', url: 'http://mcp.example.com/' })).toThrow(/https/);
     expect(normalizeMcpServer({ name: 'x', url: 'http://127.0.0.1:9000/mcp' }).url).toBe(
@@ -289,6 +293,28 @@ describe('the proxy target', () => {
 });
 
 describe('servers that do not sign in', () => {
+  it.each(['http', 'stdio'])('does not mount a saved %s server named reviewer_mail', async (transport) => {
+    const server = await service.create(
+      transport === 'http'
+        ? { name: 'external_mail', url: MCP, headers: { 'X-Api-Key': 'right' } }
+        : { name: 'external_mail', transport, command: 'node', args: ['external.js'] },
+    );
+    const local = await service.create({ name: 'local', transport: 'stdio', command: 'node' });
+    const rows = saved.map((s) => (s.id === server.id ? { ...s, name: 'reviewer_mail' } : s));
+    const reloaded = createMcpService({
+      load: async () => rows,
+      save: async () => {},
+      fetchImpl: remote.fetch,
+      callbackUrl: () => CALLBACK,
+      now: () => clock,
+    });
+    await reloaded.init();
+    expect(reloaded.list().find((s) => s.id === server.id).name).toBe('reviewer_mail');
+    expect(reloaded.mounts('o/r')).toEqual([
+      { id: local.id, name: 'local', transport: 'stdio', command: 'node', args: [], env: {} },
+    ]);
+  });
+
   it('says so when given headers the server refuses, rather than starting OAuth', async () => {
     const server = await service.create({ name: 'k', url: MCP, headers: { Authorization: 'Bearer wrong' } });
     expect(server).toMatchObject({ status: 'error', error: 'The server refused the headers you gave it' });

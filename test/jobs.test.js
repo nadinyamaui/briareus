@@ -262,6 +262,7 @@ import {
   setSlackAccess,
   setExternalMcp,
   slackProtocol,
+  mailProtocol,
   pushProtocol,
   rotateSessionWebhook,
   sessionWebhookState,
@@ -11907,11 +11908,11 @@ describe('the shared browser in a session', () => {
 
   // One claude turn on a stand-in CLI: its args, the MCP servers its config mounts, and its
   // first message. It answers and exits at once unless `hold`.
-  async function turn(job, text, { hold = false } = {}) {
+  async function turn(job, text, { hold = false, binary = 'claude', workerNotice = false } = {}) {
     job.status = 'idle';
-    getProviderForJob.mockReturnValue(state.provider);
+    getProviderForJob.mockReturnValue({ ...state.provider, binary });
     captureProviderAuth.mockResolvedValue(undefined);
-    const bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    const bin = vi.spyOn(BINARIES[binary], 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
     const seen = { spawned: false, args: null, mcp: null, prompt: null };
     const realSpawn = spawn.getMockImplementation();
     spawn.mockImplementation((cmd, ...rest) => {
@@ -11920,17 +11921,20 @@ describe('the shared browser in a session', () => {
       seen.spawned = true;
       seen.args = args;
       // The file goes with the turn, so it is read while the turn is alive.
-      seen.mcp = JSON.parse(fs.readFileSync(args[args.indexOf('--mcp-config') + 1], 'utf8')).mcpServers;
+      if (binary === 'claude')
+        seen.mcp = JSON.parse(fs.readFileSync(args[args.indexOf('--mcp-config') + 1], 'utf8')).mcpServers;
+      if (binary === 'grok') seen.prompt = fs.readFileSync(args[args.indexOf('--prompt-file') + 1], 'utf8');
       const child = new EventEmitter();
       child.stdin = new PassThrough();
       child.stdout = new PassThrough();
       child.stderr = new PassThrough();
       child.stdin.on('data', (chunk) => {
-        seen.prompt ??= JSON.parse(chunk.toString()).message.content;
+        seen.prompt ??= binary === 'claude' ? JSON.parse(chunk.toString()).message.content : chunk.toString();
         if (hold) return;
         child.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' }) + '\n');
       });
       child.stdin.on('finish', () => setImmediate(() => child.emit('close', 0)));
+      if (binary === 'grok') setImmediate(() => child.emit('close', 0));
       seen.child = child;
       return child;
     });
@@ -11942,7 +11946,8 @@ describe('the shared browser in a session', () => {
       };
       bus.on('job', onJob);
     });
-    sendDevMessage(job.id, text);
+    if (workerNotice) deliverWorkerNotices(job);
+    else sendDevMessage(job.id, text);
     return {
       seen,
       settled: settled.finally(() => {
@@ -12036,6 +12041,98 @@ describe('the shared browser in a session', () => {
     expect(
       job.events.some((e) => e.text === 'Shared browser could not start: No Chromium on this server'),
     ).toBe(true);
+  });
+
+  it.each(['grok', 'opencode'])(
+    'delivers mail instructions to resumed %s sessions after opt-in',
+    async (binary) => {
+      const job = getJob('br-turn');
+      const project = state.projects.find((p) => p.repo === job.repo);
+      const previous = project.mailToolsEnabled;
+      const chats = job.chats;
+      job.browser = false;
+      job.chats = { [state.provider.id]: { started: true, sessionId: 'ses_mail_existing' } };
+      try {
+        project.mailToolsEnabled = false;
+        const off = await turn(job, 'Continue', { binary });
+        await off.settled;
+        expect(off.seen.prompt).not.toContain('# Email');
+        project.mailToolsEnabled = true;
+        const on = await turn(job, 'Read my email', { binary });
+        await on.settled;
+        expect(on.seen.args).toContain(binary === 'grok' ? '--resume' : '--session');
+        expect(on.seen.prompt).toContain('# Email');
+        expect(on.seen.prompt).toContain('GET /api/agent/mail/accounts');
+        project.mailToolsEnabled = false;
+        const revoked = await turn(job, 'Continue', { binary });
+        await revoked.settled;
+        expect(revoked.seen.prompt).not.toContain('# Email');
+      } finally {
+        project.mailToolsEnabled = previous;
+        job.chats = chats;
+      }
+    },
+  );
+
+  it('refuses mail tools during automatic worker-notice turns and restores them for the user', async () => {
+    const job = getJob('br-turn');
+    const worker = getJob('br-open');
+    const project = state.projects.find((p) => p.repo === job.repo);
+    const previous = project.mailToolsEnabled;
+    const parentId = worker.parentId;
+    job.browser = false;
+    worker.status = 'idle';
+    worker.parentId = job.id;
+    job.orchestrator = true;
+    job.pendingWorkerNotices = [{ workerId: worker.id, text: 'Worker finished', kind: 'result' }];
+    try {
+      project.mailToolsEnabled = true;
+      const automatic = await turn(job, '', { workerNotice: true });
+      await automatic.settled;
+      expect(job.unattendedTurn).toBe(true);
+      expect(mailProtocol(job)).toBe('');
+      expect(automatic.seen.mcp).not.toHaveProperty('reviewer_mail');
+      const attended = await turn(job, 'Read my mail');
+      await attended.settled;
+      expect(job.unattendedTurn).toBe(false);
+      expect(attended.seen.mcp).toHaveProperty('reviewer_mail');
+    } finally {
+      project.mailToolsEnabled = previous;
+      worker.parentId = parentId;
+      job.orchestrator = false;
+    }
+  });
+
+  it('mounts internal mail tools only in opted-in projects and interactive chats', async () => {
+    const job = getJob('br-turn');
+    const project = state.projects.find((p) => p.repo === job.repo);
+    const previous = project.mailToolsEnabled;
+    job.browser = false;
+    try {
+      project.mailToolsEnabled = false;
+      const off = await turn(job, 'Write some code');
+      await off.settled;
+      expect(off.seen.mcp).not.toHaveProperty('reviewer_mail');
+      expect(mailProtocol(job)).toBe('');
+      project.mailToolsEnabled = true;
+      const on = await turn(job, 'Read my email');
+      await on.settled;
+      expect(on.seen.mcp.reviewer_mail.args[0]).toMatch(/mail-mcp\.js$/);
+      expect(on.seen.mcp.reviewer_mail.env).toEqual(on.seen.mcp.reviewer_memory.env);
+      expect(mailProtocol(job)).toContain('# Email');
+      job.readOnly = true;
+      const analyst = await turn(job, 'Analyze this code');
+      await analyst.settled;
+      expect(analyst.seen.mcp).not.toHaveProperty('reviewer_mail');
+      job.readOnly = false;
+      project.mailToolsEnabled = false;
+      const revoked = await turn(job, 'Continue coding');
+      await revoked.settled;
+      expect(revoked.seen.mcp).not.toHaveProperty('reviewer_mail');
+    } finally {
+      project.mailToolsEnabled = previous;
+      job.readOnly = false;
+    }
   });
 
   it('mounts the project’s own MCP servers: a remote one through the proxy, behind the session token', async () => {

@@ -7,6 +7,7 @@ import { forgeRoutes } from './lib/forge-routes.js';
 import { createEnvoyerService } from './lib/envoyer.js';
 import { envoyerRoutes } from './lib/envoyer-routes.js';
 import { createForgeAccounts } from './lib/forge-accounts.js';
+import { mailAgentRoutes } from './lib/mail-agent.js';
 import { createMailService } from './lib/mail.js';
 import { mailRoutes, mailCallbackRoutes } from './lib/mail-routes.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
@@ -593,6 +594,7 @@ api.use(
   }),
 );
 api.use(mailRoutes({ service: mailService }));
+api.use(mailAgentRoutes({ service: mailService, agentSession, getProject }));
 
 api.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
