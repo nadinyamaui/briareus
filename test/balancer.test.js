@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const state = vi.hoisted(() => ({ rows: [], usage: {} }));
 
 vi.mock('../lib/providerstore.js', () => ({
+  getProvider: (id) => state.rows.find((p) => p.id === id) || null,
   providerGroup: (p) => state.rows.filter((r) => r.active && r.binary === p.binary && !r.apiKey),
 }));
 
@@ -346,6 +348,9 @@ describe('providerUsage after a rate limit', () => {
 });
 
 describe('providerUsage across a restart', () => {
+  const fingerprint = createHash('sha256')
+    .update(JSON.stringify(['claude', '', '', null]))
+    .digest('hex');
   const settle = () => new Promise((r) => setTimeout(r, 0));
   // Unwired again so later tests do not write into this one's store.
   const unwire = () => restoreProviderUsage({ load: () => null, update: null });
@@ -353,7 +358,7 @@ describe('providerUsage across a restart', () => {
   const store = (stored = {}) => ({ stored, update: vi.fn(async (fn) => fn(stored)) });
 
   it('serves a restored read inside its TTL instead of asking again', async () => {
-    const saved = { 1: { at: Date.now() - 60_000, value: windows(30) } };
+    const saved = { 1: { at: Date.now() - 60_000, fingerprint, value: windows(30) } };
     await restoreProviderUsage({ load: async () => saved, update: async () => {} });
     expect(await providerUsage(row(1))).toEqual(windows(30));
     expect(await providerUsage(row(1), { ttlMs: FRESH_USAGE_TTL_MS })).toEqual(windows(30));
@@ -363,7 +368,9 @@ describe('providerUsage across a restart', () => {
 
   it('keeps a restored rate limit until its retryAt, even for a manual refresh', async () => {
     const retryAt = new Date(Date.now() + 30 * 60_000).toISOString();
-    const saved = { 1: { at: Date.now() - 20 * 60_000, value: { windows: [], retryAt }, retryAt } };
+    const saved = {
+      1: { at: Date.now() - 20 * 60_000, fingerprint, value: { windows: [], retryAt }, retryAt },
+    };
     await restoreProviderUsage({ load: async () => saved, update: async () => {} });
     await providerUsage(row(1), { ttlMs: 0 });
     expect(providers.claudeUsage).not.toHaveBeenCalled();
@@ -376,7 +383,7 @@ describe('providerUsage across a restart', () => {
     state.usage['/claude-1'] = windows(12);
     await providerUsage(row(1));
     await settle();
-    expect(stored).toEqual({ 1: { at: expect.any(Number), value: windows(12) } });
+    expect(stored).toEqual({ 1: { at: expect.any(Number), fingerprint, value: windows(12) } });
     forgetProviderUsage(1);
     await settle();
     expect(stored).toEqual({});
@@ -386,7 +393,10 @@ describe('providerUsage across a restart', () => {
   it("leaves other accounts' stored entries alone, so another server's newer lockout survives", async () => {
     const at = Date.now() - 60_000;
     const { stored, update } = store();
-    await restoreProviderUsage({ load: async () => ({ 1: { at, value: windows(30) } }), update });
+    await restoreProviderUsage({
+      load: async () => ({ 1: { at, fingerprint, value: windows(30) } }),
+      update,
+    });
     // Another server sharing the database saved a lockout for account 1 since.
     const retryAt = new Date(Date.now() + 60 * 60_000).toISOString();
     const lockout = { at: Date.now(), value: { windows: [], retryAt }, retryAt };
@@ -394,14 +404,14 @@ describe('providerUsage across a restart', () => {
     state.usage['/claude-2'] = windows(7);
     await providerUsage(row(2));
     await settle();
-    expect(stored).toEqual({ 1: lockout, 2: { at: expect.any(Number), value: windows(7) } });
+    expect(stored).toEqual({ 1: lockout, 2: { at: expect.any(Number), fingerprint, value: windows(7) } });
     await unwire();
   });
 
   it('keeps a stored entry newer than the one being saved, but a forget still drops it', async () => {
     const { stored, update } = store();
     await restoreProviderUsage({ load: async () => ({}), update });
-    const newer = { at: Date.now() + 60_000, value: windows(90) };
+    const newer = { at: Date.now() + 60_000, fingerprint, value: windows(90) };
     stored[1] = newer;
     state.usage['/claude-1'] = windows(12);
     await providerUsage(row(1));
@@ -411,6 +421,87 @@ describe('providerUsage across a restart', () => {
     await settle();
     expect(stored).toEqual({});
     await unwire();
+  });
+
+  it('rejects a legacy restored lockout without an account fingerprint', async () => {
+    const retryAt = new Date(Date.now() + 3600000).toISOString();
+    await restoreProviderUsage({
+      load: () => ({ 1: { at: Date.now(), value: { windows: [], retryAt }, retryAt } }),
+      update: null,
+    });
+    state.usage['/claude-1'] = windows(7);
+    expect(cachedProviderUsage(row(1))).toBeUndefined();
+    expect(await providerUsage(row(1), { ttlMs: 0 })).toEqual(windows(7));
+    expect(providers.claudeUsage).toHaveBeenCalledTimes(1);
+    await unwire();
+  });
+
+  it('does not restore an old account lockout when its invalidation failed', async () => {
+    const { stored, update } = store();
+    await restoreProviderUsage({ load: () => ({}), update });
+    const retryAt = new Date(Date.now() + 3600000).toISOString();
+    state.usage['/claude-1'] = { windows: [], retryAt };
+    await providerUsage(row(1));
+    await flushProviderUsage();
+    await restoreProviderUsage({
+      load: () => null,
+      update: async () => {
+        throw new Error('db down');
+      },
+    });
+    state.rows[0] = row(1, { apiKey: 'NEW_KEY', baseUrl: 'https://api.z.ai' });
+    forgetProviderUsage(1);
+    await flushProviderUsage();
+    expect(stored[1].retryAt).toBe(retryAt);
+    // A fresh process loads the unchanged old setting with the new configuration.
+    vi.resetModules();
+    const restarted = await import('../lib/balancer.js');
+    await restarted.restoreProviderUsage({ load: () => stored, update: null });
+    state.usage.zai = windows(4);
+    expect(await restarted.providerUsage(state.rows[0], { ttlMs: 0 })).toEqual(windows(4));
+    expect(providers.zaiUsage).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(stored)).not.toContain('NEW_KEY');
+    await unwire();
+  });
+
+  it('rejects another server’s old in-flight read after a successful edit and invalidation', async () => {
+    const { stored } = store();
+    let current = row(1);
+    const update = async (fn) => fn(stored, current);
+    await restoreProviderUsage({ load: () => ({}), update });
+    let finish;
+    const pending = providerUsage(row(1), { read: () => new Promise((r) => (finish = r)) });
+    // This process still has the old provider cache; another server committed the edit.
+    current = row(1, { authData: { credentials: { claudeAiOauth: { accessToken: 'NEW_LOGIN' } } } });
+    delete stored[1];
+    finish({ windows: [], retryAt: new Date(Date.now() + 3600000).toISOString() });
+    await pending;
+    await flushProviderUsage();
+    expect(stored).toEqual({});
+    state.rows[0] = current;
+    expect(cachedProviderUsage(current)).toBeUndefined();
+    state.usage['/claude-1'] = windows(6);
+    expect(await providerUsage(current)).toEqual(windows(6));
+    await flushProviderUsage();
+    expect(stored[1].value).toEqual(windows(6));
+    expect(JSON.stringify(stored)).not.toContain('NEW_LOGIN');
+    await unwire();
+  });
+
+  it('does not reuse a changed account’s pending read or its previous windows', async () => {
+    state.usage['/claude-1'] = windows(99);
+    await providerUsage(row(1));
+    let finish;
+    const pending = providerUsage(row(1), { ttlMs: 0, read: () => new Promise((r) => (finish = r)) });
+    state.rows[0] = row(1, { authData: { token: 'NEW_LOGIN' } });
+    const retryAt = new Date(Date.now() + 3600000).toISOString();
+    state.usage['/claude-1'] = { windows: [], retryAt };
+    expect(await providerUsage(state.rows[0])).toEqual({ windows: [], retryAt });
+    finish(windows(100));
+    await pending;
+    expect(cachedProviderUsage(state.rows[0])).toEqual({ windows: [], retryAt });
+    // Display-only edits still describe the same account.
+    expect(cachedProviderUsage({ ...state.rows[0], label: 'renamed' })).toEqual({ windows: [], retryAt });
   });
 
   it('lets shutdown wait for a queued write, but not past its bound', async () => {

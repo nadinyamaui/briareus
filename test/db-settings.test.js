@@ -57,3 +57,38 @@ it('writes nothing when the change throws', async () => {
   expect(JSON.parse(state.stored)).toEqual(['a']);
   expect(state.released).toBe(1);
 });
+
+it('waits for async validation on the locked connection before committing', async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  let started;
+  const ready = new Promise((r) => (started = r));
+  const writing = updateAppSetting('list', [], async (value, conn) => {
+    expect(conn.query).toBeTypeOf('function');
+    started();
+    await gate;
+    value.push('b');
+    return 'validated';
+  });
+  await ready;
+  expect(state.queries).toEqual(['BEGIN', 'INSERT IGNORE', 'SELECT `value`']);
+  expect(state.released).toBe(0);
+  release();
+  expect((await writing).result).toBe('validated');
+  expect(JSON.parse(state.stored)).toEqual(['a', 'b']);
+  expect(state.queries.slice(-2)).toEqual(['UPDATE `app_settings`', 'COMMIT']);
+  expect(state.released).toBe(1);
+});
+
+it('rolls back when async validation rejects', async () => {
+  await expect(
+    updateAppSetting('list', [], async (value) => {
+      value.push('b');
+      await Promise.resolve();
+      throw new Error('validation failed');
+    }),
+  ).rejects.toThrow('validation failed');
+  expect(JSON.parse(state.stored)).toEqual(['a']);
+  expect(state.queries).toEqual(['BEGIN', 'INSERT IGNORE', 'SELECT `value`', 'ROLLBACK']);
+  expect(state.released).toBe(1);
+});

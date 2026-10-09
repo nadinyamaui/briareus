@@ -51,6 +51,7 @@ import {
   loadJobTurnUsage,
   loadAppSetting,
   updateAppSetting,
+  getProviderRow,
 } from './lib/db.js';
 import {
   initJobs,
@@ -2058,7 +2059,10 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initProviders();
     await restoreProviderUsage({
       load: () => loadAppSetting('provider_usage', {}),
-      update: (fn) => updateAppSetting('provider_usage', {}, fn),
+      update: (fn, id) =>
+        updateAppSetting('provider_usage', {}, async (stored, conn) =>
+          fn(stored, id == null ? null : await getProviderRow(id, conn)),
+        ),
     });
     // Warm the quota cache so the first session already lands on the account with most headroom;
     // reads restored from the last process and still inside their TTL are not repeated.
