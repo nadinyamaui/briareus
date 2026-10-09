@@ -29,6 +29,8 @@ import {
   zaiHost,
   AUTH_TTL_MS,
   rememberProviderExhausted,
+  restoreProviderUsage,
+  FRESH_USAGE_TTL_MS,
 } from '../lib/balancer.js';
 
 const windows = (...pcts) => ({ windows: pcts.map((usedPct, i) => ({ usedPct, short: i ? 'wk' : '5h' })) });
@@ -339,6 +341,61 @@ describe('providerUsage after a rate limit', () => {
     await providerUsage(row(1));
     state.usage['/claude-1'] = { windows: [], error: 'Claude usage check failed (HTTP 401).' };
     expect(await providerUsage(row(1), { ttlMs: 0 })).toEqual(state.usage['/claude-1']);
+  });
+});
+
+describe('providerUsage across a restart', () => {
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  // Unwired again so later tests do not write into this one's store.
+  const unwire = () => restoreProviderUsage({ load: () => null, save: null });
+
+  it('serves a restored read inside its TTL instead of asking again', async () => {
+    const saved = { 1: { at: Date.now() - 60_000, value: windows(30) } };
+    await restoreProviderUsage({ load: async () => saved, save: async () => {} });
+    expect(await providerUsage(row(1))).toEqual(windows(30));
+    expect(await providerUsage(row(1), { ttlMs: FRESH_USAGE_TTL_MS })).toEqual(windows(30));
+    expect(providers.claudeUsage).not.toHaveBeenCalled();
+    await unwire();
+  });
+
+  it('keeps a restored rate limit until its retryAt, even for a manual refresh', async () => {
+    const retryAt = new Date(Date.now() + 30 * 60_000).toISOString();
+    const saved = { 1: { at: Date.now() - 20 * 60_000, value: { windows: [], retryAt }, retryAt } };
+    await restoreProviderUsage({ load: async () => saved, save: async () => {} });
+    await providerUsage(row(1), { ttlMs: 0 });
+    expect(providers.claudeUsage).not.toHaveBeenCalled();
+    await unwire();
+  });
+
+  it('saves each settled read and each forget, so the next process starts from them', async () => {
+    const save = vi.fn(async () => {});
+    await restoreProviderUsage({ load: async () => ({}), save });
+    state.usage['/claude-1'] = windows(12);
+    await providerUsage(row(1));
+    await settle();
+    expect(save).toHaveBeenLastCalledWith({ 1: { at: expect.any(Number), value: windows(12) } });
+    forgetProviderUsage(1);
+    await settle();
+    expect(save).toHaveBeenLastCalledWith({});
+    await unwire();
+  });
+
+  it('reads again once the restored read is past its TTL, and a failed load restores nothing', async () => {
+    await restoreProviderUsage({
+      load: async () => ({ 1: { at: Date.now() - 16 * 60_000, value: windows(5) } }),
+      save: null,
+    });
+    state.usage['/claude-1'] = windows(50);
+    expect(await providerUsage(row(1))).toEqual(windows(50));
+    await restoreProviderUsage({
+      load: async () => {
+        throw new Error('db down');
+      },
+      save: null,
+    });
+    state.usage['/claude-2'] = windows(7);
+    expect(await providerUsage(row(2))).toEqual(windows(7));
+    expect(providers.claudeUsage).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -12,6 +12,7 @@ import {
   parseContextReport,
   contextWindowFor,
   claudeUsage,
+  codexUsage,
   retryAfterAt,
   grokUsage,
   zaiUsage,
@@ -1680,6 +1681,24 @@ describe('claudeUsage', () => {
         headers: { Authorization: 'Bearer access-token', 'anthropic-beta': 'oauth-2025-04-20' },
       }),
     );
+  });
+});
+
+describe('codexUsage', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('reports a refused usage check with when to ask again', async () => {
+    const token = `x.${Buffer.from(JSON.stringify({})).toString('base64url')}.y`;
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify({ tokens: { access_token: token } }));
+    vi.stubGlobal('fetch', async () => ({ ok: false, status: 429, headers: { get: () => '600' } }));
+    const before = Date.now();
+    const usage = await codexUsage('/tmp/codex-home');
+    expect(usage.windows).toEqual([]);
+    expect(usage.error).toMatch(/^Codex rate limited the usage check\. /);
+    expect(Date.parse(usage.retryAt) - before).toBeGreaterThanOrEqual(600_000);
   });
 });
 

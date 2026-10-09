@@ -44,7 +44,14 @@ import { getConfig } from './lib/config.js';
 import { maintenanceState } from './lib/recovery.js';
 import { workerTranscript } from './lib/worker-transcript.js';
 import { orchestratorRoutes } from './lib/orchestrator-routes.js';
-import { initDb, dbHealthy, loadTaskSessions, loadJobTurnUsage } from './lib/db.js';
+import {
+  initDb,
+  dbHealthy,
+  loadTaskSessions,
+  loadJobTurnUsage,
+  loadAppSetting,
+  saveAppSetting,
+} from './lib/db.js';
 import {
   initJobs,
   resumeRestartedSessions,
@@ -141,6 +148,8 @@ import {
   rememberProviderAuth,
   cachedProviderAuth,
   forgetProviderUsage,
+  restoreProviderUsage,
+  FRESH_USAGE_TTL_MS,
 } from './lib/balancer.js';
 import {
   initProjects,
@@ -1090,7 +1099,7 @@ async function providerAuthUsage(p, cfg, fresh = false) {
   let auth = null;
   let usage = null;
   // Through lib/balancer.js's cache, so page loads keep the balancer's numbers warm.
-  const readUsage = () => providerUsage(p, fresh ? { ttlMs: 0 } : {});
+  const readUsage = () => providerUsage(p, fresh ? { ttlMs: FRESH_USAGE_TTL_MS } : {});
   const zaiKeyUsage = () => (p.apiKey && zaiHost(p.baseUrl) ? readUsage() : null);
   if (p.binary === 'claude') {
     if (p.apiKey) {
@@ -2046,7 +2055,12 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initMemorySelection();
     await initMemories();
     await initProviders();
-    // Warm the quota cache so the first session already lands on the account with most headroom.
+    await restoreProviderUsage({
+      load: () => loadAppSetting('provider_usage', {}),
+      save: (value) => saveAppSetting('provider_usage', value),
+    });
+    // Warm the quota cache so the first session already lands on the account with most headroom;
+    // reads restored from the last process and still inside their TTL are not repeated.
     for (const p of listProviders().filter((r) => r.active)) providerUsage(p).catch(() => {});
     // Refresh each login-backed Codex row's model catalog before models are resolved; a failure
     // leaves the last cache usable.
