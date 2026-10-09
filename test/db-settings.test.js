@@ -24,7 +24,7 @@ vi.mock('mysql2/promise', () => {
   return { default: { createPool: () => ({ getConnection: async () => conn, end: async () => {} }) } };
 });
 
-const { updateAppSetting } = await import('../lib/db.js');
+const { updateAppSetting, getProviderRow } = await import('../lib/db.js');
 
 beforeEach(() => {
   state.queries = [];
@@ -91,4 +91,19 @@ it('rolls back when async validation rejects', async () => {
   expect(JSON.parse(state.stored)).toEqual(['a']);
   expect(state.queries).toEqual(['BEGIN', 'INSERT IGNORE', 'SELECT `value`', 'ROLLBACK']);
   expect(state.released).toBe(1);
+});
+
+it('uses a compatible shared provider lock on the setting transaction connection', async () => {
+  const query = vi.fn(async () => [[]]);
+  await updateAppSetting('list', [], async (_value, conn) => {
+    const original = conn.query;
+    conn.query = query;
+    try {
+      expect(await getProviderRow(7, conn)).toBeNull();
+    } finally {
+      conn.query = original;
+    }
+  });
+  expect(query).toHaveBeenCalledWith('SELECT * FROM `providers` WHERE `id` = ? LOCK IN SHARE MODE', [7]);
+  expect(state.queries.at(-1)).toBe('COMMIT');
 });

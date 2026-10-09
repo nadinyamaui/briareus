@@ -357,6 +357,73 @@ describe('providerUsage across a restart', () => {
   // The stored setting, changed in place the way updateAppSetting hands it to fn.
   const store = (stored = {}) => ({ stored, update: vi.fn(async (fn) => fn(stored)) });
 
+  const claudeAuth = (account, rotation, organization = 'org-1') => ({
+    credentials: {
+      claudeAiOauth: {
+        accessToken: `access-${rotation}`,
+        refreshToken: `refresh-${rotation}`,
+        expiresAt: rotation,
+      },
+    },
+    settings: { oauthAccount: { accountUuid: account, organizationUuid: organization } },
+  });
+  const codexAuth = (account, rotation) => ({
+    auth: {
+      tokens: {
+        access_token: `x.${Buffer.from(
+          JSON.stringify({ exp: rotation, 'https://api.openai.com/auth': { chatgpt_account_id: account } }),
+        ).toString('base64url')}.sig-${rotation}`,
+        refresh_token: `refresh-${rotation}`,
+        id_token: `id-${rotation}`,
+      },
+      last_refresh: rotation,
+    },
+  });
+
+  it.each([
+    ['claude', claudeAuth],
+    ['codex', codexAuth],
+  ])('preserves %s lockouts through token rotation, persistence and restart', async (binary, auth) => {
+    const { stored } = store();
+    state.rows[0] = row(1, { binary, authData: auth('account-1', 1) });
+    // The credentials rotate before the queued write validates the provider row.
+    const update = async (fn) => {
+      state.rows[0] = row(1, { binary, authData: auth('account-1', 2) });
+      fn(stored, state.rows[0]);
+    };
+    await restoreProviderUsage({ load: () => ({}), update });
+    const retryAt = new Date(Date.now() + 3600000).toISOString();
+    const value = { windows: [], retryAt };
+    const read = vi.fn(async () => value);
+    await providerUsage(state.rows[0], { read });
+    await flushProviderUsage();
+    expect(stored[1].retryAt).toBe(retryAt);
+    expect(await providerUsage(state.rows[0], { read, ttlMs: 0 })).toEqual(value);
+    expect(cachedProviderUsage(state.rows[0])).toEqual(value);
+    expect(read).toHaveBeenCalledTimes(1);
+
+    vi.resetModules();
+    const restarted = await import('../lib/balancer.js');
+    state.rows[0] = row(1, { binary, authData: auth('account-1', 3) });
+    await restarted.restoreProviderUsage({ load: () => stored, update: null });
+    expect(await restarted.providerUsage(state.rows[0], { read, ttlMs: 0 })).toEqual(value);
+    expect(read).toHaveBeenCalledTimes(1);
+    state.rows[0] = row(1, { binary, authData: auth('account-2', 3) });
+    expect(restarted.cachedProviderUsage(state.rows[0])).toBeUndefined();
+    await restarted.providerUsage(state.rows[0], { read, ttlMs: 0 });
+    expect(read).toHaveBeenCalledTimes(2);
+    await unwire();
+  });
+
+  it('invalidates Claude usage when the same user switches organizations', async () => {
+    state.rows[0] = row(1, { authData: claudeAuth('account-1', 1) });
+    const read = vi.fn(async () => ({ windows: [], retryAt: new Date(Date.now() + 3600000).toISOString() }));
+    await providerUsage(state.rows[0], { read });
+    state.rows[0] = row(1, { authData: claudeAuth('account-1', 2, 'org-2') });
+    await providerUsage(state.rows[0], { read });
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
   it('serves a restored read inside its TTL instead of asking again', async () => {
     const saved = { 1: { at: Date.now() - 60_000, fingerprint, value: windows(30) } };
     await restoreProviderUsage({ load: async () => saved, update: async () => {} });
