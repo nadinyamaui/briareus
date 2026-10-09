@@ -498,6 +498,43 @@ describe('▶ Run: the links it answers with', () => {
     ).toBe(true);
   });
 
+  it.each(['stdout', 'stderr'])(
+    'preserves split UTF-8 bytes from %s in startup failure diagnostics',
+    async (stream) => {
+      const job = session();
+      const starting = startDevServe(job.id);
+      const rejected = expect(starting).rejects.toThrow('The run commands exited immediately: €');
+      while (!state.procs.length) await tick();
+      const proc = state.procs[0];
+      proc[stream].write(Buffer.from([0xe2]));
+      await tick();
+      proc[stream].write(Buffer.from([0x82, 0xac]));
+      proc.exitCode = 1;
+      proc.emit('exit', 1);
+
+      await rejected;
+      const failure = job.events.findLast((e) => e.text?.startsWith('App server died'));
+      expect(failure.text).toBe('App server died (exit 1): €');
+    },
+  );
+
+  it.each(['stdout', 'stderr'])(
+    'preserves split UTF-8 bytes from %s in later crash diagnostics',
+    async (stream) => {
+      const job = session();
+      await startDevServe(job.id);
+      const proc = state.procs[0];
+      proc[stream].write(Buffer.from([0xe2]));
+      await tick();
+      proc[stream].write(Buffer.from([0x82, 0xac]));
+      proc.exitCode = 1;
+      proc.emit('exit', 1);
+
+      const failure = job.events.findLast((e) => e.text?.startsWith('App server died'));
+      expect(failure.text).toBe('App server died (exit 1): €');
+    },
+  );
+
   it('retains bounded output from both streams when a running server fails', async () => {
     const job = session();
     await startDevServe(job.id);
