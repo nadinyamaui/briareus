@@ -262,6 +262,7 @@ import {
   setSlackAccess,
   setExternalMcp,
   slackProtocol,
+  mailProtocol,
   pushProtocol,
   rotateSessionWebhook,
   sessionWebhookState,
@@ -12038,19 +12039,34 @@ describe('the shared browser in a session', () => {
     ).toBe(true);
   });
 
-  it('mounts internal mail tools with the session token only for interactive chats', async () => {
+  it('mounts internal mail tools only in opted-in projects and interactive chats', async () => {
     const job = getJob('br-turn');
+    const project = state.projects.find((p) => p.repo === job.repo);
+    const previous = project.mailToolsEnabled;
     job.browser = false;
-    const { seen, settled } = await turn(job, 'Read my email');
-    await settled;
-    expect(seen.mcp.reviewer_mail.args[0]).toMatch(/mail-mcp\.js$/);
-    expect(seen.mcp.reviewer_mail.env).toEqual(seen.mcp.reviewer_memory.env);
-    job.readOnly = true;
     try {
-      const next = await turn(job, 'Analyze this code');
-      await next.settled;
-      expect(next.seen.mcp).not.toHaveProperty('reviewer_mail');
+      project.mailToolsEnabled = false;
+      const off = await turn(job, 'Write some code');
+      await off.settled;
+      expect(off.seen.mcp).not.toHaveProperty('reviewer_mail');
+      expect(mailProtocol(job)).toBe('');
+      project.mailToolsEnabled = true;
+      const on = await turn(job, 'Read my email');
+      await on.settled;
+      expect(on.seen.mcp.reviewer_mail.args[0]).toMatch(/mail-mcp\.js$/);
+      expect(on.seen.mcp.reviewer_mail.env).toEqual(on.seen.mcp.reviewer_memory.env);
+      expect(mailProtocol(job)).toContain('# Email');
+      job.readOnly = true;
+      const analyst = await turn(job, 'Analyze this code');
+      await analyst.settled;
+      expect(analyst.seen.mcp).not.toHaveProperty('reviewer_mail');
+      job.readOnly = false;
+      project.mailToolsEnabled = false;
+      const revoked = await turn(job, 'Continue coding');
+      await revoked.settled;
+      expect(revoked.seen.mcp).not.toHaveProperty('reviewer_mail');
     } finally {
+      project.mailToolsEnabled = previous;
       job.readOnly = false;
     }
   });

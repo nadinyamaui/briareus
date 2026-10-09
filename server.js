@@ -594,7 +594,7 @@ api.use(
   }),
 );
 api.use(mailRoutes({ service: mailService }));
-api.use(mailAgentRoutes({ service: mailService, agentSession }));
+api.use(mailAgentRoutes({ service: mailService, agentSession, getProject }));
 
 api.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);

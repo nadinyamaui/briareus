@@ -1,7 +1,7 @@
 # Email from a session
 
-Interactive Briareus sessions receive the internal `reviewer_mail` MCP automatically,
-including Claude sessions. It uses the existing Gmail/Outlook service, with the
+Interactive Briareus sessions receive the internal `reviewer_mail` MCP only when
+their project explicitly enables email tools, including Claude sessions. It uses the existing Gmail/Outlook service, with the
 session's token; provider credentials remain encrypted on the core server.
 After deploying this change, the tools appear on the next session turn.
 
@@ -16,6 +16,21 @@ The nine tools are `mail_accounts`, `mail_search`, `mail_read`, `mail_sync`,
 `mail_connect`, `mail_finish_connect`, `mail_send`, `mail_reply`, and `mail_update`.
 The internal HTTP endpoints live under `/api/agent/mail`; this is a session tool,
 not an external dashboard-control MCP.
+
+## Select projects
+
+Email tools default to **off** for both existing and new projects. An operator
+with an admin API token opts a project in through
+`PUT /api/v1/settings/projects/{id}` with `{ "mailToolsEnabled": true }`.
+The projects list and defaults expose this boolean so clients can offer a switch.
+To revoke access, send `{ "mailToolsEnabled": false }` to the same endpoint.
+
+The tools and email instructions appear on the next turn of eligible sessions in
+that project. Revocation takes effect on every internal email HTTP request,
+including tools loaded earlier and direct API fallback calls. Disabled or removed
+projects have no session email access. This setting is independent of mailbox
+OAuth access: selecting a project allows its sessions to use the connected
+mailboxes; sending/filing still needs each mailbox's management consent.
 
 ## Connect a mailbox
 
@@ -41,8 +56,8 @@ The admin API also accepts `access` on `POST /api/v1/settings/mail/accounts/conn
 
 ## Behavior and access
 
-Email is the operator's own data: eligible interactive chats can access all
-connected mailboxes, across projects. Worker, review, QA, read-only analyst,
+Email is the operator's own data: eligible interactive chats in opted-in projects can access all
+connected mailboxes. Other projects have no access. Worker, review, QA, read-only analyst,
 preview, closed and failed sessions are refused, as are unattended delivery turns.
 These checks run at every HTTP request, even if a turn already loaded the tools.
 No tools disconnect mailboxes or permanently delete messages.

@@ -4,10 +4,11 @@ import readline from 'node:readline';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { mailAgentRoutes, mailSessionAllowed } from '../lib/mail-agent.js';
 
-let server, base, job, service;
+let server, base, job, service, project;
 const interactive = () => ({ id: 'chat', kind: 'devchat', repo: 'owner/repo', status: 'running' });
 beforeEach(async () => {
   job = interactive();
+  project = { repo: job.repo, enabled: true, mailToolsEnabled: true };
   service = {
     connectStart: vi.fn(async (input) => ({ url: 'https://signin.test', input })),
     connectFinish: vi.fn(async () => ({ id: 7 })),
@@ -22,6 +23,7 @@ beforeEach(async () => {
   app.use(
     mailAgentRoutes({
       service,
+      getProject: (repo) => (project?.repo === repo ? project : null),
       agentSession: (req, res) => {
         if (req.headers.authorization !== 'Bearer session-token') {
           res.status(401).json({ error: 'Unknown session token' });
@@ -43,6 +45,39 @@ const get = (path, token = 'session-token') =>
   fetch(`${base}/api/agent/mail${path}`, { headers: { Authorization: `Bearer ${token}` } });
 
 describe('session mailbox authorization', () => {
+  it.each([
+    null,
+    {},
+    { mailToolsEnabled: false },
+    { mailToolsEnabled: 'true' },
+    { mailToolsEnabled: true, enabled: false },
+  ])('refuses projects without explicit opt-in: %j', async (settings) => {
+    project = settings == null ? null : { repo: job.repo, ...settings };
+    const res = await get('/accounts');
+    expect(res.status).toBe(403);
+    expect(service.list).not.toHaveBeenCalled();
+  });
+  it('revokes every endpoint immediately when the project opt-in is disabled', async () => {
+    expect((await get('/accounts')).status).toBe(200);
+    project.mailToolsEnabled = false;
+    for (const [path, method] of [
+      ['/accounts', 'GET'],
+      ['/messages', 'GET'],
+      ['/accounts/7/messages/id', 'GET'],
+      ['/accounts/7/action', 'POST'],
+      ['/accounts/7/sync', 'POST'],
+      ['/connect', 'POST'],
+      ['/connect/finish', 'POST'],
+    ]) {
+      const res = await fetch(`${base}/api/agent/mail${path}`, {
+        method,
+        headers: { Authorization: 'Bearer session-token' },
+      });
+      expect(res.status).toBe(403);
+    }
+    expect(service.list).toHaveBeenCalledTimes(1);
+    for (const [name, fn] of Object.entries(service)) if (name !== 'list') expect(fn).not.toHaveBeenCalled();
+  });
   it('rejects unknown tokens', async () => {
     expect((await get('/accounts', 'bad')).status).toBe(401);
     expect(service.list).not.toHaveBeenCalled();
@@ -60,7 +95,7 @@ describe('session mailbox authorization', () => {
     'unattendedTurn',
   ])('refuses %s sessions on every route', async (key) => {
     job[key] = true;
-    expect(mailSessionAllowed(job)).toBe(false);
+    expect(mailSessionAllowed(job, project)).toBe(false);
     for (const path of [
       '/accounts',
       '/messages',
@@ -82,7 +117,7 @@ describe('session mailbox authorization', () => {
   it.each([{ status: 'closed' }, { status: 'failed' }, { kind: 'review' }, { repo: '' }])(
     'refuses ineligible sessions %j',
     (fields) => {
-      expect(mailSessionAllowed({ ...job, ...fields })).toBe(false);
+      expect(mailSessionAllowed({ ...job, ...fields }, project)).toBe(false);
     },
   );
   it('handles service failures with their status', async () => {

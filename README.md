@@ -39,7 +39,8 @@ screens are separate work. See [WhatsApp setup and client flow](docs/whatsapp.md
 ## Email in agent sessions
 
 Chat with Claude to read, search, reply to, send and archive Gmail or Outlook
-email through the internal mail MCP. Existing connections stay read-only until
+email through the internal mail MCP in projects with `mailToolsEnabled: true`
+(off by default). Existing connections stay read-only until
 you reconnect them with management permissions. See [Email from a session](docs/email-mcp.md)
 for setup and access details.
 
