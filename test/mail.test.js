@@ -1109,6 +1109,48 @@ describe('mail management access', () => {
     expect(errors).toEqual([]);
   });
 
+  it.each(['read', 'unread', 'archive'])(
+    'refreshes committed %s state after a server error with periodic sync disabled',
+    async (action) => {
+      cfg.mail.syncMinutes = 0;
+      mailbox.manage = true;
+      const account = await connect({ access: 'manage' });
+      await settled();
+      const id = action === 'unread' ? 'b' : 'a';
+      const before = await service.message(account.id, id);
+      const original = gmail.request.getMockImplementation();
+      gmail.request.mockImplementation(async (url, opts) => {
+        if (url.endsWith(`/messages/${id}/modify`)) {
+          mailbox.messages[id].unread = action === 'unread';
+          return Response.json({}, { status: 503 });
+        }
+        if (url.includes('/history?')) return Response.json({}, { status: 404 });
+        const response = await original(url, opts);
+        if (action === 'archive' && url.includes(`/messages/${id}?format=full`)) {
+          const data = await response.json();
+          data.labelIds = data.labelIds.filter((label) => label !== 'INBOX');
+          return Response.json(data);
+        }
+        return response;
+      });
+      const error = await service.action(account.id, { action, id }).catch((e) => e);
+      expect(error).toMatchObject({ uncertain: true, syncCompleted: true });
+      const after = await service.message(account.id, id);
+      if (action === 'archive') {
+        expect(before.inInbox).toBe(true);
+        expect(after.inInbox).toBe(false);
+      } else {
+        expect(after.isRead).toBe(action === 'read');
+        expect(after.isRead).not.toBe(before.isRead);
+      }
+      expect(gmail.request.mock.calls.filter(([url]) => url.endsWith(`/messages/${id}/modify`))).toHaveLength(
+        1,
+      );
+      expect((await service.list())[0].syncing).toBe(false);
+      expect(errors).toEqual([]);
+    },
+  );
+
   it.each(['lost response', 'server error', 'failed sync', 'running sync'])(
     'refreshes uncertain sends before returning reconciliation guidance: %s',
     async (scenario) => {

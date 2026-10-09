@@ -62,6 +62,38 @@ describe('email actions', () => {
     expect(request.mock.calls[0][1].method).toBe('POST');
   });
 
+  it.each(
+    ['gmail', 'outlook'].flatMap((provider) =>
+      ['read', 'unread', 'archive'].flatMap((action) =>
+        [500, 502, 503, 504, 403, 404].map((status) => ({ provider, action, status })),
+      ),
+    ),
+  )(
+    'preserves $provider $action outcomes for HTTP $status without retrying',
+    async ({ provider, action, status }) => {
+      const { run, request } = make(provider, new Response('{}', { status }));
+      const error = await run({ action, id: 'abc' }).catch((e) => e);
+      if (status >= 500) {
+        expect(error).toMatchObject({ uncertain: true, status: 502 });
+        expect(error.message).toMatch(/may have succeeded/);
+      } else {
+        expect(error).toMatchObject({ status });
+        expect(error).not.toHaveProperty('uncertain');
+        expect(error.message).toMatch(/refused/);
+      }
+      expect(request).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('keeps Gmail reply metadata server errors definite without sending', async () => {
+    const { run, request } = make('gmail', new Response('{}', { status: 503 }));
+    const error = await run({ action: 'reply', id: 'abc', text: 'Answer' }).catch((e) => e);
+    expect(error).toMatchObject({ status: 502 });
+    expect(error).not.toHaveProperty('uncertain');
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0][1].method).toBe('GET');
+  });
+
   it('folds multi-recipient Gmail headers and preserves every recipient', async () => {
     const { run, request } = make();
     const to = Array.from({ length: 50 }, (_, i) => `recipient.number.${i}@company.example.com`);
