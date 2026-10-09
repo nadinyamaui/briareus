@@ -509,7 +509,40 @@ describe('▶ Run: the links it answers with', () => {
     proc.emit('exit', 1);
 
     const failure = job.events.findLast((e) => e.text?.startsWith('App server died'));
-    expect(failure.text).toContain('Database unavailable\nServer stopped');
+    expect(failure.text).toContain('Server stopped\nDatabase unavailable');
+    expect(failure.text.length).toBeLessThanOrEqual('App server died (exit 1): '.length + 2000);
+  });
+
+  it('preserves stderr diagnostics after noisy stdout during startup', async () => {
+    const job = session();
+    const starting = startDevServe(job.id);
+    const rejected = expect(starting).rejects.toThrow('Fatal: Database unavailable');
+    while (!state.procs.length) await tick();
+    const proc = state.procs[0];
+    proc.stderr.write('Fatal: Database unavailable\n');
+    proc.stdout.write('x'.repeat(3400) + '\nCleanup finished\n');
+    proc.exitCode = 1;
+    proc.emit('exit', 1);
+
+    await rejected;
+    const failure = job.events.findLast((e) => e.text?.startsWith('App server died'));
+    expect(failure.text).toContain('Fatal: Database unavailable');
+    expect(failure.text).toContain('Cleanup finished');
+    expect(failure.text.length).toBeLessThanOrEqual('App server died (exit 1): '.length + 2000);
+  });
+
+  it('preserves both bounded stream tails after noisy stdout on a later crash', async () => {
+    const job = session();
+    await startDevServe(job.id);
+    const proc = state.procs[0];
+    proc.stderr.write('y'.repeat(3400) + '\nFatal: Database unavailable\n');
+    proc.stdout.write('x'.repeat(3400) + '\nCleanup finished\n');
+    proc.exitCode = 1;
+    proc.emit('exit', 1);
+
+    const failure = job.events.findLast((e) => e.text?.startsWith('App server died'));
+    expect(failure.text).toContain('Fatal: Database unavailable');
+    expect(failure.text).toContain('Cleanup finished');
     expect(failure.text.length).toBeLessThanOrEqual('App server died (exit 1): '.length + 2000);
   });
 
