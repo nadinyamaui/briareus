@@ -955,15 +955,52 @@ describe('message deletion', () => {
     await vi.waitFor(() =>
       expect(gmail.request.mock.calls.some(([url]) => String(url).endsWith('/trash'))).toBe(true),
     );
+    expect(await service.sync(a.id)).toMatchObject({ syncing: true });
     const removal = expect(service.remove(a.id)).rejects.toBe(failure);
     releaseDelete();
     await deletion;
     await removal;
-    expect((await service.list())[0]).toMatchObject({ id: a.id, enabled: false });
+    await settled();
+    expect((await service.list())[0]).toMatchObject({ id: a.id, enabled: false, syncing: false });
     expect(mailbox.messages.a).toBeUndefined();
     await expect(service.message(a.id, 'a')).rejects.toMatchObject({ status: 404 });
     expect((await service.messages({ account: a.id })).messages.map((m) => m.id)).toEqual(['b']);
   });
+
+  it.each([200, 403, 401])(
+    'reports queued syncs until deletion and refresh settle (trash %s)',
+    async (status) => {
+      const a = await connect();
+      await settled();
+      const lastSyncAt = (await service.list())[0].lastSyncAt;
+      clock += 1000;
+      let releaseDelete;
+      mailbox.trashWait = new Promise((resolve) => {
+        releaseDelete = resolve;
+      });
+      if (status !== 200) mailbox.trashStatus = status;
+      if (status === 401) mailbox.refreshRefused = true;
+      const deletion = service.trashMessage(a.id, 'a');
+      const result = status === 200 ? deletion : expect(deletion).rejects.toMatchObject({ status: 409 });
+      await vi.waitFor(() =>
+        expect(gmail.request.mock.calls.some(([url]) => String(url).endsWith('/trash'))).toBe(true),
+      );
+      expect((await service.list())[0].syncing).toBe(false);
+      const before = gmail.request.mock.calls.length;
+      expect(await service.sync(a.id)).toMatchObject({ syncing: true, lastSyncAt });
+      expect(await service.sync(a.id)).toMatchObject({ syncing: true });
+      expect((await service.list())[0].syncing).toBe(true);
+      expect(gmail.request.mock.calls).toHaveLength(before);
+      releaseDelete();
+      await result;
+      await settled();
+      expect((await service.list())[0]).toMatchObject({
+        syncing: false,
+        lastSyncAt: status === 401 ? lastSyncAt : clock,
+        status: status === 401 ? 'reauth' : 'connected',
+      });
+    },
+  );
 
   it('waits for a running sync, and holds subsequent syncs until deletion completes', async () => {
     const a = await connect();
