@@ -546,6 +546,125 @@ describe('providerUsage across a restart', () => {
     }
   });
 
+  it('preserves disk account backoff through an unreadable credential snapshot', async () => {
+    const actual = await vi.importActual('../lib/providers.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'balancer-unreadable-'));
+    const savedAuth = codexAuth('workspace-A', 1);
+    const diskAuth = codexAuth('workspace-B', 1);
+    state.rows[0] = row(1, { binary: 'codex', authData: savedAuth });
+    const file = path.join(dir, 'auth.json');
+    fs.writeFileSync(file, JSON.stringify(diskAuth.auth));
+    const fetch = vi.fn(async () => ({ status: 429, headers: new Headers({ 'Retry-After': '3600' }) }));
+    vi.stubGlobal('fetch', fetch);
+    const readDisk = () => {
+      providers.codexHomeDir.mockReturnValueOnce(dir);
+      providers.readCodexAuth.mockImplementationOnce(actual.readCodexAuth);
+    };
+    providers.codexUsage.mockImplementation(actual.codexUsage);
+    try {
+      readDisk();
+      const lockout = await providerUsage(state.rows[0]);
+      fs.writeFileSync(file, '');
+      readDisk();
+      expect(await providerUsage(state.rows[0], { ttlMs: 0 })).toBeNull();
+      expect(cachedProviderUsage(state.rows[0])).toBeUndefined();
+      fs.writeFileSync(file, JSON.stringify(diskAuth.auth));
+      readDisk();
+      expect(await providerUsage(state.rows[0], { ttlMs: 0 })).toEqual(lockout);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      // A different, identifiable account must still get its own reading.
+      fs.writeFileSync(file, JSON.stringify(savedAuth.auth));
+      readDisk();
+      await providerUsage(state.rows[0]);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    } finally {
+      providers.codexUsage.mockImplementation(async (dir) => state.usage[dir] ?? null);
+      vi.unstubAllGlobals();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['null', 'rejection'])(
+    'keeps another server’s active lockout after a later %s failure',
+    async (failure) => {
+      const { stored, update } = store();
+      await restoreProviderUsage({ load: () => ({}), update });
+      let finish, fail;
+      const pending = providerUsage(row(1), {
+        read: () =>
+          new Promise((resolve, reject) => {
+            finish = resolve;
+            fail = reject;
+          }),
+      });
+      vi.resetModules();
+      const other = await import('../lib/balancer.js');
+      await other.restoreProviderUsage({ load: () => ({}), update });
+      const lockout = { windows: [], retryAt: new Date(Date.now() + 3600000).toISOString() };
+      await other.providerUsage(row(1), { read: async () => lockout });
+      await other.flushProviderUsage();
+      const saved = structuredClone(stored[1]);
+      if (failure === 'null') finish(null);
+      else fail(new Error('timeout'));
+      expect(await pending).toBeNull();
+      await flushProviderUsage();
+      expect(stored[1]).toEqual(saved);
+      vi.resetModules();
+      const restarted = await import('../lib/balancer.js');
+      await restarted.restoreProviderUsage({ load: () => stored, update: null });
+      const read = vi.fn(async () => windows(0));
+      expect(await restarted.providerUsage(row(1), { ttlMs: 0, read })).toEqual(lockout);
+      expect(read).not.toHaveBeenCalled();
+      // A successful sample can still supersede it; expired backoff can be replaced by null.
+      await providerUsage(row(1), { ttlMs: 0, read: async () => windows(8) });
+      await flushProviderUsage();
+      expect(stored[1].value).toEqual(windows(8));
+      stored[1] = { ...saved, retryAt: new Date(Date.now() - 1000).toISOString() };
+      await providerUsage(row(1), { ttlMs: 0, read: async () => null });
+      await flushProviderUsage();
+      expect(stored[1].value).toBeNull();
+      await unwire();
+    },
+  );
+
+  it.each([1, null])('preserves subsequent measurements when delayed forget(%s) runs', async (id) => {
+    const { stored } = store();
+    let releaseWrite;
+    let writes = 0;
+    await restoreProviderUsage({
+      load: () => ({}),
+      update: async (fn) => {
+        if (++writes === 1) await new Promise((resolve) => (releaseWrite = resolve));
+        fn(stored);
+      },
+    });
+    await providerUsage(row(2), { read: async () => windows(5) });
+    await settle();
+    state.rows[0] = row(1, { binary: 'codex', authData: codexAuth('NEW', 1) });
+    forgetProviderUsage(id);
+    vi.resetModules();
+    const other = await import('../lib/balancer.js');
+    await other.restoreProviderUsage({ load: () => ({}), update: (fn) => fn(stored) });
+    const lockout = { windows: [], retryAt: new Date(Date.now() + 3600000).toISOString() };
+    await other.providerUsage(state.rows[0], { read: async () => lockout });
+    await other.flushProviderUsage();
+    const saved = structuredClone(stored[1]);
+    releaseWrite();
+    await flushProviderUsage();
+    expect(stored[1]).toEqual(saved);
+    vi.resetModules();
+    const restarted = await import('../lib/balancer.js');
+    await restarted.restoreProviderUsage({ load: () => stored, update: null });
+    const read = vi.fn(async () => windows(0));
+    expect(await restarted.providerUsage(state.rows[0], { ttlMs: 0, read })).toEqual(lockout);
+    expect(read).not.toHaveBeenCalled();
+    // A later explicit forget still invalidates this measurement.
+    forgetProviderUsage(id);
+    await flushProviderUsage();
+    expect(stored[1]).toBeUndefined();
+    await unwire();
+  });
+
   it('does not delete another server’s lockout when account adoption starts a pending refresh', async () => {
     const { stored } = store();
     let releaseWrite;
@@ -699,12 +818,14 @@ describe('providerUsage across a restart', () => {
   it('keeps a stored entry newer than the one being saved, but a forget still drops it', async () => {
     const { stored, update } = store();
     await restoreProviderUsage({ load: async () => ({}), update });
-    const newer = { at: Date.now() + 60_000, fingerprint, value: windows(90) };
+    const newer = { at: Date.now() + 20, fingerprint, value: windows(90) };
     stored[1] = newer;
     state.usage['/claude-1'] = windows(12);
     await providerUsage(row(1));
     await settle();
     expect(stored[1]).toBe(newer);
+    // Forget is scheduled after this newer measurement, so it still removes it.
+    await new Promise((resolve) => setTimeout(resolve, 25));
     forgetProviderUsage(1);
     await settle();
     expect(stored).toEqual({});
