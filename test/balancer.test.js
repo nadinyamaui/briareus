@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const state = vi.hoisted(() => ({ rows: [], usage: {} }));
@@ -10,8 +13,11 @@ vi.mock('../lib/providerstore.js', () => ({
 
 vi.mock('../lib/providers.js', () => ({
   claudeHomeDir: (p) => `/claude-${p.id}`,
-  codexHomeDir: (p) => `/codex-${p.id}`,
+  codexHomeDir: vi.fn((p) => `/codex-${p.id}`),
   grokHomeDir: (p) => `/grok-${p.id}`,
+  readClaudeAuth: (dir) => state.rows.find((p) => `/claude-${p.id}` === dir)?.authData ?? null,
+  readCodexAuth: vi.fn((dir) => state.rows.find((p) => `/codex-${p.id}` === dir)?.authData ?? null),
+  readGrokAuth: (dir) => state.rows.find((p) => `/grok-${p.id}` === dir)?.authData ?? null,
   claudeUsage: vi.fn(async (dir) => state.usage[dir] ?? null),
   codexUsage: vi.fn(async (dir) => state.usage[dir] ?? null),
   grokUsage: vi.fn(async (dir) => state.usage[dir] ?? null),
@@ -367,11 +373,14 @@ describe('providerUsage across a restart', () => {
     },
     settings: { oauthAccount: { accountUuid: account, organizationUuid: organization } },
   });
-  const codexAuth = (account, rotation) => ({
+  const codexAuth = (account, rotation, user = 'user-1') => ({
     auth: {
       tokens: {
         access_token: `x.${Buffer.from(
-          JSON.stringify({ exp: rotation, 'https://api.openai.com/auth': { chatgpt_account_id: account } }),
+          JSON.stringify({
+            exp: rotation,
+            'https://api.openai.com/auth': { chatgpt_account_id: account, chatgpt_user_id: user },
+          }),
         ).toString('base64url')}.sig-${rotation}`,
         refresh_token: `refresh-${rotation}`,
         id_token: `id-${rotation}`,
@@ -413,6 +422,134 @@ describe('providerUsage across a restart', () => {
     await restarted.providerUsage(state.rows[0], { read, ttlMs: 0 });
     expect(read).toHaveBeenCalledTimes(2);
     await unwire();
+  });
+
+  it('rejects a previous Codex user’s delayed lockout in the same workspace', async () => {
+    const { stored } = store();
+    state.rows[0] = row(1, { binary: 'codex', authData: codexAuth('workspace', 1, 'user-A') });
+    await restoreProviderUsage({ load: () => ({}), update: (fn) => fn(stored, state.rows[0]) });
+    let finish;
+    const pending = providerUsage(state.rows[0], { read: () => new Promise((r) => (finish = r)) });
+    state.rows[0] = row(1, { binary: 'codex', authData: codexAuth('workspace', 2, 'user-B') });
+    // Another server invalidated storage; this process still has A’s active read.
+    delete stored[1];
+    finish({ windows: [], retryAt: new Date(Date.now() + 3600000).toISOString() });
+    await pending;
+    await flushProviderUsage();
+    expect(stored).toEqual({});
+    vi.resetModules();
+    const restarted = await import('../lib/balancer.js');
+    await restarted.restoreProviderUsage({ load: () => stored, update: null });
+    const read = vi.fn(async () => windows(7));
+    expect(await restarted.providerUsage(state.rows[0], { read })).toEqual(windows(7));
+    expect(read).toHaveBeenCalledTimes(1);
+    await unwire();
+  });
+
+  it('falls back to credentials when a Codex workspace has no user identity', async () => {
+    const auth = codexAuth('workspace', 1);
+    const incomplete = (rotation) => {
+      const copy = structuredClone(auth);
+      const claims = { 'https://api.openai.com/auth': { chatgpt_account_id: 'workspace' } };
+      copy.auth.tokens.access_token = `x.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.${rotation}`;
+      return copy;
+    };
+    state.rows[0] = row(1, { binary: 'codex', authData: incomplete(1) });
+    const read = vi.fn(async () => ({ windows: [], retryAt: new Date(Date.now() + 3600000).toISOString() }));
+    await providerUsage(state.rows[0], { read });
+    state.rows[0].authData = incomplete(2);
+    await providerUsage(state.rows[0], { read });
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not persist another disk account’s measurement under the saved row', async () => {
+    const actual = await vi.importActual('../lib/providers.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'balancer-auth-'));
+    const savedAuth = codexAuth('workspace-A', 1);
+    const diskAuth = codexAuth('workspace-B', 1);
+    const { stored, update } = store();
+    state.rows[0] = row(1, { binary: 'codex', authData: savedAuth });
+    fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify(diskAuth.auth));
+    providers.codexHomeDir.mockReturnValueOnce(dir);
+    providers.readCodexAuth.mockImplementationOnce(actual.readCodexAuth);
+    providers.codexUsage.mockImplementationOnce((home, snapshot) => {
+      // Replacement between snapshot capture and meter dispatch must not change the token.
+      fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify(savedAuth.auth));
+      return actual.codexUsage(home, snapshot);
+    });
+    const fetch = vi.fn(async (_url, options) => {
+      expect(options.headers.Authorization).toBe(`Bearer ${diskAuth.auth.tokens.access_token}`);
+      // A login changes the file after dispatch; it must not change the measurement identity.
+      fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify(savedAuth.auth));
+      return { ok: true, json: async () => ({ rate_limit: { primary_window: { used_percent: 97 } } }) };
+    });
+    vi.stubGlobal('fetch', fetch);
+    try {
+      await restoreProviderUsage({ load: () => ({}), update });
+      expect((await providerUsage(state.rows[0])).windows[0].usedPct).toBe(97);
+      await flushProviderUsage();
+      expect(stored).toEqual({});
+      expect(cachedProviderUsage(state.rows[0])).toBeUndefined();
+      vi.resetModules();
+      const restarted = await import('../lib/balancer.js');
+      await restarted.restoreProviderUsage({ load: () => stored, update: null });
+      const read = vi.fn(async () => windows(4));
+      expect(await restarted.providerUsage(state.rows[0], { read })).toEqual(windows(4));
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+      fs.rmSync(dir, { recursive: true, force: true });
+      await unwire();
+    }
+  });
+
+  it('drains active reads, then their writes, while refusing new shutdown reads', async () => {
+    vi.resetModules();
+    const isolated = await import('../lib/balancer.js');
+    const stored = {};
+    let finishRead, finishWrite;
+    await isolated.restoreProviderUsage({
+      load: () => ({}),
+      update: (fn) =>
+        new Promise(
+          (resolve) =>
+            (finishWrite = () => {
+              fn(stored);
+              resolve();
+            }),
+        ),
+    });
+    const read = vi.fn(() => new Promise((r) => (finishRead = r)));
+    const pending = isolated.providerUsage(row(1), { read });
+    let drained = false;
+    const flush = isolated.flushProviderUsage(1000, { shutdown: true }).then(() => (drained = true));
+    await settle();
+    expect(drained).toBe(false);
+    expect(await isolated.providerUsage(row(2), { read })).toBeNull();
+    expect(read).toHaveBeenCalledTimes(1);
+    const retryAt = new Date(Date.now() + 3600000).toISOString();
+    finishRead({ windows: [], retryAt });
+    await pending;
+    await settle();
+    expect(drained).toBe(false);
+    finishWrite();
+    await flush;
+    expect(stored[1].retryAt).toBe(retryAt);
+    vi.resetModules();
+    const restarted = await import('../lib/balancer.js');
+    await restarted.restoreProviderUsage({ load: () => stored, update: null });
+    expect((await restarted.providerUsage(row(1), { read })).retryAt).toBe(retryAt);
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it('bounds the drain even when an active read never settles', async () => {
+    vi.resetModules();
+    const isolated = await import('../lib/balancer.js');
+    const pending = isolated.providerUsage(row(1), { read: () => new Promise(() => {}) });
+    const started = Date.now();
+    await isolated.flushProviderUsage(20, { shutdown: true });
+    expect(Date.now() - started).toBeLessThan(1000);
+    void pending;
   });
 
   it('invalidates Claude usage when the same user switches organizations', async () => {
@@ -684,11 +821,11 @@ describe('providerUsage in flight', () => {
 describe('readProviderUsage', () => {
   it('reads each meter from where the account keeps it', async () => {
     await readProviderUsage(row(1));
-    expect(providers.claudeUsage).toHaveBeenCalledWith('/claude-1');
+    expect(providers.claudeUsage).toHaveBeenCalledWith('/claude-1', null);
     await readProviderUsage(row(2, { binary: 'codex' }));
-    expect(providers.codexUsage).toHaveBeenCalledWith('/codex-2');
+    expect(providers.codexUsage).toHaveBeenCalledWith('/codex-2', null);
     await readProviderUsage(row(3, { binary: 'grok' }));
-    expect(providers.grokUsage).toHaveBeenCalledWith('/grok-3');
+    expect(providers.grokUsage).toHaveBeenCalledWith('/grok-3', null);
     await readProviderUsage(row(4, { binary: 'codex', baseUrl: 'https://api.z.ai/v1', apiKey: 'k' }));
     expect(providers.zaiUsage).toHaveBeenCalledWith('https://api.z.ai/v1', 'k');
   });
