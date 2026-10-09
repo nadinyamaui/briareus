@@ -50,7 +50,7 @@ import {
   loadTaskSessions,
   loadJobTurnUsage,
   loadAppSetting,
-  saveAppSetting,
+  updateAppSetting,
 } from './lib/db.js';
 import {
   initJobs,
@@ -149,6 +149,7 @@ import {
   cachedProviderAuth,
   forgetProviderUsage,
   restoreProviderUsage,
+  flushProviderUsage,
   FRESH_USAGE_TTL_MS,
 } from './lib/balancer.js';
 import {
@@ -2057,7 +2058,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await initProviders();
     await restoreProviderUsage({
       load: () => loadAppSetting('provider_usage', {}),
-      save: (value) => saveAppSetting('provider_usage', value),
+      update: (fn) => updateAppSetting('provider_usage', {}, fn),
     });
     // Warm the quota cache so the first session already lands on the account with most headroom;
     // reads restored from the last process and still inside their TTL are not repeated.
@@ -2141,6 +2142,7 @@ process.on('uncaughtException', (e) => {
   const giveUp = setTimeout(() => process.exit(1), 5000);
   stopAllJobProcesses()
     .finally(() => flushJobs())
+    .finally(() => flushProviderUsage())
     .catch(() => {})
     .finally(() => {
       clearTimeout(giveUp);
@@ -2155,6 +2157,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     stopAllBrowsers();
     stopAllJobProcesses()
       .finally(() => flushJobs())
+      .finally(() => flushProviderUsage())
       .catch((e) => console.error('Could not finish session shutdown:', e.message))
       .finally(() => process.exit(0));
   });

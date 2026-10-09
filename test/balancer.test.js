@@ -30,6 +30,7 @@ import {
   AUTH_TTL_MS,
   rememberProviderExhausted,
   restoreProviderUsage,
+  flushProviderUsage,
   FRESH_USAGE_TTL_MS,
 } from '../lib/balancer.js';
 
@@ -347,11 +348,13 @@ describe('providerUsage after a rate limit', () => {
 describe('providerUsage across a restart', () => {
   const settle = () => new Promise((r) => setTimeout(r, 0));
   // Unwired again so later tests do not write into this one's store.
-  const unwire = () => restoreProviderUsage({ load: () => null, save: null });
+  const unwire = () => restoreProviderUsage({ load: () => null, update: null });
+  // The stored setting, changed in place the way updateAppSetting hands it to fn.
+  const store = (stored = {}) => ({ stored, update: vi.fn(async (fn) => fn(stored)) });
 
   it('serves a restored read inside its TTL instead of asking again', async () => {
     const saved = { 1: { at: Date.now() - 60_000, value: windows(30) } };
-    await restoreProviderUsage({ load: async () => saved, save: async () => {} });
+    await restoreProviderUsage({ load: async () => saved, update: async () => {} });
     expect(await providerUsage(row(1))).toEqual(windows(30));
     expect(await providerUsage(row(1), { ttlMs: FRESH_USAGE_TTL_MS })).toEqual(windows(30));
     expect(providers.claudeUsage).not.toHaveBeenCalled();
@@ -361,29 +364,82 @@ describe('providerUsage across a restart', () => {
   it('keeps a restored rate limit until its retryAt, even for a manual refresh', async () => {
     const retryAt = new Date(Date.now() + 30 * 60_000).toISOString();
     const saved = { 1: { at: Date.now() - 20 * 60_000, value: { windows: [], retryAt }, retryAt } };
-    await restoreProviderUsage({ load: async () => saved, save: async () => {} });
+    await restoreProviderUsage({ load: async () => saved, update: async () => {} });
     await providerUsage(row(1), { ttlMs: 0 });
     expect(providers.claudeUsage).not.toHaveBeenCalled();
     await unwire();
   });
 
   it('saves each settled read and each forget, so the next process starts from them', async () => {
-    const save = vi.fn(async () => {});
-    await restoreProviderUsage({ load: async () => ({}), save });
+    const { stored, update } = store();
+    await restoreProviderUsage({ load: async () => ({}), update });
     state.usage['/claude-1'] = windows(12);
     await providerUsage(row(1));
     await settle();
-    expect(save).toHaveBeenLastCalledWith({ 1: { at: expect.any(Number), value: windows(12) } });
+    expect(stored).toEqual({ 1: { at: expect.any(Number), value: windows(12) } });
     forgetProviderUsage(1);
     await settle();
-    expect(save).toHaveBeenLastCalledWith({});
+    expect(stored).toEqual({});
+    await unwire();
+  });
+
+  it("leaves other accounts' stored entries alone, so another server's newer lockout survives", async () => {
+    const at = Date.now() - 60_000;
+    const { stored, update } = store();
+    await restoreProviderUsage({ load: async () => ({ 1: { at, value: windows(30) } }), update });
+    // Another server sharing the database saved a lockout for account 1 since.
+    const retryAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    const lockout = { at: Date.now(), value: { windows: [], retryAt }, retryAt };
+    stored[1] = lockout;
+    state.usage['/claude-2'] = windows(7);
+    await providerUsage(row(2));
+    await settle();
+    expect(stored).toEqual({ 1: lockout, 2: { at: expect.any(Number), value: windows(7) } });
+    await unwire();
+  });
+
+  it('keeps a stored entry newer than the one being saved, but a forget still drops it', async () => {
+    const { stored, update } = store();
+    await restoreProviderUsage({ load: async () => ({}), update });
+    const newer = { at: Date.now() + 60_000, value: windows(90) };
+    stored[1] = newer;
+    state.usage['/claude-1'] = windows(12);
+    await providerUsage(row(1));
+    await settle();
+    expect(stored[1]).toBe(newer);
+    forgetProviderUsage(1);
+    await settle();
+    expect(stored).toEqual({});
+    await unwire();
+  });
+
+  it('lets shutdown wait for a queued write, but not past its bound', async () => {
+    let release;
+    const update = vi.fn(() => new Promise((r) => (release = r)));
+    await restoreProviderUsage({ load: async () => ({}), update });
+    await providerUsage(row(1));
+    let drained = false;
+    const flush = flushProviderUsage(1000).then(() => (drained = true));
+    await settle();
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(drained).toBe(false);
+    release();
+    await flush;
+    expect(drained).toBe(true);
+
+    forgetProviderUsage(1); // held until released below
+    const started = Date.now();
+    await flushProviderUsage(20);
+    expect(Date.now() - started).toBeLessThan(1000);
+    release(); // so the queue is free for later tests
+    await flushProviderUsage();
     await unwire();
   });
 
   it('reads again once the restored read is past its TTL, and a failed load restores nothing', async () => {
     await restoreProviderUsage({
       load: async () => ({ 1: { at: Date.now() - 16 * 60_000, value: windows(5) } }),
-      save: null,
+      update: null,
     });
     state.usage['/claude-1'] = windows(50);
     expect(await providerUsage(row(1))).toEqual(windows(50));
@@ -391,7 +447,7 @@ describe('providerUsage across a restart', () => {
       load: async () => {
         throw new Error('db down');
       },
-      save: null,
+      update: null,
     });
     state.usage['/claude-2'] = windows(7);
     expect(await providerUsage(row(2))).toEqual(windows(7));
