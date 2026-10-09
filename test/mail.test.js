@@ -874,6 +874,60 @@ describe('mail management access', () => {
     expect(JSON.parse(open(store.accounts.get(account.id).credentials)).refreshToken).toBe('refresh-fresh');
   });
 
+  it.each(['remove', 'read reconnect', 'manage reconnect'])(
+    'refuses an obsolete action token after %s during a successful refresh',
+    async (change) => {
+      mailbox.manage = true;
+      const account = await connect({ access: 'manage' });
+      await settled();
+      clock += 2 * 3600_000;
+      let release;
+      gmail.gate.refresh = new Promise((resolve) => (release = resolve));
+      const action = service
+        .action(account.id, {
+          action: 'send',
+          to: ['you@example.com'],
+          subject: 's',
+          text: 'b',
+        })
+        .catch((e) => e);
+      await vi.waitFor(() =>
+        expect(gmail.tokenCalls.some((c) => c.grant_type === 'refresh_token')).toBe(true),
+      );
+      if (change === 'remove') await service.remove(account.id);
+      else {
+        mailbox.manage = change === 'manage reconnect';
+        await connect({ accountId: account.id, access: mailbox.manage ? 'manage' : 'read' }, 'fresh');
+      }
+      release();
+      const error = await action;
+      expect(error).toMatchObject({
+        status: change === 'remove' ? 404 : change === 'read reconnect' ? 403 : 409,
+      });
+      expect(error).not.toHaveProperty('uncertain');
+      expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/messages/send'))).toHaveLength(0);
+      await settled();
+    },
+  );
+
+  it('allows an action after its own successful refresh', async () => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    clock += 2 * 3600_000;
+    expect(
+      await service.action(account.id, {
+        action: 'send',
+        to: ['you@example.com'],
+        subject: 's',
+        text: 'b',
+      }),
+    ).toMatchObject({ status: 'accepted' });
+    const sent = gmail.request.mock.calls.find(([url]) => url.endsWith('/messages/send'));
+    expect(sent[1].headers.Authorization).toBe('Bearer access-2');
+    await settled();
+  });
+
   it('queues a sync after a write when the running pass holds stale state', async () => {
     mailbox.manage = true;
     const account = await connect({ access: 'manage' });
@@ -1031,6 +1085,61 @@ describe('mail management access', () => {
       }
     },
   );
+  it.each(['fresh sync', 'running sync'])(
+    'returns pending uncertainty guidance within ten seconds while retaining the %s',
+    async (scenario) => {
+      cfg.mail.syncMinutes = 0;
+      mailbox.manage = true;
+      const account = await connect({ access: 'manage' });
+      await settled();
+      const original = gmail.request.getMockImplementation();
+      let release;
+      const gate = new Promise((resolve) => (release = resolve));
+      let paused = false;
+      gmail.request.mockImplementation(async (url, opts) => {
+        if (url.endsWith('/messages/send')) {
+          mailbox.messages.sent = { at: clock, labels: ['SENT'] };
+          throw new Error('response lost');
+        }
+        if (url.includes('/history?')) return Response.json({}, { status: 404 });
+        const response = await original(url, opts);
+        if (url.includes('/messages?') && !paused) {
+          paused = true;
+          await gate;
+        }
+        return response;
+      });
+      if (scenario === 'running sync') {
+        await service.sync(account.id);
+        await vi.waitFor(() => expect(paused).toBe(true));
+      }
+      vi.useFakeTimers();
+      const action = service
+        .action(account.id, {
+          action: 'send',
+          to: ['you@example.com'],
+          subject: 's',
+          text: 'b',
+        })
+        .catch((e) => e);
+      await vi.advanceTimersByTimeAsync(10_000);
+      const error = await action;
+      expect(error).toMatchObject({ uncertain: true, syncCompleted: false, syncPending: true });
+      expect(error.message).toMatch(/reconciliation is still pending/);
+      expect(error.message).toMatch(/cached absence from Sent cannot justify a retry/);
+      expect(error.message).toMatch(/absence alone does not prove non-delivery/);
+      expect((await service.list())[0].syncing).toBe(true);
+      expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/messages/send'))).toHaveLength(1);
+      release();
+      vi.useRealTimers();
+      await settled();
+      expect((await service.messages({ account: account.id })).messages.some((m) => m.id === 'sent')).toBe(
+        true,
+      );
+      expect(errors).toEqual([]);
+    },
+  );
+
   it('rejects invalid or refused management consent without saving a grant', async () => {
     expect(() => service.connectStart({ provider: 'gmail', access: 'admin' })).toThrow(/Choose/);
     await expect(connect({ access: 'manage' })).rejects.toThrow(/did not grant/);
