@@ -951,6 +951,26 @@ describe('mail management access', () => {
     expect((await service.list())[0].lastSyncAt).toBe(clock);
     expect(errors).toEqual([]);
   });
+  it('does not sync or reconcile Sent after a failed Gmail reply metadata read', async () => {
+    cfg.mail.syncMinutes = 0;
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    gmail.request.mockClear();
+    gmail.request.mockRejectedValue(new TypeError('fetch failed'));
+    const error = await service
+      .action(account.id, { action: 'reply', id: 'a', text: 'Answer' })
+      .catch((e) => e);
+    await settled();
+    expect(error).toMatchObject({ status: 502, message: expect.stringMatching(/no mail action was sent/) });
+    expect(error).not.toHaveProperty('uncertain');
+    expect(error).not.toHaveProperty('syncCompleted');
+    expect(gmail.request).toHaveBeenCalledTimes(1);
+    expect(gmail.request.mock.calls[0][0]).toBe(`${GMAIL}/messages/a?format=metadata`);
+    expect(gmail.request.mock.calls[0][1].method).toBe('GET');
+    expect(errors).toEqual([]);
+  });
+
   it.each(['lost response', 'server error', 'failed sync', 'running sync'])(
     'refreshes uncertain sends before returning reconciliation guidance: %s',
     async (scenario) => {

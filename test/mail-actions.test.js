@@ -13,6 +13,29 @@ const make = (provider = 'gmail', ...responses) => {
 };
 
 describe('email actions', () => {
+  it.each(['network failure', 'timeout'])('keeps Gmail metadata %s definite', async (failure) => {
+    const { run, request } = make();
+    request.mockRejectedValue(
+      failure === 'timeout' ? new DOMException('Timed out', 'TimeoutError') : new TypeError('fetch failed'),
+    );
+    const error = await run({ action: 'reply', id: 'abc', text: 'Answer' }).catch((e) => e);
+    expect(error).toMatchObject({ status: 502, message: expect.stringMatching(/no mail action was sent/) });
+    expect(error).not.toHaveProperty('uncertain');
+    expect(error.message).not.toMatch(/may have succeeded|Sent|sync/);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0][1].method).toBe('GET');
+  });
+
+  it.each(['gmail', 'outlook'])('keeps %s write transport failures uncertain', async (provider) => {
+    const { run, request } = make(provider);
+    request.mockRejectedValue(new TypeError('fetch failed'));
+    await expect(
+      run({ action: 'send', to: ['you@example.com'], subject: 's', text: 'b' }),
+    ).rejects.toMatchObject({ uncertain: true, status: 502 });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0][1].method).toBe('POST');
+  });
+
   it('folds multi-recipient Gmail headers and preserves every recipient', async () => {
     const { run, request } = make();
     const to = Array.from({ length: 50 }, (_, i) => `recipient.number.${i}@company.example.com`);
