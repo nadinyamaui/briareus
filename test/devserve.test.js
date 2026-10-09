@@ -478,6 +478,111 @@ describe('▶ Run: the links it answers with', () => {
     warn.mockRestore();
   });
 
+  it('reports stdout failures when run commands exit during startup', async () => {
+    const job = session();
+    const starting = startDevServe(job.id);
+    const rejected = expect(starting).rejects.toThrow(
+      'The run commands exited immediately: The domain cannot be registered for this tenant.',
+    );
+    while (!state.procs.length) await tick();
+    const proc = state.procs[0];
+    proc.stdout.write('The domain cannot be registered for this tenant.\n');
+    proc.exitCode = 1;
+    proc.emit('exit', 1);
+
+    await rejected;
+    expect(
+      job.events.some(
+        (e) => e.text === 'App server died (exit 1): The domain cannot be registered for this tenant.',
+      ),
+    ).toBe(true);
+  });
+
+  it.each(['stdout', 'stderr'])(
+    'preserves split UTF-8 bytes from %s in startup failure diagnostics',
+    async (stream) => {
+      const job = session();
+      const starting = startDevServe(job.id);
+      const rejected = expect(starting).rejects.toThrow('The run commands exited immediately: €');
+      while (!state.procs.length) await tick();
+      const proc = state.procs[0];
+      proc[stream].write(Buffer.from([0xe2]));
+      await tick();
+      proc[stream].write(Buffer.from([0x82, 0xac]));
+      proc.exitCode = 1;
+      proc.emit('exit', 1);
+
+      await rejected;
+      const failure = job.events.findLast((e) => e.text?.startsWith('App server died'));
+      expect(failure.text).toBe('App server died (exit 1): €');
+    },
+  );
+
+  it.each(['stdout', 'stderr'])(
+    'preserves split UTF-8 bytes from %s in later crash diagnostics',
+    async (stream) => {
+      const job = session();
+      await startDevServe(job.id);
+      const proc = state.procs[0];
+      proc[stream].write(Buffer.from([0xe2]));
+      await tick();
+      proc[stream].write(Buffer.from([0x82, 0xac]));
+      proc.exitCode = 1;
+      proc.emit('exit', 1);
+
+      const failure = job.events.findLast((e) => e.text?.startsWith('App server died'));
+      expect(failure.text).toBe('App server died (exit 1): €');
+    },
+  );
+
+  it('retains bounded output from both streams when a running server fails', async () => {
+    const job = session();
+    await startDevServe(job.id);
+    const proc = state.procs[0];
+    proc.stdout.write('x'.repeat(3000));
+    proc.stderr.write('\nDatabase unavailable');
+    proc.stdout.write('\nServer stopped\n');
+    proc.exitCode = 1;
+    proc.emit('exit', 1);
+
+    const failure = job.events.findLast((e) => e.text?.startsWith('App server died'));
+    expect(failure.text).toContain('Server stopped\nDatabase unavailable');
+    expect(failure.text.length).toBeLessThanOrEqual('App server died (exit 1): '.length + 2000);
+  });
+
+  it('preserves stderr diagnostics after noisy stdout during startup', async () => {
+    const job = session();
+    const starting = startDevServe(job.id);
+    const rejected = expect(starting).rejects.toThrow('Fatal: Database unavailable');
+    while (!state.procs.length) await tick();
+    const proc = state.procs[0];
+    proc.stderr.write('Fatal: Database unavailable\n');
+    proc.stdout.write('x'.repeat(3400) + '\nCleanup finished\n');
+    proc.exitCode = 1;
+    proc.emit('exit', 1);
+
+    await rejected;
+    const failure = job.events.findLast((e) => e.text?.startsWith('App server died'));
+    expect(failure.text).toContain('Fatal: Database unavailable');
+    expect(failure.text).toContain('Cleanup finished');
+    expect(failure.text.length).toBeLessThanOrEqual('App server died (exit 1): '.length + 2000);
+  });
+
+  it('preserves both bounded stream tails after noisy stdout on a later crash', async () => {
+    const job = session();
+    await startDevServe(job.id);
+    const proc = state.procs[0];
+    proc.stderr.write('y'.repeat(3400) + '\nFatal: Database unavailable\n');
+    proc.stdout.write('x'.repeat(3400) + '\nCleanup finished\n');
+    proc.exitCode = 1;
+    proc.emit('exit', 1);
+
+    const failure = job.events.findLast((e) => e.text?.startsWith('App server died'));
+    expect(failure.text).toContain('Fatal: Database unavailable');
+    expect(failure.text).toContain('Cleanup finished');
+    expect(failure.text.length).toBeLessThanOrEqual('App server died (exit 1): '.length + 2000);
+  });
+
   it('leaves no unhandled rejection when the run commands exit at once', async () => {
     const unhandled = vi.fn();
     process.on('unhandledRejection', unhandled);

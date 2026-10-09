@@ -170,7 +170,7 @@ describe('gmailMessage', () => {
 });
 
 describe('gmailProvider', () => {
-  it('asks for offline mail access including trash with PKCE', () => {
+  it('asks for offline, read-only access with PKCE', () => {
     const url = new URL(
       gmailProvider(GOOGLE).authorizeUrl({ state: 'st', challenge: 'ch', loginHint: 'me@gmail.com' }),
     );
@@ -179,7 +179,7 @@ describe('gmailProvider', () => {
       client_id: 'gid',
       redirect_uri: 'http://127.0.0.1',
       response_type: 'code',
-      scope: 'https://www.googleapis.com/auth/gmail.modify',
+      scope: 'https://www.googleapis.com/auth/gmail.readonly',
       access_type: 'offline',
       prompt: 'consent',
       state: 'st',
@@ -613,11 +613,11 @@ describe('outlookMessage', () => {
 });
 
 describe('outlookProvider', () => {
-  it('signs in on the tenant with mail write scopes, and sends a secret only when there is one', async () => {
+  it('signs in on the tenant with read-only scopes, and sends a secret only when there is one', async () => {
     const url = new URL(outlookProvider(MICROSOFT).authorizeUrl({ state: 's', challenge: 'c' }));
     expect(url.origin + url.pathname).toBe('https://login.microsoftonline.com/common/oauth2/v2.0/authorize');
     expect(url.searchParams.get('scope')).toBe(
-      'offline_access https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read',
+      'offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read',
     );
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
 
@@ -652,8 +652,7 @@ describe('outlookProvider', () => {
     const outlook = outlookProvider(MICROSOFT, { request });
 
     await expect(outlook.exchange('c', 'v')).resolves.toMatchObject({
-      scope:
-        'offline_access https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read',
+      scope: 'offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read',
     });
     await expect(outlook.exchange('c', 'v')).resolves.toMatchObject({ refreshToken: 'r' });
     await expect(outlook.refresh('r')).rejects.toMatchObject({
@@ -1216,6 +1215,21 @@ describe('outlookProvider', () => {
 });
 
 describe('moving selected messages to trash', () => {
+  it.each([false, true])(
+    'records omitted Outlook scopes for the requested access (manage: %s)',
+    async (manage) => {
+      const { request, calls } = fakeFetch([
+        [/./, () => ({ body: { access_token: 'a', refresh_token: 'r' } })],
+      ]);
+      const provider = outlookProvider(MICROSOFT, { request, manage });
+      const grant = await provider.exchange('code', 'verifier');
+      expect(provider.canTrash(grant.scope)).toBe(manage);
+      expect(grant.scope.includes('Mail.Send')).toBe(manage);
+      await provider.refresh('r');
+      expect(new URLSearchParams(calls[1].init.body).has('scope')).toBe(false);
+    },
+  );
+
   it.each(['gmail', 'outlook'])(
     'uses %s trash rather than permanent deletion, encoding the message id',
     async (name) => {

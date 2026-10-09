@@ -642,6 +642,19 @@ describe('buildArgs', () => {
     expect(plain.args.join(' ')).not.toContain('mcp_servers');
   });
 
+  it('codex gives internal mail enough time for reply requests and uncertain-send reconciliation', () => {
+    const mcp = ['reviewer_mail', 'reviewer_memory', 'reviewer_ssh'].map((name) => ({
+      name,
+      command: '/usr/bin/node',
+      args: [`/app/lib/${name}.js`],
+    }));
+    for (const build of [BINARIES.codex.buildArgs, BINARIES.codex.buildReviewArgs]) {
+      const { args } = build({ model: 'gpt', effort: 'high', sessionId: 't', mcp });
+      expect(args).toContain('mcp_servers.reviewer_mail.tool_timeout_sec=240');
+      expect(args.filter((arg) => arg.includes('tool_timeout_sec'))).toHaveLength(1);
+    }
+  });
+
   it('codex takes a remote server by its URL and headers', () => {
     const mcp = [
       { name: 'meta', url: 'http://127.0.0.1:4300/api/agent/mcp/7', headers: { Authorization: 'Bearer t' } },

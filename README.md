@@ -36,6 +36,14 @@ chat history, text replies, read receipts and attachment downloads are exposed
 through admin-only `/api/v1/whatsapp` endpoints for clients to use; client inbox
 screens are separate work. See [WhatsApp setup and client flow](docs/whatsapp.md).
 
+## Email in agent sessions
+
+Chat with Claude to read, search, reply to, send and archive Gmail or Outlook
+email through the internal mail MCP in projects with `mailToolsEnabled: true`
+(off by default). Existing connections stay read-only until
+you reconnect them with management permissions. See [Email from a session](docs/email-mcp.md)
+for setup and access details.
+
 ## How a session runs
 
 1. **Claim resources.** The session takes an idle workspace clone from the
@@ -1045,11 +1053,13 @@ An account another project was given answers 404. Deploying needs the
 
 Briareus can keep a copy of Gmail and Outlook mailboxes so a client reads them
 through `/api/v1` without talking to Google or Microsoft itself. The sign-in
-asks for `gmail.modify` or `Mail.ReadWrite` so the client can also move a
-selected message to Trash or Deleted Items. It never permanently erases mail
-or sends messages. All of it is admin-only, since it is the operator's own mail.
-Existing read-only connections can still sync and read; reconnect them once
-to grant deletion access.
+defaults to read-only; `access: manage` requests `gmail.modify` or Outlook
+`Mail.ReadWrite` and `Mail.Send`. Admin clients can move a selected message to
+Trash or Deleted Items without permanently erasing it. Interactive sessions
+can send and file mail through the guarded tools when their project opts in
+(see [Email from a session](docs/email-mcp.md)).
+Existing read-only connections can still sync and read; reconnect them with
+`access: manage` to grant deletion access.
 
 The sign-in is the providers' own OAuth flow with PKCE. Its simplest form ends
 on this server: register `PUBLIC_BASE_URL/oauth/mail/callback` (an https
@@ -1059,7 +1069,7 @@ sign-in as the browser arrives there, whatever device signed in.
 1. Register an OAuth client and put it in the server's environment (see
    `.env.example`):
    - **Gmail**: in Google Cloud, enable the Gmail API, set up the OAuth consent
-     screen with the `gmail.modify` scope, and create an OAuth client of type
+     screen with the `gmail.readonly` and `gmail.modify` scopes, and create an OAuth client of type
      _Web application_ whose authorized redirect URI is exactly
      `PUBLIC_BASE_URL/oauth/mail/callback`. Set `GOOGLE_OAUTH_CLIENT_ID`,
      `GOOGLE_OAUTH_CLIENT_SECRET` and `GOOGLE_OAUTH_REDIRECT_URI` (that same
@@ -1076,7 +1086,8 @@ sign-in as the browser arrives there, whatever device signed in.
      after six months without use.
 
    - **Outlook**: in Microsoft Entra, register an app with the delegated Graph
-     permissions `Mail.ReadWrite`, `User.Read` and `offline_access`, add a _Web_
+     permissions `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `User.Read` and
+     `offline_access`, add a _Web_
      platform with the redirect URI `PUBLIC_BASE_URL/oauth/mail/callback`, and
      create a client secret. Set `MICROSOFT_OAUTH_CLIENT_ID`,
      `MICROSOFT_OAUTH_CLIENT_SECRET` and `MICROSOFT_OAUTH_REDIRECT_URI`. Match

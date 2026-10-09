@@ -794,3 +794,23 @@ describe('autonomous review loops', () => {
     expect((await updateProject(saved.id, { autonomousReviewLoop: false })).autonomousReviewLoop).toBe(false);
   });
 });
+
+describe('email tool project opt-in', () => {
+  it('defaults new projects to no email access', async () => {
+    expect(PROJECT_DEFAULTS.mailToolsEnabled).toBe(false);
+    expect((await createProject(base)).mailToolsEnabled).toBe(false);
+  });
+  it('persists explicit opt-in, preserves it on unrelated edits, and can revoke it', async () => {
+    const p = await createProject({ ...base, mailToolsEnabled: true });
+    expect(p.mailToolsEnabled).toBe(true);
+    expect((await updateProject(p.id, { label: 'Renamed' })).mailToolsEnabled).toBe(true);
+    expect((await updateProject(p.id, { mailToolsEnabled: false })).mailToolsEnabled).toBe(false);
+  });
+  it.each(['true', 'false', 1, 0, null])(
+    'rejects non-boolean permission values: %j',
+    async (mailToolsEnabled) => {
+      await expect(createProject({ ...base, mailToolsEnabled })).rejects.toThrow(/must be true or false/);
+      expect(state.saved).toHaveLength(0);
+    },
+  );
+});

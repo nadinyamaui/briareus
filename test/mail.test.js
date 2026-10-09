@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import express from 'express';
+import { mailAgentRoutes } from '../lib/mail-agent.js';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 
 const cfg = vi.hoisted(() => ({ credentialsKey: 'k'.repeat(32) }));
@@ -155,9 +157,15 @@ function fakeGmail(mailbox) {
         access_token: `access-${tokenCalls.length}`,
         refresh_token: form.grant_type === 'authorization_code' ? `refresh-${form.code}` : undefined,
         expires_in: 3600,
-        scope: mailbox.scope ?? 'https://www.googleapis.com/auth/gmail.modify',
+        scope:
+          mailbox.scope ??
+          (mailbox.manage
+            ? 'https://www.googleapis.com/auth/gmail.modify'
+            : 'https://www.googleapis.com/auth/gmail.readonly'),
       });
     }
+    if (url.endsWith('/messages/send') && init.method === 'POST')
+      return reply({ id: 'sent', threadId: 'sent-thread' });
     if (gate.wait) await gate.wait;
     if (url.endsWith('/trash')) {
       if (mailbox.trashWait) await mailbox.trashWait;
@@ -409,7 +417,7 @@ describe('connecting a mailbox', () => {
     expect(stored).not.toContain('refresh-abc');
     expect(JSON.parse(open(stored))).toEqual({
       refreshToken: 'refresh-abc',
-      scope: 'https://www.googleapis.com/auth/gmail.modify',
+      scope: 'https://www.googleapis.com/auth/gmail.readonly',
       accessToken: 'access-1',
       expiresAt: clock + 3600_000,
     });
@@ -822,8 +830,44 @@ describe('reading', () => {
 });
 
 describe('message deletion', () => {
+  beforeEach(() => {
+    mailbox.manage = true;
+  });
+  it('reconciles an uncertain send after queued deletion with a successful fresh sync', async () => {
+    const account = await connect({ access: 'manage' });
+    await settled();
+    let release;
+    mailbox.trashWait = new Promise((resolve) => {
+      release = resolve;
+    });
+    const deletion = service.trashMessage(account.id, 'a');
+    await vi.waitFor(() =>
+      expect(gmail.request.mock.calls.some(([url]) => String(url).endsWith('/trash'))).toBe(true),
+    );
+    const original = gmail.request.getMockImplementation();
+    gmail.request.mockImplementation(async (url, opts) => {
+      if (url.endsWith('/messages/send')) return Response.json({}, { status: 503 });
+      return original(url, opts);
+    });
+    const result = service
+      .action(account.id, {
+        action: 'send',
+        to: ['you@example.com'],
+        subject: 'Hello',
+        text: 'Body',
+      })
+      .catch((error) => error);
+    await vi.waitFor(async () => expect((await service.list())[0].syncing).toBe(true));
+    release();
+    await deletion;
+    expect(await result).toMatchObject({ uncertain: true, syncCompleted: true, syncPending: false });
+    await settled();
+    await expect(service.message(account.id, 'a')).rejects.toMatchObject({ status: 404 });
+    expect(errors).toEqual([]);
+  });
+
   it('trashes only the selected account and message, and removes it from the synced copy', async () => {
-    const a = await connect();
+    const a = await connect({ access: 'manage' });
     await settled();
     await store.upsert(99, [{ id: 'a' }], clock);
     await service.trashMessage(a.id, 'a');
@@ -836,7 +880,7 @@ describe('message deletion', () => {
   it.each([null, 'https://www.googleapis.com/auth/gmail.readonly'])(
     'keeps old read connections working but refuses deletion (scope %s)',
     async (scope) => {
-      const a = await connect();
+      const a = await connect({ access: 'manage' });
       await settled();
       const credentials = JSON.parse(open(store.accounts.get(a.id).credentials));
       await service.update(a.id, { enabled: false });
@@ -848,7 +892,7 @@ describe('message deletion', () => {
     },
   );
   it.each([403, 429, 500])('retains the cached message on provider refusal %s', async (status) => {
-    const a = await connect();
+    const a = await connect({ access: 'manage' });
     await settled();
     mailbox.trashStatus = status;
     await expect(service.trashMessage(a.id, 'a')).rejects.toMatchObject({
@@ -858,7 +902,7 @@ describe('message deletion', () => {
     expect(gmail.request.mock.calls.filter(([url]) => String(url).endsWith('/trash'))).toHaveLength(1);
   });
   it('marks a revoked grant for reconnecting without dropping the cached message', async () => {
-    const a = await connect();
+    const a = await connect({ access: 'manage' });
     await settled();
     mailbox.trashStatus = 401;
     mailbox.refreshRefused = true;
@@ -867,7 +911,7 @@ describe('message deletion', () => {
     expect((await service.message(a.id, 'a')).id).toBe('a');
   });
   it('serializes duplicate deletes and removes an account safely during an in-flight delete', async () => {
-    const a = await connect();
+    const a = await connect({ access: 'manage' });
     await settled();
     let releaseDelete;
     mailbox.trashWait = new Promise((resolve) => {
@@ -890,7 +934,7 @@ describe('message deletion', () => {
   });
 
   it('removes a cached message the provider already deleted and rejects unknown targets', async () => {
-    const a = await connect();
+    const a = await connect({ access: 'manage' });
     await settled();
     mailbox.trashStatus = 404;
     mailbox.trashError = { error: { code: 404, errors: [{ reason: 'notFound' }] } };
@@ -940,7 +984,7 @@ describe('message deletion', () => {
   });
 
   it('removes successfully trashed mail when overlapping account removal rolls back', async () => {
-    const a = await connect({ enabled: false });
+    const a = await connect({ enabled: false, access: 'manage' });
     await service.sync(a.id);
     await settled();
     const failure = new Error('Account deletion failed');
@@ -970,7 +1014,7 @@ describe('message deletion', () => {
   it.each([200, 403, 401])(
     'reports queued syncs until deletion and refresh settle (trash %s)',
     async (status) => {
-      const a = await connect();
+      const a = await connect({ access: 'manage' });
       await settled();
       const lastSyncAt = (await service.list())[0].lastSyncAt;
       clock += 1000;
@@ -1003,7 +1047,7 @@ describe('message deletion', () => {
   );
 
   it('waits for a running sync, and holds subsequent syncs until deletion completes', async () => {
-    const a = await connect();
+    const a = await connect({ access: 'manage' });
     await settled();
     const originalUpsert = store.upsert;
     let releaseSync;
@@ -1040,5 +1084,474 @@ describe('message deletion', () => {
     await deletion;
     await settled();
     expect(store.messages.has(`${a.id}:a`)).toBe(false);
+  });
+});
+
+describe('mail management access', () => {
+  it.each(
+    ['refresh', 'reply metadata'].flatMap((wait) =>
+      ['opt-out', 'project disabled', 'session closed', 'unchanged'].map((change) => [wait, change]),
+    ),
+  )('revalidates route authorization after %s with %s', async (wait, change) => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    const job = { kind: 'devchat', repo: 'owner/repo', status: 'running' };
+    let project = { mailToolsEnabled: true, enabled: true };
+    let release;
+    const paused = new Promise((resolve) => (release = resolve));
+    if (wait === 'refresh') {
+      clock += 2 * 3600_000;
+      gmail.gate.refresh = paused;
+    } else {
+      const original = gmail.request.getMockImplementation();
+      gmail.request.mockImplementation(async (url, init) => {
+        if (String(url).endsWith('?format=metadata')) {
+          await paused;
+          return new Response(
+            JSON.stringify({
+              threadId: 'thread',
+              payload: {
+                headers: [
+                  { name: 'From', value: 'you@example.com' },
+                  { name: 'Subject', value: 's' },
+                  { name: 'Message-ID', value: '<original@example.com>' },
+                ],
+              },
+            }),
+          );
+        }
+        return original(url, init);
+      });
+    }
+    const app = express();
+    app.use(express.json());
+    app.use(mailAgentRoutes({ service, agentSession: () => job, getProject: () => project }));
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    try {
+      const pending = fetch(
+        `http://127.0.0.1:${server.address().port}/api/agent/mail/accounts/${account.id}/action`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            wait === 'refresh'
+              ? { action: 'send', to: ['you@example.com'], subject: 's', text: 'b' }
+              : { action: 'reply', id: 'a', text: 'b' },
+          ),
+        },
+      );
+      await vi.waitFor(() =>
+        expect(
+          wait === 'refresh'
+            ? gmail.tokenCalls.some((c) => c.grant_type === 'refresh_token')
+            : gmail.request.mock.calls.some(([url]) => String(url).endsWith('?format=metadata')),
+        ).toBe(true),
+      );
+      if (change === 'opt-out') project = { ...project, mailToolsEnabled: false };
+      if (change === 'project disabled') project = { ...project, enabled: false };
+      if (change === 'session closed') job.status = 'closed';
+      release();
+      const response = await pending;
+      expect(response.status).toBe(change === 'unchanged' ? 200 : 403);
+      expect(await response.json()).toMatchObject(
+        change === 'unchanged'
+          ? { status: 'accepted' }
+          : { error: expect.stringMatching(/interactive session/) },
+      );
+      expect(gmail.request.mock.calls.filter(([url]) => String(url).endsWith('/messages/send'))).toHaveLength(
+        change === 'unchanged' ? 1 : 0,
+      );
+      await settled();
+    } finally {
+      release();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it.each(['corrupt', 'missing-key', 'changed-key'])(
+    'keeps account inspection and disabling available with %s credentials',
+    async (damage) => {
+      mailbox.manage = true;
+      const account = await connect({ access: 'manage' });
+      await settled();
+      if (damage === 'corrupt') {
+        store.accounts.get(account.id).credentials = 'broken';
+        await service.init();
+      } else cfg.credentialsKey = damage === 'missing-key' ? '' : 'z'.repeat(32);
+      expect((await service.list())[0]).toMatchObject({ id: account.id, access: 'read' });
+      expect(await service.update(account.id, { enabled: false })).toMatchObject({ enabled: false });
+      const before = gmail.request.mock.calls.length;
+      await expect(service.action(account.id, { action: 'read', id: 'a' })).rejects.toThrow();
+      expect(gmail.request.mock.calls.length).toBe(before);
+    },
+  );
+
+  it('marks a refused action refresh for reconnect before issuing a write', async () => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    clock += 2 * 3600_000;
+    mailbox.refreshRefused = true;
+    await expect(service.action(account.id, { action: 'read', id: 'a' })).rejects.toMatchObject({
+      reauth: true,
+    });
+    expect((await service.list())[0]).toMatchObject({
+      status: 'reauth',
+      lastSyncError: expect.stringMatching(/expired or revoked/),
+    });
+    expect(
+      gmail.request.mock.calls.some(
+        ([, opts]) => opts.method === 'POST' && opts.body?.includes('removeLabelIds'),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not mark reconnected credentials for an old action refresh refusal', async () => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    clock += 2 * 3600_000;
+    let release;
+    gmail.gate.refresh = new Promise((resolve) => (release = resolve));
+    mailbox.refreshRefused = true;
+    const action = service.action(account.id, { action: 'read', id: 'a' });
+    const rejected = expect(action).rejects.toMatchObject({ status: 409 });
+    await connect({ accountId: account.id, access: 'manage' }, 'fresh');
+    release();
+    await rejected;
+    await settled();
+    expect((await service.list())[0].status).toBe('connected');
+    expect(JSON.parse(open(store.accounts.get(account.id).credentials)).refreshToken).toBe('refresh-fresh');
+  });
+
+  it.each(['remove', 'read reconnect', 'manage reconnect'])(
+    'refuses an obsolete action token after %s during a successful refresh',
+    async (change) => {
+      mailbox.manage = true;
+      const account = await connect({ access: 'manage' });
+      await settled();
+      clock += 2 * 3600_000;
+      let release;
+      gmail.gate.refresh = new Promise((resolve) => (release = resolve));
+      const action = service
+        .action(account.id, {
+          action: 'send',
+          to: ['you@example.com'],
+          subject: 's',
+          text: 'b',
+        })
+        .catch((e) => e);
+      await vi.waitFor(() =>
+        expect(gmail.tokenCalls.some((c) => c.grant_type === 'refresh_token')).toBe(true),
+      );
+      if (change === 'remove') await service.remove(account.id);
+      else {
+        mailbox.manage = change === 'manage reconnect';
+        await connect({ accountId: account.id, access: mailbox.manage ? 'manage' : 'read' }, 'fresh');
+      }
+      release();
+      const error = await action;
+      expect(error).toMatchObject({
+        status: change === 'remove' ? 404 : change === 'read reconnect' ? 403 : 409,
+      });
+      expect(error).not.toHaveProperty('uncertain');
+      expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/messages/send'))).toHaveLength(0);
+      await settled();
+    },
+  );
+
+  it('allows an action after its own successful refresh', async () => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    clock += 2 * 3600_000;
+    expect(
+      await service.action(account.id, {
+        action: 'send',
+        to: ['you@example.com'],
+        subject: 's',
+        text: 'b',
+      }),
+    ).toMatchObject({ status: 'accepted' });
+    const sent = gmail.request.mock.calls.find(([url]) => url.endsWith('/messages/send'));
+    expect(sent[1].headers.Authorization).toBe('Bearer access-2');
+    await settled();
+  });
+
+  it('queues a sync after a write when the running pass holds stale state', async () => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    let release;
+    let paused = false;
+    const gate = new Promise((resolve) => (release = resolve));
+    const original = gmail.request.getMockImplementation();
+    gmail.request.mockImplementation(async (url, opts) => {
+      if (url.includes('/history?')) return Response.json({}, { status: 404 });
+      if (url.endsWith('/messages/a/modify')) {
+        mailbox.messages.a.unread = false;
+        return Response.json({});
+      }
+      const response = await original(url, opts);
+      if (url.includes('/messages/a?format=full') && !paused) {
+        paused = true;
+        await gate;
+      }
+      return response;
+    });
+    await service.sync(account.id);
+    await vi.waitFor(() => expect(paused).toBe(true));
+    await service.action(account.id, { action: 'read', id: 'a' });
+    release();
+    await settled();
+    expect((await service.message(account.id, 'a')).isRead).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
+  it('keeps existing grants read-only and refuses actions without touching the provider', async () => {
+    const account = await connect();
+    await settled();
+    expect((await service.list())[0].access).toBe('read');
+    const before = gmail.request.mock.calls.length;
+    await expect(
+      service.action(account.id, { action: 'send', to: ['you@example.com'], subject: 's', text: 'body' }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(gmail.request.mock.calls.length).toBe(before);
+  });
+  it('stores management access sealed and preserves it across refresh and reconnect', async () => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    expect(account.access).toBe('manage');
+    expect(account).not.toHaveProperty('credentials');
+    expect(JSON.parse(open(store.accounts.get(account.id).credentials)).access).toBe('manage');
+    clock += 3600_000;
+    await service.sync(account.id);
+    await settled();
+    expect(JSON.parse(open(store.accounts.get(account.id).credentials)).access).toBe('manage');
+    mailbox.manage = false;
+    const reconnected = await connect({ accountId: account.id, access: 'read' });
+    await settled();
+    expect(reconnected.access).toBe('read');
+    await expect(service.action(account.id, { action: 'archive', id: 'a' })).rejects.toMatchObject({
+      status: 403,
+    });
+  });
+  it('sends using the sealed grant and starts an authoritative sync afterward', async () => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    clock += 1000;
+    const result = await service.action(account.id, {
+      action: 'send',
+      to: ['you@example.com'],
+      subject: 'Hello',
+      text: 'Body',
+    });
+    expect(result).toEqual({ status: 'accepted', action: 'send', id: 'sent', threadId: 'sent-thread' });
+    const sent = gmail.request.mock.calls.find(([url]) => url.endsWith('/messages/send'));
+    expect(sent[1].headers.Authorization).toBe('Bearer access-1');
+    await settled();
+    expect((await service.list())[0].lastSyncAt).toBe(clock);
+    expect(errors).toEqual([]);
+  });
+  it('does not sync or reconcile Sent after a failed Gmail reply metadata read', async () => {
+    cfg.mail.syncMinutes = 0;
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    gmail.request.mockClear();
+    gmail.request.mockRejectedValue(new TypeError('fetch failed'));
+    const error = await service
+      .action(account.id, { action: 'reply', id: 'a', text: 'Answer' })
+      .catch((e) => e);
+    await settled();
+    expect(error).toMatchObject({ status: 502, message: expect.stringMatching(/no mail action was sent/) });
+    expect(error).not.toHaveProperty('uncertain');
+    expect(error).not.toHaveProperty('syncCompleted');
+    expect(gmail.request).toHaveBeenCalledTimes(1);
+    expect(gmail.request.mock.calls[0][0]).toBe(`${GMAIL}/messages/a?format=metadata`);
+    expect(gmail.request.mock.calls[0][1].method).toBe('GET');
+    expect(errors).toEqual([]);
+  });
+
+  it.each(['read', 'unread', 'archive'])(
+    'refreshes committed %s state after a server error with periodic sync disabled',
+    async (action) => {
+      cfg.mail.syncMinutes = 0;
+      mailbox.manage = true;
+      const account = await connect({ access: 'manage' });
+      await settled();
+      const id = action === 'unread' ? 'b' : 'a';
+      const before = await service.message(account.id, id);
+      const original = gmail.request.getMockImplementation();
+      gmail.request.mockImplementation(async (url, opts) => {
+        if (url.endsWith(`/messages/${id}/modify`)) {
+          mailbox.messages[id].unread = action === 'unread';
+          return Response.json({}, { status: 503 });
+        }
+        if (url.includes('/history?')) return Response.json({}, { status: 404 });
+        const response = await original(url, opts);
+        if (action === 'archive' && url.includes(`/messages/${id}?format=full`)) {
+          const data = await response.json();
+          data.labelIds = data.labelIds.filter((label) => label !== 'INBOX');
+          return Response.json(data);
+        }
+        return response;
+      });
+      const error = await service.action(account.id, { action, id }).catch((e) => e);
+      expect(error).toMatchObject({ uncertain: true, syncCompleted: true });
+      const after = await service.message(account.id, id);
+      if (action === 'archive') {
+        expect(before.inInbox).toBe(true);
+        expect(after.inInbox).toBe(false);
+      } else {
+        expect(after.isRead).toBe(action === 'read');
+        expect(after.isRead).not.toBe(before.isRead);
+      }
+      expect(gmail.request.mock.calls.filter(([url]) => url.endsWith(`/messages/${id}/modify`))).toHaveLength(
+        1,
+      );
+      expect((await service.list())[0].syncing).toBe(false);
+      expect(errors).toEqual([]);
+    },
+  );
+
+  it.each(['lost response', 'server error', 'failed sync', 'running sync'])(
+    'refreshes uncertain sends before returning reconciliation guidance: %s',
+    async (scenario) => {
+      cfg.mail.syncMinutes = 0;
+      mailbox.manage = true;
+      const account = await connect({ access: 'manage' });
+      await settled();
+      const original = gmail.request.getMockImplementation();
+      let release;
+      const gate = new Promise((resolve) => (release = resolve));
+      let paused = false;
+      let wrote = false;
+      let finished = false;
+      gmail.request.mockImplementation(async (url, opts) => {
+        if (url.endsWith('/messages/send')) {
+          wrote = true;
+          mailbox.messages.sent = { at: clock, labels: ['SENT'] };
+          if (scenario === 'server error') return Response.json({}, { status: 503 });
+          throw new Error('response lost');
+        }
+        if (scenario === 'failed sync') return Response.json({}, { status: 403 });
+        if (url.includes('/history?')) return Response.json({}, { status: 404 });
+        const response = await original(url, opts);
+        if (scenario === 'running sync' && url.includes('/messages?') && !paused) {
+          paused = true;
+          await gate;
+        }
+        return response;
+      });
+      if (scenario === 'running sync') {
+        await service.sync(account.id);
+        await vi.waitFor(() => expect(paused).toBe(true));
+      }
+      const action = service
+        .action(account.id, { action: 'send', to: ['you@example.com'], subject: 's', text: 'b' })
+        .catch((error) => {
+          finished = true;
+          return error;
+        });
+      await vi.waitFor(() => expect(wrote).toBe(true));
+      if (scenario === 'running sync') {
+        expect(finished).toBe(false);
+        release();
+      }
+      const error = await action;
+      expect(error).toMatchObject({ uncertain: true, syncCompleted: scenario !== 'failed sync' });
+      expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/messages/send'))).toHaveLength(1);
+      if (scenario === 'failed sync') {
+        expect(error.message).toMatch(/cached absence from Sent cannot justify a retry/);
+        expect((await service.list())[0].lastSyncError).toBeTruthy();
+      } else {
+        expect(error.message).toMatch(/fresh mailbox sync completed/);
+        expect(
+          (await service.messages({ account: account.id })).messages.some(
+            (m) => m.id === 'sent' && m.labels.includes('SENT'),
+          ),
+        ).toBe(true);
+      }
+    },
+  );
+  it.each(['fresh sync', 'running sync', 'slow reply'])(
+    'returns pending uncertainty guidance within ten seconds while retaining the %s',
+    async (scenario) => {
+      cfg.mail.syncMinutes = 0;
+      mailbox.manage = true;
+      const account = await connect({ access: 'manage' });
+      await settled();
+      const original = gmail.request.getMockImplementation();
+      let release;
+      const gate = new Promise((resolve) => (release = resolve));
+      let paused = false;
+      gmail.request.mockImplementation(async (url, opts) => {
+        if (scenario === 'slow reply' && url.includes('?format=metadata')) {
+          await new Promise((resolve) => setTimeout(resolve, 29_000));
+          return Response.json({
+            threadId: 'thread',
+            payload: {
+              headers: [
+                { name: 'From', value: 'you@example.com' },
+                { name: 'Subject', value: 's' },
+                { name: 'Message-ID', value: '<original@example.com>' },
+              ],
+            },
+          });
+        }
+        if (url.endsWith('/messages/send')) {
+          mailbox.messages.sent = { at: clock, labels: ['SENT'] };
+          if (scenario === 'slow reply') await new Promise((resolve) => setTimeout(resolve, 30_000));
+          throw new Error('response lost');
+        }
+        if (url.includes('/history?')) return Response.json({}, { status: 404 });
+        const response = await original(url, opts);
+        if (url.includes('/messages?') && !paused) {
+          paused = true;
+          await gate;
+        }
+        return response;
+      });
+      if (scenario === 'running sync') {
+        await service.sync(account.id);
+        await vi.waitFor(() => expect(paused).toBe(true));
+      }
+      vi.useFakeTimers();
+      const action = service
+        .action(account.id, {
+          action: scenario === 'slow reply' ? 'reply' : 'send',
+          id: 'original',
+          to: ['you@example.com'],
+          subject: 's',
+          text: 'b',
+        })
+        .catch((e) => e);
+      await vi.advanceTimersByTimeAsync(scenario === 'slow reply' ? 69_000 : 10_000);
+      const error = await action;
+      expect(error).toMatchObject({ uncertain: true, syncCompleted: false, syncPending: true });
+      expect(error.message).toMatch(/reconciliation is still pending/);
+      expect(error.message).toMatch(/cached absence from Sent cannot justify a retry/);
+      expect(error.message).toMatch(/absence alone does not prove non-delivery/);
+      expect((await service.list())[0].syncing).toBe(true);
+      expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/messages/send'))).toHaveLength(1);
+      release();
+      vi.useRealTimers();
+      await settled();
+      expect((await service.messages({ account: account.id })).messages.some((m) => m.id === 'sent')).toBe(
+        true,
+      );
+      expect(errors).toEqual([]);
+    },
+  );
+
+  it('rejects invalid or refused management consent without saving a grant', async () => {
+    expect(() => service.connectStart({ provider: 'gmail', access: 'admin' })).toThrow(/Choose/);
+    await expect(connect({ access: 'manage' })).rejects.toThrow(/did not grant/);
+    expect(await service.list()).toEqual([]);
   });
 });
