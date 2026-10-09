@@ -161,7 +161,7 @@ function fakeGmail(mailbox) {
     if (gate.wait) await gate.wait;
     if (url.endsWith('/trash')) {
       if (mailbox.trashWait) await mailbox.trashWait;
-      if (mailbox.trashStatus) return reply({}, mailbox.trashStatus);
+      if (mailbox.trashStatus) return reply(mailbox.trashError || {}, mailbox.trashStatus);
       const id = decodeURIComponent(url.split('/').at(-2));
       delete mailbox.messages[id];
       return reply({ id });
@@ -893,11 +893,78 @@ describe('message deletion', () => {
     const a = await connect();
     await settled();
     mailbox.trashStatus = 404;
+    mailbox.trashError = { error: { code: 404, errors: [{ reason: 'notFound' }] } };
     await service.trashMessage(a.id, 'a');
     await expect(service.message(a.id, 'a')).rejects.toMatchObject({ status: 404 });
     await expect(service.trashMessage(a.id, 'missing')).rejects.toMatchObject({ status: 404 });
     await expect(service.trashMessage(900, 'b')).rejects.toMatchObject({ status: 404 });
   });
+  it.each([
+    ['gmail', { code: 404, errors: [{ reason: 'notFound' }] }, true],
+    ['gmail', { code: 404 }, false],
+    ['gmail', { code: 404, errors: [{ reason: 'unknown' }] }, false],
+    ['outlook', { code: 'ErrorItemNotFound' }, true],
+    ['outlook', { code: 'MailboxNotEnabledForRESTAPI' }, false],
+    ['outlook', { code: 'MailboxNotSupportedForRESTAPI' }, false],
+    ['outlook', { code: 'UnknownError' }, false],
+    ['outlook', {}, false],
+  ])('classifies %s trash 404 %j (missing message: %s)', async (provider, error, missing) => {
+    cfg.mail.microsoft = { clientId: 'mid', clientSecret: 'secret' };
+    const a = await store.insertAccount({
+      provider,
+      email: 'me@example.com',
+      enabled: false,
+      status: 'connected',
+      syncDays: 30,
+      credentials: seal(
+        JSON.stringify({
+          accessToken: 'token',
+          expiresAt: clock + DAY,
+          scope: provider === 'gmail' ? 'https://www.googleapis.com/auth/gmail.modify' : 'Mail.ReadWrite',
+        }),
+      ),
+    });
+    await store.upsert(a.id, [{ id: 'a', receivedAt: clock - DAY }], clock);
+    const request = vi.fn(async () => new Response(JSON.stringify({ error }), { status: 404 }));
+    service = createMailService({ store, request, now: () => clock, sleep: async () => {} });
+    await service.init();
+    if (missing) {
+      await service.trashMessage(a.id, 'a');
+      await expect(service.message(a.id, 'a')).rejects.toMatchObject({ status: 404 });
+    } else {
+      await expect(service.trashMessage(a.id, 'a')).rejects.toMatchObject({ upstream: 404 });
+      expect((await service.message(a.id, 'a')).id).toBe('a');
+      expect((await service.messages({ account: a.id })).messages.map((m) => m.id)).toEqual(['a']);
+    }
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes successfully trashed mail when overlapping account removal rolls back', async () => {
+    const a = await connect({ enabled: false });
+    await service.sync(a.id);
+    await settled();
+    const failure = new Error('Account deletion failed');
+    store.deleteAccount = vi.fn(async () => {
+      throw failure;
+    });
+    let releaseDelete;
+    mailbox.trashWait = new Promise((resolve) => {
+      releaseDelete = resolve;
+    });
+    const deletion = service.trashMessage(a.id, 'a');
+    await vi.waitFor(() =>
+      expect(gmail.request.mock.calls.some(([url]) => String(url).endsWith('/trash'))).toBe(true),
+    );
+    const removal = expect(service.remove(a.id)).rejects.toBe(failure);
+    releaseDelete();
+    await deletion;
+    await removal;
+    expect((await service.list())[0]).toMatchObject({ id: a.id, enabled: false });
+    expect(mailbox.messages.a).toBeUndefined();
+    await expect(service.message(a.id, 'a')).rejects.toMatchObject({ status: 404 });
+    expect((await service.messages({ account: a.id })).messages.map((m) => m.id)).toEqual(['b']);
+  });
+
   it('waits for a running sync, and holds subsequent syncs until deletion completes', async () => {
     const a = await connect();
     await settled();
