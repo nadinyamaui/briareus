@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import express from 'express';
+import { mailAgentRoutes } from '../lib/mail-agent.js';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 
 const cfg = vi.hoisted(() => ({ credentialsKey: 'k'.repeat(32) }));
@@ -818,6 +820,88 @@ describe('reading', () => {
 });
 
 describe('mail management access', () => {
+  it.each(
+    ['refresh', 'reply metadata'].flatMap((wait) =>
+      ['opt-out', 'project disabled', 'session closed', 'unchanged'].map((change) => [wait, change]),
+    ),
+  )('revalidates route authorization after %s with %s', async (wait, change) => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    const job = { kind: 'devchat', repo: 'owner/repo', status: 'running' };
+    let project = { mailToolsEnabled: true, enabled: true };
+    let release;
+    const paused = new Promise((resolve) => (release = resolve));
+    if (wait === 'refresh') {
+      clock += 2 * 3600_000;
+      gmail.gate.refresh = paused;
+    } else {
+      const original = gmail.request.getMockImplementation();
+      gmail.request.mockImplementation(async (url, init) => {
+        if (String(url).endsWith('?format=metadata')) {
+          await paused;
+          return new Response(
+            JSON.stringify({
+              threadId: 'thread',
+              payload: {
+                headers: [
+                  { name: 'From', value: 'you@example.com' },
+                  { name: 'Subject', value: 's' },
+                  { name: 'Message-ID', value: '<original@example.com>' },
+                ],
+              },
+            }),
+          );
+        }
+        return original(url, init);
+      });
+    }
+    const app = express();
+    app.use(express.json());
+    app.use(mailAgentRoutes({ service, agentSession: () => job, getProject: () => project }));
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    try {
+      const pending = fetch(
+        `http://127.0.0.1:${server.address().port}/api/agent/mail/accounts/${account.id}/action`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            wait === 'refresh'
+              ? { action: 'send', to: ['you@example.com'], subject: 's', text: 'b' }
+              : { action: 'reply', id: 'a', text: 'b' },
+          ),
+        },
+      );
+      await vi.waitFor(() =>
+        expect(
+          wait === 'refresh'
+            ? gmail.tokenCalls.some((c) => c.grant_type === 'refresh_token')
+            : gmail.request.mock.calls.some(([url]) => String(url).endsWith('?format=metadata')),
+        ).toBe(true),
+      );
+      if (change === 'opt-out') project = { ...project, mailToolsEnabled: false };
+      if (change === 'project disabled') project = { ...project, enabled: false };
+      if (change === 'session closed') job.status = 'closed';
+      release();
+      const response = await pending;
+      expect(response.status).toBe(change === 'unchanged' ? 200 : 403);
+      expect(await response.json()).toMatchObject(
+        change === 'unchanged'
+          ? { status: 'accepted' }
+          : { error: expect.stringMatching(/interactive session/) },
+      );
+      expect(gmail.request.mock.calls.filter(([url]) => String(url).endsWith('/messages/send'))).toHaveLength(
+        change === 'unchanged' ? 1 : 0,
+      );
+      await settled();
+    } finally {
+      release();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it.each(['corrupt', 'missing-key', 'changed-key'])(
     'keeps account inspection and disabling available with %s credentials',
     async (damage) => {

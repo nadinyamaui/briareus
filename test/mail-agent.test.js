@@ -168,16 +168,28 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
     await tool('mail_sync', { account: 7 });
     expect(service.sync).toHaveBeenCalledWith(7);
     await tool('mail_send', { account: 7, to: ['you@example.com'], subject: 's', text: 'body' });
-    expect(service.action).toHaveBeenLastCalledWith(7, {
-      action: 'send',
-      to: ['you@example.com'],
-      subject: 's',
-      text: 'body',
-    });
+    expect(service.action).toHaveBeenLastCalledWith(
+      7,
+      {
+        action: 'send',
+        to: ['you@example.com'],
+        subject: 's',
+        text: 'body',
+      },
+      expect.any(Function),
+    );
     await tool('mail_reply', { account: 7, id: 'message', text: 'yes' });
-    expect(service.action).toHaveBeenLastCalledWith(7, { action: 'reply', id: 'message', text: 'yes' });
+    expect(service.action).toHaveBeenLastCalledWith(
+      7,
+      { action: 'reply', id: 'message', text: 'yes' },
+      expect.any(Function),
+    );
     await tool('mail_update', { account: 7, id: 'message', action: 'archive' });
-    expect(service.action).toHaveBeenLastCalledWith(7, { action: 'archive', id: 'message' });
+    expect(service.action).toHaveBeenLastCalledWith(
+      7,
+      { action: 'archive', id: 'message' },
+      expect.any(Function),
+    );
     job.unattendedTurn = true;
     expect((await tool('mail_accounts')).result.isError).toBe(true);
     expect((await tool('mail_update', { account: 7, id: 'm', action: 'send' })).result.isError).toBe(true);

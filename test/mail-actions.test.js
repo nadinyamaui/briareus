@@ -13,6 +13,32 @@ const make = (provider = 'gmail', ...responses) => {
 };
 
 describe('email actions', () => {
+  it.each(['gmail', 'outlook'])(
+    'rechecks request authorization after a 401 refresh for %s',
+    async (provider) => {
+      let allowed = true;
+      const request = vi.fn(async () => new Response('{}', { status: 401 }));
+      const token = vi.fn(async (force) => {
+        if (force) allowed = false;
+        return 'access';
+      });
+      const error = await mailAction({
+        provider,
+        email: 'me@example.com',
+        input: { action: 'read', id: 'message' },
+        request,
+        token,
+        authorize: () => {
+          if (!allowed) throw Object.assign(new Error('Mail access revoked'), { status: 403 });
+        },
+      }).catch((e) => e);
+      expect(error).toMatchObject({ status: 403, message: 'Mail access revoked' });
+      expect(error).not.toHaveProperty('uncertain');
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(token.mock.calls).toEqual([[false], [true]]);
+    },
+  );
+
   it.each(['network failure', 'timeout'])('keeps Gmail metadata %s definite', async (failure) => {
     const { run, request } = make();
     request.mockRejectedValue(
