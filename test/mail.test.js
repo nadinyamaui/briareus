@@ -818,6 +818,92 @@ describe('reading', () => {
 });
 
 describe('mail management access', () => {
+  it.each(['corrupt', 'missing-key', 'changed-key'])(
+    'keeps account inspection and disabling available with %s credentials',
+    async (damage) => {
+      mailbox.manage = true;
+      const account = await connect({ access: 'manage' });
+      await settled();
+      if (damage === 'corrupt') {
+        store.accounts.get(account.id).credentials = 'broken';
+        await service.init();
+      } else cfg.credentialsKey = damage === 'missing-key' ? '' : 'z'.repeat(32);
+      expect((await service.list())[0]).toMatchObject({ id: account.id, access: 'read' });
+      expect(await service.update(account.id, { enabled: false })).toMatchObject({ enabled: false });
+      const before = gmail.request.mock.calls.length;
+      await expect(service.action(account.id, { action: 'read', id: 'a' })).rejects.toThrow();
+      expect(gmail.request.mock.calls.length).toBe(before);
+    },
+  );
+
+  it('marks a refused action refresh for reconnect before issuing a write', async () => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    clock += 2 * 3600_000;
+    mailbox.refreshRefused = true;
+    await expect(service.action(account.id, { action: 'read', id: 'a' })).rejects.toMatchObject({
+      reauth: true,
+    });
+    expect((await service.list())[0]).toMatchObject({
+      status: 'reauth',
+      lastSyncError: expect.stringMatching(/expired or revoked/),
+    });
+    expect(
+      gmail.request.mock.calls.some(
+        ([, opts]) => opts.method === 'POST' && opts.body?.includes('removeLabelIds'),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not mark reconnected credentials for an old action refresh refusal', async () => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    clock += 2 * 3600_000;
+    let release;
+    gmail.gate.refresh = new Promise((resolve) => (release = resolve));
+    mailbox.refreshRefused = true;
+    const action = service.action(account.id, { action: 'read', id: 'a' });
+    const rejected = expect(action).rejects.toMatchObject({ status: 409 });
+    await connect({ accountId: account.id, access: 'manage' }, 'fresh');
+    release();
+    await rejected;
+    await settled();
+    expect((await service.list())[0].status).toBe('connected');
+    expect(JSON.parse(open(store.accounts.get(account.id).credentials)).refreshToken).toBe('refresh-fresh');
+  });
+
+  it('queues a sync after a write when the running pass holds stale state', async () => {
+    mailbox.manage = true;
+    const account = await connect({ access: 'manage' });
+    await settled();
+    let release;
+    let paused = false;
+    const gate = new Promise((resolve) => (release = resolve));
+    const original = gmail.request.getMockImplementation();
+    gmail.request.mockImplementation(async (url, opts) => {
+      if (url.includes('/history?')) return Response.json({}, { status: 404 });
+      if (url.endsWith('/messages/a/modify')) {
+        mailbox.messages.a.unread = false;
+        return Response.json({});
+      }
+      const response = await original(url, opts);
+      if (url.includes('/messages/a?format=full') && !paused) {
+        paused = true;
+        await gate;
+      }
+      return response;
+    });
+    await service.sync(account.id);
+    await vi.waitFor(() => expect(paused).toBe(true));
+    await service.action(account.id, { action: 'read', id: 'a' });
+    release();
+    await settled();
+    expect((await service.message(account.id, 'a')).isRead).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
   it('keeps existing grants read-only and refuses actions without touching the provider', async () => {
     const account = await connect();
     await settled();

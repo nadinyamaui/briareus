@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { decodeWords } from '../lib/mail-parse.js';
 import { mailAction } from '../lib/mail-actions.js';
 import { gmailProvider, outlookProvider } from '../lib/mail-providers.js';
 const make = (provider = 'gmail', ...responses) => {
@@ -47,6 +48,55 @@ describe('email actions', () => {
     const mime = Buffer.from(body.raw, 'base64url').toString();
     expect(mime).toContain('To: Reply Person <reply@example.com>');
     expect(mime).toContain('In-Reply-To: <original@example.com>');
+  });
+
+  it.each(['=?UTF-8?B?Q2Fmw6k=?=', '=?UTF-8?Q?Caf=C3=A9?='])(
+    'decodes a Gmail reply subject %s before serializing it',
+    async (subject) => {
+      const { run, request } = make(
+        'gmail',
+        Response.json({
+          threadId: 'thread',
+          payload: {
+            headers: [
+              { name: 'From', value: 'sender@example.com' },
+              { name: 'Subject', value: subject },
+              { name: 'Message-ID', value: '<original@example.com>' },
+            ],
+          },
+        }),
+      );
+      await run({ action: 'reply', id: 'abc', text: 'Yes' });
+      const mime = Buffer.from(JSON.parse(request.mock.calls[1][1].body).raw, 'base64url').toString();
+      expect(decodeWords(mime.match(/Subject: ([^\r]+)/)[1])).toBe('Café');
+    },
+  );
+
+  it.each(['a'.repeat(100), 'a'.repeat(998), '😀é界 '.repeat(190), ''])(
+    'folds Gmail subjects without breaking UTF-8 characters',
+    async (subject) => {
+      const { run, request } = make();
+      await run({ action: 'send', to: ['you@example.com'], subject, text: 'body' });
+      const mime = Buffer.from(JSON.parse(request.mock.calls[0][1].body).raw, 'base64url').toString();
+      const encoded = mime.match(/Subject: ([^\r]*(?:\r\n [^\r]*)*)/)[1];
+      expect(decodeWords(encoded)).toBe(subject);
+      for (const word of encoded.match(/=\?UTF-8\?B\?[^?]+\?=/g) || []) {
+        expect(word.length).toBeLessThanOrEqual(75);
+        expect(Buffer.from(word.slice(10, -2), 'base64').toString()).not.toContain('�');
+      }
+      for (const line of `Subject: ${encoded}`.split('\r\n')) expect(line.length).toBeLessThanOrEqual(76);
+    },
+  );
+
+  it.each([false, true])('preserves definite token failures (after 401: %s)', async (retry) => {
+    const { run, token, request } = make('gmail', new Response('{}', { status: 401 }));
+    const error = Object.assign(new Error('invalid_grant'), { reauth: true });
+    token.mockImplementation(async (force) => {
+      if (!retry || force) throw error;
+      return 'access';
+    });
+    await expect(run({ action: 'read', id: 'abc' })).rejects.toBe(error);
+    expect(request).toHaveBeenCalledTimes(retry ? 1 : 0);
   });
 
   it.each(['read', 'unread', 'archive'])('updates Gmail %s using labels', async (action) => {
