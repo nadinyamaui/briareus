@@ -1211,7 +1211,7 @@ describe('mail management access', () => {
       }
     },
   );
-  it.each(['fresh sync', 'running sync'])(
+  it.each(['fresh sync', 'running sync', 'slow reply'])(
     'returns pending uncertainty guidance within ten seconds while retaining the %s',
     async (scenario) => {
       cfg.mail.syncMinutes = 0;
@@ -1223,8 +1223,22 @@ describe('mail management access', () => {
       const gate = new Promise((resolve) => (release = resolve));
       let paused = false;
       gmail.request.mockImplementation(async (url, opts) => {
+        if (scenario === 'slow reply' && url.includes('?format=metadata')) {
+          await new Promise((resolve) => setTimeout(resolve, 29_000));
+          return Response.json({
+            threadId: 'thread',
+            payload: {
+              headers: [
+                { name: 'From', value: 'you@example.com' },
+                { name: 'Subject', value: 's' },
+                { name: 'Message-ID', value: '<original@example.com>' },
+              ],
+            },
+          });
+        }
         if (url.endsWith('/messages/send')) {
           mailbox.messages.sent = { at: clock, labels: ['SENT'] };
+          if (scenario === 'slow reply') await new Promise((resolve) => setTimeout(resolve, 30_000));
           throw new Error('response lost');
         }
         if (url.includes('/history?')) return Response.json({}, { status: 404 });
@@ -1242,13 +1256,14 @@ describe('mail management access', () => {
       vi.useFakeTimers();
       const action = service
         .action(account.id, {
-          action: 'send',
+          action: scenario === 'slow reply' ? 'reply' : 'send',
+          id: 'original',
           to: ['you@example.com'],
           subject: 's',
           text: 'b',
         })
         .catch((e) => e);
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(scenario === 'slow reply' ? 69_000 : 10_000);
       const error = await action;
       expect(error).toMatchObject({ uncertain: true, syncCompleted: false, syncPending: true });
       expect(error.message).toMatch(/reconciliation is still pending/);
