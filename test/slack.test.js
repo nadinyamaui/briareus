@@ -533,6 +533,118 @@ describe('a session reading', () => {
   describe.each(['conversations.history', 'conversations.replies'])('%s content rendering', (method) => {
     it.each([
       {
+        title: 'table rows with raw and rich-text cells and empty cell boundaries',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'table',
+                rows: [
+                  [
+                    { type: 'raw_text', text: 'Request' },
+                    { type: 'raw_text', text: 'Due' },
+                  ],
+                  [
+                    { type: 'raw_text', text: 'Approve production deployment' },
+                    { type: 'raw_text', text: 'Today' },
+                  ],
+                  [
+                    { type: 'raw_text', text: '' },
+                    {
+                      type: 'rich_text',
+                      elements: [
+                        { type: 'rich_text_section', elements: [{ type: 'text', text: 'Tomorrow' }] },
+                      ],
+                    },
+                  ],
+                ],
+              },
+            ],
+          },
+        ],
+        expected: ['Request | Due\nApprove production deployment | Today\n | Tomorrow'],
+      },
+      {
+        title: 'struck text and deduplicated matching summaries',
+        messages: [
+          ...['', '~Deploy production now.~'].map((text) => ({
+            text,
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [{ type: 'text', text: 'Deploy production now.', style: { strike: true } }],
+                  },
+                ],
+              },
+            ],
+          })),
+          {
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [
+                      { type: 'text', text: 'Deploy now', style: { strike: true } },
+                      { type: 'text', text: ' Wait for approval.', style: { strike: false } },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        expected: ['~Deploy production now.~', '~Deploy production now.~', '~Deploy now~ Wait for approval.'],
+      },
+      {
+        title: 'usergroup identifiers and broadcast audiences',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [
+                      { type: 'text', text: 'Please ask ' },
+                      { type: 'usergroup', usergroup_id: 'S123' },
+                      { type: 'text', text: ' to approve.' },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          ...['here', 'channel', 'everyone'].map((range) => ({
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [
+                      { type: 'broadcast', range },
+                      { type: 'text', text: ' please approve.' },
+                    ],
+                  },
+                ],
+              },
+            ],
+          })),
+        ],
+        expected: [
+          'Please ask @S123 to approve.',
+          '@here please approve.',
+          '@channel please approve.',
+          '@everyone please approve.',
+        ],
+      },
+      {
         title: 'emoji confirmations',
         messages: [
           {
