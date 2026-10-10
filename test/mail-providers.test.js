@@ -651,7 +651,9 @@ describe('outlookProvider', () => {
     ]);
     const outlook = outlookProvider(MICROSOFT, { request });
 
-    await expect(outlook.exchange('c', 'v')).resolves.toMatchObject({ scope: null });
+    await expect(outlook.exchange('c', 'v')).resolves.toMatchObject({
+      scope: 'offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read',
+    });
     await expect(outlook.exchange('c', 'v')).resolves.toMatchObject({ refreshToken: 'r' });
     await expect(outlook.refresh('r')).rejects.toMatchObject({
       reauth: true,
@@ -1209,5 +1211,98 @@ describe('outlookProvider', () => {
     expect(calls.some((c) => c.url.includes('/mailFolders/inbox'))).toBe(false);
     expect(state.deltas).toEqual({ 'INBOX-ID': `${GRAPH}/mailFolders/INBOX-ID/messages/delta?token=new` });
     expect(sink.pruned).toEqual(['INBOX-ID']);
+  });
+});
+
+describe('moving selected messages to trash', () => {
+  it.each([false, true])(
+    'records omitted Outlook scopes for the requested access (manage: %s)',
+    async (manage) => {
+      const { request, calls } = fakeFetch([
+        [/./, () => ({ body: { access_token: 'a', refresh_token: 'r' } })],
+      ]);
+      const provider = outlookProvider(MICROSOFT, { request, manage });
+      const grant = await provider.exchange('code', 'verifier');
+      expect(provider.canTrash(grant.scope)).toBe(manage);
+      expect(grant.scope.includes('Mail.Send')).toBe(manage);
+      await provider.refresh('r');
+      expect(new URLSearchParams(calls[1].init.body).has('scope')).toBe(false);
+    },
+  );
+
+  it.each(['gmail', 'outlook'])(
+    'uses %s trash rather than permanent deletion, encoding the message id',
+    async (name) => {
+      const { request, calls } = fakeFetch([[/./, () => ({ body: { id: 'm' } })]]);
+      const provider =
+        name === 'gmail' ? gmailProvider(GOOGLE, { request }) : outlookProvider(MICROSOFT, { request });
+      await provider.trash(
+        provider.api(async () => 'token'),
+        'same/+=',
+      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe(
+        name === 'gmail' ? `${GMAIL}/messages/same%2F%2B%3D/trash` : `${GRAPH}/messages/same%2F%2B%3D/move`,
+      );
+      expect(calls[0].init.method).toBe('POST');
+      expect(calls[0].init.headers.Authorization).toBe('Bearer token');
+      if (name === 'outlook') {
+        expect(JSON.parse(calls[0].init.body)).toEqual({ destinationId: 'deleteditems' });
+        expect(calls[0].init.headers.Prefer).toContain('IdType="ImmutableId"');
+      }
+    },
+  );
+  it.each([429, 500, 503])('does not replay a write after HTTP %s', async (status) => {
+    const { request, calls } = fakeFetch([[/./, () => ({ status })]]);
+    const sleep = vi.fn();
+    const provider = outlookProvider(MICROSOFT, { request, sleep });
+    await expect(
+      provider.trash(
+        provider.api(async () => 't'),
+        'm',
+      ),
+    ).rejects.toMatchObject({ upstream: status });
+    expect(calls).toHaveLength(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+  it('does not replay an uncertain network write', async () => {
+    const request = vi.fn(async () => {
+      throw new Error('disconnected');
+    });
+    const provider = gmailProvider(GOOGLE, { request });
+    await expect(
+      provider.trash(
+        provider.api(async () => 't'),
+        'm',
+      ),
+    ).rejects.toMatchObject({ status: 502 });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+  it('refreshes once after a definitive authentication refusal', async () => {
+    let status = 401;
+    const { request, calls } = fakeFetch([
+      [
+        /./,
+        () => {
+          const previous = status;
+          status = 200;
+          return { status: previous };
+        },
+      ],
+    ]);
+    const token = vi.fn(async () => 't');
+    const provider = outlookProvider(MICROSOFT, { request });
+    await provider.trash(provider.api(token), 'm');
+    expect(calls).toHaveLength(2);
+    expect(token.mock.calls).toEqual([[false], [true]]);
+  });
+  it('requires write scopes without granting deletion to existing read-only connections', () => {
+    const gmail = gmailProvider(GOOGLE),
+      outlook = outlookProvider(MICROSOFT);
+    expect(gmail.canTrash(null)).toBe(false);
+    expect(gmail.canTrash('https://www.googleapis.com/auth/gmail.readonly')).toBe(false);
+    expect(gmail.canTrash('https://www.googleapis.com/auth/gmail.modify')).toBe(true);
+    expect(outlook.canTrash('Mail.Read')).toBe(false);
+    expect(outlook.canTrash('https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite')).toBe(true);
   });
 });

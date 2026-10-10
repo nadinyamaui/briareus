@@ -157,14 +157,23 @@ function fakeGmail(mailbox) {
         access_token: `access-${tokenCalls.length}`,
         refresh_token: form.grant_type === 'authorization_code' ? `refresh-${form.code}` : undefined,
         expires_in: 3600,
-        scope: mailbox.manage
-          ? 'https://www.googleapis.com/auth/gmail.modify'
-          : 'https://www.googleapis.com/auth/gmail.readonly',
+        scope:
+          mailbox.scope ??
+          (mailbox.manage
+            ? 'https://www.googleapis.com/auth/gmail.modify'
+            : 'https://www.googleapis.com/auth/gmail.readonly'),
       });
     }
     if (url.endsWith('/messages/send') && init.method === 'POST')
       return reply({ id: 'sent', threadId: 'sent-thread' });
     if (gate.wait) await gate.wait;
+    if (url.endsWith('/trash')) {
+      if (mailbox.trashWait) await mailbox.trashWait;
+      if (mailbox.trashStatus) return reply(mailbox.trashError || {}, mailbox.trashStatus);
+      const id = decodeURIComponent(url.split('/').at(-2));
+      delete mailbox.messages[id];
+      return reply({ id });
+    }
     if (url.startsWith(`${GMAIL}/profile`)) return reply({ emailAddress: mailbox.email, historyId: '10' });
     if (url.startsWith(`${GMAIL}/labels`)) return reply({ labels: mailbox.labels || [] });
     if (url.startsWith(`${GMAIL}/messages?`))
@@ -408,6 +417,7 @@ describe('connecting a mailbox', () => {
     expect(stored).not.toContain('refresh-abc');
     expect(JSON.parse(open(stored))).toEqual({
       refreshToken: 'refresh-abc',
+      scope: 'https://www.googleapis.com/auth/gmail.readonly',
       accessToken: 'access-1',
       expiresAt: clock + 3600_000,
     });
@@ -816,6 +826,264 @@ describe('reading', () => {
       body: { text: 'Body of m0', html: null, truncated: false },
     });
     await expect(service.message(account.id, 'nope')).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('message deletion', () => {
+  beforeEach(() => {
+    mailbox.manage = true;
+  });
+  it('reconciles an uncertain send after queued deletion with a successful fresh sync', async () => {
+    const account = await connect({ access: 'manage' });
+    await settled();
+    let release;
+    mailbox.trashWait = new Promise((resolve) => {
+      release = resolve;
+    });
+    const deletion = service.trashMessage(account.id, 'a');
+    await vi.waitFor(() =>
+      expect(gmail.request.mock.calls.some(([url]) => String(url).endsWith('/trash'))).toBe(true),
+    );
+    const original = gmail.request.getMockImplementation();
+    gmail.request.mockImplementation(async (url, opts) => {
+      if (url.endsWith('/messages/send')) return Response.json({}, { status: 503 });
+      return original(url, opts);
+    });
+    const result = service
+      .action(account.id, {
+        action: 'send',
+        to: ['you@example.com'],
+        subject: 'Hello',
+        text: 'Body',
+      })
+      .catch((error) => error);
+    await vi.waitFor(async () => expect((await service.list())[0].syncing).toBe(true));
+    release();
+    await deletion;
+    expect(await result).toMatchObject({ uncertain: true, syncCompleted: true, syncPending: false });
+    await settled();
+    await expect(service.message(account.id, 'a')).rejects.toMatchObject({ status: 404 });
+    expect(errors).toEqual([]);
+  });
+
+  it('trashes only the selected account and message, and removes it from the synced copy', async () => {
+    const a = await connect({ access: 'manage' });
+    await settled();
+    await store.upsert(99, [{ id: 'a' }], clock);
+    await service.trashMessage(a.id, 'a');
+    expect(store.messages.has(`${a.id}:a`)).toBe(false);
+    expect(store.messages.has('99:a')).toBe(true);
+    expect((await service.messages({})).messages.map((m) => m.id)).toEqual(['b']);
+    expect(mailbox.messages.a).toBeUndefined();
+    expect(mailbox.messages.b).toBeDefined();
+  });
+  it.each([null, 'https://www.googleapis.com/auth/gmail.readonly'])(
+    'keeps old read connections working but refuses deletion (scope %s)',
+    async (scope) => {
+      const a = await connect({ access: 'manage' });
+      await settled();
+      const credentials = JSON.parse(open(store.accounts.get(a.id).credentials));
+      await service.update(a.id, { enabled: false });
+      store.accounts.get(a.id).credentials = seal(JSON.stringify({ ...credentials, scope }));
+      await service.init();
+      await expect(service.trashMessage(a.id, 'a')).rejects.toMatchObject({ status: 409 });
+      expect((await service.message(a.id, 'a')).id).toBe('a');
+      expect(gmail.request.mock.calls.some(([url]) => String(url).endsWith('/trash'))).toBe(false);
+    },
+  );
+  it.each([403, 429, 500])('retains the cached message on provider refusal %s', async (status) => {
+    const a = await connect({ access: 'manage' });
+    await settled();
+    mailbox.trashStatus = status;
+    await expect(service.trashMessage(a.id, 'a')).rejects.toMatchObject({
+      status: status === 403 ? 409 : status === 429 ? 429 : 502,
+    });
+    expect((await service.message(a.id, 'a')).id).toBe('a');
+    expect(gmail.request.mock.calls.filter(([url]) => String(url).endsWith('/trash'))).toHaveLength(1);
+  });
+  it('marks a revoked grant for reconnecting without dropping the cached message', async () => {
+    const a = await connect({ access: 'manage' });
+    await settled();
+    mailbox.trashStatus = 401;
+    mailbox.refreshRefused = true;
+    await expect(service.trashMessage(a.id, 'a')).rejects.toMatchObject({ status: 409 });
+    expect((await service.list())[0].status).toBe('reauth');
+    expect((await service.message(a.id, 'a')).id).toBe('a');
+  });
+  it('serializes duplicate deletes and removes an account safely during an in-flight delete', async () => {
+    const a = await connect({ access: 'manage' });
+    await settled();
+    let releaseDelete;
+    mailbox.trashWait = new Promise((resolve) => {
+      releaseDelete = resolve;
+    });
+    const first = service.trashMessage(a.id, 'a');
+    await vi.waitFor(() =>
+      expect(gmail.request.mock.calls.some(([url]) => String(url).endsWith('/trash'))).toBe(true),
+    );
+    const second = service.trashMessage(a.id, 'a');
+    const result = expect(second).rejects.toMatchObject({ status: 404 });
+    const removal = service.remove(a.id);
+    releaseDelete();
+    await first;
+    await result;
+    await removal;
+    expect(await service.list()).toEqual([]);
+    expect(store.ofAccount(a.id)).toEqual([]);
+    expect(gmail.request.mock.calls.filter(([url]) => String(url).endsWith('/trash'))).toHaveLength(1);
+  });
+
+  it('removes a cached message the provider already deleted and rejects unknown targets', async () => {
+    const a = await connect({ access: 'manage' });
+    await settled();
+    mailbox.trashStatus = 404;
+    mailbox.trashError = { error: { code: 404, errors: [{ reason: 'notFound' }] } };
+    await service.trashMessage(a.id, 'a');
+    await expect(service.message(a.id, 'a')).rejects.toMatchObject({ status: 404 });
+    await expect(service.trashMessage(a.id, 'missing')).rejects.toMatchObject({ status: 404 });
+    await expect(service.trashMessage(900, 'b')).rejects.toMatchObject({ status: 404 });
+  });
+  it.each([
+    ['gmail', { code: 404, errors: [{ reason: 'notFound' }] }, true],
+    ['gmail', { code: 404 }, false],
+    ['gmail', { code: 404, errors: [{ reason: 'unknown' }] }, false],
+    ['outlook', { code: 'ErrorItemNotFound' }, true],
+    ['outlook', { code: 'MailboxNotEnabledForRESTAPI' }, false],
+    ['outlook', { code: 'MailboxNotSupportedForRESTAPI' }, false],
+    ['outlook', { code: 'UnknownError' }, false],
+    ['outlook', {}, false],
+  ])('classifies %s trash 404 %j (missing message: %s)', async (provider, error, missing) => {
+    cfg.mail.microsoft = { clientId: 'mid', clientSecret: 'secret' };
+    const a = await store.insertAccount({
+      provider,
+      email: 'me@example.com',
+      enabled: false,
+      status: 'connected',
+      syncDays: 30,
+      credentials: seal(
+        JSON.stringify({
+          accessToken: 'token',
+          expiresAt: clock + DAY,
+          scope: provider === 'gmail' ? 'https://www.googleapis.com/auth/gmail.modify' : 'Mail.ReadWrite',
+        }),
+      ),
+    });
+    await store.upsert(a.id, [{ id: 'a', receivedAt: clock - DAY }], clock);
+    const request = vi.fn(async () => new Response(JSON.stringify({ error }), { status: 404 }));
+    service = createMailService({ store, request, now: () => clock, sleep: async () => {} });
+    await service.init();
+    if (missing) {
+      await service.trashMessage(a.id, 'a');
+      await expect(service.message(a.id, 'a')).rejects.toMatchObject({ status: 404 });
+    } else {
+      await expect(service.trashMessage(a.id, 'a')).rejects.toMatchObject({ upstream: 404 });
+      expect((await service.message(a.id, 'a')).id).toBe('a');
+      expect((await service.messages({ account: a.id })).messages.map((m) => m.id)).toEqual(['a']);
+    }
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes successfully trashed mail when overlapping account removal rolls back', async () => {
+    const a = await connect({ enabled: false, access: 'manage' });
+    await service.sync(a.id);
+    await settled();
+    const failure = new Error('Account deletion failed');
+    store.deleteAccount = vi.fn(async () => {
+      throw failure;
+    });
+    let releaseDelete;
+    mailbox.trashWait = new Promise((resolve) => {
+      releaseDelete = resolve;
+    });
+    const deletion = service.trashMessage(a.id, 'a');
+    await vi.waitFor(() =>
+      expect(gmail.request.mock.calls.some(([url]) => String(url).endsWith('/trash'))).toBe(true),
+    );
+    expect(await service.sync(a.id)).toMatchObject({ syncing: true });
+    const removal = expect(service.remove(a.id)).rejects.toBe(failure);
+    releaseDelete();
+    await deletion;
+    await removal;
+    await settled();
+    expect((await service.list())[0]).toMatchObject({ id: a.id, enabled: false, syncing: false });
+    expect(mailbox.messages.a).toBeUndefined();
+    await expect(service.message(a.id, 'a')).rejects.toMatchObject({ status: 404 });
+    expect((await service.messages({ account: a.id })).messages.map((m) => m.id)).toEqual(['b']);
+  });
+
+  it.each([200, 403, 401])(
+    'reports queued syncs until deletion and refresh settle (trash %s)',
+    async (status) => {
+      const a = await connect({ access: 'manage' });
+      await settled();
+      const lastSyncAt = (await service.list())[0].lastSyncAt;
+      clock += 1000;
+      let releaseDelete;
+      mailbox.trashWait = new Promise((resolve) => {
+        releaseDelete = resolve;
+      });
+      if (status !== 200) mailbox.trashStatus = status;
+      if (status === 401) mailbox.refreshRefused = true;
+      const deletion = service.trashMessage(a.id, 'a');
+      const result = status === 200 ? deletion : expect(deletion).rejects.toMatchObject({ status: 409 });
+      await vi.waitFor(() =>
+        expect(gmail.request.mock.calls.some(([url]) => String(url).endsWith('/trash'))).toBe(true),
+      );
+      expect((await service.list())[0].syncing).toBe(false);
+      const before = gmail.request.mock.calls.length;
+      expect(await service.sync(a.id)).toMatchObject({ syncing: true, lastSyncAt });
+      expect(await service.sync(a.id)).toMatchObject({ syncing: true });
+      expect((await service.list())[0].syncing).toBe(true);
+      expect(gmail.request.mock.calls).toHaveLength(before);
+      releaseDelete();
+      await result;
+      await settled();
+      expect((await service.list())[0]).toMatchObject({
+        syncing: false,
+        lastSyncAt: status === 401 ? lastSyncAt : clock,
+        status: status === 401 ? 'reauth' : 'connected',
+      });
+    },
+  );
+
+  it('waits for a running sync, and holds subsequent syncs until deletion completes', async () => {
+    const a = await connect({ access: 'manage' });
+    await settled();
+    const originalUpsert = store.upsert;
+    let releaseSync;
+    const syncing = new Promise((resolve) => {
+      releaseSync = resolve;
+    });
+    let sawUpsert;
+    const entered = new Promise((resolve) => {
+      sawUpsert = resolve;
+    });
+    store.upsert = async (...args) => {
+      sawUpsert();
+      await syncing;
+      return originalUpsert(...args);
+    };
+    // Force a full pass; the original cached credentials still have write scope.
+    await service.update(a.id, { syncDays: 31 });
+    await entered;
+    let releaseDelete;
+    mailbox.trashWait = new Promise((resolve) => {
+      releaseDelete = resolve;
+    });
+    const deletion = service.trashMessage(a.id, 'a');
+    expect(gmail.request.mock.calls.some(([url]) => String(url).endsWith('/trash'))).toBe(false);
+    releaseSync();
+    await vi.waitFor(() =>
+      expect(gmail.request.mock.calls.some(([url]) => String(url).endsWith('/trash'))).toBe(true),
+    );
+    const before = gmail.request.mock.calls.length;
+    await service.sync(a.id);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(gmail.request.mock.calls).toHaveLength(before);
+    releaseDelete();
+    await deletion;
+    await settled();
+    expect(store.messages.has(`${a.id}:a`)).toBe(false);
   });
 });
 

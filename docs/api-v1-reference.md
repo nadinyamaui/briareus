@@ -1557,6 +1557,12 @@ Read one synced message with its body. Needs `admin`.
 
 **Returns** `{ message: MailMessage }`. URL-encode the message’s `id`: an Outlook id may hold `/`, `+` and `=`. 404 when the account or the message is not there, which a message deleted or moved to the trash is from the next sync on.
 
+### `DELETE /mail/accounts/{account}/messages/{id}`
+
+Move one synced message to the provider trash and remove the synced copy. Needs `admin`.
+
+**Returns** `{ ok: boolean }`. Moves only this message, not its thread, to Gmail Trash or Outlook Deleted Items; it does not permanently erase it. URL-encode `id`. Existing read-only connections need reconnecting with access: manage for gmail.modify or Mail.ReadWrite; otherwise 409. 404 for a missing account or cached message. Provider failures keep the synced copy; an uncertain write is not automatically retried.
+
 ## Settings
 
 ### `PUT /settings/projects/order`
@@ -3038,6 +3044,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/envoyer/accounts/:id/projects/:project/deployments`                   | `POST /envoyer/accounts/{id}/projects/{project}/deployments`                    |
 | `GET /api/mail/messages`                                                         | `GET /mail/messages`                                                            |
 | `GET /api/mail/accounts/:account/messages/:id`                                   | `GET /mail/accounts/{account}/messages/{id}`                                    |
+| `DELETE /api/mail/accounts/:account/messages/:id`                                | `DELETE /mail/accounts/{account}/messages/{id}`                                 |
 | `GET /videos/*file`                                                              | `GET /videos/{file}`                                                            |
 | `PUT /api/projects/order`                                                        | `PUT /settings/projects/order`                                                  |
 | `GET /api/projects`                                                              | `GET /settings/projects`                                                        |

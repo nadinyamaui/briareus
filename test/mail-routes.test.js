@@ -39,6 +39,7 @@ beforeEach(async () => {
     }),
     update: vi.fn(async (id, input) => ({ id, input })),
     remove: vi.fn(async () => {}),
+    trashMessage: vi.fn(async () => {}),
     sync: vi.fn(async (id) => ({ id, syncing: true })),
     messages: vi.fn(async (query) => ({ messages: [], nextCursor: null, query })),
     message: vi.fn(async (account, id) => {
@@ -95,6 +96,20 @@ describe('mail through /api/v1', () => {
     const res = await call('/api/mail/messages', { token: 'session-token' });
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: 'Mail is reached through /api/v1' });
+  });
+
+  it('deletes an encoded message only through the admin gateway', async () => {
+    const path = `/api/v1/mail/accounts/7/messages/${encodeURIComponent('same/+=')}`;
+    expect((await call(path, { method: 'DELETE', token: tokens.manage })).status).toBe(403);
+    expect((await call(path, { method: 'DELETE', token: '' })).status).toBe(401);
+    expect(service.trashMessage).not.toHaveBeenCalled();
+    const res = await call(path, { method: 'DELETE' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(service.trashMessage).toHaveBeenCalledWith(7, 'same/+=');
+    expect((await call('/api/mail/accounts/7/messages/m', { method: 'DELETE', token: 'agent' })).status).toBe(
+      403,
+    );
   });
 
   it('lists accounts with the providers and defaults', async () => {
