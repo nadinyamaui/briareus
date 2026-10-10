@@ -24,7 +24,7 @@ vi.mock('mysql2/promise', () => {
   return { default: { createPool: () => ({ getConnection: async () => conn, end: async () => {} }) } };
 });
 
-const { updateAppSetting } = await import('../lib/db.js');
+const { updateAppSetting, getProviderRow } = await import('../lib/db.js');
 
 beforeEach(() => {
   state.queries = [];
@@ -56,4 +56,54 @@ it('writes nothing when the change throws', async () => {
   expect(state.queries).toEqual(['BEGIN', 'INSERT IGNORE', 'SELECT `value`', 'ROLLBACK']);
   expect(JSON.parse(state.stored)).toEqual(['a']);
   expect(state.released).toBe(1);
+});
+
+it('waits for async validation on the locked connection before committing', async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  let started;
+  const ready = new Promise((r) => (started = r));
+  const writing = updateAppSetting('list', [], async (value, conn) => {
+    expect(conn.query).toBeTypeOf('function');
+    started();
+    await gate;
+    value.push('b');
+    return 'validated';
+  });
+  await ready;
+  expect(state.queries).toEqual(['BEGIN', 'INSERT IGNORE', 'SELECT `value`']);
+  expect(state.released).toBe(0);
+  release();
+  expect((await writing).result).toBe('validated');
+  expect(JSON.parse(state.stored)).toEqual(['a', 'b']);
+  expect(state.queries.slice(-2)).toEqual(['UPDATE `app_settings`', 'COMMIT']);
+  expect(state.released).toBe(1);
+});
+
+it('rolls back when async validation rejects', async () => {
+  await expect(
+    updateAppSetting('list', [], async (value) => {
+      value.push('b');
+      await Promise.resolve();
+      throw new Error('validation failed');
+    }),
+  ).rejects.toThrow('validation failed');
+  expect(JSON.parse(state.stored)).toEqual(['a']);
+  expect(state.queries).toEqual(['BEGIN', 'INSERT IGNORE', 'SELECT `value`', 'ROLLBACK']);
+  expect(state.released).toBe(1);
+});
+
+it('uses a compatible shared provider lock on the setting transaction connection', async () => {
+  const query = vi.fn(async () => [[]]);
+  await updateAppSetting('list', [], async (_value, conn) => {
+    const original = conn.query;
+    conn.query = query;
+    try {
+      expect(await getProviderRow(7, conn)).toBeNull();
+    } finally {
+      conn.query = original;
+    }
+  });
+  expect(query).toHaveBeenCalledWith('SELECT * FROM `providers` WHERE `id` = ? LOCK IN SHARE MODE', [7]);
+  expect(state.queries.at(-1)).toBe('COMMIT');
 });
