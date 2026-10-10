@@ -390,6 +390,117 @@ describe('providerUsage across a restart', () => {
     },
   });
 
+  it.each([1, null, 'switch'])(
+    'does not dispatch obsolete Claude credentials after invalidation %s during a profile check',
+    async (change) => {
+      const { stored, update } = store();
+      const old = row(1, { authData: claudeAuth('account-A', 1) });
+      state.rows[0] = old;
+      let finish;
+      providers.claudeUsageAccountMatches.mockImplementationOnce(
+        () => new Promise((resolve) => (finish = resolve)),
+      );
+      providers.claudeUsage.mockResolvedValueOnce({
+        windows: [],
+        error: 'Claude usage check failed (HTTP 401).',
+      });
+      try {
+        await restoreProviderUsage({ load: () => ({}), update });
+        const pending = providerUsage(old);
+        state.rows[0] = row(1, {
+          authData: claudeAuth(change === 'switch' ? 'account-B' : 'account-A', 2),
+        });
+        if (change !== 'switch') forgetProviderUsage(change);
+        await settle();
+        const before = structuredClone(stored);
+        finish(true);
+        expect(await pending).toBeNull();
+        await flushProviderUsage();
+        expect(providers.claudeUsage).not.toHaveBeenCalled();
+        expect(stored).toEqual(before);
+        vi.resetModules();
+        const restarted = await import('../lib/balancer.js');
+        await restarted.restoreProviderUsage({ load: () => structuredClone(stored), update: null });
+        const read = vi.fn(async () => windows(5));
+        expect(await restarted.providerUsage(state.rows[0], { read })).toEqual(windows(5));
+        expect(read).toHaveBeenCalledTimes(1);
+      } finally {
+        providers.claudeUsage.mockReset();
+        providers.claudeUsage.mockImplementation(async (dir) => state.usage[dir] ?? null);
+        await unwire();
+      }
+    },
+  );
+
+  it.each([
+    ['reconnect', 1, true],
+    ['reconnect', null, true],
+    ['switch', 1, true],
+    ['switch', 'none', true],
+    ['switch', 1, false],
+  ])(
+    'discards obsolete Claude profile verification after %s, forget=%s, valid=%s',
+    async (change, forget, valid) => {
+      const actual = await vi.importActual('../lib/providers.js');
+      const { stored, update } = store();
+      const old = row(1, { authData: claudeAuth('account-A', 1) });
+      const current = row(1, {
+        authData: claudeAuth(change === 'switch' ? 'account-B' : 'account-A', 2),
+      });
+      state.rows[0] = old;
+      let finishProfile;
+      const fetch = vi.fn(async (url, options) => {
+        const obsolete = options.headers.Authorization === 'Bearer access-1';
+        if (url.endsWith('/profile')) {
+          if (obsolete) return new Promise((resolve) => (finishProfile = resolve));
+          return {
+            ok: true,
+            json: async () => ({
+              account: { uuid: current.authData.settings.oauthAccount.accountUuid },
+              organization: { uuid: 'org-1' },
+            }),
+          };
+        }
+        return { ok: false, status: obsolete ? 401 : 429, headers: new Headers({ 'retry-after': '3600' }) };
+      });
+      vi.stubGlobal('fetch', fetch);
+      try {
+        await restoreProviderUsage({ load: () => ({}), update });
+        providers.claudeUsageAccountMatches.mockImplementationOnce(actual.claudeUsageAccountMatches);
+        providers.claudeUsage.mockImplementationOnce(actual.claudeUsage);
+        const pending = providerUsage(old);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        state.rows[0] = current;
+        if (forget !== 'none') forgetProviderUsage(forget);
+        providers.claudeUsageAccountMatches.mockImplementationOnce(actual.claudeUsageAccountMatches);
+        const lockout = await providerUsage(current);
+        expect(lockout.retryAt).toBeDefined();
+        await flushProviderUsage(1);
+        const before = structuredClone(stored);
+        finishProfile({
+          ok: valid,
+          json: async () => ({ account: { uuid: 'account-A' }, organization: { uuid: 'org-1' } }),
+        });
+        expect(await pending).toBeNull();
+        await flushProviderUsage();
+        expect(stored).toEqual(before);
+        expect(cachedProviderUsage(current)).toEqual(lockout);
+        expect(await providerUsage(current, { ttlMs: 0 })).toEqual(lockout);
+        expect(providers.claudeUsage).toHaveBeenCalledTimes(1);
+        expect(fetch).toHaveBeenCalledTimes(3);
+        vi.resetModules();
+        const restarted = await import('../lib/balancer.js');
+        await restarted.restoreProviderUsage({ load: () => structuredClone(stored), update: null });
+        const read = vi.fn(async () => windows(5));
+        expect(await restarted.providerUsage(current, { read, ttlMs: 0 })).toEqual(lockout);
+        expect(read).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+        await unwire();
+      }
+    },
+  );
+
   it.each([
     ['account', true],
     ['account', false],
