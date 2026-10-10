@@ -814,3 +814,21 @@ describe('email tool project opt-in', () => {
     },
   );
 });
+
+describe('WhatsApp tool project opt-in', () => {
+  it('defaults new projects to no WhatsApp access, independently of email', async () => {
+    expect(PROJECT_DEFAULTS.whatsappToolsEnabled).toBe(false);
+    const p = await createProject({ ...base, mailToolsEnabled: true });
+    expect(p).toMatchObject({ mailToolsEnabled: true, whatsappToolsEnabled: false });
+  });
+  it('persists explicit opt-in, preserves it on unrelated edits, and can revoke it', async () => {
+    const p = await createProject({ ...base, whatsappToolsEnabled: true });
+    expect(p.whatsappToolsEnabled).toBe(true);
+    expect((await updateProject(p.id, { label: 'Renamed' })).whatsappToolsEnabled).toBe(true);
+    expect((await updateProject(p.id, { whatsappToolsEnabled: false })).whatsappToolsEnabled).toBe(false);
+  });
+  it.each(['true', 1, null])('rejects non-boolean permission values: %j', async (whatsappToolsEnabled) => {
+    await expect(createProject({ ...base, whatsappToolsEnabled })).rejects.toThrow(/must be true or false/);
+    expect(state.saved).toHaveLength(0);
+  });
+});
