@@ -402,6 +402,52 @@ describe('a session reading', () => {
     });
   });
 
+  it.each([
+    ['history', 'conversations.list', 'revoke'],
+    ['history', 'conversations.list', 'rotate'],
+    ['history', 'conversations.history', 'revoke'],
+    ['history', 'users.list', 'remove'],
+    ['history', 'users.list', 'rotate'],
+    ['conversations', 'conversations.list', 'revoke'],
+    ['conversations', 'conversations.list', 'rotate'],
+    ['conversations', 'conversations.list', 'disable DMs'],
+    ['conversations', 'users.list', 'remove'],
+    ['conversations', 'users.list', 'revoke'],
+  ])('rejects %s during %s when settings change: %s', async (reader, method, change) => {
+    const { s, w, slack } = await service();
+    const original = slack.api.getMockImplementation();
+    let changed = false;
+    slack.api.mockImplementation(async (...args) => {
+      if (!changed && args[1] === method) {
+        changed = true;
+        if (change === 'remove') await s.remove(w.id);
+        else if (change === 'rotate') await s.update(w.id, { token: `${TOKEN}-rotated` });
+        else if (change === 'disable DMs')
+          await s.update(w.id, { projects: [{ repo: 'o/a', channels: ['dev'], directMessages: false }] });
+        else await s.update(w.id, { projects: [] });
+      }
+      return original(...args);
+    });
+    const pending = reader === 'history' ? s.history(job(), { channel: '#dev' }) : s.conversations(job());
+    await expect(pending).rejects.toMatchObject({ status: 403 });
+    expect(changed).toBe(true);
+    if (method === 'conversations.list') {
+      expect(slack.calls.some((c) => c.method === 'conversations.history' || c.params.types === 'im')).toBe(
+        false,
+      );
+    }
+  });
+
+  it('rejects a channel listing without DMs when access changes during lookup', async () => {
+    const { s, w, slack } = await service({ project: { directMessages: false } });
+    const original = slack.api.getMockImplementation();
+    slack.api.mockImplementation(async (...args) => {
+      if (args[1] === 'conversations.list') await s.update(w.id, { projects: [] });
+      return original(...args);
+    });
+    await expect(s.conversations(job())).rejects.toMatchObject({ status: 403 });
+  });
+
   it('reads nothing outside the project’s channels, DMs it may not use, or an unwatched turn', async () => {
     const { s, slack } = await service();
     await expect(s.history(job(), { channel: '#general' })).rejects.toMatchObject({ status: 403 });
