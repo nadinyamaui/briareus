@@ -892,11 +892,44 @@ describe('message deletion', () => {
     const account = await connect();
     await settled();
     expect(account.access).toBe('read');
-    await expect(service.trashMessage(account.id, 'a')).rejects.toMatchObject({ status: 403 });
+    await expect(service.trashMessage(account.id, 'a')).rejects.toMatchObject({ status: 409 });
     expect(mailbox.messages.a).toBeDefined();
     expect(store.messages.has(`${account.id}:a`)).toBe(true);
     expect(gmail.request.mock.calls.filter(([url]) => String(url).endsWith('/trash'))).toHaveLength(0);
   });
+
+  it.each(['gmail', 'outlook'])(
+    'keeps %s mail readable when deletion needs provider consent',
+    async (provider) => {
+      cfg.mail.microsoft = { clientId: 'mid', clientSecret: 'secret' };
+      const account = await store.insertAccount({
+        provider,
+        email: 'me@example.com',
+        enabled: false,
+        status: 'connected',
+        syncDays: 30,
+        credentials: seal(
+          JSON.stringify({
+            access: 'read',
+            accessToken: 'token',
+            expiresAt: clock + DAY,
+            scope: provider === 'gmail' ? 'https://www.googleapis.com/auth/gmail.readonly' : 'Mail.Read',
+          }),
+        ),
+      });
+      await store.upsert(account.id, [{ id: 'a', receivedAt: clock - DAY }], clock);
+      await service.init();
+
+      await expect(service.trashMessage(account.id, 'a')).rejects.toMatchObject({
+        status: 409,
+        message: 'Reconnect this mailbox with access: manage to trash mail',
+      });
+      expect((await service.message(account.id, 'a')).id).toBe('a');
+      expect((await service.messages({ account: account.id })).messages.map((m) => m.id)).toEqual(['a']);
+      expect((await service.list())[0]).toMatchObject({ access: 'read', messages: 1 });
+      expect(gmail.request).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['remove', 'read reconnect', 'manage reconnect'])(
     'refuses an obsolete trash token after %s during refresh',
@@ -918,7 +951,7 @@ describe('message deletion', () => {
       }
       release();
       expect(await deletion).toMatchObject({
-        status: change === 'remove' ? 404 : change === 'read reconnect' ? 403 : 409,
+        status: change === 'remove' ? 404 : 409,
       });
       await removal;
       await settled();

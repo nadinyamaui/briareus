@@ -112,6 +112,21 @@ describe('mail through /api/v1', () => {
     );
   });
 
+  it('returns a mailbox reconnect conflict to an admin client without blocking reads', async () => {
+    service.trashMessage.mockRejectedValue(
+      Object.assign(new Error('Reconnect this mailbox with access: manage to trash mail'), {
+        status: 409,
+      }),
+    );
+    const res = await call('/api/v1/mail/accounts/7/messages/a', { method: 'DELETE' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: 'Reconnect this mailbox with access: manage to trash mail',
+    });
+    expect((await call('/api/v1/settings/mail/accounts')).status).toBe(200);
+    expect((await call('/api/v1/mail/messages')).status).toBe(200);
+  });
+
   it('lists accounts with the providers and defaults', async () => {
     expect(await (await call('/api/v1/settings/mail/accounts')).json()).toEqual({
       accounts: [{ id: 1, email: 'me@gmail.com' }],
