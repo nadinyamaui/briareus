@@ -533,6 +533,141 @@ describe('a session reading', () => {
   describe.each(['conversations.history', 'conversations.replies'])('%s content rendering', (method) => {
     it.each([
       {
+        title: 'emoji confirmations',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  { type: 'rich_text_section', elements: [{ type: 'emoji', name: 'white_check_mark' }] },
+                ],
+              },
+            ],
+          },
+        ],
+        expected: [':white_check_mark:'],
+      },
+      {
+        title: 'image descriptions in blocks and accessories',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'image',
+                image_url: 'https://example.com/incident.png',
+                alt_text: 'Production failed. Please roll back.',
+              },
+            ],
+          },
+          {
+            blocks: [
+              {
+                type: 'image',
+                title: { type: 'plain_text', text: 'Incident' },
+                image_url: 'https://example.com/incident.png',
+                alt_text: 'Production failed.',
+              },
+            ],
+          },
+          {
+            blocks: [
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: 'Please review' },
+                accessory: {
+                  type: 'image',
+                  image_url: 'https://example.com/incident.png',
+                  alt_text: 'Production failed.',
+                },
+              },
+            ],
+          },
+        ],
+        expected: [
+          'Production failed. Please roll back.',
+          'Incident\nProduction failed.',
+          'Please review\nProduction failed.',
+        ],
+      },
+      {
+        title: 'section and actions button labels and destinations',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: 'Please review' },
+                accessory: {
+                  type: 'button',
+                  text: { type: 'plain_text', text: 'Deployment 123' },
+                  url: 'https://deploy.example/123',
+                  value: 'internal-action',
+                },
+              },
+            ],
+          },
+          {
+            blocks: [
+              {
+                type: 'actions',
+                elements: [
+                  {
+                    type: 'button',
+                    text: { type: 'plain_text', text: 'Deployment 123' },
+                    url: 'https://deploy.example/123',
+                    value: 'internal-action',
+                  },
+                  { type: 'button', text: { type: 'plain_text', text: 'Approve' } },
+                ],
+              },
+            ],
+          },
+        ],
+        expected: [
+          'Please review\nDeployment 123 (https://deploy.example/123)',
+          'Deployment 123 (https://deploy.example/123)\nApprove',
+        ],
+      },
+      {
+        title: 'list styles and ordered step offsets',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_list',
+                    style: 'ordered',
+                    offset: 2,
+                    elements: [
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Approve deployment' }] },
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Notify team' }] },
+                    ],
+                  },
+                  {
+                    type: 'rich_text_list',
+                    style: 'ordered',
+                    elements: [
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Verify health' }] },
+                    ],
+                  },
+                  {
+                    type: 'rich_text_list',
+                    style: 'bullet',
+                    elements: [
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Check logs' }] },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        expected: ['3. Approve deployment\n4. Notify team\n1. Verify health\n- Check logs'],
+      },
+      {
         title: 'attachment title destinations',
         messages: [
           {
