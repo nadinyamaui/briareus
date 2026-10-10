@@ -402,6 +402,76 @@ describe('a session reading', () => {
     });
   });
 
+  it.each(['conversations.history', 'conversations.replies'])(
+    'preserves attachment and block content in %s when top-level text is empty',
+    async (method) => {
+      const { s, slack } = await service();
+      const api = slack.api.getMockImplementation();
+      const messages = [
+        { text: '', attachments: [{ text: 'Please approve <@U3>', fallback: 'Approval needed' }] },
+        { attachments: [{ fallback: 'Deployment &lt;failed&gt;' }] },
+        {
+          text: ' ',
+          blocks: [
+            { type: 'header', text: { type: 'plain_text', text: 'Approval' } },
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: 'Check <https://example.com|deployment>' },
+              fields: [{ type: 'plain_text', text: 'Production' }],
+            },
+            { type: 'context', elements: [{ type: 'mrkdwn', text: 'Requested by <@U1>' }] },
+          ],
+        },
+        {
+          attachments: [
+            {
+              title: 'Deploy',
+              pretext: 'Needs approval',
+              fields: [{ title: 'Environment', value: 'Production' }],
+              blocks: [{ type: 'section', text: { type: 'mrkdwn', text: 'Please approve' } }],
+              fallback: 'Duplicate summary',
+            },
+          ],
+        },
+        { text: 'Existing text', attachments: [{ text: 'Duplicate text' }], blocks: [] },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [
+                    { type: 'text', text: 'Please ' },
+                    { type: 'text', text: 'approve', style: { bold: true } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        { text: '', files: [{}] },
+      ].map((m, i) => ({ ts: `${i + 1}.1`, user: 'U1', ...m }));
+      slack.api.mockImplementation((token, called, params) =>
+        called === method ? Promise.resolve({ ok: true, messages }) : api(token, called, params),
+      );
+      const page = await s.history(job(), {
+        channel: 'D1',
+        ...(method === 'conversations.replies' ? { threadTs: '1.1' } : {}),
+      });
+      expect(page.messages.map((m) => m.text)).toEqual([
+        'Please approve @nadin',
+        'Deployment <failed>',
+        'Approval\nCheck deployment (https://example.com)\nProduction\nRequested by @andres',
+        'Needs approval\nDeploy\nEnvironment\nProduction\nPlease approve',
+        'Existing text',
+        'Please approve',
+        '',
+      ]);
+      expect(page.messages[6].files).toBe(1);
+    },
+  );
+
   it.each([
     ['history', 'conversations.list', 'revoke'],
     ['history', 'conversations.list', 'rotate'],
