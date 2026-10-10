@@ -533,6 +533,194 @@ describe('a session reading', () => {
   describe.each(['conversations.history', 'conversations.replies'])('%s content rendering', (method) => {
     it.each([
       {
+        title: 'nested list hierarchy and multiline ordered items',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_list',
+                    style: 'bullet',
+                    indent: 0,
+                    elements: [
+                      {
+                        type: 'rich_text_section',
+                        elements: [{ type: 'text', text: 'If staging checks pass' }],
+                      },
+                    ],
+                  },
+                  {
+                    type: 'rich_text_list',
+                    style: 'bullet',
+                    indent: 1,
+                    elements: [
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Deploy production' }] },
+                    ],
+                  },
+                  {
+                    type: 'rich_text_list',
+                    style: 'ordered',
+                    indent: 2,
+                    offset: 2,
+                    elements: [
+                      {
+                        type: 'rich_text_section',
+                        elements: [{ type: 'text', text: 'Verify health\nCheck logs' }],
+                      },
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Notify team' }] },
+                    ],
+                  },
+                  {
+                    type: 'rich_text_list',
+                    style: 'bullet',
+                    indent: 0,
+                    elements: [
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Otherwise wait' }] },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        expected: [
+          '- If staging checks pass\n  - Deploy production\n    3. Verify health\n       Check logs\n    4. Notify team\n- Otherwise wait',
+        ],
+      },
+      {
+        title: 'message and file references with labels, URLs or identifier fallbacks',
+        messages: [
+          ...[
+            [
+              { type: 'message_mention', channel_id: 'C1', message_ts: '1.1' },
+              { type: 'file', file_id: 'F123' },
+            ],
+            [
+              {
+                type: 'message_mention',
+                channel_id: 'C1',
+                message_ts: '1.1',
+                text: 'the request',
+                url: 'https://slack.example/message',
+              },
+              { type: 'file', file_id: 'F123', text: 'approval.pdf', url: 'https://slack.example/file' },
+            ],
+            [
+              {
+                type: 'message_mention',
+                channel_id: 'C1',
+                message_ts: '1.1',
+                url: 'https://slack.example/message',
+              },
+              { type: 'file', file_id: 'F123', url: 'https://slack.example/file' },
+            ],
+            [
+              { type: 'message_mention', channel_id: 'C1', message_ts: '1.1', text: 'the request' },
+              { type: 'file', file_id: 'F123', text: 'approval.pdf' },
+            ],
+          ].map(([message, file]) => ({
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [
+                      { type: 'text', text: 'Review ' },
+                      message,
+                      { type: 'text', text: ' and approve ' },
+                      file,
+                    ],
+                  },
+                ],
+              },
+            ],
+          })),
+        ],
+        expected: [
+          'Review message #C1 at 1.1 and approve file F123',
+          'Review the request (https://slack.example/message) and approve approval.pdf (https://slack.example/file)',
+          'Review message #C1 at 1.1 (https://slack.example/message) and approve file F123 (https://slack.example/file)',
+          'Review the request and approve approval.pdf',
+        ],
+      },
+      {
+        title: 'struck labeled and unlabeled links without duplicate summaries',
+        messages: ['', '~<https://deploy.example/123|Approve this deployment>~']
+          .map((text) => ({
+            text,
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [
+                      {
+                        type: 'link',
+                        text: 'Approve this deployment',
+                        url: 'https://deploy.example/123',
+                        style: { strike: true },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          }))
+          .concat([
+            {
+              blocks: [
+                {
+                  type: 'rich_text',
+                  elements: [
+                    {
+                      type: 'rich_text_section',
+                      elements: [
+                        { type: 'link', url: 'https://deploy.example/123', style: { strike: true } },
+                        { type: 'text', text: ' instead use ' },
+                        {
+                          type: 'link',
+                          text: 'Current request',
+                          url: 'https://deploy.example/456',
+                          style: { strike: false },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ]),
+        expected: [
+          '~Approve this deployment (https://deploy.example/123)~',
+          '~Approve this deployment (https://deploy.example/123)~',
+          '~https://deploy.example/123~ instead use Current request (https://deploy.example/456)',
+        ],
+      },
+      {
+        title: 'video descriptions and title destinations with embedded URL fallback',
+        messages: ['https://video.example/watch', undefined].map((title_url) => ({
+          blocks: [
+            {
+              type: 'video',
+              title: { type: 'plain_text', text: 'Release walkthrough' },
+              description: { type: 'plain_text', text: 'Please review and approve before 17:00' },
+              title_url,
+              video_url: 'https://video.example/embed',
+              thumbnail_url: 'https://video.example/thumbnail.png',
+              alt_text: 'Release video',
+            },
+          ],
+        })),
+        expected: [
+          'Release walkthrough (https://video.example/watch)\nPlease review and approve before 17:00\nRelease video',
+          'Release walkthrough (https://video.example/embed)\nPlease review and approve before 17:00\nRelease video',
+        ],
+      },
+      {
         title: 'table rows with raw and rich-text cells and empty cell boundaries',
         messages: [
           {
