@@ -1154,6 +1154,58 @@ describe('message deletion', () => {
     },
   );
 
+  it.each(['sync', 'trash'])(
+    'expires trash queued behind a slow %s without dispatching it later',
+    async (blockedBy) => {
+      const a = await connect({ access: 'manage' });
+      await settled();
+      let release;
+      const held = new Promise((resolve) => {
+        release = resolve;
+      });
+      let blocking;
+      if (blockedBy === 'sync') {
+        const originalUpsert = store.upsert;
+        let entered;
+        const started = new Promise((resolve) => {
+          entered = resolve;
+        });
+        store.upsert = async (...args) => {
+          entered();
+          await held;
+          return originalUpsert(...args);
+        };
+        await service.update(a.id, { syncDays: 31 });
+        await started;
+      } else {
+        mailbox.trashWait = held;
+        blocking = service.trashMessage(a.id, 'a');
+        await vi.waitFor(() =>
+          expect(gmail.request.mock.calls.some(([url]) => String(url).endsWith('/trash'))).toBe(true),
+        );
+      }
+      vi.useFakeTimers();
+      const deletion = service.trashMessage(a.id, 'b').catch((e) => e);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await deletion).toMatchObject({ status: 503 });
+      expect((await deletion).message).toMatch(/not moved.*retry/i);
+      const before = gmail.request.mock.calls.length;
+      await service.sync(a.id);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(gmail.request.mock.calls).toHaveLength(before);
+      release();
+      await blocking;
+      vi.useRealTimers();
+      await settled();
+      expect(
+        gmail.request.mock.calls.filter(([url]) => String(url).endsWith('/messages/b/trash')),
+      ).toHaveLength(0);
+      expect((await service.message(a.id, 'b')).id).toBe('b');
+      await service.trashMessage(a.id, 'b');
+      expect(store.messages.has(`${a.id}:b`)).toBe(false);
+    },
+  );
+
   it('waits for a running sync, and holds subsequent syncs until deletion completes', async () => {
     const a = await connect({ access: 'manage' });
     await settled();
