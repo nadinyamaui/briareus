@@ -858,6 +858,105 @@ describe('a session reading', () => {
     });
   });
 
+  it.each(['conversations.history', 'conversations.replies'])(
+    'preserves linked dates, quotes, preformatted spans and sender names in %s',
+    async (method) => {
+      const { s, slack } = await service();
+      const api = slack.api.getMockImplementation();
+      const messages = [
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [
+                    { type: 'text', text: 'Join ' },
+                    { type: 'date', timestamp: 0, fallback: 'October 10', url: 'https://meet.example/123' },
+                    { type: 'text', text: ' or ' },
+                    { type: 'date', timestamp: 0, url: 'https://meet.example/456' },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_quote',
+                  elements: [
+                    { type: 'text', text: 'Deploy ' },
+                    { type: 'text', text: 'now\nThen notify the team.' },
+                  ],
+                },
+                {
+                  type: 'rich_text_section',
+                  elements: [{ type: 'text', text: 'This request was rejected.' }],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_preformatted',
+                  elements: [
+                    { type: 'text', text: 'curl -H ' },
+                    { type: 'text', text: 'Authorization: token' },
+                    { type: 'text', text: ' https://deploy.example\necho done' },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        { user: 'B1', username: 'Production deployment approvals', bot_id: 'BDEPLOY' },
+        { user: 'U1', username: 'Override' },
+        { user: 'UUNKNOWN' },
+        { user: undefined, username: 'Integration', bot_id: 'BDEPLOY' },
+        { user: undefined, bot_id: 'BDEPLOY' },
+      ];
+      slack.api.mockImplementation((token, called, params) =>
+        called === method
+          ? Promise.resolve({ ok: true, messages: messages.map((m) => ({ ts: '1.1', user: 'U1', ...m })) })
+          : api(token, called, params),
+      );
+      const page = await s.history(job(), {
+        channel: 'D1',
+        ...(method === 'conversations.replies' ? { threadTs: '1.1' } : {}),
+      });
+      expect(page.messages.map((m) => m.text)).toEqual([
+        'Join October 10 (https://meet.example/123) or 1970-01-01T00:00:00.000Z (https://meet.example/456)',
+        '> Deploy now\n> Then notify the team.\nThis request was rejected.',
+        'curl -H Authorization: token https://deploy.example\necho done',
+        '',
+        '',
+        '',
+        '',
+        '',
+      ]);
+      expect(page.messages.map((m) => m.from)).toEqual([
+        'Andrés Pérez',
+        'Andrés Pérez',
+        'Andrés Pérez',
+        'Production deployment approvals',
+        'Andrés Pérez',
+        'UUNKNOWN',
+        'Integration',
+        'BDEPLOY',
+      ]);
+    },
+  );
+
   it.each([
     ['history', 'conversations.list', 'revoke'],
     ['history', 'conversations.list', 'rotate'],
