@@ -139,3 +139,25 @@ and message field. Installation and endpoints follow WAHA’s official
 [installation guide](https://waha.devlike.pro/docs/how-to/install/),
 [session API](https://waha.devlike.pro/docs/how-to/sessions/) and
 [chat API](https://waha.devlike.pro/docs/how-to/chats/).
+
+## WhatsApp from a session
+
+Interactive sessions receive the internal `reviewer_whatsapp` MCP only when
+their project enables WhatsApp tools. It defaults to **off** for existing and
+new projects; an operator with an admin token opts a project in through
+`PUT /api/v1/settings/projects/{id}` with `{ "whatsappToolsEnabled": true }`
+and revokes it with `false`. The setting is independent of `mailToolsEnabled`
+and of the project’s Slack workspace, so each channel is enabled per project.
+
+The five tools are `whatsapp_accounts`, `whatsapp_conversations`,
+`whatsapp_messages`, `whatsapp_send` and `whatsapp_mark_read`, served under
+`/api/agent/whatsapp` with the session’s own token. They use the same WAHA
+service as the admin inbox; linking, the pairing QR, attachment downloads and
+logout stay admin-only. The tools and instructions appear on the next turn of
+an eligible session, and revocation applies to every request at once,
+including tools loaded earlier and direct HTTP fallback calls.
+
+As with email, review, QA, worker, read-only and preview sessions never get
+them, nor does a turn nobody is watching (webhook deliveries, instructions and
+automatic worker notices). Messages go out as the operator, so the agent sends
+only what the user asked for.

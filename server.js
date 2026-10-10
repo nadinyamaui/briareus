@@ -24,6 +24,7 @@ import { createSlackService } from './lib/slack.js';
 import { slackRoutes, slackEventsRouter } from './lib/slack-routes.js';
 import { createWhatsAppService } from './lib/whatsapp.js';
 import { whatsappRoutes } from './lib/whatsapp-routes.js';
+import { whatsappAgentRoutes } from './lib/whatsapp-agent.js';
 import { createMcpService, MCP_OAUTH_CALLBACK_PATH } from './lib/mcp-servers.js';
 import { mcpRoutes, mcpProxyRouter, mcpOAuthCallbackRouter } from './lib/mcp-routes.js';
 import { sessionWebhookRoutes } from './lib/webhook-routes.js';
@@ -553,7 +554,9 @@ function agentSession(req, res) {
 const sshService = createSshService({ getJob });
 api.use(sshRoutes({ service: sshService, agentSession, getProject }));
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
-api.use(whatsappRoutes({ service: createWhatsAppService() }));
+const whatsappService = createWhatsAppService();
+api.use(whatsappRoutes({ service: whatsappService }));
+api.use(whatsappAgentRoutes({ service: whatsappService, agentSession, getProject }));
 api.use(mcpRoutes({ service: mcpService, getProject }));
 api.use(
   operationsRoutes({

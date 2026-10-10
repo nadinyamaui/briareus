@@ -35,6 +35,9 @@ path, and restart the core after deploying the integration. Account linking,
 chat history, text replies, read receipts and attachment downloads are exposed
 through admin-only `/api/v1/whatsapp` endpoints for clients to use; client inbox
 screens are separate work. See [WhatsApp setup and client flow](docs/whatsapp.md).
+Projects with `whatsappToolsEnabled: true` (off by default) also give their
+interactive sessions an internal WhatsApp MCP to read chats, reply and mark
+them read; see [WhatsApp from a session](docs/whatsapp.md#whatsapp-from-a-session).
 
 ## Email in agent sessions
 

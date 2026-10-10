@@ -263,6 +263,7 @@ import {
   setExternalMcp,
   slackProtocol,
   mailProtocol,
+  whatsappProtocol,
   pushProtocol,
   rotateSessionWebhook,
   sessionWebhookState,
@@ -12134,6 +12135,70 @@ describe('the shared browser in a session', () => {
       job.readOnly = false;
     }
   });
+
+  it('mounts WhatsApp tools only in projects that opt in to WhatsApp, apart from email', async () => {
+    const job = getJob('br-turn');
+    const project = state.projects.find((p) => p.repo === job.repo);
+    const previous = { mail: project.mailToolsEnabled, whatsapp: project.whatsappToolsEnabled };
+    job.browser = false;
+    try {
+      project.mailToolsEnabled = true;
+      project.whatsappToolsEnabled = false;
+      const mailOnly = await turn(job, 'Read my email');
+      await mailOnly.settled;
+      expect(mailOnly.seen.mcp).toHaveProperty('reviewer_mail');
+      expect(mailOnly.seen.mcp).not.toHaveProperty('reviewer_whatsapp');
+      expect(whatsappProtocol(job)).toBe('');
+      project.mailToolsEnabled = false;
+      project.whatsappToolsEnabled = true;
+      const on = await turn(job, 'Read my WhatsApp');
+      await on.settled;
+      expect(on.seen.mcp).not.toHaveProperty('reviewer_mail');
+      expect(on.seen.mcp.reviewer_whatsapp.args[0]).toMatch(/whatsapp-mcp\.js$/);
+      expect(on.seen.mcp.reviewer_whatsapp.env).toEqual(on.seen.mcp.reviewer_memory.env);
+      expect(whatsappProtocol(job)).toContain('# WhatsApp');
+      expect(whatsappProtocol(job)).toContain('GET /api/agent/whatsapp/accounts');
+      job.readOnly = true;
+      const analyst = await turn(job, 'Analyze this code');
+      await analyst.settled;
+      expect(analyst.seen.mcp).not.toHaveProperty('reviewer_whatsapp');
+      job.readOnly = false;
+      project.whatsappToolsEnabled = false;
+      const revoked = await turn(job, 'Continue coding');
+      await revoked.settled;
+      expect(revoked.seen.mcp).not.toHaveProperty('reviewer_whatsapp');
+    } finally {
+      project.mailToolsEnabled = previous.mail;
+      project.whatsappToolsEnabled = previous.whatsapp;
+      job.readOnly = false;
+    }
+  });
+
+  it.each(['grok', 'opencode'])(
+    'delivers WhatsApp instructions to resumed %s sessions after opt-in',
+    async (binary) => {
+      const job = getJob('br-turn');
+      const project = state.projects.find((p) => p.repo === job.repo);
+      const previous = project.whatsappToolsEnabled;
+      const chats = job.chats;
+      job.browser = false;
+      job.chats = { [state.provider.id]: { started: true, sessionId: 'ses_whatsapp_existing' } };
+      try {
+        project.whatsappToolsEnabled = false;
+        const off = await turn(job, 'Continue', { binary });
+        await off.settled;
+        expect(off.seen.prompt).not.toContain('# WhatsApp');
+        project.whatsappToolsEnabled = true;
+        const on = await turn(job, 'Read my WhatsApp', { binary });
+        await on.settled;
+        expect(on.seen.prompt).toContain('# WhatsApp');
+        expect(on.seen.prompt).toContain('GET /api/agent/whatsapp/accounts');
+      } finally {
+        project.whatsappToolsEnabled = previous;
+        job.chats = chats;
+      }
+    },
+  );
 
   it('mounts the project’s own MCP servers: a remote one through the proxy, behind the session token', async () => {
     const job = getJob('br-turn');

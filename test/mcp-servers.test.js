@@ -127,6 +127,7 @@ describe('normalizeMcpServer', () => {
   it('refuses what would break a session or leak a token', () => {
     expect(() => normalizeMcpServer({ name: 'reviewer_memory', url: MCP })).toThrow(/Briareus/);
     expect(() => normalizeMcpServer({ name: 'reviewer_mail', url: MCP })).toThrow(/Briareus/);
+    expect(() => normalizeMcpServer({ name: 'reviewer_whatsapp', url: MCP })).toThrow(/Briareus/);
     expect(() => normalizeMcpServer({ name: 'reviewer_mail', transport: 'stdio', command: 'node' })).toThrow(
       /Briareus/,
     );
