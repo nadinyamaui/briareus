@@ -11,9 +11,11 @@ Ask the agent, for example:
 - “Find emails about the October invoice.”
 - “Reply to this email saying I can meet on Tuesday.”
 - “Mark this message read and archive it.”
+- “Move this week’s marketing emails to the trash.”
 
 The nine tools are `mail_accounts`, `mail_search`, `mail_read`, `mail_sync`,
-`mail_connect`, `mail_finish_connect`, `mail_send`, `mail_reply`, and `mail_update`.
+`mail_connect`, `mail_finish_connect`, `mail_send`, `mail_reply`, and `mail_update`
+(read, unread, archive, or trash: moved to the provider’s recoverable trash).
 The internal HTTP endpoints live under `/api/agent/mail`; this is a session tool,
 not an external dashboard-control MCP.
 

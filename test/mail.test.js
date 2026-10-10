@@ -877,6 +877,17 @@ describe('message deletion', () => {
     expect(mailbox.messages.a).toBeUndefined();
     expect(mailbox.messages.b).toBeDefined();
   });
+  it('refuses a trash revoked while it waited, before asking the provider', async () => {
+    const a = await connect({ access: 'manage' });
+    await settled();
+    const authorize = vi.fn(() => {
+      throw Object.assign(new Error('revoked'), { status: 403 });
+    });
+    await expect(service.trashMessage(a.id, 'a', authorize)).rejects.toMatchObject({ status: 403 });
+    expect(authorize).toHaveBeenCalledTimes(1);
+    expect(mailbox.messages.a).toBeDefined();
+    expect(store.messages.has(`${a.id}:a`)).toBe(true);
+  });
   it.each([null, 'https://www.googleapis.com/auth/gmail.readonly'])(
     'keeps old read connections working but refuses deletion (scope %s)',
     async (scope) => {
