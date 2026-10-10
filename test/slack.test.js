@@ -37,7 +37,30 @@ function fakeSlack() {
         url: 'https://okanet.slack.com/',
       };
     if (method === 'users.list') return { ok: true, members: PEOPLE };
+    if (method === 'conversations.list' && params.types === 'im')
+      return {
+        ok: true,
+        channels: [
+          { id: 'D1', user: 'U1' },
+          { id: 'D9', user: 'U4', is_user_deleted: true },
+        ],
+      };
     if (method === 'conversations.list') return { ok: true, channels: CHANNELS };
+    if (method === 'conversations.history' || method === 'conversations.replies')
+      return {
+        ok: true,
+        messages: [
+          {
+            ts: '3.1',
+            user: 'U1',
+            text: 'Can you check <@U3>? &lt;urgent&gt;',
+            reply_count: 2,
+            thread_ts: '3.1',
+          },
+          { ts: '2.1', user: 'U3', text: 'Done', files: [{}] },
+        ],
+        response_metadata: { next_cursor: 'next' },
+      };
     if (method === 'conversations.open') return { ok: true, channel: { id: `D-${params.users}` } };
     if (method === 'chat.postMessage') return { ok: true, ts: '1700000000.000100' };
     throw new Error(`unexpected ${method}`);
@@ -328,6 +351,981 @@ describe('a session sending', () => {
   });
 });
 
+describe('a session reading', () => {
+  it('lists the project’s channels and the user’s DMs, with who each is with', async () => {
+    const { s } = await service();
+    expect(await s.conversations(job())).toEqual({
+      channels: [{ id: 'C1', name: 'dev' }],
+      directMessages: [
+        {
+          id: 'D1',
+          with: { id: 'U1', handle: 'andres', realName: 'Andrés Pérez', displayName: 'Andres', title: '' },
+        },
+      ],
+    });
+    const { s: noDms, slack } = await service({ project: { directMessages: false } });
+    expect(await noDms.conversations(job())).toEqual({
+      channels: [{ id: 'C1', name: 'dev' }],
+      directMessages: [],
+    });
+    expect(slack.calls.some((c) => c.params.types === 'im')).toBe(false);
+  });
+
+  it('reads a project channel or a DM as plain text, marking the user’s own messages', async () => {
+    const { s, slack } = await service();
+    const page = await s.history(job(), { channel: '#dev', limit: 5, cursor: 'c' });
+    expect(page).toEqual({
+      channel: 'C1',
+      messages: [
+        {
+          ts: '3.1',
+          from: 'Andrés Pérez',
+          fromMe: false,
+          text: 'Can you check @nadin? <urgent>',
+          threadTs: '3.1',
+          replies: 2,
+          files: 0,
+        },
+        { ts: '2.1', from: 'Nadin Yamaui', fromMe: true, text: 'Done', threadTs: '', replies: 0, files: 1 },
+      ],
+      nextCursor: 'next',
+    });
+    expect(slack.calls.find((c) => c.method === 'conversations.history').params).toMatchObject({
+      channel: 'C1',
+      limit: 5,
+      cursor: 'c',
+    });
+    await s.history(job(), { channel: 'D1', threadTs: '3.1' });
+    expect(slack.calls.find((c) => c.method === 'conversations.replies').params).toMatchObject({
+      channel: 'D1',
+      ts: '3.1',
+    });
+  });
+
+  it.each(['conversations.history', 'conversations.replies'])(
+    'preserves attachment and block content in %s when top-level text is empty',
+    async (method) => {
+      const { s, slack } = await service();
+      const api = slack.api.getMockImplementation();
+      const messages = [
+        { text: '', attachments: [{ text: 'Please approve <@U3>', fallback: 'Approval needed' }] },
+        { attachments: [{ fallback: 'Deployment &lt;failed&gt;' }] },
+        {
+          text: ' ',
+          blocks: [
+            { type: 'header', text: { type: 'plain_text', text: 'Approval' } },
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: 'Check <https://example.com|deployment>' },
+              fields: [{ type: 'plain_text', text: 'Production' }],
+            },
+            { type: 'context', elements: [{ type: 'mrkdwn', text: 'Requested by <@U1>' }] },
+          ],
+        },
+        {
+          attachments: [
+            {
+              title: 'Deploy',
+              pretext: 'Needs approval',
+              fields: [{ title: 'Environment', value: 'Production' }],
+              blocks: [{ type: 'section', text: { type: 'mrkdwn', text: 'Please approve' } }],
+              fallback: 'Duplicate summary',
+            },
+          ],
+        },
+        { text: 'Existing text', attachments: [{ text: 'Duplicate text' }], blocks: [] },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [
+                    { type: 'text', text: 'Please ' },
+                    { type: 'text', text: 'approve', style: { bold: true } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        { text: '', files: [{}] },
+      ].map((m, i) => ({ ts: `${i + 1}.1`, user: 'U1', ...m }));
+      slack.api.mockImplementation((token, called, params) =>
+        called === method ? Promise.resolve({ ok: true, messages }) : api(token, called, params),
+      );
+      const page = await s.history(job(), {
+        channel: 'D1',
+        ...(method === 'conversations.replies' ? { threadTs: '1.1' } : {}),
+      });
+      expect(page.messages.map((m) => m.text)).toEqual([
+        'Please approve @nadin',
+        'Deployment <failed>',
+        'Approval\nCheck deployment (https://example.com)\nProduction\nRequested by @andres',
+        'Needs approval\nDeploy\nEnvironment\nProduction\nPlease approve',
+        'Existing text\nDuplicate text',
+        'Please approve',
+        '',
+      ]);
+      expect(page.messages[6].files).toBe(1);
+    },
+  );
+
+  it.each(['conversations.history', 'conversations.replies'])(
+    'preserves distinct attachments, rich-text mentions and link targets in %s',
+    async (method) => {
+      const { s, slack } = await service();
+      const api = slack.api.getMockImplementation();
+      const messages = [
+        {
+          text: 'Review requested',
+          attachments: [
+            {
+              title: 'Production deployment',
+              text: 'Approve https://deploy.example/123 before 17:00',
+              fallback: 'Review requested',
+            },
+          ],
+        },
+        {
+          text: 'Ask <@U3>',
+          attachments: [{ text: 'Ask @nadin' }, { fallback: 'Check the deadline' }],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [
+                    { type: 'text', text: 'Please ask ' },
+                    { type: 'user', user_id: 'U3' },
+                    { type: 'text', text: ' and ' },
+                    { type: 'user', user_id: 'U123' },
+                    { type: 'text', text: ' to approve ' },
+                    { type: 'link', url: 'https://deploy.example/123' },
+                    { type: 'text', text: ' or ' },
+                    { type: 'link', text: 'deployment', url: 'https://deploy.example/456' },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ].map((m, i) => ({ ts: `${i + 1}.1`, user: 'U1', ...m }));
+      slack.api.mockImplementation((token, called, params) =>
+        called === method ? Promise.resolve({ ok: true, messages }) : api(token, called, params),
+      );
+      const page = await s.history(job(), {
+        channel: 'D1',
+        ...(method === 'conversations.replies' ? { threadTs: '1.1' } : {}),
+      });
+      expect(page.messages.map((m) => m.text)).toEqual([
+        'Review requested\nProduction deployment\nApprove https://deploy.example/123 before 17:00',
+        'Ask @nadin\nCheck the deadline',
+        'Please ask @nadin and @U123 to approve https://deploy.example/123 or deployment (https://deploy.example/456)',
+      ]);
+    },
+  );
+
+  describe.each(['conversations.history', 'conversations.replies'])('%s content rendering', (method) => {
+    it.each([
+      {
+        title: 'nested list hierarchy and multiline ordered items',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_list',
+                    style: 'bullet',
+                    indent: 0,
+                    elements: [
+                      {
+                        type: 'rich_text_section',
+                        elements: [{ type: 'text', text: 'If staging checks pass' }],
+                      },
+                    ],
+                  },
+                  {
+                    type: 'rich_text_list',
+                    style: 'bullet',
+                    indent: 1,
+                    elements: [
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Deploy production' }] },
+                    ],
+                  },
+                  {
+                    type: 'rich_text_list',
+                    style: 'ordered',
+                    indent: 2,
+                    offset: 2,
+                    elements: [
+                      {
+                        type: 'rich_text_section',
+                        elements: [{ type: 'text', text: 'Verify health\nCheck logs' }],
+                      },
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Notify team' }] },
+                    ],
+                  },
+                  {
+                    type: 'rich_text_list',
+                    style: 'bullet',
+                    indent: 0,
+                    elements: [
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Otherwise wait' }] },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        expected: [
+          '- If staging checks pass\n  - Deploy production\n    3. Verify health\n       Check logs\n    4. Notify team\n- Otherwise wait',
+        ],
+      },
+      {
+        title: 'message and file references with labels, URLs or identifier fallbacks',
+        messages: [
+          ...[
+            [
+              { type: 'message_mention', channel_id: 'C1', message_ts: '1.1' },
+              { type: 'file', file_id: 'F123' },
+            ],
+            [
+              {
+                type: 'message_mention',
+                channel_id: 'C1',
+                message_ts: '1.1',
+                text: 'the request',
+                url: 'https://slack.example/message',
+              },
+              { type: 'file', file_id: 'F123', text: 'approval.pdf', url: 'https://slack.example/file' },
+            ],
+            [
+              {
+                type: 'message_mention',
+                channel_id: 'C1',
+                message_ts: '1.1',
+                url: 'https://slack.example/message',
+              },
+              { type: 'file', file_id: 'F123', url: 'https://slack.example/file' },
+            ],
+            [
+              { type: 'message_mention', channel_id: 'C1', message_ts: '1.1', text: 'the request' },
+              { type: 'file', file_id: 'F123', text: 'approval.pdf' },
+            ],
+          ].map(([message, file]) => ({
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [
+                      { type: 'text', text: 'Review ' },
+                      message,
+                      { type: 'text', text: ' and approve ' },
+                      file,
+                    ],
+                  },
+                ],
+              },
+            ],
+          })),
+        ],
+        expected: [
+          'Review message #C1 at 1.1 and approve file F123',
+          'Review the request (https://slack.example/message) and approve approval.pdf (https://slack.example/file)',
+          'Review message #C1 at 1.1 (https://slack.example/message) and approve file F123 (https://slack.example/file)',
+          'Review the request and approve approval.pdf',
+        ],
+      },
+      {
+        title: 'struck labeled and unlabeled links without duplicate summaries',
+        messages: ['', '~<https://deploy.example/123|Approve this deployment>~']
+          .map((text) => ({
+            text,
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [
+                      {
+                        type: 'link',
+                        text: 'Approve this deployment',
+                        url: 'https://deploy.example/123',
+                        style: { strike: true },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          }))
+          .concat([
+            {
+              blocks: [
+                {
+                  type: 'rich_text',
+                  elements: [
+                    {
+                      type: 'rich_text_section',
+                      elements: [
+                        { type: 'link', url: 'https://deploy.example/123', style: { strike: true } },
+                        { type: 'text', text: ' instead use ' },
+                        {
+                          type: 'link',
+                          text: 'Current request',
+                          url: 'https://deploy.example/456',
+                          style: { strike: false },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ]),
+        expected: [
+          '~Approve this deployment (https://deploy.example/123)~',
+          '~Approve this deployment (https://deploy.example/123)~',
+          '~https://deploy.example/123~ instead use Current request (https://deploy.example/456)',
+        ],
+      },
+      {
+        title: 'video descriptions and title destinations with embedded URL fallback',
+        messages: ['https://video.example/watch', undefined].map((title_url) => ({
+          blocks: [
+            {
+              type: 'video',
+              title: { type: 'plain_text', text: 'Release walkthrough' },
+              description: { type: 'plain_text', text: 'Please review and approve before 17:00' },
+              title_url,
+              video_url: 'https://video.example/embed',
+              thumbnail_url: 'https://video.example/thumbnail.png',
+              alt_text: 'Release video',
+            },
+          ],
+        })),
+        expected: [
+          'Release walkthrough (https://video.example/watch)\nPlease review and approve before 17:00\nRelease video',
+          'Release walkthrough (https://video.example/embed)\nPlease review and approve before 17:00\nRelease video',
+        ],
+      },
+      {
+        title: 'table rows with raw and rich-text cells and empty cell boundaries',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'table',
+                rows: [
+                  [
+                    { type: 'raw_text', text: 'Request' },
+                    { type: 'raw_text', text: 'Due' },
+                  ],
+                  [
+                    { type: 'raw_text', text: 'Approve production deployment' },
+                    { type: 'raw_text', text: 'Today' },
+                  ],
+                  [
+                    { type: 'raw_text', text: '' },
+                    {
+                      type: 'rich_text',
+                      elements: [
+                        { type: 'rich_text_section', elements: [{ type: 'text', text: 'Tomorrow' }] },
+                      ],
+                    },
+                  ],
+                ],
+              },
+            ],
+          },
+        ],
+        expected: ['Request | Due\nApprove production deployment | Today\n | Tomorrow'],
+      },
+      {
+        title: 'struck text and deduplicated matching summaries',
+        messages: [
+          ...['', '~Deploy production now.~'].map((text) => ({
+            text,
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [{ type: 'text', text: 'Deploy production now.', style: { strike: true } }],
+                  },
+                ],
+              },
+            ],
+          })),
+          {
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [
+                      { type: 'text', text: 'Deploy now', style: { strike: true } },
+                      { type: 'text', text: ' Wait for approval.', style: { strike: false } },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        expected: ['~Deploy production now.~', '~Deploy production now.~', '~Deploy now~ Wait for approval.'],
+      },
+      {
+        title: 'usergroup identifiers and broadcast audiences',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [
+                      { type: 'text', text: 'Please ask ' },
+                      { type: 'usergroup', usergroup_id: 'S123' },
+                      { type: 'text', text: ' to approve.' },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          ...['here', 'channel', 'everyone'].map((range) => ({
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [
+                      { type: 'broadcast', range },
+                      { type: 'text', text: ' please approve.' },
+                    ],
+                  },
+                ],
+              },
+            ],
+          })),
+        ],
+        expected: [
+          'Please ask @S123 to approve.',
+          '@here please approve.',
+          '@channel please approve.',
+          '@everyone please approve.',
+        ],
+      },
+      {
+        title: 'emoji confirmations',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  { type: 'rich_text_section', elements: [{ type: 'emoji', name: 'white_check_mark' }] },
+                ],
+              },
+            ],
+          },
+        ],
+        expected: [':white_check_mark:'],
+      },
+      {
+        title: 'image descriptions in blocks and accessories',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'image',
+                image_url: 'https://example.com/incident.png',
+                alt_text: 'Production failed. Please roll back.',
+              },
+            ],
+          },
+          {
+            blocks: [
+              {
+                type: 'image',
+                title: { type: 'plain_text', text: 'Incident' },
+                image_url: 'https://example.com/incident.png',
+                alt_text: 'Production failed.',
+              },
+            ],
+          },
+          {
+            blocks: [
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: 'Please review' },
+                accessory: {
+                  type: 'image',
+                  image_url: 'https://example.com/incident.png',
+                  alt_text: 'Production failed.',
+                },
+              },
+            ],
+          },
+        ],
+        expected: [
+          'Production failed. Please roll back.',
+          'Incident\nProduction failed.',
+          'Please review\nProduction failed.',
+        ],
+      },
+      {
+        title: 'section and actions button labels and destinations',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: 'Please review' },
+                accessory: {
+                  type: 'button',
+                  text: { type: 'plain_text', text: 'Deployment 123' },
+                  url: 'https://deploy.example/123',
+                  value: 'internal-action',
+                },
+              },
+            ],
+          },
+          {
+            blocks: [
+              {
+                type: 'actions',
+                elements: [
+                  {
+                    type: 'button',
+                    text: { type: 'plain_text', text: 'Deployment 123' },
+                    url: 'https://deploy.example/123',
+                    value: 'internal-action',
+                  },
+                  { type: 'button', text: { type: 'plain_text', text: 'Approve' } },
+                ],
+              },
+            ],
+          },
+        ],
+        expected: [
+          'Please review\nDeployment 123 (https://deploy.example/123)',
+          'Deployment 123 (https://deploy.example/123)\nApprove',
+        ],
+      },
+      {
+        title: 'list styles and ordered step offsets',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_list',
+                    style: 'ordered',
+                    offset: 2,
+                    elements: [
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Approve deployment' }] },
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Notify team' }] },
+                    ],
+                  },
+                  {
+                    type: 'rich_text_list',
+                    style: 'ordered',
+                    elements: [
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Verify health' }] },
+                    ],
+                  },
+                  {
+                    type: 'rich_text_list',
+                    style: 'bullet',
+                    elements: [
+                      { type: 'rich_text_section', elements: [{ type: 'text', text: 'Check logs' }] },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        expected: ['3. Approve deployment\n4. Notify team\n1. Verify health\n- Check logs'],
+      },
+      {
+        title: 'attachment title destinations',
+        messages: [
+          {
+            attachments: [
+              {
+                title: 'Production deployment',
+                title_link: 'https://deploy.example/123',
+                text: 'Please approve',
+              },
+            ],
+          },
+        ],
+        expected: ['Production deployment (https://deploy.example/123)\nPlease approve'],
+      },
+      {
+        title: 'distinct blocks alongside notification text without duplicate summaries',
+        messages: [
+          {
+            text: 'Approval requested',
+            blocks: [
+              { type: 'section', text: { type: 'mrkdwn', text: 'Approve deployment 123 before 17:00' } },
+            ],
+          },
+          {
+            text: 'Ask <@U3>',
+            blocks: [{ type: 'section', text: { type: 'mrkdwn', text: 'Ask @nadin' } }],
+            attachments: [{ fallback: 'Ask @nadin' }],
+          },
+        ],
+        expected: ['Approval requested\nApprove deployment 123 before 17:00', 'Ask @nadin'],
+      },
+      {
+        title: 'rich-text channel targets and date fallbacks or timestamps',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [
+                      { type: 'text', text: 'Ask ' },
+                      { type: 'channel', channel_id: 'C1' },
+                      { type: 'text', text: ' about incident. Review at ' },
+                      {
+                        type: 'date',
+                        timestamp: 1791630000,
+                        format: '{date_short} {time}',
+                        fallback: '10 October 2026 11:40',
+                      },
+                      { type: 'text', text: ' or ' },
+                      { type: 'date', timestamp: 0, format: '{date_short}' },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        expected: ['Ask #C1 about incident. Review at 10 October 2026 11:40 or 1970-01-01T00:00:00.000Z'],
+      },
+    ])('preserves $title', async ({ messages, expected }) => {
+      const { s, slack } = await service();
+      const api = slack.api.getMockImplementation();
+      slack.api.mockImplementation((token, called, params) =>
+        called === method
+          ? Promise.resolve({ ok: true, messages: messages.map((m) => ({ ts: '1.1', user: 'U1', ...m })) })
+          : api(token, called, params),
+      );
+      const page = await s.history(job(), {
+        channel: 'D1',
+        ...(method === 'conversations.replies' ? { threadTs: '1.1' } : {}),
+      });
+      expect(page.messages.map((m) => m.text)).toEqual(expected);
+    });
+  });
+
+  it.each(['conversations.history', 'conversations.replies'])(
+    'preserves linked dates, quotes, preformatted spans and sender names in %s',
+    async (method) => {
+      const { s, slack } = await service();
+      const api = slack.api.getMockImplementation();
+      const messages = [
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [
+                    { type: 'text', text: 'Join ' },
+                    { type: 'date', timestamp: 0, fallback: 'October 10', url: 'https://meet.example/123' },
+                    { type: 'text', text: ' or ' },
+                    { type: 'date', timestamp: 0, url: 'https://meet.example/456' },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_quote',
+                  elements: [
+                    { type: 'text', text: 'Deploy ' },
+                    { type: 'text', text: 'now\nThen notify the team.' },
+                  ],
+                },
+                {
+                  type: 'rich_text_section',
+                  elements: [{ type: 'text', text: 'This request was rejected.' }],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_preformatted',
+                  elements: [
+                    { type: 'text', text: 'curl -H ' },
+                    { type: 'text', text: 'Authorization: token' },
+                    { type: 'text', text: ' https://deploy.example\necho done' },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        { user: 'B1', username: 'Production deployment approvals', bot_id: 'BDEPLOY' },
+        { user: 'U1', username: 'Override' },
+        { user: 'UUNKNOWN' },
+        { user: undefined, username: 'Integration', bot_id: 'BDEPLOY' },
+        { user: undefined, bot_id: 'BDEPLOY' },
+      ];
+      slack.api.mockImplementation((token, called, params) =>
+        called === method
+          ? Promise.resolve({ ok: true, messages: messages.map((m) => ({ ts: '1.1', user: 'U1', ...m })) })
+          : api(token, called, params),
+      );
+      const page = await s.history(job(), {
+        channel: 'D1',
+        ...(method === 'conversations.replies' ? { threadTs: '1.1' } : {}),
+      });
+      expect(page.messages.map((m) => m.text)).toEqual([
+        'Join October 10 (https://meet.example/123) or 1970-01-01T00:00:00.000Z (https://meet.example/456)',
+        '> Deploy now\n> Then notify the team.\nThis request was rejected.',
+        '```\ncurl -H Authorization: token https://deploy.example\necho done\n```',
+        '',
+        '',
+        '',
+        '',
+        '',
+      ]);
+      expect(page.messages.map((m) => m.from)).toEqual([
+        'Andrés Pérez',
+        'Andrés Pérez',
+        'Andrés Pérez',
+        'Production deployment approvals',
+        'Andrés Pérez',
+        'UUNKNOWN',
+        'Integration',
+        'BDEPLOY',
+      ]);
+    },
+  );
+
+  it.each(['conversations.history', 'conversations.replies'])(
+    'preserves code boundaries and embedded backticks in %s',
+    async (method) => {
+      const { s, slack } = await service();
+      const api = slack.api.getMockImplementation();
+      const messages = [
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_preformatted',
+                  elements: [
+                    { type: 'text', text: 'Deploy ' },
+                    { type: 'text', text: 'now\nThen notify' },
+                  ],
+                },
+                { type: 'rich_text_section', elements: [{ type: 'text', text: 'This is an example' }] },
+              ],
+            },
+          ],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [
+                    { type: 'text', text: 'Deploy now', style: { code: true } },
+                    { type: 'text', text: ' is an example' },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_preformatted',
+                  elements: [{ type: 'text', text: 'echo ```\nkeep ```` intact' }],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [{ type: 'text', text: '`value` and ``other``', style: { code: true } }],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          text: '`Deploy now`',
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [{ type: 'text', text: 'Deploy now', style: { code: true } }],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [
+                    { type: 'text', text: 'Deploy now', style: { code: true, strike: true } },
+                    { type: 'text', text: ' is cancelled', style: { code: false } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ];
+      slack.api.mockImplementation((token, called, params) =>
+        called === method
+          ? Promise.resolve({ ok: true, messages: messages.map((m) => ({ ts: '1.1', user: 'U1', ...m })) })
+          : api(token, called, params),
+      );
+      const page = await s.history(job(), {
+        channel: 'D1',
+        ...(method === 'conversations.replies' ? { threadTs: '1.1' } : {}),
+      });
+      expect(page.messages.map((m) => m.text)).toEqual([
+        '```\nDeploy now\nThen notify\n```\nThis is an example',
+        '`Deploy now` is an example',
+        '`````\necho ```\nkeep ```` intact\n`````',
+        '``` `value` and ``other`` ```',
+        '`Deploy now`',
+        '~`Deploy now`~ is cancelled',
+      ]);
+    },
+  );
+
+  it.each([
+    ['history', 'conversations.list', 'revoke'],
+    ['history', 'conversations.list', 'rotate'],
+    ['history', 'conversations.history', 'revoke'],
+    ['history', 'users.list', 'remove'],
+    ['history', 'users.list', 'rotate'],
+    ['conversations', 'conversations.list', 'revoke'],
+    ['conversations', 'conversations.list', 'rotate'],
+    ['conversations', 'conversations.list', 'disable DMs'],
+    ['conversations', 'users.list', 'remove'],
+    ['conversations', 'users.list', 'revoke'],
+  ])('rejects %s during %s when settings change: %s', async (reader, method, change) => {
+    const { s, w, slack } = await service();
+    const original = slack.api.getMockImplementation();
+    let changed = false;
+    slack.api.mockImplementation(async (...args) => {
+      if (!changed && args[1] === method) {
+        changed = true;
+        if (change === 'remove') await s.remove(w.id);
+        else if (change === 'rotate') await s.update(w.id, { token: `${TOKEN}-rotated` });
+        else if (change === 'disable DMs')
+          await s.update(w.id, { projects: [{ repo: 'o/a', channels: ['dev'], directMessages: false }] });
+        else await s.update(w.id, { projects: [] });
+      }
+      return original(...args);
+    });
+    const pending = reader === 'history' ? s.history(job(), { channel: '#dev' }) : s.conversations(job());
+    await expect(pending).rejects.toMatchObject({ status: 403 });
+    expect(changed).toBe(true);
+    if (method === 'conversations.list') {
+      expect(slack.calls.some((c) => c.method === 'conversations.history' || c.params.types === 'im')).toBe(
+        false,
+      );
+    }
+  });
+
+  it('rejects a channel listing without DMs when access changes during lookup', async () => {
+    const { s, w, slack } = await service({ project: { directMessages: false } });
+    const original = slack.api.getMockImplementation();
+    slack.api.mockImplementation(async (...args) => {
+      if (args[1] === 'conversations.list') await s.update(w.id, { projects: [] });
+      return original(...args);
+    });
+    await expect(s.conversations(job())).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('reads nothing outside the project’s channels, DMs it may not use, or an unwatched turn', async () => {
+    const { s, slack } = await service();
+    await expect(s.history(job(), { channel: '#general' })).rejects.toMatchObject({ status: 403 });
+    await expect(s.history(job(), { channel: 'C2' })).rejects.toMatchObject({ status: 403 });
+    await expect(s.history(job({ unattendedTurn: true }), { channel: '#dev' })).rejects.toMatchObject({
+      status: 403,
+    });
+    await expect(s.conversations(job({ unattendedTurn: true }))).rejects.toMatchObject({ status: 403 });
+    await expect(s.history(job({ repo: 'o/other' }), { channel: '#dev' })).rejects.toMatchObject({
+      status: 404,
+    });
+    const { s: noDms } = await service({ project: { directMessages: false } });
+    await expect(noDms.history(job(), { channel: 'D1' })).rejects.toMatchObject({ status: 403 });
+    const { s: unfit } = await service({ unfit: () => 'a review session' });
+    await expect(unfit.history(job(), { channel: '#dev' })).rejects.toMatchObject({ status: 403 });
+    expect(slack.calls.some((c) => c.method === 'conversations.history')).toBe(false);
+  });
+});
+
 describe('replies through the Events API', () => {
   async function sentTo(to = 'U1', over = {}) {
     const ctx = await service({ project: { permissionMode: 'allow' }, ...over });
@@ -610,6 +1608,18 @@ describe('the wire', () => {
       });
       expect((await people.json()).people.map((p) => p.id)).toEqual(['U1']);
       expect((await fetch(`${base}/api/agent/slack/destinations`)).status).toBe(401);
+      const history = await fetch(`${base}/api/agent/slack/history?channel=%23dev&limit=5`, {
+        headers: { Authorization: 'Bearer agent' },
+      });
+      expect((await history.json()).messages.map((m) => m.ts)).toEqual(['3.1', '2.1']);
+      const outside = await fetch(`${base}/api/agent/slack/history?channel=C2`, {
+        headers: { Authorization: 'Bearer agent' },
+      });
+      expect(outside.status).toBe(403);
+      const listed = await fetch(`${base}/api/agent/slack/conversations`, {
+        headers: { Authorization: 'Bearer agent' },
+      });
+      expect((await listed.json()).directMessages.map((d) => d.id)).toEqual(['D1']);
       const sent = await fetch(`${base}/api/agent/slack/send`, {
         method: 'POST',
         headers: { Authorization: 'Bearer agent', 'Content-Type': 'application/json' },
