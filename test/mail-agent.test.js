@@ -17,6 +17,7 @@ beforeEach(async () => {
     message: vi.fn(async (account, id) => ({ accountId: account, id, bodyText: 'Untrusted email' })),
     sync: vi.fn(async () => ({ syncing: true })),
     action: vi.fn(async () => ({ status: 'accepted' })),
+    trashMessage: vi.fn(async () => {}),
   };
   const app = express();
   app.use(express.json());
@@ -65,6 +66,7 @@ describe('session mailbox authorization', () => {
       ['/messages', 'GET'],
       ['/accounts/7/messages/id', 'GET'],
       ['/accounts/7/action', 'POST'],
+      ['/accounts/7/messages/id/trash', 'POST'],
       ['/accounts/7/sync', 'POST'],
       ['/connect', 'POST'],
       ['/connect/finish', 'POST'],
@@ -101,13 +103,19 @@ describe('session mailbox authorization', () => {
       '/messages',
       '/accounts/7/messages/id',
       '/accounts/7/action',
+      '/accounts/7/messages/id/trash',
       '/accounts/7/sync',
       '/connect',
       '/connect/finish',
     ]) {
       const res = await fetch(`${base}/api/agent/mail${path}`, {
         method:
-          path.endsWith('/action') || path.endsWith('/sync') || path.startsWith('/connect') ? 'POST' : 'GET',
+          path.endsWith('/action') ||
+          path.endsWith('/trash') ||
+          path.endsWith('/sync') ||
+          path.startsWith('/connect')
+            ? 'POST'
+            : 'GET',
         headers: { Authorization: 'Bearer session-token' },
       });
       expect(res.status).toBe(403);
@@ -190,6 +198,9 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
       { action: 'archive', id: 'message' },
       expect.any(Function),
     );
+    await tool('mail_update', { account: 7, id: 'message/+=', action: 'trash' });
+    expect(service.trashMessage).toHaveBeenCalledWith(7, 'message/+=', expect.any(Function));
+    expect(service.action).toHaveBeenCalledTimes(3);
     job.unattendedTurn = true;
     expect((await tool('mail_accounts')).result.isError).toBe(true);
     expect((await tool('mail_update', { account: 7, id: 'm', action: 'send' })).result.isError).toBe(true);
