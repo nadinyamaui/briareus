@@ -464,11 +464,69 @@ describe('a session reading', () => {
         'Deployment <failed>',
         'Approval\nCheck deployment (https://example.com)\nProduction\nRequested by @andres',
         'Needs approval\nDeploy\nEnvironment\nProduction\nPlease approve',
-        'Existing text',
+        'Existing text\nDuplicate text',
         'Please approve',
         '',
       ]);
       expect(page.messages[6].files).toBe(1);
+    },
+  );
+
+  it.each(['conversations.history', 'conversations.replies'])(
+    'preserves distinct attachments, rich-text mentions and link targets in %s',
+    async (method) => {
+      const { s, slack } = await service();
+      const api = slack.api.getMockImplementation();
+      const messages = [
+        {
+          text: 'Review requested',
+          attachments: [
+            {
+              title: 'Production deployment',
+              text: 'Approve https://deploy.example/123 before 17:00',
+              fallback: 'Review requested',
+            },
+          ],
+        },
+        {
+          text: 'Ask <@U3>',
+          attachments: [{ text: 'Ask @nadin' }, { fallback: 'Check the deadline' }],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [
+                    { type: 'text', text: 'Please ask ' },
+                    { type: 'user', user_id: 'U3' },
+                    { type: 'text', text: ' and ' },
+                    { type: 'user', user_id: 'U123' },
+                    { type: 'text', text: ' to approve ' },
+                    { type: 'link', url: 'https://deploy.example/123' },
+                    { type: 'text', text: ' or ' },
+                    { type: 'link', text: 'deployment', url: 'https://deploy.example/456' },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ].map((m, i) => ({ ts: `${i + 1}.1`, user: 'U1', ...m }));
+      slack.api.mockImplementation((token, called, params) =>
+        called === method ? Promise.resolve({ ok: true, messages }) : api(token, called, params),
+      );
+      const page = await s.history(job(), {
+        channel: 'D1',
+        ...(method === 'conversations.replies' ? { threadTs: '1.1' } : {}),
+      });
+      expect(page.messages.map((m) => m.text)).toEqual([
+        'Review requested\nProduction deployment\nApprove https://deploy.example/123 before 17:00',
+        'Ask @nadin\nCheck the deadline',
+        'Please ask @nadin and @U123 to approve https://deploy.example/123 or deployment (https://deploy.example/456)',
+      ]);
     },
   );
 
