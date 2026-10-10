@@ -546,6 +546,125 @@ describe('providerUsage across a restart', () => {
     }
   });
 
+  it.each(['backoff', 'TTL'])('persists a retained disk account %s after adoption', async (kind) => {
+    const actual = await vi.importActual('../lib/providers.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'balancer-adoption-'));
+    const diskAuth = codexAuth('workspace-B', 1);
+    const { stored, update } = store();
+    state.rows[0] = row(1, { binary: 'codex', authData: codexAuth('workspace-A', 1) });
+    fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify(diskAuth.auth));
+    const fetch = vi.fn(async () =>
+      kind === 'backoff'
+        ? { status: 429, headers: new Headers({ 'Retry-After': '3600' }) }
+        : { ok: true, json: async () => ({ rate_limit: { primary_window: { used_percent: 97 } } }) },
+    );
+    vi.stubGlobal('fetch', fetch);
+    const readDisk = () => {
+      providers.codexHomeDir.mockReturnValueOnce(dir);
+      providers.readCodexAuth.mockImplementationOnce(actual.readCodexAuth);
+    };
+    providers.codexUsage.mockImplementation(actual.codexUsage);
+    try {
+      await restoreProviderUsage({ load: () => ({}), update });
+      readDisk();
+      const value = await providerUsage(state.rows[0]);
+      await flushProviderUsage();
+      expect(stored).toEqual({});
+      expect(cachedProviderUsage(state.rows[0])).toBeUndefined();
+      state.rows[0] = row(1, { binary: 'codex', authData: codexAuth('workspace-B', 2) });
+      readDisk();
+      expect(await providerUsage(state.rows[0])).toEqual(value);
+      await flushProviderUsage();
+      expect(stored[1].value).toEqual(value);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      vi.resetModules();
+      const restarted = await import('../lib/balancer.js');
+      await restarted.restoreProviderUsage({ load: () => stored, update: null });
+      const read = vi.fn(async () => windows(0));
+      expect(await restarted.providerUsage(state.rows[0], { read })).toEqual(value);
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      providers.codexUsage.mockImplementation(async (dir) => state.usage[dir] ?? null);
+      vi.unstubAllGlobals();
+      fs.rmSync(dir, { recursive: true, force: true });
+      await unwire();
+    }
+  });
+
+  it('preserves stored backoff after a delayed production HTTP failure', async () => {
+    const actual = await vi.importActual('../lib/providers.js');
+    const { stored, update } = store();
+    state.rows[0] = row(1, { authData: claudeAuth('account-1', 1) });
+    let finish;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise((r) => (finish = r))),
+    );
+    providers.claudeUsage.mockImplementation(actual.claudeUsage);
+    try {
+      await restoreProviderUsage({ load: () => ({}), update });
+      const pending = providerUsage(state.rows[0]);
+      vi.resetModules();
+      const other = await import('../lib/balancer.js');
+      await other.restoreProviderUsage({ load: () => ({}), update });
+      const lockout = { windows: [], retryAt: new Date(Date.now() + 3600000).toISOString() };
+      await other.providerUsage(state.rows[0], { read: async () => lockout });
+      await other.flushProviderUsage();
+      const saved = structuredClone(stored[1]);
+      finish({ status: 500, ok: false });
+      expect(await pending).toEqual({ windows: [], error: 'Claude usage check failed (HTTP 500).' });
+      await flushProviderUsage();
+      expect(stored[1]).toEqual(saved);
+      vi.resetModules();
+      const restarted = await import('../lib/balancer.js');
+      await restarted.restoreProviderUsage({ load: () => stored, update: null });
+      const read = vi.fn(async () => windows(0));
+      expect(await restarted.providerUsage(state.rows[0], { read, ttlMs: 0 })).toEqual(lockout);
+      expect(read).not.toHaveBeenCalled();
+      const newer = {
+        windows: [],
+        error: 'Rate limited',
+        retryAt: new Date(Date.now() + 7200000).toISOString(),
+      };
+      await providerUsage(state.rows[0], { read: async () => newer, ttlMs: 0 });
+      await flushProviderUsage();
+      expect(stored[1].value).toEqual(newer);
+    } finally {
+      providers.claudeUsage.mockImplementation(async (dir) => state.usage[dir] ?? null);
+      vi.unstubAllGlobals();
+      await unwire();
+    }
+  });
+
+  it.each([1, null])('persists forget(%s) while its replacement read is pending', async (id) => {
+    const { stored, update } = store();
+    state.rows[0] = row(1, { authData: claudeAuth('account-1', 1) });
+    await restoreProviderUsage({ load: () => ({}), update });
+    const lockout = { windows: [], retryAt: new Date(Date.now() + 3600000).toISOString() };
+    await providerUsage(state.rows[0], { read: async () => lockout });
+    await flushProviderUsage();
+    expect(stored[1].value).toEqual(lockout);
+    state.rows[0] = row(1, { authData: claudeAuth('account-1', 2) });
+    forgetProviderUsage(id);
+    let finish;
+    const pending = providerUsage(state.rows[0], { read: () => new Promise((r) => (finish = r)) });
+    await settle();
+    const afterForget = structuredClone(stored);
+    finish(null);
+    expect(await pending).toBeNull();
+    await flushProviderUsage();
+    expect(afterForget[1]).toBeUndefined();
+    expect(stored[1].value).toBeNull();
+    expect(stored[1].retryAt).toBeUndefined();
+    vi.resetModules();
+    const restarted = await import('../lib/balancer.js');
+    await restarted.restoreProviderUsage({ load: () => stored, update: null });
+    const read = vi.fn(async () => windows(8));
+    expect(await restarted.providerUsage(state.rows[0], { read, ttlMs: 0 })).toEqual(windows(8));
+    expect(read).toHaveBeenCalledTimes(1);
+    await unwire();
+  });
+
   it('preserves disk account backoff through an unreadable credential snapshot', async () => {
     const actual = await vi.importActual('../lib/providers.js');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'balancer-unreadable-'));
