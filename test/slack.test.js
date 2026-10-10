@@ -530,6 +530,87 @@ describe('a session reading', () => {
     },
   );
 
+  describe.each(['conversations.history', 'conversations.replies'])('%s content rendering', (method) => {
+    it.each([
+      {
+        title: 'attachment title destinations',
+        messages: [
+          {
+            attachments: [
+              {
+                title: 'Production deployment',
+                title_link: 'https://deploy.example/123',
+                text: 'Please approve',
+              },
+            ],
+          },
+        ],
+        expected: ['Production deployment (https://deploy.example/123)\nPlease approve'],
+      },
+      {
+        title: 'distinct blocks alongside notification text without duplicate summaries',
+        messages: [
+          {
+            text: 'Approval requested',
+            blocks: [
+              { type: 'section', text: { type: 'mrkdwn', text: 'Approve deployment 123 before 17:00' } },
+            ],
+          },
+          {
+            text: 'Ask <@U3>',
+            blocks: [{ type: 'section', text: { type: 'mrkdwn', text: 'Ask @nadin' } }],
+            attachments: [{ fallback: 'Ask @nadin' }],
+          },
+        ],
+        expected: ['Approval requested\nApprove deployment 123 before 17:00', 'Ask @nadin'],
+      },
+      {
+        title: 'rich-text channel targets and date fallbacks or timestamps',
+        messages: [
+          {
+            blocks: [
+              {
+                type: 'rich_text',
+                elements: [
+                  {
+                    type: 'rich_text_section',
+                    elements: [
+                      { type: 'text', text: 'Ask ' },
+                      { type: 'channel', channel_id: 'C1' },
+                      { type: 'text', text: ' about incident. Review at ' },
+                      {
+                        type: 'date',
+                        timestamp: 1791630000,
+                        format: '{date_short} {time}',
+                        fallback: '10 October 2026 11:40',
+                      },
+                      { type: 'text', text: ' or ' },
+                      { type: 'date', timestamp: 0, format: '{date_short}' },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        expected: ['Ask #C1 about incident. Review at 10 October 2026 11:40 or 1970-01-01T00:00:00.000Z'],
+      },
+    ])('preserves $title', async ({ messages, expected }) => {
+      const { s, slack } = await service();
+      const api = slack.api.getMockImplementation();
+      slack.api.mockImplementation((token, called, params) =>
+        called === method
+          ? Promise.resolve({ ok: true, messages: messages.map((m) => ({ ts: '1.1', user: 'U1', ...m })) })
+          : api(token, called, params),
+      );
+      const page = await s.history(job(), {
+        channel: 'D1',
+        ...(method === 'conversations.replies' ? { threadTs: '1.1' } : {}),
+      });
+      expect(page.messages.map((m) => m.text)).toEqual(expected);
+    });
+  });
+
   it.each([
     ['history', 'conversations.list', 'revoke'],
     ['history', 'conversations.list', 'rotate'],
