@@ -37,7 +37,30 @@ function fakeSlack() {
         url: 'https://okanet.slack.com/',
       };
     if (method === 'users.list') return { ok: true, members: PEOPLE };
+    if (method === 'conversations.list' && params.types === 'im')
+      return {
+        ok: true,
+        channels: [
+          { id: 'D1', user: 'U1' },
+          { id: 'D9', user: 'U4', is_user_deleted: true },
+        ],
+      };
     if (method === 'conversations.list') return { ok: true, channels: CHANNELS };
+    if (method === 'conversations.history' || method === 'conversations.replies')
+      return {
+        ok: true,
+        messages: [
+          {
+            ts: '3.1',
+            user: 'U1',
+            text: 'Can you check <@U3>? &lt;urgent&gt;',
+            reply_count: 2,
+            thread_ts: '3.1',
+          },
+          { ts: '2.1', user: 'U3', text: 'Done', files: [{}] },
+        ],
+        response_metadata: { next_cursor: 'next' },
+      };
     if (method === 'conversations.open') return { ok: true, channel: { id: `D-${params.users}` } };
     if (method === 'chat.postMessage') return { ok: true, ts: '1700000000.000100' };
     throw new Error(`unexpected ${method}`);
@@ -328,6 +351,76 @@ describe('a session sending', () => {
   });
 });
 
+describe('a session reading', () => {
+  it('lists the project’s channels and the user’s DMs, with who each is with', async () => {
+    const { s } = await service();
+    expect(await s.conversations(job())).toEqual({
+      channels: [{ id: 'C1', name: 'dev' }],
+      directMessages: [
+        {
+          id: 'D1',
+          with: { id: 'U1', handle: 'andres', realName: 'Andrés Pérez', displayName: 'Andres', title: '' },
+        },
+      ],
+    });
+    const { s: noDms, slack } = await service({ project: { directMessages: false } });
+    expect(await noDms.conversations(job())).toEqual({
+      channels: [{ id: 'C1', name: 'dev' }],
+      directMessages: [],
+    });
+    expect(slack.calls.some((c) => c.params.types === 'im')).toBe(false);
+  });
+
+  it('reads a project channel or a DM as plain text, marking the user’s own messages', async () => {
+    const { s, slack } = await service();
+    const page = await s.history(job(), { channel: '#dev', limit: 5, cursor: 'c' });
+    expect(page).toEqual({
+      channel: 'C1',
+      messages: [
+        {
+          ts: '3.1',
+          from: 'Andrés Pérez',
+          fromMe: false,
+          text: 'Can you check @nadin? <urgent>',
+          threadTs: '3.1',
+          replies: 2,
+          files: 0,
+        },
+        { ts: '2.1', from: 'Nadin Yamaui', fromMe: true, text: 'Done', threadTs: '', replies: 0, files: 1 },
+      ],
+      nextCursor: 'next',
+    });
+    expect(slack.calls.find((c) => c.method === 'conversations.history').params).toMatchObject({
+      channel: 'C1',
+      limit: 5,
+      cursor: 'c',
+    });
+    await s.history(job(), { channel: 'D1', threadTs: '3.1' });
+    expect(slack.calls.find((c) => c.method === 'conversations.replies').params).toMatchObject({
+      channel: 'D1',
+      ts: '3.1',
+    });
+  });
+
+  it('reads nothing outside the project’s channels, DMs it may not use, or an unwatched turn', async () => {
+    const { s, slack } = await service();
+    await expect(s.history(job(), { channel: '#general' })).rejects.toMatchObject({ status: 403 });
+    await expect(s.history(job(), { channel: 'C2' })).rejects.toMatchObject({ status: 403 });
+    await expect(s.history(job({ unattendedTurn: true }), { channel: '#dev' })).rejects.toMatchObject({
+      status: 403,
+    });
+    await expect(s.conversations(job({ unattendedTurn: true }))).rejects.toMatchObject({ status: 403 });
+    await expect(s.history(job({ repo: 'o/other' }), { channel: '#dev' })).rejects.toMatchObject({
+      status: 404,
+    });
+    const { s: noDms } = await service({ project: { directMessages: false } });
+    await expect(noDms.history(job(), { channel: 'D1' })).rejects.toMatchObject({ status: 403 });
+    const { s: unfit } = await service({ unfit: () => 'a review session' });
+    await expect(unfit.history(job(), { channel: '#dev' })).rejects.toMatchObject({ status: 403 });
+    expect(slack.calls.some((c) => c.method === 'conversations.history')).toBe(false);
+  });
+});
+
 describe('replies through the Events API', () => {
   async function sentTo(to = 'U1', over = {}) {
     const ctx = await service({ project: { permissionMode: 'allow' }, ...over });
@@ -610,6 +703,18 @@ describe('the wire', () => {
       });
       expect((await people.json()).people.map((p) => p.id)).toEqual(['U1']);
       expect((await fetch(`${base}/api/agent/slack/destinations`)).status).toBe(401);
+      const history = await fetch(`${base}/api/agent/slack/history?channel=%23dev&limit=5`, {
+        headers: { Authorization: 'Bearer agent' },
+      });
+      expect((await history.json()).messages.map((m) => m.ts)).toEqual(['3.1', '2.1']);
+      const outside = await fetch(`${base}/api/agent/slack/history?channel=C2`, {
+        headers: { Authorization: 'Bearer agent' },
+      });
+      expect(outside.status).toBe(403);
+      const listed = await fetch(`${base}/api/agent/slack/conversations`, {
+        headers: { Authorization: 'Bearer agent' },
+      });
+      expect((await listed.json()).directMessages.map((d) => d.id)).toEqual(['D1']);
       const sent = await fetch(`${base}/api/agent/slack/send`, {
         method: 'POST',
         headers: { Authorization: 'Bearer agent', 'Content-Type': 'application/json' },

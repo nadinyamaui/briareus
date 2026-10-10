@@ -862,12 +862,17 @@ clients reload history to recover missed updates. Sending from the inbox is a
 human action and takes effect immediately, without launching an agent or an approval.
 
 Separately, sessions whose project has a workspace receive the `slack_destinations`, `slack_find_people`,
-`slack_send` and `slack_result` MCP tools; reviews, QA, loop sessions and workers do not.
+`slack_conversations`, `slack_history`, `slack_send` and `slack_result` MCP tools; reviews, QA, loop sessions and workers do not.
 A project may post only to the channels it lists, and to people only with `directMessages`.
 In **ask** mode (the default) each message waits in `GET /api/v1/slack/requests` and the
 attention inbox until approved (`POST /api/v1/slack/requests/:id/decision`), for a day at most;
 in **allow** mode it is sent at once, except in a turn a webhook delivery or a Slack reply
 started, which always asks. Approvals are held in memory, so a restart sends nothing.
+
+The same sessions can read too, with `slack_conversations` and `slack_history` (threads
+included): the project's listed channels and, with `directMessages`, the user's own DMs, so
+"what do I have to answer?" works from a chat. Reading needs the `*:history` scopes above
+and someone watching the turn: a webhook delivery or Slack reply turn cannot read.
 
 A reply reaches the session when it answers in a direct message the session wrote in during
 the last 14 days, or in the thread of a message the session sent. It arrives as a delivery
