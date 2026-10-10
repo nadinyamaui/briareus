@@ -1125,7 +1125,7 @@ describe('a session reading', () => {
       expect(page.messages.map((m) => m.text)).toEqual([
         'Join October 10 (https://meet.example/123) or 1970-01-01T00:00:00.000Z (https://meet.example/456)',
         '> Deploy now\n> Then notify the team.\nThis request was rejected.',
-        'curl -H Authorization: token https://deploy.example\necho done',
+        '```\ncurl -H Authorization: token https://deploy.example\necho done\n```',
         '',
         '',
         '',
@@ -1141,6 +1141,122 @@ describe('a session reading', () => {
         'UUNKNOWN',
         'Integration',
         'BDEPLOY',
+      ]);
+    },
+  );
+
+  it.each(['conversations.history', 'conversations.replies'])(
+    'preserves code boundaries and embedded backticks in %s',
+    async (method) => {
+      const { s, slack } = await service();
+      const api = slack.api.getMockImplementation();
+      const messages = [
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_preformatted',
+                  elements: [
+                    { type: 'text', text: 'Deploy ' },
+                    { type: 'text', text: 'now\nThen notify' },
+                  ],
+                },
+                { type: 'rich_text_section', elements: [{ type: 'text', text: 'This is an example' }] },
+              ],
+            },
+          ],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [
+                    { type: 'text', text: 'Deploy now', style: { code: true } },
+                    { type: 'text', text: ' is an example' },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_preformatted',
+                  elements: [{ type: 'text', text: 'echo ```\nkeep ```` intact' }],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [{ type: 'text', text: '`value` and ``other``', style: { code: true } }],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          text: '`Deploy now`',
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [{ type: 'text', text: 'Deploy now', style: { code: true } }],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          blocks: [
+            {
+              type: 'rich_text',
+              elements: [
+                {
+                  type: 'rich_text_section',
+                  elements: [
+                    { type: 'text', text: 'Deploy now', style: { code: true, strike: true } },
+                    { type: 'text', text: ' is cancelled', style: { code: false } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ];
+      slack.api.mockImplementation((token, called, params) =>
+        called === method
+          ? Promise.resolve({ ok: true, messages: messages.map((m) => ({ ts: '1.1', user: 'U1', ...m })) })
+          : api(token, called, params),
+      );
+      const page = await s.history(job(), {
+        channel: 'D1',
+        ...(method === 'conversations.replies' ? { threadTs: '1.1' } : {}),
+      });
+      expect(page.messages.map((m) => m.text)).toEqual([
+        '```\nDeploy now\nThen notify\n```\nThis is an example',
+        '`Deploy now` is an example',
+        '`````\necho ```\nkeep ```` intact\n`````',
+        '``` `value` and ``other`` ```',
+        '`Deploy now`',
+        '~`Deploy now`~ is cancelled',
       ]);
     },
   );
