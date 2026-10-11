@@ -1,8 +1,10 @@
 # Client API v1
 
-`/api/v1` is the one HTTP API a Briareus client talks to: Briareus Windows and
-Briareus iOS, each in a repository of its own. It is the only API the server has, and
-the server has no UI of its own: the routes the removed dashboard called with
+`/api/v1` is the HTTP API used by [Briareus Windows](https://github.com/okanetsolutions/briareus-windows),
+[Briareus iOS (Swift)](https://github.com/okanetsolutions/briareus-swift), and
+[Briareus Meta Quest](https://github.com/okanetsolutions/briareus-quest).
+Each client lives in its own repository. This repository contains only the server.
+The server has no UI of its own. `/api/v1` is its only client API: the routes the removed dashboard called with
 its login cookie (`/api/dev/*`,
 `/api/projects`, …) and the earlier mobile API (`/api/mobile/v1`) are retired,
 and every handler they reached is behind a route here.
@@ -102,6 +104,8 @@ from, so neither can describe a route the server does not have.
 
 What is there, by area:
 
+See the [feature overview](features.md) for server capabilities and recent additions.
+
 | Area                     | Paths                                                                                                                                                                                                | Needs         |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
 | The token                | `/`, `/openapi.json`, `/token`, `/events`                                                                                                                                                            | read          |
@@ -111,9 +115,12 @@ What is there, by area:
 | Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                                                                                                  | read to admin |
 | Memory                   | `/memories`, `/memories/health`                                                                                                                                                                      | read / admin  |
 | Slack inbox              | `/slack/workspaces`, `/slack/workspaces/{id}/conversations`, `people`, `direct-messages`, `events`; conversation history, threads, replies and read positions                                        | admin         |
+| WhatsApp inbox           | `/whatsapp/accounts`, account linking, QR codes, conversations, messages, read receipts and media downloads                                                                                          | admin         |
 | Operations               | `/attention`, `/maintenance`, `/deployments`, `/ssh/requests`, `/slack/requests`, `/tasks`, `/videos`                                                                                                | admin         |
 | Mail                     | `/mail/messages`, `/mail/accounts/{account}/messages/{id}`                                                                                                                                           | admin         |
-| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `slack/workspaces`, `mail/accounts`, `templates`                                                                       | admin         |
+| Laravel Forge            | `/forge/accounts/{account}/servers`, sites, deployment scripts and environment files                                                                                                                 | admin         |
+| Laravel Envoyer          | `/envoyer/accounts`, account projects, servers and deployments                                                                                                                                       | read / manage |
+| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `slack/workspaces`, `mail/accounts`, `mcp/servers`, `forge/accounts`, `envoyer/accounts`, `templates`                  | admin         |
 
 Everything the removed dashboard could do has a route, except its browser push
 notifications, which went with it. The reference ends with a table from each of
@@ -199,6 +206,32 @@ Do not automatically retry a send when a timeout makes its outcome unknown.
 See Slack's [message retrieval](https://docs.slack.dev/messaging/retrieving-messages/),
 [Events API](https://docs.slack.dev/apis/events-api/) and
 [rate limits](https://docs.slack.dev/apis/web-api/rate-limits/) references.
+
+## WhatsApp inbox
+
+Admin clients use `/whatsapp/accounts` to link a phone through a local WAHA
+service, read conversations and messages, send text replies, mark chats read,
+and download attachments. The server provides the API; the client provides
+the QR display and inbox UI. See [WhatsApp setup and client flow](whatsapp.md)
+for installation, pagination, engine limitations and session-tool access.
+
+## Gmail and Outlook mail
+
+Admin clients connect mailboxes through `/settings/mail/accounts/connect`
+and read the synced copy through `/mail/messages` and
+`/mail/accounts/{account}/messages/{id}`. Search covers the configured sync
+window, and message reads do not mark mail as read.
+
+`DELETE /mail/accounts/{account}/messages/{id}` moves one message to Gmail
+Trash or Outlook Deleted Items. It requires a mailbox connected with
+`access: manage`; a read-only connection returns 409 and must be reconnected.
+It does not permanently erase mail. An uncertain provider write is not retried
+automatically.
+
+Sending, replying, marking read/unread, archiving and trashing are also
+available through guarded tools in opted-in interactive sessions. These
+tools are internal session APIs, separate from the client mail routes.
+See [mailbox setup](../README.md#mail) and [email from a session](email-mcp.md).
 
 ## Autonomous review loops
 

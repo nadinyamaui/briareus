@@ -4,6 +4,16 @@ Thanks for looking. This is a small, opinionated project, and the conventions
 below are not style preferences so much as the reason the codebase stays
 readable without a framework holding it together.
 
+This repository contains only the Briareus server and its `/api/v1` API.
+The client UIs live in separate repositories:
+
+- [Briareus Windows](https://github.com/okanetsolutions/briareus-windows)
+- [Briareus iOS (Swift)](https://github.com/okanetsolutions/briareus-swift)
+- [Briareus Meta Quest](https://github.com/okanetsolutions/briareus-quest)
+
+Make client UI changes in the corresponding client repository. Keep server
+behaviour and API changes here.
+
 ## Getting it running
 
 See [Requirements](README.md#requirements) and [Setup](README.md#setup) in the
@@ -73,6 +83,9 @@ stands out. `npm run test:watch` while you work.
 The README is the overview; `docs/api-v1.md` is the client API guide, and
 `docs/api-v1-reference.md` is generated from the catalog by
 `npm run build:api-docs` (`npm test` fails when it is stale).
+Keep [the feature overview](docs/features.md) and the relevant setup guides
+current when adding or changing a server capability. Document server support
+separately from the UI each client implements.
 
 ## Commits and pull requests
 

@@ -10,10 +10,18 @@ and no bundler anywhere. `node server.js` runs the source as-is. Do not
 introduce TS, JSX, a build step, or `require()`.
 
 **The core, with no UI.** This repo is the server only: no pages, no static
-files, no browser login. Every client (web, desktop, iOS) lives in a repository
-of its own and talks to `/api/v1` with a token. Client-facing behaviour is a
+files, no browser login. The clients live in separate repositories:
+
+- [Briareus Windows](https://github.com/okanetsolutions/briareus-windows)
+- [Briareus iOS (Swift)](https://github.com/okanetsolutions/briareus-swift)
+- [Briareus Meta Quest](https://github.com/okanetsolutions/briareus-quest)
+
+Make client UI changes in the corresponding client repository. Each client
+talks to this server's `/api/v1` with a token. Client-facing server behaviour is a
 route in `lib/api-v1-catalog.js` (then `npm run build:api-docs`), never a page
 or an ad-hoc route.
+When changing a capability, update `docs/features.md` and its relevant guide.
+Describe what the server supports without assuming every client implements it.
 
 ## Layout
 

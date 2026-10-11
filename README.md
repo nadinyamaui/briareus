@@ -9,13 +9,18 @@ own, so parallel sessions never share a working tree or a database. You
 describe what to build; the agent edits, runs the app and its tests, and can
 push a feature branch / open a PR when asked.
 
-> **Briareus is now a core app: you need a client to use it.** The built-in
-> dashboard and everything else that ran in a browser have been removed, so
-> opening the server in a browser shows nothing. The clients, **Briareus
-> Windows** and **Briareus iOS**, live in repositories of their own and talk to
-> this server through [`/api/v1`](#client-api) with a token from
-> `npm run create-token`. Where this README names a chip, a button or a screen,
-> it is describing what a client offers on top of the API.
+This repository contains only the Briareus server. It has no built-in UI;
+opening its address in a browser shows no dashboard. Use one of the clients,
+each maintained in its own repository:
+
+- [Briareus Windows](https://github.com/okanetsolutions/briareus-windows)
+- [Briareus iOS (Swift)](https://github.com/okanetsolutions/briareus-swift)
+- [Briareus Meta Quest](https://github.com/okanetsolutions/briareus-quest)
+
+The clients connect to this server through [`/api/v1`](#client-api) with a
+token from `npm run create-token`. Where this README names a chip, a button,
+or a screen, it describes a client UI on top of the API. Client UI changes
+belong in the corresponding client repository.
 
 > **This app runs shell commands as you.** A session edits files, runs the
 > project's setup and run commands, and pushes to GitHub with the credentials
@@ -25,6 +30,25 @@ push a feature branch / open a PR when asked.
 > `api: OFF` until then). Before you put a hostname in front of it, read
 > [Reaching it from anywhere](#reaching-it-from-anywhere) and
 > [SECURITY.md](SECURITY.md).
+
+## Server features
+
+The server provides these capabilities through its API; each client decides
+which controls and screens it implements.
+
+| Area                     | Capabilities                                                                                                                                            |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Coding sessions          | Multiple agent providers, isolated workspaces and optional database servers, streamed conversations, queued messages, orchestrators and worker sessions |
+| GitHub                   | Pull requests, issues, Projects v2 boards, findings, branch updates, merges, repository files and archive downloads                                     |
+| Review and QA            | Independent finding verification, fix-value assessments, operator triage, review/fix loops, test sheets and QA runs                                     |
+| Previews                 | Run profiles, branch and PR previews, a shared browser, screenshot feedback and recorded QA videos                                                      |
+| Business inboxes         | Slack, Gmail, Outlook and WhatsApp access for clients, plus controlled tools for interactive agent sessions                                             |
+| Operations               | Operator attention, restart recovery, maintenance draining, SSH approvals, deployment workflows, Laravel Forge and Envoyer                              |
+| Configuration and memory | Projects, providers, credentials, MCP servers with OAuth, saved prompts and project memories                                                            |
+| Usage                    | Per-turn tokens and costs, project/account/model breakdowns, provider quota readings and Claude account failover                                        |
+
+See the [feature overview and recent additions](docs/features.md) for details
+and the [client API guide](docs/api-v1.md) for integration.
 
 ## WhatsApp inbox
 
