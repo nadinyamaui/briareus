@@ -889,6 +889,9 @@ describe('Home Assistant configuration', () => {
     { HOME_ASSISTANT_URL: 'ftp://localhost', HOME_ASSISTANT_TOKEN: 'token' },
     { HOME_ASSISTANT_URL: 'http://user:pass@localhost', HOME_ASSISTANT_TOKEN: 'token' },
     { HOME_ASSISTANT_URL: 'http://localhost/?token=secret', HOME_ASSISTANT_TOKEN: 'token' },
+    { HOME_ASSISTANT_URL: 'http://localhost/?', HOME_ASSISTANT_TOKEN: 'token' },
+    { HOME_ASSISTANT_URL: 'http://localhost/#', HOME_ASSISTANT_TOKEN: 'token' },
+    { HOME_ASSISTANT_URL: 'http://localhost/?#', HOME_ASSISTANT_TOKEN: 'token' },
   ])('refuses incomplete or unsafe configuration %j', async (values) => {
     const { getConfig } = await loadConfig(complete(values));
     expect(() => getConfig()).toThrow(/HOME_ASSISTANT/);
