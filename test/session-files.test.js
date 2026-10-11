@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
+import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
   sessionFileDownloads,
@@ -252,6 +253,132 @@ describe('local links in the transcript', () => {
     expect(rewritten.text).toMatch(/^\[Report\]\(<http:\/\/127\.0\.0\.1:\d+\/files\/[^>]+> "Title"\)$/);
     const url = rewritten.text.match(/\(<([^>]+)>/)[1];
     expect(await (await fetch(url)).text()).toBe('escaped report');
+  });
+
+  it.each([
+    ['a&b.csv', 'a&amp;b.csv'],
+    ['a&b.csv', 'a&#38;b.csv'],
+    ['a&b.csv', 'a&#x26;b.csv'],
+    ['a©b.csv', 'a&copy;b.csv'],
+    ['a≂̸b.csv', 'a&NotEqualTilde;b.csv'],
+    ['a&b.csv', 'a&#37;26b.csv'],
+    ['a&amp;b.csv', String.raw`a\&amp;b.csv`],
+    ['a&amp;b.csv', 'a&amp;amp;b.csv'],
+    ['a&amp;b.csv', 'a%26amp;b.csv'],
+    [String.raw`a\!b.csv`, 'a&#92;!b.csv'],
+    ['a&unknown;b.csv', 'a&unknown;b.csv'],
+    ['a&ampb.csv', 'a&ampb.csv'],
+    ['a�b.csv', 'a&#0;b.csv'],
+    ['a�b.csv', 'a&#xD800;b.csv'],
+    ['a�b.csv', 'a&#x110000;b.csv'],
+  ])('resolves Markdown destination %s spelled %s without double decoding', async (name, destination) => {
+    await fs.writeFile(path.join(job.workDir, name), 'entity report');
+    const rewritten = await sessionFileEvent(job, {
+      seq: 16,
+      kind: 'text',
+      text: `[Report](${destination})`,
+    });
+    const url = rewritten.text.match(/\(<([^>]+)>\)/)?.[1];
+    expect(url).toBeDefined();
+    expect(await (await fetch(url)).text()).toBe('entity report');
+  });
+
+  it.each([1, 3, 5])('preserves a bracket escaped by %i backslashes without publication', async (count) => {
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'private example');
+    const event = { seq: 17, kind: 'text', text: '\\'.repeat(count) + '[example](report.csv)' };
+    expect(await sessionFileEvent(job, event)).toEqual(event);
+    expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+  });
+
+  it.each([0, 2, 4])('publishes a bracket preceded by %i backslashes', async (count) => {
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'actual link');
+    const prefix = '\\'.repeat(count);
+    const rewritten = await sessionFileEvent(job, {
+      seq: 18,
+      kind: 'text',
+      text: prefix + '[Report](report.csv)',
+    });
+    expect(rewritten.text.startsWith(prefix + '[Report](<')).toBe(true);
+    expect(await (await fetch(rewritten.text.match(/\(<([^>]+)>\)/)[1])).text()).toBe('actual link');
+  });
+
+  it.each([
+    ['[Report][ref]', '[ref]: report.csv'],
+    ['[Report][]', '[report]: report.csv'],
+    ['[Report]', '[REPORT]: report.csv'],
+    ['![Report][ref]', '[ref]: report.csv'],
+    ['[Report][  The   REF ]', '[the ref]: report.csv'],
+    ['[Report][ref]', '[ref]:\n  <report.csv> "Title"'],
+    ['[Report][ref]', '[ref]: report.csv\n[REF]: missing.csv'],
+    ['[Report][ref]', '[ref]: report.csv\n\n`[code][ref]`'],
+  ])('converts reference link %s using %s', async (link, definition) => {
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'reference report');
+    const event = { seq: 19, kind: 'text', text: `${link}\n\n${definition}` };
+    const rewritten = await sessionFileEvent(job, event);
+    expect(rewritten.text.startsWith('[Report](<')).toBe(true);
+    expect(rewritten.text.slice(rewritten.text.indexOf('\n'))).toBe('\n\n' + definition);
+    expect(await (await fetch(rewritten.text.match(/\(<([^>]+)>/)[1])).text()).toBe('reference report');
+    await fs.rm(job.workDir, { recursive: true });
+    expect(await sessionFileEvent(job, event)).toEqual(rewritten);
+  });
+
+  it('keeps escaped references and code-only definitions from publishing files', async () => {
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'private example');
+    for (const text of [
+      String.raw`\[Report][ref]` + '\n\n[ref]: report.csv',
+      '[Report][ref]\n\n```md\n[ref]: report.csv\n```',
+      '[missing]\n\n[ref]: report.csv',
+    ]) {
+      const event = { seq: 20, kind: 'text', text };
+      expect(await sessionFileEvent(job, event)).toEqual(event);
+    }
+    expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+  });
+
+  it('decodes reference destinations and applies workspace containment', async () => {
+    await fs.writeFile(path.join(job.workDir, 'a&b.csv'), 'reference entity');
+    await fs.writeFile(path.join(job.workDir, '.env'), 'private');
+    const event = {
+      seq: 21,
+      kind: 'text',
+      text: '[Report][ref] [private][secret]\n\n[ref]: a&amp;b.csv\n[secret]: &#46;env',
+    };
+    const rewritten = await sessionFileEvent(job, event);
+    expect(await (await fetch(rewritten.text.match(/\(<([^>]+)>/)[1])).text()).toBe('reference entity');
+    expect(rewritten.text).toContain('[private][secret]');
+  });
+
+  it('retains cached downloads through secret rotation, module reload and workspace removal', async () => {
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'original snapshot');
+    const event = { seq: 22, kind: 'text', text: '[Report](report.csv)' };
+    const rewritten = await sessionFileEvent(job, event);
+    await fs.rm(job.workDir, { recursive: true });
+    cfg.auth.secret = 'rotated-secret';
+    vi.resetModules();
+    const reloaded = await import('../lib/session-files.js');
+    expect(await reloaded.sessionFileEvent(job, event)).toEqual(rewritten);
+    expect(await (await fetch(rewritten.text.match(/\(<([^>]+)>/)[1])).text()).toBe('original snapshot');
+    cfg.auth.secret = '';
+    expect(await reloaded.sessionFileEvent(job, event)).toEqual(rewritten);
+  });
+
+  it('adopts legacy keyed caches before rotation even when the workspace is gone', async () => {
+    const event = { seq: 23, kind: 'text', text: '[Report](report.csv)' };
+    const file = await publishSessionFile(job, 'report.csv', Buffer.from('legacy snapshot'));
+    const text = `[Report](<${file.url}>)`;
+    const legacyId = crypto
+      .createHmac('sha256', cfg.auth.secret)
+      .update(JSON.stringify([job.id, event.seq, event.text]))
+      .digest('hex');
+    const dir = path.join(cfg.testVideosDir, '.session-files', '.events');
+    await fs.mkdir(dir);
+    await fs.writeFile(path.join(dir, legacyId), text);
+    await fs.rm(job.workDir, { recursive: true });
+    expect(await sessionFileEvent(job, event)).toEqual({ ...event, text });
+    await fs.rm(path.join(dir, legacyId));
+    cfg.auth.secret = 'rotated-secret';
+    expect(await sessionFileEvent(job, event)).toEqual({ ...event, text });
+    expect(await (await fetch(file.url)).text()).toBe('legacy snapshot');
   });
 
   it('does not export user messages, hidden config, external paths or escaping symlinks', async () => {
