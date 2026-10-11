@@ -174,6 +174,16 @@ describe('published session files', () => {
     expect(put.mock.calls[0][1].headers['content-disposition']).toContain('attachment');
     await publishSessionFile(job, 'report.csv', Buffer.from('report'));
     expect(put).toHaveBeenCalledTimes(1);
+    cfg.r2.bucket = 'new-files';
+    expect((await publishSessionFile(job, 'report.csv', Buffer.from('report'))).url).toBe(remote.url);
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(String(put.mock.calls[1][0])).toContain('/new-files/');
+    cfg.r2.endpoint = 'https://new-r2.example.com';
+    expect((await publishSessionFile(job, 'report.csv', Buffer.from('report'))).url).toBe(remote.url);
+    expect(put).toHaveBeenCalledTimes(3);
+    expect(String(put.mock.calls[2][0])).toContain('https://new-r2.example.com/new-files/');
+    await publishSessionFile(job, 'report.csv', Buffer.from('report'));
+    expect(put).toHaveBeenCalledTimes(3);
     put.mockResolvedValue({ ok: false, status: 503, text: async () => 'down' });
     const local = await publishSessionFile(job, 'other.csv', Buffer.from('fallback'));
     expect(local.url.startsWith(cfg.publicBaseUrl)).toBe(true);
@@ -198,15 +208,31 @@ describe('local links in the transcript', () => {
       text: `[Detalle](<${file}:12>)\n[web](https://example.com)\n\`[code](<${file}>)\`\n\`\`\`md\n[code](<${file}>)\n\`\`\``,
     };
     const rewritten = await sessionFileEvent(job, event);
-    expect(rewritten.text).toContain('[Detalle](http://127.0.0.1:');
+    expect(rewritten.text).toContain('[Detalle](<http://127.0.0.1:');
     expect(rewritten.text.slice(rewritten.text.indexOf('\n'))).toBe(
       event.text.slice(event.text.indexOf('\n')),
     );
-    const url = rewritten.text.match(/\[Detalle\]\(([^)]+)\)/)[1];
+    const url = rewritten.text.match(/\[Detalle\]\(<([^>]+)>\)/)[1];
     expect(await (await fetch(url)).text()).toBe('155 decisions');
     await fs.rm(job.workDir, { recursive: true });
     expect(await sessionFileEvent(job, event)).toEqual(rewritten);
     expect(event.text).toContain(file);
+  });
+
+  it('preserves the Markdown destination boundary for filenames containing parentheses', async () => {
+    await fs.writeFile(path.join(job.workDir, 'report).csv'), 'parenthesized report');
+    const rewritten = await sessionFileEvent(job, {
+      seq: 4,
+      kind: 'text',
+      text: '[Report](<report).csv>)',
+    });
+    expect(rewritten.text).toMatch(
+      /^\[Report\]\(<http:\/\/127\.0\.0\.1:\d+\/files\/[a-f0-9]{64}\/report\)\.csv>\)$/,
+    );
+    const destination = rewritten.text.slice('[Report](<'.length, -2);
+    const downloaded = await fetch(destination);
+    expect(downloaded.status).toBe(200);
+    expect(await downloaded.text()).toBe('parenthesized report');
   });
 
   it('does not export user messages, hidden config, external paths or escaping symlinks', async () => {
@@ -224,7 +250,7 @@ describe('local links in the transcript', () => {
     log = [{ seq: 1, kind: 'text', text: '[Report](report.txt)' }];
     const headers = { authorization: 'Bearer admin' };
     const read = await (await request('/api/v1/sessions/session1', { headers })).json();
-    const first = read.events[0].text.match(/\(([^)]+)\)/)[1];
+    const first = read.events[0].text.match(/\(<([^>]+)>\)/)[1];
     expect(await (await fetch(first)).text()).toBe('downloaded from chat');
     for (const url of ['/api/v1/sessions/session1/events?since=1', '/api/v1/events?transcripts=1']) {
       log = [];
