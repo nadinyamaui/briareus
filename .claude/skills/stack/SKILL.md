@@ -20,6 +20,8 @@ Make client UI changes in the corresponding client repository. Each client
 talks to this server's `/api/v1` with a token. Client-facing server behaviour is a
 route in `lib/api-v1-catalog.js` (then `npm run build:api-docs`), never a page
 or an ad-hoc route.
+When changing a capability, update `docs/features.md` and its relevant guide.
+Describe what the server supports without assuming every client implements it.
 
 ## Layout
 

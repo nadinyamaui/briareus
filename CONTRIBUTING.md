@@ -83,6 +83,9 @@ stands out. `npm run test:watch` while you work.
 The README is the overview; `docs/api-v1.md` is the client API guide, and
 `docs/api-v1-reference.md` is generated from the catalog by
 `npm run build:api-docs` (`npm test` fails when it is stale).
+Keep [the feature overview](docs/features.md) and the relevant setup guides
+current when adding or changing a server capability. Document server support
+separately from the UI each client implements.
 
 ## Commits and pull requests
 
