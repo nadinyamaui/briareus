@@ -102,6 +102,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
@@ -243,6 +244,166 @@ describe('local links in the transcript', () => {
     expect(await sessionFileEvent(job, event)).toEqual(event);
     expect(await sessionFileEvent(job, { ...event, kind: 'user' })).toEqual({ ...event, kind: 'user' });
     expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+  });
+
+  it('rejects an ancestor swapped for a symlink immediately before opening', async () => {
+    const output = path.join(job.workDir, 'output');
+    const outside = path.join(scratch, 'other-session');
+    await fs.mkdir(output);
+    await fs.mkdir(outside);
+    await fs.writeFile(path.join(output, 'report.csv'), 'safe');
+    await fs.writeFile(path.join(outside, 'report.csv'), 'other session secret');
+    const open = fs.open.bind(fs);
+    let swapped = false;
+    vi.spyOn(fs, 'open').mockImplementation(async (file, ...args) => {
+      if (!swapped) {
+        swapped = true;
+        await fs.rename(output, `${output}-original`);
+        await fs.symlink(outside, output);
+      }
+      return open(file, ...args);
+    });
+    const event = { seq: 10, kind: 'text', text: '[Report](output/report.csv)' };
+    expect(await sessionFileEvent(job, event)).toEqual(event);
+    expect(swapped).toBe(true);
+    expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+  });
+
+  it('keeps reading the pinned directory when its name is swapped before the final open', async () => {
+    const output = path.join(job.workDir, 'output');
+    const outside = path.join(scratch, 'other-session');
+    await fs.mkdir(output);
+    await fs.mkdir(outside);
+    await fs.writeFile(path.join(output, 'report.csv'), 'safe original');
+    await fs.writeFile(path.join(outside, 'report.csv'), 'other session secret');
+    const open = fs.open.bind(fs);
+    let swapped = false;
+    vi.spyOn(fs, 'open').mockImplementation(async (file, ...args) => {
+      if (!swapped && String(file).endsWith('/report.csv')) {
+        swapped = true;
+        await fs.rename(output, `${output}-original`);
+        await fs.symlink(outside, output);
+      }
+      return open(file, ...args);
+    });
+    const rewritten = await sessionFileEvent(job, {
+      seq: 15,
+      kind: 'text',
+      text: '[Report](output/report.csv)',
+    });
+    expect(swapped).toBe(true);
+    const url = rewritten.text.match(/\(<([^>]+)>\)/)[1];
+    expect(await (await fetch(url)).text()).toBe('safe original');
+  });
+
+  it('publishes empty files and files at exactly the size limit', async () => {
+    for (const size of [0, MAX_SESSION_FILE_BYTES]) {
+      await fs.writeFile(path.join(job.workDir, 'boundary.csv'), Buffer.alloc(size, 65));
+      const rewritten = await sessionFileEvent(job, {
+        seq: size,
+        kind: 'text',
+        text: '[Boundary](boundary.csv)',
+      });
+      const url = rewritten.text.match(/\(<([^>]+)>\)/)[1];
+      const bytes = Buffer.from(await (await fetch(url)).arrayBuffer());
+      expect(bytes.length).toBe(size);
+      if (size) expect(bytes.at(-1)).toBe(65);
+    }
+  });
+
+  it('caps reads when a file grows after descriptor stat', async () => {
+    const file = path.join(job.workDir, 'report.csv');
+    await fs.writeFile(file, 'small');
+    const open = fs.open.bind(fs);
+    let readBytes = 0;
+    vi.spyOn(fs, 'open').mockImplementation(async (name, ...args) => {
+      const handle = await open(name, ...args);
+      if (String(name).endsWith('/report.csv')) {
+        const stat = handle.stat.bind(handle);
+        handle.stat = async () => {
+          const result = await stat();
+          await fs.truncate(file, MAX_SESSION_FILE_BYTES * 4);
+          return result;
+        };
+        const read = handle.read.bind(handle);
+        handle.read = async (...args) => {
+          const result = await read(...args);
+          readBytes += result.bytesRead;
+          return result;
+        };
+      }
+      return handle;
+    });
+    const event = { seq: 11, kind: 'text', text: '[Report](report.csv)' };
+    expect(await sessionFileEvent(job, event)).toEqual(event);
+    expect(readBytes).toBe(MAX_SESSION_FILE_BYTES + 1);
+    expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+  });
+
+  it('converts compact adjacent links and retains optional titles and balanced parentheses', async () => {
+    await fs.writeFile(path.join(job.workDir, 'a.csv'), 'A');
+    await fs.writeFile(path.join(job.workDir, 'b.csv'), 'B');
+    await fs.writeFile(path.join(job.workDir, 'report(1).csv'), 'parentheses');
+    const event = {
+      seq: 12,
+      kind: 'text',
+      text: `|[A](a.csv)|[B](b.csv)|\n[A](a.csv),[B](b.csv)\n[A](a.csv "Report") [B](b.csv 'Title') [R](report(1).csv)`,
+    };
+    const rewritten = await sessionFileEvent(job, event);
+    const urls = [...rewritten.text.matchAll(/\(<([^>]+)>/g)].map((match) => match[1]);
+    expect(urls).toHaveLength(7);
+    expect(rewritten.text).toContain('> "Report")');
+    expect(rewritten.text).toContain("> 'Title')");
+    expect(await Promise.all(urls.map(async (url) => (await fetch(url)).text()))).toEqual([
+      'A',
+      'B',
+      'A',
+      'B',
+      'A',
+      'B',
+      'parentheses',
+    ]);
+  });
+
+  it('preserves multi-backtick spans, indented blocks and fences without publishing examples', async () => {
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'example contents');
+    const text = [
+      '``[Report](report.csv) `nested` ``',
+      '```[Report](report.csv)````` still code ```',
+      '    [Report](report.csv)',
+      '\t[Report](report.csv)',
+      '~~~~md',
+      '[Report](report.csv)',
+      '~~~',
+      '[Report](report.csv)',
+      '~~~~',
+      '````md',
+      '[Report](report.csv)',
+      '```',
+      '[Report](report.csv)',
+    ].join('\n');
+    const event = { seq: 13, kind: 'text', text };
+    expect(await sessionFileEvent(job, event)).toEqual(event);
+    expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+  });
+
+  it('retries missing links while keeping the original published snapshot', async () => {
+    const file = path.join(job.workDir, 'report.csv');
+    await fs.writeFile(file, 'original report');
+    const event = { seq: 14, kind: 'text', text: '[First](report.csv) [Later](later.csv)' };
+    const first = await sessionFileEvent(job, event);
+    expect(first.text).toContain('[Later](later.csv)');
+    const firstUrl = first.text.match(/\(<([^>]+)>\)/)[1];
+    await fs.writeFile(file, 'changed report');
+    await fs.writeFile(path.join(job.workDir, 'later.csv'), 'later report');
+    const retried = await sessionFileEvent(job, event);
+    const urls = [...retried.text.matchAll(/\(<([^>]+)>\)/g)].map((match) => match[1]);
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toBe(firstUrl);
+    expect(await (await fetch(urls[0])).text()).toBe('original report');
+    expect(await (await fetch(urls[1])).text()).toBe('later report');
+    await fs.rm(job.workDir, { recursive: true });
+    expect(await sessionFileEvent(job, event)).toEqual(retried);
   });
 
   it('returns downloadable links on a transcript read and on both live streams', async () => {

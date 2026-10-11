@@ -611,6 +611,42 @@ describe('the event streams', () => {
     }
   });
 
+  it('delivers another session transcript while preserving the stalled session order', async () => {
+    let release;
+    const stalled = new Promise((resolve) => {
+      release = resolve;
+    });
+    presentEvent = async (job, event) => {
+      if (job.id === 'mine' && event.seq === 1) await stalled;
+      return event;
+    };
+    const controller = new AbortController();
+    try {
+      const response = await request('/events?transcripts=1', {
+        token: tokens.admin,
+        signal: controller.signal,
+      });
+      const reader = response.body.getReader();
+      await reader.read();
+      bus.emit('event', 'mine', { seq: 1, kind: 'text', text: 'first' });
+      bus.emit('event', 'mine', { seq: 2, kind: 'text', text: 'second' });
+      bus.emit('event', 'foreign', { seq: 3, kind: 'text', text: 'unrelated' });
+      let text = '';
+      const receive = async () => {
+        text += new TextDecoder().decode((await reader.read()).value);
+      };
+      while (!text.includes('unrelated')) await receive();
+      expect(text).toContain('"sessionId":"foreign"');
+      expect(text).not.toContain('"sessionId":"mine"');
+      release();
+      while (!text.includes('second')) await receive();
+      expect(text.indexOf('first')).toBeLessThan(text.indexOf('second'));
+    } finally {
+      release();
+      controller.abort();
+    }
+  });
+
   it('leaves transcript lines out unless asked, and shows an admin token every project', async () => {
     const events = await readEvents('/events', 3, {
       token: tokens.admin,
