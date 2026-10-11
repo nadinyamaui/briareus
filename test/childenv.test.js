@@ -16,6 +16,8 @@ describe('childEnv', () => {
     vi.stubEnv('FORGE_API_TOKEN', 'forge-secret');
     vi.stubEnv('GOOGLE_OAUTH_CLIENT_SECRET', 'google-secret');
     vi.stubEnv('MICROSOFT_OAUTH_CLIENT_SECRET', 'microsoft-secret');
+    vi.stubEnv('HOME_ASSISTANT_TOKEN', 'ha-secret');
+    vi.stubEnv('HOME_ASSISTANT_URL', 'http://private:8123');
     vi.stubEnv('WAHA_API_KEY', 'waha-secret');
     vi.stubEnv('WAHA_CONFIG_FILE', '/private/waha.env');
     vi.stubEnv('OPENAI_API_KEY', 'a-session-own-key');
@@ -30,6 +32,8 @@ describe('childEnv', () => {
     expect(env).not.toHaveProperty('FORGE_API_TOKEN');
     expect(env).not.toHaveProperty('GOOGLE_OAUTH_CLIENT_SECRET');
     expect(env).not.toHaveProperty('MICROSOFT_OAUTH_CLIENT_SECRET');
+    expect(env).not.toHaveProperty('HOME_ASSISTANT_TOKEN');
+    expect(env).not.toHaveProperty('HOME_ASSISTANT_URL');
     expect(env).not.toHaveProperty('WAHA_API_KEY');
     expect(env).not.toHaveProperty('WAHA_CONFIG_FILE');
     expect(env.OPENAI_API_KEY).toBe('a-session-own-key');
