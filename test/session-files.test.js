@@ -418,6 +418,50 @@ describe('local links in the transcript', () => {
     expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
   });
 
+  it.each(['.env', '.hidden/config.txt', 'node_modules/config.txt', 'vendor/config.txt'])(
+    'does not publish excluded source symlink %s pointing to a visible workspace file',
+    async (source) => {
+      const file = path.join(job.workDir, 'private-config.txt');
+      const alias = path.join(job.workDir, source);
+      await fs.writeFile(file, 'private bytes');
+      await fs.mkdir(path.dirname(alias), { recursive: true });
+      await fs.symlink(file, alias);
+      for (const target of [source, encodeURIComponent(source), alias, `file://${alias}`]) {
+        const event = { seq: 24, kind: 'text', text: `[Configuration](<${target}>)` };
+        expect(await sessionFileEvent(job, event)).toEqual(event);
+      }
+      expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+    },
+  );
+
+  it.each(['.env', '.hidden/config.txt', 'node_modules/config.txt', 'vendor/config.txt'])(
+    'does not publish a visible symlink pointing to excluded target %s',
+    async (target) => {
+      const file = path.join(job.workDir, target);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'private bytes');
+      await fs.symlink(file, path.join(job.workDir, 'config.txt'));
+      const event = { seq: 25, kind: 'text', text: '[Configuration](config.txt)' };
+      expect(await sessionFileEvent(job, event)).toEqual(event);
+      expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+    },
+  );
+
+  it('publishes visible inward symlinks through normalized workspace paths', async () => {
+    const file = path.join(job.workDir, 'report.csv');
+    await fs.writeFile(file, 'visible report');
+    await fs.symlink(file, path.join(job.workDir, 'download.csv'));
+    for (const target of ['./download.csv', 'output/../download.csv']) {
+      const rewritten = await sessionFileEvent(job, {
+        seq: 26,
+        kind: 'text',
+        text: `[Report](${target})`,
+      });
+      const url = rewritten.text.match(/\(<([^>]+)>\)/)[1];
+      expect(await (await fetch(url)).text()).toBe('visible report');
+    }
+  });
+
   it('rejects an ancestor swapped for a symlink immediately before opening', async () => {
     const output = path.join(job.workDir, 'output');
     const outside = path.join(scratch, 'other-session');
