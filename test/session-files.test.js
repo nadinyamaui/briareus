@@ -717,6 +717,53 @@ describe('local links in the transcript', () => {
     expect(await (await fetch(url)).text()).toBe('fragment report');
   });
 
+  it.each([
+    ['100%.csv', '100%.csv'],
+    ['100%25.csv', '100%.csv'],
+    ['100%done.csv', '100%done.csv'],
+    ['100%25%20done.csv', '100% done.csv'],
+    ['100%2525.csv', '100%25.csv'],
+  ])('publishes literal percents and decodes valid escapes once in %s', async (destination, name) => {
+    const file = path.join(job.workDir, name);
+    await fs.writeFile(file, 'percent report');
+    for (const target of [destination, `file://${job.workDir}/${destination}`]) {
+      const event = { seq: 43, kind: 'text', text: `[Report](<${target}>)` };
+      const rewritten = await sessionFileEvent(job, event);
+      const url = rewritten.text.match(/^\[Report\]\(<([^>]+)>\)$/)?.[1];
+      expect(url).toBeDefined();
+      expect(url.endsWith(`/${encodeURIComponent(name)}`)).toBe(true);
+      const downloaded = await fetch(url);
+      expect(downloaded.status).toBe(200);
+      expect(await downloaded.text()).toBe('percent report');
+    }
+  });
+
+  it.each([
+    ['report.csv?download=1', 'report.csv', ''],
+    ['report.csv?download=1#details', 'report.csv', '#details'],
+    ['report.csv:12?download=1', 'report.csv', ''],
+    ['report%3Fdraft.csv?download=1', 'report?draft.csv', ''],
+  ])('separates the query in %s from the workspace pathname', async (destination, name, fragment) => {
+    await fs.writeFile(path.join(job.workDir, name), 'query report');
+    const targets = [destination, `file://${job.workDir}/${destination}`];
+    for (const competing of [false, true]) {
+      if (competing) {
+        await fs.writeFile(path.join(job.workDir, `${name}?download=1`), 'wrong query bytes');
+      }
+      for (const target of targets) {
+        const event = { seq: competing ? 45 : 44, kind: 'text', text: `[Report](<${target}>)` };
+        const rewritten = await sessionFileEvent(job, event);
+        const url = rewritten.text.match(/^\[Report\]\(<([^>]+)>\)$/)?.[1];
+        expect(url).toBeDefined();
+        expect(new URL(url).search).toBe('');
+        expect(new URL(url).hash).toBe(fragment);
+        const downloaded = await fetch(url);
+        expect(downloaded.status).toBe(200);
+        expect(await downloaded.text()).toBe('query report');
+      }
+    }
+  });
+
   it('converts compact adjacent links and retains optional titles and balanced parentheses', async () => {
     await fs.writeFile(path.join(job.workDir, 'a.csv'), 'A');
     await fs.writeFile(path.join(job.workDir, 'b.csv'), 'B');
