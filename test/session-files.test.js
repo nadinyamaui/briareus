@@ -236,6 +236,24 @@ describe('local links in the transcript', () => {
     expect(await downloaded.text()).toBe('parenthesized report');
   });
 
+  it.each([
+    ['report(1).csv', String.raw`report\(1\).csv`],
+    ['report(1).csv', String.raw`<report\(1\).csv>`],
+    ['report!_#.csv', String.raw`report\!\_\#.csv`],
+    ['report(1).csv', String.raw`report\%281\%29.csv`],
+    [String.raw`report\q.csv`, String.raw`report\q.csv`],
+  ])('unescapes Markdown punctuation in destination %s spelled %s', async (name, destination) => {
+    await fs.writeFile(path.join(job.workDir, name), 'escaped report');
+    const rewritten = await sessionFileEvent(job, {
+      seq: 15,
+      kind: 'text',
+      text: `[Report](${destination} "Title")`,
+    });
+    expect(rewritten.text).toMatch(/^\[Report\]\(<http:\/\/127\.0\.0\.1:\d+\/files\/[^>]+> "Title"\)$/);
+    const url = rewritten.text.match(/\(<([^>]+)>/)[1];
+    expect(await (await fetch(url)).text()).toBe('escaped report');
+  });
+
   it('does not export user messages, hidden config, external paths or escaping symlinks', async () => {
     await fs.writeFile(path.join(scratch, 'secret'), 'outside');
     await fs.writeFile(path.join(job.workDir, '.env'), 'credentials');
@@ -404,6 +422,65 @@ describe('local links in the transcript', () => {
     expect(await (await fetch(urls[1])).text()).toBe('later report');
     await fs.rm(job.workDir, { recursive: true });
     expect(await sessionFileEvent(job, event)).toEqual(retried);
+  });
+
+  it('serializes overlapping event updates and retains every snapshot after workspace reuse', async () => {
+    await fs.writeFile(path.join(job.workDir, 'a.csv'), 'original A');
+    await fs.writeFile(path.join(job.workDir, 'unrelated.csv'), 'unrelated');
+    const event = { seq: 16, kind: 'text', text: '[A](a.csv) [B](b.csv)' };
+    const paused = Promise.withResolvers();
+    const release = Promise.withResolvers();
+    const open = fs.open.bind(fs);
+    let blocked = false;
+    vi.spyOn(fs, 'open').mockImplementation(async (file, ...args) => {
+      const handle = await open(file, ...args);
+      if (String(file).endsWith('/a.csv') && !blocked) {
+        blocked = true;
+        const read = handle.read.bind(handle);
+        handle.read = async (...readArgs) => {
+          paused.resolve();
+          await release.promise;
+          return read(...readArgs);
+        };
+      }
+      return handle;
+    });
+    const first = sessionFileEvent(job, event);
+    await paused.promise;
+    await fs.writeFile(path.join(job.workDir, 'b.csv'), 'original B');
+    const second = sessionFileEvent(job, event);
+    let completedWhilePaused;
+    try {
+      const unrelated = await sessionFileEvent(job, {
+        seq: 17,
+        kind: 'text',
+        text: '[Other](unrelated.csv)',
+      });
+      expect(await (await fetch(unrelated.text.match(/\(<([^>]+)>/)[1])).text()).toBe('unrelated');
+      completedWhilePaused = await Promise.race([
+        second.then(() => true),
+        new Promise((resolve) => setTimeout(() => resolve(false), 100)),
+      ]);
+    } finally {
+      release.resolve();
+      await first;
+      await second;
+    }
+    expect(completedWhilePaused).toBe(false);
+    const partial = await first;
+    expect(partial.text).toContain('[B](b.csv)');
+    const complete = await second;
+    const urls = [...complete.text.matchAll(/\(<([^>]+)>/g)].map((match) => match[1]);
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toBe(partial.text.match(/\(<([^>]+)>/)[1]);
+    await fs.writeFile(path.join(job.workDir, '.git', 'briareus-owner'), 'another-session');
+    await fs.rm(path.join(job.workDir, 'a.csv'));
+    await fs.rm(path.join(job.workDir, 'b.csv'));
+    expect(await sessionFileEvent(job, event)).toEqual(complete);
+    expect(await Promise.all(urls.map(async (url) => (await fetch(url)).text()))).toEqual([
+      'original A',
+      'original B',
+    ]);
   });
 
   it('returns downloadable links on a transcript read and on both live streams', async () => {
