@@ -503,6 +503,58 @@ describe('connecting a mailbox', () => {
     }
   });
 
+  it.each(['read', 'manage'])('rejects stale inherited %s access after another reconnect', async (access) => {
+    mailbox.manage = access === 'manage';
+    const first = await connect({ access });
+    await settled();
+    const stale = service.connectStart({ provider: 'gmail', accountId: first.id });
+    const currentAccess = access === 'manage' ? 'read' : 'manage';
+    mailbox.manage = currentAccess === 'manage';
+    await connect({ accountId: first.id, access: currentAccess }, 'current');
+    await settled();
+    const credentials = store.accounts.get(first.id).credentials;
+    mailbox.manage = access === 'manage';
+
+    await expect(service.connectFinish({ state: stale.state, code: 'stale' })).rejects.toMatchObject({
+      status: 409,
+      message: 'Mailbox access changed during sign-in; start it again',
+    });
+    expect((await service.list())[0].access).toBe(currentAccess);
+    expect(store.accounts.get(first.id).credentials).toBe(credentials);
+    if (currentAccess === 'read')
+      await expect(service.trashMessage(first.id, 'a')).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('checks inherited access after a pending permission downgrade lands', async () => {
+    mailbox.manage = true;
+    const first = await connect({ access: 'manage', enabled: false });
+    const stale = service.connectStart({ provider: 'gmail', accountId: first.id });
+    const held = holdWrites((changes) => changes.status === 'connected');
+    mailbox.manage = false;
+    const downgrading = connect({ accountId: first.id, access: 'read' }, 'current');
+    await vi.waitFor(() => expect(held.holding).toBe(true));
+    mailbox.manage = true;
+    const reconnecting = service.connectFinish({ state: stale.state, code: 'stale' });
+    const rejected = expect(reconnecting).rejects.toMatchObject({ status: 409 });
+    await vi.waitFor(() => expect(gmail.tokenCalls.some((c) => c.code === 'stale')).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    held.land();
+    await downgrading;
+    await rejected;
+    expect((await service.list())[0].access).toBe('read');
+    expect(JSON.parse(open(store.accounts.get(first.id).credentials)).refreshToken).toBe('refresh-current');
+  });
+
+  it('allows explicit management access after another reconnect downgrades access', async () => {
+    mailbox.manage = true;
+    const first = await connect({ access: 'manage', enabled: false });
+    const explicit = service.connectStart({ provider: 'gmail', accountId: first.id, access: 'manage' });
+    mailbox.manage = false;
+    await connect({ accountId: first.id, access: 'read' }, 'current');
+    mailbox.manage = true;
+    expect((await service.connectFinish({ state: explicit.state, code: 'explicit' })).access).toBe('manage');
+  });
+
   it('enables deletion after an explicit management reconnect', async () => {
     const first = await connect();
     await settled();
