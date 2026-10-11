@@ -485,6 +485,70 @@ describe('local links in the transcript', () => {
     expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
   });
 
+  it.each([
+    '[`report.csv`](report.csv)',
+    '[Download `report.csv`](report.csv)',
+    '[Download ``report[1].csv``](report.csv)',
+    '- Item\n    [Report](report.csv)',
+    '- Item\n\n    [Report](report.csv)',
+    '1. Item\n    [Report](report.csv)',
+    '- Item\n  - Nested\n    [Report](report.csv)',
+    '\\` [Report](report.csv) \\`',
+    '[Report [draft]](report.csv)',
+    '[Report [draft [v2]]](report.csv)',
+    '[Report](\nreport.csv\n)',
+    '[Report](\n    <report.csv>\n)',
+    '[Report](\nreport.csv "Title"\n)',
+    '[Report [draft]][ref]\n\n[ref]: report.csv',
+    '[`report.csv`][ref]\n\n[ref]: report.csv',
+  ])('publishes the rendered Markdown link %s', async (text) => {
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'rendered report');
+    const event = { seq: 30, kind: 'text', text };
+    const rewritten = await sessionFileEvent(job, event);
+    const url = rewritten.text.match(/\(<([^>]+)>/)[1];
+    const labelEnd = text.includes('](') ? text.lastIndexOf('](') : text.indexOf('][ref]');
+    expect(rewritten.text.split('](<')[0]).toBe(text.slice(0, labelEnd));
+    if (text.includes('"Title"')) expect(rewritten.text).toContain('> "Title")');
+    expect(await (await fetch(url)).text()).toBe('rendered report');
+    await fs.rm(job.workDir, { recursive: true });
+    expect(await sessionFileEvent(job, event)).toEqual(rewritten);
+  });
+
+  it.each([
+    '    - Item\n      [Report](report.csv)',
+    '- Item\n\n      [Report](report.csv)',
+    '1. Item\n\n       [Report](report.csv)',
+    '- Item\n  - Nested\n\n        [Report](report.csv)',
+    '- Item\n  - Nested\n\n\t\t[Report](report.csv)',
+    '`[Report [draft]](report.csv)`',
+    '``[Download `report.csv`](report.csv)``',
+    '[Report](\n\nreport.csv\n)',
+  ])('preserves code or invalid link boundaries in %s', async (text) => {
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'example contents');
+    const event = { seq: 31, kind: 'text', text };
+    expect(await sessionFileEvent(job, event)).toEqual(event);
+    expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+  });
+
+  it.each([
+    ['report.csv#details', 'report.csv', '#details'],
+    ['report.csv#section%202', 'report.csv', '#section%202'],
+    ['report.csv#', 'report.csv', '#'],
+    ['report.csv:12#details', 'report.csv', '#details'],
+    ['report%23draft.csv', 'report#draft.csv', ''],
+    ['report%23draft.csv#details', 'report#draft.csv', '#details'],
+    ['report.csv&#35;details', 'report.csv#details', ''],
+  ])('separates the fragment in %s from file %s', async (destination, name, fragment) => {
+    await fs.writeFile(path.join(job.workDir, name), 'fragment report');
+    if (fragment) await fs.writeFile(path.join(job.workDir, `${name}${fragment}`), 'wrong file');
+    const event = { seq: 32, kind: 'text', text: `[Report](${destination})` };
+    const rewritten = await sessionFileEvent(job, event);
+    const url = rewritten.text.match(/\(<([^>]+)>/)[1];
+    expect(url.slice(cfg.publicBaseUrl.length)).toMatch(/^\/files\/[a-f0-9]{64}\//);
+    expect(url.endsWith(`/${encodeURIComponent(name)}${fragment}`)).toBe(true);
+    expect(await (await fetch(url)).text()).toBe('fragment report');
+  });
+
   it('converts compact adjacent links and retains optional titles and balanced parentheses', async () => {
     await fs.writeFile(path.join(job.workDir, 'a.csv'), 'A');
     await fs.writeFile(path.join(job.workDir, 'b.csv'), 'B');
