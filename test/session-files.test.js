@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import express from 'express';
 import contentDisposition from 'content-disposition';
 import crypto from 'node:crypto';
@@ -246,6 +247,43 @@ describe('local links in the transcript', () => {
     await fs.rm(job.workDir, { recursive: true });
     expect(await sessionFileEvent(job, event)).toEqual(rewritten);
     expect(event.text).toContain(file);
+  });
+
+  it.each(['', 'localhost'])(
+    'publishes local file URLs with authority "%s" and encoded filenames',
+    async (authority) => {
+      const file = path.join(job.workDir, 'decision #report.csv');
+      await fs.writeFile(file, 'local file report');
+      const target = pathToFileURL(file).href.replace('file://', `file://${authority}`);
+      const rewritten = await sessionFileEvent(job, {
+        seq: 27,
+        kind: 'text',
+        text: `[Report](${target}#details)`,
+      });
+      expect(rewritten.text).toMatch(
+        /^\[Report\]\(<http:\/\/127\.0\.0\.1:\d+\/files\/[a-f0-9]{64}\/decision%20%23report\.csv#details>\)$/,
+      );
+      const downloaded = await fetch(rewritten.text.slice('[Report](<'.length, -2));
+      expect(downloaded.status).toBe(200);
+      expect(await downloaded.text()).toBe('local file report');
+    },
+  );
+
+  it('rejects nonlocal file authorities and excluded or external localhost paths', async () => {
+    const visible = path.join(job.workDir, 'report.csv');
+    const hidden = path.join(job.workDir, '.env');
+    const external = path.join(scratch, 'outside.csv');
+    for (const file of [visible, hidden, external]) await fs.writeFile(file, 'private bytes');
+    const localUrl = (file) => pathToFileURL(file).href.replace('file://', 'file://localhost');
+    const remote = pathToFileURL(visible).href.replace('file://', 'file://remote.example');
+    const mistakenPath = path.join(job.workDir, 'remote.example', visible);
+    await fs.mkdir(path.dirname(mistakenPath), { recursive: true });
+    await fs.writeFile(mistakenPath, 'must not publish');
+    for (const target of [remote, localUrl(hidden), localUrl(external)]) {
+      const event = { seq: 28, kind: 'text', text: `[Report](${target})` };
+      expect(await sessionFileEvent(job, event)).toEqual(event);
+    }
+    expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
   });
 
   it('preserves the Markdown destination boundary for filenames containing parentheses', async () => {
