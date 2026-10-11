@@ -951,6 +951,20 @@ describe('session cost estimates', () => {
     expect(events[0].costUsd).toBeNull();
   });
 
+  it('keeps a long turn and the following short turn costs on their own footers', () => {
+    const events = [100000, 102000].map((at) => ({
+      kind: 'result',
+      t: new Date(at).toISOString(),
+      inputTokens: 100,
+      outputTokens: 20,
+    }));
+    const rows = [
+      { at: 100000, durationMs: 100000, costUsd: 1, costEstimated: true },
+      { at: 102000, durationMs: 1000, costUsd: 0.01, costEstimated: true },
+    ];
+    expect(estimateEventCosts(events, rows).map((event) => event.costUsd)).toEqual([1, 0.01]);
+  });
+
   it('keeps the tokens a Codex footer reported, whichever ledger row it pairs with', () => {
     // The legacy footers are rewritten once by the backfill, so a pairing that
     // lands on another turn's row (or a compaction's) moves an estimate only.

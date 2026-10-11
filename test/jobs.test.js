@@ -10671,16 +10671,22 @@ describe('Codex turn usage', () => {
       });
       expect(publicJob(job)).toMatchObject({ inputTokens: 300000, outputTokens: 1000 });
       expect(publicJob(job).pendingCodexUsage).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(7000);
       const child = children.at(-1);
       child.stdout.end(JSON.stringify({ type: 'turn.completed', usage: total }) + '\n');
       child.emit('close', 0);
       await vi.waitFor(() => expect(job.status).toBe('idle'));
       expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
         usageKey: live.usageKey,
-        at: live.at,
+        at: expect.any(Number),
+        durationMs: expect.any(Number),
         inputTokens: 300000,
         outputTokens: 1000,
       });
+      const final = recordTurnUsage.mock.lastCall[1];
+      expect(final.durationMs).toBeGreaterThanOrEqual(12000);
+      expect(final.at).toBeGreaterThan(live.at);
+      expect(final.at - final.durationMs).toBe(live.at - live.durationMs);
       expect(job.pendingCodexUsage).toBeUndefined();
     } finally {
       vi.useRealTimers();
@@ -10713,7 +10719,9 @@ describe('Codex turn usage', () => {
     writeRollout({ input_tokens: 800000, cached_input_tokens: 730000, output_tokens: 21000 });
     state.stored[0].pendingCodexUsage = {
       usageKey: 'checkpoint-before-restart',
-      at: Date.now() - 5000,
+      at: Date.now() - 86400000,
+      observedAt: Date.now() - 86395000,
+      usage: { durationMs: 5000 },
       providerId: 2,
       model: 'own-model',
       sessionId: 'thread-1',
@@ -10724,6 +10732,7 @@ describe('Codex turn usage', () => {
     await initJobs();
     expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
       usageKey: 'checkpoint-before-restart',
+      durationMs: 5000,
       inputTokens: 300000,
       cachedInputTokens: 280000,
       outputTokens: 1000,
@@ -10734,6 +10743,73 @@ describe('Codex turn usage', () => {
     await initJobs();
     expect(recordTurnUsage.mock.calls.length).toBe(calls);
     expect(recordTurnUsage.mock.lastCall[1].usageKey).toBe('checkpoint-before-restart');
+  });
+
+  it('finalizes a metadata-only fresh rollout without borrowing old context', async () => {
+    writeRollout({}, 'fresh-thread');
+    const file = path.join(
+      home,
+      '.codex-provider-2',
+      'sessions',
+      '2026',
+      '09',
+      '30',
+      'rollout-2026-09-30T00-00-00-fresh-thread.jsonl',
+    );
+    fs.writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { id: 'fresh-thread' } }) + '\n');
+    state.stored[0].contextUsage = null;
+    state.stored[0].pendingCodexUsage = {
+      usageKey: 'fresh',
+      at: Date.now() - 86400000,
+      providerId: 2,
+      sessionId: 'fresh-thread',
+      model: 'own-model',
+      baseline: null,
+    };
+    await initJobs();
+    expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({ usageKey: 'fresh', durationMs: null });
+    expect(recordTurnUsage.mock.lastCall[1].inputTokens).toBeUndefined();
+    expect(getJob('codex-usage').pendingCodexUsage).toBeUndefined();
+  });
+
+  it('retries frozen accounting without a live provider', async () => {
+    state.stored[0].pendingCodexUsage = {
+      usageKey: 'deleted-provider',
+      at: Date.now(),
+      providerId: 99,
+      provider: { id: 99, binary: 'codex', label: 'Deleted account' },
+      model: 'own-model',
+      frozen: true,
+      usage: { inputTokens: 100, durationMs: 5000 },
+    };
+    await initJobs();
+    expect(recordTurnUsage.mock.lastCall[2]).toEqual({ id: 99, binary: 'codex', label: 'Deleted account' });
+    expect(getJob('codex-usage').pendingCodexUsage).toBeUndefined();
+  });
+
+  it.each(['turnCanceled', 'closing'])('honors %s during a checkpoint retry', async (flag) => {
+    const job = getJob('codex-usage');
+    job.pendingCodexUsage = {
+      usageKey: 'retry',
+      at: Date.now(),
+      providerId: 2,
+      model: 'own-model',
+      frozen: true,
+      usage: { inputTokens: 100 },
+    };
+    let finish;
+    recordTurnUsage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    sendDevMessage(job.id, 'Next request');
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    job[flag] = true;
+    finish(true);
+    await vi.waitFor(() => expect(job.pendingCodexUsage).toBeUndefined());
+    expect(children).toHaveLength(0);
   });
 
   it('retains a failed checkpoint for a retry instead of claiming it was saved', async () => {
