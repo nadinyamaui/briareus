@@ -202,6 +202,28 @@ describe('Home Assistant bridge through the real gateway and upstream HTTP', () 
   });
 });
 
+it.each([42, true, {}, [], null, undefined, ''].map((name) => [name]))(
+  'uses the entity ID for friendly_name %j',
+  async (name) => {
+    const state = { ...raw, attributes: { friendly_name: name } };
+    const service = createHomeAssistantService({
+      config: () => ({ url: 'http://ha.test', token: 'secret' }),
+      fetcher: vi
+        .fn()
+        .mockResolvedValueOnce(Response.json([state]))
+        .mockResolvedValueOnce(Response.json(state))
+        .mockResolvedValueOnce(Response.json([state]))
+        .mockResolvedValueOnce(Response.json({ changed_states: [state] })),
+    });
+    expect((await service.entities()).entities[0].name).toBe('light.kitchen');
+    expect((await service.entity('light.kitchen')).entity.name).toBe('light.kitchen');
+    expect((await service.callService('light', 'turn_on')).entities[0].name).toBe('light.kitchen');
+    expect(
+      (await service.callService('light', 'turn_on', {}, { returnResponse: '1' })).entities[0].name,
+    ).toBe('light.kitchen');
+  },
+);
+
 it('reports unconfigured status and refuses operations', async () => {
   const service = createHomeAssistantService({ config: () => null });
   expect(await service.status()).toEqual({ configured: false, connected: false });
