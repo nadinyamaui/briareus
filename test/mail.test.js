@@ -484,6 +484,51 @@ describe('connecting a mailbox', () => {
     expect(store.accounts.size).toBe(1);
   });
 
+  it.each(['read', 'manage'])('preserves %s access on ordinary reconnect', async (access) => {
+    mailbox.manage = access === 'manage';
+    const first = await connect({ access });
+    await settled();
+    const start = service.connectStart({ provider: 'gmail', accountId: first.id });
+    expect(new URL(start.url).searchParams.get('scope')).toContain(
+      access === 'manage' ? 'gmail.modify' : 'gmail.readonly',
+    );
+    const again = await service.connectFinish({ state: start.state, code: 'fresh' });
+    expect(again.access).toBe(access);
+    await settled();
+    if (access === 'manage') {
+      await service.trashMessage(first.id, 'a');
+      await expect(service.message(first.id, 'a')).rejects.toMatchObject({ status: 404 });
+    } else {
+      await expect(service.trashMessage(first.id, 'a')).rejects.toMatchObject({ status: 409 });
+    }
+  });
+
+  it('enables deletion after an explicit management reconnect', async () => {
+    const first = await connect();
+    await settled();
+    await expect(service.trashMessage(first.id, 'a')).rejects.toMatchObject({ status: 409 });
+    mailbox.manage = true;
+    const start = service.connectStart({ provider: 'gmail', accountId: first.id, access: 'manage' });
+    expect(new URL(start.url).searchParams.get('scope')).toContain('gmail.modify');
+    const again = await service.connectFinish({ state: start.state, code: 'manage' });
+    expect(again.id).toBe(first.id);
+    expect(again.access).toBe('manage');
+    await settled();
+    await service.trashMessage(first.id, 'a');
+    await expect(service.message(first.id, 'a')).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('allows explicitly reconnecting a management mailbox as read-only', async () => {
+    mailbox.manage = true;
+    const first = await connect({ access: 'manage' });
+    await settled();
+    mailbox.manage = false;
+    const again = await connect({ accountId: first.id, access: 'read' }, 'read');
+    expect(again.access).toBe('read');
+    await settled();
+    await expect(service.trashMessage(first.id, 'a')).rejects.toMatchObject({ status: 409 });
+  });
+
   it('refuses a reconnect that signed in to another mailbox', async () => {
     const first = await connect();
     await settled();
