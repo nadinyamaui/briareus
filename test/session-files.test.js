@@ -222,6 +222,65 @@ describe('published session files', () => {
 });
 
 describe('local links in the transcript', () => {
+  it('reuses fallback publications within an event and retries on later requests', async () => {
+    cfg.r2 = {
+      endpoint: 'https://r2.example.com',
+      bucket: 'files',
+      publicBaseUrl: 'https://cdn.example.com',
+      accessKeyId: 'TEST',
+      secretAccessKey: 'TEST_SECRET',
+    };
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'fallback report');
+    const realFetch = globalThis.fetch;
+    const put = vi.fn(async () => ({ ok: false, status: 503, text: async () => 'down' }));
+    vi.stubGlobal('fetch', (url, options) =>
+      String(url).startsWith(cfg.r2.endpoint) ? put(url, options) : realFetch(url, options),
+    );
+    const event = {
+      seq: 40,
+      kind: 'text',
+      text: Array.from({ length: 10 }, (_, i) => `[Report ${i}](report.csv#section${i})`).join(' '),
+    };
+    const rewritten = await sessionFileEvent(job, event);
+    const urls = [...rewritten.text.matchAll(/\(<([^>]+)>/g)].map((match) => match[1]);
+    expect(urls).toHaveLength(10);
+    expect(new Set(urls.map((url) => url.split('#')[0])).size).toBe(1);
+    expect(urls.map((url) => new URL(url).hash)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `#section${i}`),
+    );
+    expect(await (await fetch(urls[0])).text()).toBe('fallback report');
+    expect(put).toHaveBeenCalledTimes(1);
+
+    await sessionFileEvent(job, { ...event, seq: 41 });
+    expect(put).toHaveBeenCalledTimes(2);
+    put.mockResolvedValue({ ok: true });
+    const remote = await publishSessionFile(job, 'report.csv', Buffer.from('fallback report'));
+    expect(remote.url).toMatch(/^https:\/\/cdn.example.com\/session-files\//);
+    expect(put).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ['report.csv#&#62;', '#%3E'],
+    ['<report.csv#a&gt;b>', '#a%3Eb'],
+    ['report.csv#&#10;', '#%0A'],
+    ['report.csv#&#13;&#9;', '#%0D%09'],
+    ['report.csv#&lt;&quot;&#92;&#96;', '#%3C%22%5C%60'],
+    ['report.csv#&amp;gt;', '#%26gt;'],
+    ['report.csv#section%202/%3e', '#section%202/%3e'],
+    ['report.csv#details', '#details'],
+  ])('serializes decoded fragments safely in %s', async (destination, fragment) => {
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'fragment report');
+    const rewritten = await sessionFileEvent(job, {
+      seq: 42,
+      kind: 'text',
+      text: `[Report](${destination})`,
+    });
+    const url = rewritten.text.match(/^\[Report\]\(<([^>\s]+)>\)$/)?.[1];
+    expect(url).toBeDefined();
+    expect(url.endsWith(`/report.csv${fragment}`)).toBe(true);
+    expect(await (await fetch(url)).text()).toBe('fragment report');
+  });
+
   it('does not read another session after the workspace slot is reused', async () => {
     await fs.writeFile(path.join(job.workDir, 'other.txt'), 'another session');
     await fs.writeFile(path.join(job.workDir, '.git', 'briareus-owner'), 'other-session');
