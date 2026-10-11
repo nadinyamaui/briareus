@@ -202,6 +202,49 @@ describe('Home Assistant bridge through the real gateway and upstream HTTP', () 
   });
 });
 
+it.each(['١', '１', '𝟙'])(
+  'accepts decimal digit %s in entity, domain and service identifiers',
+  async (digit) => {
+    const state = { ...raw, entity_id: `sensor${digit}.room_${digit}` };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(state))
+      .mockResolvedValueOnce(Response.json([state]))
+      .mockResolvedValueOnce(Response.json([state]));
+    const service = createHomeAssistantService({
+      config: () => ({ url: 'http://ha.test', token: 'secret' }),
+      fetcher,
+    });
+    const normalized = { ...expected, id: state.entity_id };
+    expect(await service.entity(state.entity_id)).toEqual({ entity: normalized });
+    expect(await service.entities({ domain: `sensor${digit}` })).toEqual({ entities: [normalized] });
+    expect(await service.callService(`sensor${digit}`, `update_${digit}`)).toEqual({
+      entities: [normalized],
+      response: null,
+    });
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      `http://ha.test/api/states/sensor${digit}.room_${digit}`,
+      'http://ha.test/api/states',
+      `http://ha.test/api/services/sensor${digit}/update_${digit}`,
+    ]);
+  },
+);
+it.each(['²', 'Ⅳ', 'A', '/', '-'])(
+  'rejects invalid identifier character %s before upstream',
+  async (char) => {
+    const fetcher = vi.fn();
+    const service = createHomeAssistantService({
+      config: () => ({ url: 'http://ha.test', token: 'secret' }),
+      fetcher,
+    });
+    await expect(service.entity(`sensor.room_${char}`)).rejects.toMatchObject({ status: 400 });
+    await expect(service.entities({ domain: `sensor${char}` })).rejects.toMatchObject({ status: 400 });
+    await expect(service.callService(`sensor${char}`, 'update')).rejects.toMatchObject({ status: 400 });
+    await expect(service.callService('sensor', `update_${char}`)).rejects.toMatchObject({ status: 400 });
+    expect(fetcher).not.toHaveBeenCalled();
+  },
+);
+
 it.each([42, true, {}, [], null, undefined, ''].map((name) => [name]))(
   'uses the entity ID for friendly_name %j',
   async (name) => {

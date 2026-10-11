@@ -1535,7 +1535,7 @@ Deploy an Envoyer project. Needs `manage`, held to `repo`.
 
 Check the Home Assistant connection. Needs `admin`.
 
-**Returns** `{ configured: boolean, connected: boolean }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. 503 when unconfigured, 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ configured: boolean, connected: boolean }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/entities`
 
@@ -1547,13 +1547,13 @@ Read current Home Assistant entities. Needs `admin`.
 | -------- | -------- | ----------------------------------------------- |
 | `domain` | `string` | Optional domain filter, such as light or vacuum |
 
-**Returns** `{ entities: HomeAssistantEntity[] }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. 503 when unconfigured, 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ entities: HomeAssistantEntity[] }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/entities/{id}`
 
 Read one Home Assistant entity. Needs `admin`.
 
-**Returns** `{ entity: HomeAssistantEntity }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. 503 when unconfigured, 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ entity: HomeAssistantEntity }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/services`
 
