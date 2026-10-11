@@ -802,6 +802,24 @@ describe('recordTurnUsage', () => {
     });
   });
 
+  it('returns false when the database rejects the write', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      saveTurnUsage.mockRejectedValueOnce(new Error('database unavailable'));
+      expect(
+        await recordTurnUsage(
+          { id: 'retry' },
+          { inputTokens: 300000, usageKey: 'stable', at: 123 },
+          { binary: 'codex' },
+          'gpt-6.1-sol',
+        ),
+      ).toBe(false);
+      expect(saveTurnUsage.mock.lastCall[0]).toMatchObject({ usageKey: 'stable', at: 123 });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it('stops waiting for a stalled write after one second', async () => {
     vi.useFakeTimers();
     try {
@@ -931,6 +949,20 @@ describe('session cost estimates', () => {
       events[1],
     ]);
     expect(events[0].costUsd).toBeNull();
+  });
+
+  it('keeps a long turn and the following short turn costs on their own footers', () => {
+    const events = [100000, 102000].map((at) => ({
+      kind: 'result',
+      t: new Date(at).toISOString(),
+      inputTokens: 100,
+      outputTokens: 20,
+    }));
+    const rows = [
+      { at: 100000, durationMs: 100000, costUsd: 1, costEstimated: true },
+      { at: 102000, durationMs: 1000, costUsd: 0.01, costEstimated: true },
+    ];
+    expect(estimateEventCosts(events, rows).map((event) => event.costUsd)).toEqual([1, 0.01]);
   });
 
   it('keeps the tokens a Codex footer reported, whichever ledger row it pairs with', () => {
