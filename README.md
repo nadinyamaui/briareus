@@ -9,13 +9,18 @@ own, so parallel sessions never share a working tree or a database. You
 describe what to build; the agent edits, runs the app and its tests, and can
 push a feature branch / open a PR when asked.
 
-> **Briareus is now a core app: you need a client to use it.** The built-in
-> dashboard and everything else that ran in a browser have been removed, so
-> opening the server in a browser shows nothing. The clients, **Briareus
-> Windows** and **Briareus iOS**, live in repositories of their own and talk to
-> this server through [`/api/v1`](#client-api) with a token from
-> `npm run create-token`. Where this README names a chip, a button or a screen,
-> it is describing what a client offers on top of the API.
+This repository contains only the Briareus server. It has no built-in UI;
+opening its address in a browser shows no dashboard. Use one of the clients,
+each maintained in its own repository:
+
+- [Briareus Windows](https://github.com/okanetsolutions/briareus-windows)
+- [Briareus iOS (Swift)](https://github.com/okanetsolutions/briareus-swift)
+- [Briareus Meta Quest](https://github.com/okanetsolutions/briareus-quest)
+
+The clients connect to this server through [`/api/v1`](#client-api) with a
+token from `npm run create-token`. Where this README names a chip, a button,
+or a screen, it describes a client UI on top of the API. Client UI changes
+belong in the corresponding client repository.
 
 > **This app runs shell commands as you.** A session edits files, runs the
 > project's setup and run commands, and pushes to GitHub with the credentials

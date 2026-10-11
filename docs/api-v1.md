@@ -1,8 +1,10 @@
 # Client API v1
 
-`/api/v1` is the one HTTP API a Briareus client talks to: Briareus Windows and
-Briareus iOS, each in a repository of its own. It is the only API the server has, and
-the server has no UI of its own: the routes the removed dashboard called with
+`/api/v1` is the HTTP API used by [Briareus Windows](https://github.com/okanetsolutions/briareus-windows),
+[Briareus iOS (Swift)](https://github.com/okanetsolutions/briareus-swift), and
+[Briareus Meta Quest](https://github.com/okanetsolutions/briareus-quest).
+Each client lives in its own repository. This repository contains only the server.
+The server has no UI of its own. `/api/v1` is its only client API: the routes the removed dashboard called with
 its login cookie (`/api/dev/*`,
 `/api/projects`, …) and the earlier mobile API (`/api/mobile/v1`) are retired,
 and every handler they reached is behind a route here.
