@@ -222,6 +222,114 @@ describe('published session files', () => {
 });
 
 describe('local links in the transcript', () => {
+  it.each([0, 2, 10])(
+    'stops R2 attempts after failure following %i successful uploads',
+    async (successes) => {
+      cfg.r2 = {
+        endpoint: 'https://r2.example.com',
+        bucket: 'files',
+        publicBaseUrl: 'https://cdn.example.com',
+        accessKeyId: 'TEST',
+        secretAccessKey: 'TEST_SECRET',
+      };
+      for (let i = 0; i < 10; i++) await fs.writeFile(path.join(job.workDir, `${i}.csv`), `report ${i}`);
+      const realFetch = globalThis.fetch;
+      let attempts = 0;
+      const put = vi.fn(async () => {
+        if (attempts++ >= successes) throw new Error('R2 unavailable');
+        return { ok: true };
+      });
+      vi.stubGlobal('fetch', (url, options) =>
+        String(url).startsWith(cfg.r2.endpoint) ? put(url, options) : realFetch(url, options),
+      );
+      const event = {
+        seq: 50,
+        kind: 'text',
+        text: Array.from({ length: 10 }, (_, i) => `[Report ${i}](${i}.csv)`).join(' '),
+      };
+      const rewritten = await sessionFileEvent(job, event);
+      const urls = [...rewritten.text.matchAll(/\(<([^>]+)>/g)].map((match) => match[1]);
+      expect(urls).toHaveLength(10);
+      expect(put).toHaveBeenCalledTimes(Math.min(successes + 1, 10));
+      expect(urls.filter((url) => url.startsWith(cfg.r2.publicBaseUrl))).toHaveLength(successes);
+      for (let i = 0; i < 10; i++) {
+        if (urls[i].startsWith(cfg.publicBaseUrl))
+          expect(await (await fetch(urls[i])).text()).toBe(`report ${i}`);
+      }
+      if (successes < 10) {
+        await sessionFileEvent(job, { ...event, seq: 51 });
+        expect(put).toHaveBeenCalledTimes(successes + 2);
+        put.mockResolvedValue({ ok: true });
+        const remote = await publishSessionFile(job, '0.csv', Buffer.from('report 0'));
+        expect(remote.url.startsWith(cfg.r2.publicBaseUrl)).toBe(true);
+        expect(put).toHaveBeenCalledTimes(successes + 3);
+      }
+      await fs.rm(job.workDir, { recursive: true });
+      expect(await sessionFileEvent(job, event)).toEqual(rewritten);
+    },
+  );
+
+  it.each(['/api/v1/sessions/session1/events?since=1', '/api/v1/events?transcripts=1'])(
+    'delivers ten local fallbacks and following text in order after one stalled PUT on %s',
+    async (url) => {
+      cfg.r2 = {
+        endpoint: 'https://r2.example.com',
+        bucket: 'files',
+        publicBaseUrl: 'https://cdn.example.com',
+        accessKeyId: 'TEST',
+        secretAccessKey: 'TEST_SECRET',
+      };
+      for (let i = 0; i < 10; i++) await fs.writeFile(path.join(job.workDir, `${i}.csv`), `report ${i}`);
+      const started = Promise.withResolvers();
+      const release = Promise.withResolvers();
+      const realFetch = globalThis.fetch;
+      const put = vi.fn(async () => {
+        started.resolve();
+        await release.promise;
+        throw new Error('R2 timeout');
+      });
+      vi.stubGlobal('fetch', (target, options) =>
+        String(target).startsWith(cfg.r2.endpoint) ? put(target, options) : realFetch(target, options),
+      );
+      const controller = new AbortController();
+      const opened = request(url, { headers: { authorization: 'Bearer admin' }, signal: controller.signal });
+      const first = {
+        seq: 50,
+        kind: 'text',
+        text: Array.from({ length: 10 }, (_, i) => `[Report ${i}](${i}.csv)`).join(' '),
+      };
+      const next = { seq: 51, kind: 'text', text: 'Finished' };
+      try {
+        await vi.waitFor(() => expect(bus.listenerCount('event')).toBe(1));
+        bus.emit('event', job.id, first);
+        await started.promise;
+        bus.emit('event', job.id, next);
+        release.resolve();
+        const reader = (await opened).body.getReader();
+        let frames = '';
+        while (frames.split('data: ').length < 3) {
+          frames += new TextDecoder().decode((await reader.read()).value);
+        }
+        const events = [...frames.matchAll(/^data: (.+)$/gm)].map((match) => {
+          const payload = JSON.parse(match[1]);
+          return payload.event ?? payload;
+        });
+        expect(events.map((event) => event.seq)).toEqual([50, 51]);
+        expect(events[1]).toEqual(next);
+        expect(put).toHaveBeenCalledTimes(1);
+        const urls = [...events[0].text.matchAll(/\(<([^>]+)>/g)].map((match) => match[1]);
+        expect(urls).toHaveLength(10);
+        await fs.rm(job.workDir, { recursive: true });
+        for (let i = 0; i < 10; i++) expect(await (await fetch(urls[i])).text()).toBe(`report ${i}`);
+      } finally {
+        release.resolve();
+        controller.abort();
+        await opened.catch(() => {});
+        await vi.waitFor(() => expect(bus.listenerCount('event')).toBe(0));
+      }
+    },
+  );
+
   it('reuses fallback publications within an event and retries on later requests', async () => {
     cfg.r2 = {
       endpoint: 'https://r2.example.com',
