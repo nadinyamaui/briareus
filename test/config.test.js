@@ -83,7 +83,7 @@ beforeEach(() => {
   savedEnv = { ...process.env };
   for (const k of Object.keys(process.env))
     if (
-      /^(R2_|CLOUDFLARE_|OPENAI_TRANSCRIBE_|PREVIEW_ACCESS_CLIENT_|GOOGLE_OAUTH_|MICROSOFT_OAUTH_|WAHA_)/.test(
+      /^(R2_|CLOUDFLARE_|OPENAI_TRANSCRIBE_|PREVIEW_ACCESS_CLIENT_|GOOGLE_OAUTH_|MICROSOFT_OAUTH_|WAHA_|HOME_ASSISTANT_)/.test(
         k,
       )
     )
@@ -868,5 +868,29 @@ describe('WhatsApp configuration', () => {
       const cfg = await loadConfig(complete({ WAHA_URL: url, WAHA_API_KEY: 'key' }));
       expect(() => cfg.getConfig()).toThrow(/WAHA_URL/);
     }
+  });
+});
+
+describe('Home Assistant configuration', () => {
+  it('is optional and prefers the server environment', async () => {
+    vi.stubEnv('HOME_ASSISTANT_URL', 'http://127.0.0.1:8123/');
+    vi.stubEnv('HOME_ASSISTANT_TOKEN', 'private-token');
+    const { getConfig } = await loadConfig(complete({ HOME_ASSISTANT_TOKEN: 'old-token' }));
+    expect(getConfig().homeAssistant).toEqual({ url: 'http://127.0.0.1:8123', token: 'private-token' });
+  });
+
+  it('is disabled without credentials', async () => {
+    const { getConfig } = await loadConfig(complete());
+    expect(getConfig().homeAssistant).toBeNull();
+  });
+
+  it.each([
+    { HOME_ASSISTANT_URL: 'http://localhost:8123' },
+    { HOME_ASSISTANT_URL: 'ftp://localhost', HOME_ASSISTANT_TOKEN: 'token' },
+    { HOME_ASSISTANT_URL: 'http://user:pass@localhost', HOME_ASSISTANT_TOKEN: 'token' },
+    { HOME_ASSISTANT_URL: 'http://localhost/?token=secret', HOME_ASSISTANT_TOKEN: 'token' },
+  ])('refuses incomplete or unsafe configuration %j', async (values) => {
+    const { getConfig } = await loadConfig(complete(values));
+    expect(() => getConfig()).toThrow(/HOME_ASSISTANT/);
   });
 });

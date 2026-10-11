@@ -39,6 +39,10 @@ Projects with `whatsappToolsEnabled: true` (off by default) also give their
 interactive sessions an internal WhatsApp MCP to read chats, reply and mark
 them read; see [WhatsApp from a session](docs/whatsapp.md#whatsapp-from-a-session).
 
+The Home Assistant bridge exposes live entities, available actions, and automation
+events through admin-only `/api/v1/home-assistant` endpoints.
+See [Connect Home Assistant to Briareus](docs/home-assistant.md).
+
 ## Email in agent sessions
 
 Chat with Claude to read, search, reply to, send and archive Gmail or Outlook

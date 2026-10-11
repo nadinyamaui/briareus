@@ -22,6 +22,8 @@ import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
 import { createSlackService } from './lib/slack.js';
 import { slackRoutes, slackEventsRouter } from './lib/slack-routes.js';
+import { createHomeAssistantService } from './lib/home-assistant.js';
+import { homeAssistantRoutes } from './lib/home-assistant-routes.js';
 import { createWhatsAppService } from './lib/whatsapp.js';
 import { whatsappRoutes } from './lib/whatsapp-routes.js';
 import { whatsappAgentRoutes } from './lib/whatsapp-agent.js';
@@ -565,6 +567,7 @@ function agentSession(req, res) {
 const sshService = createSshService({ getJob });
 api.use(sshRoutes({ service: sshService, agentSession, getProject }));
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
+api.use(homeAssistantRoutes({ service: createHomeAssistantService() }));
 const whatsappService = createWhatsAppService();
 api.use(whatsappRoutes({ service: whatsappService }));
 api.use(whatsappAgentRoutes({ service: whatsappService, agentSession, getProject }));

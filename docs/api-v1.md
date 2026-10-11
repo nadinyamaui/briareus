@@ -112,6 +112,7 @@ What is there, by area:
 | Memory                   | `/memories`, `/memories/health`                                                                                                                                                                      | read / admin  |
 | Slack inbox              | `/slack/workspaces`, `/slack/workspaces/{id}/conversations`, `people`, `direct-messages`, `events`; conversation history, threads, replies and read positions                                        | admin         |
 | Operations               | `/attention`, `/maintenance`, `/deployments`, `/ssh/requests`, `/slack/requests`, `/tasks`, `/videos`                                                                                                | admin         |
+| Home Assistant           | `/home-assistant`, `/home-assistant/entities`, `/home-assistant/services`, `/home-assistant/events/{type}`                                                                                           | admin         |
 | Mail                     | `/mail/messages`, `/mail/accounts/{account}/messages/{id}`                                                                                                                                           | admin         |
 | Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `slack/workspaces`, `mail/accounts`, `templates`                                                                       | admin         |
 

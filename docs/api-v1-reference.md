@@ -1529,6 +1529,60 @@ Deploy an Envoyer project. Needs `manage`, held to `repo`.
 
 **Returns** `{ ok: boolean }`. Runs as the account, which must be available to `repo`; 404 when it is not. 502 when Envoyer refuses the account’s token, 429 when it is rate limiting it. Envoyer’s objects come back as Envoyer shapes them. `ok` means Envoyer queued it; the deployments list shows it run. The account’s token needs the `deployments:create` scope.
 
+## Home Assistant
+
+### `GET /home-assistant`
+
+Check the Home Assistant connection. Needs `admin`.
+
+**Returns** `{ configured: boolean, connected: boolean }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. 503 when unconfigured, 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+
+### `GET /home-assistant/entities`
+
+Read current Home Assistant entities. Needs `admin`.
+
+**Query**
+
+| Field    | Type     |                                                 |
+| -------- | -------- | ----------------------------------------------- |
+| `domain` | `string` | Optional domain filter, such as light or vacuum |
+
+**Returns** `{ entities: HomeAssistantEntity[] }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. 503 when unconfigured, 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+
+### `GET /home-assistant/entities/{id}`
+
+Read one Home Assistant entity. Needs `admin`.
+
+**Returns** `{ entity: HomeAssistantEntity }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. 503 when unconfigured, 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+
+### `GET /home-assistant/services`
+
+Discover available Home Assistant actions. Needs `admin`.
+
+**Returns** `{ services: object[] }`. Returns Home Assistant domain/service definitions, including service descriptions and fields, for clients to build action inputs.
+
+### `POST /home-assistant/services/{domain}/{service}`
+
+Execute a Home Assistant action. Needs `admin`.
+
+**Query**
+
+| Field            | Type   |                                                                                        |
+| ---------------- | ------ | -------------------------------------------------------------------------------------- |
+| `returnResponse` | `0\|1` | 1 asks Home Assistant for service response data; use for services requiring a response |
+
+**Body**: a [HomeAssistantData](#homeassistantdata), whole or in part.
+
+**Returns** `{ entities: HomeAssistantEntity[], response: object? }`. Send service data directly as a JSON object, for example { "entity_id": "light.kitchen" } for light/turn_on. Returned entities are states changed during the call, not proof that a physical device completed the action. Services requiring response data need returnResponse=1; services that do not support it require the default 0. Do not automatically retry actions after a timeout or invalid receipt.
+
+### `POST /home-assistant/events/{type}`
+
+Fire an event for Home Assistant automations. Needs `admin`.
+
+**Body**: a [HomeAssistantData](#homeassistantdata), whole or in part.
+
+**Returns** `{ ok: boolean }`. Send event data directly as a JSON object. Home Assistant owns event listeners and automations; an accepted event does not confirm that an automation finished.
+
 ## Mail
 
 ### `GET /mail/messages`
@@ -2024,6 +2078,26 @@ Remove a account. Needs `admin`.
 **Returns** `{ ok: boolean }`
 
 ## Objects
+
+### HomeAssistantData
+
+A JSON object of Home Assistant service or event data. Field names and values depend on the selected service or event; entity_id may be a string or an array of entity IDs.
+
+| Field | Type |     |
+| ----- | ---- | --- |
+
+### HomeAssistantEntity
+
+A Home Assistant entity read live through the operator bridge.
+
+| Field         | Type      |                                                     |
+| ------------- | --------- | --------------------------------------------------- |
+| `id`          | `string`  | Home Assistant entity_id, such as light.kitchen     |
+| `name`        | `string`  | Friendly name, or the entity ID                     |
+| `state`       | `string`  | Current state, including unknown or unavailable     |
+| `attributes`  | `object`  | Domain-specific attributes from Home Assistant      |
+| `lastChanged` | `string?` | ISO timestamp of the last state change              |
+| `lastUpdated` | `string?` | ISO timestamp of the last state or attribute update |
 
 ### Client
 
@@ -3001,6 +3075,12 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/operations/maintenance`                                               | `POST /maintenance`                                                             |
 | `GET /api/ssh/requests`                                                          | `GET /ssh/requests`                                                             |
 | `POST /api/ssh/requests/:id/decision`                                            | `POST /ssh/requests/{id}/decision`                                              |
+| `GET /api/home-assistant`                                                        | `GET /home-assistant`                                                           |
+| `GET /api/home-assistant/entities`                                               | `GET /home-assistant/entities`                                                  |
+| `GET /api/home-assistant/entities/:id`                                           | `GET /home-assistant/entities/{id}`                                             |
+| `GET /api/home-assistant/services`                                               | `GET /home-assistant/services`                                                  |
+| `POST /api/home-assistant/services/:domain/:service`                             | `POST /home-assistant/services/{domain}/{service}`                              |
+| `POST /api/home-assistant/events/:type`                                          | `POST /home-assistant/events/{type}`                                            |
 | `GET /api/whatsapp/accounts`                                                     | `GET /whatsapp/accounts`                                                        |
 | `GET /api/whatsapp/accounts/:id`                                                 | `GET /whatsapp/accounts/{id}`                                                   |
 | `POST /api/whatsapp/accounts/:id/start`                                          | `POST /whatsapp/accounts/{id}/start`                                            |
