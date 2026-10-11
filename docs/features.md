@@ -28,8 +28,10 @@ pull requests and issues, move board cards, update PR branches and merge.
 Repository routes expose trees, files and gzipped archives at a revision.
 
 Reviews require independent verification and an assessment of whether each
-finding is worth fixing. Findings wait for operator decisions. Review loops
-run reviews and fixes on the session's branch; optional QA loops create and
+finding is worth fixing. Findings normally wait for operator decisions. With
+`autonomousReviewLoop` enabled, active review loops automatically fix verified,
+worthwhile findings with complete assessments without an operator decision.
+Review loops run reviews and fixes on the session's branch; optional QA loops create and
 execute test sheets after review passes. Feedback left unfixed gets a visible
 PR note explaining the decision.
 
