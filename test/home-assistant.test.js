@@ -59,7 +59,7 @@ async function setup() {
           ? { changed_states: [raw], service_response: { result: 'done' } }
           : [raw],
       );
-    if (req.path === '/api/events/briareus_command') return res.json({ message: 'Event fired.' });
+    if (req.path.startsWith('/api/events/')) return res.json({ message: 'Event fired.' });
     res.status(404).json({ message: 'not found' });
   });
   const base = await serve(upstream);
@@ -149,6 +149,31 @@ describe('Home Assistant bridge through the real gateway and upstream HTTP', () 
       (await fetch(`${url}/api/home-assistant/entities`, { headers: { Authorization: 'Bearer agent' } }))
         .status,
     ).toBe(403);
+    expect(calls).toEqual([]);
+  });
+  it.each([
+    ['ios.shortcut_run', '/api/events/ios.shortcut_run'],
+    ['Briareus-Command', '/api/events/Briareus-Command'],
+    ['Briareus/Command?source=ios#run', '/api/events/Briareus%2FCommand%3Fsource%3Dios%23run'],
+  ])('delivers event %s as one encoded path segment', async (type, path) => {
+    const { call, calls } = await setup();
+    const res = await call(`/events/${encodeURIComponent(type)}`, {
+      method: 'POST',
+      body: { source: 'ios' },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(calls).toEqual([
+      { path, method: 'POST', body: { source: 'ios' }, query: {}, token: 'Bearer private-ha-token' },
+    ]);
+  });
+  it('rejects empty and non-string event types before contacting Home Assistant', async () => {
+    const { service, calls } = await setup();
+    for (const type of ['', null, 42, ['briareus_command']])
+      await expect(service.fireEvent(type)).rejects.toMatchObject({
+        status: 400,
+        message: 'Invalid Home Assistant event type',
+      });
     expect(calls).toEqual([]);
   });
   it('validates identifiers, query and body before sending an action', async () => {
