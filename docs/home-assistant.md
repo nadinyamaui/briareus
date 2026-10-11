@@ -13,10 +13,22 @@ The Compose app forwards these variables to the server without writing the token
 Clients authenticate with their Briareus admin token. The server adds Home Assistant's token to upstream requests; it never returns it to clients.
 Read and manage tokens cannot use the bridge. The bridge operates independently of projects and agent sessions.
 
-Use the following calls to control a device:
+An entity is a state or capability, such as `light.kitchen` or `sensor.temperature`.
+One physical device can provide several entities. This bridge lists entities, not the physical device or area registries.
+Device setup, pairing, and integration configuration remain in Home Assistant.
+
+Use the following calls to find entities and control them:
 
 ```sh
-# Read current devices and discover the actual entity IDs.
+# List every entity and its current state.
+curl "$BRIAREUS_URL/api/v1/home-assistant/entities" \
+  -H "Authorization: Bearer $BRIAREUS_ADMIN_TOKEN"
+
+# Read one entity; replace the example ID with one from the list.
+curl "$BRIAREUS_URL/api/v1/home-assistant/entities/light.kitchen" \
+  -H "Authorization: Bearer $BRIAREUS_ADMIN_TOKEN"
+
+# Filter entities by domain and discover the actual entity IDs.
 curl "$BRIAREUS_URL/api/v1/home-assistant/entities?domain=vacuum" \
   -H "Authorization: Bearer $BRIAREUS_ADMIN_TOKEN"
 
@@ -29,6 +41,12 @@ curl "$BRIAREUS_URL/api/v1/home-assistant/services/vacuum/start" \
   -H "Authorization: Bearer $BRIAREUS_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"entity_id":"vacuum.mova"}'
+
+# Turn on a light with service-specific data.
+curl "$BRIAREUS_URL/api/v1/home-assistant/services/light/turn_on" \
+  -H "Authorization: Bearer $BRIAREUS_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"entity_id":"light.kitchen","brightness":128}'
 
 # Send an event to an existing Home Assistant automation.
 curl "$BRIAREUS_URL/api/v1/home-assistant/events/briareus_command" \
