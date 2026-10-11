@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
+import contentDisposition from 'content-disposition';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
@@ -156,6 +157,32 @@ describe('published session files', () => {
     await expect(
       publishSessionFile(job, 'big', Buffer.alloc(MAX_SESSION_FILE_BYTES + 1)),
     ).rejects.toMatchObject({ status: 413 });
+  });
+
+  it.each([
+    ['ordinary.csv', 'ordinary.csv'],
+    ["Bob's report.csv", 'Bob%27s%20report.csv'],
+    ['report(1).csv', 'report%281%29.csv'],
+    ["résumé! (final)'100%.csv", 'r%C3%A9sum%C3%A9!%20%28final%29%27100%25.csv'],
+  ])('uploads a valid extended download filename for %s', async (name, encoded) => {
+    cfg.r2 = {
+      endpoint: 'https://r2.example.com',
+      bucket: 'files',
+      publicBaseUrl: 'https://cdn.example.com',
+      accessKeyId: 'TEST',
+      secretAccessKey: 'TEST_SECRET',
+    };
+    const put = vi.fn(async () => ({ ok: true }));
+    vi.stubGlobal('fetch', put);
+    const remote = await publishSessionFile(job, name, Buffer.from('report'));
+    expect(remote.url.startsWith(cfg.r2.publicBaseUrl)).toBe(true);
+    expect(put).toHaveBeenCalledTimes(1);
+    const header = put.mock.calls[0][1].headers['content-disposition'];
+    expect(header).toBe(`attachment; filename*=UTF-8''${encoded}`);
+    expect(contentDisposition.parse(header)).toMatchObject({
+      type: 'attachment',
+      parameters: { filename: name },
+    });
   });
 
   it('uploads to R2 with download headers and falls back to a working local URL on failure', async () => {
