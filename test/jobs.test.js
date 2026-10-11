@@ -10628,6 +10628,134 @@ describe('Codex turn usage', () => {
   };
   const walks = (spy) => spy.mock.calls.filter(([dir]) => String(dir).includes('.codex-provider-2')).length;
 
+  it('prices a running turn and updates the same checkpoint at close', async () => {
+    vi.useFakeTimers();
+    try {
+      const job = getJob('codex-usage');
+      sendDevMessage(job.id, 'Long request');
+      const total = { input_tokens: 800000, cached_input_tokens: 730000, output_tokens: 21000 };
+      writeRollout(total);
+      const file = path.join(
+        home,
+        '.codex-provider-2',
+        'sessions',
+        '2026',
+        '09',
+        '30',
+        'rollout-2026-09-30T00-00-00-thread-1.jsonl',
+      );
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          type: 'event_msg',
+          timestamp: '2026-09-30T00:00:00Z',
+          payload: {
+            type: 'token_count',
+            info: {
+              total_token_usage: total,
+              last_token_usage: { input_tokens: 300000, cached_input_tokens: 280000, output_tokens: 1000 },
+            },
+          },
+        }) + '\n',
+      );
+      await vi.advanceTimersByTimeAsync(5000);
+      await vi.waitFor(() => expect(recordTurnUsage).toHaveBeenCalledOnce());
+      const live = recordTurnUsage.mock.lastCall[1];
+      expect(live).toMatchObject({
+        inputTokens: 300000,
+        cachedInputTokens: 280000,
+        outputTokens: 1000,
+        longInputTokens: 300000,
+        longCachedInputTokens: 280000,
+        longOutputTokens: 1000,
+      });
+      expect(publicJob(job)).toMatchObject({ inputTokens: 300000, outputTokens: 1000 });
+      expect(publicJob(job).pendingCodexUsage).toBeUndefined();
+      const child = children.at(-1);
+      child.stdout.end(JSON.stringify({ type: 'turn.completed', usage: total }) + '\n');
+      child.emit('close', 0);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+        usageKey: live.usageKey,
+        at: live.at,
+        inputTokens: 300000,
+        outputTokens: 1000,
+      });
+      expect(job.pendingCodexUsage).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('books shutdown usage before the final flush without completing the recovery turn', async () => {
+    const job = getJob('codex-usage');
+    sendDevMessage(job.id, 'Interrupted work');
+    writeRollout({ input_tokens: 800000, cached_input_tokens: 730000, output_tokens: 21000 });
+    try {
+      await stopAllJobProcesses();
+      children.at(-1).emit('close', null);
+      await flushJobs();
+      expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+        inputTokens: 300000,
+        cachedInputTokens: 280000,
+        outputTokens: 1000,
+        usageKey: expect.any(String),
+      });
+      expect(job.pendingCodexUsage).toBeUndefined();
+      expect(job.recoveryTurn.completed).toBe(false);
+    } finally {
+      setDraining(false);
+      await initJobs();
+    }
+  });
+
+  it('recovers an interrupted checkpoint before taking the next turn baseline', async () => {
+    writeRollout({ input_tokens: 800000, cached_input_tokens: 730000, output_tokens: 21000 });
+    state.stored[0].pendingCodexUsage = {
+      usageKey: 'checkpoint-before-restart',
+      at: Date.now() - 5000,
+      providerId: 2,
+      model: 'own-model',
+      sessionId: 'thread-1',
+      baseline: { inputTokens: 500000, cachedInputTokens: 450000, outputTokens: 20000 },
+      baseInputTokens: 100,
+      baseOutputTokens: 10,
+    };
+    await initJobs();
+    expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+      usageKey: 'checkpoint-before-restart',
+      inputTokens: 300000,
+      cachedInputTokens: 280000,
+      outputTokens: 1000,
+    });
+    expect(getJob('codex-usage')).toMatchObject({ inputTokens: 300100, outputTokens: 1010 });
+    expect(getJob('codex-usage').pendingCodexUsage).toBeUndefined();
+    const calls = recordTurnUsage.mock.calls.length;
+    await initJobs();
+    expect(recordTurnUsage.mock.calls.length).toBe(calls);
+    expect(recordTurnUsage.mock.lastCall[1].usageKey).toBe('checkpoint-before-restart');
+  });
+
+  it('retains a failed checkpoint for a retry instead of claiming it was saved', async () => {
+    state.stored[0].pendingCodexUsage = {
+      usageKey: 'retry-checkpoint',
+      at: Date.now(),
+      providerId: 2,
+      model: 'own-model',
+      frozen: true,
+      usage: { inputTokens: 300000, cachedInputTokens: 280000, outputTokens: 1000 },
+    };
+    recordTurnUsage.mockResolvedValueOnce(false);
+    await initJobs();
+    expect(getJob('codex-usage').pendingCodexUsage.usageKey).toBe('retry-checkpoint');
+    await initJobs();
+    expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+      usageKey: 'retry-checkpoint',
+      inputTokens: 300000,
+    });
+    expect(getJob('codex-usage').pendingCodexUsage).toBeUndefined();
+  });
+
   it('persists the measured long-request counts while excluding the resumed thread prefix', async () => {
     const job = getJob('codex-usage');
     // No cached path at spawn: the pricing reader must skip old requests.
@@ -11216,8 +11344,9 @@ describe('Codex turn usage', () => {
       cachedInputTokens: 270000,
       outputTokens: 6000,
     });
-    // And the thread totals, as the probe would have set them.
-    expect(job).toMatchObject({ inputTokens: 900000, outputTokens: 31000 });
+    // Session totals exclude the thread prefix; contextUsage keeps that prefix.
+    expect(job).toMatchObject({ inputTokens: 300000, outputTokens: 6000 });
+    expect(job.contextUsage).toMatchObject({ inputTokens: 900000, outputTokens: 31000 });
     expect(
       await turn(job, 'Again', { input_tokens: 950000, cached_input_tokens: 855000, output_tokens: 32000 }),
     ).toMatchObject({ inputTokens: 50000, cachedInputTokens: 45000, outputTokens: 1000 });

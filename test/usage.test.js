@@ -802,6 +802,24 @@ describe('recordTurnUsage', () => {
     });
   });
 
+  it('returns false when the database rejects the write', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      saveTurnUsage.mockRejectedValueOnce(new Error('database unavailable'));
+      expect(
+        await recordTurnUsage(
+          { id: 'retry' },
+          { inputTokens: 300000, usageKey: 'stable', at: 123 },
+          { binary: 'codex' },
+          'gpt-6.1-sol',
+        ),
+      ).toBe(false);
+      expect(saveTurnUsage.mock.lastCall[0]).toMatchObject({ usageKey: 'stable', at: 123 });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it('stops waiting for a stalled write after one second', async () => {
     vi.useFakeTimers();
     try {
