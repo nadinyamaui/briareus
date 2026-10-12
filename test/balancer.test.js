@@ -1506,10 +1506,15 @@ describe('expired Claude usage login', () => {
     }
   });
 
-  it('keeps rate-limit backoff after refreshing a login with no stored account ID', async () => {
+  it('persists rate-limit backoff after refreshing a login with no stored account ID', async () => {
     const actual = await vi.importActual('../lib/providers.js');
     const store = await import('../lib/providerstore.js');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'balancer-unknown-claude-'));
+    const stored = {};
+    await restoreProviderUsage({
+      load: () => stored,
+      update: (fn) => fn(stored, state.rows[0]),
+    });
     const authData = {
       credentials: {
         claudeAiOauth: {
@@ -1541,17 +1546,30 @@ describe('expired Claude usage login', () => {
       providers.readClaudeAuth.mockImplementationOnce(actual.readClaudeAuth);
       providers.claudeUsage.mockImplementationOnce(actual.claudeUsage);
       store.captureProviderAuth.mockImplementationOnce(async (current) => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(stored[1]).toBeUndefined();
         state.rows[0] = { ...current, authData: actual.readClaudeAuth(dir) };
         return state.rows[0];
       });
       const lockout = await providerUsage(p);
       expect(lockout.retryAt).toBeDefined();
       expect(cachedProviderUsage(state.rows[0])).toEqual(lockout);
+      await flushProviderUsage();
+      expect(stored[1]?.value).toEqual(lockout);
+      expect(stored[1]?.retryAt).toBe(lockout.retryAt);
+      vi.resetModules();
+      const restarted = await import('../lib/balancer.js');
+      await restarted.restoreProviderUsage({ load: () => stored, update: null });
+      const read = vi.fn(async () => windows(12));
+      expect(await restarted.providerUsage(state.rows[0], { read, ttlMs: 0 })).toEqual(lockout);
+      expect(read).not.toHaveBeenCalled();
       expect(await providerUsage(state.rows[0], { ttlMs: 0 })).toEqual(lockout);
       expect(providers.claudeUsage).toHaveBeenCalledTimes(1);
       expect(fetch).toHaveBeenCalledTimes(2);
     } finally {
       vi.unstubAllGlobals();
+      await flushProviderUsage();
+      await restoreProviderUsage({ load: () => null, update: null });
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
