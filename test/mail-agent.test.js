@@ -189,6 +189,18 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
     expect(path.basename(saved.path)).toBe('evil name.pdf');
     expect(fs.readFileSync(saved.path, 'utf8')).toBe('PDF');
     fs.rmSync(path.dirname(saved.path), { recursive: true });
+    service.attachment.mockResolvedValueOnce({
+      name: `${'a'.repeat(300)}.pdf`,
+      mimeType: 'application/pdf',
+      size: 3,
+      data: 'UERG',
+    });
+    const long = JSON.parse(
+      (await tool('mail_attachment', { account: 7, id: 'm', attachmentId: 'a/1' })).result.content[0].text,
+    );
+    expect(path.basename(long.path)).toBe(`${'a'.repeat(150)}.pdf`);
+    expect(fs.readFileSync(long.path, 'utf8')).toBe('PDF');
+    fs.rmSync(path.dirname(long.path), { recursive: true });
     await tool('mail_sync', { account: 7 });
     expect(service.sync).toHaveBeenCalledWith(7);
     await tool('mail_send', { account: 7, to: ['you@example.com'], subject: 's', text: 'body' });

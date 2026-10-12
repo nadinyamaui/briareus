@@ -1317,3 +1317,25 @@ describe('Outlook attachment', () => {
     await expect(outlook.attachment(call, 'm', 'i')).rejects.toMatchObject({ status: 415 });
   });
 });
+
+describe('Gmail attachment', () => {
+  it('names an inline-bytes attachment by its part and decodes it from the message', async () => {
+    const payload = {
+      partId: '',
+      mimeType: 'multipart/mixed',
+      parts: [
+        { partId: '0', mimeType: 'text/plain', body: { data: Buffer.from('hi').toString('base64url') } },
+        { partId: '1', filename: 'tiny.pdf', mimeType: 'application/pdf', body: { size: 3, data: 'UERG' } },
+      ],
+    };
+    const row = gmailMessage({ id: 'm', labelIds: [], payload }, new Map(), 'me');
+    expect(row.attachments).toEqual([
+      { id: 'part:1', name: 'tiny.pdf', mimeType: 'application/pdf', size: 3 },
+    ]);
+    const call = vi.fn(async () => ({ payload }));
+    const gmail = gmailProvider(GOOGLE);
+    expect((await gmail.attachment(call, 'm', 'part:1')).toString()).toBe('PDF');
+    expect(call).toHaveBeenCalledWith(expect.stringMatching(/\/messages\/m\?format=full$/));
+    await expect(gmail.attachment(call, 'm', 'part:9')).rejects.toMatchObject({ status: 404 });
+  });
+});
