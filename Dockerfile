@@ -28,22 +28,14 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit && npm cache clean --force
 
-# The Claude Code, codex and opencode CLIs are dependencies of this app, so the
+# The Claude Code, codex, grok and opencode CLIs are dependencies of this app, so the
 # image already has them. Put them where the binary discovery in lib/config.js
 # and lib/providers.js looks (PATH, then /usr/local/bin) instead of installing
 # second copies.
 RUN ln -sf /app/node_modules/.bin/claude /usr/local/bin/claude \
     && ln -sf /app/node_modules/.bin/codex /usr/local/bin/codex \
+    && ln -sf /app/node_modules/.bin/grok /usr/local/bin/grok \
     && ln -sf /app/node_modules/.bin/opencode /usr/local/bin/opencode
-
-# grok is not on npm (the `grok-cli` package there is an unrelated wrapper), so
-# it comes from x.ai's installer. Its download dir is fixed at $HOME/.grok, and
-# /home/node is a volume at runtime, so the install runs with a HOME of its own
-# under /opt and links the binary onto PATH from there.
-RUN set -eux; \
-    HOME=/opt/grok GROK_BIN_DIR=/usr/local/bin bash -c "$(curl -fsSL https://x.ai/cli/install.sh)"; \
-    chmod -R a+rX /opt/grok; \
-    grok --version
 
 COPY . .
 COPY docker/entrypoint.sh /usr/local/bin/reviewer-entrypoint
