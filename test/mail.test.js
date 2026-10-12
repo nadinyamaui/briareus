@@ -926,6 +926,30 @@ describe('reading', () => {
   });
 });
 
+describe('attachment download', () => {
+  it('fetches only an attachment the stored message names, live from the provider', async () => {
+    const a = await connect();
+    await settled();
+    store.messages.get(`${a.id}:a`).attachments = [
+      { id: 'att/1', name: 'manual.pdf', mimeType: 'application/pdf', size: 3 },
+    ];
+    const original = gmail.request.getMockImplementation();
+    gmail.request.mockImplementation(async (url, opts) =>
+      String(url).endsWith('/messages/a/attachments/att%2F1')
+        ? Response.json({ data: Buffer.from('PDF').toString('base64url'), size: 3 })
+        : original(url, opts),
+    );
+    expect(await service.attachment(a.id, 'a', 'att/1')).toEqual({
+      name: 'manual.pdf',
+      mimeType: 'application/pdf',
+      size: 3,
+      data: Buffer.from('PDF').toString('base64'),
+    });
+    await expect(service.attachment(a.id, 'a', 'other')).rejects.toMatchObject({ status: 404 });
+    await expect(service.attachment(a.id, 'b', 'att/1')).rejects.toMatchObject({ status: 404 });
+  });
+});
+
 describe('message deletion', () => {
   beforeEach(() => {
     mailbox.manage = true;

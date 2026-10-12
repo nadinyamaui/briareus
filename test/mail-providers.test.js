@@ -1306,3 +1306,14 @@ describe('moving selected messages to trash', () => {
     expect(outlook.canTrash('https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite')).toBe(true);
   });
 });
+
+describe('Outlook attachment', () => {
+  it('decodes a file attachment and refuses an attached item', async () => {
+    const files = { 'm/a': { contentBytes: Buffer.from('PDF').toString('base64') }, 'm/i': {} };
+    const call = async (url) =>
+      files[decodeURIComponent(url.split('/messages/')[1].replace('/attachments/', '/'))];
+    const outlook = outlookProvider(MICROSOFT);
+    expect((await outlook.attachment(call, 'm', 'a')).toString()).toBe('PDF');
+    await expect(outlook.attachment(call, 'm', 'i')).rejects.toMatchObject({ status: 415 });
+  });
+});

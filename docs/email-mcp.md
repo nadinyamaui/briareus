@@ -13,7 +13,7 @@ Ask the agent, for example:
 - “Mark this message read and archive it.”
 - “Move this week’s marketing emails to the trash.”
 
-The nine tools are `mail_accounts`, `mail_search`, `mail_read`, `mail_sync`,
+The ten tools are `mail_accounts`, `mail_search`, `mail_read`, `mail_attachment`, `mail_sync`,
 `mail_connect`, `mail_finish_connect`, `mail_send`, `mail_reply`, and `mail_update`
 (read, unread, archive, or trash: moved to the provider’s recoverable trash).
 The internal HTTP endpoints live under `/api/agent/mail`; this is a session tool,
@@ -69,7 +69,8 @@ not the entire historical mailbox. `q` is a text search rather than Gmail query
 syntax. `mail_search` pages using `nextCursor`; `mail_read` returns the body and
 attachment metadata and does not mark the email read. `mail_sync` starts a refresh;
 follow `syncing` and `lastSyncAt` in `mail_accounts` before searching again.
-Attachment downloads and uploads are not included.
+`mail_attachment` fetches one attachment (up to 25 MiB) live from the provider and
+saves it to a private temporary file whose path it returns. Attachment uploads are not included.
 
 Sending and replying use plain text. Replies go to the original email's Reply-To
 address (or sender) and keep Gmail threading. `mail_update` supports `read`,
