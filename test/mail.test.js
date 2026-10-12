@@ -926,6 +926,58 @@ describe('reading', () => {
   });
 });
 
+describe('attachment download', () => {
+  it('fetches only an attachment the stored message names, live from the provider', async () => {
+    const a = await connect();
+    await settled();
+    store.messages.get(`${a.id}:a`).attachments = [
+      { id: 'att/1', name: 'manual.pdf', mimeType: 'application/pdf', size: 3 },
+    ];
+    const original = gmail.request.getMockImplementation();
+    gmail.request.mockImplementation(async (url, opts) =>
+      String(url).endsWith('/messages/a/attachments/att%2F1')
+        ? Response.json({ data: Buffer.from('PDF').toString('base64url'), size: 3 })
+        : original(url, opts),
+    );
+    expect(await service.attachment(a.id, 'a', 'att/1')).toEqual({
+      name: 'manual.pdf',
+      mimeType: 'application/pdf',
+      size: 3,
+      data: Buffer.from('PDF').toString('base64'),
+    });
+    await expect(service.attachment(a.id, 'a', 'other')).rejects.toMatchObject({ status: 404 });
+    await expect(service.attachment(a.id, 'b', 'att/1')).rejects.toMatchObject({ status: 404 });
+  });
+
+  it.each(['remove', 'reconnect'])(
+    'refuses an obsolete attachment token after %s during refresh',
+    async (change) => {
+      const account = await connect();
+      await settled();
+      store.messages.get(`${account.id}:a`).attachments = [
+        { id: 'att/1', name: 'manual.pdf', mimeType: 'application/pdf', size: 3 },
+      ];
+      clock += 2 * 3600_000;
+      let release;
+      gmail.gate.refresh = new Promise((resolve) => (release = resolve));
+      const reading = service.attachment(account.id, 'a', 'att/1').catch((e) => e);
+      await vi.waitFor(() =>
+        expect(gmail.tokenCalls.some((c) => c.grant_type === 'refresh_token')).toBe(true),
+      );
+      let removal;
+      if (change === 'remove') removal = service.remove(account.id);
+      else await connect({ accountId: account.id }, 'fresh');
+      release();
+      expect(await reading).toMatchObject({ status: change === 'remove' ? 404 : 409 });
+      await removal;
+      await settled();
+      expect(gmail.request.mock.calls.filter(([url]) => String(url).includes('/attachments/'))).toHaveLength(
+        0,
+      );
+    },
+  );
+});
+
 describe('message deletion', () => {
   beforeEach(() => {
     mailbox.manage = true;

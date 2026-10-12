@@ -1,5 +1,7 @@
 import express from 'express';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import readline from 'node:readline';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { mailAgentRoutes, mailSessionAllowed } from '../lib/mail-agent.js';
@@ -18,6 +20,12 @@ beforeEach(async () => {
     sync: vi.fn(async () => ({ syncing: true })),
     action: vi.fn(async () => ({ status: 'accepted' })),
     trashMessage: vi.fn(async () => {}),
+    attachment: vi.fn(async () => ({
+      name: '../../evil name.pdf',
+      mimeType: 'application/pdf',
+      size: 3,
+      data: Buffer.from('PDF').toString('base64'),
+    })),
   };
   const app = express();
   app.use(express.json());
@@ -157,7 +165,7 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
   const tool = (name, args = {}) => rpc('tools/call', { name, arguments: args });
   try {
     expect((await rpc('initialize')).result.serverInfo.name).toBe('reviewer-mail');
-    expect((await rpc('tools/list')).result.tools).toHaveLength(9);
+    expect((await rpc('tools/list')).result.tools).toHaveLength(10);
     await tool('mail_connect', { provider: 'gmail', accountId: 7, access: 'manage' });
     expect(service.connectStart).toHaveBeenCalledWith({ provider: 'gmail', accountId: 7, access: 'manage' });
     await tool('mail_finish_connect', { url: 'http://localhost/?state=s&code=c' });
@@ -173,6 +181,26 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
     });
     await tool('mail_read', { account: 7, id: 'message/+=' });
     expect(service.message).toHaveBeenCalledWith(7, 'message/+=');
+    const saved = JSON.parse(
+      (await tool('mail_attachment', { account: 7, id: 'message/+=', attachmentId: 'a/1' })).result.content[0]
+        .text,
+    );
+    expect(service.attachment).toHaveBeenCalledWith(7, 'message/+=', 'a/1', expect.any(Function));
+    expect(path.basename(saved.path)).toBe('evil name.pdf');
+    expect(fs.readFileSync(saved.path, 'utf8')).toBe('PDF');
+    fs.rmSync(path.dirname(saved.path), { recursive: true });
+    service.attachment.mockResolvedValueOnce({
+      name: `${'a'.repeat(300)}.pdf`,
+      mimeType: 'application/pdf',
+      size: 3,
+      data: 'UERG',
+    });
+    const long = JSON.parse(
+      (await tool('mail_attachment', { account: 7, id: 'm', attachmentId: 'a/1' })).result.content[0].text,
+    );
+    expect(path.basename(long.path)).toBe(`${'a'.repeat(150)}.pdf`);
+    expect(fs.readFileSync(long.path, 'utf8')).toBe('PDF');
+    fs.rmSync(path.dirname(long.path), { recursive: true });
     await tool('mail_sync', { account: 7 });
     expect(service.sync).toHaveBeenCalledWith(7);
     await tool('mail_send', { account: 7, to: ['you@example.com'], subject: 's', text: 'body' });
