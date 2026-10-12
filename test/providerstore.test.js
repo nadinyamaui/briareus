@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   codexAuth: null,
   grokAuth: null,
   ensureThrows: null,
+  beforeAuthSave: null,
 }));
 
 // The grouping resolves each row's catalog, which goes through the config the
@@ -27,10 +28,32 @@ vi.mock('../lib/db.js', () => ({
   },
   saveProviderRow: async (p) => {
     if (state.saveError) throw state.saveError;
+    if (
+      state.beforeAuthSave &&
+      JSON.stringify(p.authData) !== JSON.stringify(state.rows.find((r) => r.id === p.id)?.authData)
+    )
+      await state.beforeAuthSave();
     const saved = { ...p, id: p.id ?? state.nextId++ };
     state.saved.push(saved);
     state.rows = [...state.rows.filter((r) => r.id !== saved.id), saved];
     return saved;
+  },
+  saveProviderAuth: async (p, authData) => {
+    if (state.beforeAuthSave) await state.beforeAuthSave();
+    const current = state.rows.find((r) => r.id === p.id);
+    if (
+      current &&
+      current.binary === p.binary &&
+      current.baseUrl === p.baseUrl &&
+      current.apiKey === p.apiKey &&
+      JSON.stringify(current.authData) === JSON.stringify(p.authData)
+    ) {
+      const saved = { ...current, authData };
+      state.saved.push(saved);
+      state.rows = state.rows.map((r) => (r.id === p.id ? saved : r));
+      return saved;
+    }
+    return current || null;
   },
   deleteProviderRow: async (id) => {
     state.deleted.push(id);
@@ -131,6 +154,7 @@ beforeEach(() => {
   state.codexAuth = null;
   state.grokAuth = null;
   state.ensureThrows = null;
+  state.beforeAuthSave = null;
   logs = {
     log: vi.spyOn(console, 'log').mockImplementation(() => {}),
     error: vi.spyOn(console, 'error').mockImplementation(() => {}),
@@ -279,6 +303,28 @@ describe('capturing a login back into the row', () => {
     expect(saved.authData).toEqual({ token: 'fresh' });
   });
 
+  it.each([
+    { active: false, label: 'Edited provider' },
+    { active: false, apiKey: 'new-key', baseUrl: 'https://new.example' },
+    { authData: { token: 'new-login' } },
+    { binary: 'grok' },
+  ])('preserves concurrent provider edits %j during capture', async (edit) => {
+    const p = getProvider(1);
+    state.claudeAuth = { token: 'refreshed' };
+    let release;
+    state.beforeAuthSave = () => new Promise((resolve) => (release = resolve));
+    const capture = captureProviderAuth(p);
+    await updateProvider(1, edit);
+    if (edit.authData) state.rows[0] = { ...state.rows[0], authData: edit.authData };
+    release();
+    const saved = await capture;
+    expect(saved).toMatchObject(edit);
+    expect(getProvider(1)).toMatchObject(edit);
+    expect(saved.authData).toEqual(
+      edit.apiKey || edit.binary ? null : edit.authData || { token: 'refreshed' },
+    );
+  });
+
   it('writes nothing when the login has not changed', async () => {
     state.claudeAuth = { token: 'same' };
 
@@ -296,6 +342,7 @@ describe('capturing a login back into the row', () => {
   });
 
   it('captures a codex login when the entry has no custom endpoint', async () => {
+    await seed([row({ id: 1, binary: 'codex' })]);
     state.codexAuth = { token: 'codex-fresh' };
 
     const saved = await captureProviderAuth(row({ id: 1, binary: 'codex' }));
@@ -318,6 +365,7 @@ describe('capturing a login back into the row', () => {
   });
 
   it('captures a grok login', async () => {
+    await seed([row({ id: 1, binary: 'grok' })]);
     state.grokAuth = { token: 'grok-fresh' };
 
     const saved = await captureProviderAuth(row({ id: 1, binary: 'grok' }));

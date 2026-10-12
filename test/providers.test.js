@@ -1828,9 +1828,24 @@ describe('Claude usage token refresh', () => {
     expect(await claudeUsage(dir)).toEqual({
       windows: [],
       error: 'Claude login could not be refreshed. Sign in again to check usage.',
+      ...(status >= 500 ? { retryable: true } : {}),
     });
     expect(readClaudeAuth(dir)).toEqual(before);
     expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(path.join(dir, '.oauth_refresh.lock'))).toBe(false);
+  });
+
+  it('allows retry after a temporary token refresh network failure', async () => {
+    const before = login();
+    const fetch = upstream();
+    fetch.mockRejectedValueOnce(new TypeError('fetch failed'));
+    expect(await claudeUsage(dir)).toEqual({
+      windows: [],
+      error: 'Claude usage check failed. Check usage again.',
+      retryable: true,
+    });
+    expect(readClaudeAuth(dir)).toEqual(before);
+    expect(await claudeUsage(dir)).toEqual(expectedUsage);
     expect(fs.existsSync(path.join(dir, '.oauth_refresh.lock'))).toBe(false);
   });
 
@@ -1851,6 +1866,7 @@ describe('Claude usage token refresh', () => {
     expect(await claudeUsage(dir)).toEqual({
       windows: [],
       error: 'Claude login is being refreshed. Check usage again shortly.',
+      retryable: true,
     });
     expect(fetch).not.toHaveBeenCalled();
     expect(readClaudeAuth(dir)).toEqual(before);
@@ -1877,6 +1893,7 @@ describe('Claude usage token refresh', () => {
     expect(await claudeUsage(dir)).toEqual({
       windows: [],
       error: 'Claude login changed. Check usage again.',
+      retryable: true,
     });
     expect(readClaudeAuth(dir).credentials).toEqual(replacement);
     expect(fetch).toHaveBeenCalledTimes(1);

@@ -1500,6 +1500,10 @@ describe('expired Claude usage login', () => {
       expect(store.captureProviderAuth).toHaveBeenCalledWith(p);
       expect(actual.readClaudeAuth(dir).credentials.claudeAiOauth.refreshToken).toBe('fresh-refresh');
       expect(fetch.mock.calls.map(([url]) => url.split('/').at(-1))).toEqual(['token', 'profile', 'usage']);
+      state.rows[0] = { ...p, authData: actual.readClaudeAuth(dir) };
+      expect(await providerUsage(state.rows[0])).toEqual(usage);
+      expect(providers.claudeUsageAccountMatches).toHaveBeenCalledTimes(1);
+      expect(providers.claudeUsage).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();
       fs.rmSync(dir, { recursive: true, force: true });
@@ -1570,6 +1574,52 @@ describe('expired Claude usage login', () => {
       vi.unstubAllGlobals();
       await flushProviderUsage();
       await restoreProviderUsage({ load: () => null, update: null });
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('retries usage after a temporary refresh lock clears and retains subsequent 429 backoff', async () => {
+    const actual = await vi.importActual('../lib/providers.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'balancer-refresh-lock-'));
+    const authData = {
+      credentials: { claudeAiOauth: { accessToken: 'old', refreshToken: 'refresh', expiresAt: 1 } },
+      settings: { oauthAccount: { accountUuid: 'account-A' } },
+    };
+    state.rows[0] = row(1, { authData });
+    fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify(authData.credentials));
+    fs.writeFileSync(path.join(dir, '.claude.json'), JSON.stringify(authData.settings));
+    const fetch = vi.fn(async (url) => ({
+      ok: url.endsWith('/profile'),
+      status: url.endsWith('/profile') ? 200 : 429,
+      headers: new Headers({ 'retry-after': '3600' }),
+      json: async () => ({ account: { uuid: 'account-A' } }),
+    }));
+    vi.stubGlobal('fetch', fetch);
+    try {
+      state.usage['/claude-1'] = windows(12);
+      await providerUsage(state.rows[0]);
+      fs.mkdirSync(path.join(dir, '.oauth_refresh.lock'));
+      providers.claudeHomeDir.mockReturnValueOnce(dir);
+      providers.readClaudeAuth.mockImplementationOnce(actual.readClaudeAuth);
+      providers.claudeUsage.mockImplementationOnce(actual.claudeUsage);
+      expect(await providerUsage(state.rows[0], { ttlMs: 0 })).toEqual({
+        windows: [],
+        error: 'Claude login is being refreshed. Check usage again shortly.',
+        retryable: true,
+      });
+      fs.rmdirSync(path.join(dir, '.oauth_refresh.lock'));
+      authData.credentials.claudeAiOauth = { accessToken: 'fresh', expiresAt: Date.now() + 3600000 };
+      fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify(authData.credentials));
+      providers.claudeHomeDir.mockReturnValueOnce(dir);
+      providers.readClaudeAuth.mockImplementationOnce(actual.readClaudeAuth);
+      providers.claudeUsageAccountMatches.mockImplementationOnce(actual.claudeUsageAccountMatches);
+      providers.claudeUsage.mockImplementationOnce(actual.claudeUsage);
+      const lockout = await providerUsage(state.rows[0]);
+      expect(lockout.retryAt).toBeDefined();
+      expect(await providerUsage(state.rows[0], { ttlMs: 0 })).toEqual(lockout);
+      expect(fetch.mock.calls.map(([url]) => url.split('/').at(-1))).toEqual(['profile', 'usage']);
+    } finally {
+      vi.unstubAllGlobals();
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
