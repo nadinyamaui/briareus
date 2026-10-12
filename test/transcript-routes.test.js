@@ -5,7 +5,7 @@ import { sessionTranscriptRoutes } from '../lib/transcript-routes.js';
 
 // The transcript routes with lib/jobs.js stubbed (hidden lines are a set here): under test is
 // where the routes apply the hiding and where they do not.
-let server, base, routes, job, log, hidden, bus, clearDevTranscript;
+let server, base, routes, job, log, hidden, bus, clearDevTranscript, presentEvent;
 const ev = (seq, text) => ({ seq, kind: 'text', text });
 
 beforeEach(async () => {
@@ -13,6 +13,7 @@ beforeEach(async () => {
   log = [ev(1, 'old'), ev(2, 'older reply'), ev(3, 'new')];
   hidden = new Set([1, 2]);
   bus = new EventEmitter();
+  presentEvent = vi.fn(async (_job, event) => event);
   clearDevTranscript = vi.fn(async (id) => {
     if (id !== job.id) throw new Error('Session not found');
     if (job.status === 'running') throw new Error('Wait until the session is idle to clear its transcript');
@@ -29,6 +30,7 @@ beforeEach(async () => {
     jobUsageEstimates: async () => new Map(),
     estimateEventCosts: (events) => events,
     bus,
+    presentEvent,
   });
   const app = express();
   app.use(express.json());
@@ -100,6 +102,15 @@ describe('the stream that follows it', () => {
     hidden = new Set([2]);
     const got = frames('abc123/events?since=1', (text) => text.includes('"seq":3'));
     expect(seqs(await got)).toEqual([3]);
+  });
+
+  it('continues replay and live delivery after an event presentation fails', async () => {
+    hidden.clear();
+    presentEvent.mockRejectedValueOnce(new Error('presentation failed'));
+    const got = frames('abc123/events', (text) => text.includes('"seq":4'));
+    await vi.waitFor(() => expect(bus.listenerCount('event')).toBe(1));
+    bus.emit('event', 'abc123', ev(4, 'live'));
+    expect(await got).toEqual([ev(2, 'older reply'), ev(3, 'new'), ev(4, 'live')]);
   });
 });
 

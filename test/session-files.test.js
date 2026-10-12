@@ -324,6 +324,10 @@ describe('local links in the transcript', () => {
       '[See [Report](<URL>)](other.csv)\n\n[ref]: report.csv',
     ],
     ['[See [deep [Report](report.csv)]](other.csv)', '[See [deep [Report](<URL>)]](other.csv)'],
+    [
+      '['.repeat(32) + '[Report](report.csv)' + ']'.repeat(32),
+      '['.repeat(32) + '[Report](<URL>)' + ']'.repeat(32),
+    ],
   ])('publishes only the active inner link in %s', async (text, expected) => {
     await fs.writeFile(path.join(job.workDir, 'report.csv'), 'active report');
     await fs.writeFile(path.join(job.workDir, 'other.csv'), 'unrelated bytes');
@@ -335,6 +339,58 @@ describe('local links in the transcript', () => {
     expect(await downloaded.text()).toBe('active report');
     const snapshots = await fs.readdir(path.join(cfg.testVideosDir, '.session-files'));
     expect(snapshots.filter((name) => !name.startsWith('.'))).toHaveLength(1);
+  });
+
+  it.each([64, 128, 10_000])(
+    'preserves labels nested %i levels without publishing their destinations',
+    async (depth) => {
+      await fs.writeFile(path.join(job.workDir, 'report.csv'), 'private bytes');
+      const text = '['.repeat(depth) + 'x' + ']'.repeat(depth) + '(report.csv)';
+      const event = { seq: 74, kind: 'text', text };
+      expect(await sessionFileEvent(job, event)).toEqual(event);
+      expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+    },
+  );
+
+  it('still publishes ordinary links before and after an over-nested label', async () => {
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'ordinary report');
+    const nested = '['.repeat(128) + '[Report](report.csv)' + ']'.repeat(128) + '(report.csv)';
+    const text = `[Before](report.csv) ${nested} [After](report.csv)`;
+    const rewritten = await sessionFileEvent(job, { seq: 75, kind: 'text', text });
+    const url = rewritten.text.match(/\(<([^>]+)>/)[1];
+    expect(rewritten.text).toBe(`[Before](<${url}>) ${nested} [After](<${url}>)`);
+    expect(await (await fetch(url)).text()).toBe('ordinary report');
+  });
+
+  it('reads and replays deeply nested assistant text without interrupting later events', async () => {
+    log = [
+      { seq: 1, kind: 'text', text: '['.repeat(10_000) + 'x' + ']'.repeat(10_000) },
+      { seq: 2, kind: 'text', text: 'following event' },
+    ];
+    const headers = { authorization: 'Bearer read' };
+    const response = await request('/api/v1/sessions/session1', { headers });
+    expect(response.status).toBe(200);
+    expect((await response.json()).events).toEqual(log);
+    const controller = new AbortController();
+    try {
+      const replay = await request('/api/v1/sessions/session1/events', {
+        headers,
+        signal: controller.signal,
+      });
+      const reader = replay.body.getReader();
+      let frames = '';
+      while (!frames.includes('"seq":2')) {
+        frames += new TextDecoder().decode((await reader.read()).value);
+      }
+      expect(
+        frames
+          .split('\n\n')
+          .filter(Boolean)
+          .map((frame) => JSON.parse(frame.split('\ndata: ')[1])),
+      ).toEqual(log);
+    } finally {
+      controller.abort();
+    }
   });
 
   it.each([
