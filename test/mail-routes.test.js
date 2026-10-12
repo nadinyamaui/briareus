@@ -40,6 +40,7 @@ beforeEach(async () => {
     update: vi.fn(async (id, input) => ({ id, input })),
     remove: vi.fn(async () => {}),
     trashMessage: vi.fn(async () => {}),
+    action: vi.fn(async (id, input) => ({ status: 'accepted', action: input.action })),
     sync: vi.fn(async (id) => ({ id, syncing: true })),
     messages: vi.fn(async (query) => ({ messages: [], nextCursor: null, query })),
     message: vi.fn(async (account, id) => {
@@ -110,6 +111,17 @@ describe('mail through /api/v1', () => {
     expect((await call('/api/mail/accounts/7/messages/m', { method: 'DELETE', token: 'agent' })).status).toBe(
       403,
     );
+  });
+
+  it('replies to an encoded message only through the admin gateway', async () => {
+    const path = `/api/v1/mail/accounts/7/messages/${encodeURIComponent('same/+=')}/reply`;
+    const body = { text: 'Tuesday works' };
+    expect((await call(path, { method: 'POST', body, token: tokens.manage })).status).toBe(403);
+    expect(service.action).not.toHaveBeenCalled();
+    const res = await call(path, { method: 'POST', body });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'accepted', action: 'reply' });
+    expect(service.action).toHaveBeenCalledWith(7, { action: 'reply', id: 'same/+=', text: 'Tuesday works' });
   });
 
   it('returns a mailbox reconnect conflict to an admin client without blocking reads', async () => {

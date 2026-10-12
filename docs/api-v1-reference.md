@@ -1617,6 +1617,18 @@ Move one synced message to the provider trash and remove the synced copy. Needs 
 
 **Returns** `{ ok: boolean }`. Moves only this message, not its thread, to Gmail Trash or Outlook Deleted Items; it does not permanently erase it. URL-encode `id`. Existing read-only connections need reconnecting with access: manage for gmail.modify or Mail.ReadWrite; otherwise 409. 404 for a missing account or cached message. Provider failures keep the synced copy; an uncertain write is not automatically retried.
 
+### `POST /mail/accounts/{account}/messages/{id}/reply`
+
+Send a plain-text reply to one synced message as the mailbox owner. Needs `admin`.
+
+**Body**
+
+| Field               | Type     |                                                       |
+| ------------------- | -------- | ----------------------------------------------------- |
+| `text` **required** | `string` | The reply body, plain text, at most 100000 characters |
+
+**Returns** `{ status: string, action: string }`. Goes to the original’s Reply-To, or its sender, threaded on its Message-ID; `status` is `accepted` once the provider took it. URL-encode `id`. Read-only connections need reconnecting with access: manage; otherwise 403. A 502 means the send may have gone out: sync and check Sent before retrying.
+
 ## Settings
 
 ### `PUT /settings/projects/order`
@@ -3126,6 +3138,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/mail/messages`                                                         | `GET /mail/messages`                                                            |
 | `GET /api/mail/accounts/:account/messages/:id`                                   | `GET /mail/accounts/{account}/messages/{id}`                                    |
 | `DELETE /api/mail/accounts/:account/messages/:id`                                | `DELETE /mail/accounts/{account}/messages/{id}`                                 |
+| `POST /api/mail/accounts/:account/messages/:id/reply`                            | `POST /mail/accounts/{account}/messages/{id}/reply`                             |
 | `GET /videos/*file`                                                              | `GET /videos/{file}`                                                            |
 | `PUT /api/projects/order`                                                        | `PUT /settings/projects/order`                                                  |
 | `GET /api/projects`                                                              | `GET /settings/projects`                                                        |
