@@ -229,7 +229,12 @@ Trash or Outlook Deleted Items. It requires a mailbox connected with
 It does not permanently erase mail. An uncertain provider write is not retried
 automatically.
 
-Sending, replying, marking read/unread, archiving and trashing are also
+`POST /mail/accounts/{account}/messages/{id}/reply` with `{ "text": "…" }`
+sends a plain-text reply to the message's Reply-To (or sender), threaded on
+the original. It also needs `access: manage` (403 otherwise). A 502 means the
+send may have gone out: sync and check Sent before retrying.
+
+Sending new mail, marking read/unread, archiving and trashing are also
 available through guarded tools in opted-in interactive sessions. These
 tools are internal session APIs, separate from the client mail routes.
 See [mailbox setup](../README.md#mail) and [email from a session](email-mcp.md).
