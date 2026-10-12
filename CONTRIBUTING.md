@@ -20,7 +20,7 @@ See [Requirements](README.md#requirements) and [Setup](README.md#setup) in the
 README. The short version:
 
 ```bash
-npm install
+GROK_HOME="$PWD/node_modules/.grok" npm install
 cp .env.example .env                    # then fill in the required half
 npm run create-token -- --label Dev     # sets AUTH_SECRET, prints a token
 npm start                               # http://localhost:4300/api/v1

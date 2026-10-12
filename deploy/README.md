@@ -7,7 +7,7 @@ changes under whoever is using it.
 ```bash
 cd /path/to/briareus
 git pull --ff-only
-npm ci --omit=dev          # only when package-lock.json moved
+GROK_HOME="$PWD/node_modules/.grok" npm ci --omit=dev # only when package-lock.json moved
 sudo systemctl restart briareus.service
 ```
 

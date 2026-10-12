@@ -489,11 +489,16 @@ written idempotently so a database from before then just gets its row in
 ## Setup
 
 ```
-npm install
+GROK_HOME="$PWD/node_modules/.grok" npm install
 cp .env.example .env                       # then fill it in
 npm run create-token -- --label Desktop    # sets AUTH_SECRET and prints an admin token
 npm start                                  # http://localhost:4300/api/v1
 ```
+
+Set `GROK_HOME="$PWD/node_modules/.grok"` for dependency installs and updates,
+including `npm ci`. Grok's npm installer also writes binaries and configuration
+to its home directory; this keeps those writes out of your standalone `~/.grok`
+installation. The bundled executable remains in `node_modules/.bin/grok`.
 
 Then point a client at the server and give it that token: the server has no
 pages of its own, so a client is the only way to start and follow sessions.
