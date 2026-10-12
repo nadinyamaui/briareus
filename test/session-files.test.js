@@ -161,6 +161,49 @@ describe('published session files', () => {
   });
 
   it.each([
+    [' .env', 'env'],
+    [' .r2-url', 'r2-url'],
+    [' . .env ', 'env'],
+    ['\u00a0.\u00a0.env', 'env'],
+    [' . ', 'file'],
+    [' .. ', 'file'],
+    [' report.csv ', 'report.csv'],
+  ])('normalizes %j into a stable downloadable name', async (name, expected) => {
+    const response = await upload('/api/agent/files', 'agent', 'original bytes', name);
+    expect(response.status).toBe(200);
+    const file = await response.json();
+    expect(file.name).toBe(expected);
+    const downloaded = await fetch(file.url);
+    expect(downloaded.status).toBe(200);
+    expect(await downloaded.text()).toBe('original bytes');
+    expect((await publishSessionFile(job, file.name, Buffer.from('original bytes'))).url).toBe(file.url);
+  });
+
+  it('keeps a whitespace-prefixed marker filename separate from R2 completion metadata', async () => {
+    cfg.r2 = {
+      endpoint: 'https://r2.example.com',
+      bucket: 'files',
+      publicBaseUrl: 'https://cdn.example.com',
+      accessKeyId: 'TEST',
+      secretAccessKey: 'TEST_SECRET',
+    };
+    const realFetch = globalThis.fetch;
+    const put = vi.fn(async () => ({ ok: true }));
+    vi.stubGlobal('fetch', (url, options) =>
+      String(url).startsWith(cfg.r2.endpoint) ? put(url, options) : realFetch(url, options),
+    );
+    const remote = await publishSessionFile(job, ' .r2-url', Buffer.from('original bytes'));
+    expect(put).toHaveBeenCalledTimes(1);
+    cfg.r2 = null;
+    vi.unstubAllGlobals();
+    const local = await publishSessionFile(job, ' .r2-url', Buffer.from('original bytes'));
+    const downloaded = await fetch(local.url);
+    expect(downloaded.status).toBe(200);
+    expect(await downloaded.text()).toBe('original bytes');
+    expect(remote.name).toBe('r2-url');
+  });
+
+  it.each([
     ['ordinary.csv', 'ordinary.csv'],
     ["Bob's report.csv", 'Bob%27s%20report.csv'],
     ['report(1).csv', 'report%281%29.csv'],
