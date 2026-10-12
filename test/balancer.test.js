@@ -1624,6 +1624,93 @@ describe('expired Claude usage login', () => {
     }
   });
 
+  it.each(['account-A', 'account-B'])(
+    'validates replacement credentials for %s during token-refresh backoff',
+    async (account) => {
+      const actual = await vi.importActual('../lib/providers.js');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'balancer-changed-backoff-'));
+      const authData = {
+        credentials: {
+          claudeAiOauth: { accessToken: 'old', refreshToken: 'refresh', expiresAt: Date.now() + 3600000 },
+        },
+        settings: { oauthAccount: { accountUuid: 'account-A' } },
+      };
+      const p = row(1, { authData });
+      state.rows[0] = p;
+      const write = (credentials) =>
+        fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify(credentials));
+      write(authData.credentials);
+      fs.writeFileSync(path.join(dir, '.claude.json'), JSON.stringify(authData.settings));
+      const stored = {};
+      await restoreProviderUsage({ load: () => stored, update: (fn) => fn(stored, state.rows[0]) });
+      const fetch = vi.fn(async (url, options) => {
+        if (url.endsWith('/token'))
+          return { ok: false, status: 429, headers: new Headers({ 'retry-after': '3600' }) };
+        return {
+          ok: true,
+          status: 200,
+          json: async () =>
+            url.endsWith('/profile')
+              ? { account: { uuid: options.headers.Authorization === 'Bearer old' ? 'account-A' : account } }
+              : { five_hour: { utilization: 12 } },
+        };
+      });
+      vi.stubGlobal('fetch', fetch);
+      providers.claudeHomeDir.mockReturnValue(dir);
+      providers.readClaudeAuth.mockImplementation(actual.readClaudeAuth);
+      providers.claudeUsageAccountMatches.mockImplementation(actual.claudeUsageAccountMatches);
+      providers.claudeUsage.mockImplementation(actual.claudeUsage);
+      try {
+        const usage = await providerUsage(p);
+        write({ claudeAiOauth: { ...authData.credentials.claudeAiOauth, expiresAt: 1 } });
+        const lockout = await providerUsage(p, { ttlMs: 0 });
+        expect(lockout.windows).toEqual(usage.windows);
+        expect(lockout.retryAt).toBeDefined();
+        write({
+          claudeAiOauth: { accessToken: 'replacement', refreshToken: 'replacement-refresh', expiresAt: 1 },
+        });
+        expect(cachedProviderUsage(p)).toBeUndefined();
+        expect(await providerUsage(p)).toEqual({ ...lockout, windows: [] });
+        expect(await providerUsage(p, { ttlMs: 0 })).toEqual({ ...lockout, windows: [] });
+        expect(cachedProviderUsage(p)).toBeUndefined();
+        await flushProviderUsage();
+        expect(stored[1].retryAt).toBe(lockout.retryAt);
+        expect(fetch.mock.calls.map(([url]) => url.split('/').at(-1))).toEqual(['profile', 'usage', 'token']);
+        write({ claudeAiOauth: { ...authData.credentials.claudeAiOauth, expiresAt: 1 } });
+        expect(await providerUsage(p)).toEqual(lockout);
+        expect(cachedProviderUsage(p)).toEqual(lockout);
+        write({
+          claudeAiOauth: { accessToken: 'replacement', expiresAt: Date.parse(lockout.retryAt) + 3600000 },
+        });
+        expect(await providerUsage(p)).toEqual({ ...lockout, windows: [] });
+        expect(fetch.mock.calls.map(([url]) => url.split('/').at(-1))).toEqual(['profile', 'usage', 'token']);
+        const now = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(lockout.retryAt) + 1);
+        try {
+          expect(await providerUsage(p)).toEqual(account === 'account-A' ? usage : null);
+          expect(cachedProviderUsage(p)).toEqual(account === 'account-A' ? usage : undefined);
+          expect(fetch.mock.calls.map(([url]) => url.split('/').at(-1))).toEqual(
+            account === 'account-A'
+              ? ['profile', 'usage', 'token', 'profile', 'usage']
+              : ['profile', 'usage', 'token', 'profile'],
+          );
+        } finally {
+          now.mockRestore();
+        }
+      } finally {
+        vi.unstubAllGlobals();
+        providers.claudeHomeDir.mockImplementation((p) => `/claude-${p.id}`);
+        providers.readClaudeAuth.mockImplementation(
+          (dir) => state.rows.find((p) => `/claude-${p.id}` === dir)?.authData ?? null,
+        );
+        providers.claudeUsageAccountMatches.mockImplementation(async () => true);
+        providers.claudeUsage.mockImplementation(async (dir) => state.usage[dir] ?? null);
+        await flushProviderUsage();
+        await restoreProviderUsage({ load: () => null, update: null });
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.each(['credential-only', 'profile', 'usage'])(
     'respects token-refresh backoff during %s checks, including after restart',
     async (stage) => {
@@ -1679,7 +1766,9 @@ describe('expired Claude usage login', () => {
         vi.resetModules();
         const restarted = await import('../lib/balancer.js');
         await restarted.restoreProviderUsage({ load: () => stored, update: null });
-        expect(await restarted.providerUsage(p, { ttlMs: 0 })).toEqual(expected);
+        // A restart loses token verification, so retain the deadline but hide quota until validation.
+        expect(await restarted.providerUsage(p, { ttlMs: 0 })).toEqual({ ...expected, windows: [] });
+        if (stage === 'usage') expect(restarted.cachedProviderUsage(p)).toBeUndefined();
         expect(fetch.mock.calls.map(([url]) => url.split('/').at(-1))).toEqual(['token']);
         now.mockReturnValue(1791810000001);
         fetch.mockImplementationOnce(async () => ({
