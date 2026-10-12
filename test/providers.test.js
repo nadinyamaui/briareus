@@ -12,6 +12,8 @@ import {
   parseContextReport,
   contextWindowFor,
   claudeUsage,
+  claudeUsageAccountMatches,
+  readClaudeAuth,
   codexUsage,
   retryAfterAt,
   grokUsage,
@@ -1681,6 +1683,249 @@ describe('claudeUsage', () => {
         headers: { Authorization: 'Bearer access-token', 'anthropic-beta': 'oauth-2025-04-20' },
       }),
     );
+  });
+});
+
+describe('Claude usage token refresh', () => {
+  let dir;
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    dir = null;
+  });
+
+  function login(overrides = {}) {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-usage-refresh-'));
+    const credentials = {
+      otherLogin: { keep: true },
+      claudeAiOauth: {
+        accessToken: 'expired-access',
+        refreshToken: 'old-refresh',
+        expiresAt: 1,
+        subscriptionType: 'team',
+        scopes: ['user:profile'],
+        ...overrides,
+      },
+    };
+    fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify(credentials));
+    fs.writeFileSync(
+      path.join(dir, '.claude.json'),
+      JSON.stringify({
+        oauthAccount: { accountUuid: 'account-A', organizationUuid: 'org-A' },
+        hasCompletedOnboarding: true,
+      }),
+    );
+    return readClaudeAuth(dir);
+  }
+
+  function upstream(onRefresh = () => {}) {
+    const fetch = vi.fn(async (url, options) => {
+      if (url.endsWith('/oauth/token')) {
+        await onRefresh();
+        return {
+          ok: true,
+          json: async () => ({
+            access_token: 'fresh-access',
+            refresh_token: 'fresh-refresh',
+            expires_in: 3600,
+          }),
+        };
+      }
+      expect(options.headers.Authorization).toBe('Bearer fresh-access');
+      return {
+        ok: true,
+        status: 200,
+        json: async () =>
+          url.endsWith('/profile')
+            ? { account: { uuid: 'account-A' }, organization: { uuid: 'org-A' } }
+            : { five_hour: { utilization: 12 }, seven_day: { utilization: 35 } },
+      };
+    });
+    vi.stubGlobal('fetch', fetch);
+    return fetch;
+  }
+
+  const expectedUsage = {
+    windows: [
+      { label: 'Session (5h window)', short: '5h', usedPct: 12, resetsAt: null },
+      { label: 'Week (7-day window)', short: 'wk', usedPct: 35, resetsAt: null },
+    ],
+  };
+
+  it('refreshes an expired login before profile verification and preserves account metadata on disk', async () => {
+    const snapshot = login();
+    const fetch = upstream();
+    expect(await claudeUsageAccountMatches(snapshot, dir)).toBe(true);
+    expect(await claudeUsage(dir, snapshot)).toEqual(expectedUsage);
+    const saved = readClaudeAuth(dir);
+    expect(saved.credentials).toEqual({
+      otherLogin: { keep: true },
+      claudeAiOauth: {
+        accessToken: 'fresh-access',
+        refreshToken: 'fresh-refresh',
+        expiresAt: expect.any(Number),
+        subscriptionType: 'team',
+        scopes: ['user:profile'],
+      },
+    });
+    expect(saved.settings).toEqual(snapshot.settings);
+    expect(saved.credentials.claudeAiOauth.expiresAt).toBeGreaterThan(Date.now());
+    expect(fs.statSync(path.join(dir, '.credentials.json')).mode & 0o777).toBe(0o600);
+    expect(fs.readdirSync(dir).sort()).toEqual(['.claude.json', '.credentials.json']);
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
+      grant_type: 'refresh_token',
+      refresh_token: 'old-refresh',
+      client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
+    });
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      'https://console.anthropic.com/v1/oauth/token',
+      'https://api.anthropic.com/api/oauth/profile',
+      'https://api.anthropic.com/api/oauth/usage',
+    ]);
+  });
+
+  it('shares a token rotation between concurrent profile and usage requests', async () => {
+    const snapshot = login();
+    const fetch = upstream();
+    const [matches, usage] = await Promise.all([
+      claudeUsageAccountMatches(snapshot, dir),
+      claudeUsage(dir, structuredClone(snapshot)),
+    ]);
+    expect(matches).toBe(true);
+    expect(usage).toEqual(expectedUsage);
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith('/oauth/token'))).toHaveLength(1);
+  });
+
+  it('refreshes and retries once after an early 401', async () => {
+    login({ expiresAt: Date.now() + 3600000 });
+    const fetch = upstream();
+    fetch.mockImplementationOnce(async () => ({ ok: false, status: 401 }));
+    expect(await claudeUsage(dir)).toEqual(expectedUsage);
+    expect(fetch.mock.calls.map(([url]) => url.split('/').at(-1))).toEqual(['usage', 'token', 'usage']);
+  });
+
+  it('stops after one refresh if the replacement token is also refused', async () => {
+    login({ expiresAt: Date.now() + 3600000 });
+    const fetch = upstream();
+    fetch.mockImplementationOnce(async () => ({ ok: false, status: 401 }));
+    fetch.mockImplementationOnce(async () => ({
+      ok: true,
+      json: async () => ({
+        access_token: 'fresh-access',
+        expires_in: 3600,
+      }),
+    }));
+    fetch.mockImplementationOnce(async () => ({ ok: false, status: 401 }));
+    expect(await claudeUsage(dir)).toEqual({ windows: [], error: 'Claude usage check failed (HTTP 401).' });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(readClaudeAuth(dir).credentials.claudeAiOauth.refreshToken).toBe('old-refresh');
+  });
+
+  it.each([400, 500])('keeps credentials when refresh fails with HTTP %s', async (status) => {
+    const before = login();
+    const fetch = upstream();
+    fetch.mockImplementationOnce(async () => ({ ok: false, status }));
+    expect(await claudeUsage(dir)).toEqual({
+      windows: [],
+      error: 'Claude login could not be refreshed. Sign in again to check usage.',
+      ...(status >= 500 ? { retryable: true } : {}),
+    });
+    expect(readClaudeAuth(dir)).toEqual(before);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(path.join(dir, '.oauth_refresh.lock'))).toBe(false);
+  });
+
+  it('allows retry after a temporary token refresh network failure', async () => {
+    const before = login();
+    const fetch = upstream();
+    fetch.mockRejectedValueOnce(new TypeError('fetch failed'));
+    expect(await claudeUsage(dir)).toEqual({
+      windows: [],
+      error: 'Claude usage check failed. Check usage again.',
+      retryable: true,
+    });
+    expect(readClaudeAuth(dir)).toEqual(before);
+    expect(await claudeUsage(dir)).toEqual(expectedUsage);
+    expect(fs.existsSync(path.join(dir, '.oauth_refresh.lock'))).toBe(false);
+  });
+
+  it('gives a sign-in instruction when an expired login has no refresh token', async () => {
+    login({ refreshToken: null });
+    const fetch = upstream();
+    expect(await claudeUsage(dir)).toEqual({
+      windows: [],
+      error: 'Claude login expired. Sign in again to check usage.',
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('does not rotate credentials while Claude Code holds the refresh lock', async () => {
+    const before = login();
+    fs.mkdirSync(path.join(dir, '.oauth_refresh.lock'));
+    const fetch = upstream();
+    expect(await claudeUsage(dir)).toEqual({
+      windows: [],
+      error: 'Claude login is being refreshed. Check usage again shortly.',
+      retryable: true,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(readClaudeAuth(dir)).toEqual(before);
+    expect(fs.existsSync(path.join(dir, '.oauth_refresh.lock'))).toBe(true);
+  });
+
+  it('recovers a refresh lock left behind by a crashed process', async () => {
+    login();
+    const lock = path.join(dir, '.oauth_refresh.lock');
+    fs.mkdirSync(lock);
+    const stale = new Date(Date.now() - 120000);
+    fs.utimesSync(lock, stale, stale);
+    upstream();
+    expect(await claudeUsage(dir)).toEqual(expectedUsage);
+    expect(fs.existsSync(lock)).toBe(false);
+  });
+
+  it('does not overwrite a new login that arrives while refresh is in flight', async () => {
+    login();
+    const replacement = { claudeAiOauth: { accessToken: 'account-B', refreshToken: 'refresh-B' } };
+    const fetch = upstream(() => {
+      fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify(replacement));
+    });
+    expect(await claudeUsage(dir)).toEqual({
+      windows: [],
+      error: 'Claude login changed. Check usage again.',
+      retryable: true,
+    });
+    expect(readClaudeAuth(dir).credentials).toEqual(replacement);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps invalid refresh JSON non-retryable without replacing the login', async () => {
+    const before = login();
+    const fetch = upstream();
+    fetch.mockResolvedValueOnce(new Response('invalid JSON'));
+    expect(await claudeUsage(dir)).toEqual({
+      windows: [],
+      error: 'Claude usage check failed. Check usage again.',
+    });
+    expect(readClaudeAuth(dir)).toEqual(before);
+    expect(fs.existsSync(path.join(dir, '.oauth_refresh.lock'))).toBe(false);
+  });
+
+  it('rejects malformed refresh responses without replacing the login', async () => {
+    const before = login();
+    const fetch = upstream();
+    fetch.mockImplementationOnce(async () => ({
+      ok: true,
+      json: async () => ({
+        access_token: 'fresh-access',
+        expires_in: -1,
+      }),
+    }));
+    expect(await claudeUsage(dir)).toEqual({
+      windows: [],
+      error: 'Claude returned invalid login credentials. Check usage again.',
+    });
+    expect(readClaudeAuth(dir)).toEqual(before);
   });
 });
 
