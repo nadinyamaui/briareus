@@ -1624,6 +1624,88 @@ describe('expired Claude usage login', () => {
     }
   });
 
+  it.each(['credential-only', 'profile', 'usage'])(
+    'respects token-refresh backoff during %s checks, including after restart',
+    async (stage) => {
+      const actual = await vi.importActual('../lib/providers.js');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'balancer-token-backoff-'));
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1791806400000);
+      const authData = {
+        credentials: {
+          claudeAiOauth: { accessToken: 'old', refreshToken: 'refresh', expiresAt: 1 },
+        },
+        settings: stage === 'credential-only' ? null : { oauthAccount: { accountUuid: 'account-A' } },
+      };
+      const p = row(1, { authData });
+      state.rows[0] = p;
+      fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify(authData.credentials));
+      if (authData.settings)
+        fs.writeFileSync(path.join(dir, '.claude.json'), JSON.stringify(authData.settings));
+      const stored = {};
+      await restoreProviderUsage({ load: () => stored, update: (fn) => fn(stored, state.rows[0]) });
+      const fetch = vi.fn(async (url) => {
+        if (url.endsWith('/token'))
+          return { ok: false, status: 429, headers: new Headers({ 'retry-after': '3600' }) };
+        return {
+          ok: true,
+          status: 200,
+          json: async () =>
+            url.endsWith('/profile')
+              ? { account: { uuid: 'account-A' } }
+              : { five_hour: { utilization: 12 } },
+        };
+      });
+      vi.stubGlobal('fetch', fetch);
+      try {
+        if (stage === 'usage') {
+          state.usage['/claude-1'] = windows(12);
+          await providerUsage(p);
+        }
+        providers.claudeHomeDir.mockReturnValue(dir);
+        providers.readClaudeAuth.mockImplementation(actual.readClaudeAuth);
+        providers.claudeUsageAccountMatches.mockImplementation(actual.claudeUsageAccountMatches);
+        providers.claudeUsage.mockImplementation(actual.claudeUsage);
+        const expected = {
+          windows: [],
+          error: 'Claude login could not be refreshed. Sign in again to check usage.',
+          retryable: true,
+          retryAt: '2026-10-12T13:00:00.000Z',
+          ...(stage === 'usage' ? { windows: [{ usedPct: 12, short: '5h' }], stale: true } : {}),
+        };
+        expect(await providerUsage(p, { ttlMs: 0 })).toEqual(expected);
+        expect(await providerUsage(p)).toEqual(expected);
+        expect(await providerUsage(p, { ttlMs: 0 })).toEqual(expected);
+        await flushProviderUsage();
+        vi.resetModules();
+        const restarted = await import('../lib/balancer.js');
+        await restarted.restoreProviderUsage({ load: () => stored, update: null });
+        expect(await restarted.providerUsage(p, { ttlMs: 0 })).toEqual(expected);
+        expect(fetch.mock.calls.map(([url]) => url.split('/').at(-1))).toEqual(['token']);
+        now.mockReturnValue(1791810000001);
+        fetch.mockImplementationOnce(async () => ({
+          ok: true,
+          json: async () => ({ access_token: 'fresh', expires_in: 3600 }),
+        }));
+        expect(await providerUsage(p)).toEqual({
+          windows: [{ label: 'Session (5h window)', short: '5h', usedPct: 12, resetsAt: null }],
+        });
+        expect(fetch.mock.calls.filter(([url]) => url.endsWith('/token'))).toHaveLength(2);
+      } finally {
+        now.mockRestore();
+        vi.unstubAllGlobals();
+        providers.claudeHomeDir.mockImplementation((p) => `/claude-${p.id}`);
+        providers.readClaudeAuth.mockImplementation(
+          (dir) => state.rows.find((p) => `/claude-${p.id}` === dir)?.authData ?? null,
+        );
+        providers.claudeUsageAccountMatches.mockImplementation(async () => true);
+        providers.claudeUsage.mockImplementation(async (dir) => state.usage[dir] ?? null);
+        await flushProviderUsage();
+        await restoreProviderUsage({ load: () => null, update: null });
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('shows a refresh failure and allows an immediate retry', async () => {
     const p = row(1, {
       authData: {
