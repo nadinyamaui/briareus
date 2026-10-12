@@ -24,7 +24,7 @@ jobs:
           # CI cannot drift from what the machine actually runs.
           node-version-file: .nvmrc
           cache: npm
-      - run: npm ci --no-audit
+      - run: GROK_HOME="$PWD/node_modules/.grok" npm ci --no-audit
       - run: npm run format:check
       - run: npm run lint
       - run: npm run typecheck

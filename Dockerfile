@@ -26,7 +26,7 @@ WORKDIR /app
 
 # The lockfile alone first, so a source edit does not re-run the install.
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --no-audit && npm cache clean --force
+RUN GROK_HOME=/app/node_modules/.grok npm ci --omit=dev --no-audit && npm cache clean --force
 
 # The Claude Code, codex, grok and opencode CLIs are dependencies of this app, so the
 # image already has them. Put them where the binary discovery in lib/config.js
@@ -35,7 +35,8 @@ RUN npm ci --omit=dev --no-audit && npm cache clean --force
 RUN ln -sf /app/node_modules/.bin/claude /usr/local/bin/claude \
     && ln -sf /app/node_modules/.bin/codex /usr/local/bin/codex \
     && ln -sf /app/node_modules/.bin/grok /usr/local/bin/grok \
-    && ln -sf /app/node_modules/.bin/opencode /usr/local/bin/opencode
+    && ln -sf /app/node_modules/.bin/opencode /usr/local/bin/opencode \
+    && grok --version
 
 COPY . .
 COPY docker/entrypoint.sh /usr/local/bin/reviewer-entrypoint
