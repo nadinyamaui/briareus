@@ -222,6 +222,154 @@ describe('published session files', () => {
 });
 
 describe('local links in the transcript', () => {
+  it.each([0, 2, 4])(
+    'shares an R2 failure budget across a transcript read after %i successes',
+    async (successes) => {
+      cfg.r2 = {
+        endpoint: 'https://r2.example.com',
+        bucket: 'files',
+        publicBaseUrl: 'https://cdn.example.com',
+        accessKeyId: 'TEST',
+        secretAccessKey: 'TEST_SECRET',
+      };
+      for (let i = 0; i < 4; i++) {
+        await fs.writeFile(path.join(job.workDir, `${i}.csv`), `report ${i}`);
+        log.push({ seq: i + 1, kind: 'text', text: `[Report ${i}](${i}.csv)` });
+      }
+      const started = Promise.withResolvers();
+      const release = Promise.withResolvers();
+      const realFetch = globalThis.fetch;
+      let attempts = 0;
+      const put = vi.fn(async () => {
+        if (attempts++ < successes) return { ok: true };
+        started.resolve();
+        await release.promise;
+        throw new Error('R2 unavailable');
+      });
+      vi.stubGlobal('fetch', (url, options) =>
+        String(url).startsWith(cfg.r2.endpoint) ? put(url, options) : realFetch(url, options),
+      );
+      let delivered = false;
+      const reading = request('/api/v1/sessions/session1', {
+        headers: { authorization: 'Bearer read' },
+      }).then(async (response) => {
+        const body = await response.json();
+        delivered = true;
+        return body;
+      });
+      if (successes < 4) {
+        await started.promise;
+        expect(delivered).toBe(false);
+        release.resolve();
+      }
+      const body = await reading;
+      expect(body.events.map((event) => event.seq)).toEqual([1, 2, 3, 4]);
+      expect(put).toHaveBeenCalledTimes(Math.min(successes + 1, 4));
+      const urls = body.events.map((event) => event.text.match(/\(<([^>]+)>/)[1]);
+      expect(urls.filter((url) => url.startsWith(cfg.r2.publicBaseUrl))).toHaveLength(successes);
+      for (let i = successes; i < 4; i++) {
+        const downloaded = await fetch(urls[i]);
+        expect(downloaded.status).toBe(200);
+        expect(await downloaded.text()).toBe(`report ${i}`);
+      }
+      await fs.writeFile(path.join(job.workDir, 'later.csv'), 'later report');
+      log.push({ seq: 5, kind: 'text', text: '[Later](later.csv)' });
+      put.mockResolvedValue({ ok: true });
+      const later = await (
+        await request('/api/v1/sessions/session1', {
+          headers: { authorization: 'Bearer read' },
+        })
+      ).json();
+      expect(put).toHaveBeenCalledTimes(Math.min(successes + 1, 4) + 1);
+      expect(later.events[4].text).toContain('https://cdn.example.com/session-files/');
+    },
+  );
+
+  it('shares an R2 failure budget for repeated files across transcript events', async () => {
+    cfg.r2 = {
+      endpoint: 'https://r2.example.com',
+      bucket: 'files',
+      publicBaseUrl: 'https://cdn.example.com',
+      accessKeyId: 'TEST',
+      secretAccessKey: 'TEST_SECRET',
+    };
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'same report');
+    log = [1, 2, 3].map((seq) => ({ seq, kind: 'text', text: '[Report](report.csv)' }));
+    const realFetch = globalThis.fetch;
+    const put = vi.fn(async () => {
+      throw new Error('R2 unavailable');
+    });
+    vi.stubGlobal('fetch', (url, options) =>
+      String(url).startsWith(cfg.r2.endpoint) ? put(url, options) : realFetch(url, options),
+    );
+    const body = await (
+      await request('/api/v1/sessions/session1', {
+        headers: { authorization: 'Bearer read' },
+      })
+    ).json();
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(body.events).toHaveLength(3);
+    for (const event of body.events) {
+      const downloaded = await fetch(event.text.match(/\(<([^>]+)>/)[1]);
+      expect(downloaded.status).toBe(200);
+      expect(await downloaded.text()).toBe('same report');
+    }
+  });
+
+  it.each([
+    ['[See [Report](report.csv)]', '[See [Report](<URL>)]'],
+    ['[See [Report](report.csv)](other.csv)', '[See [Report](<URL>)](other.csv)'],
+    [
+      '[See [Report][ref]](other.csv)\n\n[ref]: report.csv',
+      '[See [Report](<URL>)](other.csv)\n\n[ref]: report.csv',
+    ],
+    ['[See [deep [Report](report.csv)]](other.csv)', '[See [deep [Report](<URL>)]](other.csv)'],
+  ])('publishes only the active inner link in %s', async (text, expected) => {
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'active report');
+    await fs.writeFile(path.join(job.workDir, 'other.csv'), 'unrelated bytes');
+    const rewritten = await sessionFileEvent(job, { seq: 70, kind: 'text', text });
+    const url = rewritten.text.match(/\(<([^>]+)>/)[1];
+    expect(rewritten.text).toBe(expected.replace('URL', url));
+    const downloaded = await fetch(url);
+    expect(downloaded.status).toBe(200);
+    expect(await downloaded.text()).toBe('active report');
+    const snapshots = await fs.readdir(path.join(cfg.testVideosDir, '.session-files'));
+    expect(snapshots.filter((name) => !name.startsWith('.'))).toHaveLength(1);
+  });
+
+  it.each([
+    '[See `[Report](other.csv)`](report.csv)',
+    '[See \\[Report\\](other.csv)](report.csv)',
+    '[See ![Preview](other.csv)](report.csv)',
+  ])('keeps the outer link active when its inner brackets are not links in %s', async (text) => {
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'outer report');
+    await fs.writeFile(path.join(job.workDir, 'other.csv'), 'inner bytes');
+    const rewritten = await sessionFileEvent(job, { seq: 73, kind: 'text', text });
+    const url = rewritten.text.match(/\(<([^>]+)>/)[1];
+    expect(rewritten.text).toBe(text.slice(0, text.lastIndexOf('](')) + `](<${url}>)`);
+    const downloaded = await fetch(url);
+    expect(downloaded.status).toBe(200);
+    expect(await downloaded.text()).toBe('outer report');
+  });
+
+  it('does not publish an outer destination enclosing an active external link', async () => {
+    await fs.writeFile(path.join(job.workDir, 'other.csv'), 'unrelated bytes');
+    const event = { seq: 71, kind: 'text', text: '[See [Report](https://example.com)](other.csv)' };
+    expect(await sessionFileEvent(job, event)).toEqual(event);
+    expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+  });
+
+  it.each(['//', '&#47;&#47;'])('does not publish a network-path URL starting with %s', async (prefix) => {
+    await fs.writeFile(path.join(job.workDir, 'report.csv'), 'private bytes');
+    const event = {
+      seq: 72,
+      kind: 'text',
+      text: `[Report](${prefix}${path.join(job.workDir, 'report.csv').slice(1)})`,
+    };
+    expect(await sessionFileEvent(job, event)).toEqual(event);
+    expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+  });
+
   it.each([0, 2, 10])(
     'stops R2 attempts after failure following %i successful uploads',
     async (successes) => {
