@@ -1899,6 +1899,18 @@ describe('Claude usage token refresh', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps invalid refresh JSON non-retryable without replacing the login', async () => {
+    const before = login();
+    const fetch = upstream();
+    fetch.mockResolvedValueOnce(new Response('invalid JSON'));
+    expect(await claudeUsage(dir)).toEqual({
+      windows: [],
+      error: 'Claude usage check failed. Check usage again.',
+    });
+    expect(readClaudeAuth(dir)).toEqual(before);
+    expect(fs.existsSync(path.join(dir, '.oauth_refresh.lock'))).toBe(false);
+  });
+
   it('rejects malformed refresh responses without replacing the login', async () => {
     const before = login();
     const fetch = upstream();

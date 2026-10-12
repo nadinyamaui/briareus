@@ -1706,6 +1706,70 @@ describe('expired Claude usage login', () => {
     },
   );
 
+  it.each([
+    ['disconnect', undefined],
+    ['disconnect', FRESH_USAGE_TTL_MS],
+    ['timeout', undefined],
+    ['timeout', FRESH_USAGE_TTL_MS],
+  ])('retries a refresh body %s immediately with TTL %s', async (failure, ttlMs) => {
+    const actual = await vi.importActual('../lib/providers.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'balancer-refresh-body-'));
+    const authData = {
+      credentials: {
+        claudeAiOauth: { accessToken: 'old', refreshToken: 'refresh', expiresAt: 1 },
+      },
+      settings: null,
+    };
+    const p = row(1, { authData });
+    state.rows[0] = p;
+    fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify(authData.credentials));
+    const fetch = vi.fn(async (url) =>
+      Response.json(
+        url.endsWith('/token')
+          ? { access_token: 'fresh', expires_in: 3600 }
+          : { five_hour: { utilization: 12 } },
+      ),
+    );
+    fetch.mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(
+              failure === 'disconnect'
+                ? new TypeError('terminated')
+                : new DOMException('The operation timed out', 'TimeoutError'),
+            );
+          },
+        }),
+      ),
+    );
+    vi.stubGlobal('fetch', fetch);
+    try {
+      providers.claudeHomeDir.mockReturnValue(dir);
+      providers.readClaudeAuth.mockImplementation(actual.readClaudeAuth);
+      providers.claudeUsage.mockImplementation(actual.claudeUsage);
+      expect(await providerUsage(p)).toEqual({
+        windows: [],
+        error: 'Claude usage check failed. Check usage again.',
+        retryable: true,
+      });
+      expect(actual.readClaudeAuth(dir)).toEqual(authData);
+      expect(fs.existsSync(path.join(dir, '.oauth_refresh.lock'))).toBe(false);
+      expect(await providerUsage(p, { ttlMs })).toEqual({
+        windows: [{ label: 'Session (5h window)', short: '5h', usedPct: 12, resetsAt: null }],
+      });
+      expect(fetch.mock.calls.map(([url]) => url.split('/').at(-1))).toEqual(['token', 'token', 'usage']);
+    } finally {
+      vi.unstubAllGlobals();
+      providers.claudeHomeDir.mockImplementation((p) => `/claude-${p.id}`);
+      providers.readClaudeAuth.mockImplementation(
+        (dir) => state.rows.find((p) => `/claude-${p.id}` === dir)?.authData ?? null,
+      );
+      providers.claudeUsage.mockImplementation(async (dir) => state.usage[dir] ?? null);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('shows a refresh failure and allows an immediate retry', async () => {
     const p = row(1, {
       authData: {
