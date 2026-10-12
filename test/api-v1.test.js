@@ -17,10 +17,11 @@ const jobs = {
   review: { id: 'review', repo, kind: 'review' },
 };
 
-let auth, server, url, clock, apiOn, bus, sessions, project, handler, tokens, previewAccess;
+let auth, server, url, clock, apiOn, bus, sessions, project, handler, tokens, previewAccess, presentEvent;
 beforeEach(async () => {
   let saved = [];
   previewAccess = null;
+  presentEvent = async (_job, event) => event;
   clock = Date.now();
   apiOn = true;
   auth = createMobileAuth({
@@ -78,6 +79,7 @@ beforeEach(async () => {
       getProject: (name) => (name === repo ? project : null),
       listSessions: () => sessions,
       bus,
+      presentEvent: (job, event) => presentEvent(job, event),
       reviewerRuntime: (p) =>
         p.reviewProviderId
           ? { providerId: p.reviewProviderId, model: p.reviewModel, effort: p.reviewEffort }
@@ -99,9 +101,10 @@ afterEach(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
-function request(route, { token = tokens.manage, method = 'GET', body, headers = {} } = {}) {
+function request(route, { token = tokens.manage, method = 'GET', body, headers = {}, signal } = {}) {
   return fetch(`${url}${prefix}${route}`, {
     method,
+    signal,
     headers: {
       ...(body === undefined || Buffer.isBuffer(body) ? {} : { 'Content-Type': 'application/json' }),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -566,9 +569,82 @@ describe('the event streams', () => {
     expect(events).toEqual([
       { event: 'session', data: sessions[0] },
       { event: 'session', data: { id: 'mine', repo, kind: 'devchat', status: 'running' } },
-      { event: 'transcript', data: { sessionId: 'mine', event: { seq: 9, kind: 'text' } } },
       { event: 'session.deleted', data: { id: 'mine' } },
+      { event: 'transcript', data: { sessionId: 'mine', event: { seq: 9, kind: 'text' } } },
     ]);
+  });
+
+  it('sends state and deletion updates during a stalled publication, then delivers transcripts in order', async () => {
+    let release;
+    const stalled = new Promise((resolve) => {
+      release = resolve;
+    });
+    presentEvent = vi.fn(async (_job, event) => {
+      if (event.seq === 1) await stalled;
+      return event;
+    });
+    const controller = new AbortController();
+    try {
+      const response = await request('/events?transcripts=1', { signal: controller.signal });
+      const reader = response.body.getReader();
+      await reader.read();
+      bus.emit('event', 'mine', { seq: 1, kind: 'text' });
+      bus.emit('event', 'mine', { seq: 2, kind: 'text' });
+      await vi.waitFor(() => expect(presentEvent).toHaveBeenCalledTimes(1));
+      bus.emit('job', { id: 'second', repo, kind: 'devchat', status: 'completed' });
+      bus.emit('deleted', 'second', repo);
+      let text = '';
+      const decoder = new TextDecoder();
+      const receive = async () => {
+        text += decoder.decode((await reader.read()).value);
+      };
+      while (!text.includes('event: session.deleted')) await receive();
+      expect(text).toContain('"status":"completed"');
+      expect(text).toContain('event: session.deleted\ndata: {"id":"second"}');
+      expect(text).not.toContain('event: transcript');
+      release();
+      while (!text.includes('"seq":2')) await receive();
+      expect(text.indexOf('"seq":1')).toBeLessThan(text.indexOf('"seq":2'));
+    } finally {
+      release();
+      controller.abort();
+    }
+  });
+
+  it('delivers another session transcript while preserving the stalled session order', async () => {
+    let release;
+    const stalled = new Promise((resolve) => {
+      release = resolve;
+    });
+    presentEvent = async (job, event) => {
+      if (job.id === 'mine' && event.seq === 1) await stalled;
+      return event;
+    };
+    const controller = new AbortController();
+    try {
+      const response = await request('/events?transcripts=1', {
+        token: tokens.admin,
+        signal: controller.signal,
+      });
+      const reader = response.body.getReader();
+      await reader.read();
+      bus.emit('event', 'mine', { seq: 1, kind: 'text', text: 'first' });
+      bus.emit('event', 'mine', { seq: 2, kind: 'text', text: 'second' });
+      bus.emit('event', 'foreign', { seq: 3, kind: 'text', text: 'unrelated' });
+      let text = '';
+      const receive = async () => {
+        text += new TextDecoder().decode((await reader.read()).value);
+      };
+      while (!text.includes('unrelated')) await receive();
+      expect(text).toContain('"sessionId":"foreign"');
+      expect(text).not.toContain('"sessionId":"mine"');
+      release();
+      while (!text.includes('second')) await receive();
+      expect(text.indexOf('first')).toBeLessThan(text.indexOf('second'));
+    } finally {
+      release();
+      controller.abort();
+    }
   });
 
   it('leaves transcript lines out unless asked, and shows an admin token every project', async () => {

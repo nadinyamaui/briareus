@@ -509,6 +509,20 @@ Start a session; starts a paid agent. Needs `manage`, held to `repo`.
 
 **Returns** 201 `{ session: Session }`. A plain session needs `prompt` or `attachments`; a `review` or `qa` needs `branch`.
 
+### `POST /sessions/{id}/files`
+
+Publish a downloadable session file from raw bytes. Needs `manage`, held to the session’s project.
+
+**Query**
+
+| Field  | Type     |                 |
+| ------ | -------- | --------------- |
+| `name` | `string` | The file’s name |
+
+**Body**: the raw bytes, up to 25 MiB, with any content type other than JSON.
+
+**Returns** `{ name: string, size: integer, url: string }`. Maximum 25 MiB; the URL grants download access to anyone holding it without an API token. Files are stored independently of the session workspace and uploaded to R2 when configured, with a local download fallback.
+
 ### `GET /sessions/{id}`
 
 Read a session and its transcript. Needs `read`, held to the session’s project.
@@ -3032,6 +3046,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/repo/archive`                                                          | `GET /repo/archive`                                                             |
 | `GET /api/dev/sessions`                                                          | `GET /sessions`                                                                 |
 | `POST /api/dev/sessions`                                                         | `POST /sessions`                                                                |
+| `POST /api/dev/sessions/:id/files`                                               | `POST /sessions/{id}/files`                                                     |
 | `GET /api/dev/sessions/:id`                                                      | `GET /sessions/{id}`                                                            |
 | `GET /api/dev/sessions/:id/events`                                               | `GET /sessions/{id}/events`                                                     |
 | `PATCH /api/dev/sessions/:id`                                                    | `PATCH /sessions/{id}`                                                          |

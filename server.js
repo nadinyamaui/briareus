@@ -212,6 +212,7 @@ import { boardInScope, moveBoardItem, projectBoard } from './lib/projectboard.js
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload, getUpload } from './lib/uploads.js';
+import { sessionFileEvent, sessionFileRoutes, sessionFileDownloads } from './lib/session-files.js';
 import { transcribe, transcribeAvailable } from './lib/transcribe.js';
 import { previewAccess } from './lib/tunnel.js';
 import { projectUsage, overallUsage, jobUsageEstimates, estimateEventCosts } from './lib/usage.js';
@@ -244,6 +245,7 @@ const api = express.Router();
 // On every response, including the webhooks': nothing here is a page, and the
 // headers say so (lib/security.js).
 app.use(securityHeaders);
+app.use(sessionFileDownloads());
 
 // Slack inbox and session replies (lib/slack.js): created here because its events route
 // is a webhook, and webhooks come before everything else.
@@ -287,6 +289,7 @@ app.use(
     stepRuntime,
     transcribeAvailable,
     previewAccess,
+    presentEvent: sessionFileEvent,
   }),
 );
 app.use(express.json({ limit: '1mb' }));
@@ -565,6 +568,7 @@ function agentSession(req, res) {
 }
 
 const sshService = createSshService({ getJob });
+api.use(sessionFileRoutes({ agentSession, getJob }));
 api.use(sshRoutes({ service: sshService, agentSession, getProject }));
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
 api.use(homeAssistantRoutes({ service: createHomeAssistantService() }));
@@ -1796,6 +1800,7 @@ api.post('/api/dev/sessions', (req, res) => {
 // The transcript a page opens with, the stream that follows it, and ✕ Clear
 // (lib/transcript-routes.js).
 const transcript = sessionTranscriptRoutes({
+  presentEvent: sessionFileEvent,
   getJob,
   publicJob,
   jobEventsFor,

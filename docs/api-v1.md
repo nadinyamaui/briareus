@@ -377,6 +377,36 @@ and hand back with a message.
 The session record's `browser` is `null` while it is off and `{ "running" }`
 while it is on, so a client knows when to offer the view without asking.
 
+## Download files delivered in chat
+
+Assistant Markdown links to existing files inside the session workspace become
+HTTPS download links in transcript reads and both event streams. The server
+keeps a snapshot outside the workspace pool, including the rewritten transcript
+link, so reopening the chat does not require the original file. Hidden files,
+`node_modules`, `vendor`, paths outside the workspace, and escaping symlinks are
+excluded from automatic publication. Code examples and user messages remain unchanged.
+Uncached links from a pooled workspace are converted only while its ownership
+marker still identifies the session, so old transcripts cannot export another
+session's files after the slot is reused.
+
+An agent can explicitly publish any intended deliverable, including a file it
+created in a temporary directory, with `POST /api/agent/files?name=report.csv`
+and its session bearer token. Native clients use
+`POST /api/v1/sessions/:id/files?name=report.csv` with a `manage` or `admin` token.
+Both accept raw bytes with `Content-Type: application/octet-stream`, up to 25 MiB,
+and return `{ name, size, url }`. The session briefing instructs agents to publish
+files before linking them in their replies.
+
+Published files live under `TEST_VIDEOS_DIR/.session-files`; keep that volume
+persistent and include it in backups. With the existing `R2_*` configuration,
+publication uploads the file to the bucket before returning its public URL.
+If R2 fails, the response uses the durable local copy at
+`PUBLIC_BASE_URL/files/<unguessable-id>/<filename>`.
+The URL grants download access to anyone holding it, without a client API token,
+and does not expire automatically. Do not publish credentials or private configuration.
+Deleting a session does not delete its published files. A remote SSH file must
+first be downloaded through the authorized server tools before byte publication.
+
 ## Deploying behind Cloudflare Access
 
 Add an Access application for **`/api/v1` and `/api/v1/*`** with a **Bypass →
@@ -385,8 +415,9 @@ Briareus still requires its token on every route. GitHub's deliveries need
 the same for **`/webhooks/*`**, since they authenticate themselves with an
 HMAC, and so does **`/oauth/mail/callback`** when a mailbox's sign-in ends on
 this server: the browser that signed in brings it a single-use `state`, which
-is all it accepts. Nothing else needs exempting: every other path answers 404
-or 410.
+is all it accepts. Download links under **`/files/*`** also need a bypass if
+you want them to open without an Access login. Their unguessable URL grants
+access to one file; Briareus does not list published files.
 
 ## What is not in this API
 
@@ -397,6 +428,7 @@ or 410.
   `DELETE /token`.
 - `/api/agent/*`: the calls an agent makes from inside its own session.
 - `/webhooks/*`: deliveries from GitHub and from systems that wake a session.
+- `/files/*`: downloads of explicitly published files and assistant-linked workspace files, authorized by their unguessable URL.
 - `/healthz` is public and outside the prefix: 200 when the server and its
   database answer.
 - `/oauth/mail/callback` is where a Gmail or Outlook sign-in ends when its
