@@ -38,7 +38,15 @@ describe('Codex compaction protocol', () => {
     f.ready();
     expect(f.spawnProcess).toHaveBeenCalledWith(
       '/codex',
-      ['app-server'],
+      [
+        'app-server',
+        '-c',
+        'sandbox_mode="danger-full-access"',
+        '-c',
+        'approval_policy="never"',
+        '-c',
+        'projects={"/workspace"={trust_level="trusted"}}',
+      ],
       expect.objectContaining({
         cwd: '/workspace',
         env: { CODEX_HOME: '/account' },

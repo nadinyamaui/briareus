@@ -13378,6 +13378,7 @@ describe('automatic recovery after a server restart', () => {
     expect(children[0].prompt).toContain('server restarted');
     expect(children[0].prompt).toContain('Finish the requested change');
     expect(children[0].cwd).toBe(checkout);
+    expect(children[0].args).toContain(`projects={${JSON.stringify(checkout)}={trust_level="trusted"}}`);
     expect(fs.readFileSync(path.join(checkout, 'unfinished.txt'), 'utf8')).toBe('keep this work');
     expect(resumeRestartedSessions()).toBe(0);
     expect(children[0].rpc.find((m) => m.method === 'turn/steer').params.input).toEqual([

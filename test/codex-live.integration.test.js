@@ -1,15 +1,16 @@
 import { it, expect } from 'vitest';
 import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { codexLiveTurn } from '../lib/codex-live.js';
+import { BINARIES } from '../lib/providers.js';
 
 // The installed CLI talks only to this local Responses stub, never a paid provider.
 it('steers new and resumed turns through the installed Codex App Server', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'codex-live-'));
+  const root = mkdtempSync(join(tmpdir(), 'codex.live-'));
   const requests = [];
   let live, child, steered;
   const server = createServer(async (req, res) => {
@@ -66,6 +67,9 @@ it('steers new and resumed turns through the installed Codex App Server', async 
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   try {
+    execFileSync('git', ['init', '-q', root]);
+    mkdirSync(join(root, '.codex'));
+    writeFileSync(join(root, '.codex/config.toml'), 'developer_instructions="PROJECT_LOCAL_CONFIG_LOADED"\n');
     writeFileSync(
       join(root, 'config.toml'),
       `model="gpt-6.1-sol"\nmodel_provider="local_test"\n[model_providers.local_test]\nname="Local test"\nbase_url="http://127.0.0.1:${server.address().port}/v1"\nwire_api="responses"\nrequires_openai_auth=false\n`,
@@ -77,7 +81,13 @@ it('steers new and resumed turns through the installed Codex App Server', async 
         accepted = [],
         completed = [];
       let stderr = '';
-      child = spawn(resolve('node_modules/.bin/codex'), ['app-server'], {
+      const { args } = BINARIES.codex.buildArgs({
+        model: 'gpt-6.1-sol',
+        effort: 'medium',
+        live: true,
+        cwd: root,
+      });
+      child = spawn(resolve('node_modules/.bin/codex'), args, {
         cwd: root,
         env: { ...process.env, CODEX_HOME: root },
       });
@@ -112,6 +122,9 @@ it('steers new and resumed turns through the installed Codex App Server', async 
       live.start();
       try {
         expect(await exited, stderr).toBe(0);
+        expect(stderr).not.toContain('Project-local config, hooks, and exec policies are disabled');
+        expect(stderr).not.toContain('needs access to create user namespaces');
+        expect(JSON.stringify(requests.at(-1))).toContain('PROJECT_LOCAL_CONFIG_LOADED');
         expect(completed, stderr).toEqual([true]);
         expect(accepted).toEqual(['Change the answer to STEERED']);
         const started = events.find((e) => e.type === 'thread.started');
