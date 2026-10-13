@@ -827,7 +827,7 @@ Change a session’s webhook settings. Needs `admin`.
 | --------------- | --------- | ------------------------------------------------------------------------------------------- |
 | `armed`         | `boolean` | Whether deliveries are accepted                                                             |
 | `perHour`       | `integer` | Deliveries taken in any one hour                                                            |
-| `maxTurns`      | `integer` | Turns deliveries may start in a row with no word from the operator                          |
+| `maxTurns`      | `integer` | Turns deliveries may start in a row with no word from the operator; 0 means unlimited       |
 | `sshUnattended` | `boolean` | Whether an SSH server in `allow` mode runs commands unapproved in a turn a delivery started |
 | `instructions`  | `boolean` | Whether the second, instructions webhook is on                                              |
 
@@ -2996,7 +2996,7 @@ A session’s webhook: where an outside system posts to wake it, and the limits 
 | ----------------- | --------- | ------------------------------------------------------------------------------------------- |
 | `armed`           | `boolean` | Whether deliveries are accepted                                                             |
 | `perHour`         | `integer` | Deliveries taken in any one hour                                                            |
-| `maxTurns`        | `integer` | Turns deliveries may start in a row with no word from the operator                          |
+| `maxTurns`        | `integer` | Turns deliveries may start in a row with no word from the operator; 0 means unlimited       |
 | `sshUnattended`   | `boolean` | Whether an SSH server in `allow` mode runs commands unapproved in a turn a delivery started |
 | `instructions`    | `boolean` | Whether the second, instructions webhook is on                                              |
 | `url`             | `string`  | Where a sender posts; not in a body                                                         |

@@ -3208,6 +3208,8 @@ describe('webhook deliveries', () => {
     'hk-stop',
     'hk-rate',
     'hk-turns',
+    'hk-unlimited',
+    'hk-unlimited-resume',
     'hk-orch',
     'hk-dup',
     'hk-full',
@@ -3454,7 +3456,7 @@ describe('webhook deliveries', () => {
   it('takes so many an hour and no more, and says when to come back', async () => {
     fakeCli();
     const job = getJob('hk-rate');
-    setSessionWebhook('hk-rate', { perHour: 2 });
+    setSessionWebhook('hk-rate', { perHour: 2, maxTurns: 0 });
     expect(deliverToSession('hk-rate', { text: 'one' }).status).toBe('running');
     expect(deliverToSession('hk-rate', { text: 'two' }).status).toBe('held');
     const third = refused(() => deliverToSession('hk-rate', { text: 'three' }));
@@ -3600,6 +3602,36 @@ describe('webhook deliveries', () => {
     expect(job.unattendedTurns).toBe(0);
     await cli.finish(job);
     expect(deliverToSession('hk-turns', { text: 'four' }).status).toBe('running');
+    await cli.finish(job);
+  });
+
+  it('keeps accepting unlimited turns beyond the finite limit and still pauses on failure', async () => {
+    fakeCli();
+    const job = getJob('hk-unlimited');
+    setSessionWebhook(job.id, { armed: false });
+    setSessionWebhook(job.id, { armed: true, maxTurns: 0 });
+    expect(infos(job).at(-1)).toContain('at most 30 an hour and unlimited turns in a row.');
+    job.unattendedTurns = 1000;
+    for (const text of ['one', 'two']) {
+      expect(deliverToSession(job.id, { text }).status).toBe('running');
+      await cli.finish(job);
+    }
+    expect(job.unattendedTurns).toBe(1002);
+    expect(job.webhookPaused).toBeNull();
+    expect(deliverToSession(job.id, { text: 'fails' }).status).toBe('running');
+    await cli.finish(job, 1);
+    expect(job.webhookPaused).toMatchObject({ kind: 'failed' });
+    expect(refused(() => deliverToSession(job.id, { text: 'blocked' }))).toMatchObject({ status: 429 });
+  });
+
+  it('resumes a session paused by its turn limit when changed to unlimited', async () => {
+    fakeCli();
+    const job = getJob('hk-unlimited-resume');
+    job.unattendedTurns = 10;
+    expect(refused(() => deliverToSession(job.id, { text: 'blocked' }))).toMatchObject({ status: 429 });
+    expect(job.webhookPaused).toMatchObject({ kind: 'turns' });
+    expect(setSessionWebhook(job.id, { maxTurns: 0 })).toMatchObject({ maxTurns: 0, paused: null });
+    expect(deliverToSession(job.id, { text: 'resumed' }).status).toBe('running');
     await cli.finish(job);
   });
 
