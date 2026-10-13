@@ -56,6 +56,48 @@ function spawnedScope(...emitters) {
   }
 }
 
+// Minimal App Server peer for job lifecycle tests. It records actual RPC requests.
+function fakeCodexServer(child, args, returnedThreadId) {
+  if (args[0] !== 'app-server') return;
+  child.rpc = [];
+  child.threadId = 'thread-1';
+  child.prompt = '';
+  child.notify = (method, params) =>
+    child.stdout.write(
+      JSON.stringify({ method, params: { threadId: child.threadId, turnId: 'turn-1', ...params } }) + '\n',
+    );
+  const reply = (id, result) => child.stdout.write(JSON.stringify({ id, result }) + '\n');
+  child.stdin.on('data', (chunk) => {
+    const msg = JSON.parse(chunk.toString());
+    child.rpc.push(msg);
+    if (msg.method === 'initialize') reply(msg.id, {});
+    if (msg.method === 'thread/start' || msg.method === 'thread/resume') {
+      child.threadId = returnedThreadId || msg.params.threadId || 'first-turn-thread';
+      reply(msg.id, { thread: { id: child.threadId } });
+    }
+    if (msg.method === 'turn/start') {
+      child.prompt = msg.params.input[0].text;
+      reply(msg.id, { turn: { id: 'turn-1', status: 'inProgress' } });
+    }
+    if (msg.method === 'turn/steer' && !child.holdSteers) reply(msg.id, { turnId: 'turn-1' });
+  });
+  child.complete = (usage, status = 'completed') => {
+    if (usage)
+      child.notify('thread/tokenUsage/updated', {
+        tokenUsage: {
+          total: {
+            inputTokens: usage.input_tokens,
+            cachedInputTokens: usage.cached_input_tokens,
+            outputTokens: usage.output_tokens,
+          },
+        },
+      });
+    child.notify('turn/completed', {
+      turn: { id: 'turn-1', status, ...(status === 'failed' ? { error: { message: 'stream lost' } } : {}) },
+    });
+  };
+}
+
 vi.mock('../lib/config.js', () => ({
   getConfig: () => ({
     claudeBin: '/usr/bin/claude',
@@ -3154,7 +3196,7 @@ describe('webhook deliveries', () => {
     createdAt: '2026-08-29T00:00:00.000Z',
     meta: {},
     // Resumable conversation, so a turn's prompt is the message alone, without the briefing.
-    chats: { 1: { sessionId: 'resume-id', started: true } },
+    chats: { 1: { sessionId: 'ses_resume-id', started: true } },
     ...extra,
   });
   const armed = (extra) => ({ armed: true, epoch: 0, perHour: 30, maxTurns: 10, ...extra });
@@ -3214,9 +3256,9 @@ describe('webhook deliveries', () => {
     getJob('hk-stop').turnCanceled = true;
   });
 
-  // A provider CLI that answers when the test says: one child per turn, prompt read from stdin.
+  // Queue-only provider by default; live delivery is exercised separately for Claude and Codex.
   let cli;
-  function fakeCli(binary = 'codex') {
+  function fakeCli(binary = 'opencode') {
     getProviderForJob.mockReturnValue({ ...state.provider, binary });
     captureProviderAuth.mockResolvedValue(undefined);
     const bin = vi.spyOn(BINARIES[binary], 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
@@ -10349,6 +10391,7 @@ describe('auto-compaction after a turn', () => {
       child.stdout = new PassThrough();
       child.stderr = new PassThrough();
       spawnedScope(child, child.stdout, child.stderr);
+      fakeCodexServer(child, rest[0]);
       children.push(child);
       return child;
     });
@@ -10441,6 +10484,7 @@ describe('auto-compaction after a turn', () => {
         }),
     );
     sendDevMessage(job.id, 'First');
+    children[0].complete();
     children[0].emit('close', 0);
     await vi.waitFor(() => expect(compactCodexThread).toHaveBeenCalledTimes(1));
     expect(compactCodexThread).toHaveBeenLastCalledWith(expect.objectContaining({ threadId: 'thread-1' }));
@@ -10452,6 +10496,7 @@ describe('auto-compaction after a turn', () => {
     expect(job.contextTokens).toBe(30000);
     expect(job.contextUsage.compactedAt).toBeTruthy();
     const done = idle(job);
+    children[1].complete();
     children[1].emit('close', 0);
     await done;
     // The second turn ended under the threshold, so no second compaction.
@@ -10462,12 +10507,14 @@ describe('auto-compaction after a turn', () => {
     const job = getJob('auto-compact');
     let done = idle(job);
     sendDevMessage(job.id, 'Not opted in');
+    children[0].complete();
     children[0].emit('close', 0);
     await done;
     setDevSessionAutoCompact(job.id, true);
     job.contextUsage.tokens = 249999;
     done = idle(job);
     sendDevMessage(job.id, 'Under');
+    children[1].complete();
     children[1].emit('close', 0);
     await done;
     expect(compactCodexThread).not.toHaveBeenCalled();
@@ -10479,6 +10526,7 @@ describe('auto-compaction after a turn', () => {
     compactCodexThread.mockRejectedValueOnce(new Error('No quota'));
     const done = idle(job);
     sendDevMessage(job.id, 'Go');
+    children[0].complete();
     children[0].emit('close', 0);
     await done;
     expect(
@@ -10494,6 +10542,7 @@ describe('auto-compaction after a turn', () => {
     const done = idle(job);
     sendDevMessage(job.id, 'CI failed', undefined, { unattended: true });
     const bubble = job.events.findLast((e) => e.kind === 'user').seq;
+    children[0].complete();
     children[0].emit('close', 0);
     await done;
     expect(compactCodexThread).toHaveBeenCalledTimes(1);
@@ -10517,6 +10566,7 @@ describe('auto-compaction after a turn', () => {
     const done = idle(job);
     sendDevMessage(job.id, 'CI failed', undefined, { unattended: true });
     const bubble = job.events.findLast((e) => e.kind === 'user').seq;
+    children.at(-1).complete();
     children.at(-1).emit('close', 0);
     await vi.waitFor(() => expect(compactCodexThread).toHaveBeenCalledTimes(1));
     // A restart now records the turn without the compaction's own lines.
@@ -10536,7 +10586,9 @@ describe('Codex turn usage', () => {
   let homeSpy;
   let bin;
   let children;
+  let returnedThreadId;
   beforeEach(async () => {
+    returnedThreadId = null;
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-turn-usage-'));
     homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
     state.stored = [
@@ -10578,6 +10630,7 @@ describe('Codex turn usage', () => {
       child.stdout = new PassThrough();
       child.stderr = new PassThrough();
       spawnedScope(child, child.stdout, child.stderr);
+      fakeCodexServer(child, rest[0], returnedThreadId);
       children.push(child);
       return child;
     });
@@ -10589,6 +10642,90 @@ describe('Codex turn usage', () => {
     getProviderForJob.mockReset();
     captureProviderAuth.mockReset();
     fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('delivers messages into the running Codex turn and books its usage once', async () => {
+    const job = getJob('codex-usage');
+    sendDevMessage(job.id, 'Build the form');
+    const child = children[0];
+    expect(publicJob(job).liveInput).toBe(true);
+    const answer = sendDevMessage(job.id, 'Make the phone mandatory');
+    expect(answer.queued).toBeUndefined();
+    expect(children).toHaveLength(1);
+    expect(child.rpc.find((m) => m.method === 'turn/steer')).toMatchObject({
+      params: {
+        threadId: 'thread-1',
+        expectedTurnId: 'turn-1',
+        input: [{ type: 'text', text: 'Make the phone mandatory' }],
+      },
+    });
+    expect(job.events.findLast((e) => e.kind === 'user')).toMatchObject({
+      text: 'Make the phone mandatory',
+      live: true,
+    });
+    child.complete({ input_tokens: 500100, cached_input_tokens: 450050, output_tokens: 20010 });
+    expect(publicJob(job).liveInput).toBe(false);
+    child.emit('close', 0);
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    expect(children).toHaveLength(1);
+    expect(recordTurnUsage).toHaveBeenCalledOnce();
+    expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+      inputTokens: 100,
+      cachedInputTokens: 50,
+      outputTokens: 10,
+    });
+    await flushJobs();
+    expect(saveJob.mock.calls.findLast(([j]) => j.id === job.id)?.[0].recoveryQueue).toEqual([]);
+  });
+
+  it('queues a rejected completion-race message without losing it or duplicating its bubble', async () => {
+    const job = getJob('codex-usage');
+    sendDevMessage(job.id, 'First');
+    const child = children[0];
+    child.holdSteers = true;
+    sendDevMessage(job.id, 'Late correction');
+    child.complete();
+    expect(publicJob(job).liveInput).toBe(false);
+    child.stdout.write(JSON.stringify({ id: 3, error: { message: 'No active turn' } }) + '\n');
+    child.emit('close', 0);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(children[1].prompt).toBe('Late correction');
+    children[1].complete();
+    children[1].emit('close', 0);
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    expect(job.events.filter((e) => e.kind === 'user' && e.text === 'Late correction')).toHaveLength(1);
+  });
+
+  it('recovers an accepted but unanswered live message after Stop', async () => {
+    const job = getJob('codex-usage');
+    sendDevMessage(job.id, 'First');
+    sendDevMessage(job.id, 'Correction');
+    await flushJobs();
+    expect(saveJob.mock.calls.findLast(([j]) => j.id === job.id)?.[0].recoveryQueue).toEqual([
+      expect.objectContaining({ shown: 'Correction', sent: true }),
+    ]);
+    cancelDevTurn(job.id);
+    children[0].emit('close', null);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(children[1].prompt).toBe('Correction');
+    children[1].complete();
+    children[1].emit('close', 0);
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    expect(job.events.filter((e) => e.kind === 'user' && e.text === 'Correction')).toHaveLength(1);
+  });
+
+  it('reports uncompleted live messages on failure instead of silently replaying them', async () => {
+    const job = getJob('codex-usage');
+    sendDevMessage(job.id, 'First');
+    sendDevMessage(job.id, 'Correction');
+    children[0].complete(null, 'failed');
+    children[0].emit('close', 0);
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    expect(children).toHaveLength(1);
+    expect(job.events.some((e) => e.kind === 'info' && e.text.includes('never answered 1 message'))).toBe(
+      true,
+    );
+    expect(publicJob(job).liveInput).toBe(false);
   });
 
   // The thread's rollout as the CLI leaves it: the lifetime totals ride on
@@ -10621,7 +10758,7 @@ describe('Codex turn usage', () => {
     });
     sendDevMessage(job.id, text);
     const child = children.at(-1);
-    child.stdout.end(`${JSON.stringify({ type: 'turn.completed', usage })}\n`);
+    child.complete(usage);
     setImmediate(() => child.emit('close', 0));
     await settled;
     return recordTurnUsage.mock.lastCall[1];
@@ -10673,7 +10810,7 @@ describe('Codex turn usage', () => {
       expect(publicJob(job).pendingCodexUsage).toBeUndefined();
       await vi.advanceTimersByTimeAsync(7000);
       const child = children.at(-1);
-      child.stdout.end(JSON.stringify({ type: 'turn.completed', usage: total }) + '\n');
+      child.complete(total);
       child.emit('close', 0);
       await vi.waitFor(() => expect(job.status).toBe('idle'));
       expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
@@ -10904,7 +11041,7 @@ describe('Codex turn usage', () => {
       dropSessionDatabase.mockClear();
       try {
         const child = children.at(-1);
-        child.stdout.end(`${JSON.stringify({ type: 'turn.completed', usage: total })}\n`);
+        child.complete(total);
         child.emit('close', 0);
         await vi.waitFor(() => expect(reader).toHaveBeenCalledOnce());
         let closed = false;
@@ -11016,7 +11153,7 @@ describe('Codex turn usage', () => {
           );
           fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('40000', '400000'));
           const child = children.at(-1);
-          child.stdout.end(`${JSON.stringify({ type: 'turn.completed', usage: baseline })}\n`);
+          child.complete(baseline);
           child.emit('close', 0);
         }
         await vi.waitFor(() => expect(reader).toHaveBeenCalledOnce());
@@ -11166,9 +11303,7 @@ describe('Codex turn usage', () => {
   it('drains accepted corrections after Stop cancels a follow-up turn', async () => {
     const job = getJob('codex-usage');
     sendDevMessage(job.id, 'Start the next change');
-    expect(sendDevMessage(job.id, 'Use the corrected approach').queued).toEqual([
-      { text: 'Use the corrected approach' },
-    ]);
+    expect(sendDevMessage(job.id, 'Use the corrected approach').liveInput).toBe(true);
     cancelDevTurn(job.id);
     children[0].emit('close', null);
     await vi.waitFor(() => expect(children).toHaveLength(2));
@@ -11177,6 +11312,7 @@ describe('Codex turn usage', () => {
     expect(job.events.filter((event) => event.kind === 'user').at(-1).text).toBe(
       'Use the corrected approach',
     );
+    if (!children[1].stdin.writableEnded) children[1].complete();
     children[1].emit('close', 0);
     await vi.waitFor(() => expect(job.status).toBe('idle'));
     expect(job.turnCanceled).toBe(false);
@@ -11195,9 +11331,7 @@ describe('Codex turn usage', () => {
     });
     const job = getJob(session.id);
     await vi.waitFor(() => expect(job.proc).toBeTruthy());
-    expect(sendDevMessage(job.id, 'Use the corrected approach').queued).toEqual([
-      { text: 'Use the corrected approach' },
-    ]);
+    expect(sendDevMessage(job.id, 'Use the corrected approach').liveInput).toBe(true);
     cancelDevTurn(job.id);
     children[0].emit('close', null);
     await vi.waitFor(() => expect(children).toHaveLength(2));
@@ -11206,6 +11340,7 @@ describe('Codex turn usage', () => {
     expect(job.events.filter((event) => event.kind === 'user').at(-1).text).toBe(
       'Use the corrected approach',
     );
+    if (!children[1].stdin.writableEnded) children[1].complete();
     children[1].emit('close', 0);
     await vi.waitFor(() => expect(job.status).toBe('idle'));
     await closeDevSession(job.id);
@@ -11318,10 +11453,10 @@ describe('Codex turn usage', () => {
       });
       sendDevMessage(job.id, 'Next');
       await vi.waitFor(() => expect(children).toHaveLength(1));
-      expect(walks(readdir)).toBe(0);
+      // The App Server handshake already triggered the live context probe.
       const child = children.at(-1);
       const usage = { input_tokens: 650000, cached_input_tokens: 585000, output_tokens: 26000 };
-      child.stdout.end(`${JSON.stringify({ type: 'turn.completed', usage })}\n`);
+      child.complete(usage);
       setImmediate(() => child.emit('close', 0));
       await settled;
       expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
@@ -11371,14 +11506,13 @@ describe('Codex turn usage', () => {
       };
       bus.on('job', onJob);
     });
+    returnedThreadId = 'thread-2';
     sendDevMessage(job.id, 'Next');
     // The resume opened thread-2, which used 800k before the stream failed;
     // thread-1 was at 500k.
     writeRollout({ input_tokens: 800000, cached_input_tokens: 700000, output_tokens: 30000 }, 'thread-2');
     const child = children.at(-1);
-    child.stdout.end(
-      `${JSON.stringify({ type: 'thread.started', thread_id: 'thread-2' })}\n${JSON.stringify({ type: 'turn.failed', error: { message: 'stream lost' } })}\n`,
-    );
+    child.complete(null, 'failed');
     setImmediate(() => child.emit('close', 1));
     await settled;
     expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
@@ -11407,7 +11541,7 @@ describe('Codex turn usage', () => {
     const child = children.at(-1);
     const opened = vi.spyOn(fs, 'openSync');
     try {
-      child.stdout.end(`${JSON.stringify({ type: 'turn.failed', error: { message: 'stream lost' } })}\n`);
+      child.complete(null, 'failed');
       setImmediate(() => child.emit('close', 1));
       await settled;
       // Read once at close: the probe takes the booking's reading.
@@ -13184,9 +13318,10 @@ describe('automatic recovery after a server restart', () => {
       child.prompt = '';
       child.cwd = opts.cwd;
       child.stdin.on('data', (chunk) => {
-        child.prompt += chunk.toString();
+        if (args[0] !== 'app-server') child.prompt += chunk.toString();
       });
       spawnedScope(child, child.stdout, child.stderr);
+      fakeCodexServer(child, args);
       children.push(child);
       return child;
     });
@@ -13213,9 +13348,11 @@ describe('automatic recovery after a server restart', () => {
     reclaimInstance.mockReset();
   });
   const finish = (child) => {
-    child.stdout.write(
-      JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\n',
-    );
+    if (child.complete) child.complete({ input_tokens: 1, output_tokens: 1 });
+    else
+      child.stdout.write(
+        JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\n',
+      );
     child.emit('close', 0);
   };
 
@@ -13237,16 +13374,17 @@ describe('automatic recovery after a server restart', () => {
     expect(children).toHaveLength(0);
     expect(resumeRestartedSessions()).toBe(1);
     await vi.waitFor(() => expect(children).toHaveLength(1));
-    expect(children[0].args.slice(0, 3)).toEqual(['exec', 'resume', 'saved-thread']);
+    expect(children[0].rpc.find((m) => m.method === 'thread/resume').params.threadId).toBe('saved-thread');
     expect(children[0].prompt).toContain('server restarted');
     expect(children[0].prompt).toContain('Finish the requested change');
     expect(children[0].cwd).toBe(checkout);
     expect(fs.readFileSync(path.join(checkout, 'unfinished.txt'), 'utf8')).toBe('keep this work');
     expect(resumeRestartedSessions()).toBe(0);
+    expect(children[0].rpc.find((m) => m.method === 'turn/steer').params.input).toEqual([
+      { type: 'text', text: 'Then check the result' },
+    ]);
     finish(children[0]);
-    await vi.waitFor(() => expect(children).toHaveLength(2));
-    expect(children[1].prompt).toBe('Then check the result');
-    finish(children[1]);
+    expect(children).toHaveLength(1);
     await vi.waitFor(() => expect(saved.status).toBe('idle'));
     expect(saved.events.filter((e) => e.kind === 'user').map((e) => e.text)).toEqual([
       'Then check the result',
@@ -13254,7 +13392,7 @@ describe('automatic recovery after a server restart', () => {
     expect(publicJob(saved)).not.toHaveProperty('recoveryTurn');
     await vi.waitFor(() =>
       expect(saveJob.mock.calls.findLast(([j]) => j.id === saved.id)?.[0]).toMatchObject({
-        recoveryTurn: { prompt: 'Then check the result', completed: true },
+        recoveryTurn: { completed: true },
         recoveryQueue: [],
         restartPending: false,
       }),
@@ -13762,7 +13900,7 @@ describe('automatic recovery after a server restart', () => {
       expect(saved.recoveryTurn.opts.step).toBeUndefined();
       resumeRestartedSessions();
       await vi.waitFor(() => expect(children).toHaveLength(1));
-      expect(children[0].args.slice(0, 3)).toEqual(['exec', 'resume', 'saved-thread']);
+      expect(children[0].rpc.find((m) => m.method === 'thread/resume').params.threadId).toBe('saved-thread');
       expect(children[0].prompt).toContain('Explain the architecture');
       finish(children[0]);
       await vi.waitFor(() => expect(saved.status).toBe('idle'));
@@ -14126,9 +14264,6 @@ describe('automatic recovery after a server restart', () => {
     expect(children[0].args).not.toContain('resume');
     expect(children[0].prompt).toContain('Original first request');
     expect(children[0].prompt).not.toContain('server restarted');
-    children[0].stdout.write(
-      JSON.stringify({ type: 'thread.started', thread_id: 'first-turn-thread' }) + '\n',
-    );
     expect(saved.turns).toBe(0);
     await vi.waitFor(() =>
       expect(saveJob.mock.calls.findLast(([j]) => j.id === saved.id)?.[0]).toMatchObject({

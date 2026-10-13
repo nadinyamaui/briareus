@@ -115,8 +115,11 @@ for setup and access details.
    that slot and what it installs is still on disk; the fingerprints live in
    the clone's `.git/reviewer-setup.json`. Builds and anything touching the
    database run every time.
-4. **Chat.** Every message spawns one headless provider run that resumes the
-   provider's own session state. Output streams to the client live (SSE). The
+4. **Chat.** Each turn starts a provider process that resumes the
+   provider's own session state. Claude and interactive Codex turns accept
+   more messages while they run when the session reports `liveInput: true`.
+   Codex uses App Server's `turn/steer`; messages that arrive too late run next.
+   Codex review and QA steps keep queued input. Output streams to the client live (SSE). The
    session keeps its clone and database server between turns, for as long as
    it stays open. On a Claude session, a message starting with `/btw` (or
    `POST /api/v1/sessions/{id}/btw`) is a side question instead: it is
