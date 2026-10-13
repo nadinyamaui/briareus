@@ -73,6 +73,7 @@ function serve() {
     const event = (name, data, session = sessionId) =>
       client.send({ method: name, params: data, ...(session ? { sessionId: session } : {}) });
     if (method === 'Test.calls') return reply({ calls });
+    if (method === 'Test.launch') return reply({ args: process.argv.slice(2), display: process.env.DISPLAY });
     if (method === 'Test.emit') {
       everyone(params.message, client);
       return reply({});

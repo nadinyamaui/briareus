@@ -18,6 +18,50 @@ the user it runs as and the tunnel in front of it are all yours to decide.
 There is nothing to build: `node server.js` runs the source as it is, and the
 server has no frontend to compile.
 
+## Shared browser with a virtual display
+
+Set `BROWSER_DISPLAY=:98` and `BROWSER_BIN=/usr/bin/google-chrome` in the
+server's `.env` to run the shared browser with a GUI. The existing Browser
+panel and Playwright use the same CDP connection and session profiles.
+Leave `BROWSER_DISPLAY` unset to run headless.
+
+On Ubuntu, install Xvfb and its runtime dependencies with
+`sudo apt-get install xvfb xauth`. The user service below expects the Xvfb
+binary under `~/.local/share/briareus-xvfb/usr/bin/Xvfb`. For a system install,
+change its `ExecStart` binary to `/usr/bin/Xvfb`. If the dependencies are
+already installed, extract the Ubuntu package without root instead:
+
+```bash
+task_xvfb_dir=$(mktemp -d)
+(cd "$task_xvfb_dir" && apt-get download xvfb)
+mkdir -p "$HOME/.local/share/briareus-xvfb"
+for package in "$task_xvfb_dir"/*.deb; do
+  dpkg-deb -x "$package" "$HOME/.local/share/briareus-xvfb"
+done
+rm -rf "$task_xvfb_dir"
+```
+
+Display `:98` must be free. Create an authentication cookie and install the
+service as the same user that runs Briareus. The X server uses a local socket
+and does not listen on TCP. These commands use `~/.Xauthority`, Chrome's
+default authentication file, so do not override `XAUTHORITY` in the app's
+environment.
+
+```bash
+xauth add :98 . "$(mcookie)"
+install -m 644 -D deploy/briareus-browser-display.service \
+  "$HOME/.config/systemd/user/briareus-browser-display.service"
+systemctl --user daemon-reload
+systemctl --user enable --now briareus-browser-display.service
+systemctl --user status briareus-browser-display.service
+```
+
+Deploy the code and restart Briareus after setting the two `.env` values.
+Reopen the session's Browser panel to launch Chrome in the new mode. If the
+display service is unavailable, Chrome fails to start rather than falling
+back to headless. This setup does not guarantee access to sites that block
+the browser or the server's network.
+
 # Pool databases in RAM
 
 The eight pool instances (`mysql-pool@3307` … `mysql-pool@3314`) keep their

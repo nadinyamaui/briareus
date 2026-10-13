@@ -6,8 +6,12 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 // lib/browser.js against a stand-in Chromium (test/fixtures/fake-chromium.js) that speaks the
 // DevTools Protocol over a real WebSocket and records every call the module makes.
 const FAKE = path.resolve(import.meta.dirname, 'fixtures', 'fake-chromium.js');
+const cfg = vi.hoisted(() => ({ browserDisplay: '' }));
 vi.mock('../lib/config.js', () => ({
-  getConfig: () => ({ browserBin: path.resolve(import.meta.dirname, 'fixtures', 'fake-chromium.js') }),
+  getConfig: () => ({
+    ...cfg,
+    browserBin: path.resolve(import.meta.dirname, 'fixtures', 'fake-chromium.js'),
+  }),
 }));
 
 const browser = await import('../lib/browser.js');
@@ -23,6 +27,7 @@ const sessionId = () => {
   return id;
 };
 afterEach(async () => {
+  cfg.browserDisplay = '';
   delete process.env.FAKE_CHROMIUM_MODE;
   while (used.length) browser.forgetBrowser(used.pop());
 });
@@ -55,6 +60,33 @@ async function probe(id) {
 }
 
 describe('starting', () => {
+  it('keeps headless mode when no display is configured', async () => {
+    const id = sessionId();
+    await browser.startBrowser(id);
+    const p = await probe(id);
+    try {
+      const launch = await p.call('Test.launch');
+      expect(launch.args).toContain('--headless=new');
+    } finally {
+      p.close();
+    }
+  });
+
+  it('runs with a GUI on the configured display, on the same CDP endpoint', async () => {
+    cfg.browserDisplay = ':99';
+    const id = sessionId();
+    await browser.startBrowser(id);
+    const p = await probe(id);
+    try {
+      const launch = await p.call('Test.launch');
+      expect(launch.display).toBe(':99');
+      expect(launch.args.some((arg) => arg.startsWith('--headless'))).toBe(false);
+      expect(launch.args).toContain(`--user-data-dir=${browser.profileDir(id)}`);
+    } finally {
+      p.close();
+    }
+  });
+
   it('launches, finds the first tab and hands out a loopback endpoint', async () => {
     const id = sessionId();
     const changed = vi.fn();
