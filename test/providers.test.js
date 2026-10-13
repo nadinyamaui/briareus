@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import TOML from '@iarna/toml';
 import {
   BINARIES,
   getBinary,
@@ -113,6 +114,50 @@ describe('ensureCodexHome for a custom endpoint', () => {
     expect(/^review_model = "(.*)"$/m.exec(toml)[1]).toBe(model);
     return model;
   }
+
+  it('preserves a login provider config across repeated preparation', () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-codex-home-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const provider = { id: 7 };
+    const dir = ensureCodexHome(provider);
+    const config = '# Operator settings\n[projects."/workspace"]\ntrust_level = "trusted"\n';
+    fs.writeFileSync(path.join(dir, 'config.toml'), config);
+    ensureCodexHome(provider);
+    ensureCodexHome(provider);
+    expect(fs.readFileSync(path.join(dir, 'config.toml'), 'utf8')).toBe(config);
+  });
+
+  it('preserves project trust when refreshing an endpoint and switching back to login', () => {
+    configModel({ models: ['gpt-6.1-sol'] });
+    const dir = path.join(home, '.codex-provider-7');
+    fs.appendFileSync(
+      path.join(dir, 'config.toml'),
+      '\n[projects."/workspace"]\ntrust_level = "trusted"\n[features]\nmulti_agent = true\n',
+    );
+    configModel({ models: ['gpt-6.1-sol'], apiKey: 'updated-key' });
+    const refreshed = fs.readFileSync(path.join(dir, 'config.toml'), 'utf8');
+    expect(TOML.parse(refreshed).projects).toEqual({ '/workspace': { trust_level: 'trusted' } });
+    expect(refreshed).toContain('updated-key');
+    ensureCodexHome({ id: 7 });
+    const login = fs.readFileSync(path.join(dir, 'config.toml'), 'utf8');
+    expect(TOML.parse(login)).toEqual({
+      projects: { '/workspace': { trust_level: 'trusted' } },
+      features: { multi_agent: true },
+    });
+    expect(login).not.toContain('model_provider');
+    expect(login).not.toContain('model_catalog_json');
+    expect(login).not.toContain('updated-key');
+    expect(fs.existsSync(path.join(dir, 'models.json'))).toBe(false);
+  });
+
+  it('leaves invalid config intact without leaking its contents through the error', () => {
+    configModel({ models: ['gpt-6.1-sol'] });
+    const file = path.join(home, '.codex-provider-7', 'config.toml');
+    const source = 'experimental_bearer_token = "secret-key" invalid';
+    fs.writeFileSync(file, source);
+    expect(() => ensureCodexHome({ id: 7 })).toThrow(`Cannot parse Codex configuration: ${file}`);
+    expect(fs.readFileSync(file, 'utf8')).toBe(source);
+  });
 
   it('falls back through the defaults the row lists, as the picker does', () => {
     expect(configModel({ models: ['gpt-5.5', 'gpt-6-sol'] })).toBe('gpt-6-sol');
@@ -562,6 +607,18 @@ describe('buildArgs', () => {
     expect(built.args.slice(0, 3)).toEqual(['exec', 'resume', 't1']);
     expect(built.args).toContain('model_reasoning_effort="high"');
     expect(built.briefingInPrompt).toBe(true);
+  });
+
+  it('scopes Codex trust to the session workspace for live, exec and review turns', () => {
+    for (const build of [BINARIES.codex.buildArgs, BINARIES.codex.buildReviewArgs]) {
+      for (const live of [false, true]) {
+        if (live && build === BINARIES.codex.buildReviewArgs) continue;
+        const { args } = build({ model: 'gpt', effort: 'high', cwd: '/repo.with dots', live });
+        expect(args).toContain('projects={"/repo.with dots"={trust_level="trusted"}}');
+        expect(args).toContain('sandbox_mode="danger-full-access"');
+        expect(args).toContain('approval_policy="never"');
+      }
+    }
   });
 
   it('codex sends a wide pick as its real slug plus the window override', () => {
