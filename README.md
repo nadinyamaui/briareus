@@ -351,7 +351,7 @@ the errand that acts on them.
 
 ### The shared browser
 
-A session can be given a headless Chromium of its own that its agent and its
+A session can be given a Chromium of its own that its agent and its
 user drive together, on the same tabs. `POST /api/v1/sessions/{id}/browser`
 starts it; from the next turn the agent drives it (Claude and Codex through the
 Playwright MCP server mounted as `browser`, Grok and opencode through
@@ -371,6 +371,9 @@ through the shell. Open the session's Browser panel to watch its current page.
 
 Chromium is found by itself when Playwright has downloaded one (any QA run
 does) or one is on PATH; `BROWSER_BIN` overrides it.
+It runs headless unless `BROWSER_DISPLAY` names an X display; on a server,
+[deploy/README.md](deploy/README.md#shared-browser-with-a-virtual-display)
+describes the Xvfb service for running Chrome with a GUI through the same panel.
 
 ### What a session costs
 

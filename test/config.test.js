@@ -354,6 +354,15 @@ describe('developer sessions', () => {
     expect(getConfig()).toMatchObject({ codexBin: '', grokBin: '' });
   });
 
+  it('keeps the shared browser headless unless an X display is configured', async () => {
+    const headless = await loadConfig(complete());
+    expect(headless.getConfig().browserDisplay).toBe('');
+    const headed = await loadConfig(
+      complete({ BROWSER_DISPLAY: ':99', BROWSER_BIN: '/usr/bin/google-chrome' }),
+    );
+    expect(headed.getConfig()).toMatchObject({ browserDisplay: ':99', browserBin: '/usr/bin/google-chrome' });
+  });
+
   it('takes an explicit path for them', async () => {
     const { getConfig } = await loadConfig(complete({ CODEX_BIN: '/opt/codex', GROK_BIN: '/opt/grok' }));
 

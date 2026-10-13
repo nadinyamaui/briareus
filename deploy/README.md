@@ -18,6 +18,46 @@ the user it runs as and the tunnel in front of it are all yours to decide.
 There is nothing to build: `node server.js` runs the source as it is, and the
 server has no frontend to compile.
 
+## Shared browser with a virtual display
+
+Set `BROWSER_DISPLAY=:98` and `BROWSER_BIN=/usr/bin/google-chrome` in the
+server's `.env` to run the shared browser with a GUI. A nonempty
+`BROWSER_DISPLAY` enables headed mode; Xvfb allocates a free display for each
+session rather than using that value as a shared display address. Each browser
+has its own authenticated X server and clipboard. The Browser panel and
+Playwright continue to use the same CDP connection and session profiles.
+Leave `BROWSER_DISPLAY` unset to run headless.
+
+On Ubuntu, install Xvfb and its runtime dependencies with
+`sudo apt-get install xvfb xauth`. Briareus uses
+`~/.local/share/briareus-xvfb/usr/bin/Xvfb` when present, otherwise `Xvfb` on
+PATH. If the dependencies are already installed, extract the Ubuntu package
+without root instead:
+
+```bash
+task_xvfb_dir=$(mktemp -d)
+(cd "$task_xvfb_dir" && apt-get download xvfb)
+mkdir -p "$HOME/.local/share/briareus-xvfb"
+for package in "$task_xvfb_dir"/*.deb; do
+  dpkg-deb -x "$package" "$HOME/.local/share/briareus-xvfb"
+done
+rm -rf "$task_xvfb_dir"
+```
+
+Briareus starts and stops each display with its browser, stores a private
+cookie in that session's profile, and disables TCP access. If you installed
+the earlier shared display service, disable it:
+
+```bash
+systemctl --user disable --now briareus-browser-display.service
+```
+
+Deploy the code and restart Briareus after setting the two `.env` values.
+Reopen the session's Browser panel to launch Chrome in the new mode. If Xvfb
+or xauth is unavailable, startup fails rather than falling back to a shared
+display or headless mode. This setup does not guarantee access to sites that
+block the browser or the server's network.
+
 # Pool databases in RAM
 
 The eight pool instances (`mysql-pool@3307` … `mysql-pool@3314`) keep their

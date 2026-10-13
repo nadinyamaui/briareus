@@ -6,8 +6,27 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 // lib/browser.js against a stand-in Chromium (test/fixtures/fake-chromium.js) that speaks the
 // DevTools Protocol over a real WebSocket and records every call the module makes.
 const FAKE = path.resolve(import.meta.dirname, 'fixtures', 'fake-chromium.js');
+vi.mock('child_process', async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    spawn: (bin, args, options) =>
+      actual.spawn(
+        bin.endsWith('Xvfb') ? process.execPath : bin,
+        bin.endsWith('Xvfb') ? [path.resolve(import.meta.dirname, 'fixtures/fake-xvfb.js'), ...args] : args,
+        options,
+      ),
+    execFileSync: (bin, args, options) =>
+      bin === 'xauth' ? undefined : actual.execFileSync(bin, args, options),
+  };
+});
+
+const cfg = vi.hoisted(() => ({ browserDisplay: '' }));
 vi.mock('../lib/config.js', () => ({
-  getConfig: () => ({ browserBin: path.resolve(import.meta.dirname, 'fixtures', 'fake-chromium.js') }),
+  getConfig: () => ({
+    ...cfg,
+    browserBin: path.resolve(import.meta.dirname, 'fixtures', 'fake-chromium.js'),
+  }),
 }));
 
 const browser = await import('../lib/browser.js');
@@ -23,7 +42,9 @@ const sessionId = () => {
   return id;
 };
 afterEach(async () => {
+  cfg.browserDisplay = '';
   delete process.env.FAKE_CHROMIUM_MODE;
+  delete process.env.FAKE_XVFB_MODE;
   while (used.length) browser.forgetBrowser(used.pop());
 });
 
@@ -55,6 +76,77 @@ async function probe(id) {
 }
 
 describe('starting', () => {
+  it('keeps headless mode when no display is configured', async () => {
+    const id = sessionId();
+    await browser.startBrowser(id);
+    const p = await probe(id);
+    try {
+      const launch = await p.call('Test.launch');
+      expect(launch.args).toContain('--headless=new');
+    } finally {
+      p.close();
+    }
+  });
+
+  it('gives simultaneous headed sessions separate displays and cleans up on stop', async () => {
+    cfg.browserDisplay = ':99';
+    const a = sessionId();
+    const b = sessionId();
+    const [first, second] = await Promise.all([browser.startBrowser(a), browser.startBrowser(b)]);
+    const probes = await Promise.all([probe(a), probe(b)]);
+    try {
+      const launches = await Promise.all(probes.map((p) => p.call('Test.launch')));
+      expect(launches[0].display).not.toBe(launches[1].display);
+      for (const [i, launch] of launches.entries()) {
+        expect(launch.display).toMatch(/^:\d+$/);
+        expect(launch.args.some((arg) => arg.startsWith('--headless'))).toBe(false);
+        expect(launch.args).toContain(`--user-data-dir=${browser.profileDir([a, b][i])}`);
+      }
+      browser.stopBrowser(a);
+      await vi.waitFor(() => expect(first.displayProc.signalCode).toBe('SIGKILL'));
+      expect(second.displayProc.signalCode).toBeNull();
+      expect(browser.browserRunning(b)).toBe(true);
+      browser.forgetBrowser(b);
+      await vi.waitFor(() => expect(second.displayProc.signalCode).toBe('SIGKILL'));
+    } finally {
+      probes.forEach((p) => p.close());
+    }
+  });
+
+  it('cleans the display after a failed Chromium launch', async () => {
+    cfg.browserDisplay = ':99';
+    process.env.FAKE_CHROMIUM_MODE = 'exit';
+    const id = sessionId();
+    await expect(browser.startBrowser(id)).rejects.toThrow(/exited before it was ready/);
+    await vi.waitFor(() => expect(fs.readdirSync(browser.profileDir(id))).toEqual([]));
+  });
+
+  it('reports a display startup failure and removes its authentication directory', async () => {
+    cfg.browserDisplay = ':99';
+    process.env.FAKE_XVFB_MODE = 'exit';
+    const id = sessionId();
+    await expect(browser.startBrowser(id)).rejects.toThrow(/browser display exited: fake display failure/);
+    expect(fs.readdirSync(browser.profileDir(id))).toEqual([]);
+  });
+
+  it('cleans the display when a headed launch is cancelled', async () => {
+    cfg.browserDisplay = ':99';
+    const id = sessionId();
+    const launching = browser.startBrowser(id);
+    browser.stopBrowser(id);
+    await expect(launching).rejects.toMatchObject({ status: 409 });
+    await vi.waitFor(() => expect(fs.readdirSync(browser.profileDir(id))).toEqual([]));
+  });
+
+  it('kills displays during shutdown, including one still starting', async () => {
+    cfg.browserDisplay = ':99';
+    const first = await browser.startBrowser(sessionId());
+    const launching = browser.startBrowser(sessionId());
+    browser.stopAllBrowsers();
+    await expect(launching).rejects.toThrow(/browser display exited/);
+    await vi.waitFor(() => expect(first.displayProc.signalCode).toBe('SIGKILL'));
+  });
+
   it('launches, finds the first tab and hands out a loopback endpoint', async () => {
     const id = sessionId();
     const changed = vi.fn();
