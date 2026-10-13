@@ -21,15 +21,18 @@ server has no frontend to compile.
 ## Shared browser with a virtual display
 
 Set `BROWSER_DISPLAY=:98` and `BROWSER_BIN=/usr/bin/google-chrome` in the
-server's `.env` to run the shared browser with a GUI. The existing Browser
-panel and Playwright use the same CDP connection and session profiles.
+server's `.env` to run the shared browser with a GUI. A nonempty
+`BROWSER_DISPLAY` enables headed mode; Xvfb allocates a free display for each
+session rather than using that value as a shared display address. Each browser
+has its own authenticated X server and clipboard. The Browser panel and
+Playwright continue to use the same CDP connection and session profiles.
 Leave `BROWSER_DISPLAY` unset to run headless.
 
 On Ubuntu, install Xvfb and its runtime dependencies with
-`sudo apt-get install xvfb xauth`. The user service below expects the Xvfb
-binary under `~/.local/share/briareus-xvfb/usr/bin/Xvfb`. For a system install,
-change its `ExecStart` binary to `/usr/bin/Xvfb`. If the dependencies are
-already installed, extract the Ubuntu package without root instead:
+`sudo apt-get install xvfb xauth`. Briareus uses
+`~/.local/share/briareus-xvfb/usr/bin/Xvfb` when present, otherwise `Xvfb` on
+PATH. If the dependencies are already installed, extract the Ubuntu package
+without root instead:
 
 ```bash
 task_xvfb_dir=$(mktemp -d)
@@ -41,26 +44,19 @@ done
 rm -rf "$task_xvfb_dir"
 ```
 
-Display `:98` must be free. Create an authentication cookie and install the
-service as the same user that runs Briareus. The X server uses a local socket
-and does not listen on TCP. These commands use `~/.Xauthority`, Chrome's
-default authentication file, so do not override `XAUTHORITY` in the app's
-environment.
+Briareus starts and stops each display with its browser, stores a private
+cookie in that session's profile, and disables TCP access. If you installed
+the earlier shared display service, disable it:
 
 ```bash
-xauth add :98 . "$(mcookie)"
-install -m 644 -D deploy/briareus-browser-display.service \
-  "$HOME/.config/systemd/user/briareus-browser-display.service"
-systemctl --user daemon-reload
-systemctl --user enable --now briareus-browser-display.service
-systemctl --user status briareus-browser-display.service
+systemctl --user disable --now briareus-browser-display.service
 ```
 
 Deploy the code and restart Briareus after setting the two `.env` values.
-Reopen the session's Browser panel to launch Chrome in the new mode. If the
-display service is unavailable, Chrome fails to start rather than falling
-back to headless. This setup does not guarantee access to sites that block
-the browser or the server's network.
+Reopen the session's Browser panel to launch Chrome in the new mode. If Xvfb
+or xauth is unavailable, startup fails rather than falling back to a shared
+display or headless mode. This setup does not guarantee access to sites that
+block the browser or the server's network.
 
 # Pool databases in RAM
 
