@@ -281,7 +281,8 @@ Each errand runs at most once per head commit; a new push makes all three
 eligible again. Pull requests opened from a fork are skipped, since their branch
 is not on the project's repository. After three conflict or checks fixes in a
 row that leave the checks failing or the conflict in place, the babysitter stops
-starting those two until the head is green and mergeable again; reviews go on.
+starting those two until the head is green (or has no checks) and mergeable
+again; reviews go on.
 The errands run on the project's review provider, model and effort, and nothing
 starts until one is set. When the project has a PR author
 (`reviewAuthor`), conflicts and checks are only fixed on that author's pull

@@ -775,10 +775,12 @@ describe('pullRequestHasOpenSession', () => {
       row('bs-synced', { branch: 'dev-y', prStatus: { number: 212, state: 'open' } }),
       row('bs-borrowed', { branch: 'dev-z', prBranch: 'feature/213' }),
       row('bs-own-branch', { branch: 'feature/214' }),
+      row('bs-preparing', { branch: null, startBranch: 'feature/216' }),
       row('bs-closed', { branch: 'feature/215', startedOnPr: 215 }),
     ];
     await initJobs();
-    for (const id of ['bs-number', 'bs-synced', 'bs-borrowed', 'bs-own-branch']) getJob(id).status = 'idle';
+    for (const id of ['bs-number', 'bs-synced', 'bs-borrowed', 'bs-own-branch', 'bs-preparing'])
+      getJob(id).status = 'idle';
   });
 
   it('finds an open session by the pull request it was started on or synced to', () => {
@@ -789,6 +791,10 @@ describe('pullRequestHasOpenSession', () => {
   it('finds one by the branch it is filed under or checked out on', () => {
     expect(pullRequestHasOpenSession('acme/babysit', 213, 'feature/213')).toBe(true);
     expect(pullRequestHasOpenSession('acme/babysit', 214, 'feature/214')).toBe(true);
+  });
+
+  it('finds one still preparing on the branch it was started on', () => {
+    expect(pullRequestHasOpenSession('acme/babysit', 216, 'feature/216')).toBe(true);
   });
 
   it('ignores closed sessions, other repositories and a missing branch', () => {

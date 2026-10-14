@@ -191,6 +191,17 @@ describe('babysitter tick', () => {
     });
   });
 
+  it('starts the count again on a mergeable head with no checks, but not on pending ones', async () => {
+    const stored = () => ({ 'acme/shop#7': { 'solve-conflicts': 'older', pushes: MAX_PUSH_ERRANDS } });
+    const none = sitter({ stored: stored(), pulls: [pr({ checks: null })] });
+    await none.b.tick();
+    expect(none.saved.at(-1)['acme/shop#7'].pushes).toBe(0);
+
+    const pending = sitter({ stored: stored(), pulls: [pr({ checks: 'pending' })] });
+    await pending.b.tick();
+    expect(pending.saved.at(-1)['acme/shop#7'].pushes).toBe(MAX_PUSH_ERRANDS);
+  });
+
   it('leaves pull requests with an open session alone', async () => {
     const { b, start } = sitter({ hasSession: () => true });
     await b.tick();
