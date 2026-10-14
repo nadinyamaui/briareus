@@ -1,5 +1,7 @@
 import express from 'express';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import readline from 'node:readline';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { whatsappAgentRoutes, whatsappSessionAllowed } from '../lib/whatsapp-agent.js';
@@ -11,7 +13,9 @@ const ROUTES = [
   [`/accounts/default/conversations/${CHAT}/messages`, 'GET'],
   [`/accounts/default/conversations/${CHAT}/messages`, 'POST'],
   [`/accounts/default/conversations/${CHAT}/read`, 'POST'],
+  [`/accounts/default/conversations/${CHAT}/messages/m1/media`, 'GET'],
 ];
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 let server, base, job, service, project;
 beforeEach(async () => {
@@ -26,7 +30,7 @@ beforeEach(async () => {
     start: vi.fn(),
     qr: vi.fn(),
     logout: vi.fn(),
-    media: vi.fn(),
+    media: vi.fn(async () => new Response(PNG, { headers: { 'Content-Type': 'image/png' } })),
   };
   const app = express();
   app.use(express.json());
@@ -152,16 +156,38 @@ describe('session WhatsApp authorization', () => {
     expect(await res.json()).toEqual({ error: 'WhatsApp returned an unexpected response' });
   });
 
-  it('exposes no pairing, logout or media route to sessions', async () => {
+  it('exposes no pairing or logout route to sessions', async () => {
     for (const [path, method] of [
       ['/accounts/default', 'GET'],
       ['/accounts/default/start', 'POST'],
       ['/accounts/default/qr', 'GET'],
       ['/accounts/default/logout', 'POST'],
-      [`/accounts/default/conversations/${CHAT}/messages/m1/media`, 'GET'],
     ])
       expect((await request(path, method)).status).toBe(404);
-    for (const name of ['start', 'qr', 'logout', 'media']) expect(service[name]).not.toHaveBeenCalled();
+    for (const name of ['start', 'qr', 'logout']) expect(service[name]).not.toHaveBeenCalled();
+  });
+
+  it('returns media as base64 JSON and refuses it past 25 MiB', async () => {
+    let res = await request(`/accounts/default/conversations/${CHAT}/messages/m1/media`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      mimetype: 'image/png',
+      size: PNG.length,
+      data: PNG.toString('base64'),
+    });
+    expect(service.media).toHaveBeenCalledWith('default', CHAT, 'm1', expect.any(AbortSignal));
+    const big = new Uint8Array(25 * 1024 * 1024 + 1);
+    service.media.mockImplementationOnce(async () => new Response(big));
+    res = await request(`/accounts/default/conversations/${CHAT}/messages/m1/media`);
+    expect(res.status).toBe(413);
+    service.media.mockImplementationOnce(
+      async () =>
+        new Response(new ReadableStream({ start: (c) => (c.enqueue(big), c.close()) }), {
+          headers: { 'Content-Type': 'application/pdf' },
+        }),
+    );
+    res = await request(`/accounts/default/conversations/${CHAT}/messages/m1/media`);
+    expect(res.status).toBe(413);
   });
 });
 
@@ -190,6 +216,7 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
       'whatsapp_accounts',
       'whatsapp_conversations',
       'whatsapp_messages',
+      'whatsapp_media',
       'whatsapp_send',
       'whatsapp_mark_read',
     ]);
@@ -199,6 +226,14 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
     expect(service.conversations).toHaveBeenCalledWith('default', { limit: '20', offset: '40' });
     await tool('whatsapp_messages', { account: 'default', chat: CHAT });
     expect(service.messages).toHaveBeenCalledWith('default', CHAT, {});
+    const media = JSON.parse(
+      (await tool('whatsapp_media', { account: 'default', chat: CHAT, message: 'm1' })).result.content[0]
+        .text,
+    );
+    expect(media).toMatchObject({ mimetype: 'image/png', size: PNG.length });
+    expect(media.path).toMatch(/whatsapp-media-[^/]+\/media\.png$/);
+    expect(fs.readFileSync(media.path)).toEqual(PNG);
+    fs.rmSync(path.dirname(media.path), { recursive: true });
     const sent = await tool('whatsapp_send', { account: 'default', chat: CHAT, text: 'Hola', replyTo: 'm1' });
     expect(JSON.parse(sent.result.content[0].text).message.id).toBe('sent');
     expect(service.send).toHaveBeenCalledWith('default', CHAT, { text: 'Hola', replyTo: 'm1' });

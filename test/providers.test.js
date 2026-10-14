@@ -702,16 +702,21 @@ describe('buildArgs', () => {
     expect(plain.args.join(' ')).not.toContain('mcp_servers');
   });
 
-  it('codex gives internal mail enough time for reply requests and uncertain-send reconciliation', () => {
-    const mcp = ['reviewer_mail', 'reviewer_memory', 'reviewer_ssh'].map((name) => ({
+  it('codex gives internal mail and WhatsApp enough time for sends and media downloads', () => {
+    const mcp = ['reviewer_mail', 'reviewer_whatsapp', 'reviewer_memory', 'reviewer_ssh'].map((name) => ({
       name,
       command: '/usr/bin/node',
       args: [`/app/lib/${name}.js`],
     }));
-    for (const build of [BINARIES.codex.buildArgs, BINARIES.codex.buildReviewArgs]) {
+    for (const build of [
+      BINARIES.codex.buildArgs,
+      BINARIES.codex.buildReviewArgs,
+      (opts) => BINARIES.codex.buildArgs({ ...opts, live: true }),
+    ]) {
       const { args } = build({ model: 'gpt', effort: 'high', sessionId: 't', mcp });
       expect(args).toContain('mcp_servers.reviewer_mail.tool_timeout_sec=240');
-      expect(args.filter((arg) => arg.includes('tool_timeout_sec'))).toHaveLength(1);
+      expect(args).toContain('mcp_servers.reviewer_whatsapp.tool_timeout_sec=240');
+      expect(args.filter((arg) => arg.includes('tool_timeout_sec'))).toHaveLength(2);
     }
   });
 

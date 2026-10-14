@@ -57,6 +57,17 @@ describe('parseAddressList', () => {
     expect(parseAddressList('"Say \\"hi\\"" <a@b.c>')).toEqual([{ name: 'Say "hi"', address: 'a@b.c' }]);
   });
 
+  it.each(['"a>b"@example.com', '"a<b>c"@example.com', '"a\\">b"@example.com'])(
+    'preserves quoted angle characters in %s',
+    (address) => {
+      expect(parseAddressList(`Other <${address}>, bob@example.com`)).toEqual([
+        { name: 'Other', address },
+        { name: '', address: 'bob@example.com' },
+      ]);
+      expect(parseAddressList(address)).toEqual([{ name: '', address }]);
+    },
+  );
+
   it('leaves comments out of addresses and names, and does not split on a comma in one', () => {
     expect(
       parseAddressList(
