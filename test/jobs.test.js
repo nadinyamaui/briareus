@@ -278,6 +278,7 @@ import {
   createDevSession,
   stepProvider,
   devSessionSlots,
+  pullRequestHasOpenSession,
   dropQueuedMessage,
   cancelDevTurn,
   closeDevSessionWithReason,
@@ -754,6 +755,46 @@ describe('devSessionSlots', () => {
     state.claimsServer = true;
     state.capacity = 2;
     expect(devSessionSlots('acme/shop')).toBe(2);
+  });
+});
+
+describe('pullRequestHasOpenSession', () => {
+  // Own repo and PR numbers, so the rows restored here match nothing the other blocks sync.
+  const row = (id, over) => ({
+    id,
+    kind: 'devchat',
+    status: 'closed',
+    repo: 'acme/babysit',
+    turns: 1,
+    ...over,
+  });
+
+  beforeAll(async () => {
+    state.stored = [
+      row('bs-number', { branch: 'dev-x', startedOnPr: 211 }),
+      row('bs-synced', { branch: 'dev-y', prStatus: { number: 212, state: 'open' } }),
+      row('bs-borrowed', { branch: 'dev-z', prBranch: 'feature/213' }),
+      row('bs-own-branch', { branch: 'feature/214' }),
+      row('bs-closed', { branch: 'feature/215', startedOnPr: 215 }),
+    ];
+    await initJobs();
+    for (const id of ['bs-number', 'bs-synced', 'bs-borrowed', 'bs-own-branch']) getJob(id).status = 'idle';
+  });
+
+  it('finds an open session by the pull request it was started on or synced to', () => {
+    expect(pullRequestHasOpenSession('acme/babysit', 211, 'feature/211')).toBe(true);
+    expect(pullRequestHasOpenSession('ACME/Babysit', 212, 'feature/212')).toBe(true);
+  });
+
+  it('finds one by the branch it is filed under or checked out on', () => {
+    expect(pullRequestHasOpenSession('acme/babysit', 213, 'feature/213')).toBe(true);
+    expect(pullRequestHasOpenSession('acme/babysit', 214, 'feature/214')).toBe(true);
+  });
+
+  it('ignores closed sessions, other repositories and a missing branch', () => {
+    expect(pullRequestHasOpenSession('acme/babysit', 215, 'feature/215')).toBe(false);
+    expect(pullRequestHasOpenSession('acme/other', 211, 'feature/213')).toBe(false);
+    expect(pullRequestHasOpenSession('acme/babysit', 299, '')).toBe(false);
   });
 });
 

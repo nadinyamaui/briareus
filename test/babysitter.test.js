@@ -6,8 +6,16 @@ vi.mock('../lib/jobs.js', () => ({
   devSessionSlots: vi.fn(() => Infinity),
   pullRequestHasOpenSession: vi.fn(() => false),
 }));
+// The spec itself is lib/actions.js's business, tested there; here it only has to
+// reach createDevSession with the runtime on top.
+vi.mock('../lib/actions.js', () => ({
+  getAction: vi.fn((id) => (id === 'fix-checks' || id === 'solve-conflicts' ? { id } : null)),
+  actionSessionSpec: vi.fn(async (action, context) => ({ activity: action.id, prNumber: context.prNumber })),
+}));
 
-import { createBabysitter, errandFor } from '../lib/babysitter.js';
+import { createBabysitter, errandsFor, startErrand, MAX_PUSH_ERRANDS } from '../lib/babysitter.js';
+import { createDevSession } from '../lib/jobs.js';
+import { actionSessionSpec } from '../lib/actions.js';
 
 const project = (over = {}) => ({
   repo: 'acme/shop',
@@ -50,28 +58,47 @@ function sitter({ projects = [project()], pulls = [pr()], stored = {}, ...over }
   return { b, start, saved };
 }
 
-describe('errandFor', () => {
-  it('puts conflicts before failing checks before a review', () => {
+describe('errandsFor', () => {
+  it('lists conflicts before failing checks before a review', () => {
     const p = project();
-    expect(errandFor(pr({ recommended: 'solve-conflicts', checks: 'failure' }), p)).toBe('solve-conflicts');
-    expect(errandFor(pr({ checks: 'failure' }), p)).toBe('fix-checks');
-    expect(errandFor(pr({ checks: 'error', recommended: null }), p)).toBe('fix-checks');
-    expect(errandFor(pr(), p)).toBe('review');
-    expect(errandFor(pr({ recommended: 'qa' }), p)).toBe(null);
-    expect(errandFor(pr({ checks: 'pending' }), p)).toBe('review');
+    expect(errandsFor(pr({ recommended: 'solve-conflicts', checks: 'failure', labels: [] }), p)).toEqual([
+      'solve-conflicts',
+      'fix-checks',
+      'review',
+    ]);
+    expect(errandsFor(pr({ checks: 'failure' }), p)).toEqual(['fix-checks', 'review']);
+    expect(
+      errandsFor(pr({ checks: 'error', recommended: null, labels: [{ name: 'feedback-given' }] }), p),
+    ).toEqual(['fix-checks']);
+    expect(errandsFor(pr(), p)).toEqual(['review']);
+    expect(errandsFor(pr({ recommended: 'qa', labels: [{ name: 'code-approved' }] }), p)).toEqual([]);
+    expect(errandsFor(pr({ checks: 'pending' }), p)).toEqual(['review']);
   });
 
-  it('skips drafts and stalled pull requests', () => {
-    expect(errandFor(pr({ draft: true }), project())).toBe(null);
-    expect(errandFor(pr({ labels: [{ name: 'blocked' }], checks: 'failure' }), project())).toBe(null);
+  it('still offers the review behind a has-conflicts label', () => {
+    const labels = [{ name: 'has-conflicts' }];
+    expect(errandsFor(pr({ recommended: 'solve-conflicts', labels }), project())).toEqual([
+      'solve-conflicts',
+      'review',
+    ]);
+    const reviewed = [...labels, { name: 'feedback-given' }];
+    expect(errandsFor(pr({ recommended: 'solve-conflicts', labels: reviewed }), project())).toEqual([
+      'solve-conflicts',
+    ]);
+  });
+
+  it('skips drafts, stalled pull requests and ones opened from a fork', () => {
+    expect(errandsFor(pr({ draft: true }), project())).toEqual([]);
+    expect(errandsFor(pr({ labels: [{ name: 'blocked' }], checks: 'failure' }), project())).toEqual([]);
+    expect(errandsFor(pr({ crossRepository: true, checks: 'failure' }), project())).toEqual([]);
   });
 
   it('pushes only to the configured author’s pull requests, but reviews anyone’s', () => {
     const p = project({ reviewAuthor: 'Nadin' });
-    expect(errandFor(pr({ author: 'someone', checks: 'failure' }), p)).toBe(null);
-    expect(errandFor(pr({ author: 'someone', recommended: 'solve-conflicts' }), p)).toBe(null);
-    expect(errandFor(pr({ author: 'nadin', checks: 'failure' }), p)).toBe('fix-checks');
-    expect(errandFor(pr({ author: 'someone' }), p)).toBe('review');
+    expect(errandsFor(pr({ author: 'someone', checks: 'failure' }), p)).toEqual(['review']);
+    expect(errandsFor(pr({ author: 'someone', recommended: 'solve-conflicts' }), p)).toEqual(['review']);
+    expect(errandsFor(pr({ author: 'nadin', checks: 'failure' }), p)).toEqual(['fix-checks', 'review']);
+    expect(errandsFor(pr({ author: 'someone' }), p)).toEqual(['review']);
   });
 });
 
@@ -109,7 +136,59 @@ describe('babysitter tick', () => {
     });
     await b.tick();
     expect(start.mock.calls[0][0]).toBe('fix-checks');
-    expect(saved.at(-1)['acme/shop#7']).toEqual({ review: 'abc1234def', 'fix-checks': 'abc1234def' });
+    expect(saved.at(-1)['acme/shop#7']).toEqual({
+      review: 'abc1234def',
+      'fix-checks': 'abc1234def',
+      pushes: 1,
+    });
+  });
+
+  it('reviews a head whose checks were already tried and stayed red', async () => {
+    const { b, start, saved } = sitter({
+      stored: { 'acme/shop#7': { 'fix-checks': 'abc1234def', pushes: 1 } },
+      pulls: [pr({ checks: 'failure' })],
+    });
+    await b.tick();
+    expect(start.mock.calls.map((c) => c[0])).toEqual(['review']);
+    expect(saved.at(-1)['acme/shop#7']).toEqual({
+      'fix-checks': 'abc1234def',
+      review: 'abc1234def',
+      pushes: 1,
+    });
+  });
+
+  it('starts one errand per pull request a round', async () => {
+    const { b, start } = sitter({ pulls: [pr({ checks: 'failure' })] });
+    await b.tick();
+    expect(start.mock.calls.map((c) => c[0])).toEqual(['fix-checks']);
+  });
+
+  it('stops pushing after MAX_PUSH_ERRANDS in a row, but keeps reviewing', async () => {
+    const { b, start, saved } = sitter({
+      stored: { 'acme/shop#7': { 'fix-checks': 'older', pushes: MAX_PUSH_ERRANDS } },
+      pulls: [pr({ checks: 'failure' })],
+    });
+    await b.tick();
+    expect(start.mock.calls.map((c) => c[0])).toEqual(['review']);
+    expect(saved.at(-1)['acme/shop#7'].pushes).toBe(MAX_PUSH_ERRANDS);
+  });
+
+  it('counts pushes until a green head, which starts the count again', async () => {
+    const red = sitter({
+      stored: { 'acme/shop#7': { 'solve-conflicts': 'older', pushes: 1 } },
+      pulls: [pr({ recommended: 'solve-conflicts', checks: 'success' })],
+    });
+    await red.b.tick();
+    expect(red.start.mock.calls[0][0]).toBe('solve-conflicts');
+    expect(red.saved.at(-1)['acme/shop#7'].pushes).toBe(2);
+
+    const green = sitter({ stored: { 'acme/shop#7': { 'fix-checks': 'older', pushes: MAX_PUSH_ERRANDS } } });
+    await green.b.tick();
+    expect(green.saved.at(-1)['acme/shop#7']).toEqual({
+      'fix-checks': 'older',
+      review: 'abc1234def',
+      pushes: 0,
+    });
   });
 
   it('leaves pull requests with an open session alone', async () => {
@@ -149,5 +228,45 @@ describe('babysitter tick', () => {
     });
     await b.tick();
     expect(saved.at(-1)).toEqual({ 'other/repo#1': { review: 'x' } });
+  });
+});
+
+describe('startErrand', () => {
+  const runtime = { providerId: 3, model: 'opus', effort: 'high' };
+  const run = { provider: 3, model: 'opus', effort: 'high' };
+
+  it('starts a code review on the PR branch', async () => {
+    createDevSession.mockClear();
+    await startErrand('review', project(), pr(), runtime);
+    expect(createDevSession).toHaveBeenCalledWith({
+      ...run,
+      repo: 'acme/shop',
+      branch: 'feature/cart',
+      review: true,
+      prNumber: 7,
+    });
+  });
+
+  it('starts a pushing errand from its action spec, with the PR as context', async () => {
+    createDevSession.mockClear();
+    const p = project();
+    await startErrand('fix-checks', p, pr(), runtime);
+    expect(actionSessionSpec).toHaveBeenLastCalledWith(
+      { id: 'fix-checks' },
+      {
+        repo: 'acme/shop',
+        prNumber: 7,
+        branch: 'feature/cart',
+        baseBranch: 'main',
+        title: 'Add cart',
+        project: p,
+        input: '',
+      },
+    );
+    expect(createDevSession).toHaveBeenCalledWith({ ...run, activity: 'fix-checks', prNumber: 7 });
+  });
+
+  it('refuses an errand it has no action for', async () => {
+    await expect(startErrand('qa', project(), pr(), runtime)).rejects.toThrow(/Unknown action: qa/);
   });
 });
