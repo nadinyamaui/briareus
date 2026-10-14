@@ -2077,4 +2077,59 @@ describe('mail push', () => {
     expect(graph.mock.calls.some(([, init]) => init.method === 'DELETE')).toBe(true);
     expect(await service.list()).toEqual([]);
   });
+  it('retries Outlook replacement after deletion succeeds but registration fails', async () => {
+    cfg.mail.syncMinutes = 0;
+    cfg.mail.microsoft = { clientId: 'ms', clientSecret: 'secret', tenant: 'common' };
+    const account = await store.insertAccount({
+      provider: 'outlook',
+      email: 'me@outlook.com',
+      enabled: true,
+      status: 'connected',
+      credentials: seal(JSON.stringify({ accessToken: 'access', expiresAt: clock + DAY })),
+      pushState: {
+        id: 'deleted',
+        fingerprint: 'https://old.example.com/webhooks/mail',
+        expiresAt: clock + 3 * DAY,
+        secret: seal('secret'),
+      },
+    });
+    let deleted = false;
+    let failRegistration = true;
+    const graph = vi.fn(async (_url, init = {}) => {
+      if (init.method === 'DELETE') {
+        if (deleted) return new Response(JSON.stringify({ error: { message: 'Missing' } }), { status: 404 });
+        deleted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (failRegistration)
+        return new Response(JSON.stringify({ error: { message: 'Registration failed' } }), { status: 400 });
+      return new Response(
+        JSON.stringify({
+          id: 'replacement',
+          expirationDateTime: JSON.parse(init.body).expirationDateTime,
+        }),
+      );
+    });
+    service = createMailService({
+      store,
+      request: graph,
+      now: () => clock,
+      pushUrl: () => 'https://new.example.com/webhooks/mail',
+      log: { error: vi.fn() },
+    });
+    await service.init();
+    vi.useFakeTimers();
+    service.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(store.accounts.get(account.id).pushState.lastError).toContain('Registration failed');
+    failRegistration = false;
+    clock += 3600_000;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(store.accounts.get(account.id).pushState).toMatchObject({
+      id: 'replacement',
+      fingerprint: 'https://new.example.com/webhooks/mail',
+      lastError: null,
+    });
+    expect(graph.mock.calls.map(([, init]) => init.method)).toEqual(['DELETE', 'POST', 'DELETE', 'POST']);
+  });
 });

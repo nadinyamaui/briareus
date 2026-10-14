@@ -3829,6 +3829,63 @@ describe('webhook deliveries', () => {
       expect(() => setSessionMailWake(job.id, { rules: [{ account: 7 }] })).toThrow(/Email wakes require/);
       expect(setSessionMailWake(job.id, { rules: [] }).rules).toEqual([]);
     });
+    it.each(['display names', 'escaped metadata'])(
+      'delivers large recipient lists with %s without blocking later mail',
+      async (kind) => {
+        const { prompts } = fakeCli();
+        const job = getJob('hk-mail');
+        const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }] }).rules[0];
+        job.awaitingAnswer = true;
+        const address = {
+          name: (kind === 'display names' ? 'n' : '\u0000').repeat(1000),
+          address: (kind === 'display names' ? 'a' : '\u0000').repeat(1000),
+        };
+        mailReceived(account, {
+          ...email('large', rule.since),
+          from: { ...address, address: 'sender@example.com' },
+          to: Array(500).fill(address),
+          cc: Array(500).fill(address),
+          subject: '\u0000'.repeat(1000),
+          bodyText: '\u0000'.repeat(6000),
+        });
+        mailReceived(account, email('ordinary', rule.since));
+        expect(job.pendingMailWakes).toHaveLength(0);
+        expect(job.pendingDeliveries).toHaveLength(2);
+        const notification = JSON.parse(job.pendingDeliveries[0].text);
+        expect(notification.id).toBe('large');
+        expect(notification.from.address).toBe('sender@example.com');
+        job.awaitingAnswer = false;
+        flushDeliveries(job);
+        await vi.waitFor(() => expect(prompts).toHaveLength(1));
+        expect(prompts[0]).toContain('large');
+        expect(prompts[0]).toContain('ordinary');
+        await cli.finish(job);
+      },
+    );
+    it.each([
+      ['pendingDeliveries', 'mailbox'],
+      ['pendingDeliveries', 'project'],
+      ['pendingMailWakes', 'mailbox'],
+      ['pendingMailWakes', 'project'],
+    ])('persists %s cancellation after %s revocation', async (queue, access) => {
+      const job = getJob('hk-mail');
+      const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }], maxTurns: 1 }).rules[0];
+      job.awaitingAnswer = true;
+      if (queue === 'pendingMailWakes') job.unattendedTurns = 1;
+      mailReceived(account, email('revoked', rule.since));
+      expect(job[queue]).toHaveLength(1);
+      await flushJobs();
+      expect(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0][queue]).toHaveLength(1);
+      saveJob.mockClear();
+      if (access === 'mailbox') setMailWakeAccess(() => false);
+      else project.mailToolsEnabled = false;
+      flushDeliveries(job);
+      await flushJobs();
+      const saved = saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)?.[0];
+      expect(saved).toBeDefined();
+      expect(saved).not.toHaveProperty('pendingMailWakes');
+      expect(saved).not.toHaveProperty('pendingDeliveries');
+    });
     it('retains messages refused by the hourly cap and cancels pending messages when the rule is disabled', () => {
       const job = getJob('hk-mail-cap');
       job.status = 'idle';
