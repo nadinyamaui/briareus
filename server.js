@@ -8,7 +8,9 @@ import { createEnvoyerService } from './lib/envoyer.js';
 import { envoyerRoutes } from './lib/envoyer-routes.js';
 import { createForgeAccounts } from './lib/forge-accounts.js';
 import { mailAgentRoutes } from './lib/mail-agent.js';
-import { createMailService } from './lib/mail.js';
+import { mailPushRoutes } from './lib/mail-push-routes.js';
+import { sessionMailWakeRoutes } from './lib/mail-wake.js';
+import { createMailService, MAIL_PUSH_PATH } from './lib/mail.js';
 import { mailRoutes, mailCallbackRoutes } from './lib/mail-routes.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
 import { estimateCosts } from './lib/prices.js';
@@ -107,6 +109,10 @@ import {
   replyToReviewFinding,
   retryLoopRound,
   deliverToSession,
+  mailReceived,
+  sessionMailWakeState,
+  setSessionMailWake,
+  setMailWakeAccess,
   noteSession,
   webhookUnfit,
   setSlackAccess,
@@ -260,6 +266,9 @@ setSlackAccess((repo) => slackService.briefing(repo));
 
 // Webhooks go ahead of the JSON body parser: GitHub and Slack sign the raw bytes with an HMAC,
 // and a re-serialized body verifies against nothing (lib/webhooks.js).
+const mailService = createMailService({ onReceived: mailReceived });
+setMailWakeAccess((id) => mailService.wakeAccountEnabled(id));
+app.use(mailPushRoutes({ service: mailService }));
 app.use('/webhooks/slack', slackEventsRouter({ service: slackService }));
 
 // The operator's MCP servers (lib/mcp-servers.js). The provider's redirect
@@ -311,9 +320,7 @@ app.get('/healthz', async (req, res) => {
 });
 
 // Where a mailbox's sign-in ends when its redirect URI is this server's own
-// (lib/mail-routes.js). The mail service is created here for it, and the
-// API's mail routes below share it.
-const mailService = createMailService();
+// (lib/mail-routes.js). The API's mail routes below share its service.
 app.use(mailCallbackRoutes({ service: mailService }));
 
 // The scenario videos a test run records. The run copies each .webm here, and
@@ -615,7 +622,18 @@ api.use(
   }),
 );
 api.use(mailRoutes({ service: mailService }));
-api.use(mailAgentRoutes({ service: mailService, agentSession, getProject }));
+api.use(
+  mailAgentRoutes({
+    service: mailService,
+    agentSession,
+    getProject,
+    wakeState: sessionMailWakeState,
+    wakeUpdate: setSessionMailWake,
+  }),
+);
+api.use(
+  sessionMailWakeRoutes({ service: mailService, state: sessionMailWakeState, update: setSessionMailWake }),
+);
 
 api.get('/api/agent/memories', (req, res) => {
   const job = agentSession(req, res);
@@ -2040,7 +2058,8 @@ app.use((req, res) =>
 );
 app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
-  console.error(`${req.method} ${req.originalUrl} failed:`, err);
+  const url = req.path.startsWith(MAIL_PUSH_PATH) ? req.path : req.originalUrl;
+  console.error(`${req.method} ${url} failed:`, err);
   res.status(err.status || err.statusCode || 500).json({ error: err.message || 'Server error' });
 });
 

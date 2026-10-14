@@ -164,6 +164,12 @@ function fakeGmail(mailbox) {
             : 'https://www.googleapis.com/auth/gmail.readonly'),
       });
     }
+    if (url.endsWith('/watch'))
+      return reply(
+        mailbox.watchError || { historyId: '999', expiration: String(clock + 7 * DAY) },
+        mailbox.watchStatus || 200,
+      );
+    if (url.endsWith('/stop')) return new Response(null, { status: 204 });
     if (url.endsWith('/messages/send') && init.method === 'POST')
       return reply({ id: 'sent', threadId: 'sent-thread' });
     if (gate.wait) await gate.wait;
@@ -1894,6 +1900,181 @@ describe('mail management access', () => {
   it('rejects invalid or refused management consent without saving a grant', async () => {
     expect(() => service.connectStart({ provider: 'gmail', access: 'admin' })).toThrow(/Choose/);
     await expect(connect({ access: 'manage' })).rejects.toThrow(/did not grant/);
+    expect(await service.list()).toEqual([]);
+  });
+});
+
+describe('mail push', () => {
+  const token = 'push-secret'.repeat(5);
+  const notification = (email = 'me@gmail.com') => ({
+    message: {
+      data: Buffer.from(JSON.stringify({ emailAddress: email, historyId: '999' })).toString('base64url'),
+    },
+  });
+  async function setupPush(onReceived) {
+    cfg.mail.gmailPush = { topic: 'projects/mail/topics/events', token };
+    service.stop();
+    service = createMailService({
+      store,
+      request: gmail.request,
+      now: () => clock,
+      sleep: async () => {},
+      pushUrl: () => 'https://mail.example.com/webhooks/mail',
+      onReceived,
+      log: { error: (...args) => errors.push(args.join(' ')) },
+    });
+    await service.init();
+  }
+  async function finishSync() {
+    await vi.waitFor(async () => expect((await service.list())[0].syncing).toBe(false));
+  }
+  it('registers, persists a sealed secret, keeps the sync cursor, renews daily and stops on disable', async () => {
+    await setupPush();
+    const started = service.connectStart({ provider: 'gmail' });
+    const account = await service.connectFinish({ state: started.state, code: 'c' });
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.expiresAt).toBe(clock + 7 * DAY));
+    expect(store.accounts.get(account.id).syncState.historyId).toBe('10');
+    expect((await service.list())[0]).not.toHaveProperty('pushState');
+    expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/watch'))).toHaveLength(1);
+    clock += DAY + 1;
+    await service.sync(account.id);
+    await finishSync();
+    expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/watch'))).toHaveLength(2);
+    await service.update(account.id, { enabled: false });
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState).toBeNull());
+    expect(gmail.request.mock.calls.some(([url]) => url.endsWith('/stop'))).toBe(true);
+  });
+  it('authenticates notifications and fetches mail without copying the hint history id into sync state', async () => {
+    const received = vi.fn();
+    await setupPush(received);
+    const started = service.connectStart({ provider: 'gmail' });
+    const account = await service.connectFinish({ state: started.state, code: 'c' });
+    await finishSync();
+    received.mockClear();
+    expect(() => service.gmailNotification(notification(), 'bad')).toThrow('Invalid mail push token');
+    expect(() => service.gmailNotification({ message: { data: 'bad' } }, token)).toThrow(
+      'Invalid Gmail notification',
+    );
+    // Force a fresh snapshot so the fake Gmail lists the new message too.
+    await service.update(account.id, { syncDays: 31 });
+    await finishSync();
+    store.accounts.get(account.id).syncState = null;
+    await service.init();
+    mailbox.messages.fresh = { at: clock, unread: true };
+    service.gmailNotification(notification(), token);
+    service.gmailNotification(notification(), token);
+    await finishSync();
+    expect(received).toHaveBeenCalledTimes(1);
+    expect(received.mock.calls[0][1].id).toBe('fresh');
+    expect(store.accounts.get(account.id).syncState.historyId).not.toBe('999');
+    const calls = gmail.request.mock.calls.length;
+    service.gmailNotification(notification('unknown@gmail.com'), token);
+    expect(gmail.request.mock.calls).toHaveLength(calls);
+  });
+  it('keeps polling usable when watch registration fails and exposes the failure without credentials', async () => {
+    mailbox.watchStatus = 403;
+    mailbox.watchError = { error: { message: 'Topic permissions missing' } };
+    await setupPush();
+    const started = service.connectStart({ provider: 'gmail' });
+    await service.connectFinish({ state: started.state, code: 'c' });
+    await finishSync();
+    expect((await service.list())[0]).toMatchObject({
+      lastSyncError: null,
+      push: { active: false, lastError: expect.stringContaining('Topic permissions missing') },
+    });
+    const watches = gmail.request.mock.calls.filter(([url]) => url.endsWith('/watch')).length;
+    await service.sync(1);
+    await finishSync();
+    expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/watch'))).toHaveLength(watches);
+  });
+  it('renews watches even with periodic polling disabled', async () => {
+    await setupPush();
+    const started = service.connectStart({ provider: 'gmail' });
+    await service.connectFinish({ state: started.state, code: 'c' });
+    await finishSync();
+    cfg.mail.syncMinutes = 0;
+    vi.useFakeTimers();
+    service.start();
+    clock += DAY + 1;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/watch'))).toHaveLength(2);
+  });
+  it('validates Outlook clientState, renews lifecycle notifications and unregisters on removal', async () => {
+    cfg.mail = {
+      syncMinutes: 5,
+      google: null,
+      microsoft: {
+        clientId: 'ms',
+        clientSecret: 'secret',
+        tenant: 'common',
+        redirectUri: 'https://mail.test/cb',
+      },
+    };
+    const account = await store.insertAccount({
+      provider: 'outlook',
+      email: 'me@outlook.com',
+      enabled: true,
+      syncDays: 30,
+      status: 'connected',
+      credentials: seal(
+        JSON.stringify({ accessToken: 'access', refreshToken: 'refresh', expiresAt: clock + DAY }),
+      ),
+    });
+    let secret;
+    const graph = vi.fn(async (url, init = {}) => {
+      if (url.includes('/subscriptions')) {
+        if (init.method === 'DELETE') return new Response(null, { status: 204 });
+        const body = JSON.parse(init.body);
+        if (init.method === 'POST') secret = body.clientState;
+        return new Response(
+          JSON.stringify({ id: 'subscription', expirationDateTime: body.expirationDateTime }),
+        );
+      }
+      return new Response(JSON.stringify(url.includes('mailFolders?') ? { value: [] } : { id: 'inbox' }));
+    });
+    service = createMailService({
+      store,
+      request: graph,
+      now: () => clock,
+      pushUrl: () => 'https://mail.example.com/webhooks/mail',
+    });
+    await service.init();
+    await service.sync(account.id);
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.id).toBe('subscription'));
+    const state = store.accounts.get(account.id).pushState;
+    const registration = graph.mock.calls.find(([, init]) => init.method === 'POST')[1];
+    expect(JSON.parse(registration.body)).toMatchObject({
+      resource: 'me/messages',
+      changeType: 'created,updated,deleted',
+      notificationUrl: 'https://mail.example.com/webhooks/mail/outlook',
+      lifecycleNotificationUrl: 'https://mail.example.com/webhooks/mail/outlook',
+    });
+    expect(state.secret).not.toBe(secret);
+    expect(open(state.secret)).toBe(secret);
+    expect(() =>
+      service.outlookNotification({ value: [{ subscriptionId: 'subscription', clientState: 'wrong' }] }),
+    ).toThrow('Invalid Outlook clientState');
+    expect(() => service.outlookNotification({ value: {} })).toThrow('Invalid Outlook notification');
+    expect(() =>
+      service.outlookNotification({
+        value: [
+          { subscriptionId: 'subscription', clientState: secret, lifecycleEvent: 'subscriptionRemoved' },
+          { subscriptionId: 'subscription', clientState: 'wrong' },
+        ],
+      }),
+    ).toThrow('Invalid Outlook clientState');
+    expect(store.accounts.get(account.id).pushState.id).toBe('subscription');
+    service.outlookNotification({
+      value: [
+        { subscriptionId: 'subscription', clientState: secret, lifecycleEvent: 'reauthorizationRequired' },
+      ],
+    });
+    await finishSync();
+    await vi.waitFor(() => expect(graph.mock.calls.some(([, init]) => init.method === 'PATCH')).toBe(true));
+    await service.remove(account.id);
+    expect(graph.mock.calls.some(([, init]) => init.method === 'DELETE')).toBe(true);
     expect(await service.list()).toEqual([]);
   });
 });

@@ -83,7 +83,7 @@ beforeEach(() => {
   savedEnv = { ...process.env };
   for (const k of Object.keys(process.env))
     if (
-      /^(R2_|CLOUDFLARE_|OPENAI_TRANSCRIBE_|PREVIEW_ACCESS_CLIENT_|GOOGLE_OAUTH_|MICROSOFT_OAUTH_|WAHA_|HOME_ASSISTANT_)/.test(
+      /^(R2_|CLOUDFLARE_|OPENAI_TRANSCRIBE_|PREVIEW_ACCESS_CLIENT_|GOOGLE_OAUTH_|GMAIL_PUSH_|MICROSOFT_OAUTH_|WAHA_|HOME_ASSISTANT_)/.test(
         k,
       )
     )
@@ -744,7 +744,25 @@ describe('mail sync', () => {
   it('is off for both providers when nothing is set, and syncs every five minutes', async () => {
     const { getConfig } = await loadConfig(complete());
 
-    expect(getConfig().mail).toEqual({ syncMinutes: 5, google: null, microsoft: null });
+    expect(getConfig().mail).toEqual({ syncMinutes: 5, google: null, microsoft: null, gmailPush: null });
+  });
+
+  it('validates Gmail Pub/Sub settings and keeps tokens out of child environments', async () => {
+    const { getConfig } = await loadConfig(
+      complete({ GMAIL_PUSH_TOPIC: 'projects/mail/topics/events', GMAIL_PUSH_TOKEN: 'x'.repeat(32) }),
+    );
+    expect(getConfig().mail.gmailPush).toEqual({
+      topic: 'projects/mail/topics/events',
+      token: 'x'.repeat(32),
+    });
+    const half = await loadConfig(complete({ GMAIL_PUSH_TOPIC: 'projects/mail/topics/events' }));
+    expect(() => half.getConfig()).toThrow('GMAIL_PUSH_TOPIC and GMAIL_PUSH_TOKEN');
+    const short = await loadConfig(
+      complete({ GMAIL_PUSH_TOPIC: 'projects/mail/topics/events', GMAIL_PUSH_TOKEN: 'short-secret' }),
+    );
+    expect(() => short.getConfig()).toThrow('GMAIL_PUSH_TOKEN (at least 32 characters)');
+    const invalid = await loadConfig(complete({ GMAIL_PUSH_TOPIC: 'bad', GMAIL_PUSH_TOKEN: 'x'.repeat(32) }));
+    expect(() => invalid.getConfig()).toThrow('GMAIL_PUSH_TOPIC (projects/<project>/topics/<topic>)');
   });
 
   it('reads a Google client', async () => {
