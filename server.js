@@ -110,6 +110,7 @@ import {
   retryLoopRound,
   deliverToSession,
   mailReceived,
+  cancelMailWakes,
   sessionMailWakeState,
   setSessionMailWake,
   setMailWakeAccess,
@@ -266,7 +267,7 @@ setSlackAccess((repo) => slackService.briefing(repo));
 
 // Webhooks go ahead of the JSON body parser: GitHub and Slack sign the raw bytes with an HMAC,
 // and a re-serialized body verifies against nothing (lib/webhooks.js).
-const mailService = createMailService({ onReceived: mailReceived });
+const mailService = createMailService({ onReceived: mailReceived, onDisabled: cancelMailWakes });
 setMailWakeAccess((id) => mailService.wakeAccountEnabled(id));
 app.use(mailPushRoutes({ service: mailService }));
 app.use('/webhooks/slack', slackEventsRouter({ service: slackService }));

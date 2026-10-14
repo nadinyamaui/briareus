@@ -1972,6 +1972,141 @@ describe('mail push', () => {
     service.gmailNotification(notification('unknown@gmail.com'), token);
     expect(gmail.request.mock.calls).toHaveLength(calls);
   });
+  it('caches label-only restorations without waking, while genuine arrivals still wake', async () => {
+    const received = vi.fn();
+    await setupPush(received);
+    const account = await connect();
+    await finishSync();
+    received.mockClear();
+    mailbox.messages.restored = { at: clock, labels: ['SPAM'] };
+    mailbox.messages.arrival = { at: clock };
+    let restoring = false;
+    const request = gmail.request.getMockImplementation();
+    gmail.request.mockImplementation(async (url, init) => {
+      if (url.includes('/history?'))
+        return new Response(
+          JSON.stringify({
+            historyId: restoring ? '12' : '11',
+            history: [
+              restoring
+                ? { labelsAdded: [{ message: { id: 'restored' } }] }
+                : { messagesAdded: [{ message: { id: 'restored' } }, { message: { id: 'arrival' } }] },
+            ],
+          }),
+        );
+      if (url.endsWith('/restored?format=minimal'))
+        return new Response(JSON.stringify({ id: 'restored', labelIds: ['INBOX'] }));
+      return request(url, init);
+    });
+    await service.sync(account.id);
+    await finishSync();
+    expect(await store.get(account.id, 'restored')).toBeNull();
+    expect(received.mock.calls.map(([, row]) => row.id)).toEqual(['arrival']);
+    restoring = true;
+    mailbox.messages.restored.labels = [];
+    await service.sync(account.id);
+    await finishSync();
+    expect(await store.get(account.id, 'restored')).toMatchObject({ inInbox: true });
+    expect(received.mock.calls.map(([, row]) => row.id)).toEqual(['arrival']);
+  });
+  it('reports mailbox disable before a concurrent re-enable and never after a failed write', async () => {
+    const disabled = vi.fn();
+    service = createMailService({
+      store,
+      request: gmail.request,
+      now: () => clock,
+      sleep: async () => {},
+      onDisabled: disabled,
+    });
+    await service.init();
+    const account = await connect();
+    await finishSync();
+    const update = store.updateAccount;
+    store.updateAccount = async (id, changes) => {
+      if (changes.enabled === false) throw new Error('Disable write failed');
+      return update(id, changes);
+    };
+    await expect(service.update(account.id, { enabled: false })).rejects.toThrow('Disable write failed');
+    expect(disabled).not.toHaveBeenCalled();
+    store.updateAccount = update;
+    await Promise.all([
+      service.update(account.id, { enabled: false }),
+      service.update(account.id, { enabled: true }),
+    ]);
+    expect(disabled).toHaveBeenCalledExactlyOnceWith(account.id);
+    expect(service.wakeAccountEnabled(account.id)).toBe(true);
+  });
+  it.each(['gmail', 'outlook'])(
+    'clears a stopped %s watch when the state-clear write fails and recreates it',
+    async (provider) => {
+      cfg.mail.syncMinutes = 0;
+      cfg.mail.gmailPush = { topic: 'projects/mail/topics/events', token };
+      cfg.mail.microsoft = { clientId: 'ms', clientSecret: 'secret', tenant: 'common' };
+      const account = await store.insertAccount({
+        provider,
+        label: '',
+        email: provider === 'gmail' ? 'me@gmail.com' : 'me@outlook.com',
+        enabled: true,
+        syncDays: 30,
+        status: 'connected',
+        credentials: seal(JSON.stringify({ accessToken: 'access', expiresAt: clock + DAY })),
+        pushState: {
+          id: 'old',
+          expiresAt: clock + (provider === 'gmail' ? 7 : 3) * DAY,
+          fingerprint:
+            provider === 'gmail' ? cfg.mail.gmailPush.topic : 'https://mail.example.com/webhooks/mail',
+          secret: seal('old-secret'),
+        },
+      });
+      const update = store.updateAccount;
+      let failClear = true;
+      store.updateAccount = async (id, changes) => {
+        if (changes.pushState === null && failClear) {
+          failClear = false;
+          throw new Error('Clear write failed');
+        }
+        return update(id, changes);
+      };
+      const graph = vi.fn(async (url, init = {}) => {
+        if (init.method === 'DELETE') return new Response(null, { status: 204 });
+        if (init.method === 'POST')
+          return new Response(
+            JSON.stringify({ id: 'new', expirationDateTime: JSON.parse(init.body).expirationDateTime }),
+          );
+        return new Response(JSON.stringify(url.includes('mailFolders?') ? { value: [] } : { id: 'inbox' }));
+      });
+      service = createMailService({
+        store,
+        request: provider === 'gmail' ? gmail.request : graph,
+        now: () => clock,
+        sleep: async () => {},
+        pushUrl: () => 'https://mail.example.com/webhooks/mail',
+        log: { error: (...args) => errors.push(args.join(' ')) },
+      });
+      await service.init();
+      await service.update(account.id, { enabled: false });
+      await vi.waitFor(() =>
+        expect(store.accounts.get(account.id).pushState?.lastError).toContain('Clear write failed'),
+      );
+      expect((await service.list())[0].push.active).toBe(false);
+      expect(store.accounts.get(account.id).pushState).not.toHaveProperty('id');
+      expect(store.accounts.get(account.id).pushState).not.toHaveProperty('expiresAt');
+      await service.update(account.id, { enabled: true });
+      expect((await service.list())[0].push.active).toBe(false);
+      clock += 3600_001;
+      vi.useFakeTimers();
+      service.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() =>
+        expect(
+          (provider === 'gmail' ? gmail.request : graph).mock.calls.some(([url, init]) =>
+            provider === 'gmail' ? url.endsWith('/watch') : init?.method === 'POST',
+          ),
+        ).toBe(true),
+      );
+      await vi.waitFor(async () => expect((await service.list())[0].push.active).toBe(true));
+    },
+  );
   it('keeps polling usable when watch registration fails and exposes the failure without credentials', async () => {
     mailbox.watchStatus = 403;
     mailbox.watchError = { error: { message: 'Topic permissions missing' } };

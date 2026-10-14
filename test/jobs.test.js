@@ -299,6 +299,7 @@ import {
   deliverWorkerNotices,
   deliverToSession,
   mailReceived,
+  cancelMailWakes,
   setSessionMailWake,
   sessionMailWakeState,
   setMailWakeAccess,
@@ -3812,6 +3813,78 @@ describe('webhook deliveries', () => {
       await vi.waitFor(() => expect(prompts).toHaveLength(1));
       await cli.finish(job);
     });
+    it('persists both queues on mailbox disable and does not revive mail after re-enable', async () => {
+      const { prompts } = fakeCli();
+      const job = getJob('hk-mail');
+      setSessionWebhook(job.id, { armed: true, perHour: 30 });
+      const rules = setSessionMailWake(job.id, {
+        rules: [{ account: 7 }, { account: 8 }],
+        perHour: 30,
+        maxTurns: 10,
+      }).rules;
+      job.awaitingAnswer = true;
+      mailReceived(account, email('cancel-held', rules[0].since));
+      job.unattendedTurns = 10;
+      mailReceived(account, email('cancel-pending', rules[0].since));
+      mailReceived({ id: 8, email: 'other@example.com' }, email('keep-other', rules[1].since));
+      job.unattendedTurns = 0;
+      deliverToSession(job.id, { text: 'keep-webhook' });
+      expect(job.pendingDeliveries).toHaveLength(2);
+      expect(job.pendingMailWakes).toHaveLength(2);
+      await flushJobs();
+      saveJob.mockClear();
+      setMailWakeAccess((id) => id !== 7);
+      cancelMailWakes(7);
+      setMailWakeAccess(() => true);
+      expect(job.pendingDeliveries.map((d) => d.text)).toEqual(['keep-webhook']);
+      expect(job.pendingMailWakes).toHaveLength(1);
+      expect(JSON.parse(job.pendingMailWakes[0].text).account).toBe(8);
+      await flushJobs();
+      const saved = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
+      expect(saved.pendingDeliveries.map((d) => d.text)).toEqual(['keep-webhook']);
+      expect(saved.pendingMailWakes).toHaveLength(1);
+      expect(JSON.parse(saved.pendingMailWakes[0].text).account).toBe(8);
+      job.awaitingAnswer = false;
+      flushDeliveries(job);
+      await vi.waitFor(() => expect(prompts).toHaveLength(1));
+      expect(prompts[0]).toContain('keep-webhook');
+      expect(prompts[0]).not.toContain('cancel-');
+      await cli.finish(job);
+    });
+    it.each(['mail', 'webhook'])(
+      'keeps capped %s pending while another source runs and restores the batch after a failed start',
+      async (capped) => {
+        const { prompts } = fakeCli();
+        const job = getJob('hk-mail');
+        setSessionWebhook(job.id, { armed: true, maxTurns: 10 });
+        const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }], maxTurns: 10 }).rules[0];
+        job.awaitingAnswer = true;
+        mailReceived(account, email('mixed-mail', rule.since));
+        deliverToSession(job.id, { text: 'mixed-webhook' });
+        job.unattendedTurns = 2;
+        if (capped === 'mail') setSessionMailWake(job.id, { rules: [rule], maxTurns: 1 });
+        else setSessionWebhook(job.id, { maxTurns: 1 });
+        job.awaitingAnswer = false;
+        setDraining(true);
+        expect(flushDeliveries(job)).toBe(false);
+        expect(job.pendingDeliveries).toHaveLength(2);
+        expect(job.unattendedTurns).toBe(2);
+        setDraining(false);
+        expect(flushDeliveries(job)).toBe(true);
+        await vi.waitFor(() => expect(prompts).toHaveLength(1));
+        expect(prompts[0]).toContain(capped === 'mail' ? 'mixed-webhook' : 'mixed-mail');
+        expect(prompts[0]).not.toContain(capped === 'mail' ? 'mixed-mail' : 'mixed-webhook');
+        expect(job.pendingDeliveries).toHaveLength(1);
+        expect(job.pendingDeliveries[0].via === 'mail').toBe(capped === 'mail');
+        await cli.finish(job);
+        expect(prompts).toHaveLength(1);
+        if (capped === 'mail') setSessionMailWake(job.id, { rules: [rule], maxTurns: 10 });
+        else setSessionWebhook(job.id, { maxTurns: 10 });
+        flushDeliveries(job);
+        await vi.waitFor(() => expect(prompts).toHaveLength(2));
+        await cli.finish(job);
+      },
+    );
     it('drops held wakes after mailbox or project revocation and permits disabling rules', () => {
       const job = getJob('hk-mail');
       const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }] }).rules[0];
