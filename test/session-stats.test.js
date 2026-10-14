@@ -162,6 +162,22 @@ describe('createSessionStats', () => {
     expect(stats.get('s1').cpuPercent).toBe(32);
   });
 
+  it('does not count again the time of a shell and its child that both exited', () => {
+    writeProc([
+      { pid: 100, ppid: 1, pgrp: 100, utime: 100, start: 5 },
+      { pid: 101, ppid: 100, pgrp: 100, utime: 40, start: 6 },
+      { pid: 102, ppid: 101, pgrp: 100, utime: 60, start: 7 },
+    ]);
+    const { stats, clock } = make();
+    stats.sample();
+    // 10 s later, nothing more was spent: 101 waited for 102, then 100 waited for 101,
+    // so 100's children's time is 40 + 60, all of it counted last time.
+    clock.advance(10_000);
+    writeProc([{ pid: 100, ppid: 1, pgrp: 100, utime: 100, cutime: 100, start: 5 }]);
+    stats.sample();
+    expect(stats.get('s1').cpuPercent).toBe(0);
+  });
+
   it('counts a reused pid’s whole time as new', () => {
     writeProc([{ pid: 100, ppid: 1, pgrp: 100, utime: 1000, start: 5 }]);
     const { stats, clock } = make();
