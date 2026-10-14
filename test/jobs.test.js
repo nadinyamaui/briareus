@@ -3849,6 +3849,57 @@ describe('webhook deliveries', () => {
         expect(job[queue]).toHaveLength(1);
       },
     );
+    it.each(['success', 'failure'])(
+      'waits for concurrent mailbox checkpoints after an older flush (%s)',
+      async (outcome) => {
+        const job = getJob('hk-mail');
+        const rules = setSessionMailWake(job.id, { rules: [{ account: 7 }, { account: 8 }] }).rules;
+        job.awaitingAnswer = true;
+        await flushJobs();
+        const older = Promise.withResolvers();
+        const checkpoint = Promise.withResolvers();
+        const original = saveJob.getMockImplementation();
+        const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+        let writes = 0;
+        saveJob.mockImplementation((row) => {
+          if (row.id !== job.id) return original?.(row);
+          writes++;
+          return writes === 1 ? older.promise : checkpoint.promise;
+        });
+        const settled = [];
+        let callbacks = [];
+        let flushing;
+        try {
+          setSessionMailWake(job.id, { rules });
+          flushing = flushJobs();
+          await vi.waitFor(() => expect(writes).toBe(1));
+          callbacks = rules.map((rule, i) =>
+            mailReceivedDurably({ ...account, id: rule.account }, email(`concurrent-${i}`, rule.since)).then(
+              () => settled.push('acknowledged'),
+              (e) => settled.push(e.message),
+            ),
+          );
+          older.resolve();
+          await vi.waitFor(() => expect(writes).toBe(2));
+          expect(settled).toEqual([]);
+          expect(job.pendingDeliveries).toHaveLength(2);
+          if (outcome === 'failure') checkpoint.reject(new Error('Database offline'));
+          else checkpoint.resolve();
+          await Promise.all(callbacks);
+          expect(settled).toEqual(
+            Array(2).fill(outcome === 'failure' ? 'Could not persist email wakes' : 'acknowledged'),
+          );
+        } finally {
+          older.resolve();
+          checkpoint.resolve();
+          await Promise.all(callbacks);
+          await flushing;
+          saveJob.mockImplementation(original);
+          await flushJobs();
+          error.mockRestore();
+        }
+      },
+    );
     it('does not acknowledge a receipt after a failed queue save and checkpoints its duplicate on retry', async () => {
       const job = getJob('hk-mail');
       const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }] }).rules[0];
