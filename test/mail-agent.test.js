@@ -6,7 +6,7 @@ import readline from 'node:readline';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { mailAgentRoutes, mailSessionAllowed } from '../lib/mail-agent.js';
 
-let server, base, job, service, project;
+let server, base, job, service, project, wakeState, wakeUpdate;
 const interactive = () => ({ id: 'chat', kind: 'devchat', repo: 'owner/repo', status: 'running' });
 beforeEach(async () => {
   job = interactive();
@@ -14,7 +14,9 @@ beforeEach(async () => {
   service = {
     connectStart: vi.fn(async (input) => ({ url: 'https://signin.test', input })),
     connectFinish: vi.fn(async () => ({ id: 7 })),
-    list: vi.fn(async () => [{ id: 7, email: 'me@example.com', access: 'read' }]),
+    list: vi.fn(async () => [
+      { id: 7, email: 'me@example.com', access: 'read', enabled: true, status: 'connected' },
+    ]),
     messages: vi.fn(async (query) => ({ messages: [], nextCursor: 'next', query })),
     message: vi.fn(async (account, id) => ({ accountId: account, id, bodyText: 'Untrusted email' })),
     sync: vi.fn(async () => ({ syncing: true })),
@@ -27,11 +29,15 @@ beforeEach(async () => {
       data: Buffer.from('PDF').toString('base64'),
     })),
   };
+  wakeState = vi.fn(() => ({ rules: [] }));
+  wakeUpdate = vi.fn((id, input) => input);
   const app = express();
   app.use(express.json());
   app.use(
     mailAgentRoutes({
       service,
+      wakeState,
+      wakeUpdate,
       getProject: (repo) => (project?.repo === repo ? project : null),
       agentSession: (req, res) => {
         if (req.headers.authorization !== 'Bearer session-token') {
@@ -78,6 +84,8 @@ describe('session mailbox authorization', () => {
       ['/accounts/7/sync', 'POST'],
       ['/connect', 'POST'],
       ['/connect/finish', 'POST'],
+      ['/wake-rules', 'GET'],
+      ['/wake-rules', 'PUT'],
     ]) {
       const res = await fetch(`${base}/api/agent/mail${path}`, {
         method,
@@ -115,6 +123,7 @@ describe('session mailbox authorization', () => {
       '/accounts/7/sync',
       '/connect',
       '/connect/finish',
+      '/wake-rules',
     ]) {
       const res = await fetch(`${base}/api/agent/mail${path}`, {
         method:
@@ -136,6 +145,20 @@ describe('session mailbox authorization', () => {
       expect(mailSessionAllowed({ ...job, ...fields }, project)).toBe(false);
     },
   );
+  it('scopes wake rules to the authenticated session and rejects unknown mailboxes', async () => {
+    const send = (body) =>
+      fetch(`${base}/api/agent/mail/wake-rules`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer session-token', 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    const body = { session: 'another-session', rules: [{ account: 7 }] };
+    expect((await send(body)).status).toBe(200);
+    expect(wakeUpdate).toHaveBeenCalledWith('chat', body);
+    expect((await send({ rules: [{ account: 999 }] })).status).toBe(400);
+    expect(wakeUpdate).toHaveBeenCalledTimes(1);
+  });
+
   it('handles service failures with their status', async () => {
     service.message.mockRejectedValue(Object.assign(new Error('Message not found'), { status: 404 }));
     const res = await get('/accounts/7/messages/missing');
@@ -165,7 +188,7 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
   const tool = (name, args = {}) => rpc('tools/call', { name, arguments: args });
   try {
     expect((await rpc('initialize')).result.serverInfo.name).toBe('reviewer-mail');
-    expect((await rpc('tools/list')).result.tools).toHaveLength(10);
+    expect((await rpc('tools/list')).result.tools).toHaveLength(12);
     await tool('mail_connect', { provider: 'gmail', accountId: 7, access: 'manage' });
     expect(service.connectStart).toHaveBeenCalledWith({ provider: 'gmail', accountId: 7, access: 'manage' });
     await tool('mail_finish_connect', { url: 'http://localhost/?state=s&code=c' });
@@ -201,6 +224,10 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
     expect(path.basename(long.path)).toBe(`${'a'.repeat(150)}.pdf`);
     expect(fs.readFileSync(long.path, 'utf8')).toBe('PDF');
     fs.rmSync(path.dirname(long.path), { recursive: true });
+    await tool('mail_wake_rules');
+    expect(wakeState).toHaveBeenCalledWith('chat');
+    await tool('mail_set_wake_rules', { rules: [{ account: 7, from: 'sender@example.com' }] });
+    expect(wakeUpdate).toHaveBeenCalledWith('chat', { rules: [{ account: 7, from: 'sender@example.com' }] });
     await tool('mail_sync', { account: 7 });
     expect(service.sync).toHaveBeenCalledWith(7);
     await tool('mail_send', { account: 7, to: ['you@example.com'], subject: 's', text: 'body' });

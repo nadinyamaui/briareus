@@ -568,6 +568,26 @@ Close a session and delete its record and transcript. Needs `manage`, held to th
 
 **Returns** `{ ok: boolean }`
 
+### `GET /sessions/{id}/mail-wake`
+
+Read a session’s email wake rules. Needs `admin`.
+
+**Returns** `{ rules: object[], perHour: integer, maxTurns: integer }`
+
+### `PUT /sessions/{id}/mail-wake`
+
+Replace a session’s email wake rules. Needs `admin`.
+
+**Body**
+
+| Field                | Type       |                                                                                                                                                                                                                      |
+| -------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rules` **required** | `object[]` | Up to 20 { id?, account, enabled?, to?, from?, subject? } rules; account is a connected mailbox id, to matches exact To/Cc, from matches an exact sender, subject is a case-insensitive substring; [] disables wakes |
+| `perHour`            | `integer`  | 1–600, default 30                                                                                                                                                                                                    |
+| `maxTurns`           | `integer`  | 1–1000 automatic turns since the last operator message, default 10                                                                                                                                                   |
+
+**Returns** `{ rules: object[], perHour: integer, maxTurns: integer }`. Admin token required. Projects must enable mailToolsEnabled. Session agents can manage only their own rules through mail_set_wake_rules. Unchanged rule ids preserve their activation time; changed or new rules start now. New incoming inbox messages match all filters of any rule. Wakes wait behind running turns and questions, remain subject to unattended protections, and never reopen closed or failed sessions.
+
 ### `POST /sessions/{id}/messages`
 
 Send a message; it starts a turn, joins the running one or waits in the queue. Needs `manage`, held to the session’s project.
@@ -2185,6 +2205,7 @@ A conversation with an agent. The record is pushed whole on every change, so rep
 | `contextWindow`  | `integer?`                                                      | The model’s context window                                                                                                     |
 | `usage`          | `object`                                                        | Spend including every session it ordered: `sessions`, `costUsd`, `estimatedCostUsd`, tokens, `durationMs`                      |
 | `awaitingAnswer` | `boolean`                                                       | Whether the agent asked a question and is waiting                                                                              |
+| `mailWake`       | `object`                                                        | Optional email wake configuration { rules, perHour, maxTurns }; seen ids and pending email bodies are private                  |
 | `queued`         | `object[]`                                                      | Messages waiting for the turn to end, each `{ text }`; absent when none                                                        |
 | `liveInput`      | `boolean`                                                       | Whether a message sent now goes into the running turn rather than the queue                                                    |
 | `lastText`       | `string?`                                                       | The opening of the agent’s latest message                                                                                      |
@@ -2732,6 +2753,7 @@ A mailbox connected with its provider’s own sign-in, whose messages the server
 | `syncing`       | `boolean`           | Whether a sync pass is running now                                                                                                    |
 | `lastSyncAt`    | `integer?`          | When the last pass that succeeded finished, epoch milliseconds                                                                        |
 | `lastSyncError` | `string?`           | Why the last pass failed; null once one succeeds                                                                                      |
+| `push`          | `object`            | { active, expiresAt, lastError } for provider push registration; no secrets                                                           |
 | `messages`      | `integer`           | How many of its messages are synced                                                                                                   |
 | `unread`        | `integer`           | How many of those are unread in the inbox                                                                                             |
 | `createdAt`     | `integer`           | Epoch milliseconds                                                                                                                    |
@@ -3051,6 +3073,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/dev/sessions/:id/events`                                               | `GET /sessions/{id}/events`                                                     |
 | `PATCH /api/dev/sessions/:id`                                                    | `PATCH /sessions/{id}`                                                          |
 | `DELETE /api/dev/sessions/:id`                                                   | `DELETE /sessions/{id}`                                                         |
+| `GET /api/dev/sessions/:id/mail-wake`                                            | `GET /sessions/{id}/mail-wake`                                                  |
+| `PUT /api/dev/sessions/:id/mail-wake`                                            | `PUT /sessions/{id}/mail-wake`                                                  |
 | `POST /api/dev/sessions/:id/message`                                             | `POST /sessions/{id}/messages`                                                  |
 | `DELETE /api/dev/sessions/:id/queue/:index`                                      | `DELETE /sessions/{id}/queue/{index}`                                           |
 | `POST /api/dev/sessions/:id/cancel`                                              | `POST /sessions/{id}/cancel`                                                    |

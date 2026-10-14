@@ -7,6 +7,7 @@ const cfg = vi.hoisted(() => ({ credentialsKey: 'k'.repeat(32) }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
 // The service is handed a store of its own below; the database's is never reached.
 vi.mock('../lib/db.js', () => ({
+  acknowledgeMailReceipt: vi.fn(),
   countMailMessages: vi.fn(),
   deleteMailAccount: vi.fn(),
   deleteMailMessages: vi.fn(),
@@ -17,6 +18,7 @@ vi.mock('../lib/db.js', () => ({
   insertMailAccount: vi.fn(),
   listMailMessages: vi.fn(),
   loadMailAccountRows: vi.fn(),
+  pendingMailReceipts: vi.fn(),
   renameMailFolder: vi.fn(),
   renameMailLabels: vi.fn(),
   updateMailAccount: vi.fn(),
@@ -35,15 +37,21 @@ const DAY = 24 * 3600_000;
 function memoryStore() {
   const accounts = new Map();
   const messages = new Map();
+  const receipts = new Map();
   let nextId = 1;
   const key = (accountId, id) => `${accountId}:${id}`;
   const ofAccount = (accountId) => [...messages.values()].filter((m) => m.accountId === accountId);
   const drop = (pred) => {
-    for (const [k, m] of messages) if (pred(m)) messages.delete(k);
+    for (const [k, m] of messages)
+      if (pred(m)) {
+        messages.delete(k);
+        receipts.delete(k);
+      }
   };
   return {
     accounts,
     messages,
+    receipts,
     loadAccounts: async () => [...accounts.values()].map((a) => ({ ...a })),
     insertAccount: async (a) => {
       if ([...accounts.values()].some((b) => b.provider === a.provider && b.email === a.email))
@@ -69,8 +77,17 @@ function memoryStore() {
       drop((m) => m.accountId === id);
       return 1;
     },
-    upsert: async (accountId, rows, syncedAt) => {
-      for (const r of rows) messages.set(key(accountId, r.id), { ...r, accountId, syncedAt });
+    upsert: async (accountId, rows, syncedAt, wakePending = false) => {
+      for (const r of rows) {
+        const k = key(accountId, r.id);
+        if (!messages.has(k) && wakePending) receipts.set(k, { ...r, accountId });
+        messages.set(k, { ...r, accountId, syncedAt });
+      }
+    },
+    pendingReceived: async (accountId) =>
+      [...messages.values()].filter((r) => r.accountId === accountId && receipts.has(key(accountId, r.id))),
+    acknowledgeReceived: async (accountId, id) => {
+      receipts.delete(key(accountId, id));
     },
     flags: async (accountId, id, flags, syncedAt) => {
       const m = messages.get(key(accountId, id));
@@ -164,6 +181,12 @@ function fakeGmail(mailbox) {
             : 'https://www.googleapis.com/auth/gmail.readonly'),
       });
     }
+    if (url.endsWith('/watch'))
+      return reply(
+        mailbox.watchError || { historyId: '999', expiration: String(clock + 7 * DAY) },
+        mailbox.watchStatus || 200,
+      );
+    if (url.endsWith('/stop')) return new Response(null, { status: 204 });
     if (url.endsWith('/messages/send') && init.method === 'POST')
       return reply({ id: 'sent', threadId: 'sent-thread' });
     if (gate.wait) await gate.wait;
@@ -1895,5 +1918,933 @@ describe('mail management access', () => {
     expect(() => service.connectStart({ provider: 'gmail', access: 'admin' })).toThrow(/Choose/);
     await expect(connect({ access: 'manage' })).rejects.toThrow(/did not grant/);
     expect(await service.list()).toEqual([]);
+  });
+});
+
+describe('mail push', () => {
+  const token = 'push-secret'.repeat(5);
+  const notification = (email = 'me@gmail.com') => ({
+    message: {
+      data: Buffer.from(JSON.stringify({ emailAddress: email, historyId: '999' })).toString('base64url'),
+    },
+  });
+  async function setupPush(onReceived) {
+    cfg.mail.gmailPush = { topic: 'projects/mail/topics/events', token };
+    service.stop();
+    service = createMailService({
+      store,
+      request: gmail.request,
+      now: () => clock,
+      sleep: async () => {},
+      pushUrl: () => 'https://mail.example.com/webhooks/mail',
+      onReceived,
+      log: { error: (...args) => errors.push(args.join(' ')) },
+    });
+    await service.init();
+  }
+  async function finishSync() {
+    await vi.waitFor(async () => expect((await service.list())[0].syncing).toBe(false));
+  }
+  it.each(['gmail', 'outlook'])(
+    'marks refused %s push credentials for reconnection without polling',
+    async (provider) => {
+      cfg.mail.syncMinutes = 0;
+      cfg.mail.gmailPush = { topic: 'projects/mail/topics/events', token };
+      cfg.mail.microsoft = { clientId: 'ms', clientSecret: 'secret', tenant: 'common' };
+      const account = await store.insertAccount({
+        provider,
+        email: `me@${provider}.com`,
+        enabled: true,
+        syncDays: 30,
+        status: 'connected',
+        credentials: seal(JSON.stringify({ refreshToken: 'revoked', expiresAt: clock - DAY })),
+      });
+      const request = vi.fn(async (url) => {
+        if (!url.includes('/token')) throw new Error(`Unexpected provider request: ${url}`);
+        return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Revoked grant' }), {
+          status: 400,
+        });
+      });
+      service = createMailService({
+        store,
+        request,
+        now: () => clock,
+        sleep: async () => {},
+        pushUrl: () => 'https://mail.example.com/webhooks/mail',
+        log: { error: vi.fn() },
+      });
+      await service.init();
+      vi.useFakeTimers();
+      service.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect((await service.list())[0]).toMatchObject({
+        status: 'reauth',
+        push: { active: false, lastError: expect.stringContaining('Revoked grant') },
+      });
+      expect(store.accounts.get(account.id).status).toBe('reauth');
+      expect(service.wakeAccountEnabled(account.id)).toBe(false);
+      // Outlook also attempts subscription recovery, which refreshes the refused grant again.
+      expect(request).toHaveBeenCalledTimes(provider === 'outlook' ? 2 : 1);
+    },
+  );
+  it('keeps reconnected credentials after an old push refresh is refused', async () => {
+    cfg.mail.syncMinutes = 0;
+    await setupPush();
+    const account = await connect();
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.expiresAt).toBeTruthy());
+    clock += DAY + 1;
+    mailbox.refreshRefused = true;
+    let release;
+    gmail.gate.refresh = new Promise((resolve) => (release = resolve));
+    await service.update(account.id, { label: 'refresh' });
+    await vi.waitFor(() => expect(gmail.tokenCalls.some((c) => c.grant_type === 'refresh_token')).toBe(true));
+    await connect({ accountId: account.id }, 'fresh');
+    release();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState.lastError).toBeTruthy());
+    await finishSync();
+    expect((await service.list())[0].status).toBe('connected');
+    expect(service.wakeAccountEnabled(account.id)).toBe(true);
+    expect(JSON.parse(open(store.accounts.get(account.id).credentials)).refreshToken).toBe('refresh-fresh');
+  });
+  it('registers, persists a sealed secret, keeps the sync cursor, renews daily and stops on disable', async () => {
+    await setupPush();
+    const started = service.connectStart({ provider: 'gmail' });
+    const account = await service.connectFinish({ state: started.state, code: 'c' });
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.expiresAt).toBe(clock + 7 * DAY));
+    expect(store.accounts.get(account.id).syncState.historyId).toBe('10');
+    expect((await service.list())[0]).not.toHaveProperty('pushState');
+    expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/watch'))).toHaveLength(1);
+    clock += DAY + 1;
+    await service.sync(account.id);
+    await finishSync();
+    expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/watch'))).toHaveLength(2);
+    await service.update(account.id, { enabled: false });
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState).toBeNull());
+    expect(gmail.request.mock.calls.some(([url]) => url.endsWith('/stop'))).toBe(true);
+  });
+  it('authenticates notifications and fetches mail without copying the hint history id into sync state', async () => {
+    const received = vi.fn();
+    await setupPush(received);
+    const started = service.connectStart({ provider: 'gmail' });
+    const account = await service.connectFinish({ state: started.state, code: 'c' });
+    await finishSync();
+    received.mockClear();
+    expect(() => service.gmailNotification(notification(), 'bad')).toThrow('Invalid mail push token');
+    expect(() => service.gmailNotification({ message: { data: 'bad' } }, token)).toThrow(
+      'Invalid Gmail notification',
+    );
+    // Force a fresh snapshot so the fake Gmail lists the new message too.
+    await service.update(account.id, { syncDays: 31 });
+    await finishSync();
+    store.accounts.get(account.id).syncState = null;
+    await service.init();
+    mailbox.messages.fresh = { at: clock, unread: true };
+    service.gmailNotification(notification(), token);
+    service.gmailNotification(notification(), token);
+    await finishSync();
+    expect(received).toHaveBeenCalledTimes(1);
+    expect(received.mock.calls[0][1].id).toBe('fresh');
+    expect(store.accounts.get(account.id).syncState.historyId).not.toBe('999');
+    const calls = gmail.request.mock.calls.length;
+    service.gmailNotification(notification('unknown@gmail.com'), token);
+    expect(gmail.request.mock.calls).toHaveLength(calls);
+  });
+  it('caches label-only restorations without waking, while genuine arrivals still wake', async () => {
+    const received = vi.fn();
+    await setupPush(received);
+    const account = await connect();
+    await finishSync();
+    received.mockClear();
+    mailbox.messages.restored = { at: clock, labels: ['SPAM'] };
+    mailbox.messages.arrival = { at: clock };
+    let restoring = false;
+    const request = gmail.request.getMockImplementation();
+    gmail.request.mockImplementation(async (url, init) => {
+      if (url.includes('/history?'))
+        return new Response(
+          JSON.stringify({
+            historyId: restoring ? '12' : '11',
+            history: [
+              restoring
+                ? { labelsAdded: [{ message: { id: 'restored' } }] }
+                : { messagesAdded: [{ message: { id: 'restored' } }, { message: { id: 'arrival' } }] },
+            ],
+          }),
+        );
+      if (url.endsWith('/restored?format=minimal'))
+        return new Response(JSON.stringify({ id: 'restored', labelIds: ['INBOX'] }));
+      return request(url, init);
+    });
+    await service.sync(account.id);
+    await finishSync();
+    expect(await store.get(account.id, 'restored')).toBeNull();
+    expect(received.mock.calls.map(([, row]) => row.id)).toEqual(['arrival']);
+    restoring = true;
+    mailbox.messages.restored.labels = [];
+    await service.sync(account.id);
+    await finishSync();
+    expect(await store.get(account.id, 'restored')).toMatchObject({ inInbox: true });
+    expect(received.mock.calls.map(([, row]) => row.id)).toEqual(['arrival']);
+  });
+  it('reports mailbox disable before a concurrent re-enable and never after a failed write', async () => {
+    const disabled = vi.fn();
+    service = createMailService({
+      store,
+      request: gmail.request,
+      now: () => clock,
+      sleep: async () => {},
+      onDisabled: disabled,
+    });
+    await service.init();
+    const account = await connect();
+    await finishSync();
+    const update = store.updateAccount;
+    store.updateAccount = async (id, changes) => {
+      if (changes.enabled === false) throw new Error('Disable write failed');
+      return update(id, changes);
+    };
+    await expect(service.update(account.id, { enabled: false })).rejects.toThrow('Disable write failed');
+    expect(disabled).not.toHaveBeenCalled();
+    store.updateAccount = update;
+    await Promise.all([
+      service.update(account.id, { enabled: false }),
+      service.update(account.id, { enabled: true }),
+    ]);
+    expect(disabled).toHaveBeenCalledExactlyOnceWith(account.id);
+    expect(service.wakeAccountEnabled(account.id)).toBe(true);
+  });
+  it.each(['gmail', 'outlook'])(
+    'clears a stopped %s watch when the state-clear write fails and recreates it',
+    async (provider) => {
+      cfg.mail.syncMinutes = 0;
+      cfg.mail.gmailPush = { topic: 'projects/mail/topics/events', token };
+      cfg.mail.microsoft = { clientId: 'ms', clientSecret: 'secret', tenant: 'common' };
+      const account = await store.insertAccount({
+        provider,
+        label: '',
+        email: provider === 'gmail' ? 'me@gmail.com' : 'me@outlook.com',
+        enabled: true,
+        syncDays: 30,
+        status: 'connected',
+        credentials: seal(JSON.stringify({ accessToken: 'access', expiresAt: clock + DAY })),
+        pushState: {
+          id: 'old',
+          expiresAt: clock + (provider === 'gmail' ? 7 : 3) * DAY,
+          fingerprint:
+            provider === 'gmail' ? cfg.mail.gmailPush.topic : 'https://mail.example.com/webhooks/mail',
+          secret: seal('old-secret'),
+        },
+      });
+      const update = store.updateAccount;
+      let failClear = true;
+      store.updateAccount = async (id, changes) => {
+        if (changes.pushState === null && failClear) {
+          failClear = false;
+          throw new Error('Clear write failed');
+        }
+        return update(id, changes);
+      };
+      const graph = vi.fn(async (url, init = {}) => {
+        if (init.method === 'DELETE') return new Response(null, { status: 204 });
+        if (init.method === 'POST')
+          return new Response(
+            JSON.stringify({ id: 'new', expirationDateTime: JSON.parse(init.body).expirationDateTime }),
+          );
+        return new Response(JSON.stringify(url.includes('mailFolders?') ? { value: [] } : { id: 'inbox' }));
+      });
+      service = createMailService({
+        store,
+        request: provider === 'gmail' ? gmail.request : graph,
+        now: () => clock,
+        sleep: async () => {},
+        pushUrl: () => 'https://mail.example.com/webhooks/mail',
+        log: { error: (...args) => errors.push(args.join(' ')) },
+      });
+      await service.init();
+      await service.update(account.id, { enabled: false });
+      await vi.waitFor(() =>
+        expect(store.accounts.get(account.id).pushState?.lastError).toContain('Clear write failed'),
+      );
+      expect((await service.list())[0].push.active).toBe(false);
+      expect(store.accounts.get(account.id).pushState).not.toHaveProperty('id');
+      expect(store.accounts.get(account.id).pushState).not.toHaveProperty('expiresAt');
+      await service.update(account.id, { enabled: true });
+      expect((await service.list())[0].push.active).toBe(false);
+      clock += 3600_001;
+      vi.useFakeTimers();
+      service.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() =>
+        expect(
+          (provider === 'gmail' ? gmail.request : graph).mock.calls.some(([url, init]) =>
+            provider === 'gmail' ? url.endsWith('/watch') : init?.method === 'POST',
+          ),
+        ).toBe(true),
+      );
+      await vi.waitFor(async () => expect((await service.list())[0].push.active).toBe(true));
+    },
+  );
+  it('keeps polling usable when watch registration fails and exposes the failure without credentials', async () => {
+    mailbox.watchStatus = 403;
+    mailbox.watchError = { error: { message: 'Topic permissions missing' } };
+    await setupPush();
+    const started = service.connectStart({ provider: 'gmail' });
+    await service.connectFinish({ state: started.state, code: 'c' });
+    await finishSync();
+    expect((await service.list())[0]).toMatchObject({
+      lastSyncError: null,
+      push: { active: false, lastError: expect.stringContaining('Topic permissions missing') },
+    });
+    const watches = gmail.request.mock.calls.filter(([url]) => url.endsWith('/watch')).length;
+    await service.sync(1);
+    await finishSync();
+    expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/watch'))).toHaveLength(watches);
+  });
+  it('notifies committed messages before a later message write fails, without duplicate wakes on retry', async () => {
+    const received = vi.fn();
+    await setupPush(received);
+    const account = await connect();
+    await finishSync();
+    received.mockClear();
+    store.accounts.get(account.id).syncState = null;
+    await service.init();
+    mailbox.messages.c = { at: clock, unread: true };
+    mailbox.messages.d = { at: clock, unread: true };
+    const upsert = store.upsert;
+    let fail = true;
+    store.upsert = async (id, rows, marker, wakePending) => {
+      for (const row of rows) {
+        if (row.id === 'd' && fail) {
+          fail = false;
+          throw new Error('Transient database failure');
+        }
+        await upsert(id, [row], marker, wakePending);
+      }
+    };
+    await service.sync(account.id);
+    await finishSync();
+    expect(store.ofAccount(account.id).map((m) => m.id)).toContain('c');
+    expect(store.accounts.get(account.id).lastSyncError).toContain('Transient database failure');
+    expect(received.mock.calls.map(([, row]) => row.id)).toEqual(['c']);
+    await service.sync(account.id);
+    await finishSync();
+    expect(received.mock.calls.map(([, row]) => row.id)).toEqual(['c', 'd']);
+  });
+  it.each(['before callback', 'before checkpoint'])(
+    'replays a committed receipt after a crash %s with polling disabled',
+    async (crash) => {
+      const received = vi.fn();
+      await setupPush(received);
+      const account = await connect();
+      await finishSync();
+      received.mockClear();
+      store.accounts.get(account.id).syncState = null;
+      await service.init();
+      const upsert = store.upsert;
+      if (crash === 'before callback') {
+        store.upsert = async (...args) => {
+          await upsert(...args);
+          if (args[1][0].id === 'fresh') throw new Error('Crash after message commit');
+        };
+      } else received.mockRejectedValueOnce(new Error('Crash before wake persistence'));
+      mailbox.messages.fresh = { at: clock };
+      await service.sync(account.id);
+      await finishSync();
+      expect(await store.get(account.id, 'fresh')).toBeTruthy();
+      expect((await store.pendingReceived(account.id)).map((r) => r.id)).toEqual(['fresh']);
+      if (crash === 'before callback') expect(received).not.toHaveBeenCalled();
+      store.upsert = upsert;
+      service.stop();
+      cfg.mail.syncMinutes = 0;
+      received.mockClear();
+      await setupPush(received);
+      vi.useFakeTimers();
+      service.start();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(received).toHaveBeenCalledTimes(1);
+      expect(received.mock.calls[0][1].id).toBe('fresh');
+      expect(await store.pendingReceived(account.id)).toEqual([]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(received).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each(['window change', 'reconnect', 'disable with window change'])(
+    'preserves or cancels a committed receipt during %s',
+    async (change) => {
+      const received = vi.fn();
+      await setupPush(received);
+      const account = await connect();
+      await finishSync();
+      received.mockClear();
+      store.accounts.get(account.id).syncState = null;
+      await service.init();
+      mailbox.messages.fresh = { at: clock };
+      const upsert = store.upsert;
+      let release;
+      const held = new Promise((resolve) => (release = resolve));
+      let paused = false;
+      store.upsert = async (...args) => {
+        await upsert(...args);
+        if (args[1][0].id === 'fresh' && !paused) {
+          paused = true;
+          await held;
+        }
+      };
+      await service.sync(account.id);
+      await vi.waitFor(() => expect(paused).toBe(true));
+      try {
+        expect((await store.pendingReceived(account.id)).map((r) => r.id)).toEqual(['fresh']);
+        if (change === 'reconnect') await connect({ accountId: account.id }, 'fresh-grant');
+        else
+          await service.update(account.id, {
+            syncDays: 31,
+            ...(change === 'disable with window change' ? { enabled: false } : {}),
+          });
+      } finally {
+        release();
+      }
+      await finishSync();
+      expect(received.mock.calls.map(([, row]) => row.id)).toEqual(
+        change === 'disable with window change' ? [] : ['fresh'],
+      );
+      expect(await store.pendingReceived(account.id)).toEqual([]);
+      if (change === 'disable with window change') await service.update(account.id, { enabled: true });
+      await service.sync(account.id);
+      await finishSync();
+      expect(received).toHaveBeenCalledTimes(change === 'disable with window change' ? 0 : 1);
+    },
+  );
+  it('cancels pending receipt replay when the mailbox is disabled', async () => {
+    const received = vi.fn();
+    await setupPush(received);
+    const account = await connect();
+    await finishSync();
+    await store.upsert(account.id, [{ id: 'pending', inInbox: true, receivedAt: clock }], clock, true);
+    await service.update(account.id, { enabled: false });
+    received.mockClear();
+    cfg.mail.syncMinutes = 0;
+    vi.useFakeTimers();
+    service.start();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(received).not.toHaveBeenCalled();
+    expect(await store.pendingReceived(account.id)).toEqual([]);
+  });
+  it('keeps the receipt until the asynchronous wake checkpoint succeeds', async () => {
+    const received = vi.fn();
+    await setupPush(received);
+    const account = await connect();
+    await finishSync();
+    store.accounts.get(account.id).syncState = null;
+    await service.init();
+    let release;
+    received.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    mailbox.messages.fresh = { at: clock };
+    const sync = service.sync(account.id);
+    await vi.waitFor(() => expect(release).toBeDefined());
+    expect(await store.get(account.id, 'fresh')).toBeTruthy();
+    expect((await store.pendingReceived(account.id)).map((r) => r.id)).toEqual(['fresh']);
+    release();
+    await sync;
+    await finishSync();
+    expect(await store.pendingReceived(account.id)).toEqual([]);
+  });
+  it.each(['disable', 'remove', 'expired renewal'])(
+    'stops Gmail after a lost watch response on %s, including after restart',
+    async (action) => {
+      await setupPush();
+      const request = gmail.request.getMockImplementation();
+      let watching = false;
+      let loseResponse = action !== 'expired renewal';
+      gmail.request.mockImplementation(async (url, init) => {
+        if (url.endsWith('/watch')) {
+          watching = true;
+          if (loseResponse) throw new Error('Response lost');
+        }
+        if (url.endsWith('/stop')) watching = false;
+        return request(url, init);
+      });
+      const account = await connect();
+      await finishSync();
+      if (action === 'expired renewal') {
+        clock += 6 * DAY + 1;
+        loseResponse = true;
+        await service.sync(account.id);
+        await finishSync();
+        clock += DAY;
+      }
+      await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.lastError).toBeTruthy());
+      expect(watching).toBe(true);
+      expect((await service.list())[0].push.active).toBe(false);
+      await setupPush();
+      if (action === 'disable') {
+        await service.update(account.id, { enabled: false });
+        // Automatic cleanup still honors registration backoff.
+        expect(watching).toBe(true);
+        cfg.mail.syncMinutes = 0;
+        vi.useFakeTimers();
+        service.start();
+        clock += 3600_000;
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(store.accounts.get(account.id).pushState).toBeNull();
+      } else {
+        await service.remove(account.id);
+        expect(await service.list()).toEqual([]);
+      }
+      expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/stop'))).toHaveLength(1);
+      expect(watching).toBe(false);
+    },
+  );
+  it('retries failed cleanup of a lost Gmail watch response after restart', async () => {
+    await setupPush();
+    const request = gmail.request.getMockImplementation();
+    let failStop = true;
+    gmail.request.mockImplementation(async (url, init) => {
+      if (url.endsWith('/watch')) throw new Error('Response lost');
+      if (url.endsWith('/stop') && failStop)
+        return new Response(JSON.stringify({ error: { message: 'Cleanup unavailable' } }), { status: 503 });
+      return request(url, init);
+    });
+    const account = await connect();
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.lastError).toBeTruthy());
+    await expect(service.remove(account.id)).rejects.toMatchObject({ upstream: 503 });
+    expect(store.accounts.get(account.id)).toMatchObject({ enabled: false });
+    const deadline = store.accounts.get(account.id).pushState.cleanupUntil;
+    expect(deadline).toBe(clock + 7 * DAY);
+    await setupPush();
+    cfg.mail.syncMinutes = 0;
+    vi.useFakeTimers();
+    service.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/stop'))).toHaveLength(1);
+    failStop = false;
+    clock += 3600_000;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(store.accounts.get(account.id).pushState).toBeNull();
+    expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/stop'))).toHaveLength(2);
+    await service.remove(account.id);
+    expect(await service.list()).toEqual([]);
+  });
+  it('removes an expired uncertain Gmail watch locally with revoked credentials', async () => {
+    await setupPush();
+    const request = gmail.request.getMockImplementation();
+    gmail.request.mockImplementation(async (url, init) => {
+      if (url.endsWith('/watch')) throw new Error('Response lost');
+      return request(url, init);
+    });
+    const account = await connect();
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.lastError).toBeTruthy());
+    expect(store.accounts.get(account.id).pushState.cleanupUntil).toBe(clock + 7 * DAY);
+    clock += 7 * DAY;
+    mailbox.refreshRefused = true;
+    await setupPush();
+    gmail.request.mockClear();
+    await service.remove(account.id);
+    expect(gmail.request).not.toHaveBeenCalled();
+    expect(await service.list()).toEqual([]);
+  });
+  it('removes Gmail locally after a definitive watch refusal', async () => {
+    mailbox.watchStatus = 403;
+    mailbox.watchError = { error: { message: 'Topic permissions missing' } };
+    await setupPush();
+    const account = await connect();
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.lastError).toBeTruthy());
+    expect(store.accounts.get(account.id).pushState).not.toHaveProperty('cleanupUntil');
+    gmail.request.mockClear();
+    await service.remove(account.id);
+    expect(gmail.request).not.toHaveBeenCalled();
+    expect(await service.list()).toEqual([]);
+  });
+  it('backs off disabled-account cleanup but allows explicit removal to stop the watch immediately', async () => {
+    await setupPush();
+    const account = await connect();
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.expiresAt).toBeTruthy());
+    const request = gmail.request.getMockImplementation();
+    gmail.request.mockImplementation(async (url, init) =>
+      url.endsWith('/stop')
+        ? new Response(JSON.stringify({ error: { message: 'Cleanup refused' } }), { status: 403 })
+        : request(url, init),
+    );
+    await service.update(account.id, { enabled: false });
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState.retryAt).toBe(clock + 3600_000));
+    const stops = () => gmail.request.mock.calls.filter(([url]) => url.endsWith('/stop')).length;
+    expect(stops()).toBe(1);
+    cfg.mail.syncMinutes = 0;
+    vi.useFakeTimers();
+    service.start();
+    clock += 60_000;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(stops()).toBe(1);
+    clock += 3600_000;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(stops()).toBe(2);
+    await expect(service.remove(account.id)).rejects.toMatchObject({ upstream: 403 });
+    expect(stops()).toBe(3);
+    expect(store.accounts.get(account.id).pushState.retryAt).toBe(clock + 3600_000);
+    gmail.request.mockImplementation(request);
+    await service.remove(account.id);
+    expect(stops()).toBe(4);
+    expect(await service.list()).toEqual([]);
+  });
+  it.each([
+    ['gmail', '503'],
+    ['gmail', 'timeout'],
+    ['outlook', '503'],
+    ['outlook', 'timeout'],
+  ])('retains disabled %s cleanup across restart after removal encounters %s', async (provider, failure) => {
+    cfg.mail.syncMinutes = 0;
+    cfg.mail.gmailPush = { topic: 'projects/mail/topics/events', token };
+    cfg.mail.microsoft = { clientId: 'ms', clientSecret: 'secret', tenant: 'common' };
+    const credentials = seal(JSON.stringify({ accessToken: 'access', expiresAt: clock + DAY }));
+    const secret = seal('watch-secret');
+    const account = await store.insertAccount({
+      provider,
+      email: provider === 'gmail' ? 'me@gmail.com' : 'me@outlook.com',
+      enabled: true,
+      syncDays: 30,
+      status: 'connected',
+      credentials,
+      pushState: {
+        id: 'subscription',
+        expiresAt: clock + 3 * DAY,
+        fingerprint:
+          provider === 'gmail' ? cfg.mail.gmailPush.topic : 'https://mail.example.com/webhooks/mail',
+        secret,
+      },
+    });
+    await store.upsert(account.id, [{ id: 'cached', receivedAt: clock }], clock);
+    let failing = true;
+    const request = vi.fn(async () => {
+      if (failing) {
+        if (failure === 'timeout') throw new Error('Request timed out');
+        return new Response(JSON.stringify({ error: { message: 'Cleanup unavailable' } }), { status: 503 });
+      }
+      return provider === 'outlook'
+        ? new Response(JSON.stringify({ error: { message: 'Already gone' } }), { status: 404 })
+        : new Response(null, { status: 204 });
+    });
+    const disabled = vi.fn();
+    const create = () =>
+      createMailService({
+        store,
+        request,
+        now: () => clock,
+        sleep: async () => {},
+        pushUrl: () => 'https://mail.example.com/webhooks/mail',
+        onDisabled: disabled,
+        log: { error: vi.fn() },
+      });
+    service = create();
+    await service.init();
+    await expect(service.remove(account.id)).rejects.toMatchObject({ status: 502 });
+    expect(store.accounts.get(account.id)).toMatchObject({
+      enabled: false,
+      credentials,
+      pushState: { id: 'subscription', secret, retryAt: clock + 3600_000, lastError: expect.any(String) },
+    });
+    expect(await store.get(account.id, 'cached')).toBeTruthy();
+    expect(disabled).toHaveBeenCalledExactlyOnceWith(account.id);
+    expect(service.wakeAccountEnabled(account.id)).toBe(false);
+
+    service.stop();
+    service = create();
+    await service.init();
+    expect(service.wakeAccountEnabled(account.id)).toBe(false);
+    vi.useFakeTimers();
+    service.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(request).toHaveBeenCalledTimes(1);
+    failing = false;
+    clock += 3600_000;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(store.accounts.get(account.id).pushState).toBeNull();
+    expect((await service.list())[0]).toMatchObject({ id: account.id, enabled: false });
+    await service.remove(account.id);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(await service.list()).toEqual([]);
+    expect(await store.get(account.id, 'cached')).toBeNull();
+  });
+  it.each([
+    ['gmail', -1],
+    ['gmail', 0],
+    ['gmail', 1],
+    ['outlook', -1],
+    ['outlook', 0],
+    ['outlook', 1],
+  ])(
+    'removes an expired %s watch locally with revoked credentials (expiry offset %s)',
+    async (provider, offset) => {
+      cfg.mail.syncMinutes = 0;
+      cfg.mail.microsoft = { clientId: 'ms', clientSecret: 'secret', tenant: 'common' };
+      const account = await store.insertAccount({
+        provider,
+        email: provider === 'gmail' ? 'me@gmail.com' : 'me@outlook.com',
+        enabled: false,
+        syncDays: 30,
+        status: 'connected',
+        credentials: seal(JSON.stringify({ refreshToken: 'revoked', expiresAt: clock - DAY })),
+        pushState: { id: 'expired', expiresAt: clock + offset, retryAt: clock + DAY, secret: seal('secret') },
+      });
+      await store.upsert(account.id, [{ id: 'cached', receivedAt: clock }], clock);
+      const request = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Revoked grant' }), {
+            status: 400,
+          }),
+      );
+      service = createMailService({
+        store,
+        request,
+        now: () => clock,
+        sleep: async () => {},
+        log: { error: vi.fn() },
+      });
+      await service.init();
+      if (offset > 0) {
+        await expect(service.remove(account.id)).rejects.toMatchObject({ reauth: true });
+        expect(store.accounts.get(account.id).pushState.id).toBe('expired');
+        expect(await store.get(account.id, 'cached')).toBeTruthy();
+        clock += offset;
+      }
+      const calls = request.mock.calls.length;
+      await service.remove(account.id);
+      expect(request).toHaveBeenCalledTimes(calls);
+      expect(await service.list()).toEqual([]);
+      expect(await store.get(account.id, 'cached')).toBeNull();
+    },
+  );
+  it.each(['lost response', 'failed persistence'])(
+    'recovers Outlook registration after %s',
+    async (failure) => {
+      cfg.mail.syncMinutes = 0;
+      cfg.mail.microsoft = { clientId: 'ms', clientSecret: 'secret', tenant: 'common' };
+      const account = await store.insertAccount({
+        provider: 'outlook',
+        email: 'me@outlook.com',
+        enabled: true,
+        syncDays: 30,
+        status: 'connected',
+        credentials: seal(JSON.stringify({ accessToken: 'access', expiresAt: clock + DAY })),
+      });
+      let subscription;
+      let failLookup = true;
+      const graph = vi.fn(async (url, init = {}) => {
+        if (url.endsWith('/subscriptions')) {
+          if (init.method === 'POST') {
+            if (subscription)
+              return new Response(JSON.stringify({ error: { message: 'Duplicate subscription' } }), {
+                status: 409,
+              });
+            subscription = { ...JSON.parse(init.body), id: 'recovered' };
+            if (failure === 'lost response') throw new Error('Response lost');
+            return new Response(JSON.stringify(subscription));
+          }
+          if (failLookup) {
+            failLookup = false;
+            return new Response(JSON.stringify({ error: { message: 'Lookup unavailable' } }), {
+              status: 403,
+            });
+          }
+          return new Response(JSON.stringify({ value: [subscription] }));
+        }
+        return new Response(JSON.stringify(url.includes('mailFolders?') ? { value: [] } : { id: 'inbox' }));
+      });
+      const update = store.updateAccount;
+      let failWrite = failure === 'failed persistence';
+      store.updateAccount = async (id, changes) => {
+        if (changes.pushState?.id && failWrite) {
+          failWrite = false;
+          throw new Error('State write failed');
+        }
+        return update(id, changes);
+      };
+      service = createMailService({
+        store,
+        request: graph,
+        now: () => clock,
+        pushUrl: () => 'https://mail.example.com/webhooks/mail',
+        log: { error: vi.fn() },
+      });
+      await service.init();
+      vi.useFakeTimers();
+      service.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+      if (failure === 'failed persistence') {
+        expect(store.accounts.get(account.id).pushState.id).toBe('recovered');
+        expect(open(store.accounts.get(account.id).pushState.secret)).toBe(subscription.clientState);
+      }
+      // Reload persisted state before retrying; recovery must survive a restart.
+      await service.init();
+      clock += 3600_000;
+      await vi.advanceTimersByTimeAsync(60_000);
+      const state = store.accounts.get(account.id).pushState;
+      expect(state.id).toBe('recovered');
+      expect(open(state.secret)).toBe(subscription.clientState);
+      expect(graph.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(
+        failure === 'lost response' ? 2 : 1,
+      );
+      const calls = graph.mock.calls.length;
+      service.outlookNotification({
+        value: [{ subscriptionId: state.id, clientState: subscription.clientState }],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(graph.mock.calls.length).toBeGreaterThan(calls);
+      expect((await service.list())[0].lastSyncError).toBeNull();
+    },
+  );
+  it('renews watches even with periodic polling disabled', async () => {
+    await setupPush();
+    const started = service.connectStart({ provider: 'gmail' });
+    await service.connectFinish({ state: started.state, code: 'c' });
+    await finishSync();
+    cfg.mail.syncMinutes = 0;
+    vi.useFakeTimers();
+    service.start();
+    clock += DAY + 1;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/watch'))).toHaveLength(2);
+  });
+  it('validates Outlook clientState, renews lifecycle notifications and unregisters on removal', async () => {
+    cfg.mail = {
+      syncMinutes: 5,
+      google: null,
+      microsoft: {
+        clientId: 'ms',
+        clientSecret: 'secret',
+        tenant: 'common',
+        redirectUri: 'https://mail.test/cb',
+      },
+    };
+    const account = await store.insertAccount({
+      provider: 'outlook',
+      email: 'me@outlook.com',
+      enabled: true,
+      syncDays: 30,
+      status: 'connected',
+      credentials: seal(
+        JSON.stringify({ accessToken: 'access', refreshToken: 'refresh', expiresAt: clock + DAY }),
+      ),
+    });
+    let secret;
+    const graph = vi.fn(async (url, init = {}) => {
+      if (url.includes('/subscriptions')) {
+        if (init.method === 'DELETE') return new Response(null, { status: 204 });
+        const body = JSON.parse(init.body);
+        if (init.method === 'POST') secret = body.clientState;
+        return new Response(
+          JSON.stringify({ id: 'subscription', expirationDateTime: body.expirationDateTime }),
+        );
+      }
+      return new Response(JSON.stringify(url.includes('mailFolders?') ? { value: [] } : { id: 'inbox' }));
+    });
+    service = createMailService({
+      store,
+      request: graph,
+      now: () => clock,
+      pushUrl: () => 'https://mail.example.com/webhooks/mail',
+    });
+    await service.init();
+    await service.sync(account.id);
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.id).toBe('subscription'));
+    const state = store.accounts.get(account.id).pushState;
+    const registration = graph.mock.calls.find(([, init]) => init.method === 'POST')[1];
+    expect(JSON.parse(registration.body)).toMatchObject({
+      resource: 'me/messages',
+      changeType: 'created,updated,deleted',
+      notificationUrl: 'https://mail.example.com/webhooks/mail/outlook',
+      lifecycleNotificationUrl: 'https://mail.example.com/webhooks/mail/outlook',
+    });
+    expect(state.secret).not.toBe(secret);
+    expect(open(state.secret)).toBe(secret);
+    expect(() =>
+      service.outlookNotification({ value: [{ subscriptionId: 'subscription', clientState: 'wrong' }] }),
+    ).toThrow('Invalid Outlook clientState');
+    expect(() => service.outlookNotification({ value: {} })).toThrow('Invalid Outlook notification');
+    expect(() =>
+      service.outlookNotification({
+        value: [
+          { subscriptionId: 'subscription', clientState: secret, lifecycleEvent: 'subscriptionRemoved' },
+          { subscriptionId: 'subscription', clientState: 'wrong' },
+        ],
+      }),
+    ).toThrow('Invalid Outlook clientState');
+    expect(store.accounts.get(account.id).pushState.id).toBe('subscription');
+    service.outlookNotification({
+      value: [
+        { subscriptionId: 'subscription', clientState: secret, lifecycleEvent: 'reauthorizationRequired' },
+      ],
+    });
+    await finishSync();
+    await vi.waitFor(() => expect(graph.mock.calls.some(([, init]) => init.method === 'PATCH')).toBe(true));
+    await service.remove(account.id);
+    expect(graph.mock.calls.some(([, init]) => init.method === 'DELETE')).toBe(true);
+    expect(await service.list()).toEqual([]);
+  });
+  it('retries Outlook replacement after deletion succeeds but registration fails', async () => {
+    cfg.mail.syncMinutes = 0;
+    cfg.mail.microsoft = { clientId: 'ms', clientSecret: 'secret', tenant: 'common' };
+    const account = await store.insertAccount({
+      provider: 'outlook',
+      email: 'me@outlook.com',
+      enabled: true,
+      status: 'connected',
+      credentials: seal(JSON.stringify({ accessToken: 'access', expiresAt: clock + DAY })),
+      pushState: {
+        id: 'deleted',
+        fingerprint: 'https://old.example.com/webhooks/mail',
+        expiresAt: clock + 3 * DAY,
+        secret: seal('secret'),
+      },
+    });
+    let deleted = false;
+    let failRegistration = true;
+    const graph = vi.fn(async (_url, init = {}) => {
+      if (init.method === 'DELETE') {
+        if (deleted) return new Response(JSON.stringify({ error: { message: 'Missing' } }), { status: 404 });
+        deleted = true;
+        return new Response(null, { status: 204 });
+      }
+      if (failRegistration)
+        return new Response(JSON.stringify({ error: { message: 'Registration failed' } }), { status: 400 });
+      return new Response(
+        JSON.stringify({
+          id: 'replacement',
+          expirationDateTime: JSON.parse(init.body).expirationDateTime,
+        }),
+      );
+    });
+    service = createMailService({
+      store,
+      request: graph,
+      now: () => clock,
+      pushUrl: () => 'https://new.example.com/webhooks/mail',
+      log: { error: vi.fn() },
+    });
+    await service.init();
+    vi.useFakeTimers();
+    service.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(store.accounts.get(account.id).pushState.lastError).toContain('Registration failed');
+    failRegistration = false;
+    clock += 3600_000;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(store.accounts.get(account.id).pushState).toMatchObject({
+      id: 'replacement',
+      fingerprint: 'https://new.example.com/webhooks/mail',
+      lastError: null,
+    });
+    expect(graph.mock.calls.map(([, init]) => init.method)).toEqual(['DELETE', 'POST', 'DELETE', 'POST']);
   });
 });

@@ -14,6 +14,7 @@ describe('childEnv', () => {
     vi.stubEnv('CLOUDFLARE_API_TOKEN', 'cf-secret');
     vi.stubEnv('PREVIEW_ACCESS_CLIENT_SECRET', 'svc-secret');
     vi.stubEnv('FORGE_API_TOKEN', 'forge-secret');
+    vi.stubEnv('GMAIL_PUSH_TOKEN', 'private-push-token');
     vi.stubEnv('GOOGLE_OAUTH_CLIENT_SECRET', 'google-secret');
     vi.stubEnv('MICROSOFT_OAUTH_CLIENT_SECRET', 'microsoft-secret');
     vi.stubEnv('HOME_ASSISTANT_TOKEN', 'ha-secret');
@@ -31,6 +32,7 @@ describe('childEnv', () => {
     expect(env).not.toHaveProperty('PREVIEW_ACCESS_CLIENT_SECRET');
     expect(env).not.toHaveProperty('FORGE_API_TOKEN');
     expect(env).not.toHaveProperty('GOOGLE_OAUTH_CLIENT_SECRET');
+    expect(env).not.toHaveProperty('GMAIL_PUSH_TOKEN');
     expect(env).not.toHaveProperty('MICROSOFT_OAUTH_CLIENT_SECRET');
     expect(env).not.toHaveProperty('HOME_ASSISTANT_TOKEN');
     expect(env).not.toHaveProperty('HOME_ASSISTANT_URL');
