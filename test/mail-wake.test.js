@@ -43,6 +43,14 @@ describe('email wake rules', () => {
     expect(mailWakeView(next)).toEqual({ rules: [rule], perHour: 2, maxTurns: 3 });
     expect(normalizeMailWake({ rules: [] }, previous).rules).toEqual([]);
   });
+  it('advances edited rules even when the clock has not ticked or moves backwards', () => {
+    const first = normalizeMailWake({ rules: [{ account: 7 }] }, {}, 100);
+    const edited = normalizeMailWake({ rules: [{ ...first.rules[0], subject: 'new' }] }, first, 100);
+    expect(edited.rules[0].since).toBe(101);
+    const again = normalizeMailWake({ rules: [{ ...edited.rules[0], subject: 'other' }] }, edited, 99);
+    expect(again.rules[0].since).toBe(102);
+    expect(normalizeMailWake({ rules: again.rules }, again, 99).rules[0].since).toBe(102);
+  });
   it.each([
     {},
     { rules: [null] },

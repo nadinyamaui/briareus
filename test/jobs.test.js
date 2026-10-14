@@ -299,6 +299,7 @@ import {
   deliverWorkerNotices,
   deliverToSession,
   mailReceived,
+  mailReceivedDurably,
   cancelMailWakes,
   setSessionMailWake,
   sessionMailWakeState,
@@ -3812,6 +3813,61 @@ describe('webhook deliveries', () => {
       flushDeliveries(job);
       await vi.waitFor(() => expect(prompts).toHaveLength(1));
       await cli.finish(job);
+    });
+    it.each(['pendingMailWakes', 'pendingDeliveries'])(
+      'cancels %s on a same-millisecond rule edit',
+      (queue) => {
+        const job = getJob('hk-mail');
+        const time = vi.spyOn(Date, 'now').mockReturnValue(100);
+        try {
+          const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }], maxTurns: 1 }).rules[0];
+          job.awaitingAnswer = true;
+          if (queue === 'pendingMailWakes') job.unattendedTurns = 1;
+          mailReceived(account, { ...email('old-filter', rule.since), receivedAt: 100 });
+          expect(job[queue]).toHaveLength(1);
+          setSessionMailWake(job.id, { rules: [{ ...rule, subject: 'different' }] });
+          expect(job.pendingMailWakes).toHaveLength(0);
+          expect(job.pendingDeliveries).toHaveLength(0);
+        } finally {
+          time.mockRestore();
+        }
+      },
+    );
+    it.each(['pendingMailWakes', 'pendingDeliveries'])(
+      'checkpoints %s before acknowledging a receipt and deduplicates retries',
+      async (queue) => {
+        const job = getJob('hk-mail');
+        const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }], maxTurns: 1 }).rules[0];
+        job.awaitingAnswer = true;
+        if (queue === 'pendingMailWakes') job.unattendedTurns = 1;
+        const msg = email('durable', rule.since);
+        await mailReceivedDurably(account, msg);
+        const saved = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
+        expect(saved[queue]).toHaveLength(1);
+        // A crash after this save but before receipt acknowledgement replays the same message.
+        await mailReceivedDurably(account, msg);
+        expect(job[queue]).toHaveLength(1);
+      },
+    );
+    it('does not acknowledge a receipt after a failed queue save and checkpoints its duplicate on retry', async () => {
+      const job = getJob('hk-mail');
+      const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }] }).rules[0];
+      job.awaitingAnswer = true;
+      await flushJobs();
+      const msg = email('retry-checkpoint', rule.since);
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      saveJob.mockRejectedValueOnce(new Error('Database offline'));
+      try {
+        await expect(mailReceivedDurably(account, msg)).rejects.toThrow('Could not persist email wakes');
+        expect(job.pendingDeliveries).toHaveLength(1);
+        await mailReceivedDurably(account, msg);
+        expect(job.pendingDeliveries).toHaveLength(1);
+        expect(saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0].pendingDeliveries).toHaveLength(
+          1,
+        );
+      } finally {
+        error.mockRestore();
+      }
     });
     it('persists both queues on mailbox disable and does not revive mail after re-enable', async () => {
       const { prompts } = fakeCli();

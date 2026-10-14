@@ -7,6 +7,7 @@ const cfg = vi.hoisted(() => ({ credentialsKey: 'k'.repeat(32) }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
 // The service is handed a store of its own below; the database's is never reached.
 vi.mock('../lib/db.js', () => ({
+  acknowledgeMailReceipt: vi.fn(),
   countMailMessages: vi.fn(),
   deleteMailAccount: vi.fn(),
   deleteMailMessages: vi.fn(),
@@ -17,6 +18,7 @@ vi.mock('../lib/db.js', () => ({
   insertMailAccount: vi.fn(),
   listMailMessages: vi.fn(),
   loadMailAccountRows: vi.fn(),
+  pendingMailReceipts: vi.fn(),
   renameMailFolder: vi.fn(),
   renameMailLabels: vi.fn(),
   updateMailAccount: vi.fn(),
@@ -35,15 +37,21 @@ const DAY = 24 * 3600_000;
 function memoryStore() {
   const accounts = new Map();
   const messages = new Map();
+  const receipts = new Map();
   let nextId = 1;
   const key = (accountId, id) => `${accountId}:${id}`;
   const ofAccount = (accountId) => [...messages.values()].filter((m) => m.accountId === accountId);
   const drop = (pred) => {
-    for (const [k, m] of messages) if (pred(m)) messages.delete(k);
+    for (const [k, m] of messages)
+      if (pred(m)) {
+        messages.delete(k);
+        receipts.delete(k);
+      }
   };
   return {
     accounts,
     messages,
+    receipts,
     loadAccounts: async () => [...accounts.values()].map((a) => ({ ...a })),
     insertAccount: async (a) => {
       if ([...accounts.values()].some((b) => b.provider === a.provider && b.email === a.email))
@@ -69,8 +77,17 @@ function memoryStore() {
       drop((m) => m.accountId === id);
       return 1;
     },
-    upsert: async (accountId, rows, syncedAt) => {
-      for (const r of rows) messages.set(key(accountId, r.id), { ...r, accountId, syncedAt });
+    upsert: async (accountId, rows, syncedAt, wakePending = false) => {
+      for (const r of rows) {
+        const k = key(accountId, r.id);
+        if (!messages.has(k) && wakePending) receipts.set(k, { ...r, accountId });
+        messages.set(k, { ...r, accountId, syncedAt });
+      }
+    },
+    pendingReceived: async (accountId) =>
+      [...messages.values()].filter((r) => r.accountId === accountId && receipts.has(key(accountId, r.id))),
+    acknowledgeReceived: async (accountId, id) => {
+      receipts.delete(key(accountId, id));
     },
     flags: async (accountId, id, flags, syncedAt) => {
       const m = messages.get(key(accountId, id));
@@ -2135,13 +2152,13 @@ describe('mail push', () => {
     mailbox.messages.d = { at: clock, unread: true };
     const upsert = store.upsert;
     let fail = true;
-    store.upsert = async (id, rows, marker) => {
+    store.upsert = async (id, rows, marker, wakePending) => {
       for (const row of rows) {
         if (row.id === 'd' && fail) {
           fail = false;
           throw new Error('Transient database failure');
         }
-        await upsert(id, [row], marker);
+        await upsert(id, [row], marker, wakePending);
       }
     };
     await service.sync(account.id);
@@ -2152,6 +2169,83 @@ describe('mail push', () => {
     await service.sync(account.id);
     await finishSync();
     expect(received.mock.calls.map(([, row]) => row.id)).toEqual(['c', 'd']);
+  });
+  it.each(['before callback', 'before checkpoint'])(
+    'replays a committed receipt after a crash %s with polling disabled',
+    async (crash) => {
+      const received = vi.fn();
+      await setupPush(received);
+      const account = await connect();
+      await finishSync();
+      received.mockClear();
+      store.accounts.get(account.id).syncState = null;
+      await service.init();
+      const upsert = store.upsert;
+      if (crash === 'before callback') {
+        store.upsert = async (...args) => {
+          await upsert(...args);
+          if (args[1][0].id === 'fresh') throw new Error('Crash after message commit');
+        };
+      } else received.mockRejectedValueOnce(new Error('Crash before wake persistence'));
+      mailbox.messages.fresh = { at: clock };
+      await service.sync(account.id);
+      await finishSync();
+      expect(await store.get(account.id, 'fresh')).toBeTruthy();
+      expect((await store.pendingReceived(account.id)).map((r) => r.id)).toEqual(['fresh']);
+      if (crash === 'before callback') expect(received).not.toHaveBeenCalled();
+      store.upsert = upsert;
+      service.stop();
+      cfg.mail.syncMinutes = 0;
+      received.mockClear();
+      await setupPush(received);
+      vi.useFakeTimers();
+      service.start();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(received).toHaveBeenCalledTimes(1);
+      expect(received.mock.calls[0][1].id).toBe('fresh');
+      expect(await store.pendingReceived(account.id)).toEqual([]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(received).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('cancels pending receipt replay when the mailbox is disabled', async () => {
+    const received = vi.fn();
+    await setupPush(received);
+    const account = await connect();
+    await finishSync();
+    await store.upsert(account.id, [{ id: 'pending', inInbox: true, receivedAt: clock }], clock, true);
+    await service.update(account.id, { enabled: false });
+    received.mockClear();
+    cfg.mail.syncMinutes = 0;
+    vi.useFakeTimers();
+    service.start();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(received).not.toHaveBeenCalled();
+    expect(await store.pendingReceived(account.id)).toEqual([]);
+  });
+  it('keeps the receipt until the asynchronous wake checkpoint succeeds', async () => {
+    const received = vi.fn();
+    await setupPush(received);
+    const account = await connect();
+    await finishSync();
+    store.accounts.get(account.id).syncState = null;
+    await service.init();
+    let release;
+    received.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    mailbox.messages.fresh = { at: clock };
+    const sync = service.sync(account.id);
+    await vi.waitFor(() => expect(release).toBeDefined());
+    expect(await store.get(account.id, 'fresh')).toBeTruthy();
+    expect((await store.pendingReceived(account.id)).map((r) => r.id)).toEqual(['fresh']);
+    release();
+    await sync;
+    await finishSync();
+    expect(await store.pendingReceived(account.id)).toEqual([]);
   });
   it('backs off disabled-account cleanup but allows explicit removal to stop the watch immediately', async () => {
     await setupPush();
