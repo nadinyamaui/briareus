@@ -2271,8 +2271,92 @@ describe('mail push', () => {
     clock += 3600_000;
     await vi.advanceTimersByTimeAsync(60_000);
     expect(stops()).toBe(2);
-    await service.remove(account.id);
+    await expect(service.remove(account.id)).rejects.toMatchObject({ upstream: 403 });
     expect(stops()).toBe(3);
+    expect(store.accounts.get(account.id).pushState.retryAt).toBe(clock + 3600_000);
+    gmail.request.mockImplementation(request);
+    await service.remove(account.id);
+    expect(stops()).toBe(4);
+    expect(await service.list()).toEqual([]);
+  });
+  it.each([
+    ['gmail', '503'],
+    ['gmail', 'timeout'],
+    ['outlook', '503'],
+    ['outlook', 'timeout'],
+  ])('retains disabled %s cleanup across restart after removal encounters %s', async (provider, failure) => {
+    cfg.mail.syncMinutes = 0;
+    cfg.mail.gmailPush = { topic: 'projects/mail/topics/events', token };
+    cfg.mail.microsoft = { clientId: 'ms', clientSecret: 'secret', tenant: 'common' };
+    const credentials = seal(JSON.stringify({ accessToken: 'access', expiresAt: clock + DAY }));
+    const secret = seal('watch-secret');
+    const account = await store.insertAccount({
+      provider,
+      email: provider === 'gmail' ? 'me@gmail.com' : 'me@outlook.com',
+      enabled: true,
+      syncDays: 30,
+      status: 'connected',
+      credentials,
+      pushState: {
+        id: 'subscription',
+        expiresAt: clock + 3 * DAY,
+        fingerprint:
+          provider === 'gmail' ? cfg.mail.gmailPush.topic : 'https://mail.example.com/webhooks/mail',
+        secret,
+      },
+    });
+    await store.upsert(account.id, [{ id: 'cached', receivedAt: clock }], clock);
+    let failing = true;
+    const request = vi.fn(async () => {
+      if (failing) {
+        if (failure === 'timeout') throw new Error('Request timed out');
+        return new Response(JSON.stringify({ error: { message: 'Cleanup unavailable' } }), { status: 503 });
+      }
+      return provider === 'outlook'
+        ? new Response(JSON.stringify({ error: { message: 'Already gone' } }), { status: 404 })
+        : new Response(null, { status: 204 });
+    });
+    const disabled = vi.fn();
+    const create = () =>
+      createMailService({
+        store,
+        request,
+        now: () => clock,
+        sleep: async () => {},
+        pushUrl: () => 'https://mail.example.com/webhooks/mail',
+        onDisabled: disabled,
+        log: { error: vi.fn() },
+      });
+    service = create();
+    await service.init();
+    await expect(service.remove(account.id)).rejects.toMatchObject({ status: 502 });
+    expect(store.accounts.get(account.id)).toMatchObject({
+      enabled: false,
+      credentials,
+      pushState: { id: 'subscription', secret, retryAt: clock + 3600_000, lastError: expect.any(String) },
+    });
+    expect(await store.get(account.id, 'cached')).toBeTruthy();
+    expect(disabled).toHaveBeenCalledExactlyOnceWith(account.id);
+    expect(service.wakeAccountEnabled(account.id)).toBe(false);
+
+    service.stop();
+    service = create();
+    await service.init();
+    expect(service.wakeAccountEnabled(account.id)).toBe(false);
+    vi.useFakeTimers();
+    service.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(request).toHaveBeenCalledTimes(1);
+    failing = false;
+    clock += 3600_000;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(store.accounts.get(account.id).pushState).toBeNull();
+    expect((await service.list())[0]).toMatchObject({ id: account.id, enabled: false });
+    await service.remove(account.id);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(await service.list()).toEqual([]);
+    expect(await store.get(account.id, 'cached')).toBeNull();
   });
   it.each(['lost response', 'failed persistence'])(
     'recovers Outlook registration after %s',
