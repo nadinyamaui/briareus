@@ -69,6 +69,8 @@ describe('email wake rules', () => {
     expect(mailWakeAllowed(job, project)).toBe(true);
     expect(mailWakeAllowed(job, { ...project, mailToolsEnabled: false })).toBe(false);
     expect(mailWakeAllowed({ ...job, status: 'closed' }, project)).toBe(false);
+    expect(mailWakeAllowed({ ...job, closing: true }, project)).toBe(false);
+    expect(mailWakeAllowed({ ...job, closePending: true }, project)).toBe(false);
     expect(mailWakeAllowed({ ...job, parentId: 'parent' }, project)).toBe(false);
   });
 });

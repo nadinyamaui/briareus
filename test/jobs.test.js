@@ -3814,6 +3814,35 @@ describe('webhook deliveries', () => {
       await vi.waitFor(() => expect(prompts).toHaveLength(1));
       await cli.finish(job);
     });
+    it('rejects email arriving during close cleanup without retaining a wake', async () => {
+      const { prompts } = fakeCli();
+      const job = getJob('hk-mail');
+      const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }] }).rules[0];
+      const workDir = job.workDir;
+      const { promise, resolve } = Promise.withResolvers();
+      releaseInstance.mockReturnValueOnce(promise);
+      const closing = closeDevSession(job.id);
+      try {
+        await vi.waitFor(() => expect(releaseInstance).toHaveBeenCalledWith(job));
+        expect(job.closing).toBe(true);
+        expect(job.status).toBe('idle');
+        await mailReceivedDurably(account, email('during-close', rule.since));
+        expect(job.pendingMailWakes).toHaveLength(0);
+        expect(job.pendingDeliveries).toHaveLength(0);
+        expect(prompts).toHaveLength(0);
+        resolve();
+        await closing;
+        await flushJobs();
+        const saved = saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0];
+        expect(saved.status).toBe('closed');
+        expect(saved).not.toHaveProperty('pendingMailWakes');
+        expect(saved).not.toHaveProperty('pendingDeliveries');
+      } finally {
+        resolve();
+        await closing;
+        job.workDir = workDir;
+      }
+    });
     it.each(['pendingMailWakes', 'pendingDeliveries'])(
       'cancels %s on a same-millisecond rule edit',
       (queue) => {
