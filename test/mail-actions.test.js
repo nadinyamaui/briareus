@@ -483,6 +483,26 @@ describe('email actions', () => {
     else expect(body.message.ccRecipients).toEqual([{ emailAddress: { address } }]);
   });
 
+  it('keeps a display-name mailbox with a quoted > in Gmail reply-all Cc', async () => {
+    const address = '"a>b"@example.com';
+    const { run, request } = make(
+      'gmail',
+      Response.json({
+        payload: {
+          headers: [
+            { name: 'From', value: 'bob@example.com' },
+            { name: 'To', value: `me@example.com, Other <${address}>` },
+            { name: 'Message-ID', value: '<original@example.com>' },
+          ],
+        },
+      }),
+    );
+    const result = await run({ action: 'reply', id: 'abc', text: 'Answer', replyAll: true });
+    expect(result.cc).toEqual([address]);
+    const body = JSON.parse(request.mock.calls[1][1].body);
+    expect(Buffer.from(body.raw, 'base64url').toString()).toContain(`Cc: ${address}`);
+  });
+
   it.each(['replyTo', 'from'])('keeps a quoted Outlook %s as the primary recipient', async (field) => {
     const address = '"alice smith"@example.com';
     const recipient = { emailAddress: { address } };
