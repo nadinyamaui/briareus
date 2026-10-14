@@ -1715,7 +1715,15 @@ describe('mail management access', () => {
       subject: 'Hello',
       text: 'Body',
     });
-    expect(result).toEqual({ status: 'accepted', action: 'send', id: 'sent', threadId: 'sent-thread' });
+    expect(result).toEqual({
+      status: 'accepted',
+      action: 'send',
+      id: 'sent',
+      threadId: 'sent-thread',
+      to: ['you@example.com'],
+      cc: [],
+      bcc: [],
+    });
     const sent = gmail.request.mock.calls.find(([url]) => url.endsWith('/messages/send'));
     expect(sent[1].headers.Authorization).toBe('Bearer access-1');
     await settled();
