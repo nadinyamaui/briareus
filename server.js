@@ -36,8 +36,11 @@ import { sessionTranscriptRoutes } from './lib/transcript-routes.js';
 import { providerTestRoutes } from './lib/provider-test-routes.js';
 import { sessionEditRoute } from './lib/session-edit-route.js';
 import { sessionBrowserRoutes } from './lib/browser-routes.js';
+import { createSessionStats } from './lib/session-stats.js';
+import { sessionStatsRoutes } from './lib/session-stats-routes.js';
 import {
   browserInput,
+  browserPids,
   browserScreenshot,
   browserState,
   stopAllBrowsers,
@@ -1853,6 +1856,22 @@ api.get('/api/dev/sessions/:id/browser/stream', sharedBrowser.stream);
 api.get('/api/dev/sessions/:id/browser/screenshot', sharedBrowser.screenshot);
 api.post('/api/dev/sessions/:id/browser/input', sharedBrowser.input);
 
+// What each open session costs the machine (lib/session-stats.js), sampled from the
+// processes it spawned: the turn's CLI, the ▶ Run server and the shared browser.
+const sessionStats = createSessionStats({
+  listSessions: () => devSessionRecords().filter((job) => DEV_OPEN.includes(job.status)),
+  rootsOf: (job) => [
+    ...(job.proc?.pid ? [{ pid: job.proc.pid, role: 'agent' }] : []),
+    ...(job.serveProc?.pid ? [{ pid: job.serveProc.pid, role: 'serve' }] : []),
+    ...browserPids(job.id).map((pid) => ({ pid, role: 'browser' })),
+  ],
+  disks: [
+    { label: 'workspaces', dir: getConfig().workspaceDir },
+    { label: 'files', dir: getConfig().testVideosDir },
+  ],
+});
+api.use(sessionStatsRoutes({ stats: sessionStats, getJob, isOpen: (job) => DEV_OPEN.includes(job.status) }));
+
 // Mid-turn messages are injected into a claude turn or queued, and a released session reopens
 // first, so this fails only on a message the session cannot accept at all.
 api.post('/api/dev/sessions/:id/message', (req, res) => {
@@ -2136,6 +2155,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   setAgentApiBase(`http://127.0.0.1:${port}`);
   app.listen(port, cfg.bindHost, () => {
     resumeRestartedSessions();
+    sessionStats.start();
     // Recovered sessions must claim their slots before pruning unused clones.
     startWorkspacePruner();
     const projects = activeProjects();

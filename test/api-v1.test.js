@@ -853,6 +853,8 @@ describe('the contract', () => {
       'preview.access',
       'projects.list',
       'sessions.list',
+      'stats.server',
+      'stats.sessions',
       'token.revoke',
       'transcribe.create',
       'transcribe.status',

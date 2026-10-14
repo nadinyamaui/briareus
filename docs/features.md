@@ -94,6 +94,19 @@ Claude accounts can fail over when quota is exhausted.
 See [session costs](../README.md#what-a-session-costs) and
 [Claude account failover](../README.md#claude-account-failover).
 
+## Resource stats
+
+The server samples every open session every ten seconds: the CPU, resident
+memory and process count of everything it spawned (the agent's turn or a setup
+step, the ▶ Run server, the shared browser), split by kind, plus the disk its
+workspace clone takes, re-measured every five minutes. Alongside, it samples
+the machine (CPU, memory, load), the Briareus process itself and the disks
+sessions write to. The last hour is kept in memory for charts and starts over
+on restart. Session figures need Linux's `/proc`.
+
+See `GET /stats/server`, `GET /stats/sessions` and `GET /sessions/{id}/stats`
+in the [API reference](api-v1-reference.md#operations).
+
 ## Recent additions
 
 These additions are present in the server revision documented here:
