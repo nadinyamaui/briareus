@@ -178,6 +178,23 @@ describe('createSessionStats', () => {
     expect(stats.get('s1').cpuPercent).toBe(0);
   });
 
+  it('does not take off the time of a background child reaped outside the session', () => {
+    writeProc([
+      { pid: 100, ppid: 1, pgrp: 100, start: 5 },
+      { pid: 101, ppid: 100, pgrp: 100, utime: 40, start: 6 },
+      { pid: 102, ppid: 101, pgrp: 100, utime: 59, start: 7 },
+    ]);
+    const { stats, clock } = make();
+    stats.sample();
+    // 10 s later: 101 exited without waiting for 102, 100 waited for 101, and 102 was
+    // reparented and reaped by init. 100 spent 50 ticks itself; its children's time is
+    // only 101's 40, so 102's 59 must not come off.
+    clock.advance(10_000);
+    writeProc([{ pid: 100, ppid: 1, pgrp: 100, utime: 50, cutime: 40, start: 5 }]);
+    stats.sample();
+    expect(stats.get('s1').cpuPercent).toBe(5);
+  });
+
   it('counts a reused pid’s whole time as new', () => {
     writeProc([{ pid: 100, ppid: 1, pgrp: 100, utime: 1000, start: 5 }]);
     const { stats, clock } = make();
