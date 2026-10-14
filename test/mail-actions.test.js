@@ -187,6 +187,96 @@ describe('email actions', () => {
     expect(mime).toContain('In-Reply-To: <original@example.com>');
   });
 
+  it('sends Gmail cc and bcc without repeating a recipient', async () => {
+    const { run, request } = make();
+    const result = await run({
+      action: 'send',
+      to: ['a@example.com'],
+      cc: ['b@example.com', 'A@example.com'],
+      bcc: ['c@example.com', 'b@example.com'],
+      subject: 's',
+      text: 'body',
+    });
+    expect(result).toMatchObject({ to: ['a@example.com'], cc: ['b@example.com'], bcc: ['c@example.com'] });
+    const mime = Buffer.from(JSON.parse(request.mock.calls[0][1].body).raw, 'base64url').toString();
+    expect(mime).toContain('To: a@example.com\r\nCc: b@example.com\r\nBcc: c@example.com\r\n');
+  });
+
+  it.each([{ cc: ['Name <b@example.com>'] }, { bcc: 'b@example.com' }, { replyAll: 'yes' }])(
+    'rejects malformed recipients %o before calling the provider',
+    async (extra) => {
+      const { run, request } = make();
+      await expect(run({ action: 'reply', id: 'abc', text: 'x', ...extra })).rejects.toMatchObject({
+        status: 400,
+      });
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
+
+  it('replies to all in the Gmail thread with the whole reference chain', async () => {
+    const { run, request } = make(
+      'gmail',
+      Response.json({
+        threadId: 'thread',
+        payload: {
+          headers: [
+            { name: 'From', value: 'Andy <andy@example.com>' },
+            { name: 'To', value: 'Me <ME@example.com>, Matt <matt@example.com>' },
+            { name: 'Cc', value: 'alan@example.com, andy@example.com, undisclosed-recipients:;' },
+            { name: 'Subject', value: 'Re: Working together' },
+            { name: 'Message-ID', value: '<3@example.com>' },
+            { name: 'References', value: '<1@example.com> <2@example.com>' },
+          ],
+        },
+      }),
+    );
+    const result = await run({
+      action: 'reply',
+      id: 'abc',
+      text: 'Thanks',
+      replyAll: true,
+      cc: ['matt@example.com', 'zoe@example.com'],
+    });
+    expect(result).toMatchObject({
+      to: ['Andy <andy@example.com>'],
+      cc: ['matt@example.com', 'alan@example.com', 'zoe@example.com'],
+      threadId: undefined,
+    });
+    const body = JSON.parse(request.mock.calls[1][1].body);
+    expect(body.threadId).toBe('thread');
+    const mime = Buffer.from(body.raw, 'base64url').toString();
+    expect(mime).toContain(
+      'To: Andy <andy@example.com>\r\nCc: matt@example.com,\r\n alan@example.com,\r\n zoe@example.com\r\n',
+    );
+    expect(mime).toContain('References: <1@example.com> <2@example.com> <3@example.com>');
+    expect(decodeWords(mime.match(/Subject: ([^\r]+)/)[1])).toBe('Re: Working together');
+  });
+
+  it('spells out Outlook reply recipients once cc or reply-all is asked for', async () => {
+    const { run, request } = make(
+      'outlook',
+      Response.json({
+        from: { emailAddress: { address: 'andy@example.com' } },
+        replyTo: [],
+        toRecipients: [
+          { emailAddress: { address: 'me@example.com' } },
+          { emailAddress: { address: 'matt@example.com' } },
+        ],
+        ccRecipients: [{ emailAddress: { address: 'alan@example.com' } }],
+      }),
+      new Response(null, { status: 202 }),
+    );
+    await run({ action: 'reply', id: 'm1', text: 'Thanks', replyAll: true, bcc: ['me2@example.com'] });
+    expect(request.mock.calls[0][0]).toMatch(/\/messages\/m1\?\$select=/);
+    const [url, options] = request.mock.calls[1];
+    expect(url).toMatch(/\/messages\/m1\/reply$/);
+    const address = (list) => list.map((r) => r.emailAddress.address);
+    const { message } = JSON.parse(options.body);
+    expect(address(message.toRecipients)).toEqual(['andy@example.com']);
+    expect(address(message.ccRecipients)).toEqual(['matt@example.com', 'alan@example.com']);
+    expect(address(message.bccRecipients)).toEqual(['me2@example.com']);
+  });
+
   it.each(['=?UTF-8?B?Q2Fmw6k=?=', '=?UTF-8?Q?Caf=C3=A9?='])(
     'decodes a Gmail reply subject %s before serializing it',
     async (subject) => {
@@ -205,7 +295,7 @@ describe('email actions', () => {
       );
       await run({ action: 'reply', id: 'abc', text: 'Yes' });
       const mime = Buffer.from(JSON.parse(request.mock.calls[1][1].body).raw, 'base64url').toString();
-      expect(decodeWords(mime.match(/Subject: ([^\r]+)/)[1])).toBe('Café');
+      expect(decodeWords(mime.match(/Subject: ([^\r]+)/)[1])).toBe('Re: Café');
     },
   );
 
