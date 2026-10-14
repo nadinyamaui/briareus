@@ -1945,6 +1945,68 @@ describe('mail push', () => {
   async function finishSync() {
     await vi.waitFor(async () => expect((await service.list())[0].syncing).toBe(false));
   }
+  it.each(['gmail', 'outlook'])(
+    'marks refused %s push credentials for reconnection without polling',
+    async (provider) => {
+      cfg.mail.syncMinutes = 0;
+      cfg.mail.gmailPush = { topic: 'projects/mail/topics/events', token };
+      cfg.mail.microsoft = { clientId: 'ms', clientSecret: 'secret', tenant: 'common' };
+      const account = await store.insertAccount({
+        provider,
+        email: `me@${provider}.com`,
+        enabled: true,
+        syncDays: 30,
+        status: 'connected',
+        credentials: seal(JSON.stringify({ refreshToken: 'revoked', expiresAt: clock - DAY })),
+      });
+      const request = vi.fn(async (url) => {
+        if (!url.includes('/token')) throw new Error(`Unexpected provider request: ${url}`);
+        return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Revoked grant' }), {
+          status: 400,
+        });
+      });
+      service = createMailService({
+        store,
+        request,
+        now: () => clock,
+        sleep: async () => {},
+        pushUrl: () => 'https://mail.example.com/webhooks/mail',
+        log: { error: vi.fn() },
+      });
+      await service.init();
+      vi.useFakeTimers();
+      service.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect((await service.list())[0]).toMatchObject({
+        status: 'reauth',
+        push: { active: false, lastError: expect.stringContaining('Revoked grant') },
+      });
+      expect(store.accounts.get(account.id).status).toBe('reauth');
+      expect(service.wakeAccountEnabled(account.id)).toBe(false);
+      // Outlook also attempts subscription recovery, which refreshes the refused grant again.
+      expect(request).toHaveBeenCalledTimes(provider === 'outlook' ? 2 : 1);
+    },
+  );
+  it('keeps reconnected credentials after an old push refresh is refused', async () => {
+    cfg.mail.syncMinutes = 0;
+    await setupPush();
+    const account = await connect();
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.expiresAt).toBeTruthy());
+    clock += DAY + 1;
+    mailbox.refreshRefused = true;
+    let release;
+    gmail.gate.refresh = new Promise((resolve) => (release = resolve));
+    await service.update(account.id, { label: 'refresh' });
+    await vi.waitFor(() => expect(gmail.tokenCalls.some((c) => c.grant_type === 'refresh_token')).toBe(true));
+    await connect({ accountId: account.id }, 'fresh');
+    release();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState.lastError).toBeTruthy());
+    await finishSync();
+    expect((await service.list())[0].status).toBe('connected');
+    expect(service.wakeAccountEnabled(account.id)).toBe(true);
+    expect(JSON.parse(open(store.accounts.get(account.id).credentials)).refreshToken).toBe('refresh-fresh');
+  });
   it('registers, persists a sealed secret, keeps the sync cursor, renews daily and stops on disable', async () => {
     await setupPush();
     const started = service.connectStart({ provider: 'gmail' });
