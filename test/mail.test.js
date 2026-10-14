@@ -1988,6 +1988,142 @@ describe('mail push', () => {
     await finishSync();
     expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/watch'))).toHaveLength(watches);
   });
+  it('notifies committed messages before a later message write fails, without duplicate wakes on retry', async () => {
+    const received = vi.fn();
+    await setupPush(received);
+    const account = await connect();
+    await finishSync();
+    received.mockClear();
+    store.accounts.get(account.id).syncState = null;
+    await service.init();
+    mailbox.messages.c = { at: clock, unread: true };
+    mailbox.messages.d = { at: clock, unread: true };
+    const upsert = store.upsert;
+    let fail = true;
+    store.upsert = async (id, rows, marker) => {
+      for (const row of rows) {
+        if (row.id === 'd' && fail) {
+          fail = false;
+          throw new Error('Transient database failure');
+        }
+        await upsert(id, [row], marker);
+      }
+    };
+    await service.sync(account.id);
+    await finishSync();
+    expect(store.ofAccount(account.id).map((m) => m.id)).toContain('c');
+    expect(store.accounts.get(account.id).lastSyncError).toContain('Transient database failure');
+    expect(received.mock.calls.map(([, row]) => row.id)).toEqual(['c']);
+    await service.sync(account.id);
+    await finishSync();
+    expect(received.mock.calls.map(([, row]) => row.id)).toEqual(['c', 'd']);
+  });
+  it('backs off disabled-account cleanup but allows explicit removal to stop the watch immediately', async () => {
+    await setupPush();
+    const account = await connect();
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.expiresAt).toBeTruthy());
+    const request = gmail.request.getMockImplementation();
+    gmail.request.mockImplementation(async (url, init) =>
+      url.endsWith('/stop')
+        ? new Response(JSON.stringify({ error: { message: 'Cleanup refused' } }), { status: 403 })
+        : request(url, init),
+    );
+    await service.update(account.id, { enabled: false });
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState.retryAt).toBe(clock + 3600_000));
+    const stops = () => gmail.request.mock.calls.filter(([url]) => url.endsWith('/stop')).length;
+    expect(stops()).toBe(1);
+    cfg.mail.syncMinutes = 0;
+    vi.useFakeTimers();
+    service.start();
+    clock += 60_000;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(stops()).toBe(1);
+    clock += 3600_000;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(stops()).toBe(2);
+    await service.remove(account.id);
+    expect(stops()).toBe(3);
+  });
+  it.each(['lost response', 'failed persistence'])(
+    'recovers Outlook registration after %s',
+    async (failure) => {
+      cfg.mail.syncMinutes = 0;
+      cfg.mail.microsoft = { clientId: 'ms', clientSecret: 'secret', tenant: 'common' };
+      const account = await store.insertAccount({
+        provider: 'outlook',
+        email: 'me@outlook.com',
+        enabled: true,
+        syncDays: 30,
+        status: 'connected',
+        credentials: seal(JSON.stringify({ accessToken: 'access', expiresAt: clock + DAY })),
+      });
+      let subscription;
+      let failLookup = true;
+      const graph = vi.fn(async (url, init = {}) => {
+        if (url.endsWith('/subscriptions')) {
+          if (init.method === 'POST') {
+            if (subscription)
+              return new Response(JSON.stringify({ error: { message: 'Duplicate subscription' } }), {
+                status: 409,
+              });
+            subscription = { ...JSON.parse(init.body), id: 'recovered' };
+            if (failure === 'lost response') throw new Error('Response lost');
+            return new Response(JSON.stringify(subscription));
+          }
+          if (failLookup) {
+            failLookup = false;
+            return new Response(JSON.stringify({ error: { message: 'Lookup unavailable' } }), {
+              status: 403,
+            });
+          }
+          return new Response(JSON.stringify({ value: [subscription] }));
+        }
+        return new Response(JSON.stringify(url.includes('mailFolders?') ? { value: [] } : { id: 'inbox' }));
+      });
+      const update = store.updateAccount;
+      let failWrite = failure === 'failed persistence';
+      store.updateAccount = async (id, changes) => {
+        if (changes.pushState?.id && failWrite) {
+          failWrite = false;
+          throw new Error('State write failed');
+        }
+        return update(id, changes);
+      };
+      service = createMailService({
+        store,
+        request: graph,
+        now: () => clock,
+        pushUrl: () => 'https://mail.example.com/webhooks/mail',
+        log: { error: vi.fn() },
+      });
+      await service.init();
+      vi.useFakeTimers();
+      service.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+      if (failure === 'failed persistence') {
+        expect(store.accounts.get(account.id).pushState.id).toBe('recovered');
+        expect(open(store.accounts.get(account.id).pushState.secret)).toBe(subscription.clientState);
+      }
+      // Reload persisted state before retrying; recovery must survive a restart.
+      await service.init();
+      clock += 3600_000;
+      await vi.advanceTimersByTimeAsync(60_000);
+      const state = store.accounts.get(account.id).pushState;
+      expect(state.id).toBe('recovered');
+      expect(open(state.secret)).toBe(subscription.clientState);
+      expect(graph.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(
+        failure === 'lost response' ? 2 : 1,
+      );
+      const calls = graph.mock.calls.length;
+      service.outlookNotification({
+        value: [{ subscriptionId: state.id, clientState: subscription.clientState }],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(graph.mock.calls.length).toBeGreaterThan(calls);
+      expect((await service.list())[0].lastSyncError).toBeNull();
+    },
+  );
   it('renews watches even with periodic polling disabled', async () => {
     await setupPush();
     const started = service.connectStart({ provider: 'gmail' });
