@@ -1175,7 +1175,7 @@ describe('the claude parser', () => {
     expect(onNotify).toContainEqual({ kind: 'agent', state: 'end', id: 'bg-1' });
   });
 
-  it('tracks the background agents and Monitors the process waits on', () => {
+  it('tracks the background agents, Monitors and shell commands the process waits on', () => {
     const turn = newTurn();
     const parser = parserFor('claude', turn);
     parser.feed({
@@ -1199,18 +1199,26 @@ describe('the claude parser', () => {
       { kind: 'background', tasks: [{ name: 'Explore', summary: 'map' }], ended: [] },
     ]);
     expect(started('tm', 'm1').at(-1).tasks).toHaveLength(2);
-    expect(started('tb', 'b1')).toEqual([]); // a background Bash is not waited on
+    // The CLI waits on a background Bash too, and wakes when it ends.
+    expect(started('tb', 'b1').at(-1).tasks.at(-1)).toEqual({ name: 'Bash', summary: 'npm run dev' });
     // The agent's notification ends both its background task and its sub-agent row.
     expect(
       parser.feed({ type: 'system', subtype: 'task_notification', task_id: 'ta', tool_use_id: 'a1' }),
     ).toEqual([
       { kind: 'agent', state: 'end', id: 'a1' },
-      { kind: 'background', tasks: [{ name: 'Monitor', summary: 'replies' }], ended: ['ta'] },
+      {
+        kind: 'background',
+        tasks: [
+          { name: 'Monitor', summary: 'replies' },
+          { name: 'Bash', summary: 'npm run dev' },
+        ],
+        ended: ['ta'],
+      },
     ]);
     // The CLI's own list prunes whatever it no longer runs.
     expect(
       parser.feed({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'tb' }] }),
-    ).toEqual([{ kind: 'background', tasks: [], ended: ['tm'] }]);
+    ).toEqual([{ kind: 'background', tasks: [{ name: 'Bash', summary: 'npm run dev' }], ended: ['tm'] }]);
   });
 
   it('says when a task was stopped rather than done, after the drop that ended it', () => {
