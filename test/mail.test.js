@@ -2293,6 +2293,115 @@ describe('mail push', () => {
     await finishSync();
     expect(await store.pendingReceived(account.id)).toEqual([]);
   });
+  it.each(['disable', 'remove', 'expired renewal'])(
+    'stops Gmail after a lost watch response on %s, including after restart',
+    async (action) => {
+      await setupPush();
+      const request = gmail.request.getMockImplementation();
+      let watching = false;
+      let loseResponse = action !== 'expired renewal';
+      gmail.request.mockImplementation(async (url, init) => {
+        if (url.endsWith('/watch')) {
+          watching = true;
+          if (loseResponse) throw new Error('Response lost');
+        }
+        if (url.endsWith('/stop')) watching = false;
+        return request(url, init);
+      });
+      const account = await connect();
+      await finishSync();
+      if (action === 'expired renewal') {
+        clock += 6 * DAY + 1;
+        loseResponse = true;
+        await service.sync(account.id);
+        await finishSync();
+        clock += DAY;
+      }
+      await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.lastError).toBeTruthy());
+      expect(watching).toBe(true);
+      expect((await service.list())[0].push.active).toBe(false);
+      await setupPush();
+      if (action === 'disable') {
+        await service.update(account.id, { enabled: false });
+        // Automatic cleanup still honors registration backoff.
+        expect(watching).toBe(true);
+        cfg.mail.syncMinutes = 0;
+        vi.useFakeTimers();
+        service.start();
+        clock += 3600_000;
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(store.accounts.get(account.id).pushState).toBeNull();
+      } else {
+        await service.remove(account.id);
+        expect(await service.list()).toEqual([]);
+      }
+      expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/stop'))).toHaveLength(1);
+      expect(watching).toBe(false);
+    },
+  );
+  it('retries failed cleanup of a lost Gmail watch response after restart', async () => {
+    await setupPush();
+    const request = gmail.request.getMockImplementation();
+    let failStop = true;
+    gmail.request.mockImplementation(async (url, init) => {
+      if (url.endsWith('/watch')) throw new Error('Response lost');
+      if (url.endsWith('/stop') && failStop)
+        return new Response(JSON.stringify({ error: { message: 'Cleanup unavailable' } }), { status: 503 });
+      return request(url, init);
+    });
+    const account = await connect();
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.lastError).toBeTruthy());
+    await expect(service.remove(account.id)).rejects.toMatchObject({ upstream: 503 });
+    expect(store.accounts.get(account.id)).toMatchObject({ enabled: false });
+    const deadline = store.accounts.get(account.id).pushState.cleanupUntil;
+    expect(deadline).toBe(clock + 7 * DAY);
+    await setupPush();
+    cfg.mail.syncMinutes = 0;
+    vi.useFakeTimers();
+    service.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/stop'))).toHaveLength(1);
+    failStop = false;
+    clock += 3600_000;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(store.accounts.get(account.id).pushState).toBeNull();
+    expect(gmail.request.mock.calls.filter(([url]) => url.endsWith('/stop'))).toHaveLength(2);
+    await service.remove(account.id);
+    expect(await service.list()).toEqual([]);
+  });
+  it('removes an expired uncertain Gmail watch locally with revoked credentials', async () => {
+    await setupPush();
+    const request = gmail.request.getMockImplementation();
+    gmail.request.mockImplementation(async (url, init) => {
+      if (url.endsWith('/watch')) throw new Error('Response lost');
+      return request(url, init);
+    });
+    const account = await connect();
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.lastError).toBeTruthy());
+    expect(store.accounts.get(account.id).pushState.cleanupUntil).toBe(clock + 7 * DAY);
+    clock += 7 * DAY;
+    mailbox.refreshRefused = true;
+    await setupPush();
+    gmail.request.mockClear();
+    await service.remove(account.id);
+    expect(gmail.request).not.toHaveBeenCalled();
+    expect(await service.list()).toEqual([]);
+  });
+  it('removes Gmail locally after a definitive watch refusal', async () => {
+    mailbox.watchStatus = 403;
+    mailbox.watchError = { error: { message: 'Topic permissions missing' } };
+    await setupPush();
+    const account = await connect();
+    await finishSync();
+    await vi.waitFor(() => expect(store.accounts.get(account.id).pushState?.lastError).toBeTruthy());
+    expect(store.accounts.get(account.id).pushState).not.toHaveProperty('cleanupUntil');
+    gmail.request.mockClear();
+    await service.remove(account.id);
+    expect(gmail.request).not.toHaveBeenCalled();
+    expect(await service.list()).toEqual([]);
+  });
   it('backs off disabled-account cleanup but allows explicit removal to stop the watch immediately', async () => {
     await setupPush();
     const account = await connect();
