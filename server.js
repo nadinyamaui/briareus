@@ -1851,7 +1851,7 @@ const sessionStats = createSessionStats({
     { label: 'files', dir: getConfig().testVideosDir },
   ],
 });
-api.use(sessionStatsRoutes({ stats: sessionStats, getJob }));
+api.use(sessionStatsRoutes({ stats: sessionStats, getJob, isOpen: (job) => DEV_OPEN.includes(job.status) }));
 
 // Mid-turn messages are injected into a claude turn or queued, and a released session reopens
 // first, so this fails only on a message the session cannot accept at all.

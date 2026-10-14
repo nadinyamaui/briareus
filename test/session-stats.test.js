@@ -7,7 +7,18 @@ import { attribute, createSessionStats, parseProcStat } from '../lib/session-sta
 import { sessionStatsRoutes } from '../lib/session-stats-routes.js';
 
 // A /proc/<pid>/stat line with the fields this module reads; the rest are zeros.
-function statLine({ pid, comm = 'x', ppid, pgrp, utime = 0, stime = 0, start = 1, rss = 0 }) {
+function statLine({
+  pid,
+  comm = 'x',
+  ppid,
+  pgrp,
+  utime = 0,
+  stime = 0,
+  cutime = 0,
+  cstime = 0,
+  start = 1,
+  rss = 0,
+}) {
   const f = Array(50).fill('0');
   f[0] = String(pid);
   f[1] = `(${comm})`;
@@ -16,6 +27,8 @@ function statLine({ pid, comm = 'x', ppid, pgrp, utime = 0, stime = 0, start = 1
   f[4] = String(pgrp);
   f[13] = String(utime);
   f[14] = String(stime);
+  f[15] = String(cutime);
+  f[16] = String(cstime);
   f[21] = String(start);
   f[23] = String(rss);
   return f.join(' ');
@@ -40,9 +53,20 @@ afterEach(() => fs.rmSync(procDir, { recursive: true, force: true }));
 describe('parseProcStat', () => {
   it('counts fields from the last parenthesis, so a command name with spaces or parens parses', () => {
     const stat = parseProcStat(
-      statLine({ pid: 7, comm: 'a (b) c', ppid: 3, pgrp: 7, utime: 5, stime: 6, start: 9, rss: 11 }),
+      statLine({
+        pid: 7,
+        comm: 'a (b) c',
+        ppid: 3,
+        pgrp: 7,
+        utime: 5,
+        stime: 6,
+        cutime: 2,
+        cstime: 3,
+        start: 9,
+        rss: 11,
+      }),
     );
-    expect(stat).toEqual({ ppid: 3, pgrp: 7, ticks: 11, start: 9, rss: 11 });
+    expect(stat).toEqual({ ppid: 3, pgrp: 7, ticks: 11, childTicks: 5, start: 9, rss: 11 });
   });
 });
 
@@ -105,10 +129,11 @@ describe('createSessionStats', () => {
     stats.sample();
     expect(stats.get('s1')).toMatchObject({ cpuPercent: null, memoryBytes: 15 * 4096, processes: 2 });
 
-    // 10 s later: pid 100 spent 2 s more, 101 exited, 102 started and spent 1 s.
+    // 10 s later: pid 100 spent 2 s more, 101 exited (spending nothing more, so 100 waited
+    // for the 50 ticks already counted), 102 started and spent 1 s.
     clock.advance(10_000);
     writeProc([
-      { pid: 100, ppid: 1, pgrp: 100, utime: 300, rss: 10, start: 5 },
+      { pid: 100, ppid: 1, pgrp: 100, utime: 300, cutime: 50, rss: 10, start: 5 },
       { pid: 102, ppid: 100, pgrp: 100, utime: 100, rss: 1, start: 9 },
     ]);
     stats.sample();
@@ -120,6 +145,21 @@ describe('createSessionStats', () => {
     });
     await new Promise((r) => setImmediate(r));
     expect(stats.get('s1').disk).toEqual({ bytes: 5000, measuredAt: expect.any(Number) });
+  });
+
+  it('counts a child that ran and exited between samples, once', () => {
+    writeProc([
+      { pid: 100, ppid: 1, pgrp: 100, utime: 100, start: 5 },
+      { pid: 101, ppid: 100, pgrp: 100, utime: 40, start: 6 },
+    ]);
+    const { stats, clock } = make();
+    stats.sample();
+    // 10 s later: 101 spent 20 more ticks and exited; 102 started, spent 300 and exited.
+    // 100 waited for both: its children's time is 60 + 300.
+    clock.advance(10_000);
+    writeProc([{ pid: 100, ppid: 1, pgrp: 100, utime: 100, cutime: 360, start: 5 }]);
+    stats.sample();
+    expect(stats.get('s1').cpuPercent).toBe(32);
   });
 
   it('counts a reused pid’s whole time as new', () => {
@@ -155,6 +195,35 @@ describe('createSessionStats', () => {
     expect(stats.history('s1')).toEqual([]);
   });
 
+  it('measures the workspace that has waited longest first', async () => {
+    writeProc([]);
+    const measured = [];
+    const { stats, clock, sessions } = make({
+      diskEveryMs: 15_000,
+      measureDisk: async (dir) => (measured.push(dir), 1),
+    });
+    sessions.push({ id: 's2', workDir: '/w/s2' }, { id: 's3', workDir: '/w/s3' });
+    for (let i = 0; i < 6; i++) {
+      stats.sample();
+      await new Promise((r) => setImmediate(r));
+      clock.advance(10_000);
+    }
+    // s1 falls due again before s3 has had a turn, but s3 has waited longer.
+    expect(measured).toEqual(['/w/s1', '/w/s2', '/w/s3', '/w/s1', '/w/s2', '/w/s3']);
+  });
+
+  it('drops a size measured for the workspace a session has since left', async () => {
+    writeProc([]);
+    let finish;
+    const { stats, sessions } = make({ measureDisk: () => new Promise((r) => (finish = r)) });
+    stats.sample();
+    sessions[0] = { id: 's1', workDir: '/w/other' };
+    stats.sample();
+    finish(5000);
+    await new Promise((r) => setImmediate(r));
+    expect(stats.get('s1').disk).toBeNull();
+  });
+
   it('totals the sessions it is asked about and lists each disk once', async () => {
     writeProc([{ pid: 100, ppid: 1, pgrp: 100, rss: 10 }]);
     const { stats } = make({
@@ -185,8 +254,8 @@ describe('createSessionStats', () => {
 describe('sessionStatsRoutes', () => {
   it('answers per session and holds lists and totals to the token’s projects', async () => {
     const jobs = {
-      a: { id: 'a', kind: 'devchat', repo: 'o/a' },
-      b: { id: 'b', kind: 'devchat', repo: 'o/b' },
+      a: { id: 'a', kind: 'devchat', repo: 'o/a', status: 'idle' },
+      b: { id: 'b', kind: 'devchat', repo: 'o/b', status: 'idle' },
       r: { id: 'r', kind: 'review', repo: 'o/a' },
     };
     const sample = (id) => ({ sessionId: id, cpuPercent: 1, memoryBytes: 1, processes: 1, disk: null });
@@ -203,7 +272,13 @@ describe('sessionStatsRoutes', () => {
       res.locals.apiRepos = repos;
       next();
     });
-    app.use(sessionStatsRoutes({ stats, getJob: (id) => jobs[id] || null }));
+    app.use(
+      sessionStatsRoutes({
+        stats,
+        getJob: (id) => jobs[id] || null,
+        isOpen: (job) => job.status !== 'closed',
+      }),
+    );
     const server = app.listen(0, '127.0.0.1');
     await new Promise((r) => server.once('listening', r));
     const get = async (p) => {
@@ -222,6 +297,12 @@ describe('sessionStatsRoutes', () => {
         'b',
       ]);
       repos = ['o/b'];
+      expect((await get('/api/dev/stats/sessions')).body.sessions.map((s) => s.sessionId)).toEqual(['b']);
+      expect((await get('/api/dev/stats/server')).body.sessions.open).toBe(1);
+      // Closed since the last sample, which still holds it: answered as closed at once.
+      repos = null;
+      jobs.a.status = 'closed';
+      expect((await get('/api/dev/sessions/a/stats')).body).toMatchObject({ stats: null, history: [] });
       expect((await get('/api/dev/stats/sessions')).body.sessions.map((s) => s.sessionId)).toEqual(['b']);
       expect((await get('/api/dev/stats/server')).body.sessions.open).toBe(1);
     } finally {
