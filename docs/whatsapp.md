@@ -149,11 +149,14 @@ new projects; an operator with an admin token opts a project in through
 and revokes it with `false`. The setting is independent of `mailToolsEnabled`
 and of the project’s Slack workspace, so each channel is enabled per project.
 
-The five tools are `whatsapp_accounts`, `whatsapp_conversations`,
-`whatsapp_messages`, `whatsapp_send` and `whatsapp_mark_read`, served under
-`/api/agent/whatsapp` with the session’s own token. They use the same WAHA
-service as the admin inbox; linking, the pairing QR, attachment downloads and
-logout stay admin-only. The tools and instructions appear on the next turn of
+The six tools are `whatsapp_accounts`, `whatsapp_conversations`,
+`whatsapp_messages`, `whatsapp_media`, `whatsapp_send` and
+`whatsapp_mark_read`, served under `/api/agent/whatsapp` with the session’s
+own token. They use the same WAHA service as the admin inbox; linking, the
+pairing QR and logout stay admin-only. `whatsapp_media` downloads one message’s
+media (up to 25 MiB, like mail attachments) to a private temporary file and
+returns its path, so the agent can open images and documents with its file
+tools. The tools and instructions appear on the next turn of
 an eligible session, and revocation applies to every request at once,
 including tools loaded earlier and direct HTTP fallback calls.
 
