@@ -2208,6 +2208,52 @@ describe('mail push', () => {
       expect(received).toHaveBeenCalledTimes(1);
     },
   );
+  it.each(['window change', 'reconnect', 'disable with window change'])(
+    'preserves or cancels a committed receipt during %s',
+    async (change) => {
+      const received = vi.fn();
+      await setupPush(received);
+      const account = await connect();
+      await finishSync();
+      received.mockClear();
+      store.accounts.get(account.id).syncState = null;
+      await service.init();
+      mailbox.messages.fresh = { at: clock };
+      const upsert = store.upsert;
+      let release;
+      const held = new Promise((resolve) => (release = resolve));
+      let paused = false;
+      store.upsert = async (...args) => {
+        await upsert(...args);
+        if (args[1][0].id === 'fresh' && !paused) {
+          paused = true;
+          await held;
+        }
+      };
+      await service.sync(account.id);
+      await vi.waitFor(() => expect(paused).toBe(true));
+      try {
+        expect((await store.pendingReceived(account.id)).map((r) => r.id)).toEqual(['fresh']);
+        if (change === 'reconnect') await connect({ accountId: account.id }, 'fresh-grant');
+        else
+          await service.update(account.id, {
+            syncDays: 31,
+            ...(change === 'disable with window change' ? { enabled: false } : {}),
+          });
+      } finally {
+        release();
+      }
+      await finishSync();
+      expect(received.mock.calls.map(([, row]) => row.id)).toEqual(
+        change === 'disable with window change' ? [] : ['fresh'],
+      );
+      expect(await store.pendingReceived(account.id)).toEqual([]);
+      if (change === 'disable with window change') await service.update(account.id, { enabled: true });
+      await service.sync(account.id);
+      await finishSync();
+      expect(received).toHaveBeenCalledTimes(change === 'disable with window change' ? 0 : 1);
+    },
+  );
   it('cancels pending receipt replay when the mailbox is disabled', async () => {
     const received = vi.fn();
     await setupPush(received);
@@ -2358,6 +2404,55 @@ describe('mail push', () => {
     expect(await service.list()).toEqual([]);
     expect(await store.get(account.id, 'cached')).toBeNull();
   });
+  it.each([
+    ['gmail', -1],
+    ['gmail', 0],
+    ['gmail', 1],
+    ['outlook', -1],
+    ['outlook', 0],
+    ['outlook', 1],
+  ])(
+    'removes an expired %s watch locally with revoked credentials (expiry offset %s)',
+    async (provider, offset) => {
+      cfg.mail.syncMinutes = 0;
+      cfg.mail.microsoft = { clientId: 'ms', clientSecret: 'secret', tenant: 'common' };
+      const account = await store.insertAccount({
+        provider,
+        email: provider === 'gmail' ? 'me@gmail.com' : 'me@outlook.com',
+        enabled: false,
+        syncDays: 30,
+        status: 'connected',
+        credentials: seal(JSON.stringify({ refreshToken: 'revoked', expiresAt: clock - DAY })),
+        pushState: { id: 'expired', expiresAt: clock + offset, retryAt: clock + DAY, secret: seal('secret') },
+      });
+      await store.upsert(account.id, [{ id: 'cached', receivedAt: clock }], clock);
+      const request = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Revoked grant' }), {
+            status: 400,
+          }),
+      );
+      service = createMailService({
+        store,
+        request,
+        now: () => clock,
+        sleep: async () => {},
+        log: { error: vi.fn() },
+      });
+      await service.init();
+      if (offset > 0) {
+        await expect(service.remove(account.id)).rejects.toMatchObject({ reauth: true });
+        expect(store.accounts.get(account.id).pushState.id).toBe('expired');
+        expect(await store.get(account.id, 'cached')).toBeTruthy();
+        clock += offset;
+      }
+      const calls = request.mock.calls.length;
+      await service.remove(account.id);
+      expect(request).toHaveBeenCalledTimes(calls);
+      expect(await service.list()).toEqual([]);
+      expect(await store.get(account.id, 'cached')).toBeNull();
+    },
+  );
   it.each(['lost response', 'failed persistence'])(
     'recovers Outlook registration after %s',
     async (failure) => {
