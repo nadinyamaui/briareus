@@ -1307,6 +1307,67 @@ describe('moving selected messages to trash', () => {
   });
 });
 
+describe('Outlook subscription recovery', () => {
+  const url = 'https://mail.example.com/webhooks/mail/outlook';
+  const subscription = {
+    id: 'orphan',
+    resource: 'me/messages',
+    changeType: 'deleted, created, updated',
+    notificationUrl: url,
+    lifecycleNotificationUrl: url,
+    clientState: 'original-secret',
+    expirationDateTime: new Date(NOW + 2 * 24 * 3600_000).toISOString(),
+  };
+  it.each([409, 503, undefined])(
+    'recovers the matching registration after creation fails with %s',
+    async (upstream) => {
+      const error = Object.assign(new Error('Creation failed'), { upstream });
+      const call = vi.fn(async (_url, init = {}) => {
+        if (init.method === 'POST') throw error;
+        return { value: [{ ...subscription, notificationUrl: 'https://other.example.com' }, subscription] };
+      });
+      await expect(
+        outlookProvider(MICROSOFT).watch(call, { url, secret: 'new-secret', previous: null, now: NOW }),
+      ).resolves.toEqual({
+        id: 'orphan',
+        expiresAt: Date.parse(subscription.expirationDateTime),
+        secret: 'original-secret',
+      });
+    },
+  );
+  it.each([
+    { resource: 'me/events' },
+    { changeType: 'created' },
+    { notificationUrl: 'https://other.example.com' },
+    { lifecycleNotificationUrl: 'https://other.example.com' },
+    { clientState: null },
+    { clientState: '' },
+    { clientState: 's'.repeat(129) },
+    { id: null },
+    { expirationDateTime: new Date(NOW).toISOString() },
+  ])('leaves mismatched or unusable registrations alone: %j', async (changes) => {
+    const error = Object.assign(new Error('Duplicate subscription'), { upstream: 409 });
+    const call = vi.fn(async (_url, init = {}) => {
+      if (init.method === 'POST') throw error;
+      return { value: [{ ...subscription, ...changes }] };
+    });
+    await expect(
+      outlookProvider(MICROSOFT).watch(call, { url, secret: 'new-secret', previous: null, now: NOW }),
+    ).rejects.toBe(error);
+    expect(call).toHaveBeenCalledTimes(2);
+  });
+  it('does not try reconciliation after a definitive registration refusal', async () => {
+    const error = Object.assign(new Error('Forbidden'), { upstream: 403 });
+    const call = vi.fn(async () => {
+      throw error;
+    });
+    await expect(
+      outlookProvider(MICROSOFT).watch(call, { url, secret: 'new-secret', previous: null, now: NOW }),
+    ).rejects.toBe(error);
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('Outlook attachment', () => {
   it('decodes a file attachment and refuses an attached item', async () => {
     const files = { 'm/a': { contentBytes: Buffer.from('PDF').toString('base64') }, 'm/i': {} };
