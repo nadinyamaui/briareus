@@ -167,6 +167,13 @@ describe('webhook settings', () => {
     });
   });
 
+  it('accept zero for unlimited turns and preserve it on later updates', () => {
+    const unlimited = normalizeWebhookSettings({ maxTurns: 0 });
+    expect(unlimited.maxTurns).toBe(0);
+    expect(normalizeWebhookSettings({ armed: true }, unlimited).maxTurns).toBe(0);
+    expect(publicWebhook(unlimited).maxTurns).toBe(0);
+  });
+
   it('are not the place to move the key’s epoch', () => {
     expect(normalizeWebhookSettings({ epoch: 9 }, { ...WEBHOOK_DEFAULTS, epoch: 2 }).epoch).toBe(2);
   });
@@ -178,7 +185,11 @@ describe('webhook settings', () => {
     [{ perHour: 0 }, /perHour must be a whole number from 1 to 600/],
     [{ perHour: 1.5 }, /perHour/],
     [{ perHour: NaN }, /perHour/],
-    [{ maxTurns: 1001 }, /maxTurns must be a whole number from 1 to 1000/],
+    [{ maxTurns: -1 }, /maxTurns must be a whole number from 0 to 1000/],
+    [{ maxTurns: 1.5 }, /maxTurns/],
+    [{ maxTurns: '0' }, /maxTurns/],
+    [{ maxTurns: null }, /maxTurns/],
+    [{ maxTurns: 1001 }, /maxTurns must be a whole number from 0 to 1000/],
   ])('refuse %o', (input, error) => {
     expect(() => normalizeWebhookSettings(input)).toThrow(error);
   });
