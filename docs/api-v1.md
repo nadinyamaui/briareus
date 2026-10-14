@@ -260,6 +260,26 @@ retry window before it stalls.
 The setting defaults to `false`. Sessions still need their review loop enabled;
 standalone reviews keep their manual findings workflow. The existing maximum
 round count and repeated-findings checks still stop a loop that cannot converge.
+
+## Babysitting pull requests
+
+Set `babysitPrs` to `true` with `PUT /api/v1/settings/projects/{id}` and the
+body `{ "babysitPrs": true }` to have the server look after the project's open
+pull requests every 15 minutes. For each non-draft pull request without the
+`blocked` or `do-not-merge` label and without an open session on it, it starts
+at most one errand, in this order:
+
+1. 🔀 Solve conflicts when the board recommends it (GitHub reports a conflict or
+   the PR carries `has-conflicts`).
+2. 🧪 Fix failing checks when the head commit's checks failed or errored.
+3. ⌕ Code review when the board recommends one (`recommended: "review"`).
+
+Each errand runs at most once per head commit; a new push makes all three
+eligible again. The errands run on the project's review provider, model and
+effort, and nothing starts until one is set. When the project has a PR author
+(`reviewAuthor`), conflicts and checks are only fixed on that author's pull
+requests, while reviews cover every author. A full session pool defers the rest
+to the next round. The setting defaults to `false`.
 If automatic triage fails, its held findings remain available for manual retry.
 
 ## Pull request data

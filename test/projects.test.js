@@ -795,6 +795,16 @@ describe('autonomous review loops', () => {
   });
 });
 
+describe('PR babysitting', () => {
+  it('defaults off and preserves the option through partial updates', async () => {
+    const saved = await createProject({ repo: 'acme/babysat' });
+    expect(saved.babysitPrs).toBe(false);
+    expect((await updateProject(saved.id, { babysitPrs: true })).babysitPrs).toBe(true);
+    expect((await updateProject(saved.id, { label: 'Babysat' })).babysitPrs).toBe(true);
+    expect((await updateProject(saved.id, { babysitPrs: false })).babysitPrs).toBe(false);
+  });
+});
+
 describe('email tool project opt-in', () => {
   it('defaults new projects to no email access', async () => {
     expect(PROJECT_DEFAULTS.mailToolsEnabled).toBe(false);

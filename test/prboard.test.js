@@ -71,7 +71,7 @@ function prNode({
     isCrossRepository: false,
     reviewDecision,
     closingIssuesReferences: { nodes: issues },
-    commits: { nodes: rollup ? [{ commit: { statusCheckRollup: { state: rollup } } }] : [] },
+    commits: { nodes: rollup ? [{ commit: { oid: 'c0ffee1', statusCheckRollup: { state: rollup } } }] : [] },
   };
 }
 
@@ -352,6 +352,7 @@ describe('projectPulls', () => {
       ],
       mergeable: 'mergeable',
       checks: 'success',
+      headSha: 'c0ffee1',
       reviewDecision: 'review_required',
       recommended: 'review',
     });

@@ -189,7 +189,7 @@ import {
   DB_SERVER_DEFAULTS,
 } from './lib/dbservers.js';
 import { probeDbServer, claimHolder, sessionCapacity } from './lib/dbpool.js';
-import { listActions, getAction } from './lib/actions.js';
+import { listActions, getAction, actionSessionSpec } from './lib/actions.js';
 import {
   initSavedPrompts,
   listSavedPrompts,
@@ -229,6 +229,7 @@ import { projectUsage, overallUsage, jobUsageEstimates, estimateEventCosts } fro
 import { agentOnly, apiEnabled } from './lib/auth.js';
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
 import { localUpdater } from './lib/local-update.js';
+import { createBabysitter } from './lib/babysitter.js';
 import { securityHeaders } from './lib/security.js';
 import { listWorkspaces, resetSetup, cleanWorkspace, startWorkspacePruner } from './lib/workspaces.js';
 import { githubWebhookUrl, sessionWebhookKey, sessionWebhookUrl } from './lib/webhooksecrets.js';
@@ -1627,33 +1628,9 @@ api.post('/api/dev/actions', async (req, res) => {
       // What the user typed, verbatim; only an action with `input` reads it.
       input: answer,
     };
-    // Awaited because a prompt may read the PR first; one that refuses fails the request rather
-    // than starting an empty errand.
-    const prompt = await action.prompt(context);
-    res.status(201).json({
-      session: createDevSession({
-        provider,
-        model,
-        effort,
-        repo: project.repo,
-        // checkout: false leaves the local tree on the developer's branch (gh-only errand).
-        branch: action.checkout === false ? undefined : branch,
-        local: (action.workspace || 'local') === 'local',
-        prompt,
-        // Attached to the PR now rather than waiting to spot its URL.
-        prNumber: number,
-        // Filed under the PR's branch, whatever branch the borrowed checkout is on.
-        prBranch: branch,
-        // One-shot errands close when done, freeing clone and database (lib/actions.js).
-        autoClose: action.autoClose === true,
-        // Arms the 🔁 review loop on pushed fixes. Exclusive with autoClose: the loop needs a
-        // parent still open when the review reports.
-        reviewLoop: action.reviewLoop === true,
-        title: action.title(context),
-        // Files the session's spend under the errand in the usage ledger.
-        activity: action.id,
-      }),
-    });
+    // A prompt that refuses fails the request rather than starting an empty errand.
+    const spec = await actionSessionSpec(action, context);
+    res.status(201).json({ session: createDevSession({ provider, model, effort, ...spec }) });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -2156,6 +2133,8 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   app.listen(port, cfg.bindHost, () => {
     resumeRestartedSessions();
     sessionStats.start();
+    // Projects with `babysitPrs` get their pull requests' errands started every 15 minutes.
+    createBabysitter().startTimer();
     // Recovered sessions must claim their slots before pruning unused clones.
     startWorkspacePruner();
     const projects = activeProjects();

@@ -31,6 +31,9 @@ Reviews require independent verification and an assessment of whether each
 finding is worth fixing. Findings normally wait for operator decisions. With
 `autonomousReviewLoop` enabled, active review loops automatically fix verified,
 worthwhile findings with complete assessments without an operator decision.
+With `babysitPrs` enabled, a project's open pull requests get their next
+errand started every 15 minutes: solve conflicts, fix failing checks, or a code
+review when one is recommended ([details](api-v1.md#babysitting-pull-requests)).
 Review loops run reviews and fixes on the session's branch; optional QA loops create and
 execute test sheets after review passes. Feedback left unfixed gets a visible
 PR note explaining the decision.
