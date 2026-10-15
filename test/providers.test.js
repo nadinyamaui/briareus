@@ -855,6 +855,24 @@ describe('buildArgs', () => {
     }
   });
 
+  // hq-core#12508: a review restated two unfixed findings only as replies on
+  // resolved threads, declared an empty block, and the PR was approved.
+  it('declares still-unfixed earlier findings in the findings block, not only on their threads', () => {
+    for (const [id, opts] of [
+      ['claude', { prNumber: 7, effort: 'high' }],
+      ['codex', { prNumber: 7, branch: 'b', base: 'main' }],
+      ['grok', { prNumber: 7 }],
+      ['opencode', { prNumber: 7, branch: 'b', base: 'main' }],
+    ]) {
+      const prompt = BINARIES[id].reviewPrompt(opts);
+      expect(prompt).not.toContain('rather than as a fresh finding');
+      expect(prompt).toContain('a still-unfixed finding left out of it is treated as fixed');
+      expect(prompt).toContain('declare it in the findings block');
+      expect(prompt).toContain('Use an empty array only when there are no new or still-unfixed findings');
+      expect(prompt).toContain('is not a duplicate or addressed');
+    }
+  });
+
   it('requires independent verification and a value assessment at every effort', () => {
     const verifies = (prompt) => prompt.includes('Before posting anything');
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
