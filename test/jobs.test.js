@@ -8195,6 +8195,7 @@ describe('the CI verdict a worker hands its orchestrator', () => {
   });
   const green = () =>
     rollupOf([identified(1, 'Fast checks', 'success', 't1'), identified(2, 'Tests', 'success', 't2')]);
+  let mirroredAt;
   // The updates this worker put in the orchestrator's buffer, joined.
   const notices = (workerId) =>
     (getJob('ci-orch').pendingWorkerNotices || [])
@@ -8346,7 +8347,13 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       }),
     ];
     await initJobs();
-    for (const j of state.stored) getJob(j.id).status = 'idle';
+    mirroredAt = new Date().toISOString();
+    for (const j of state.stored) {
+      getJob(j.id).status = 'idle';
+      // Just synced, so the 20s tick every initJobs above left running skips these
+      // open PRs (55s cadence) instead of reading them before a test sets its answer.
+      if (j.prStatus) getJob(j.id).prStatus.syncedAt = mirroredAt;
+    }
     getJob('ci-orch').status = 'idle';
     getJob('ci-orch').awaitingAnswer = true;
     githubRest.mockImplementation(async (_cfg, _method, url) => {
@@ -8492,13 +8499,13 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     );
     syncSessionsOn('acme/ci', null, 213);
     const job = getJob('ci-same-runs');
-    await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
+    await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe(mirroredAt));
     expect(notices('ci-same-runs')).toBe('');
   });
 
   it('says nothing again on the next sync of the same finished run', async () => {
     syncSessionsOn('acme/ci', null, 205);
-    await vi.waitFor(() => expect(getJob('ci-again').prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
+    await vi.waitFor(() => expect(getJob('ci-again').prStatus.syncedAt).not.toBe(mirroredAt));
     expect(notices('ci-again')).toBe('');
   });
 });
