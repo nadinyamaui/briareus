@@ -63,6 +63,11 @@ describe('email wake rules', () => {
   ])('rejects invalid settings %j', (input) => {
     expect(() => normalizeMailWake(input)).toThrow();
   });
+  it.each([0, -1, 1001, 1.5, '5'])('states the 1–1000 range for maxTurns %j', (maxTurns) => {
+    expect(() => normalizeMailWake({ rules: [], maxTurns })).toThrow(
+      'maxTurns must be a whole number from 1 to 1000',
+    );
+  });
   it('allows receiving while busy but never bypasses project opt-in or revives closed sessions', () => {
     const job = { kind: 'devchat', repo: 'a/b', status: 'running', unattendedTurn: true };
     const project = { enabled: true, mailToolsEnabled: true };
