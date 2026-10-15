@@ -1283,6 +1283,79 @@ describe('the claude parser', () => {
     ).toEqual([]);
   });
 
+  it('counts a foreground call once the CLI moves it to the background', () => {
+    const parser = parserFor('claude', newTurn());
+    parser.feed({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'gh pr checks 2 --watch' } },
+          { type: 'tool_use', id: 'b2', name: 'Bash', input: { command: 'npm test' } },
+        ],
+      },
+    });
+    const started = (task_id, tool_use_id) =>
+      parser.feed({ type: 'system', subtype: 'task_started', task_id, tool_use_id, is_backgrounded: false });
+    expect(started('t1', 'b1')).toEqual([]);
+    expect(started('t2', 'b2')).toEqual([]);
+    // One finishes in the foreground; the other is backgrounded (at 120 s, or to read a message).
+    expect(
+      parser.feed({ type: 'system', subtype: 'task_updated', task_id: 't2', patch: { status: 'completed' } }),
+    ).toEqual([]);
+    expect(
+      parser.feed({
+        type: 'system',
+        subtype: 'task_updated',
+        task_id: 't1',
+        patch: { is_backgrounded: true },
+      }),
+    ).toEqual([
+      { kind: 'background', tasks: [{ name: 'Bash', summary: 'gh pr checks 2 --watch' }], ended: [] },
+    ]);
+    expect(
+      parser.feed({
+        type: 'system',
+        subtype: 'task_updated',
+        task_id: 't2',
+        patch: { is_backgrounded: true },
+      }),
+    ).toEqual([]);
+    expect(
+      parser.feed({ type: 'system', subtype: 'task_notification', task_id: 't1', status: 'completed' }),
+    ).toEqual([{ kind: 'background', tasks: [], ended: ['t1'] }]);
+  });
+
+  it("does not count a sub-agent's background task: it wakes the sub-agent, not the turn", () => {
+    const parser = parserFor('claude', newTurn());
+    parser.feed({
+      type: 'assistant',
+      parent_tool_use_id: 'a1',
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'b1',
+            name: 'Bash',
+            input: { command: 'npm test', run_in_background: true },
+          },
+        ],
+      },
+    });
+    expect(
+      parser.feed({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 't1',
+        tool_use_id: 'b1',
+        is_backgrounded: true,
+        owned_by_subagent: true,
+      }),
+    ).toEqual([]);
+    expect(
+      parser.feed({ type: 'system', subtype: 'task_notification', task_id: 't1', status: 'completed' }),
+    ).toEqual([]);
+  });
+
   it('turns the echo of a message it read into an ack', () => {
     const parser = parserFor('claude', newTurn());
     expect(

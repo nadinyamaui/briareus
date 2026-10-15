@@ -2882,6 +2882,53 @@ describe('spawnWorkerSession', () => {
     }
   });
 
+  it('a background shell command alone does not hold stdin open past 30 quiet minutes', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Start the dev server');
+      children[0].emitLines(
+        replay('Start the dev server'),
+        {
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'call-b',
+                name: 'Bash',
+                input: { command: 'npm run dev', run_in_background: true },
+              },
+            ],
+          },
+        },
+        {
+          type: 'system',
+          subtype: 'task_started',
+          task_id: 'b1',
+          tool_use_id: 'call-b',
+          is_backgrounded: true,
+        },
+        result('Serving on :3000.'),
+      );
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      expect(children[0].ended).toBe(false);
+      expect(publicJob(job).backgroundTasks).toEqual([{ name: 'Bash', summary: 'npm run dev' }]);
+      // A dev server never ends: stdin closes so the CLI's own wait ceiling can end the turn.
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(children[0].ended).toBe(true);
+      expect(job.events.filter((e) => e.kind === 'info').at(-1).text).toMatch(/No word from .* for 30 min/);
+      const done = settled(job);
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      vi.useRealTimers();
+      restore();
+    }
+  });
+
   it('a message still waiting for its answer keeps stdin open past 30 quiet minutes', async () => {
     const job = getJob('bg-claude');
     job.status = 'idle';
