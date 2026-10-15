@@ -2916,7 +2916,7 @@ describe('spawnWorkerSession', () => {
       await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
       expect(children[0].ended).toBe(false);
       expect(publicJob(job).backgroundTasks).toEqual([{ name: 'Bash', summary: 'npm run dev' }]);
-      // A dev server never ends: stdin closes so the CLI's own wait ceiling can end the turn.
+      // A dev server never ends: stdin closes, and the CLI stops the shell at its print-mode deadline.
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
       expect(children[0].ended).toBe(true);
       expect(job.events.filter((e) => e.kind === 'info').at(-1).text).toMatch(/No word from .* for 30 min/);

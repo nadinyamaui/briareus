@@ -122,7 +122,7 @@ for setup and access details.
    A Claude turn that has answered but still waits on background work (a
    sub-agent, Monitor or background shell command) lists it in
    `backgroundTasks`, so clients can show it as waiting rather than thinking;
-   messages sent meanwhile still go straight in.
+   messages sent meanwhile go straight in while `liveInput` is true.
    Codex review and QA steps keep queued input. Output streams to the client live (SSE). The
    session keeps its clone and database server between turns, for as long as
    it stays open. On a Claude session, a message starting with `/btw` (or
