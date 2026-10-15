@@ -771,12 +771,12 @@ describe('pullRequestHasOpenSession', () => {
 
   beforeAll(async () => {
     state.stored = [
-      row('bs-number', { branch: 'dev-x', startedOnPr: 901 }),
-      row('bs-synced', { branch: 'dev-y', prStatus: { number: 902, state: 'open' } }),
-      row('bs-borrowed', { branch: 'dev-z', prBranch: 'feature/903' }),
-      row('bs-own-branch', { branch: 'feature/904' }),
-      row('bs-preparing', { branch: null, startBranch: 'feature/906' }),
-      row('bs-closed', { branch: 'feature/905', startedOnPr: 905 }),
+      row('bs-number', { branch: 'dev-x', startedOnPr: 211 }),
+      row('bs-synced', { branch: 'dev-y', prStatus: { number: 212, state: 'open' } }),
+      row('bs-borrowed', { branch: 'dev-z', prBranch: 'feature/213' }),
+      row('bs-own-branch', { branch: 'feature/214' }),
+      row('bs-preparing', { branch: null, startBranch: 'feature/216' }),
+      row('bs-closed', { branch: 'feature/215', startedOnPr: 215 }),
     ];
     await initJobs();
     for (const id of ['bs-number', 'bs-synced', 'bs-borrowed', 'bs-own-branch', 'bs-preparing'])
@@ -784,23 +784,23 @@ describe('pullRequestHasOpenSession', () => {
   });
 
   it('finds an open session by the pull request it was started on or synced to', () => {
-    expect(pullRequestHasOpenSession('acme/babysit', 901, 'feature/901')).toBe(true);
-    expect(pullRequestHasOpenSession('ACME/Babysit', 902, 'feature/902')).toBe(true);
+    expect(pullRequestHasOpenSession('acme/babysit', 211, 'feature/211')).toBe(true);
+    expect(pullRequestHasOpenSession('ACME/Babysit', 212, 'feature/212')).toBe(true);
   });
 
   it('finds one by the branch it is filed under or checked out on', () => {
-    expect(pullRequestHasOpenSession('acme/babysit', 903, 'feature/903')).toBe(true);
-    expect(pullRequestHasOpenSession('acme/babysit', 904, 'feature/904')).toBe(true);
+    expect(pullRequestHasOpenSession('acme/babysit', 213, 'feature/213')).toBe(true);
+    expect(pullRequestHasOpenSession('acme/babysit', 214, 'feature/214')).toBe(true);
   });
 
   it('finds one still preparing on the branch it was started on', () => {
-    expect(pullRequestHasOpenSession('acme/babysit', 906, 'feature/906')).toBe(true);
+    expect(pullRequestHasOpenSession('acme/babysit', 216, 'feature/216')).toBe(true);
   });
 
   it('ignores closed sessions, other repositories and a missing branch', () => {
-    expect(pullRequestHasOpenSession('acme/babysit', 905, 'feature/905')).toBe(false);
-    expect(pullRequestHasOpenSession('acme/other', 901, 'feature/903')).toBe(false);
-    expect(pullRequestHasOpenSession('acme/babysit', 909, '')).toBe(false);
+    expect(pullRequestHasOpenSession('acme/babysit', 215, 'feature/215')).toBe(false);
+    expect(pullRequestHasOpenSession('acme/other', 211, 'feature/213')).toBe(false);
+    expect(pullRequestHasOpenSession('acme/babysit', 299, '')).toBe(false);
   });
 });
 
