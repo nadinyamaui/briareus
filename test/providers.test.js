@@ -870,6 +870,7 @@ describe('buildArgs', () => {
       expect(prompt).toContain('declare it in the findings block');
       expect(prompt).toContain('Use an empty array only when there are no new or still-unfixed findings');
       expect(prompt).toContain('is not a duplicate or addressed');
+      expect(prompt).toContain('lists as dismissed or left optional counts as declined');
     }
   });
 
