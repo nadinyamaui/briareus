@@ -1180,7 +1180,7 @@ describe('the claude parser', () => {
     expect(onNotify).toContainEqual({ kind: 'agent', state: 'end', id: 'bg-1' });
   });
 
-  it('tracks the background agents and Monitors the process waits on', () => {
+  it('tracks the background agents, Monitors and shell commands the process waits on', () => {
     const turn = newTurn();
     const parser = parserFor('claude', turn);
     parser.feed({
@@ -1204,18 +1204,26 @@ describe('the claude parser', () => {
       { kind: 'background', tasks: [{ name: 'Explore', summary: 'map' }], ended: [] },
     ]);
     expect(started('tm', 'm1').at(-1).tasks).toHaveLength(2);
-    expect(started('tb', 'b1')).toEqual([]); // a background Bash is not waited on
+    // The CLI waits on a background Bash too, and wakes when it ends.
+    expect(started('tb', 'b1').at(-1).tasks.at(-1)).toEqual({ name: 'Bash', summary: 'npm run dev' });
     // The agent's notification ends both its background task and its sub-agent row.
     expect(
       parser.feed({ type: 'system', subtype: 'task_notification', task_id: 'ta', tool_use_id: 'a1' }),
     ).toEqual([
       { kind: 'agent', state: 'end', id: 'a1' },
-      { kind: 'background', tasks: [{ name: 'Monitor', summary: 'replies' }], ended: ['ta'] },
+      {
+        kind: 'background',
+        tasks: [
+          { name: 'Monitor', summary: 'replies' },
+          { name: 'Bash', summary: 'npm run dev' },
+        ],
+        ended: ['ta'],
+      },
     ]);
     // The CLI's own list prunes whatever it no longer runs.
     expect(
       parser.feed({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'tb' }] }),
-    ).toEqual([{ kind: 'background', tasks: [], ended: ['tm'] }]);
+    ).toEqual([{ kind: 'background', tasks: [{ name: 'Bash', summary: 'npm run dev' }], ended: ['tm'] }]);
   });
 
   it('says when a task was stopped rather than done, after the drop that ended it', () => {
@@ -1272,6 +1280,79 @@ describe('the claude parser', () => {
         tool_use_id: 'a2',
         is_backgrounded: false,
       }),
+    ).toEqual([]);
+  });
+
+  it('counts a foreground call once the CLI moves it to the background', () => {
+    const parser = parserFor('claude', newTurn());
+    parser.feed({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'gh pr checks 2 --watch' } },
+          { type: 'tool_use', id: 'b2', name: 'Bash', input: { command: 'npm test' } },
+        ],
+      },
+    });
+    const started = (task_id, tool_use_id) =>
+      parser.feed({ type: 'system', subtype: 'task_started', task_id, tool_use_id, is_backgrounded: false });
+    expect(started('t1', 'b1')).toEqual([]);
+    expect(started('t2', 'b2')).toEqual([]);
+    // One finishes in the foreground; the other is backgrounded (at 120 s, or to read a message).
+    expect(
+      parser.feed({ type: 'system', subtype: 'task_updated', task_id: 't2', patch: { status: 'completed' } }),
+    ).toEqual([]);
+    expect(
+      parser.feed({
+        type: 'system',
+        subtype: 'task_updated',
+        task_id: 't1',
+        patch: { is_backgrounded: true },
+      }),
+    ).toEqual([
+      { kind: 'background', tasks: [{ name: 'Bash', summary: 'gh pr checks 2 --watch' }], ended: [] },
+    ]);
+    expect(
+      parser.feed({
+        type: 'system',
+        subtype: 'task_updated',
+        task_id: 't2',
+        patch: { is_backgrounded: true },
+      }),
+    ).toEqual([]);
+    expect(
+      parser.feed({ type: 'system', subtype: 'task_notification', task_id: 't1', status: 'completed' }),
+    ).toEqual([{ kind: 'background', tasks: [], ended: ['t1'] }]);
+  });
+
+  it("does not count a sub-agent's background task: it wakes the sub-agent, not the turn", () => {
+    const parser = parserFor('claude', newTurn());
+    parser.feed({
+      type: 'assistant',
+      parent_tool_use_id: 'a1',
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'b1',
+            name: 'Bash',
+            input: { command: 'npm test', run_in_background: true },
+          },
+        ],
+      },
+    });
+    expect(
+      parser.feed({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 't1',
+        tool_use_id: 'b1',
+        is_backgrounded: true,
+        owned_by_subagent: true,
+      }),
+    ).toEqual([]);
+    expect(
+      parser.feed({ type: 'system', subtype: 'task_notification', task_id: 't1', status: 'completed' }),
     ).toEqual([]);
   });
 

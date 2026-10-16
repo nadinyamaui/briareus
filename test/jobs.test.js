@@ -1080,6 +1080,7 @@ describe('spawnWorkerSession', () => {
       await vi.waitFor(() => expect(job.events.some((e) => e.kind === 'result')).toBe(true));
       expect(ended).toBe(false);
       expect(publicJob(job).liveInput).toBe(true);
+      expect(publicJob(job).backgroundTasks).toEqual([{ name: 'agent', summary: 'dig' }]);
       expect(job.status).toBe('running');
 
       // Straight into the live CLI, not the queue.
@@ -1097,6 +1098,7 @@ describe('spawnWorkerSession', () => {
       emit({ type: 'system', subtype: 'background_tasks_changed', tasks: [] });
       await new Promise((r) => setTimeout(r, 20));
       expect(ended).toBe(false);
+      expect(publicJob(job).backgroundTasks).toEqual([]);
       emit({ type: 'result', subtype: 'success', result: 'The agent found it.' });
       await vi.waitFor(() => expect(ended).toBe(true));
       const settled = new Promise((resolve) => {
@@ -1141,7 +1143,7 @@ describe('spawnWorkerSession', () => {
     });
     try {
       sendDevMessage(job.id, 'Quick one');
-      // A background Bash does not hold the turn open; print mode reaps it.
+      // A task the CLI does not report as backgrounded holds nothing open.
       child.stdout.write(
         JSON.stringify({
           type: 'assistant',
@@ -1177,6 +1179,99 @@ describe('spawnWorkerSession', () => {
       });
       child.emit('close', 0);
       await settled;
+    } finally {
+      bin.mockRestore();
+      spawn.mockReset();
+      getProviderForJob.mockReset();
+      captureProviderAuth.mockReset();
+    }
+  });
+
+  it('a background shell command keeps the turn live and is reported as what it waits on', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    getProviderForJob.mockReturnValue(state.provider);
+    captureProviderAuth.mockResolvedValue(undefined);
+    const bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
+    let child;
+    const writes = [];
+    let ended = false;
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, ...rest) => {
+      if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
+      child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin.on('data', (chunk) => writes.push(JSON.parse(chunk.toString())));
+      child.stdin.on('finish', () => (ended = true));
+      return child;
+    });
+    const emit = (...msgs) => {
+      for (const m of msgs) child.stdout.write(JSON.stringify(m) + '\n');
+    };
+    try {
+      const results = () => job.events.filter((e) => e.kind === 'result').length;
+      const before = results();
+      sendDevMessage(job.id, 'Merge once CI passes');
+      // CLI 2.1.296 waits on a backgrounded Bash and wakes when it ends, as it
+      // does for a Monitor, even with stdin closed.
+      emit(
+        {
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'b1',
+                name: 'Bash',
+                input: { command: 'until gh pr checks 2; do sleep 30; done', run_in_background: true },
+              },
+            ],
+          },
+        },
+        { type: 'system', subtype: 'task_started', task_id: 'x1', tool_use_id: 'b1', is_backgrounded: true },
+        { type: 'result', subtype: 'success', result: 'Watching CI.' },
+      );
+      await vi.waitFor(() => expect(results()).toBe(before + 1));
+      expect(ended).toBe(false);
+      expect(publicJob(job).liveInput).toBe(true);
+      expect(publicJob(job).backgroundTasks).toEqual([
+        { name: 'Bash', summary: 'until gh pr checks 2; do sleep 30; done' },
+      ]);
+      expect(sendDevMessage(job.id, 'Also update the README').queued).toBeUndefined();
+      expect(writes.at(-1).message.content).toBe('Also update the README');
+      emit(
+        { type: 'user', message: { role: 'user', content: 'Also update the README' }, isReplay: true },
+        { type: 'result', subtype: 'success', result: 'Updated.' },
+      );
+      await vi.waitFor(() => expect(results()).toBe(before + 2));
+      expect(ended).toBe(false);
+      emit(
+        {
+          type: 'system',
+          subtype: 'task_notification',
+          task_id: 'x1',
+          tool_use_id: 'b1',
+          status: 'completed',
+        },
+        { type: 'system', subtype: 'background_tasks_changed', tasks: [] },
+      );
+      await vi.waitFor(() => expect(publicJob(job).backgroundTasks).toEqual([]));
+      expect(ended).toBe(false);
+      emit({ type: 'system', subtype: 'init' }, { type: 'result', subtype: 'success', result: 'Merged.' });
+      await vi.waitFor(() => expect(ended).toBe(true));
+      const settled = new Promise((resolve) => {
+        const onJob = (session) => {
+          if (session.id !== job.id || session.status !== 'idle') return;
+          bus.off('job', onJob);
+          resolve();
+        };
+        bus.on('job', onJob);
+      });
+      child.emit('close', 0);
+      await settled;
+      expect(publicJob(job).backgroundTasks).toEqual([]);
     } finally {
       bin.mockRestore();
       spawn.mockReset();
@@ -2826,6 +2921,53 @@ describe('spawnWorkerSession', () => {
       expect(job.events.filter((e) => e.kind === 'info').at(-1).text).toMatch(/No word from .* for 30 min/);
       const done = settled(job);
       children[0].emitLines(result('ok'));
+      children[0].emit('close', 0);
+      await done;
+    } finally {
+      vi.useRealTimers();
+      restore();
+    }
+  });
+
+  it('a background shell command alone does not hold stdin open past 30 quiet minutes', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const { children, settled, restore } = fakeClaude();
+    try {
+      sendDevMessage(job.id, 'Start the dev server');
+      children[0].emitLines(
+        replay('Start the dev server'),
+        {
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'call-b',
+                name: 'Bash',
+                input: { command: 'npm run dev', run_in_background: true },
+              },
+            ],
+          },
+        },
+        {
+          type: 'system',
+          subtype: 'task_started',
+          task_id: 'b1',
+          tool_use_id: 'call-b',
+          is_backgrounded: true,
+        },
+        result('Serving on :3000.'),
+      );
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      expect(children[0].ended).toBe(false);
+      expect(publicJob(job).backgroundTasks).toEqual([{ name: 'Bash', summary: 'npm run dev' }]);
+      // A dev server never ends: stdin closes, and the CLI stops the shell at its print-mode deadline.
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(children[0].ended).toBe(true);
+      expect(job.events.filter((e) => e.kind === 'info').at(-1).text).toMatch(/No word from .* for 30 min/);
+      const done = settled(job);
       children[0].emit('close', 0);
       await done;
     } finally {
