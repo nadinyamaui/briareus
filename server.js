@@ -28,7 +28,8 @@ import { createHomeAssistantService } from './lib/home-assistant.js';
 import { homeAssistantRoutes } from './lib/home-assistant-routes.js';
 import { createWhatsAppService } from './lib/whatsapp.js';
 import { whatsappRoutes } from './lib/whatsapp-routes.js';
-import { whatsappAgentRoutes } from './lib/whatsapp-agent.js';
+import { whatsappAgentRoutes, whatsappWatchAllowed } from './lib/whatsapp-agent.js';
+import { createWhatsAppWatcher } from './lib/whatsapp-watch.js';
 import { createMcpService, MCP_OAUTH_CALLBACK_PATH } from './lib/mcp-servers.js';
 import { mcpRoutes, mcpProxyRouter, mcpOAuthCallbackRouter } from './lib/mcp-routes.js';
 import { sessionWebhookRoutes } from './lib/webhook-routes.js';
@@ -112,11 +113,13 @@ import {
   replyToReviewFinding,
   retryLoopRound,
   deliverToSession,
+  sessionRegistryComplete,
   mailReceivedDurably,
   cancelMailWakes,
   sessionMailWakeState,
   setSessionMailWake,
   setMailWakeAccess,
+  setWhatsAppWatchAccess,
   noteSession,
   webhookUnfit,
   setSlackAccess,
@@ -585,8 +588,20 @@ api.use(sshRoutes({ service: sshService, agentSession, getProject }));
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
 api.use(homeAssistantRoutes({ service: createHomeAssistantService() }));
 const whatsappService = createWhatsAppService();
+// Replies in the chats a session wrote to come back to it (lib/whatsapp-watch.js).
+const whatsappWatcher = createWhatsAppWatcher({
+  service: whatsappService,
+  getJob,
+  allowed: (job) => whatsappWatchAllowed(job, getProject(job.repo)),
+  deliver: (id, delivery) => deliverToSession(id, delivery, { via: 'whatsapp' }),
+  note: noteSession,
+  registryComplete: sessionRegistryComplete,
+});
+setWhatsAppWatchAccess((id) => whatsappWatcher.watching(id));
 api.use(whatsappRoutes({ service: whatsappService }));
-api.use(whatsappAgentRoutes({ service: whatsappService, agentSession, getProject }));
+api.use(
+  whatsappAgentRoutes({ service: whatsappService, agentSession, getProject, watcher: whatsappWatcher }),
+);
 api.use(mcpRoutes({ service: mcpService, getProject }));
 api.use(
   operationsRoutes({
@@ -2113,6 +2128,10 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   checkProviderAuth();
   setInterval(checkProviderAuth, AUTH_RECHECK_MS).unref();
   await initJobs({ deferPolling: true });
+  // After the sessions: a watch whose session is not loaded yet would be dropped.
+  await whatsappWatcher
+    .init()
+    .catch((e) => console.error('Could not load WhatsApp watches (tried again every poll):', e.message));
   // `npm run create-token` writes the database directly; a revoked token stops new requests
   // within 15s and open streams within 30s.
   setInterval(() => {

@@ -50,6 +50,7 @@ async function setup() {
   let current = null;
   let failure = 0;
   let mediaUrl = '';
+  let groupAnswer = null;
   const upstream = express();
   upstream.use(express.json());
   upstream.use((req, res) => {
@@ -87,6 +88,8 @@ async function setup() {
     if (path.endsWith('/messages')) return res.json([RAW_MESSAGE]);
     if (path === '/api/sendText')
       return res.status(201).json({ ...RAW_MESSAGE, body: req.body.text, fromMe: true });
+    if (path === '/api/default/groups' && req.method === 'POST')
+      return res.status(201).json(groupAnswer ?? { gid: { _serialized: '120363000000000000@g.us' } });
     if (path === '/api/files/default/attachment.ogg')
       return res.type('audio/ogg').send(Buffer.from('audio bytes'));
     return res.sendStatus(404);
@@ -140,6 +143,9 @@ async function setup() {
     },
     setMedia: (value) => {
       mediaUrl = value;
+    },
+    setGroupAnswer: (value) => {
+      groupAnswer = value;
     },
   };
 }
@@ -478,6 +484,41 @@ describe('the WhatsApp core inbox', () => {
     ctx.setCurrent({ name: 'default', status: 'WORKING', me: null });
     await ctx.service.start('default');
     expect(ctx.calls).toHaveLength(1);
+  });
+
+  it('creates a group with deduplicated participants and reads its id from each engine’s answer', async () => {
+    const ctx = await setup();
+    expect(
+      await ctx.service.createGroup('default', {
+        name: ' Dudas OMD ',
+        participants: [CHAT, CHAT, '34611111111@c.us'],
+      }),
+    ).toEqual({ group: { id: '120363000000000000@g.us', name: 'Dudas OMD' } });
+    expect(ctx.calls.find((c) => c.path === '/api/default/groups').body).toEqual({
+      name: 'Dudas OMD',
+      participants: [{ id: CHAT }, { id: '34611111111@c.us' }],
+    });
+    ctx.setGroupAnswer({ id: '120363000000000001@g.us' });
+    expect((await ctx.service.createGroup('default', { name: 'x', participants: [CHAT] })).group.id).toBe(
+      '120363000000000001@g.us',
+    );
+    ctx.setGroupAnswer({ title: 'x' });
+    await expect(
+      ctx.service.createGroup('default', { name: 'x', participants: [CHAT] }),
+    ).rejects.toMatchObject({
+      status: 502,
+    });
+    const before = ctx.calls.length;
+    for (const input of [
+      { name: '', participants: [CHAT] },
+      { name: 'x'.repeat(101), participants: [CHAT] },
+      { name: 'x', participants: [] },
+      { name: 'x', participants: ['120363000000000000@g.us'] },
+      { name: 'x', participants: ['nobody'] },
+      { name: 'x' },
+    ])
+      await expect(ctx.service.createGroup('default', input)).rejects.toMatchObject({ status: 400 });
+    expect(ctx.calls.length).toBe(before);
   });
 
   it('reports disabled installs without a network call', async () => {

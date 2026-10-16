@@ -149,18 +149,50 @@ new projects; an operator with an admin token opts a project in through
 and revokes it with `false`. The setting is independent of `mailToolsEnabled`
 and of the project’s Slack workspace, so each channel is enabled per project.
 
-The six tools are `whatsapp_accounts`, `whatsapp_conversations`,
-`whatsapp_messages`, `whatsapp_media`, `whatsapp_send` and
-`whatsapp_mark_read`, served under `/api/agent/whatsapp` with the session’s
+The tools are `whatsapp_accounts`, `whatsapp_conversations`,
+`whatsapp_messages`, `whatsapp_media`, `whatsapp_send`,
+`whatsapp_create_group`, `whatsapp_watches`, `whatsapp_watch`,
+`whatsapp_unwatch` and `whatsapp_mark_read`, served under
+`/api/agent/whatsapp` with the session’s
 own token. They use the same WAHA service as the admin inbox; linking, the
 pairing QR and logout stay admin-only. `whatsapp_media` downloads one message’s
 media (up to 25 MiB, like mail attachments) to a private temporary file and
 returns its path, so the agent can open images and documents with its file
-tools. The tools and instructions appear on the next turn of
+tools. `whatsapp_create_group` opens a group with the given contacts, the
+operator as its admin. The tools and instructions appear on the next turn of
 an eligible session, and revocation applies to every request at once,
 including tools loaded earlier and direct HTTP fallback calls.
 
 As with email, review, QA, worker, read-only and preview sessions never get
-them, nor does a turn nobody is watching (webhook deliveries, instructions and
-automatic worker notices). Messages go out as the operator, so the agent sends
-only what the user asked for.
+them. Messages go out as the operator, so the agent sends only what the user
+asked for.
+
+### Replies come back to the session
+
+Sending in a chat, or opening a group, leaves a **watch** on it for 24 hours
+from the session’s last message there (`watch: false` skips it). While it
+lasts, what other people write in that chat reaches the session as a delivery,
+labelled as a WhatsApp reply and never as the operator’s word, and starts a
+turn when the session is free. So a session asked to “ask Guillo whether he
+wants a group” can take his answer, follow up and report back on its own. A
+watch nobody answers lapses; `whatsapp_watch` extends one (at most 72 hours
+from now) and `whatsapp_unwatch` ends it. A session keeps at most 20.
+
+A turn started by a delivery is one nobody is watching, so it gets the
+WhatsApp tools only for the chats this session is watching: it can read,
+open media, mark read and answer there, and cannot list the accounts or the
+inbox, open a group or start a watch on another chat. Such replies share the
+webhook caps: 30 deliveries an hour and 10 automatic turns in a row before the
+session waits for a word from the operator.
+
+The core reads the watched chats from WAHA every 15 seconds (nothing else of
+the inbox), so no WAHA webhook has to reach it. Watches and the ids of the
+messages already delivered are kept in `app_settings` (`whatsapp_watches`), so
+a restart neither loses nor repeats a reply. Only the 20 newest messages of a
+chat are read per poll. A reply the session cannot take just then (a restart
+drain, no free slot, or a cap until the operator speaks, noted once in the
+transcript) is read again on the next poll, even once its watch has lapsed:
+such a watch stays until those replies are taken, and writing there again
+renews it with them. Watches end with their
+session, or when the project turns WhatsApp tools off, which also drops the
+replies still waiting for the session.

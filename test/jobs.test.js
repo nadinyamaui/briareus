@@ -305,6 +305,7 @@ import {
   setSessionMailWake,
   sessionMailWakeState,
   setMailWakeAccess,
+  setWhatsAppWatchAccess,
   instructSession,
   flushDeliveries,
   setSessionWebhook,
@@ -3428,17 +3429,19 @@ describe('webhook deliveries', () => {
     'in-turns',
     'in-dup',
     'hk-slack',
+    'hk-whatsapp',
     'hk-mail',
     'hk-mail-cap',
   ];
 
   beforeAll(async () => {
     state.stored = [
-      ...IDLE.filter((id) => !['hk-off', 'hk-orch', 'hk-brief', 'hk-slack'].includes(id)).map((id) =>
-        row(id, { webhook: armed() }),
+      ...IDLE.filter((id) => !['hk-off', 'hk-orch', 'hk-brief', 'hk-slack', 'hk-whatsapp'].includes(id)).map(
+        (id) => row(id, { webhook: armed() }),
       ),
       row('hk-off', {}),
       row('hk-slack', {}),
+      row('hk-whatsapp', {}),
       row('hk-orch', { orchestrator: true, costUsd: 5, webhook: armed() }),
       row('hk-brief', { chats: undefined, webhook: armed() }),
       row('hk-closed', { webhook: armed() }),
@@ -3965,6 +3968,63 @@ describe('webhook deliveries', () => {
     expect(prompts[1]).toMatch(/--- delivery, from Slack @andres, [^\n]+\nSounds good\n/);
     expect(job.unattendedTurn).toBe(true);
     await cli.finish(job, 0, 1);
+  });
+
+  it('takes a WhatsApp reply with the webhook off, says it is one, and keeps it when the webhook is saved off', async () => {
+    const { prompts } = fakeCli();
+    const job = getJob('hk-whatsapp');
+    const project = { repo: 'acme/hook', enabled: true, whatsappToolsEnabled: true };
+    state.projects.push(project);
+    try {
+      job.awaitingAnswer = true;
+      expect(
+        deliverToSession(
+          'hk-whatsapp',
+          { text: 'Sí, abre el grupo', source: 'WhatsApp 34600000000@c.us' },
+          { via: 'whatsapp' },
+        ),
+      ).toEqual({ status: 'held', held: 1 });
+      setSessionWebhook('hk-whatsapp', { armed: false });
+      expect(job.pendingDeliveries).toHaveLength(1);
+      sendDevMessage('hk-whatsapp', 'Go on');
+      await cli.finish(job, 0, 0);
+      await vi.waitFor(() => expect(prompts).toHaveLength(2));
+      expect(prompts[1]).toMatch(/^WhatsApp reply, not from the operator\. /);
+      expect(prompts[1]).toMatch(
+        /--- delivery, from WhatsApp 34600000000@c\.us, [^\n]+\nSí, abre el grupo\n/,
+      );
+      expect(job.unattendedTurn).toBe(true);
+      await cli.finish(job, 0, 1);
+    } finally {
+      state.projects.splice(state.projects.indexOf(project), 1);
+    }
+  });
+
+  it('drops a held WhatsApp reply once the project turns WhatsApp off', async () => {
+    const { prompts } = fakeCli();
+    const job = getJob('hk-whatsapp');
+    const project = { repo: 'acme/hook', enabled: true, whatsappToolsEnabled: true };
+    state.projects.push(project);
+    try {
+      job.awaitingAnswer = true;
+      expect(
+        deliverToSession(
+          'hk-whatsapp',
+          { text: 'Llámame', source: 'WhatsApp 34600000000@c.us' },
+          { via: 'whatsapp' },
+        ),
+      ).toMatchObject({ status: 'held' });
+      project.whatsappToolsEnabled = false;
+      job.awaitingAnswer = false;
+      flushDeliveries(job);
+      await flushJobs();
+      expect(job.pendingDeliveries).toEqual([]);
+      expect(prompts.join('\n')).not.toContain('Llámame');
+    } finally {
+      job.awaitingAnswer = false;
+      job.pendingDeliveries = [];
+      state.projects.splice(state.projects.indexOf(project), 1);
+    }
   });
 
   describe('email wake deliveries', () => {
@@ -12930,7 +12990,11 @@ describe('the shared browser in a session', () => {
 
   // One claude turn on a stand-in CLI: its args, the MCP servers its config mounts, and its
   // first message. It answers and exits at once unless `hold`.
-  async function turn(job, text, { hold = false, binary = 'claude', workerNotice = false } = {}) {
+  async function turn(
+    job,
+    text,
+    { hold = false, binary = 'claude', workerNotice = false, unattended = false } = {},
+  ) {
     job.status = 'idle';
     getProviderForJob.mockReturnValue({ ...state.provider, binary });
     captureProviderAuth.mockResolvedValue(undefined);
@@ -12969,7 +13033,7 @@ describe('the shared browser in a session', () => {
       bus.on('job', onJob);
     });
     if (workerNotice) deliverWorkerNotices(job);
-    else sendDevMessage(job.id, text);
+    else sendDevMessage(job.id, text, undefined, unattended ? { unattended: true } : {});
     return {
       seen,
       settled: settled.finally(() => {
@@ -13179,16 +13243,31 @@ describe('the shared browser in a session', () => {
       expect(on.seen.mcp.reviewer_whatsapp.env).toEqual(on.seen.mcp.reviewer_memory.env);
       expect(whatsappProtocol(job)).toContain('# WhatsApp');
       expect(whatsappProtocol(job)).toContain('GET /api/agent/whatsapp/accounts');
+      // A turn nobody watches gets the tools only while the session watches a chat.
+      const unwatched = await turn(job, 'A reply', { unattended: true });
+      await unwatched.settled;
+      expect(unwatched.seen.mcp).not.toHaveProperty('reviewer_whatsapp');
+      expect(whatsappProtocol(job)).toBe('');
+      setWhatsAppWatchAccess((id) => id === job.id);
+      const watched = await turn(job, 'A reply', { unattended: true });
+      await watched.settled;
+      expect(watched.seen.mcp.reviewer_whatsapp.args[0]).toMatch(/whatsapp-mcp\.js$/);
+      expect(whatsappProtocol(job)).toContain('reach only the chats this session is watching');
+      const attended = await turn(job, 'Read my WhatsApp');
+      await attended.settled;
+      expect(whatsappProtocol(job)).toContain('whatsapp_create_group');
+      expect(whatsappProtocol(job)).not.toContain('reach only the chats');
       job.readOnly = true;
       const analyst = await turn(job, 'Analyze this code');
       await analyst.settled;
       expect(analyst.seen.mcp).not.toHaveProperty('reviewer_whatsapp');
       job.readOnly = false;
       project.whatsappToolsEnabled = false;
-      const revoked = await turn(job, 'Continue coding');
+      const revoked = await turn(job, 'Continue coding', { unattended: true });
       await revoked.settled;
       expect(revoked.seen.mcp).not.toHaveProperty('reviewer_whatsapp');
     } finally {
+      setWhatsAppWatchAccess(() => false);
       project.mailToolsEnabled = previous.mail;
       project.whatsappToolsEnabled = previous.whatsapp;
       job.readOnly = false;

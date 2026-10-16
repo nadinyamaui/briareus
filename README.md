@@ -60,8 +60,10 @@ chat history, text replies, read receipts and attachment downloads are exposed
 through admin-only `/api/v1/whatsapp` endpoints for clients to use; client inbox
 screens are separate work. See [WhatsApp setup and client flow](docs/whatsapp.md).
 Projects with `whatsappToolsEnabled: true` (off by default) also give their
-interactive sessions an internal WhatsApp MCP to read chats, reply and mark
-them read; see [WhatsApp from a session](docs/whatsapp.md#whatsapp-from-a-session).
+interactive sessions an internal WhatsApp MCP to read chats, reply, mark
+them read and open groups. Replies in a chat the session wrote to come back to
+it for 24 hours, so it can carry the conversation on by itself; see
+[WhatsApp from a session](docs/whatsapp.md#whatsapp-from-a-session).
 
 The Home Assistant bridge exposes live entities, available actions, and automation
 events through admin-only `/api/v1/home-assistant` endpoints.
