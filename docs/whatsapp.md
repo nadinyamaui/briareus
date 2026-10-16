@@ -192,6 +192,7 @@ a restart neither loses nor repeats a reply. Only the 20 newest messages of a
 chat are read per poll. A reply the session cannot take just then (a restart
 drain, no free slot, or a cap until the operator speaks, noted once in the
 transcript) is read again on the next poll, even once its watch has lapsed:
-such a watch stays until those replies are taken. Watches end with their
+such a watch stays until those replies are taken, and writing there again
+renews it with them. Watches end with their
 session, or when the project turns WhatsApp tools off, which also drops the
 replies still waiting for the session.

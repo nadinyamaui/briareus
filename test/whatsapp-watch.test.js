@@ -223,6 +223,65 @@ describe('WhatsApp watches', () => {
     expect(notes).toHaveLength(1);
   });
 
+  it('gives a watch that lapses during another lapsed watch’s last read its own last read', async () => {
+    const OTHER = '34611111111@c.us';
+    const w = make();
+    await w.watch('s1', { account: 'default', chat: OTHER, hours: 1 });
+    await w.watch('s1', { account: 'default', chat: CHAT, hours: 2 });
+    deliver = () => {
+      throw Object.assign(new Error('10 automatic turns ran'), { status: 429 });
+    };
+    let slow = false;
+    Object.defineProperty(chats, OTHER, {
+      get() {
+        // CHAT's watch lapses while WAHA answers for OTHER.
+        if (slow) clock = T0 + 2 * 3600_000 + 1000;
+        return [msg('o', T0 + 10 * 60_000, { from: OTHER })];
+      },
+    });
+    chats[CHAT] = [msg('a', T0 + 10 * 60_000)];
+    clock = T0 + 15 * 60_000;
+    await w.poll();
+    clock = T0 + 3600_000 + 1000;
+    slow = true;
+    await w.poll();
+    slow = false;
+    expect(stored.map((x) => x.chat).sort()).toEqual([CHAT, OTHER].sort());
+    await w.poll();
+    deliver = (id, delivery) => {
+      delivered.push({ session: id, ...delivery });
+      return { status: 'running' };
+    };
+    await w.poll();
+    expect(delivered.map((d) => d.source).sort()).toEqual([`WhatsApp ${CHAT}`, `WhatsApp ${OTHER}`].sort());
+    expect(stored).toEqual([]);
+  });
+
+  it('renews a lapsed watch whose replies wait at a cap without losing them', async () => {
+    const w = make();
+    await w.watch('s1', { account: 'default', chat: CHAT, hours: 1 });
+    deliver = () => {
+      throw Object.assign(new Error('10 automatic turns ran'), { status: 429 });
+    };
+    chats[CHAT] = [msg('a', T0 + 20 * 60_000)];
+    clock = T0 + 25 * 60_000;
+    await w.poll();
+    clock = T0 + 65 * 60_000;
+    await w.poll();
+    expect(w.watching('s1')).toBe(false);
+    clock = T0 + 90 * 60_000;
+    await w.watch('s1', { account: 'default', chat: CHAT, since: sec(clock) });
+    expect(stored).toEqual([expect.objectContaining({ since: sec(T0), seen: [] })]);
+    deliver = (id, delivery) => {
+      delivered.push({ session: id, ...delivery });
+      return { status: 'running' };
+    };
+    await w.poll();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].text).toContain('text a');
+    expect(w.watching('s1', 'default', CHAT)).toBe(true);
+  });
+
   it('retries a reply the session could not take for now (a drain, no free slot)', async () => {
     const w = make();
     await w.watch('s1', { account: 'default', chat: CHAT });
