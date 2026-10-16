@@ -180,10 +180,10 @@ from now) and `whatsapp_unwatch` ends it. A session keeps at most 20.
 
 A turn started by a delivery is one nobody is watching, so it gets the
 WhatsApp tools only for the chats this session is watching: it can read,
-open media, mark read and answer there, and cannot list the inbox, open a
-group or start a watch on another chat. Such replies share the webhook caps:
-30 deliveries an hour and 10 automatic turns in a row before the session
-waits for a word from the operator.
+open media, mark read and answer there, and cannot list the accounts or the
+inbox, open a group or start a watch on another chat. Such replies share the
+webhook caps: 30 deliveries an hour and 10 automatic turns in a row before the
+session waits for a word from the operator.
 
 The core reads the watched chats from WAHA every 15 seconds (nothing else of
 the inbox), so no WAHA webhook has to reach it. Watches and the ids of the
@@ -191,6 +191,7 @@ messages already delivered are kept in `app_settings` (`whatsapp_watches`), so
 a restart neither loses nor repeats a reply. Only the 20 newest messages of a
 chat are read per poll. A reply the session cannot take just then (a restart
 drain, no free slot, or a cap until the operator speaks, noted once in the
-transcript) is read again on the next poll. Watches end with their
+transcript) is read again on the next poll, even once its watch has lapsed:
+such a watch stays until those replies are taken. Watches end with their
 session, or when the project turns WhatsApp tools off, which also drops the
 replies still waiting for the session.

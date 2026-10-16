@@ -281,6 +281,7 @@ describe('session WhatsApp watches', () => {
       [`/accounts/default/conversations/${OTHER}/messages/m1/media`, 'GET'],
       [`/accounts/default/conversations/${OTHER}/read`, 'POST'],
       [`/accounts/default/conversations/${OTHER}/watch`, 'PUT', {}],
+      ['/accounts', 'GET'],
       ['/accounts/default/conversations', 'GET'],
       ['/accounts/default/groups', 'POST', { name: 'x', participants: [OTHER] }],
     ]) {
@@ -289,6 +290,7 @@ describe('session WhatsApp watches', () => {
       expect((await res.json()).error).toMatch(/only the chats this session is watching/);
     }
     expect(service.send).toHaveBeenCalledTimes(1);
+    expect(service.accounts).not.toHaveBeenCalled();
     expect(service.conversations).not.toHaveBeenCalled();
     expect(service.createGroup).not.toHaveBeenCalled();
     // The project's opt-in still governs it.

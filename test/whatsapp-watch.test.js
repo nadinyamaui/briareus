@@ -194,6 +194,35 @@ describe('WhatsApp watches', () => {
     expect(notes).toHaveLength(1);
   });
 
+  it('keeps a lapsed watch while its replies wait at a cap, and delivers them after', async () => {
+    const w = make();
+    await w.watch('s1', { account: 'default', chat: CHAT, hours: 1 });
+    deliver = () => {
+      throw Object.assign(new Error('10 automatic turns ran'), { status: 429 });
+    };
+    chats[CHAT] = [msg('a', T0 + 10 * 60_000)];
+    clock = T0 + 15 * 60_000;
+    await w.poll();
+    chats[CHAT].push(msg('b', T0 + 20 * 60_000), msg('late', T0 + 70 * 60_000));
+    clock = T0 + 2 * 3600_000;
+    await w.poll();
+    await w.poll();
+    expect(delivered).toEqual([]);
+    expect(w.watching('s1')).toBe(false);
+    expect(stored).toEqual([expect.objectContaining({ chat: CHAT, seen: [] })]);
+    deliver = (id, delivery) => {
+      delivered.push({ session: id, ...delivery });
+      return { status: 'running' };
+    };
+    await w.poll();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].text).toContain('text a');
+    expect(delivered[0].text).toContain('text b');
+    expect(delivered[0].text).not.toContain('text late');
+    expect(stored).toEqual([]);
+    expect(notes).toHaveLength(1);
+  });
+
   it('retries a reply the session could not take for now (a drain, no free slot)', async () => {
     const w = make();
     await w.watch('s1', { account: 'default', chat: CHAT });
