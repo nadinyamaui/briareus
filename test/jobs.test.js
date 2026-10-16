@@ -5665,6 +5665,9 @@ describe('the review loop: what a closing loop review reports back', () => {
       await waitFor(() => !!parent.reviewLoop.pendingResult?.error || !!parent.reviewLoop.done);
       expect(parent.reviewLoop.done).toBeFalsy();
       expect(parent.reviewLoop.pendingResult.error).toMatch(/has not applied the code-approved label/);
+      // On the read-failure backoff, so the deadline can end it.
+      expect(parent.reviewLoop.pendingResult).toMatchObject({ attempts: 1, approvalSaid: true });
+      expect(parent.reviewLoop.pendingResult.failingSince).toBeTruthy();
       expect(githubRest.mock.calls.length).toBeGreaterThan(reads);
       expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
       expect(recordTriage.mock.calls.length).toBe(records);
@@ -6281,6 +6284,12 @@ describe('the review loop: a pending round that is past giving up on', () => {
   // Failing since long before the deadline, and failing for less than it.
   const ancient = '2026-08-25T12:31:00.000Z';
   let recent;
+  const workerIds = ['stuck-1', 'stuck-2', 'stuck-3', 'stuck-4', 'stuck-5', 'stuck-6'];
+  // Every earlier initJobs() leaves a real 20s syncDevPrs tick running, and a tick resolves
+  // any due round with whatever the mocks answer then. Each round stays parked until its
+  // own test nudges it, and the block's sessions are retired once it is done.
+  const PARKED = '2999-01-01T00:00:00.000Z';
+  const DUE = '2026-08-25T12:35:00.000Z';
 
   beforeAll(async () => {
     recent = new Date(Date.now() - 29 * 60_000).toISOString();
@@ -6300,9 +6309,12 @@ describe('the review loop: a pending round that is past giving up on', () => {
       workerRow('stuck-2', 80, { failingSince: ancient }),
       workerRow('stuck-3', 81, { failingSince: ancient }),
       workerRow('stuck-4', 82, { failingSince: recent }),
+      workerRow('stuck-5', 83, { failingSince: ancient }),
+      workerRow('stuck-6', 84, { failingSince: recent }),
     ];
     await initJobs();
-    for (const id of ['stuck-orch', 'stuck-1', 'stuck-2', 'stuck-3', 'stuck-4']) getJob(id).status = 'idle';
+    for (const id of workerIds) getJob(id).reviewLoop.pendingResult.nextRetryAt = PARKED;
+    for (const id of ['stuck-orch', ...workerIds]) getJob(id).status = 'idle';
     githubRest.mockImplementation(async (_cfg, _method, url) => {
       const m = /^\/repos\/acme\/stuck\/pulls\/(\d+)$/.exec(url);
       if (m) {
@@ -6331,8 +6343,16 @@ describe('the review loop: a pending round that is past giving up on', () => {
     throw new Error('the loop never reached the expected state');
   };
 
+  afterAll(() => {
+    for (const id of ['stuck-orch', ...workerIds]) getJob(id).status = 'closed';
+  });
+
   // The sync tick's path: the branch event mirrors the PR, and the settle drains the round.
-  const nudge = (prNumber) => syncSessionsOn('acme/stuck', `task/stuck-${prNumber}`);
+  const nudge = (prNumber) => {
+    const pending = getJob(`stuck-${prNumber - 78}`).reviewLoop.pendingResult;
+    if (pending?.nextRetryAt === PARKED) pending.nextRetryAt = DUE;
+    return syncSessionsOn('acme/stuck', `task/stuck-${prNumber}`);
+  };
   const refuse = (n, message = 'GitHub answered 401 listing PR comments') => {
     for (let i = 0; i < n; i++) latestReviewFindings.mockRejectedValueOnce(new Error(message));
   };
@@ -6392,7 +6412,7 @@ describe('the review loop: a pending round that is past giving up on', () => {
     latestReviewFindings.mockRejectedValueOnce(limited);
     const before = latestReviewFindings.mock.calls.length;
     nudge(82);
-    await waitFor(() => parent.reviewLoop.pendingResult.nextRetryAt !== '2026-08-25T12:35:00.000Z');
+    await waitFor(() => parent.reviewLoop.pendingResult.nextRetryAt !== DUE);
     const pending = parent.reviewLoop.pendingResult;
     // The round is still the loop's next step, retried when the limit lifts.
     expect(pending).toMatchObject({ prNumber: 82, round: 1 });
@@ -6403,6 +6423,56 @@ describe('the review loop: a pending round that is past giving up on', () => {
     expect(Date.parse(pending.failingSince) - Date.parse(recent)).toBeGreaterThan(45 * 60_000);
     // And a local cooldown is not retried twice more inside the same resolve.
     expect(latestReviewFindings.mock.calls.length - before).toBe(1);
+  });
+
+  // A reviewer that restates a finding the dashboard already left optional or dismissed
+  // withholds code-approved, and prior verdicts leave nothing to fix: the approval wait
+  // backs off and gives up like an unreadable round instead of re-arming every tick.
+  describe('when prior verdicts leave nothing open and the review never approves', () => {
+    const restated = [{ key: 'prior', severity: 'medium', title: 'Prior finding' }];
+    beforeEach(() => state.projects.push({ repo: 'acme/stuck', autonomousReviewLoop: true }));
+    afterEach(() => {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/stuck');
+    });
+
+    it('stalls the loop past the deadline and tells the orchestrator', async () => {
+      const parent = getJob('stuck-5');
+      latestReviewFindings.mockResolvedValueOnce(restated);
+      sortFindingsForFix.mockResolvedValueOnce({ kept: [], parked: [] });
+      nudge(83);
+      await waitFor(() => parent.reviewLoop.stalled);
+      expect(parent.reviewLoop.pendingResult).toBeNull();
+      expect(parent.reviewLoop.done).toBeFalsy();
+      expect(infoTexts(parent).join('\n')).toMatch(
+        /review round 1 declared only findings already dismissed or left optional, and for 30 minutes the pull request did not get the code-approved label/,
+      );
+      const notice = getJob('stuck-orch').pendingWorkerNotices.find((n) => n.workerId === 'stuck-5');
+      expect(notice.text).toMatch(/the review loop stalled on PR #83/);
+      expect(notice.text).toMatch(/Prior finding/);
+    });
+
+    it('backs off before the deadline and says so once', async () => {
+      const parent = getJob('stuck-6');
+      const pendingApproval = () => infoTexts(parent).filter((t) => t.includes('remains pending approval'));
+      for (let i = 0; i < 2; i++) {
+        latestReviewFindings.mockResolvedValueOnce(restated);
+        sortFindingsForFix.mockResolvedValueOnce({ kept: [], parked: [] });
+      }
+      nudge(84);
+      await waitFor(() => pendingApproval().length === 1);
+      const pending = parent.reviewLoop.pendingResult;
+      expect(pending).toMatchObject({ prNumber: 84, round: 1, attempts: 10, failingSince: recent });
+      expect(pending.error).toMatch(/has not applied the code-approved label/);
+      expect(Date.parse(pending.nextRetryAt) - Date.now()).toBeGreaterThan(100_000);
+      expect(parent.reviewLoop.stalled).toBeFalsy();
+      // Another due retry fails the same way, without a second event.
+      // (Unmirrored again, so the sync takes the look a freshly attached PR gets.)
+      pending.nextRetryAt = new Date(0).toISOString();
+      parent.prStatus = null;
+      nudge(84);
+      await waitFor(() => parent.reviewLoop.pendingResult?.attempts === 11);
+      expect(pendingApproval()).toHaveLength(1);
+    });
   });
 
   const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);

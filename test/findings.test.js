@@ -14,6 +14,8 @@ const gh = vi.hoisted(() => ({
   files: null,
   // What a write comes back with, for the calls that read their answer.
   created: {},
+  // The token's own login, or null when GitHub will not say.
+  viewer: 'reviewer-bot',
 }));
 const db = vi.hoisted(() => ({ decisions: new Map() }));
 
@@ -22,6 +24,7 @@ vi.mock('../lib/config.js', () => ({
 }));
 
 vi.mock('../lib/github.js', () => ({
+  viewerLogin: vi.fn(async () => gh.viewer),
   githubRest: vi.fn(async (cfg, method, url, body) => {
     if (method === 'GET' && /\/pulls\/\d+\/comments\?/.test(url)) {
       const page = Number(new URL(url, 'https://x').searchParams.get('page'));
@@ -80,6 +83,7 @@ beforeEach(() => {
   gh.fail = '';
   gh.files = null;
   gh.created = {};
+  gh.viewer = 'reviewer-bot';
   db.decisions = new Map();
 });
 
@@ -791,6 +795,199 @@ describe('deleteFindingFromReview', () => {
     expect(gh.writes.map((w) => w.method)).toEqual(['PATCH']);
   });
 
+  // A still-unfixed earlier finding is restated as a reply on its old thread.
+  it('deletes only the follow-up reply of a restated finding, never its thread', async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ created_at: '2026-09-01T10:00:00Z' }),
+      inline({
+        id: 103,
+        in_reply_to_id: 101,
+        user: { login: 'Reviewer-Bot' },
+        body: 'Follow-up: still unfixed.',
+      }),
+    ];
+
+    const out = await deleteFindingFromReview(repo, 5, race, { since: '2026-09-08T09:00:00Z' });
+
+    expect(out.commentDeleted).toBe(true);
+    expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/103` });
+    expect(gh.writes.map((w) => w.method)).toEqual(['DELETE', 'PATCH']);
+  });
+
+  // A lineless restated finding must not take the one new comment on its file,
+  // which belongs to another finding.
+  it("never takes another finding's comment for a lineless restated finding", async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ id: 90, line: 30, body: 'Old thread', created_at: '2026-09-01T10:00:00Z' }),
+      inline({ id: 104, line: 5, body: '**LOW**: Unused import' }),
+      inline({
+        id: 105,
+        in_reply_to_id: 90,
+        line: 30,
+        user: { login: 'reviewer-bot' },
+        body: 'Follow-up: Race in the retry loop is still there.',
+      }),
+    ];
+
+    await deleteFindingFromReview(repo, 5, { ...race, line: null }, { since: '2026-09-08T09:00:00Z' });
+
+    expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/105` });
+  });
+
+  // Same, with a follow-up that does not quote the title: the new comment is
+  // the file's only top-level one, yet it belongs to another finding.
+  it("never takes another finding's comment for a lineless restated finding whose follow-up omits the title", async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ id: 90, line: 30, body: 'Old thread', created_at: '2026-09-01T10:00:00Z' }),
+      inline({
+        id: 105,
+        in_reply_to_id: 90,
+        line: 30,
+        user: { login: 'reviewer-bot' },
+        body: 'Follow-up: still unfixed.',
+      }),
+      inline({ id: 106, line: 5, body: '**LOW**: Unused import' }),
+    ];
+
+    const out = await deleteFindingFromReview(
+      repo,
+      5,
+      { ...race, line: null },
+      { since: '2026-09-08T09:00:00Z' },
+    );
+
+    expect(out.commentDeleted).toBe(false);
+    expect(gh.writes.map((w) => w.method)).toEqual(['PATCH']);
+  });
+
+  // A finding listed only in the summary must not take another restated
+  // finding's follow-up, even when it is the only new comment on the file.
+  it("never takes another restated finding's follow-up for a lineless summary-only finding", async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ id: 90, line: 30, body: 'Old thread', created_at: '2026-09-01T10:00:00Z' }),
+      inline({
+        id: 105,
+        in_reply_to_id: 90,
+        line: 30,
+        user: { login: 'reviewer-bot' },
+        body: 'Follow-up: Unused import is still there.',
+      }),
+    ];
+
+    const out = await deleteFindingFromReview(
+      repo,
+      5,
+      { ...race, line: null },
+      { since: '2026-09-08T09:00:00Z' },
+    );
+
+    expect(out.commentDeleted).toBe(false);
+    expect(gh.writes.map((w) => w.method)).toEqual(['PATCH']);
+  });
+
+  it("never touches someone else's reply posted since the review began", async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ id: 90, body: 'Old thread', created_at: '2026-09-01T10:00:00Z' }),
+      // The author answers on the old thread before the review's follow-up.
+      inline({ id: 91, in_reply_to_id: 90, user: { login: 'pr-author' }, body: 'Not a bug.' }),
+      inline({
+        id: 105,
+        in_reply_to_id: 90,
+        user: { login: 'reviewer-bot' },
+        body: 'Follow-up: still unfixed.',
+        created_at: '2026-09-08T10:05:00Z',
+      }),
+    ];
+
+    await deleteFindingFromReview(repo, 5, race, { since: '2026-09-08T09:00:00Z' });
+
+    expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/105` });
+  });
+
+  // A dashboard Reply sits beside the finding's only comment on its file.
+  it("still takes a lineless finding's only top-level comment after a reply on it", async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ body: 'It can spin forever.' }),
+      inline({
+        id: 102,
+        in_reply_to_id: 101,
+        user: { login: 'reviewer-bot' },
+        body: 'Will fix.',
+        created_at: '2026-09-08T11:00:00Z',
+      }),
+    ];
+
+    const out = await deleteFindingFromReview(
+      repo,
+      5,
+      { ...race, line: null },
+      { since: '2026-09-08T09:00:00Z' },
+    );
+
+    expect(out.commentDeleted).toBe(true);
+    expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/101` });
+  });
+
+  // Another finding's follow-up on an old thread at the same line comes first.
+  it("never takes another finding's follow-up at the same line as its own comment", async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ id: 90, body: 'Old thread', created_at: '2026-09-01T10:00:00Z' }),
+      inline({
+        id: 105,
+        in_reply_to_id: 90,
+        user: { login: 'reviewer-bot' },
+        body: 'Follow-up: still unfixed.',
+        created_at: '2026-09-08T10:05:00Z',
+      }),
+      inline({ id: 106, created_at: '2026-09-08T10:06:00Z' }),
+    ];
+
+    await deleteFindingFromReview(repo, 5, race, { since: '2026-09-08T09:00:00Z' });
+
+    expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/106` });
+  });
+
+  it('deletes nothing when comments from two threads share the line and neither quotes the title', async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ id: 90, body: 'Old thread', created_at: '2026-09-01T10:00:00Z' }),
+      inline({
+        id: 105,
+        in_reply_to_id: 90,
+        user: { login: 'reviewer-bot' },
+        body: 'Follow-up: still unfixed.',
+        created_at: '2026-09-08T10:05:00Z',
+      }),
+      inline({ id: 106, body: 'Off by one.', created_at: '2026-09-08T10:06:00Z' }),
+    ];
+
+    const out = await deleteFindingFromReview(repo, 5, race, { since: '2026-09-08T09:00:00Z' });
+
+    expect(out.commentDeleted).toBe(false);
+    expect(gh.writes.map((w) => w.method)).toEqual(['PATCH']);
+  });
+
+  it('counts no reply at all when the token’s own login cannot be read', async () => {
+    gh.viewer = null;
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ created_at: '2026-09-01T10:00:00Z' }),
+      inline({ id: 103, in_reply_to_id: 101, user: { login: 'reviewer-bot' }, body: 'Follow-up.' }),
+    ];
+
+    const out = await deleteFindingFromReview(repo, 5, race, { since: '2026-09-08T09:00:00Z' });
+
+    expect(out.commentDeleted).toBe(false);
+    expect(gh.writes.map((w) => w.method)).toEqual(['PATCH']);
+  });
+
   it('warns when the block cannot be rewritten: the comment is already gone', async () => {
     gh.comments = [findingsComment(entries, 7)];
     gh.reviewComments = [inline()];
@@ -862,6 +1059,77 @@ describe('replyOnFindingThread', () => {
     await expect(replyOnFindingThread(repo, 5, race, 'Noted')).rejects.toThrow(
       /no comment of its own on PR #5/,
     );
+    expect(gh.writes).toEqual([]);
+  });
+
+  it("replies under a restated finding's thread root, not under its follow-up", async () => {
+    gh.reviewComments = [
+      inline({ created_at: '2026-09-01T10:00:00Z' }),
+      inline({
+        id: 103,
+        in_reply_to_id: 101,
+        user: { login: 'Reviewer-Bot' },
+        body: 'Follow-up: still unfixed.',
+      }),
+    ];
+
+    await replyOnFindingThread(repo, 5, race, 'Noted', { since: '2026-09-08T09:00:00Z' });
+
+    expect(gh.writes).toEqual([
+      { method: 'POST', url: `/repos/${repo}/pulls/5/comments/101/replies`, body: { body: 'Noted' } },
+    ]);
+  });
+
+  it('replies under its own new comment, not under a follow-up at the same line', async () => {
+    gh.reviewComments = [
+      inline({ id: 90, body: 'Old thread', created_at: '2026-09-01T10:00:00Z' }),
+      inline({
+        id: 105,
+        in_reply_to_id: 90,
+        user: { login: 'reviewer-bot' },
+        body: 'Follow-up: still unfixed.',
+        created_at: '2026-09-08T10:05:00Z',
+      }),
+      inline({ id: 106, created_at: '2026-09-08T10:06:00Z' }),
+    ];
+
+    await replyOnFindingThread(repo, 5, race, 'Noted', { since: '2026-09-08T09:00:00Z' });
+
+    expect(gh.writes).toEqual([
+      { method: 'POST', url: `/repos/${repo}/pulls/5/comments/106/replies`, body: { body: 'Noted' } },
+    ]);
+  });
+
+  it("replies again on a lineless finding's only comment after an earlier reply", async () => {
+    gh.reviewComments = [
+      inline({ body: 'It can spin forever.' }),
+      inline({
+        id: 102,
+        in_reply_to_id: 101,
+        user: { login: 'reviewer-bot' },
+        body: 'Noted',
+        created_at: '2026-09-08T11:00:00Z',
+      }),
+    ];
+
+    await replyOnFindingThread(repo, 5, { ...race, line: null }, 'Still noted', {
+      since: '2026-09-08T09:00:00Z',
+    });
+
+    expect(gh.writes).toEqual([
+      { method: 'POST', url: `/repos/${repo}/pulls/5/comments/101/replies`, body: { body: 'Still noted' } },
+    ]);
+  });
+
+  it("never replies under someone else's reply on an unrelated thread at the same line", async () => {
+    gh.reviewComments = [
+      inline({ id: 90, body: 'Unrelated old thread', created_at: '2026-09-01T10:00:00Z' }),
+      inline({ id: 91, in_reply_to_id: 90, user: { login: 'pr-author' }, body: 'Done.' }),
+    ];
+
+    await expect(
+      replyOnFindingThread(repo, 5, race, 'Noted', { since: '2026-09-08T09:00:00Z' }),
+    ).rejects.toThrow(/no comment of its own on PR #5/);
     expect(gh.writes).toEqual([]);
   });
 
