@@ -836,6 +836,33 @@ describe('deleteFindingFromReview', () => {
     expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/105` });
   });
 
+  // Same, with a follow-up that does not quote the title: the new comment is
+  // the file's only top-level one, yet it belongs to another finding.
+  it("never takes another finding's comment for a lineless restated finding whose follow-up omits the title", async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ id: 90, line: 30, body: 'Old thread', created_at: '2026-09-01T10:00:00Z' }),
+      inline({
+        id: 105,
+        in_reply_to_id: 90,
+        line: 30,
+        user: { login: 'reviewer-bot' },
+        body: 'Follow-up: still unfixed.',
+      }),
+      inline({ id: 106, line: 5, body: '**LOW**: Unused import' }),
+    ];
+
+    const out = await deleteFindingFromReview(
+      repo,
+      5,
+      { ...race, line: null },
+      { since: '2026-09-08T09:00:00Z' },
+    );
+
+    expect(out.commentDeleted).toBe(false);
+    expect(gh.writes.map((w) => w.method)).toEqual(['PATCH']);
+  });
+
   // A finding listed only in the summary must not take another restated
   // finding's follow-up, even when it is the only new comment on the file.
   it("never takes another restated finding's follow-up for a lineless summary-only finding", async () => {
