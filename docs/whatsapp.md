@@ -190,6 +190,7 @@ the inbox), so no WAHA webhook has to reach it. Watches and the ids of the
 messages already delivered are kept in `app_settings` (`whatsapp_watches`), so
 a restart neither loses nor repeats a reply. Only the 20 newest messages of a
 chat are read per poll. A reply the session cannot take just then (a restart
-drain, no free slot) is read again on the next poll. Watches end with their
+drain, no free slot, or a cap until the operator speaks, noted once in the
+transcript) is read again on the next poll. Watches end with their
 session, or when the project turns WhatsApp tools off, which also drops the
 replies still waiting for the session.

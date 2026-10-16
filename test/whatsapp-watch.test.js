@@ -157,14 +157,41 @@ describe('WhatsApp watches', () => {
     const w = make();
     await w.watch('s1', { account: 'default', chat: CHAT });
     deliver = () => {
-      throw Object.assign(new Error('caps reached'), { status: 429 });
+      throw Object.assign(new Error('not allowed'), { status: 403 });
     };
     chats[CHAT] = [msg('a', T0 + 1000)];
     await w.poll();
     await w.poll();
     expect(notes).toEqual([
-      { id: 's1', text: `WhatsApp: a reply in ${CHAT} could not reach the agent: caps reached` },
+      { id: 's1', text: `WhatsApp: a reply in ${CHAT} could not reach the agent: not allowed` },
     ]);
+    expect(stored[0].seen).toEqual(['a']);
+  });
+
+  it('keeps a reply waiting while the session is at a cap, noted once, and delivers it after', async () => {
+    const w = make();
+    await w.watch('s1', { account: 'default', chat: CHAT });
+    deliver = () => {
+      throw Object.assign(new Error('10 automatic turns ran'), { status: 429 });
+    };
+    chats[CHAT] = [msg('a', T0 + 1000)];
+    await w.poll();
+    chats[CHAT].push(msg('b', T0 + 2000));
+    await w.poll();
+    expect(delivered).toEqual([]);
+    expect(stored[0].seen).toEqual([]);
+    expect(notes).toEqual([
+      { id: 's1', text: `WhatsApp: a reply in ${CHAT} waits for the agent: 10 automatic turns ran` },
+    ]);
+    deliver = (id, delivery) => {
+      delivered.push({ session: id, ...delivery });
+      return { status: 'running' };
+    };
+    await w.poll();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].text).toContain('text a');
+    expect(delivered[0].text).toContain('text b');
+    expect(notes).toHaveLength(1);
   });
 
   it('retries a reply the session could not take for now (a drain, no free slot)', async () => {
@@ -225,6 +252,34 @@ describe('WhatsApp watches', () => {
     await w.watch('s1', { account: 'default', chat: CHAT });
     w.stop();
     expect(stored.map((x) => x.jobId)).toEqual(['s2', 's1']);
+  });
+
+  it('keeps the watches of sessions not restored yet until the registry is complete', async () => {
+    stored = [
+      { jobId: 's9', account: 'default', chat: GROUP, since: sec(T0), expiresAt: T0 + 3600_000, seen: [] },
+    ];
+    let complete = false;
+    const w = createWhatsAppWatcher({
+      service: { messages: async () => ({ messages: [] }) },
+      getJob: (id) => jobs[id] || null,
+      allowed: () => true,
+      deliver: () => ({ status: 'running' }),
+      registryComplete: () => complete,
+      load: async (_key, fallback) => stored ?? fallback,
+      save: async (_key, value) => {
+        stored = structuredClone(value);
+      },
+      now: () => clock,
+      log: (line) => logs.push(line),
+    });
+    await w.init();
+    await w.watch('s1', { account: 'default', chat: CHAT });
+    await w.poll();
+    expect(stored.map((x) => x.jobId)).toEqual(['s9', 's1']);
+    complete = true;
+    await w.poll();
+    w.stop();
+    expect(stored.map((x) => x.jobId)).toEqual(['s1']);
   });
 
   it('starts a watch from the sent message’s own stamp when WAHA stamped it earlier', async () => {

@@ -113,6 +113,7 @@ import {
   replyToReviewFinding,
   retryLoopRound,
   deliverToSession,
+  sessionRegistryComplete,
   mailReceivedDurably,
   cancelMailWakes,
   sessionMailWakeState,
@@ -594,6 +595,7 @@ const whatsappWatcher = createWhatsAppWatcher({
   allowed: (job) => whatsappWatchAllowed(job, getProject(job.repo)),
   deliver: (id, delivery) => deliverToSession(id, delivery, { via: 'whatsapp' }),
   note: noteSession,
+  registryComplete: sessionRegistryComplete,
 });
 setWhatsAppWatchAccess((id) => whatsappWatcher.watching(id));
 api.use(whatsappRoutes({ service: whatsappService }));
