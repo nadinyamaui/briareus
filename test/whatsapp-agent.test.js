@@ -5,8 +5,11 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { whatsappAgentRoutes, whatsappSessionAllowed } from '../lib/whatsapp-agent.js';
+import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
 
 const CHAT = '34600000000@c.us';
+const OTHER = '34611111111@c.us';
+const GROUP = '120363000000000000@g.us';
 const ROUTES = [
   ['/accounts', 'GET'],
   ['/accounts/default/conversations', 'GET'],
@@ -17,7 +20,7 @@ const ROUTES = [
 ];
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-let server, base, job, service, project;
+let server, base, job, service, project, watcher;
 beforeEach(async () => {
   job = { id: 'chat', kind: 'devchat', repo: 'owner/repo', status: 'running' };
   project = { repo: job.repo, enabled: true, whatsappToolsEnabled: true };
@@ -31,12 +34,23 @@ beforeEach(async () => {
     qr: vi.fn(),
     logout: vi.fn(),
     media: vi.fn(async () => new Response(PNG, { headers: { 'Content-Type': 'image/png' } })),
+    createGroup: vi.fn(async (_id, input) => ({ group: { id: GROUP, name: input.name } })),
   };
+  watcher = createWhatsAppWatcher({
+    service,
+    getJob: () => job,
+    allowed: () => true,
+    deliver: () => {},
+    load: async (_key, fallback) => fallback,
+    save: async () => {},
+    log: () => {},
+  });
   const app = express();
   app.use(express.json());
   app.use(
     whatsappAgentRoutes({
       service,
+      watcher,
       getProject: (repo) => (project?.repo === repo ? project : null),
       agentSession: (req, res) => {
         if (req.headers.authorization !== 'Bearer session-token') {
@@ -52,6 +66,7 @@ beforeEach(async () => {
   base = `http://127.0.0.1:${server.address().port}`;
 });
 afterEach(async () => {
+  watcher.stop();
   await new Promise((resolve) => server.close(resolve));
 });
 
@@ -191,6 +206,88 @@ describe('session WhatsApp authorization', () => {
   });
 });
 
+describe('session WhatsApp watches', () => {
+  const json = async (res) => ({ status: res.status, body: await res.json() });
+
+  it('watches the chat a send went to, unless told not to', async () => {
+    const sent = await json(
+      await request(`/accounts/default/conversations/${CHAT}/messages`, 'POST', { text: 'Hola' }),
+    );
+    expect(sent.status).toBe(201);
+    expect(sent.body).toMatchObject({ message: { id: 'sent' }, watch: { chat: CHAT, group: false } });
+    expect(service.send).toHaveBeenCalledWith('default', CHAT, { text: 'Hola' });
+    const quiet = await json(
+      await request(`/accounts/default/conversations/${OTHER}/messages`, 'POST', {
+        text: 'FYI',
+        watch: false,
+      }),
+    );
+    expect(quiet.body).not.toHaveProperty('watch');
+    expect((await json(await request('/watches'))).body.watches.map((w) => w.chat)).toEqual([CHAT]);
+    expect(
+      (await request(`/accounts/default/conversations/${CHAT}/messages`, 'POST', { text: 'x', watch: 'no' }))
+        .status,
+    ).toBe(400);
+  });
+
+  it('opens a group with the given contacts and watches it', async () => {
+    const res = await json(
+      await request('/accounts/default/groups', 'POST', { name: 'OMD dudas', participants: [CHAT, OTHER] }),
+    );
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      group: { id: GROUP, name: 'OMD dudas' },
+      watch: { chat: GROUP, group: true },
+    });
+    expect(service.createGroup).toHaveBeenCalledWith('default', {
+      name: 'OMD dudas',
+      participants: [CHAT, OTHER],
+    });
+  });
+
+  it('starts, extends and ends a watch by hand', async () => {
+    let res = await json(await request(`/accounts/default/conversations/${CHAT}/watch`, 'PUT', { hours: 2 }));
+    expect(res.body.watch).toMatchObject({ chat: CHAT });
+    res = await json(await request(`/accounts/default/conversations/${CHAT}/watch`, 'PUT', { hours: 99 }));
+    expect(res.status).toBe(400);
+    res = await json(await request(`/accounts/default/conversations/${CHAT}/watch`, 'DELETE'));
+    expect(res.body).toEqual({ removed: true });
+    expect((await json(await request('/watches'))).body.watches).toEqual([]);
+  });
+
+  it('limits a turn nobody watches to the chats this session watches', async () => {
+    job.unattendedTurn = true;
+    expect((await request(`/accounts/default/conversations/${CHAT}/messages`)).status).toBe(403);
+    expect(service.messages).not.toHaveBeenCalled();
+    await watcher.watch(job.id, { account: 'default', chat: CHAT });
+    expect((await request(`/accounts/default/conversations/${CHAT}/messages`)).status).toBe(200);
+    expect((await request(`/accounts/default/conversations/${CHAT}/messages/m1/media`)).status).toBe(200);
+    expect((await request(`/accounts/default/conversations/${CHAT}/read`, 'POST')).status).toBe(200);
+    expect(
+      (await request(`/accounts/default/conversations/${CHAT}/messages`, 'POST', { text: 'Ok' })).status,
+    ).toBe(201);
+    for (const [path, method, body] of [
+      [`/accounts/default/conversations/${OTHER}/messages`, 'GET'],
+      [`/accounts/default/conversations/${OTHER}/messages`, 'POST', { text: 'x' }],
+      [`/accounts/default/conversations/${OTHER}/messages/m1/media`, 'GET'],
+      [`/accounts/default/conversations/${OTHER}/read`, 'POST'],
+      [`/accounts/default/conversations/${OTHER}/watch`, 'PUT', {}],
+      ['/accounts/default/conversations', 'GET'],
+      ['/accounts/default/groups', 'POST', { name: 'x', participants: [OTHER] }],
+    ]) {
+      const res = await request(path, method, body);
+      expect(res.status, `${method} ${path}`).toBe(403);
+      expect((await res.json()).error).toMatch(/only the chats this session is watching/);
+    }
+    expect(service.send).toHaveBeenCalledTimes(1);
+    expect(service.conversations).not.toHaveBeenCalled();
+    expect(service.createGroup).not.toHaveBeenCalled();
+    // The project's opt-in still governs it.
+    project.whatsappToolsEnabled = false;
+    expect((await request(`/accounts/default/conversations/${CHAT}/messages`)).status).toBe(403);
+  });
+});
+
 it('drives the actual stdio MCP through authenticated HTTP for every tool', async () => {
   const child = spawn(process.execPath, ['lib/whatsapp-mcp.js'], {
     env: { ...process.env, REVIEWER_MEMORY_URL: base, REVIEWER_MEMORY_TOKEN: 'session-token' },
@@ -218,6 +315,10 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
       'whatsapp_messages',
       'whatsapp_media',
       'whatsapp_send',
+      'whatsapp_create_group',
+      'whatsapp_watches',
+      'whatsapp_watch',
+      'whatsapp_unwatch',
       'whatsapp_mark_read',
     ]);
     const accounts = await tool('whatsapp_accounts');
@@ -239,6 +340,19 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
     expect(service.send).toHaveBeenCalledWith('default', CHAT, { text: 'Hola', replyTo: 'm1' });
     await tool('whatsapp_send', { account: 'default', chat: CHAT, text: 'Sin cita' });
     expect(service.send).toHaveBeenLastCalledWith('default', CHAT, { text: 'Sin cita' });
+    await tool('whatsapp_send', { account: 'default', chat: OTHER, text: 'Sin respuesta', watch: false });
+    const group = JSON.parse(
+      (await tool('whatsapp_create_group', { account: 'default', name: 'Dudas', participants: [CHAT] }))
+        .result.content[0].text,
+    );
+    expect(group.group.id).toBe(GROUP);
+    expect(service.createGroup).toHaveBeenCalledWith('default', { name: 'Dudas', participants: [CHAT] });
+    let watches = JSON.parse((await tool('whatsapp_watches')).result.content[0].text).watches;
+    expect(watches.map((w) => w.chat)).toEqual([CHAT, GROUP]);
+    await tool('whatsapp_watch', { account: 'default', chat: OTHER, hours: 1 });
+    await tool('whatsapp_unwatch', { account: 'default', chat: CHAT });
+    watches = JSON.parse((await tool('whatsapp_watches')).result.content[0].text).watches;
+    expect(watches.map((w) => w.chat)).toEqual([GROUP, OTHER]);
     await tool('whatsapp_mark_read', { account: 'default', chat: CHAT });
     expect(service.markRead).toHaveBeenCalledWith('default', CHAT);
     expect((await tool('whatsapp_logout', { account: 'default' })).result.isError).toBe(true);

@@ -58,7 +58,7 @@ See [the shared browser](api-v1.md#the-shared-browser) and
 | ----------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | Slack             | Channels, DMs, threads, replies, read positions and live events as the connected user                          | Read permitted channels and the user's DMs; send with the project's approval rules                |
 | Gmail and Outlook | Connect and sync mailboxes, search messages, read bodies, reply and move individual messages to provider trash | Opt-in projects can search, read, connect, sync, send, reply, mark read/unread, archive and trash |
-| WhatsApp          | Link through WAHA, read chats, send text replies, mark read and download attachments                           | Opt-in projects can read, open media, reply and mark read through the internal WhatsApp MCP       |
+| WhatsApp          | Link through WAHA, read chats, send text replies, mark read and download attachments                           | Opt-in projects can read, open media, reply, mark read and open groups; replies wake the session  |
 
 These client inbox routes require admin tokens and work independently of
 coding sessions. Session tools enforce their own project and turn access
