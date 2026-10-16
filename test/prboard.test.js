@@ -71,7 +71,7 @@ function prNode({
     isCrossRepository: false,
     reviewDecision,
     closingIssuesReferences: { nodes: issues },
-    commits: { nodes: rollup ? [{ commit: { statusCheckRollup: { state: rollup } } }] : [] },
+    commits: { nodes: rollup ? [{ commit: { oid: 'c0ffee1', statusCheckRollup: { state: rollup } } }] : [] },
   };
 }
 
@@ -345,6 +345,7 @@ describe('projectPulls', () => {
       number: 1,
       branch: 'feature/1',
       baseBranch: 'main',
+      crossRepository: false,
       assignees: ['nadin'],
       reviewers: [
         { user: 'ana', state: 'approved', url: 'review-url' },
@@ -352,6 +353,7 @@ describe('projectPulls', () => {
       ],
       mergeable: 'mergeable',
       checks: 'success',
+      headSha: 'c0ffee1',
       reviewDecision: 'review_required',
       recommended: 'review',
     });
@@ -1006,6 +1008,7 @@ describe('projectPulls', () => {
       const by = new Map(pulls.map((p) => [p.number, p.stack]));
       expect(by.get(9)).toBeNull();
       expect(by.get(3)).toMatchObject({ position: 3, total: 3 });
+      expect(pulls.find((p) => p.number === 9).crossRepository).toBe(true);
     });
 
     it('lists the stack in the same order whatever order GitHub lists it in', async () => {

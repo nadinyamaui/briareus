@@ -25,7 +25,7 @@ vi.mock('../lib/prtasks.js', () => ({
   prBodyPrompt: vi.fn(() => 'BODY'),
 }));
 
-import { ACTIONS, getAction, listActions } from '../lib/actions.js';
+import { ACTIONS, getAction, listActions, actionSessionSpec } from '../lib/actions.js';
 import * as prtasks from '../lib/prtasks.js';
 
 beforeEach(() => {
@@ -294,5 +294,46 @@ describe('implement-feedback', () => {
   it('a GitHub that will not answer still produces a prompt, with no head start', async () => {
     stubs.latestReviewFindings.mockRejectedValue(new Error('rate limited'));
     expect(await action.prompt(args)).toBe('IMPLEMENT:');
+  });
+});
+
+describe('actionSessionSpec', () => {
+  const context = {
+    repo: 'a/b',
+    prNumber: 4,
+    branch: 'feature/x',
+    baseBranch: 'main',
+    title: 'T',
+    project: null,
+    input: '',
+  };
+
+  it('checks out the PR branch in a worktree for an errand that pushes, and closes it when done', async () => {
+    expect(await actionSessionSpec(getAction('fix-checks'), context)).toEqual({
+      repo: 'a/b',
+      branch: 'feature/x',
+      local: false,
+      prompt: 'CHECKS',
+      prNumber: 4,
+      prBranch: 'feature/x',
+      autoClose: true,
+      reviewLoop: false,
+      title: 'Fix checks: #4',
+      activity: 'fix-checks',
+    });
+  });
+
+  it('leaves the local checkout alone for a gh-only errand, still filed under the PR branch', async () => {
+    const spec = await actionSessionSpec(getAction('delete-self-comments'), {
+      ...context,
+      project: { reviewAuthor: 'nadin' },
+    });
+    expect(spec).toMatchObject({ branch: undefined, local: true, prBranch: 'feature/x', autoClose: true });
+  });
+
+  it('arms the review loop for implement-feedback and awaits its prompt', async () => {
+    stubs.latestReviewFindings.mockResolvedValue([{ title: 'Fresh' }]);
+    const spec = await actionSessionSpec(getAction('implement-feedback'), context);
+    expect(spec).toMatchObject({ reviewLoop: true, autoClose: false, prompt: 'IMPLEMENT:Fresh' });
   });
 });

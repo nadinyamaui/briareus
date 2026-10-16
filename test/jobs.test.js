@@ -278,6 +278,7 @@ import {
   createDevSession,
   stepProvider,
   devSessionSlots,
+  pullRequestHasOpenSession,
   dropQueuedMessage,
   cancelDevTurn,
   closeDevSessionWithReason,
@@ -754,6 +755,52 @@ describe('devSessionSlots', () => {
     state.claimsServer = true;
     state.capacity = 2;
     expect(devSessionSlots('acme/shop')).toBe(2);
+  });
+});
+
+describe('pullRequestHasOpenSession', () => {
+  // Own repo and PR numbers, so the rows restored here match nothing the other blocks sync.
+  const row = (id, over) => ({
+    id,
+    kind: 'devchat',
+    status: 'closed',
+    repo: 'acme/babysit',
+    turns: 1,
+    ...over,
+  });
+
+  beforeAll(async () => {
+    state.stored = [
+      row('bs-number', { branch: 'dev-x', startedOnPr: 211 }),
+      row('bs-synced', { branch: 'dev-y', prStatus: { number: 212, state: 'open' } }),
+      row('bs-borrowed', { branch: 'dev-z', prBranch: 'feature/213' }),
+      row('bs-own-branch', { branch: 'feature/214' }),
+      row('bs-preparing', { branch: null, startBranch: 'feature/216' }),
+      row('bs-closed', { branch: 'feature/215', startedOnPr: 215 }),
+    ];
+    await initJobs();
+    for (const id of ['bs-number', 'bs-synced', 'bs-borrowed', 'bs-own-branch', 'bs-preparing'])
+      getJob(id).status = 'idle';
+  });
+
+  it('finds an open session by the pull request it was started on or synced to', () => {
+    expect(pullRequestHasOpenSession('acme/babysit', 211, 'feature/211')).toBe(true);
+    expect(pullRequestHasOpenSession('ACME/Babysit', 212, 'feature/212')).toBe(true);
+  });
+
+  it('finds one by the branch it is filed under or checked out on', () => {
+    expect(pullRequestHasOpenSession('acme/babysit', 213, 'feature/213')).toBe(true);
+    expect(pullRequestHasOpenSession('acme/babysit', 214, 'feature/214')).toBe(true);
+  });
+
+  it('finds one still preparing on the branch it was started on', () => {
+    expect(pullRequestHasOpenSession('acme/babysit', 216, 'feature/216')).toBe(true);
+  });
+
+  it('ignores closed sessions, other repositories and a missing branch', () => {
+    expect(pullRequestHasOpenSession('acme/babysit', 215, 'feature/215')).toBe(false);
+    expect(pullRequestHasOpenSession('acme/other', 211, 'feature/213')).toBe(false);
+    expect(pullRequestHasOpenSession('acme/babysit', 299, '')).toBe(false);
   });
 });
 
@@ -8148,6 +8195,7 @@ describe('the CI verdict a worker hands its orchestrator', () => {
   });
   const green = () =>
     rollupOf([identified(1, 'Fast checks', 'success', 't1'), identified(2, 'Tests', 'success', 't2')]);
+  let mirroredAt;
   // The updates this worker put in the orchestrator's buffer, joined.
   const notices = (workerId) =>
     (getJob('ci-orch').pendingWorkerNotices || [])
@@ -8299,7 +8347,13 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       }),
     ];
     await initJobs();
-    for (const j of state.stored) getJob(j.id).status = 'idle';
+    mirroredAt = new Date().toISOString();
+    for (const j of state.stored) {
+      getJob(j.id).status = 'idle';
+      // Just synced, so the 20s tick every initJobs above left running skips these
+      // open PRs (55s cadence) instead of reading them before a test sets its answer.
+      if (j.prStatus) getJob(j.id).prStatus.syncedAt = mirroredAt;
+    }
     getJob('ci-orch').status = 'idle';
     getJob('ci-orch').awaitingAnswer = true;
     githubRest.mockImplementation(async (_cfg, _method, url) => {
@@ -8445,13 +8499,13 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     );
     syncSessionsOn('acme/ci', null, 213);
     const job = getJob('ci-same-runs');
-    await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
+    await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe(mirroredAt));
     expect(notices('ci-same-runs')).toBe('');
   });
 
   it('says nothing again on the next sync of the same finished run', async () => {
     syncSessionsOn('acme/ci', null, 205);
-    await vi.waitFor(() => expect(getJob('ci-again').prStatus.syncedAt).not.toBe('2026-08-25T13:00:00.000Z'));
+    await vi.waitFor(() => expect(getJob('ci-again').prStatus.syncedAt).not.toBe(mirroredAt));
     expect(notices('ci-again')).toBe('');
   });
 });
