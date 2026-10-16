@@ -882,6 +882,71 @@ describe('deleteFindingFromReview', () => {
     expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/105` });
   });
 
+  // A dashboard Reply sits beside the finding's only comment on its file.
+  it("still takes a lineless finding's only top-level comment after a reply on it", async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ body: 'It can spin forever.' }),
+      inline({
+        id: 102,
+        in_reply_to_id: 101,
+        user: { login: 'reviewer-bot' },
+        body: 'Will fix.',
+        created_at: '2026-09-08T11:00:00Z',
+      }),
+    ];
+
+    const out = await deleteFindingFromReview(
+      repo,
+      5,
+      { ...race, line: null },
+      { since: '2026-09-08T09:00:00Z' },
+    );
+
+    expect(out.commentDeleted).toBe(true);
+    expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/101` });
+  });
+
+  // Another finding's follow-up on an old thread at the same line comes first.
+  it("never takes another finding's follow-up at the same line as its own comment", async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ id: 90, body: 'Old thread', created_at: '2026-09-01T10:00:00Z' }),
+      inline({
+        id: 105,
+        in_reply_to_id: 90,
+        user: { login: 'reviewer-bot' },
+        body: 'Follow-up: still unfixed.',
+        created_at: '2026-09-08T10:05:00Z',
+      }),
+      inline({ id: 106, created_at: '2026-09-08T10:06:00Z' }),
+    ];
+
+    await deleteFindingFromReview(repo, 5, race, { since: '2026-09-08T09:00:00Z' });
+
+    expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/106` });
+  });
+
+  it('deletes nothing when comments from two threads share the line and neither quotes the title', async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ id: 90, body: 'Old thread', created_at: '2026-09-01T10:00:00Z' }),
+      inline({
+        id: 105,
+        in_reply_to_id: 90,
+        user: { login: 'reviewer-bot' },
+        body: 'Follow-up: still unfixed.',
+        created_at: '2026-09-08T10:05:00Z',
+      }),
+      inline({ id: 106, body: 'Off by one.', created_at: '2026-09-08T10:06:00Z' }),
+    ];
+
+    const out = await deleteFindingFromReview(repo, 5, race, { since: '2026-09-08T09:00:00Z' });
+
+    expect(out.commentDeleted).toBe(false);
+    expect(gh.writes.map((w) => w.method)).toEqual(['PATCH']);
+  });
+
   it('counts no reply at all when the token’s own login cannot be read', async () => {
     gh.viewer = null;
     gh.comments = [findingsComment(entries, 7)];
@@ -985,6 +1050,47 @@ describe('replyOnFindingThread', () => {
 
     expect(gh.writes).toEqual([
       { method: 'POST', url: `/repos/${repo}/pulls/5/comments/101/replies`, body: { body: 'Noted' } },
+    ]);
+  });
+
+  it('replies under its own new comment, not under a follow-up at the same line', async () => {
+    gh.reviewComments = [
+      inline({ id: 90, body: 'Old thread', created_at: '2026-09-01T10:00:00Z' }),
+      inline({
+        id: 105,
+        in_reply_to_id: 90,
+        user: { login: 'reviewer-bot' },
+        body: 'Follow-up: still unfixed.',
+        created_at: '2026-09-08T10:05:00Z',
+      }),
+      inline({ id: 106, created_at: '2026-09-08T10:06:00Z' }),
+    ];
+
+    await replyOnFindingThread(repo, 5, race, 'Noted', { since: '2026-09-08T09:00:00Z' });
+
+    expect(gh.writes).toEqual([
+      { method: 'POST', url: `/repos/${repo}/pulls/5/comments/106/replies`, body: { body: 'Noted' } },
+    ]);
+  });
+
+  it("replies again on a lineless finding's only comment after an earlier reply", async () => {
+    gh.reviewComments = [
+      inline({ body: 'It can spin forever.' }),
+      inline({
+        id: 102,
+        in_reply_to_id: 101,
+        user: { login: 'reviewer-bot' },
+        body: 'Noted',
+        created_at: '2026-09-08T11:00:00Z',
+      }),
+    ];
+
+    await replyOnFindingThread(repo, 5, { ...race, line: null }, 'Still noted', {
+      since: '2026-09-08T09:00:00Z',
+    });
+
+    expect(gh.writes).toEqual([
+      { method: 'POST', url: `/repos/${repo}/pulls/5/comments/101/replies`, body: { body: 'Still noted' } },
     ]);
   });
 
