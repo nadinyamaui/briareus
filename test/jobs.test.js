@@ -3973,23 +3973,58 @@ describe('webhook deliveries', () => {
   it('takes a WhatsApp reply with the webhook off, says it is one, and keeps it when the webhook is saved off', async () => {
     const { prompts } = fakeCli();
     const job = getJob('hk-whatsapp');
-    job.awaitingAnswer = true;
-    expect(
-      deliverToSession(
-        'hk-whatsapp',
-        { text: 'Sí, abre el grupo', source: 'WhatsApp 34600000000@c.us' },
-        { via: 'whatsapp' },
-      ),
-    ).toEqual({ status: 'held', held: 1 });
-    setSessionWebhook('hk-whatsapp', { armed: false });
-    expect(job.pendingDeliveries).toHaveLength(1);
-    sendDevMessage('hk-whatsapp', 'Go on');
-    await cli.finish(job, 0, 0);
-    await vi.waitFor(() => expect(prompts).toHaveLength(2));
-    expect(prompts[1]).toMatch(/^WhatsApp reply, not from the operator\. /);
-    expect(prompts[1]).toMatch(/--- delivery, from WhatsApp 34600000000@c\.us, [^\n]+\nSí, abre el grupo\n/);
-    expect(job.unattendedTurn).toBe(true);
-    await cli.finish(job, 0, 1);
+    const project = { repo: 'acme/hook', enabled: true, whatsappToolsEnabled: true };
+    state.projects.push(project);
+    try {
+      job.awaitingAnswer = true;
+      expect(
+        deliverToSession(
+          'hk-whatsapp',
+          { text: 'Sí, abre el grupo', source: 'WhatsApp 34600000000@c.us' },
+          { via: 'whatsapp' },
+        ),
+      ).toEqual({ status: 'held', held: 1 });
+      setSessionWebhook('hk-whatsapp', { armed: false });
+      expect(job.pendingDeliveries).toHaveLength(1);
+      sendDevMessage('hk-whatsapp', 'Go on');
+      await cli.finish(job, 0, 0);
+      await vi.waitFor(() => expect(prompts).toHaveLength(2));
+      expect(prompts[1]).toMatch(/^WhatsApp reply, not from the operator\. /);
+      expect(prompts[1]).toMatch(
+        /--- delivery, from WhatsApp 34600000000@c\.us, [^\n]+\nSí, abre el grupo\n/,
+      );
+      expect(job.unattendedTurn).toBe(true);
+      await cli.finish(job, 0, 1);
+    } finally {
+      state.projects.splice(state.projects.indexOf(project), 1);
+    }
+  });
+
+  it('drops a held WhatsApp reply once the project turns WhatsApp off', async () => {
+    const { prompts } = fakeCli();
+    const job = getJob('hk-whatsapp');
+    const project = { repo: 'acme/hook', enabled: true, whatsappToolsEnabled: true };
+    state.projects.push(project);
+    try {
+      job.awaitingAnswer = true;
+      expect(
+        deliverToSession(
+          'hk-whatsapp',
+          { text: 'Llámame', source: 'WhatsApp 34600000000@c.us' },
+          { via: 'whatsapp' },
+        ),
+      ).toMatchObject({ status: 'held' });
+      project.whatsappToolsEnabled = false;
+      job.awaitingAnswer = false;
+      flushDeliveries(job);
+      await flushJobs();
+      expect(job.pendingDeliveries).toEqual([]);
+      expect(prompts.join('\n')).not.toContain('Llámame');
+    } finally {
+      job.awaitingAnswer = false;
+      job.pendingDeliveries = [];
+      state.projects.splice(state.projects.indexOf(project), 1);
+    }
   });
 
   describe('email wake deliveries', () => {

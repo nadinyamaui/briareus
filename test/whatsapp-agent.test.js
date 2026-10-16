@@ -230,6 +230,15 @@ describe('session WhatsApp watches', () => {
     ).toBe(400);
   });
 
+  it('starts the watch from the sent message’s own stamp', async () => {
+    const stamp = Math.floor(Date.now() / 1000) - 30;
+    service.send.mockResolvedValueOnce({ message: { id: 'sent', text: 'Hola', timestamp: stamp } });
+    const sent = await json(
+      await request(`/accounts/default/conversations/${CHAT}/messages`, 'POST', { text: 'Hola' }),
+    );
+    expect(sent.body.watch.since).toBe(new Date(stamp * 1000).toISOString());
+  });
+
   it('opens a group with the given contacts and watches it', async () => {
     const res = await json(
       await request('/accounts/default/groups', 'POST', { name: 'OMD dudas', participants: [CHAT, OTHER] }),

@@ -122,12 +122,18 @@ describe('WhatsApp watches', () => {
     expect(renewed.expiresAt).toBe(new Date(clock + 24 * 3600_000).toISOString());
     await w.poll();
     expect(delivered).toHaveLength(1);
-    clock += 24 * 3600_000 + 1;
-    chats[CHAT].push(msg('late', clock - 1000));
+    const end = clock + 24 * 3600_000;
+    clock = end + 10_000;
+    chats[CHAT].push(msg('before', end - 5000), msg('after', end + 5000));
     expect(w.watching('s1')).toBe(false);
+    // Read once more for what was written before it lapsed, then ended.
     await w.poll();
-    expect(delivered).toHaveLength(1);
+    expect(delivered).toHaveLength(2);
+    expect(delivered[1].text).toContain('text before');
+    expect(delivered[1].text).not.toContain('text after');
     expect(stored).toEqual([]);
+    await w.poll();
+    expect(delivered).toHaveLength(2);
   });
 
   it('keeps sessions apart and ends the watches of sessions that can no longer take them', async () => {
@@ -159,6 +165,99 @@ describe('WhatsApp watches', () => {
     expect(notes).toEqual([
       { id: 's1', text: `WhatsApp: a reply in ${CHAT} could not reach the agent: caps reached` },
     ]);
+  });
+
+  it('retries a reply the session could not take for now (a drain, no free slot)', async () => {
+    const w = make();
+    await w.watch('s1', { account: 'default', chat: CHAT });
+    deliver = () => {
+      throw Object.assign(new Error('the server is restarting'), { status: 409 });
+    };
+    chats[CHAT] = [msg('a', T0 + 1000)];
+    await w.poll();
+    await w.poll();
+    expect(delivered).toEqual([]);
+    expect(stored[0].seen).toEqual([]);
+    expect(logs.filter((l) => l.includes('waits: the server is restarting'))).toHaveLength(1);
+    deliver = (id, delivery) => {
+      delivered.push({ session: id, ...delivery });
+      return { status: 'running' };
+    };
+    await w.poll();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].text).toContain('text a');
+    expect(notes).toEqual([]);
+    await w.poll();
+    expect(delivered).toHaveLength(1);
+  });
+
+  it('saves nothing until the stored watches are read, so a failed load never wipes them', async () => {
+    stored = [
+      { jobId: 's2', account: 'default', chat: GROUP, since: sec(T0), expiresAt: T0 + 3600_000, seen: [] },
+    ];
+    const real = stored;
+    let down = true;
+    const w = createWhatsAppWatcher({
+      service: { messages: async () => ({ messages: [] }) },
+      getJob: (id) => jobs[id] || null,
+      allowed: () => true,
+      deliver: () => ({ status: 'running' }),
+      load: async (_key, fallback) => {
+        if (down) throw new Error('database unavailable');
+        return stored ?? fallback;
+      },
+      save: async (_key, value) => {
+        stored = structuredClone(value);
+      },
+      now: () => clock,
+      log: (line) => logs.push(line),
+    });
+    await expect(w.init()).rejects.toThrow(/database unavailable/);
+    await expect(w.watch('s1', { account: 'default', chat: CHAT })).rejects.toMatchObject({ status: 503 });
+    await expect(w.unwatch('s1', 'default', CHAT)).rejects.toMatchObject({ status: 503 });
+    await w.poll();
+    await w.poll();
+    expect(logs.filter((l) => l.includes('could not load watches'))).toHaveLength(1);
+    expect(stored).toBe(real);
+    down = false;
+    await w.poll();
+    expect(w.watching('s2', 'default', GROUP)).toBe(true);
+    await w.watch('s1', { account: 'default', chat: CHAT });
+    w.stop();
+    expect(stored.map((x) => x.jobId)).toEqual(['s2', 's1']);
+  });
+
+  it('starts a watch from the sent message’s own stamp when WAHA stamped it earlier', async () => {
+    const w = make();
+    clock = T0 + 1400;
+    const view = await w.watch('s1', { account: 'default', chat: CHAT, since: sec(T0) });
+    expect(view.since).toBe(new Date(T0).toISOString());
+    chats[CHAT] = [msg('quick', T0 + 500)];
+    await w.poll();
+    expect(delivered).toHaveLength(1);
+    // A later stamp never narrows the watch past the time it began.
+    const other = await w.watch('s2', { account: 'default', chat: CHAT, since: sec(T0) + 60 });
+    expect(other.since).toBe(new Date(sec(clock) * 1000).toISOString());
+    w.stop();
+  });
+
+  it('reports a watch as kept when only its save failed', async () => {
+    const w = createWhatsAppWatcher({
+      service: { messages: async () => ({ messages: [] }) },
+      getJob: (id) => jobs[id] || null,
+      allowed: () => true,
+      deliver: () => ({ status: 'running' }),
+      load: async (_key, fallback) => fallback,
+      save: async () => {
+        throw new Error("Table 'app_settings' is locked");
+      },
+      now: () => clock,
+      log: (line) => logs.push(line),
+    });
+    await expect(w.watch('s1', { account: 'default', chat: CHAT })).resolves.toMatchObject({ chat: CHAT });
+    expect(w.watching('s1', 'default', CHAT)).toBe(true);
+    await vi.waitFor(() => expect(logs).toContain("could not save watches: Table 'app_settings' is locked"));
+    w.stop();
   });
 
   it('logs an unreadable chat once and keeps the watch', async () => {

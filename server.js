@@ -2127,7 +2127,9 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   setInterval(checkProviderAuth, AUTH_RECHECK_MS).unref();
   await initJobs({ deferPolling: true });
   // After the sessions: a watch whose session is not loaded yet would be dropped.
-  await whatsappWatcher.init().catch((e) => console.error('Could not load WhatsApp watches:', e.message));
+  await whatsappWatcher
+    .init()
+    .catch((e) => console.error('Could not load WhatsApp watches (tried again every poll):', e.message));
   // `npm run create-token` writes the database directly; a revoked token stops new requests
   // within 15s and open streams within 30s.
   setInterval(() => {
