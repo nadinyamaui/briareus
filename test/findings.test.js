@@ -791,6 +791,41 @@ describe('deleteFindingFromReview', () => {
     expect(gh.writes.map((w) => w.method)).toEqual(['PATCH']);
   });
 
+  // A still-unfixed earlier finding is restated as a reply on its old thread.
+  it('deletes only the follow-up reply of a restated finding, never its thread', async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ created_at: '2026-09-01T10:00:00Z' }),
+      inline({ id: 103, in_reply_to_id: 101, body: 'Follow-up: still unfixed.' }),
+    ];
+
+    const out = await deleteFindingFromReview(repo, 5, race, { since: '2026-09-08T09:00:00Z' });
+
+    expect(out.commentDeleted).toBe(true);
+    expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/103` });
+    expect(gh.writes.map((w) => w.method)).toEqual(['DELETE', 'PATCH']);
+  });
+
+  // A lineless restated finding must not take the one new comment on its file,
+  // which belongs to another finding.
+  it("never takes another finding's comment for a lineless restated finding", async () => {
+    gh.comments = [findingsComment(entries, 7)];
+    gh.reviewComments = [
+      inline({ id: 90, line: 30, body: 'Old thread', created_at: '2026-09-01T10:00:00Z' }),
+      inline({ id: 104, line: 5, body: '**LOW**: Unused import' }),
+      inline({
+        id: 105,
+        in_reply_to_id: 90,
+        line: 30,
+        body: 'Follow-up: Race in the retry loop is still there.',
+      }),
+    ];
+
+    await deleteFindingFromReview(repo, 5, { ...race, line: null }, { since: '2026-09-08T09:00:00Z' });
+
+    expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/105` });
+  });
+
   it('warns when the block cannot be rewritten: the comment is already gone', async () => {
     gh.comments = [findingsComment(entries, 7)];
     gh.reviewComments = [inline()];
@@ -863,6 +898,19 @@ describe('replyOnFindingThread', () => {
       /no comment of its own on PR #5/,
     );
     expect(gh.writes).toEqual([]);
+  });
+
+  it("replies under a restated finding's thread root, not under its follow-up", async () => {
+    gh.reviewComments = [
+      inline({ created_at: '2026-09-01T10:00:00Z' }),
+      inline({ id: 103, in_reply_to_id: 101, body: 'Follow-up: still unfixed.' }),
+    ];
+
+    await replyOnFindingThread(repo, 5, race, 'Noted', { since: '2026-09-08T09:00:00Z' });
+
+    expect(gh.writes).toEqual([
+      { method: 'POST', url: `/repos/${repo}/pulls/5/comments/101/replies`, body: { body: 'Noted' } },
+    ]);
   });
 
   it('says what GitHub refused', async () => {
