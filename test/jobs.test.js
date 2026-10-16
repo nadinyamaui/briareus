@@ -6095,6 +6095,12 @@ describe('the review loop: a pending round that is past giving up on', () => {
   // Failing since long before the deadline, and failing for less than it.
   const ancient = '2026-08-25T12:31:00.000Z';
   let recent;
+  const workerIds = ['stuck-1', 'stuck-2', 'stuck-3', 'stuck-4', 'stuck-5', 'stuck-6'];
+  // Every earlier initJobs() leaves a real 20s syncDevPrs tick running, and a tick resolves
+  // any due round with whatever the mocks answer then. Each round stays parked until its
+  // own test nudges it, and the block's sessions are retired once it is done.
+  const PARKED = '2999-01-01T00:00:00.000Z';
+  const DUE = '2026-08-25T12:35:00.000Z';
 
   beforeAll(async () => {
     recent = new Date(Date.now() - 29 * 60_000).toISOString();
@@ -6118,9 +6124,8 @@ describe('the review loop: a pending round that is past giving up on', () => {
       workerRow('stuck-6', 84, { failingSince: recent }),
     ];
     await initJobs();
-    for (const id of ['stuck-orch', 'stuck-1', 'stuck-2', 'stuck-3', 'stuck-4', 'stuck-5', 'stuck-6']) {
-      getJob(id).status = 'idle';
-    }
+    for (const id of workerIds) getJob(id).reviewLoop.pendingResult.nextRetryAt = PARKED;
+    for (const id of ['stuck-orch', ...workerIds]) getJob(id).status = 'idle';
     githubRest.mockImplementation(async (_cfg, _method, url) => {
       const m = /^\/repos\/acme\/stuck\/pulls\/(\d+)$/.exec(url);
       if (m) {
@@ -6149,8 +6154,16 @@ describe('the review loop: a pending round that is past giving up on', () => {
     throw new Error('the loop never reached the expected state');
   };
 
+  afterAll(() => {
+    for (const id of ['stuck-orch', ...workerIds]) getJob(id).status = 'closed';
+  });
+
   // The sync tick's path: the branch event mirrors the PR, and the settle drains the round.
-  const nudge = (prNumber) => syncSessionsOn('acme/stuck', `task/stuck-${prNumber}`);
+  const nudge = (prNumber) => {
+    const pending = getJob(`stuck-${prNumber - 78}`).reviewLoop.pendingResult;
+    if (pending?.nextRetryAt === PARKED) pending.nextRetryAt = DUE;
+    return syncSessionsOn('acme/stuck', `task/stuck-${prNumber}`);
+  };
   const refuse = (n, message = 'GitHub answered 401 listing PR comments') => {
     for (let i = 0; i < n; i++) latestReviewFindings.mockRejectedValueOnce(new Error(message));
   };
@@ -6210,7 +6223,7 @@ describe('the review loop: a pending round that is past giving up on', () => {
     latestReviewFindings.mockRejectedValueOnce(limited);
     const before = latestReviewFindings.mock.calls.length;
     nudge(82);
-    await waitFor(() => parent.reviewLoop.pendingResult.nextRetryAt !== '2026-08-25T12:35:00.000Z');
+    await waitFor(() => parent.reviewLoop.pendingResult.nextRetryAt !== DUE);
     const pending = parent.reviewLoop.pendingResult;
     // The round is still the loop's next step, retried when the limit lifts.
     expect(pending).toMatchObject({ prNumber: 82, round: 1 });
