@@ -88,8 +88,8 @@ describe('SSH permission boundary', () => {
     expect(execute).not.toHaveBeenCalled();
     service.decide(request.id, 'approve');
     expect(() => service.decide(request.id, 'approve')).toThrow('no longer');
-    const { hasDbCredentials, hasPassword, ...stored } = server;
-    expect(execute).toHaveBeenCalledExactlyOnceWith(stored, request.command, 60);
+    const { hasDbCredentials, hasPassword, hasSudoPassword, ...stored } = server;
+    expect(execute).toHaveBeenCalledExactlyOnceWith(stored, request.command, 60, false);
     await Promise.resolve();
     expect(service.result(job, request.id).status).toBe('completed');
   });
@@ -380,3 +380,117 @@ describe('SSH password', () => {
     expect(JSON.stringify(result)).not.toContain('secret');
   });
 });
+
+describe('SSH sudo password', () => {
+  it('stores sudo separately, hides it, preserves it across edits and restarts, and clears it', async () => {
+    const server = await service.create({ ...input, sudoPassword: 'sudo secret', password: 'ssh secret' });
+    expect(server).toMatchObject({ hasSudoPassword: true, hasPassword: true });
+    expect(JSON.stringify(server)).not.toMatch(/sudo secret|sudoPasswordSealed/);
+    expect(server).not.toHaveProperty('sudoPassword');
+    await service.update(server.id, { label: 'Renamed' });
+    const rows = save.mock.calls.at(-1)[1];
+    expect(open(rows[0].sudoPasswordSealed)).toBe('sudo secret');
+    expect(open(rows[0].passwordSealed)).toBe('ssh secret');
+    const restored = createSshService({ load: async () => rows });
+    await restored.init();
+    expect(restored.list()[0].hasSudoPassword).toBe(true);
+    expect(JSON.stringify(rows)).not.toContain('sudo secret');
+    await service.update(server.id, { sudoPassword: 'replacement' });
+    expect(open(save.mock.calls.at(-1)[1][0].sudoPasswordSealed)).toBe('replacement');
+    expect((await service.update(server.id, { sudoPassword: '' })).hasSudoPassword).toBe(false);
+  });
+  it.each([null, 123, 'a\nb', 'a\rb', 'a\0b', 'é'.repeat(512)])(
+    'rejects invalid sudo passwords %#',
+    async (sudoPassword) => {
+      await expect(service.create({ ...input, sudoPassword })).rejects.toThrow('Sudo password');
+      expect(save).not.toHaveBeenCalled();
+    },
+  );
+  it('requires an explicit flag and a stored sudo password', async () => {
+    const server = await service.create(input);
+    expect(() => service.request(job, { serverId: server.id, command: 'id', sudo: true })).toThrow(
+      'No sudo password',
+    );
+    expect(() => service.request(job, { serverId: server.id, command: 'id', sudo: 'true' })).toThrow(
+      'boolean',
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it('shows the elevated command for approval, executes once, and cancels approval after a credential edit', async () => {
+    const server = await service.create({ ...input, sudoPassword: 'secret' });
+    const request = service.request(job, {
+      serverId: server.id,
+      command: 'printf \'%s\' "hello"',
+      sudo: true,
+    });
+    expect(request.command).toMatch(/^sudo -S/);
+    expect(request.command).toContain('exec </dev/null');
+    expect(JSON.stringify(request)).not.toContain('secret');
+    expect(request.status).toBe('pending');
+    expect(execute).not.toHaveBeenCalled();
+    service.decide(request.id, 'approve');
+    expect(execute).toHaveBeenCalledExactlyOnceWith(save.mock.calls.at(-1)[1][0], request.command, 60, true);
+    const pending = service.request(job, { serverId: server.id, command: 'id', sudo: true });
+    await service.update(server.id, { sudoPassword: 'new' });
+    expect(service.result(job, pending.id).status).toBe('cancelled');
+  });
+  it('sends sudo secrets only on stdin, retains SSH key auth, and redacts echoed secrets', async () => {
+    const secret = 'sudo $`secret';
+    await service.create({ ...input, sudoPassword: secret });
+    const stored = save.mock.calls.at(-1)[1][0];
+    const stdin = { end: vi.fn(), on: vi.fn() };
+    execFile.mockImplementation((_bin, _args, _options, cb) => {
+      cb({ code: 1, message: secret }, secret, secret);
+      return { stdin };
+    });
+    const result = await executeSsh(stored, "sudo -S -p '' -- sh -c 'exec </dev/null; id'", 10, true);
+    const [, args, options] = execFile.mock.calls.at(-1);
+    expect(args).toContain('BatchMode=yes');
+    expect(args).not.toContain('PreferredAuthentications=password');
+    expect(JSON.stringify([args, options, result])).not.toContain(secret);
+    expect(result).toMatchObject({ stdout: '[REDACTED]', stderr: '[REDACTED]', error: '[REDACTED]' });
+    expect(stdin.end).toHaveBeenCalledWith(secret + '\n');
+    stdin.end.mockClear();
+    await executeSsh(stored, 'id', 10);
+    expect(stdin.end).toHaveBeenCalledWith(undefined);
+  });
+});
+
+it.each([true, false])(
+  'runs the approved command without leaking stdin (sudo prompts: %s)',
+  async (prompts) => {
+    const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { execFile: realExecFile } = await vi.importActual('node:child_process');
+    const dir = await mkdtemp(join(tmpdir(), 'sudo-command-test-'));
+    try {
+      await writeFile(
+        join(dir, 'sudo'),
+        '#!/bin/sh\nif [ "$1" != "-S" ]; then exit 2; fi\nshift 4\n' +
+          (prompts ? 'IFS= read -r password\n[ "$password" = "private-password" ] || exit 3\n' : '') +
+          'exec "$@"\n',
+        { mode: 0o700 },
+      );
+      const server = await service.create({ ...input, sudoPassword: 'private-password' });
+      const literal = "spaces 'quotes' $HOME `id`";
+      const command = "printf '%s\\n' \"spaces 'quotes' \\$HOME \\`id\\`\"; cat";
+      const r = service.request(job, { serverId: server.id, command, sudo: true });
+      const result = await new Promise((resolve, reject) => {
+        const child = realExecFile(
+          '/bin/sh',
+          ['-c', r.command],
+          { env: { ...process.env, PATH: dir + ':' + process.env.PATH }, timeout: 5000 },
+          (err, stdout, stderr) => {
+            if (err) reject(err);
+            else resolve({ stdout, stderr });
+          },
+        );
+        child.stdin.end('private-password\n');
+      });
+      expect(result).toEqual({ stdout: literal + '\n', stderr: '' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
