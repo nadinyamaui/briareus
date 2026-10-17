@@ -98,28 +98,41 @@ describe('Claude account transfer', () => {
     }
   });
 
-  it.each(["You've hit your limit", "You've hit your session limit", 'You’ve hit your session limit'])(
-    'recognizes %s only in main-thread quota failures',
-    (limit) => {
-      const text = `${limit} · resets 8pm (Europe/Berlin)`;
-      for (const message of [
-        { type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text }] } },
-        { type: 'assistant', error: 'rate_limit', message: { content: text } },
-        { type: 'result', is_error: true, result: text },
-        { type: 'result', is_error: true, errors: [text] },
-      ]) {
-        expect(claudeQuotaFailure(message)).toBe(true);
-        expect(claudeQuotaFailure({ ...message, parent_tool_use_id: 'agent' })).toBe(false);
-      }
-      expect(
-        claudeQuotaFailure({
-          type: 'user',
-          message: { content: [{ type: 'tool_result', is_error: true, content: text }] },
-        }),
-      ).toBe(false);
-      expect(claudeQuotaFailure({ type: 'result', result: text })).toBe(false);
-    },
-  );
+  it.each([
+    "You've hit your limit",
+    "You've hit your session limit",
+    'You’ve hit your session limit',
+    "You've hit your weekly limit",
+    "You've hit your 5-hour limit",
+    "You've hit your Opus limit",
+    "You've hit your Sonnet limit",
+    "You've hit your Fable limit",
+    "You've hit your usage limit",
+    "You've hit your usage credit limit",
+    "You've hit your org's monthly usage limit",
+    "You've hit your org's monthly spend limit",
+    "You've hit your monthly spend limit",
+    "You've hit your individual spend limit",
+    "You've hit your individual usage limit",
+  ])('recognizes %s only in main-thread quota failures', (limit) => {
+    const text = `${limit} · resets 8pm (Europe/Berlin)`;
+    for (const message of [
+      { type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text }] } },
+      { type: 'assistant', error: 'rate_limit', message: { content: text } },
+      { type: 'result', is_error: true, result: text },
+      { type: 'result', is_error: true, errors: [text] },
+    ]) {
+      expect(claudeQuotaFailure(message)).toBe(true);
+      expect(claudeQuotaFailure({ ...message, parent_tool_use_id: 'agent' })).toBe(false);
+    }
+    expect(
+      claudeQuotaFailure({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', is_error: true, content: text }] },
+      }),
+    ).toBe(false);
+    expect(claudeQuotaFailure({ type: 'result', result: text })).toBe(false);
+  });
 
   it('recognizes terminal quota failures without treating tool errors or warnings as account exhaustion', () => {
     expect(
@@ -164,8 +177,57 @@ describe('Claude account transfer', () => {
       { type: 'result', is_error: true, result: 'API Error: 429 temporary rate limit' },
       { type: 'result', is_error: true, result: 'Invalid API key' },
       { type: 'result', result: "You've hit your limit" },
+      { type: 'result', is_error: true, result: "You've hit your fast limit · resets in 4m" },
     ])
       expect(claudeQuotaFailure(message)).toBe(false);
+  });
+
+  it('recognizes the typed usage_limit_reached error whatever the message says', () => {
+    const text = 'Some future wording · resets 8pm';
+    for (const message of [
+      {
+        type: 'assistant',
+        error: 'rate_limit',
+        api_error: 'usage_limit_reached',
+        message: { content: [{ type: 'text', text }] },
+      },
+      { type: 'result', is_error: true, api_error: 'usage_limit_reached', result: text },
+    ]) {
+      expect(claudeQuotaFailure(message)).toBe(true);
+      expect(claudeQuotaFailure({ ...message, parent_tool_use_id: 'agent' })).toBe(false);
+    }
+    for (const message of [
+      { type: 'result', api_error: 'usage_limit_reached', result: text },
+      { type: 'user', api_error: 'usage_limit_reached', message: { content: text } },
+      {
+        type: 'assistant',
+        error: 'rate_limit',
+        api_error: 'model_requires_usage_credits',
+        message: { content: [{ type: 'text', text }] },
+      },
+    ])
+      expect(claudeQuotaFailure(message)).toBe(false);
+  });
+
+  it('leaves a typed model_requires_usage_credits refusal alone whatever the message says', () => {
+    for (const text of [
+      "You've hit your monthly spend limit. Switch to another model, or manage usage credits at https://claude.ai/settings/usage, to continue.",
+      "You've hit your monthly spend limit · /model to switch models.",
+    ])
+      for (const message of [
+        {
+          type: 'assistant',
+          error: 'rate_limit',
+          api_error: 'model_requires_usage_credits',
+          message: { content: [{ type: 'text', text }] },
+        },
+        { type: 'result', is_error: true, api_error: 'model_requires_usage_credits', result: text },
+      ]) {
+        expect(claudeQuotaFailure(message)).toBe(false);
+        const { api_error, ...untyped } = message;
+        expect(api_error).toBe('model_requires_usage_credits');
+        expect(claudeQuotaFailure(untyped)).toBe(true);
+      }
   });
 });
 
