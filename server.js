@@ -2149,7 +2149,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   );
   // Agent tools run on this machine, so they call back on loopback, not PUBLIC_BASE_URL.
   setAgentApiBase(`http://127.0.0.1:${port}`);
-  app.listen(port, cfg.bindHost, () => {
+  const server = app.listen(port, cfg.bindHost, () => {
     resumeRestartedSessions();
     sessionStats.start();
     // Projects with `babysitPrs` get their pull requests' errands started every 15 minutes.
@@ -2183,6 +2183,8 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
       }; sessions → ${getConfig().publicBaseUrl}/webhooks/session/<id>`,
     );
   });
+  // Allow 500 MiB uploads over slower connections while keeping request time bounded.
+  server.requestTimeout = 30 * 60 * 1000;
 })();
 
 // On shutdown, flush the write queue: the last moments of a turn exist nowhere else.

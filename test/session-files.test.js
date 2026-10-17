@@ -999,33 +999,66 @@ describe('local links in the transcript', () => {
     }
   }, 15_000);
 
-  it('caps reads when a file grows after descriptor stat', async () => {
+  it.each([6, MAX_SESSION_FILE_BYTES * 4])(
+    'caps reads when a file grows to %i bytes after descriptor stat',
+    async (grownSize) => {
+      const file = path.join(job.workDir, 'report.csv');
+      await fs.writeFile(file, 'small');
+      const open = fs.open.bind(fs);
+      let readBytes = 0;
+      vi.spyOn(fs, 'open').mockImplementation(async (name, ...args) => {
+        const handle = await open(name, ...args);
+        if (String(name).endsWith('/report.csv')) {
+          const stat = handle.stat.bind(handle);
+          handle.stat = async () => {
+            const result = await stat();
+            await fs.truncate(file, grownSize);
+            return result;
+          };
+          const read = handle.read.bind(handle);
+          handle.read = async (...args) => {
+            const result = await read(...args);
+            readBytes += result.bytesRead;
+            return result;
+          };
+        }
+        return handle;
+      });
+      const event = { seq: 11, kind: 'text', text: '[Report](report.csv)' };
+      expect(await sessionFileEvent(job, event)).toEqual(event);
+      expect(readBytes).toBe(6);
+      expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+    },
+  );
+
+  it('publishes only bytes read when a file shrinks and descriptor reads are partial', async () => {
     const file = path.join(job.workDir, 'report.csv');
-    await fs.writeFile(file, 'small');
+    const contents = Buffer.alloc(128 * 1024 + 7);
+    for (let i = 0; i < contents.length; i++) contents[i] = i % 251;
+    await fs.writeFile(file, contents);
     const open = fs.open.bind(fs);
-    let readBytes = 0;
     vi.spyOn(fs, 'open').mockImplementation(async (name, ...args) => {
       const handle = await open(name, ...args);
       if (String(name).endsWith('/report.csv')) {
         const stat = handle.stat.bind(handle);
         handle.stat = async () => {
           const result = await stat();
-          await fs.truncate(file, MAX_SESSION_FILE_BYTES * 4);
+          await fs.truncate(file, contents.length - 11);
           return result;
         };
         const read = handle.read.bind(handle);
-        handle.read = async (...args) => {
-          const result = await read(...args);
-          readBytes += result.bytesRead;
-          return result;
-        };
+        handle.read = (buffer, offset, length, position) =>
+          read(buffer, offset, Math.min(length, 7000), position);
       }
       return handle;
     });
-    const event = { seq: 11, kind: 'text', text: '[Report](report.csv)' };
-    expect(await sessionFileEvent(job, event)).toEqual(event);
-    expect(readBytes).toBe(MAX_SESSION_FILE_BYTES + 1);
-    expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+    const rewritten = await sessionFileEvent(job, {
+      seq: 12,
+      kind: 'text',
+      text: '[Report](report.csv)',
+    });
+    const url = rewritten.text.match(/\(<([^>]+)>\)/)[1];
+    expect(Buffer.from(await (await fetch(url)).arrayBuffer())).toEqual(contents.subarray(0, -11));
   });
 
   it.each([
