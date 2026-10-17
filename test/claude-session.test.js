@@ -208,6 +208,27 @@ describe('Claude account transfer', () => {
     ])
       expect(claudeQuotaFailure(message)).toBe(false);
   });
+
+  it('leaves a typed model_requires_usage_credits refusal alone whatever the message says', () => {
+    for (const text of [
+      "You've hit your monthly spend limit. Switch to another model, or manage usage credits at https://claude.ai/settings/usage, to continue.",
+      "You've hit your monthly spend limit · /model to switch models.",
+    ])
+      for (const message of [
+        {
+          type: 'assistant',
+          error: 'rate_limit',
+          api_error: 'model_requires_usage_credits',
+          message: { content: [{ type: 'text', text }] },
+        },
+        { type: 'result', is_error: true, api_error: 'model_requires_usage_credits', result: text },
+      ]) {
+        expect(claudeQuotaFailure(message)).toBe(false);
+        const { api_error, ...untyped } = message;
+        expect(api_error).toBe('model_requires_usage_credits');
+        expect(claudeQuotaFailure(untyped)).toBe(true);
+      }
+  });
 });
 
 function run(opts = {}) {
