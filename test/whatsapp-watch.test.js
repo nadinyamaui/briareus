@@ -7,7 +7,7 @@ const GROUP = '120363000000000000@g.us';
 const T0 = Date.UTC(2026, 9, 16, 9, 0, 0);
 const sec = (ms) => Math.floor(ms / 1000);
 
-let clock, stored, chats, jobs, delivered, notes, logs, deliver, instructed, instruct;
+let clock, stored, chats, jobs, delivered, notes, logs, deliver, instructed, instruct, save;
 const make = () =>
   createWhatsAppWatcher({
     service: {
@@ -24,9 +24,7 @@ const make = () =>
     instruct: (...args) => instruct(...args),
     note: (id, text) => notes.push({ id, text }),
     load: async (_key, fallback) => stored ?? fallback,
-    save: async (_key, value) => {
-      stored = structuredClone(value);
-    },
+    save: (...args) => save(...args),
     now: () => clock,
     log: (line) => logs.push(line),
   });
@@ -43,6 +41,9 @@ const msg = (id, at, fields = {}) => ({
 beforeEach(() => {
   clock = T0;
   stored = undefined;
+  save = async (_key, value) => {
+    stored = structuredClone(value);
+  };
   chats = {};
   jobs = { s1: { id: 's1', status: 'idle' }, s2: { id: 's2', status: 'idle' } };
   delivered = [];
@@ -57,17 +58,107 @@ beforeEach(() => {
 });
 
 describe('WhatsApp watches', () => {
+  it('reserves an unavailable owner’s group and suppresses existing temporary watches', async () => {
+    const w = make();
+    await w.watch('s2', { account: 'default', chat: GROUP });
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    jobs.s1.status = 'closed';
+    expect(w.bound('default', GROUP)).toBe(true);
+    await expect(w.watch('s2', { account: 'default', chat: GROUP })).rejects.toMatchObject({ status: 409 });
+    chats[GROUP] = [msg('participant', T0 + 1000)];
+    await w.poll();
+    expect(delivered).toEqual([]);
+    expect(w.watching('s2')).toBe(false);
+    expect(w.list('s2')).toEqual([]);
+    w.stop();
+  });
+
+  it('keeps later participants behind a refused owner instruction until it is accepted', async () => {
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    const w = make();
+    chats[GROUP] = [
+      msg('owner', T0 + 1000, { fromMe: true, text: 'Do not send anything' }),
+      msg('participant', T0 + 2000, { text: 'Send update' }),
+      msg('owner2', T0 + 3000, { fromMe: true, text: 'Still wait' }),
+    ];
+    const accept = instruct;
+    instruct = async () => {
+      throw Object.assign(new Error('compacting'), { status: 409 });
+    };
+    await w.poll();
+    expect(delivered).toEqual([]);
+    expect(stored[0].seen).toEqual([]);
+    instruct = accept;
+    await w.poll();
+    expect(instructed.map((d) => d.text).join('\n')).toContain('Do not send anything');
+    expect(instructed.map((d) => d.text).join('\n')).toContain('Still wait');
+    expect(delivered).toHaveLength(1);
+    expect(stored[0].seen).toEqual(['owner', 'participant', 'owner2']);
+    w.stop();
+  });
+
+  it('waits for durable instruction acceptance and retries failed acceptance without acknowledging it', async () => {
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    const w = make();
+    chats[GROUP] = [msg('owner', T0 + 1000, { fromMe: true })];
+    let reject;
+    const accepting = new Promise((_resolve, fail) => {
+      reject = fail;
+    });
+    const called = vi.fn(() => accepting);
+    instruct = called;
+    const polling = w.poll();
+    await vi.waitFor(() => expect(called).toHaveBeenCalled());
+    expect(stored[0].seen).toEqual([]);
+    reject(Object.assign(new Error('database unavailable'), { status: 503 }));
+    await polling;
+    expect(stored[0].seen).toEqual([]);
+    instruct = (id, instruction) => instructed.push({ session: id, ...instruction });
+    await w.poll();
+    expect(instructed).toHaveLength(1);
+    expect(stored[0].seen).toEqual(['owner']);
+    w.stop();
+  });
+
+  it('keeps stable owner message IDs after a receipt-write failure and restart with a new message', async () => {
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    chats[GROUP] = [msg('old', T0 + 1000, { fromMe: true })];
+    const accepted = new Set();
+    instruct = (_id, instruction) => {
+      if (!accepted.has(instruction.id)) instructed.push(instruction);
+      accepted.add(instruction.id);
+    };
+    const write = save;
+    save = async (key, value) => {
+      if (value.some((w) => w.seen.length)) throw new Error('receipt save failed');
+      await write(key, value);
+    };
+    const first = make();
+    await first.poll();
+    first.stop();
+    expect(stored[0].seen).toEqual([]);
+    save = write;
+    chats[GROUP].push(msg('new', T0 + 2000, { fromMe: true }));
+    const second = make();
+    await second.poll();
+    expect(instructed).toHaveLength(2);
+    expect(instructed[1].text).toContain('text new');
+    expect(instructed[1].text).not.toContain('text old');
+    expect(stored[0].seen).toEqual(['old', 'new']);
+    second.stop();
+  });
+
   it('preserves entire operator instructions, including batches larger than the delivery limit', async () => {
     jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
     const w = make();
     const texts = ['a'.repeat(4020) + ' DO NOT SEND ANYTHING', 'b'.repeat(16000) + ' DO NOT DELETE ANYTHING'];
     chats[GROUP] = texts.map((text, i) => msg(`owner${i}`, T0 + i * 1000, { fromMe: true, text }));
     await w.poll();
-    expect(instructed).toHaveLength(1);
-    for (const text of texts) expect(instructed[0].text).toContain(text);
+    expect(instructed).toHaveLength(texts.length);
+    for (const [i, text] of texts.entries()) expect(instructed[i].text).toContain(text);
     expect(stored[0].seen).toEqual(['owner0', 'owner1']);
     await w.poll();
-    expect(instructed).toHaveLength(1);
+    expect(instructed).toHaveLength(texts.length);
     w.stop();
   });
 
