@@ -59,14 +59,14 @@ it('advertises SSH tools and initializes as a tools-only MCP server', async () =
 it('uses the session token and returns a pending command without submitting twice', async () => {
   const response = await rpc('tools/call', {
     name: 'ssh_execute',
-    arguments: { serverId: 1, command: 'pwd' },
+    arguments: { serverId: 1, command: 'pwd', sudo: true },
   });
   expect(JSON.parse(response.result.content[0].text).request.status).toBe('pending');
   expect(calls).toEqual([
     {
       path: '/api/agent/ssh/execute',
       method: 'POST',
-      body: { serverId: 1, command: 'pwd' },
+      body: { serverId: 1, command: 'pwd', sudo: true },
       token: 'Bearer test-token',
     },
   ]);

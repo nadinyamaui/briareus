@@ -194,3 +194,36 @@ describe('SSH database login over HTTP', () => {
     );
   });
 });
+
+it('keeps sudo credentials private and applies elevation only through the existing approval boundary', async () => {
+  const created = await request('/api/ssh/servers', {
+    operator: true,
+    method: 'POST',
+    body: { ...input, sudoPassword: 'sudo-secret' },
+  });
+  const { server } = await created.json();
+  expect(server.hasSudoPassword).toBe(true);
+  const listed = await (await request('/api/agent/ssh/servers', { token: 'session-token' })).text();
+  expect(listed).not.toMatch(/sudo-secret|sudoPasswordSealed/);
+  const res = await request('/api/agent/ssh/execute', {
+    token: 'session-token',
+    method: 'POST',
+    body: { serverId: server.id, command: 'id -u', sudo: true },
+  });
+  const { request: pending } = await res.json();
+  expect(pending).toMatchObject({ status: 'pending', sudo: true });
+  expect(pending.command).toMatch(/^sudo -S/);
+  expect(execute).not.toHaveBeenCalled();
+  await request(`/api/ssh/requests/${pending.id}/decision`, {
+    operator: true,
+    method: 'POST',
+    body: { decision: 'deny' },
+  });
+  expect(execute).not.toHaveBeenCalled();
+  const edited = await request(`/api/ssh/servers/${server.id}`, {
+    operator: true,
+    method: 'PUT',
+    body: { sudoPassword: '' },
+  });
+  expect((await edited.json()).server.hasSudoPassword).toBe(false);
+});
