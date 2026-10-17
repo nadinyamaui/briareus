@@ -7,9 +7,10 @@ import { apiV1Routes } from '../lib/api-v1.js';
 import { uploadBody, uploadHandler } from '../lib/upload-body.js';
 import { MAX_UPLOAD_BYTES } from '../lib/uploads.js';
 
-let server, url, receive, storage, entered, closed;
+let server, url, receive, storage, entered, closed, recordUsage;
 beforeEach(async () => {
   storage = null;
+  recordUsage = async () => {};
   entered = Promise.withResolvers();
   closed = Promise.withResolvers();
   const handlers = express.Router();
@@ -37,7 +38,7 @@ beforeEach(async () => {
     apiV1Routes({
       auth: {
         authenticate: () => ({ id: 'client', permission: 'admin' }),
-        recordUsage: async () => {},
+        recordUsage: () => recordUsage(),
         list: () => [],
       },
       apiEnabled: () => true,
@@ -93,6 +94,34 @@ async function expectAvailable() {
 }
 
 describe('shared upload memory budget', () => {
+  it.each(['identity', 'gzip'])(
+    'skips %s admission after a disconnect during authentication',
+    async (encoding) => {
+      const recording = Promise.withResolvers();
+      const recorded = Promise.withResolvers();
+      recordUsage = async () => {
+        recording.resolve();
+        await recorded.promise;
+      };
+      const req = httpRequest(`${url}/api/v1/uploads`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': MAX_UPLOAD_BYTES,
+          'Content-Encoding': encoding,
+        },
+      });
+      req.on('error', () => {});
+      req.write('x');
+      await recording.promise;
+      req.destroy();
+      await closed.promise;
+      recorded.resolve();
+      await expectAvailable();
+      expect((await post('/api/v1/uploads')).status).toBe(200);
+    },
+  );
+
   it('shares capacity across agent, dashboard and native upload routes before reading bodies', async () => {
     const active = await stall(); // Chunked bodies reserve the full decoded limit.
     for (const route of ['/api/dev/uploads', '/api/v1/uploads', '/api/v1/sessions/one/files']) {
