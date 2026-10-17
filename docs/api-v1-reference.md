@@ -519,9 +519,9 @@ Publish a downloadable session file from raw bytes. Needs `manage`, held to the 
 | ------ | -------- | --------------- |
 | `name` | `string` | The file’s name |
 
-**Body**: the raw bytes, up to 25 MiB, with any content type other than JSON.
+**Body**: the raw bytes, up to 500 MiB, with any content type other than JSON.
 
-**Returns** `{ name: string, size: integer, url: string }`. Maximum 25 MiB; the URL grants download access to anyone holding it without an API token. Files are stored independently of the session workspace and uploaded to R2 when configured, with a local download fallback.
+**Returns** `{ name: string, size: integer, url: string }`. Maximum 500 MiB; the URL grants download access to anyone holding it without an API token. Files are stored independently of the session workspace and uploaded to R2 when configured, with a local download fallback.
 
 ### `GET /sessions/{id}`
 
@@ -935,7 +935,7 @@ Upload one attachment; send the returned id in a message’s `attachments`. Need
 | ------------------- | -------- | --------------- |
 | `name` **required** | `string` | The file’s name |
 
-**Body**: the raw bytes, up to 25 MiB, with any content type other than JSON.
+**Body**: the raw bytes, up to 500 MiB, with any content type other than JSON.
 
 **Returns** 201 `{ file: object }`. The file is `{ id, name, size }`.
 

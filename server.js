@@ -225,6 +225,7 @@ import { boardInScope, moveBoardItem, projectBoard } from './lib/projectboard.js
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload, getUpload } from './lib/uploads.js';
+import { uploadBody, uploadHandler } from './lib/upload-body.js';
 import { sessionFileEvent, sessionFileRoutes, sessionFileDownloads } from './lib/session-files.js';
 import { transcribe, transcribeAvailable } from './lib/transcribe.js';
 import { previewAccess } from './lib/tunnel.js';
@@ -1553,14 +1554,19 @@ api.get('/api/dev/branches', async (req, res) => {
 
 // One file per request: raw bytes as the body, filename in the query; messages carry only the
 // returned ids. Clients post application/octet-stream, so the JSON parser never touches it.
-api.post('/api/dev/uploads', express.raw({ type: () => true, limit: '25mb' }), (req, res) => {
-  try {
-    if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'Empty file' });
-    res.status(201).json({ file: storeUpload(String(req.query.name || ''), req.body) });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+api.post(
+  '/api/dev/uploads',
+  uploadBody,
+  uploadHandler((req, res) => {
+    try {
+      if (!Buffer.isBuffer(req.body) || !req.body.length)
+        return res.status(400).json({ error: 'Empty file' });
+      res.status(201).json({ file: storeUpload(String(req.query.name || ''), req.body) });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }),
+);
 
 // Voice notes: the raw body's content type names the file for OpenAI. Only the text is returned;
 // the recording is not kept.
@@ -2149,7 +2155,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   );
   // Agent tools run on this machine, so they call back on loopback, not PUBLIC_BASE_URL.
   setAgentApiBase(`http://127.0.0.1:${port}`);
-  app.listen(port, cfg.bindHost, () => {
+  const server = app.listen(port, cfg.bindHost, () => {
     resumeRestartedSessions();
     sessionStats.start();
     // Projects with `babysitPrs` get their pull requests' errands started every 15 minutes.
@@ -2183,6 +2189,8 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
       }; sessions → ${getConfig().publicBaseUrl}/webhooks/session/<id>`,
     );
   });
+  // Allow 500 MiB uploads over slower connections while keeping request time bounded.
+  server.requestTimeout = 30 * 60 * 1000;
 })();
 
 // On shutdown, flush the write queue: the last moments of a turn exist nowhere else.

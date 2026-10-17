@@ -146,6 +146,19 @@ describe('published session files', () => {
     ).toBe(404);
   });
 
+  it.each([
+    ['/api/agent/files', 'agent'],
+    ['/api/v1/sessions/session1/files', 'admin'],
+  ])('publishes and downloads a file larger than 25 MiB through %s', async (route, token) => {
+    const bytes = Buffer.alloc(26 * 1024 * 1024, 65);
+    const response = await upload(route, token, bytes, 'video.mp4');
+    expect(response.status).toBe(200);
+    const file = await response.json();
+    expect(file.size).toBe(bytes.length);
+    const downloaded = Buffer.from(await (await fetch(file.url)).arrayBuffer());
+    expect(downloaded.equals(bytes)).toBe(true);
+  });
+
   it('keeps snapshots separate by session and content, and sanitizes names', async () => {
     const a = await publishSessionFile(job, '../.r2-url', Buffer.from('first'));
     expect(a.name).toBe('r2-url');
@@ -966,46 +979,86 @@ describe('local links in the transcript', () => {
 
   it('publishes empty files and files at exactly the size limit', async () => {
     for (const size of [0, MAX_SESSION_FILE_BYTES]) {
-      await fs.writeFile(path.join(job.workDir, 'boundary.csv'), Buffer.alloc(size, 65));
+      const file = path.join(job.workDir, 'boundary.csv');
+      await fs.writeFile(file, '');
+      await fs.truncate(file, size);
       const rewritten = await sessionFileEvent(job, {
         seq: size,
         kind: 'text',
         text: '[Boundary](boundary.csv)',
       });
       const url = rewritten.text.match(/\(<([^>]+)>\)/)[1];
-      const bytes = Buffer.from(await (await fetch(url)).arrayBuffer());
-      expect(bytes.length).toBe(size);
-      if (size) expect(bytes.at(-1)).toBe(65);
+      let downloaded = 0;
+      let lastByte;
+      for await (const chunk of (await fetch(url)).body) {
+        downloaded += chunk.length;
+        lastByte = chunk.at(-1);
+      }
+      expect(downloaded).toBe(size);
+      if (size) expect(lastByte).toBe(0);
     }
-  });
+  }, 15_000);
 
-  it('caps reads when a file grows after descriptor stat', async () => {
+  it.each([6, MAX_SESSION_FILE_BYTES * 4])(
+    'caps reads when a file grows to %i bytes after descriptor stat',
+    async (grownSize) => {
+      const file = path.join(job.workDir, 'report.csv');
+      await fs.writeFile(file, 'small');
+      const open = fs.open.bind(fs);
+      let readBytes = 0;
+      vi.spyOn(fs, 'open').mockImplementation(async (name, ...args) => {
+        const handle = await open(name, ...args);
+        if (String(name).endsWith('/report.csv')) {
+          const stat = handle.stat.bind(handle);
+          handle.stat = async () => {
+            const result = await stat();
+            await fs.truncate(file, grownSize);
+            return result;
+          };
+          const read = handle.read.bind(handle);
+          handle.read = async (...args) => {
+            const result = await read(...args);
+            readBytes += result.bytesRead;
+            return result;
+          };
+        }
+        return handle;
+      });
+      const event = { seq: 11, kind: 'text', text: '[Report](report.csv)' };
+      expect(await sessionFileEvent(job, event)).toEqual(event);
+      expect(readBytes).toBe(6);
+      expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+    },
+  );
+
+  it('publishes only bytes read when a file shrinks and descriptor reads are partial', async () => {
     const file = path.join(job.workDir, 'report.csv');
-    await fs.writeFile(file, 'small');
+    const contents = Buffer.alloc(128 * 1024 + 7);
+    for (let i = 0; i < contents.length; i++) contents[i] = i % 251;
+    await fs.writeFile(file, contents);
     const open = fs.open.bind(fs);
-    let readBytes = 0;
     vi.spyOn(fs, 'open').mockImplementation(async (name, ...args) => {
       const handle = await open(name, ...args);
       if (String(name).endsWith('/report.csv')) {
         const stat = handle.stat.bind(handle);
         handle.stat = async () => {
           const result = await stat();
-          await fs.truncate(file, MAX_SESSION_FILE_BYTES * 4);
+          await fs.truncate(file, contents.length - 11);
           return result;
         };
         const read = handle.read.bind(handle);
-        handle.read = async (...args) => {
-          const result = await read(...args);
-          readBytes += result.bytesRead;
-          return result;
-        };
+        handle.read = (buffer, offset, length, position) =>
+          read(buffer, offset, Math.min(length, 7000), position);
       }
       return handle;
     });
-    const event = { seq: 11, kind: 'text', text: '[Report](report.csv)' };
-    expect(await sessionFileEvent(job, event)).toEqual(event);
-    expect(readBytes).toBe(MAX_SESSION_FILE_BYTES + 1);
-    expect(await fs.stat(path.join(cfg.testVideosDir, '.session-files')).catch(() => null)).toBe(null);
+    const rewritten = await sessionFileEvent(job, {
+      seq: 12,
+      kind: 'text',
+      text: '[Report](report.csv)',
+    });
+    const url = rewritten.text.match(/\(<([^>]+)>\)/)[1];
+    expect(Buffer.from(await (await fetch(url)).arrayBuffer())).toEqual(contents.subarray(0, -11));
   });
 
   it.each([
