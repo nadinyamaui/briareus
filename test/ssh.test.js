@@ -337,11 +337,22 @@ describe('SSH password', () => {
     expect(open(save.mock.calls.at(-1)[1][0].passwordSealed)).toBe('new');
     expect((await service.update(server.id, { password: '' })).hasPassword).toBe(false);
   });
-  it.each([null, 123, 'a\nb', 'a\rb', 'a\0b', 'x'.repeat(1025)])(
+  it.each([null, 123, 'a\nb', 'a\rb', 'a\0b', 'x'.repeat(1025), 'x'.repeat(1024), 'é'.repeat(512)])(
     'rejects invalid passwords %#',
     async (password) => {
       await expect(service.create({ ...input, password })).rejects.toThrow('SSH password');
       expect(save).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['x'.repeat(1023), 'é'.repeat(511) + 'x'])(
+    'accepts passwords at the UTF-8 byte limit %#',
+    async (password) => {
+      const server = await service.create({ ...input, password });
+      expect(open(save.mock.calls.at(-1)[1][0].passwordSealed)).toBe(password);
+      await expect(service.update(server.id, { password: password + 'x' })).rejects.toThrow('SSH password');
+      expect(save).toHaveBeenCalledTimes(1);
+      await service.update(server.id, { password });
+      expect(open(save.mock.calls.at(-1)[1][0].passwordSealed)).toBe(password);
     },
   );
   it('cancels an approval when the password changes', async () => {
