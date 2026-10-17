@@ -841,14 +841,17 @@ issue.
 ### Registered SSH servers
 
 Register a server (`POST /api/v1/settings/ssh/servers`) for a project with its host, port,
-username and optional absolute private-key path on the machine running Briareus.
+username and an optional `password` or absolute private-key path on the machine running Briareus.
+The password is encrypted using `CREDENTIALS_KEY` and never returned by the API;
+`hasPassword` indicates its presence. Omit `password` on update to keep it, or send an
+empty string to clear it. A stored password selects password authentication instead of keys.
 The key must be readable by the operating-system account running Briareus. An empty
 key path uses that account's default keys or SSH agent; encrypted keys need to be unlocked
-in its agent. Password authentication, SSH config aliases, jump hosts and interactive
+in its agent. SSH config aliases, jump hosts and interactive
 terminals are not supported.
 
 Verify the host key independently and establish trust in that account's `~/.ssh/known_hosts`
-before using the tool. Connections use OpenSSH with `BatchMode=yes` and
+before using the tool. Connections use OpenSSH (with `BatchMode=yes` for key authentication) and
 `StrictHostKeyChecking=yes`: unknown or changed host keys fail without connecting to a
 remote shell ([OpenSSH configuration reference](https://man.openbsd.org/ssh_config.5)).
 

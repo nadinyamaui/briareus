@@ -91,16 +91,23 @@ describe('SSH HTTP authorization and registration', () => {
     }
   });
   it('registers, updates and deletes a server through settings', async () => {
-    const created = await request('/api/ssh/servers', { operator: true, method: 'POST', body: input });
+    const created = await request('/api/ssh/servers', {
+      operator: true,
+      method: 'POST',
+      body: { ...input, password: 'ssh-secret' },
+    });
     expect(created.status).toBe(201);
     const { server: row } = await created.json();
     expect(row.permissionMode).toBe('ask');
+    expect(row.hasPassword).toBe(true);
+    expect(row).not.toHaveProperty('password');
+    expect(row).not.toHaveProperty('passwordSealed');
     const updated = await request(`/api/ssh/servers/${row.id}`, {
       operator: true,
       method: 'PUT',
       body: { permissionMode: 'allow' },
     });
-    expect((await updated.json()).server.permissionMode).toBe('allow');
+    expect((await updated.json()).server).toMatchObject({ permissionMode: 'allow', hasPassword: true });
     expect((await request(`/api/ssh/servers/${row.id}`, { operator: true, method: 'DELETE' })).status).toBe(
       200,
     );
@@ -117,12 +124,15 @@ describe('SSH HTTP authorization and registration', () => {
       ).status,
     ).toBe(400);
   });
-  it('omits identity paths from the agent server list', async () => {
-    await service.create(input);
+  it('omits identity paths and passwords from the agent server list', async () => {
+    await service.create({ ...input, password: 'ssh-secret' });
     const res = await request('/api/agent/ssh/servers', { token: 'session-token' });
     const { servers } = await res.json();
     expect(servers).toHaveLength(1);
     expect(servers[0]).not.toHaveProperty('identityFile');
+    expect(servers[0]).toMatchObject({ hasPassword: true });
+    expect(servers[0]).not.toHaveProperty('password');
+    expect(servers[0]).not.toHaveProperty('passwordSealed');
   });
   it('executes only after an operator decision, then serves the result to the owning session', async () => {
     const row = await service.create(input);
