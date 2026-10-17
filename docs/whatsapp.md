@@ -196,10 +196,10 @@ instructions webhook or reveal its key. Other participants' messages remain
 untrusted deliveries under the webhook's caps. Replies must be sent with
 `whatsapp_send` to the linked group; the session is briefed to do so.
 
-In linked groups, the core prefixes its outgoing messages with `🤖 ` so they
+In all groups, the core prefixes its outgoing messages with `🤖 ` so they
 cannot be mistaken for the operator's words, even after a lost send receipt or
 a WAHA restart. This prefix is reserved: messages from the linked phone starting
-with it are ignored by the bridge. Messages to other chats keep their normal
+with it are ignored by the bridge. Messages to direct chats keep their normal
 text. `whatsapp_watches` shows the linked group with `expiresAt: null`; an agent
 cannot remove that link using `whatsapp_unwatch`.
 

@@ -19,7 +19,7 @@ const make = () =>
     },
     getJob: (id) => jobs[id] || null,
     listJobs: () => Object.values(jobs),
-    allowed: (job) => job.status !== 'closed',
+    allowed: (job) => job.status !== 'closed' && job.whatsappToolsEnabled !== false,
     deliver: (...args) => deliver(...args),
     instruct: (...args) => instruct(...args),
     note: (id, text) => notes.push({ id, text }),
@@ -57,6 +57,96 @@ beforeEach(() => {
 });
 
 describe('WhatsApp watches', () => {
+  it('preserves entire operator instructions, including batches larger than the delivery limit', async () => {
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    const w = make();
+    const texts = ['a'.repeat(4020) + ' DO NOT SEND ANYTHING', 'b'.repeat(16000) + ' DO NOT DELETE ANYTHING'];
+    chats[GROUP] = texts.map((text, i) => msg(`owner${i}`, T0 + i * 1000, { fromMe: true, text }));
+    await w.poll();
+    expect(instructed).toHaveLength(1);
+    for (const text of texts) expect(instructed[0].text).toContain(text);
+    expect(stored[0].seen).toEqual(['owner0', 'owner1']);
+    await w.poll();
+    expect(instructed).toHaveLength(1);
+    w.stop();
+  });
+
+  it('retains linked-group receipts without reading while access is revoked, even through a restart', async () => {
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    const history = [msg('old', T0 + 1000, { fromMe: true })];
+    const read = vi.fn(() => history);
+    Object.defineProperty(chats, GROUP, { get: read });
+    const first = make();
+    await first.poll();
+    expect(instructed).toHaveLength(1);
+    read.mockClear();
+    jobs.s1.whatsappToolsEnabled = false;
+    await first.poll();
+    expect(read).not.toHaveBeenCalled();
+    expect(stored[0].seen).toEqual(['old']);
+    first.stop();
+    const second = make();
+    await second.init();
+    second.stop();
+    await second.poll();
+    expect(read).not.toHaveBeenCalled();
+    history.push(msg('new', T0 + 2000, { fromMe: true }));
+    jobs.s1.whatsappToolsEnabled = true;
+    await second.poll();
+    expect(instructed).toHaveLength(2);
+    expect(instructed[1].text).toContain('text new');
+    expect(instructed[1].text).not.toContain('text old');
+    expect(stored[0].seen).toEqual(['old', 'new']);
+    jobs.s1.whatsappToolsEnabled = false;
+    jobs.s1.webhook.whatsappGroup = null;
+    await second.poll();
+    expect(stored).toEqual([]);
+  });
+
+  it('never promotes a core send begun before linking to an operator instruction', async () => {
+    const history = [];
+    let completeSend;
+    const pending = new Promise((resolve) => {
+      completeSend = resolve;
+    });
+    const service = createWhatsAppService({
+      config: () => ({ url: 'http://waha.test', apiKey: 'test' }),
+      fetcher: async (url, options) => {
+        if (url.endsWith('/api/sendText')) {
+          const body = JSON.parse(options.body);
+          await pending;
+          const sent = { id: 'core', body: body.text, fromMe: true, timestamp: sec(T0) + 3 };
+          history.push(sent);
+          return Response.json(sent);
+        }
+        return Response.json(history);
+      },
+    });
+    const sending = service.send('default', GROUP, { text: 'Automated output' });
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) + 2 };
+    completeSend();
+    await sending;
+    history.push({ id: 'owner', body: 'Real instruction', fromMe: true, timestamp: sec(T0) + 4 });
+    const w = createWhatsAppWatcher({
+      service,
+      getJob: (id) => jobs[id],
+      listJobs: () => Object.values(jobs),
+      allowed: () => true,
+      instruct,
+      deliver,
+      load: async (_key, fallback) => fallback,
+      save: async () => {},
+      now: () => clock,
+      log: () => {},
+    });
+    await w.poll();
+    expect(instructed).toHaveLength(1);
+    expect(instructed[0].text).toContain('Real instruction');
+    expect(instructed[0].text).not.toContain('Automated output');
+    expect(delivered).toEqual([]);
+    w.stop();
+  });
+
   it('routes the owner and another participant from a configured group without echoing the bot', async () => {
     jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
     const w = make();
@@ -174,7 +264,6 @@ describe('WhatsApp watches', () => {
     let loseReceipt = false;
     const service = createWhatsAppService({
       config: () => ({ url: 'http://waha.test', apiKey: 'test' }),
-      botGroup: (_account, chat) => chat === GROUP,
       fetcher: async (url, options) => {
         if (url.endsWith('/api/sendText')) {
           const body = JSON.parse(options.body);

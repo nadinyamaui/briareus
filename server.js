@@ -589,9 +589,7 @@ api.use(sessionFileRoutes({ agentSession, getJob }));
 api.use(sshRoutes({ service: sshService, agentSession, getProject }));
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
 api.use(homeAssistantRoutes({ service: createHomeAssistantService() }));
-const whatsappService = createWhatsAppService({
-  botGroup: (account, chat) => whatsappWatcher.bound(account, chat),
-});
+const whatsappService = createWhatsAppService();
 // Replies in the chats a session wrote to come back to it (lib/whatsapp-watch.js).
 const whatsappWatcher = createWhatsAppWatcher({
   service: whatsappService,
