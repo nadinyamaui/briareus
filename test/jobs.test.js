@@ -3428,6 +3428,8 @@ describe('webhook deliveries', () => {
     'in-busy',
     'in-turns',
     'in-dup',
+    'in-wa',
+    'in-wa-other',
     'hk-slack',
     'hk-whatsapp',
     'hk-mail',
@@ -4472,6 +4474,8 @@ describe('webhook deliveries', () => {
       maxTurns: 10,
       sshUnattended: false,
       instructions: false,
+      whatsappGroup: null,
+      whatsappAccount: 'default',
     });
     expect(JSON.stringify(shown)).not.toContain('a customer wrote this');
     // The record itself is untouched by the projection.
@@ -4529,6 +4533,90 @@ describe('webhook deliveries', () => {
       job.webhook = { ...job.webhook, instructions: true, ...extra };
       return job;
     };
+
+    it('links one opted-in session to a group and takes the owner’s words without enabling the public instructions webhook', async () => {
+      const { prompts } = fakeCli();
+      const job = getJob('in-wa');
+      const other = getJob('in-wa-other');
+      const project = { repo: 'acme/hook', enabled: true, whatsappToolsEnabled: false };
+      const group = '120363000000000000@g.us';
+      const input = { armed: true, whatsappGroup: group };
+      const route = { via: 'whatsapp', account: 'default', chat: group };
+      state.projects.push(project);
+      try {
+        expect(() => setSessionWebhook(job.id, input)).toThrow(/WhatsApp tools enabled/);
+        project.whatsappToolsEnabled = true;
+        const start = Math.floor(Date.now() / 1000) + 1;
+        expect(setSessionWebhook(job.id, input)).toMatchObject({ whatsappGroup: group, instructions: false });
+        expect(job.webhook.whatsappSince).toBeGreaterThanOrEqual(start);
+        const since = job.webhook.whatsappSince;
+        setSessionWebhook(job.id, { perHour: 60, whatsappSince: 1 });
+        expect(job.webhook.whatsappSince).toBe(since);
+        expect(() => setSessionWebhook(other.id, input)).toThrow(/already linked/);
+        job.unattendedTurns = 10;
+        job.awaitingAnswer = true;
+        expect(instructSession(job.id, { text: 'Anota la cita', id: 'wa-owner' }, route).status).toBe(
+          'running',
+        );
+        expect(job.awaitingAnswer).toBe(false);
+        expect(job.unattendedTurns).toBe(0);
+        expect(prompts[0]).toContain('Anota la cita');
+        expect(instructSession(job.id, { text: 'Anota la cita', id: 'wa-owner' }, route).status).toBe(
+          'duplicate',
+        );
+        expect(refused(() => instructSession(job.id, { text: 'public attempt' })).status).toBe(409);
+        expect(
+          refused(() =>
+            instructSession(job.id, { text: 'wrong group' }, { ...route, chat: '120363000000000001@g.us' }),
+          ).status,
+        ).toBe(403);
+        await cli.finish(job);
+        project.whatsappToolsEnabled = false;
+        expect(refused(() => instructSession(job.id, { text: 'revoked' }, route)).status).toBe(403);
+        project.whatsappToolsEnabled = true;
+        job.status = 'closed';
+        expect(() => setSessionWebhook(other.id, input)).toThrow(/already linked/);
+        job.status = 'idle';
+        setSessionWebhook(job.id, { whatsappGroup: null });
+        expect(refused(() => instructSession(job.id, { text: 'unlinked' }, route)).status).toBe(403);
+      } finally {
+        job.awaitingAnswer = false;
+        job.status = 'idle';
+        job.webhook = armed();
+        state.projects.splice(state.projects.indexOf(project), 1);
+      }
+    });
+
+    it('drops a participant’s held group message when the operator unlinks the group', () => {
+      fakeCli();
+      const job = getJob('in-wa');
+      const project = { repo: 'acme/hook', enabled: true, whatsappToolsEnabled: true };
+      state.projects.push(project);
+      try {
+        setSessionWebhook(job.id, { armed: true, whatsappGroup: '120363000000000000@g.us' });
+        job.awaitingAnswer = true;
+        expect(
+          deliverToSession(
+            job.id,
+            { text: 'El martes', id: 'wa-emily' },
+            {
+              via: 'whatsapp',
+              whatsappGroup: job.webhook.whatsappGroup,
+              whatsappAccount: 'default',
+              whatsappSince: job.webhook.whatsappSince,
+            },
+          ).status,
+        ).toBe('held');
+        expect(job.pendingDeliveries).toHaveLength(1);
+        setSessionWebhook(job.id, { whatsappGroup: null });
+        expect(job.pendingDeliveries).toEqual([]);
+      } finally {
+        job.awaitingAnswer = false;
+        job.pendingDeliveries = [];
+        job.webhook = armed();
+        state.projects.splice(state.projects.indexOf(project), 1);
+      }
+    });
 
     it('are refused until the instructions webhook is on, which the transcript says', () => {
       const job = getJob('in-off');

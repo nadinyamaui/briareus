@@ -849,13 +849,15 @@ Change a session’s webhook settings. Needs `admin`.
 
 **Body**
 
-| Field           | Type      |                                                                                             |
-| --------------- | --------- | ------------------------------------------------------------------------------------------- |
-| `armed`         | `boolean` | Whether deliveries are accepted                                                             |
-| `perHour`       | `integer` | Deliveries taken in any one hour                                                            |
-| `maxTurns`      | `integer` | Turns deliveries may start in a row with no word from the operator; 0 means unlimited       |
-| `sshUnattended` | `boolean` | Whether an SSH server in `allow` mode runs commands unapproved in a turn a delivery started |
-| `instructions`  | `boolean` | Whether the second, instructions webhook is on                                              |
+| Field             | Type      |                                                                                                                            |
+| ----------------- | --------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `armed`           | `boolean` | Whether deliveries are accepted                                                                                            |
+| `perHour`         | `integer` | Deliveries taken in any one hour                                                                                           |
+| `maxTurns`        | `integer` | Turns deliveries may start in a row with no word from the operator; 0 means unlimited                                      |
+| `sshUnattended`   | `boolean` | Whether an SSH server in `allow` mode runs commands unapproved in a turn a delivery started                                |
+| `instructions`    | `boolean` | Whether the second, instructions webhook is on                                                                             |
+| `whatsappGroup`   | `string?` | WhatsApp group ID ending in @g.us, or null to unlink; requires an armed webhook and WhatsApp tools enabled for the project |
+| `whatsappAccount` | `string`  | WAHA account for the linked group; default is default                                                                      |
 
 **Returns** `Webhook`
 
@@ -3107,19 +3109,21 @@ A prompt kept for the composer.
 
 A session’s webhook: where an outside system posts to wake it, and the limits its turns run under.
 
-| Field             | Type      |                                                                                             |
-| ----------------- | --------- | ------------------------------------------------------------------------------------------- |
-| `armed`           | `boolean` | Whether deliveries are accepted                                                             |
-| `perHour`         | `integer` | Deliveries taken in any one hour                                                            |
-| `maxTurns`        | `integer` | Turns deliveries may start in a row with no word from the operator; 0 means unlimited       |
-| `sshUnattended`   | `boolean` | Whether an SSH server in `allow` mode runs commands unapproved in a turn a delivery started |
-| `instructions`    | `boolean` | Whether the second, instructions webhook is on                                              |
-| `url`             | `string`  | Where a sender posts; not in a body                                                         |
-| `key`             | `string?` | The key a sender signs with; null while unarmed; not in a body                              |
-| `instructionsUrl` | `string`  | Where instructions are posted; not in a body                                                |
-| `instructionsKey` | `string?` | The instructions webhook’s key; not in a body                                               |
-| `held`            | `integer` | Deliveries waiting; not in a body                                                           |
-| `paused`          | `object?` | Why deliveries are paused; not in a body                                                    |
+| Field             | Type      |                                                                                                                            |
+| ----------------- | --------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `armed`           | `boolean` | Whether deliveries are accepted                                                                                            |
+| `perHour`         | `integer` | Deliveries taken in any one hour                                                                                           |
+| `maxTurns`        | `integer` | Turns deliveries may start in a row with no word from the operator; 0 means unlimited                                      |
+| `sshUnattended`   | `boolean` | Whether an SSH server in `allow` mode runs commands unapproved in a turn a delivery started                                |
+| `instructions`    | `boolean` | Whether the second, instructions webhook is on                                                                             |
+| `whatsappGroup`   | `string?` | WhatsApp group ID ending in @g.us, or null to unlink; requires an armed webhook and WhatsApp tools enabled for the project |
+| `whatsappAccount` | `string`  | WAHA account for the linked group; default is default                                                                      |
+| `url`             | `string`  | Where a sender posts; not in a body                                                                                        |
+| `key`             | `string?` | The key a sender signs with; null while unarmed; not in a body                                                             |
+| `instructionsUrl` | `string`  | Where instructions are posted; not in a body                                                                               |
+| `instructionsKey` | `string?` | The instructions webhook’s key; not in a body                                                                              |
+| `held`            | `integer` | Deliveries waiting; not in a body                                                                                          |
+| `paused`          | `object?` | Why deliveries are paused; not in a body                                                                                   |
 
 ## Coming from the dashboard’s routes
 

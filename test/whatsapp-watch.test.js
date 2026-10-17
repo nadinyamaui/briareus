@@ -1,12 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createWhatsAppWatcher, MAX_WATCHES, replyText } from '../lib/whatsapp-watch.js';
+import { createWhatsAppService } from '../lib/whatsapp.js';
 
 const CHAT = '34600000000@c.us';
 const GROUP = '120363000000000000@g.us';
 const T0 = Date.UTC(2026, 9, 16, 9, 0, 0);
 const sec = (ms) => Math.floor(ms / 1000);
 
-let clock, stored, chats, jobs, delivered, notes, logs, deliver;
+let clock, stored, chats, jobs, delivered, notes, logs, deliver, instructed, instruct;
 const make = () =>
   createWhatsAppWatcher({
     service: {
@@ -17,8 +18,10 @@ const make = () =>
       }),
     },
     getJob: (id) => jobs[id] || null,
+    listJobs: () => Object.values(jobs),
     allowed: (job) => job.status !== 'closed',
     deliver: (...args) => deliver(...args),
+    instruct: (...args) => instruct(...args),
     note: (id, text) => notes.push({ id, text }),
     load: async (_key, fallback) => stored ?? fallback,
     save: async (_key, value) => {
@@ -43,6 +46,8 @@ beforeEach(() => {
   chats = {};
   jobs = { s1: { id: 's1', status: 'idle' }, s2: { id: 's2', status: 'idle' } };
   delivered = [];
+  instructed = [];
+  instruct = (id, instruction) => instructed.push({ session: id, ...instruction });
   notes = [];
   logs = [];
   deliver = (id, delivery) => {
@@ -52,6 +57,167 @@ beforeEach(() => {
 });
 
 describe('WhatsApp watches', () => {
+  it('routes the owner and another participant from a configured group without echoing the bot', async () => {
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    const w = make();
+    chats[GROUP] = [
+      msg('old', T0 - 1000, { fromMe: true }),
+      msg('owner', T0 + 1000, { fromMe: true, text: 'Anota la cita' }),
+      msg('emily', T0 + 2000, { participant: '34611111111@c.us', text: 'El martes' }),
+      msg('bot', T0 + 3000, { fromMe: true, text: '🤖 Cita anotada' }),
+    ];
+    await w.poll();
+    expect(instructed).toHaveLength(1);
+    expect(instructed[0]).toMatchObject({ session: 's1', text: expect.stringContaining('Anota la cita') });
+    expect(instructed[0].text).not.toContain('El martes');
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].text).toContain('El martes');
+    expect(delivered[0].text).not.toContain('Anota la cita');
+    await w.poll();
+    expect(instructed).toHaveLength(1);
+    expect(delivered).toHaveLength(1);
+    expect(w.watching('s1', 'default', GROUP)).toBe(true);
+    w.stop();
+  });
+
+  it('keeps the group linked past 72 hours and through a restart, then stops immediately on unlink', async () => {
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    const first = make();
+    chats[GROUP] = [msg('owner', T0 + 1000, { fromMe: true })];
+    await first.poll();
+    first.stop();
+    clock += 7 * 24 * 3600_000;
+    const second = make();
+    await second.init();
+    second.stop();
+    chats[GROUP].push(msg('next', clock, { fromMe: true }));
+    await second.poll();
+    expect(instructed.map((d) => d.text.match(/text \w+/g))).toEqual([['text owner'], ['text next']]);
+    expect(second.list('s1')[0].expiresAt).toBeNull();
+    await expect(second.unwatch('s1', 'default', GROUP)).rejects.toMatchObject({ status: 409 });
+    jobs.s1.webhook.whatsappGroup = null;
+    chats[GROUP].push(msg('unlinked', clock + 1000, { fromMe: true }));
+    expect(second.watching('s1', 'default', GROUP)).toBe(false);
+    await second.poll();
+    expect(instructed).toHaveLength(2);
+    expect(stored).toEqual([]);
+  });
+
+  it('does not route the linked group into another session’s temporary watch', async () => {
+    const w = make();
+    await w.watch('s2', { account: 'default', chat: GROUP });
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    chats[GROUP] = [msg('emily', T0 + 1000)];
+    await w.poll();
+    expect(delivered.map((d) => d.session)).toEqual(['s1']);
+    expect(w.watching('s2', 'default', GROUP)).toBe(false);
+    await expect(w.watch('s2', { account: 'default', chat: GROUP })).rejects.toMatchObject({ status: 409 });
+    expect((await w.watch('s1', { account: 'default', chat: GROUP })).expiresAt).toBeNull();
+    w.stop();
+  });
+
+  it('does not use an in-flight group read after the project revokes access', async () => {
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    const w = make();
+    Object.defineProperty(chats, GROUP, {
+      get() {
+        jobs.s1.status = 'closed';
+        return [msg('owner', T0 + 1000, { fromMe: true })];
+      },
+    });
+    await w.poll();
+    expect(instructed).toEqual([]);
+    expect(delivered).toEqual([]);
+    w.stop();
+  });
+
+  it('retries a busy group instruction without repeating an earlier participant’s message', async () => {
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    const w = make();
+    chats[GROUP] = [msg('emily', T0 + 1000), msg('owner', T0 + 2000, { fromMe: true })];
+    // A refusal is synchronous, like instructSession during a server drain.
+    const accept = instruct;
+    instruct = () => {
+      throw Object.assign(new Error('restarting'), { status: 409 });
+    };
+    await w.poll();
+    expect(delivered).toHaveLength(1);
+    expect(stored[0].seen).toEqual(['emily']);
+    instruct = accept;
+    await w.poll();
+    expect(delivered).toHaveLength(1);
+    expect(instructed).toHaveLength(1);
+    w.stop();
+  });
+
+  it('still reads the owner when an earlier participant’s message is waiting at the automatic-turn cap', async () => {
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    const w = make();
+    chats[GROUP] = [msg('emily', T0 + 1000), msg('owner', T0 + 2000, { fromMe: true })];
+    const accept = deliver;
+    deliver = () => {
+      throw Object.assign(new Error('10 automatic turns ran'), { status: 429 });
+    };
+    await w.poll();
+    expect(instructed).toHaveLength(1);
+    expect(stored[0].seen).toEqual(['owner']);
+    deliver = accept;
+    await w.poll();
+    expect(delivered).toHaveLength(1);
+    expect(instructed).toHaveLength(1);
+    w.stop();
+  });
+
+  it('marks even an uncertain API send so a restart cannot mistake the reply for the operator', async () => {
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    const history = [];
+    let loseReceipt = false;
+    const service = createWhatsAppService({
+      config: () => ({ url: 'http://waha.test', apiKey: 'test' }),
+      botGroup: (_account, chat) => chat === GROUP,
+      fetcher: async (url, options) => {
+        if (url.endsWith('/api/sendText')) {
+          const body = JSON.parse(options.body);
+          const sent = { id: `sent${history.length}`, body: body.text, fromMe: true, timestamp: sec(T0) + 2 };
+          history.push(sent);
+          if (loseReceipt) throw new Error('receipt lost');
+          return Response.json(sent);
+        }
+        return Response.json(history);
+      },
+    });
+    expect((await service.send('default', GROUP, { text: 'Cita anotada' })).message.text).toBe(
+      '🤖 Cita anotada',
+    );
+    loseReceipt = true;
+    await expect(service.send('default', GROUP, { text: 'De acuerdo' })).rejects.toThrow(/did not confirm/);
+    history.push({ id: 'owner', body: 'Gracias', fromMe: true, timestamp: sec(T0) + 3 });
+    const w = createWhatsAppWatcher({
+      service,
+      getJob: (id) => jobs[id],
+      listJobs: () => Object.values(jobs),
+      allowed: () => true,
+      instruct,
+      deliver,
+      load: async (_key, fallback) => fallback,
+      save: async () => {},
+      now: () => clock,
+      log: () => {},
+    });
+    await w.poll();
+    expect(instructed).toHaveLength(1);
+    expect(instructed[0].text).toContain('Gracias');
+    expect(instructed[0].text).not.toMatch(/Cita anotada|De acuerdo/);
+    expect(delivered).toEqual([]);
+    loseReceipt = false;
+    expect((await service.send('default', CHAT, { text: 'hola' })).message.text).toBe('hola');
+    expect((await service.send('default', GROUP, { text: '🤖 Bien' })).message.text).toBe('🤖 Bien');
+    await expect(service.send('default', GROUP, { text: 'a'.repeat(8000) })).rejects.toMatchObject({
+      status: 400,
+    });
+    w.stop();
+  });
+
   it('delivers what others write after the watch began, oldest first, exactly once', async () => {
     const w = make();
     chats[CHAT] = [msg('old', T0 - 60_000)];

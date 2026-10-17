@@ -167,7 +167,43 @@ As with email, review, QA, worker, read-only and preview sessions never get
 them. Messages go out as the operator, so the agent sends only what the user
 asked for.
 
-### Replies come back to the session
+### Link a group to a session
+
+An operator can link one group in the session's existing webhook settings:
+
+```http
+PUT /api/v1/sessions/{session}/webhook
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{
+  "armed": true,
+  "whatsappGroup": "120363000000000000@g.us",
+  "whatsappAccount": "default"
+}
+```
+
+Use the group's ID from the WhatsApp conversations list, rather than its name.
+The project must have WhatsApp tools enabled, and a group can link to only one
+eligible session. The link survives restarts and has no expiry. Set
+`whatsappGroup` to `null` or disarm the webhook to stop it. Revoking project
+access also stops reading the group. Linking starts with the next whole second;
+messages already in the group are not imported.
+
+The linked phone's own messages reach the session as operator instructions,
+including answers to pending questions; this does not enable the public
+instructions webhook or reveal its key. Other participants' messages remain
+untrusted deliveries under the webhook's caps. Replies must be sent with
+`whatsapp_send` to the linked group; the session is briefed to do so.
+
+In linked groups, the core prefixes its outgoing messages with `🤖 ` so they
+cannot be mistaken for the operator's words, even after a lost send receipt or
+a WAHA restart. This prefix is reserved: messages from the linked phone starting
+with it are ignored by the bridge. Messages to other chats keep their normal
+text. `whatsapp_watches` shows the linked group with `expiresAt: null`; an agent
+cannot remove that link using `whatsapp_unwatch`.
+
+### Temporary reply watches
 
 Sending in a chat, or opening a group, leaves a **watch** on it for 24 hours
 from the session’s last message there (`watch: false` skips it). While it

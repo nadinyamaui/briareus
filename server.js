@@ -105,6 +105,7 @@ import {
   assertWorkerSlot,
   sessionWebhookState,
   setSessionWebhook,
+  instructSession,
   rotateSessionWebhook,
   triageLoopFindings,
   triageReviewFindings,
@@ -588,13 +589,17 @@ api.use(sessionFileRoutes({ agentSession, getJob }));
 api.use(sshRoutes({ service: sshService, agentSession, getProject }));
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
 api.use(homeAssistantRoutes({ service: createHomeAssistantService() }));
-const whatsappService = createWhatsAppService();
+const whatsappService = createWhatsAppService({
+  botGroup: (account, chat) => whatsappWatcher.bound(account, chat),
+});
 // Replies in the chats a session wrote to come back to it (lib/whatsapp-watch.js).
 const whatsappWatcher = createWhatsAppWatcher({
   service: whatsappService,
   getJob,
+  listJobs: devSessionRecords,
   allowed: (job) => whatsappWatchAllowed(job, getProject(job.repo)),
-  deliver: (id, delivery) => deliverToSession(id, delivery, { via: 'whatsapp' }),
+  deliver: (id, delivery, group) => deliverToSession(id, delivery, { via: 'whatsapp', ...group }),
+  instruct: (id, instruction, group) => instructSession(id, instruction, { via: 'whatsapp', ...group }),
   note: noteSession,
   registryComplete: sessionRegistryComplete,
 });
