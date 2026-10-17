@@ -146,6 +146,19 @@ describe('published session files', () => {
     ).toBe(404);
   });
 
+  it.each([
+    ['/api/agent/files', 'agent'],
+    ['/api/v1/sessions/session1/files', 'admin'],
+  ])('publishes and downloads a file larger than 25 MiB through %s', async (route, token) => {
+    const bytes = Buffer.alloc(26 * 1024 * 1024, 65);
+    const response = await upload(route, token, bytes, 'video.mp4');
+    expect(response.status).toBe(200);
+    const file = await response.json();
+    expect(file.size).toBe(bytes.length);
+    const downloaded = Buffer.from(await (await fetch(file.url)).arrayBuffer());
+    expect(downloaded.equals(bytes)).toBe(true);
+  });
+
   it('keeps snapshots separate by session and content, and sanitizes names', async () => {
     const a = await publishSessionFile(job, '../.r2-url', Buffer.from('first'));
     expect(a.name).toBe('r2-url');
@@ -966,18 +979,25 @@ describe('local links in the transcript', () => {
 
   it('publishes empty files and files at exactly the size limit', async () => {
     for (const size of [0, MAX_SESSION_FILE_BYTES]) {
-      await fs.writeFile(path.join(job.workDir, 'boundary.csv'), Buffer.alloc(size, 65));
+      const file = path.join(job.workDir, 'boundary.csv');
+      await fs.writeFile(file, '');
+      await fs.truncate(file, size);
       const rewritten = await sessionFileEvent(job, {
         seq: size,
         kind: 'text',
         text: '[Boundary](boundary.csv)',
       });
       const url = rewritten.text.match(/\(<([^>]+)>\)/)[1];
-      const bytes = Buffer.from(await (await fetch(url)).arrayBuffer());
-      expect(bytes.length).toBe(size);
-      if (size) expect(bytes.at(-1)).toBe(65);
+      let downloaded = 0;
+      let lastByte;
+      for await (const chunk of (await fetch(url)).body) {
+        downloaded += chunk.length;
+        lastByte = chunk.at(-1);
+      }
+      expect(downloaded).toBe(size);
+      if (size) expect(lastByte).toBe(0);
     }
-  });
+  }, 15_000);
 
   it('caps reads when a file grows after descriptor stat', async () => {
     const file = path.join(job.workDir, 'report.csv');

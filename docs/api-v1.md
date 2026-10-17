@@ -81,8 +81,8 @@ needs; give a client that only follows and steers sessions `manage`.
 
 - Send `Authorization: Bearer <token>` on every request. No cookies.
 - JSON bodies need `Content-Type: application/json` and are limited to 1 MiB.
-  Uploads and voice notes send the raw bytes (up to 25 MiB) with any other
-  content type, such as `application/octet-stream`.
+  Uploads send the raw bytes (up to 500 MiB) with any other content type,
+  such as `application/octet-stream`; voice notes are limited to 25 MiB.
 - An error is `{ "error": "..." }` with a 4xx or 5xx status. 401 means the
   token is missing, wrong, expired or revoked; 403 that it lacks the permission
   or the project.
@@ -420,7 +420,7 @@ An agent can explicitly publish any intended deliverable, including a file it
 created in a temporary directory, with `POST /api/agent/files?name=report.csv`
 and its session bearer token. Native clients use
 `POST /api/v1/sessions/:id/files?name=report.csv` with a `manage` or `admin` token.
-Both accept raw bytes with `Content-Type: application/octet-stream`, up to 25 MiB,
+Both accept raw bytes with `Content-Type: application/octet-stream`, up to 500 MiB,
 and return `{ name, size, url }`. The session briefing instructs agents to publish
 files before linking them in their replies.
 

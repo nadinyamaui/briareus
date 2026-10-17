@@ -1,6 +1,8 @@
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
+import { request as httpRequest } from 'node:http';
+import { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { createMobileAuth } from '../lib/mobile-auth.js';
@@ -490,6 +492,47 @@ describe('handing a request to the dashboard’s handler', () => {
     });
     expect(seen).toMatchObject({ path: '/api/dev/uploads', query: { name: 'shot.png' }, body: { bytes: 9 } });
   });
+
+  it('accepts attachments above the old limit while keeping the voice-note limit', async () => {
+    const body = Buffer.alloc(26 * 1024 * 1024);
+    const options = { method: 'POST', body, headers: { 'Content-Type': 'application/octet-stream' } };
+    const seen = await json('/uploads?name=video.mp4', options);
+    expect(seen.body).toEqual({ bytes: body.length });
+    expect((await request('/transcribe', options)).status).toBe(413);
+  });
+
+  it.each(['/uploads?name=video.mp4', '/sessions/mine/files?name=video.mp4'])(
+    'rejects files above 500 MiB at %s before forwarding them',
+    async (route) => {
+      const status = await new Promise((resolve, reject) => {
+        const req = httpRequest(
+          `${url}${prefix}${route}`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${tokens.manage}`,
+              'Content-Type': 'application/octet-stream',
+              'Content-Length': 500 * 1024 * 1024 + 1,
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode));
+          },
+        );
+        req.on('error', reject);
+        const chunk = Buffer.alloc(1024 * 1024);
+        Readable.from(
+          (function* () {
+            for (let i = 0; i < 500; i++) yield chunk;
+            yield Buffer.from('x');
+          })(),
+        ).pipe(req);
+      });
+      expect(status).toBe(413);
+      expect(handler).not.toHaveBeenCalled();
+    },
+  );
 
   it('answers malformed JSON and a handler’s own failure as JSON errors', async () => {
     const malformed = await fetch(`${url}${prefix}/sessions/mine/messages`, {

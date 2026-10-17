@@ -224,7 +224,7 @@ import { repoArchive, repoFile, repoTree } from './lib/repofiles.js';
 import { boardInScope, moveBoardItem, projectBoard } from './lib/projectboard.js';
 import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
-import { storeUpload, getUpload } from './lib/uploads.js';
+import { storeUpload, getUpload, MAX_UPLOAD_BYTES } from './lib/uploads.js';
 import { sessionFileEvent, sessionFileRoutes, sessionFileDownloads } from './lib/session-files.js';
 import { transcribe, transcribeAvailable } from './lib/transcribe.js';
 import { previewAccess } from './lib/tunnel.js';
@@ -1553,7 +1553,7 @@ api.get('/api/dev/branches', async (req, res) => {
 
 // One file per request: raw bytes as the body, filename in the query; messages carry only the
 // returned ids. Clients post application/octet-stream, so the JSON parser never touches it.
-api.post('/api/dev/uploads', express.raw({ type: () => true, limit: '25mb' }), (req, res) => {
+api.post('/api/dev/uploads', express.raw({ type: () => true, limit: MAX_UPLOAD_BYTES }), (req, res) => {
   try {
     if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'Empty file' });
     res.status(201).json({ file: storeUpload(String(req.query.name || ''), req.body) });
