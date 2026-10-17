@@ -97,6 +97,35 @@ describe('WhatsApp watches', () => {
     w.stop();
   });
 
+  it.each([409, 503])('keeps later owner instructions behind a refusal (%s)', async (status) => {
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    const w = make();
+    chats[GROUP] = [
+      msg('send', T0 + 1000, { fromMe: true, text: 'Send the report' }),
+      msg('cancel', T0 + 2000, { fromMe: true, text: 'Cancel the report' }),
+    ];
+    const accept = instruct;
+    let refused = false;
+    instruct = async (...args) => {
+      if (!refused) {
+        refused = true;
+        throw Object.assign(new Error('temporarily unavailable'), { status });
+      }
+      return accept(...args);
+    };
+    await w.poll();
+    expect(instructed).toEqual([]);
+    expect(stored[0].seen).toEqual([]);
+    await w.poll();
+    expect(instructed).toHaveLength(2);
+    expect(instructed[0].text).toContain('Send the report');
+    expect(instructed[1].text).toContain('Cancel the report');
+    expect(stored[0].seen).toEqual(['send', 'cancel']);
+    await w.poll();
+    expect(instructed).toHaveLength(2);
+    w.stop();
+  });
+
   it('waits for durable instruction acceptance and retries failed acceptance without acknowledging it', async () => {
     jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
     const w = make();

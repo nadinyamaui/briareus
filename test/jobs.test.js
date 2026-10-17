@@ -4685,6 +4685,34 @@ describe('webhook deliveries', () => {
       }
     });
 
+    it('allows unrelated webhook updates after WhatsApp access is revoked but refuses binding changes', () => {
+      const job = getJob('in-wa');
+      const project = { repo: 'acme/hook', enabled: true, whatsappToolsEnabled: true };
+      const group = '120363000000000000@g.us';
+      state.projects.push(project);
+      try {
+        setSessionWebhook(job.id, { armed: true, instructions: true, whatsappGroup: group });
+        const since = job.webhook.whatsappSince;
+        project.whatsappToolsEnabled = false;
+        expect(setSessionWebhook(job.id, { instructions: false })).toMatchObject({ instructions: false });
+        expect(setSessionWebhook(job.id, { perHour: 60 })).toMatchObject({ perHour: 60 });
+        expect(job.webhook).toMatchObject({ armed: true, whatsappGroup: group, whatsappSince: since });
+        expect(() => setSessionWebhook(job.id, { whatsappGroup: '120363000000000001@g.us' })).toThrow(
+          /WhatsApp tools enabled/,
+        );
+        expect(() => setSessionWebhook(job.id, { whatsappAccount: 'other' })).toThrow(
+          /WhatsApp tools enabled/,
+        );
+        setSessionWebhook(job.id, { armed: false });
+        expect(() => setSessionWebhook(job.id, { armed: true })).toThrow(/WhatsApp tools enabled/);
+        expect(job.webhook).toMatchObject({ armed: false, whatsappGroup: group, whatsappSince: since });
+        expect(setSessionWebhook(job.id, { whatsappGroup: null })).toMatchObject({ whatsappGroup: null });
+      } finally {
+        job.webhook = armed();
+        state.projects.splice(state.projects.indexOf(project), 1);
+      }
+    });
+
     it('drops a participant’s held group message when the operator unlinks the group', () => {
       fakeCli();
       const job = getJob('in-wa');
