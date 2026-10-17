@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createSshService, normalizeSshServer, executeSsh } from '../lib/ssh.js';
 import { execFile } from 'node:child_process';
+import { open } from '../lib/secretbox.js';
 
 vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ credentialsKey: 'k'.repeat(32) }) }));
@@ -87,7 +88,7 @@ describe('SSH permission boundary', () => {
     expect(execute).not.toHaveBeenCalled();
     service.decide(request.id, 'approve');
     expect(() => service.decide(request.id, 'approve')).toThrow('no longer');
-    const { hasDbCredentials, ...stored } = server;
+    const { hasDbCredentials, hasPassword, ...stored } = server;
     expect(execute).toHaveBeenCalledExactlyOnceWith(stored, request.command, 60);
     await Promise.resolve();
     expect(service.result(job, request.id).status).toBe('completed');
@@ -315,5 +316,67 @@ describe('SSH database login', () => {
   it('is not handed to agents with the server list', async () => {
     await service.create({ ...input, ...login });
     expect(JSON.stringify(service.list(input.repo))).not.toContain('dbCredentials');
+  });
+});
+
+describe('SSH password', () => {
+  it('encrypts, preserves, replaces and clears the password without exposing it', async () => {
+    const server = await service.create({ ...input, password: ' secret $`" ' });
+    expect(server.hasPassword).toBe(true);
+    expect(JSON.stringify(server)).not.toContain('passwordSealed');
+    expect(server).not.toHaveProperty('password');
+    let rows = save.mock.calls.at(-1)[1];
+    expect(open(rows[0].passwordSealed)).toBe(' secret $`" ');
+    expect(JSON.stringify(rows)).not.toContain(' secret ');
+    const restored = createSshService({ load: async () => rows });
+    await restored.init();
+    expect(restored.list()).toEqual([server]);
+    await service.update(server.id, { label: 'Renamed' });
+    expect(open(save.mock.calls.at(-1)[1][0].passwordSealed)).toBe(' secret $`" ');
+    await service.update(server.id, { password: 'new' });
+    expect(open(save.mock.calls.at(-1)[1][0].passwordSealed)).toBe('new');
+    expect((await service.update(server.id, { password: '' })).hasPassword).toBe(false);
+  });
+  it.each([null, 123, 'a\nb', 'a\rb', 'a\0b', 'x'.repeat(1025), 'x'.repeat(1024), 'é'.repeat(512)])(
+    'rejects invalid passwords %#',
+    async (password) => {
+      await expect(service.create({ ...input, password })).rejects.toThrow('SSH password');
+      expect(save).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['x'.repeat(1023), 'é'.repeat(511) + 'x'])(
+    'accepts passwords at the UTF-8 byte limit %#',
+    async (password) => {
+      const server = await service.create({ ...input, password });
+      expect(open(save.mock.calls.at(-1)[1][0].passwordSealed)).toBe(password);
+      await expect(service.update(server.id, { password: password + 'x' })).rejects.toThrow('SSH password');
+      expect(save).toHaveBeenCalledTimes(1);
+      await service.update(server.id, { password });
+      expect(open(save.mock.calls.at(-1)[1][0].passwordSealed)).toBe(password);
+    },
+  );
+  it('cancels an approval when the password changes', async () => {
+    const { server, request } = await submit({ password: 'old' });
+    await service.update(server.id, { password: 'new' });
+    expect(service.result(job, request.id).status).toBe('cancelled');
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it('uses askpass for password authentication while keeping secrets out of arguments and errors', async () => {
+    await service.create({ ...input, password: 'secret' });
+    const stored = save.mock.calls.at(-1)[1][0];
+    execFile.mockImplementation((_bin, _args, _options, cb) => {
+      cb({ code: 255, message: 'Permission denied' }, '', 'Permission denied');
+      return { stdin: { end: vi.fn() } };
+    });
+    const result = await executeSsh(stored, 'pwd', 10);
+    const [bin, args, options] = execFile.mock.calls.at(-1);
+    expect(bin).toBe('ssh');
+    expect(args).toContain('BatchMode=no');
+    expect(args).toContain('PreferredAuthentications=password');
+    expect(args).toContain('NumberOfPasswordPrompts=1');
+    expect(args).toContain('StrictHostKeyChecking=yes');
+    expect(options.env).toMatchObject({ SSH_ASKPASS_REQUIRE: 'force', BRIAREUS_SSH_PASSWORD: 'secret' });
+    expect(JSON.stringify(args)).not.toContain('secret');
+    expect(JSON.stringify(result)).not.toContain('secret');
   });
 });
