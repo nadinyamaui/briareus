@@ -423,7 +423,7 @@ describe('SSH sudo password', () => {
       command: 'printf \'%s\' "hello"',
       sudo: true,
     });
-    expect(request.command).toMatch(/^sudo -S/);
+    expect(request.command).toMatch(/^sudo -S -u root /);
     expect(request.command).toContain('exec </dev/null');
     expect(JSON.stringify(request)).not.toContain('secret');
     expect(request.status).toBe('pending');
@@ -443,7 +443,7 @@ describe('SSH sudo password', () => {
       cb({ code: 1, message: secret }, secret, secret);
       return { stdin };
     });
-    const result = await executeSsh(stored, "sudo -S -p '' -- sh -c 'exec </dev/null; id'", 10, true);
+    const result = await executeSsh(stored, "sudo -S -u root -p '' -- sh -c 'exec </dev/null; id'", 10, true);
     const [, args, options] = execFile.mock.calls.at(-1);
     expect(args).toContain('BatchMode=yes');
     expect(args).not.toContain('PreferredAuthentications=password');
@@ -467,7 +467,7 @@ it.each([true, false])(
     try {
       await writeFile(
         join(dir, 'sudo'),
-        '#!/bin/sh\nif [ "$1" != "-S" ]; then exit 2; fi\nshift 4\n' +
+        '#!/bin/sh\nif [ "$1" != "-S" ] || [ "$2" != "-u" ] || [ "$3" != "root" ]; then exit 2; fi\nshift 6\n' +
           (prompts ? 'IFS= read -r password\n[ "$password" = "private-password" ] || exit 3\n' : '') +
           'exec "$@"\n',
         { mode: 0o700 },
