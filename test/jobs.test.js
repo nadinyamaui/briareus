@@ -3432,6 +3432,7 @@ describe('webhook deliveries', () => {
     'in-dup',
     'in-wa',
     'in-wa-other',
+    'in-wa-receipts',
     'hk-slack',
     'hk-whatsapp',
     'hk-mail',
@@ -4535,6 +4536,75 @@ describe('webhook deliveries', () => {
       job.webhook = { ...job.webhook, instructions: true, ...extra };
       return job;
     };
+
+    it.each([false, true])(
+      'does not replay a WhatsApp instruction after HTTP traffic and restart (receipts recover: %s)',
+      async (recoverReceipts) => {
+        const { prompts } = fakeCli();
+        const job = getJob('in-wa-receipts');
+        const project = { repo: 'acme/hook', enabled: true, whatsappToolsEnabled: true };
+        const group = '120363000000000000@g.us';
+        state.projects.push(project);
+        let stored;
+        let failReceipt = true;
+        const messages = [];
+        const watcher = () =>
+          createWhatsAppWatcher({
+            service: { messages: async () => ({ messages }) },
+            getJob,
+            listJobs: () => [job],
+            allowed: () => true,
+            instruct: (id, instruction, route) =>
+              instructSessionDurably(id, instruction, { via: 'whatsapp', ...route }),
+            deliver: () => {
+              throw new Error('Unexpected participant');
+            },
+            load: async (_key, fallback) => stored ?? fallback,
+            save: async (_key, rows) => {
+              if (failReceipt && rows.some((w) => w.seen.length)) throw new Error('receipt write failed');
+              stored = structuredClone(rows);
+            },
+            log: () => {},
+          });
+        try {
+          setSessionWebhook(job.id, { armed: true, whatsappGroup: group, perHour: 600, maxTurns: 0 });
+          messages.push({
+            id: 'owner',
+            timestamp: job.webhook.whatsappSince,
+            fromMe: true,
+            text: 'Send the report exactly once',
+          });
+          const first = watcher();
+          await first.poll();
+          await cli.finish(job);
+          expect(stored[0].seen).toEqual([]);
+          const ownerId = job.webhook.seen.at(-1);
+          failReceipt = !recoverReceipts;
+          for (let i = 0; i < 3; i++) await first.poll();
+          first.stop();
+          for (let i = 0; i < 50; i++) {
+            expect(deliverToSession(job.id, { text: `HTTP update ${i}`, id: `http-${i}` }).status).toBe(
+              'running',
+            );
+            await cli.finish(job);
+          }
+          expect(job.webhook.seen).not.toContain(ownerId);
+          await flushJobs();
+          const saved = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
+          job.webhook = structuredClone(saved.webhook);
+          failReceipt = false;
+          const second = watcher();
+          await second.poll();
+          second.stop();
+          if (job.status !== 'idle') await cli.finish(job);
+          expect(prompts.filter((text) => text.includes('Send the report exactly once'))).toHaveLength(1);
+          expect(stored[0].seen).toEqual(['owner']);
+        } finally {
+          job.webhook = armed();
+          state.projects.splice(state.projects.indexOf(project), 1);
+        }
+      },
+    );
 
     it.each([false, true])(
       'coordinates WhatsApp receipts with the durable instruction queue (job write fails: %s)',

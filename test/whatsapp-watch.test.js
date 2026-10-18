@@ -177,6 +177,40 @@ describe('WhatsApp watches', () => {
     second.stop();
   });
 
+  it('retries dirty receipts on quiet polls until saved, including while access is revoked', async () => {
+    jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
+    chats[GROUP] = [msg('owner', T0 + 1000, { fromMe: true })];
+    const write = save;
+    let down = true;
+    save = vi.fn(async (key, rows) => {
+      if (down && rows.some((w) => w.seen.length)) throw new Error('receipt save failed');
+      await write(key, rows);
+    });
+    const first = make();
+    await first.poll();
+    expect(instructed).toHaveLength(1);
+    expect(stored[0].seen).toEqual([]);
+    save.mockClear();
+    await first.poll();
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(stored[0].seen).toEqual([]);
+    jobs.s1.whatsappToolsEnabled = false;
+    await first.poll();
+    expect(save).toHaveBeenCalledTimes(2);
+    down = false;
+    await first.poll();
+    expect(stored[0].seen).toEqual(['owner']);
+    save.mockClear();
+    await first.poll();
+    expect(save).not.toHaveBeenCalled();
+    first.stop();
+    jobs.s1.whatsappToolsEnabled = true;
+    const second = make();
+    await second.poll();
+    second.stop();
+    expect(instructed).toHaveLength(1);
+  });
+
   it('preserves entire operator instructions, including batches larger than the delivery limit', async () => {
     jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
     const w = make();
