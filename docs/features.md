@@ -58,7 +58,7 @@ See [the shared browser](api-v1.md#the-shared-browser) and
 | ----------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | Slack             | Channels, DMs, threads, replies, read positions and live events as the connected user                          | Read permitted channels and the user's DMs; send with the project's approval rules                |
 | Gmail and Outlook | Connect and sync mailboxes, search messages, read bodies, reply and move individual messages to provider trash | Opt-in projects can search, read, connect, sync, send, reply, mark read/unread, archive and trash |
-| WhatsApp          | Link through WAHA, read chats, send text replies, mark read and download attachments                           | Opt-in projects can read, open media, reply, mark read and open groups; replies wake the session  |
+| WhatsApp          | Link through WAHA, read chats, send text replies, mark read and download attachments                           | Opt-in projects read, open media, reply, mark read, open groups; replies (voice as text) wake it  |
 
 These client inbox routes require admin tokens and work independently of
 coding sessions. Session tools enforce their own project and turn access
@@ -122,7 +122,8 @@ These additions are present in the server revision documented here:
   mailbox access is validated before a connection is saved.
 - WhatsApp has a local WAHA installer and inbox API, plus opt-in session
   tools. Installer reruns preserve engine selection, and NOWEB history
-  storage is enabled for accounts created by the core.
+  storage is enabled for accounts created by the core. Replies in a chat a
+  session watches wake it, with voice notes transcribed by the core first.
 - Open sessions recover automatically after server restarts, retaining
   queued instructions and workflow stages. Workspace cleanup preserves
   checkouts for inspection and recovery instead of deleting them.

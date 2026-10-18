@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const cfg = vi.hoisted(() => ({ transcribe: null }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => cfg }));
 
-import { transcribe, transcribeAvailable } from '../lib/transcribe.js';
+import { transcribable, transcribe, transcribeAvailable } from '../lib/transcribe.js';
 
 const AUDIO = Buffer.from('fake-opus');
 
@@ -24,6 +24,13 @@ afterEach(() => {
 });
 
 describe('transcribe', () => {
+  it('knows which recordings it can send, such as a WhatsApp voice note', () => {
+    expect(transcribable('audio/ogg; codecs=opus')).toBe(true);
+    expect(transcribable('Audio/MP4')).toBe(true);
+    expect(transcribable('audio/amr')).toBe(false);
+    expect(transcribable('')).toBe(false);
+  });
+
   it('is unavailable, and refuses with 503, when the server has no key', async () => {
     cfg.transcribe = null;
     const fetchMock = answer(200, { text: 'x' });

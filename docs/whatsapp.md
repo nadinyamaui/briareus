@@ -221,6 +221,19 @@ inbox, open a group or start a watch on another chat. Such replies share the
 webhook caps: 30 deliveries an hour and 10 automatic turns in a row before the
 session waits for a word from the operator.
 
+Voice notes arrive already transcribed, the way an email wake carries its body:
+before the delivery, the core downloads the recording from WAHA and sends it
+to OpenAI with the same `OPENAI_TRANSCRIBE_API_KEY` and
+`OPENAI_TRANSCRIBE_MODEL` as the composer’s voice notes, so the session never
+has to download or transcribe audio itself. The delivery shows the text and
+still names the message, for `whatsapp_media` if the recording is wanted. A
+voice note is transcribed once, however many sessions watch the chat and even
+while its delivery waits for one;
+when the transcription fails, the note is delivered with the reason and a
+pointer to `whatsapp_media`. Without those keys, or for an audio format OpenAI
+does not accept, voice notes arrive as before, as media to open. Neither the
+recording nor its text is kept by the core.
+
 The core reads the watched chats from WAHA every 15 seconds (nothing else of
 the inbox), so no WAHA webhook has to reach it. Watches and the ids of the
 messages already delivered are kept in `app_settings` (`whatsapp_watches`), so
