@@ -163,6 +163,91 @@ describe('email actions', () => {
     expect(mime).toContain(Buffer.from('Buenos días').toString('base64'));
   });
 
+  it('uploads Gmail attachments as multipart MIME', async () => {
+    const { run, request } = make('gmail', Response.json({ id: 'sent', threadId: 't' }));
+    const pdf = Buffer.from('%PDF-1.4 hola');
+    expect(
+      await run({
+        action: 'send',
+        to: ['you@example.com'],
+        subject: 'Informe',
+        text: 'Adjunto',
+        attachments: [
+          { name: 'informe.pdf', mimeType: 'application/pdf', data: pdf.toString('base64') },
+          { name: 'Año 2026.csv', mimeType: 'text/csv', data: Buffer.from('a,b').toString('base64') },
+        ],
+      }),
+    ).toMatchObject({ status: 'accepted', id: 'sent', attachments: ['informe.pdf', 'Año 2026.csv'] });
+    const [url, options] = request.mock.calls[0];
+    expect(url).toBe('https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media');
+    expect(options.headers['Content-Type']).toBe('message/rfc822');
+    const mime = options.body;
+    const boundary = mime.match(/Content-Type: multipart\/mixed; boundary="([^"]+)"/)[1];
+    const parts = mime.split(`--${boundary}`);
+    expect(parts).toHaveLength(5);
+    expect(parts[0]).toContain('To: you@example.com\r\n');
+    expect(parts[1]).toContain(Buffer.from('Adjunto').toString('base64'));
+    expect(parts[2]).toContain('Content-Type: application/pdf\r\n');
+    expect(parts[2]).toContain('Content-Disposition: attachment; filename="informe.pdf"\r\n');
+    expect(parts[2]).toContain(`\r\n\r\n${pdf.toString('base64')}\r\n`);
+    expect(parts[3]).toContain(`filename*=UTF-8''${encodeURIComponent('Año 2026.csv')}`);
+    expect(parts[4]).toBe('--\r\n');
+    for (const line of mime.split('\r\n')) expect(Buffer.byteLength(line)).toBeLessThanOrEqual(998);
+  });
+
+  it('sends Outlook attachments inline and caps them below the Graph request limit', async () => {
+    const { run, request } = make('outlook', new Response(null, { status: 202 }));
+    await run({
+      action: 'send',
+      to: ['you@example.com'],
+      subject: 's',
+      text: 'b',
+      attachments: [{ name: 'a.txt', mimeType: 'text/plain', data: Buffer.from('hi').toString('base64') }],
+    });
+    expect(JSON.parse(request.mock.calls[0][1].body).message.attachments).toEqual([
+      {
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: 'a.txt',
+        contentType: 'text/plain',
+        contentBytes: Buffer.from('hi').toString('base64'),
+      },
+    ]);
+    const big = Buffer.alloc(2.5 * 1024 * 1024 + 1).toString('base64');
+    await expect(
+      run({
+        action: 'send',
+        to: ['you@example.com'],
+        subject: 's',
+        text: 'b',
+        attachments: [{ name: 'x', data: big }],
+      }),
+    ).rejects.toMatchObject({ status: 413 });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [[{ name: '../x', data: 'aGk=' }], /plain file name/],
+    [[{ name: 'x', data: 'not base64!' }], /base64/],
+    [[{ name: 'x', data: '' }], /empty/],
+    [[{ name: 'x', mimeType: 'text/plain\r\nBcc: a@b.c', data: 'aGk=' }], /type/],
+    [Array.from({ length: 11 }, () => ({ name: 'x', data: 'aGk=' })), /at most 10/],
+    [[{ name: 'x', data: Buffer.alloc(18 * 1024 * 1024 + 1).toString('base64') }], /18 MiB/],
+  ])('refuses bad attachments before sending', async (attachments, message) => {
+    const { run, request } = make();
+    await expect(
+      run({ action: 'send', to: ['you@example.com'], subject: 's', text: 'b', attachments }),
+    ).rejects.toThrow(message);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('keeps replies plain text', async () => {
+    const { run, request } = make();
+    await expect(
+      run({ action: 'reply', id: 'm', text: 'b', attachments: [{ name: 'x', data: 'aGk=' }] }),
+    ).rejects.toThrow(/mail_send/);
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it('threads Gmail replies using Reply-To and original Message-ID', async () => {
     const { run, request } = make(
       'gmail',

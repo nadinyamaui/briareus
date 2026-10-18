@@ -1,10 +1,11 @@
 import express from 'express';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
-import { mailAgentRoutes, mailSessionAllowed } from '../lib/mail-agent.js';
+import { mailActionPath, mailAgentRoutes, mailSessionAllowed } from '../lib/mail-agent.js';
 
 let server, base, job, service, project, wakeState, wakeUpdate;
 const interactive = () => ({ id: 'chat', kind: 'devchat', repo: 'owner/repo', status: 'running' });
@@ -32,7 +33,9 @@ beforeEach(async () => {
   wakeState = vi.fn(() => ({ rules: [] }));
   wakeUpdate = vi.fn((id, input) => input);
   const app = express();
-  app.use(express.json());
+  // As server.js: the small app-wide parser skips a send, whose attachments can be large.
+  const json = express.json();
+  app.use((req, res, next) => (mailActionPath(req.path) ? next() : json(req, res, next)));
   app.use(
     mailAgentRoutes({
       service,
@@ -241,12 +244,74 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
       },
       expect.any(Function),
     );
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mail-send-'));
+    const big = Buffer.alloc(2 * 1024 * 1024, 7);
+    fs.writeFileSync(path.join(dir, 'Informe ñ.pdf'), big);
+    fs.writeFileSync(path.join(dir, 'notes'), 'hi');
+    try {
+      const sent = await tool('mail_send', {
+        account: 7,
+        to: ['you@example.com'],
+        subject: 's',
+        text: 'body',
+        attachments: [path.join(dir, 'Informe ñ.pdf'), path.join(dir, 'notes')],
+      });
+      expect(sent.result.isError).toBeUndefined();
+      expect(service.action).toHaveBeenLastCalledWith(
+        7,
+        {
+          action: 'send',
+          to: ['you@example.com'],
+          subject: 's',
+          text: 'body',
+          attachments: [
+            { name: 'Informe ñ.pdf', mimeType: 'application/pdf', data: big.toString('base64') },
+            {
+              name: 'notes',
+              mimeType: 'application/octet-stream',
+              data: Buffer.from('hi').toString('base64'),
+            },
+          ],
+        },
+        expect.any(Function),
+      );
+      const relative = await tool('mail_send', {
+        account: 7,
+        to: ['you@example.com'],
+        subject: 's',
+        text: 'body',
+        attachments: ['notes'],
+      });
+      expect(relative.result.isError).toBe(true);
+      const folder = await tool('mail_send', {
+        account: 7,
+        to: ['you@example.com'],
+        subject: 's',
+        text: 'body',
+        attachments: [dir],
+      });
+      expect(folder.result.content[0].text).toMatch(/is not a file/);
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
     await tool('mail_reply', { account: 7, id: 'message', text: 'yes' });
     expect(service.action).toHaveBeenLastCalledWith(
       7,
       { action: 'reply', id: 'message', text: 'yes' },
       expect.any(Function),
     );
+    const replyCalls = service.action.mock.calls.length;
+    const attachedReply = await tool('mail_reply', {
+      account: 7,
+      id: 'message',
+      text: 'yes',
+      attachments: ['/etc/hostname'],
+    });
+    expect(attachedReply.result.isError).toBe(true);
+    expect(attachedReply.result.content[0].text).toMatch(
+      /Only a new email \(mail_send\) can carry attachments/,
+    );
+    expect(service.action).toHaveBeenCalledTimes(replyCalls);
     await tool('mail_update', { account: 7, id: 'message', action: 'archive' });
     expect(service.action).toHaveBeenLastCalledWith(
       7,
@@ -255,7 +320,7 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
     );
     await tool('mail_update', { account: 7, id: 'message/+=', action: 'trash' });
     expect(service.trashMessage).toHaveBeenCalledWith(7, 'message/+=', expect.any(Function));
-    expect(service.action).toHaveBeenCalledTimes(3);
+    expect(service.action).toHaveBeenCalledTimes(4);
     job.unattendedTurn = true;
     expect((await tool('mail_accounts')).result.isError).toBe(true);
     expect((await tool('mail_update', { account: 7, id: 'm', action: 'send' })).result.isError).toBe(true);

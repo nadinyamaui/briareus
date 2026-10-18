@@ -7,7 +7,7 @@ import { forgeRoutes } from './lib/forge-routes.js';
 import { createEnvoyerService } from './lib/envoyer.js';
 import { envoyerRoutes } from './lib/envoyer-routes.js';
 import { createForgeAccounts } from './lib/forge-accounts.js';
-import { mailAgentRoutes } from './lib/mail-agent.js';
+import { mailActionPath, mailAgentRoutes } from './lib/mail-agent.js';
 import { mailPushRoutes } from './lib/mail-push-routes.js';
 import { sessionMailWakeRoutes } from './lib/mail-wake.js';
 import { createMailService, MAIL_PUSH_PATH } from './lib/mail.js';
@@ -311,7 +311,9 @@ app.use(
     presentEvent: sessionFileEvent,
   }),
 );
-app.use(express.json({ limit: '1mb' }));
+const jsonBody = express.json({ limit: '1mb' });
+// Mail sends carry their attachments in the body; lib/mail-agent.js parses those after auth.
+app.use((req, res, next) => (mailActionPath(req.path) ? next() : jsonBody(req, res, next)));
 
 // Of all the handlers added for the rest of this file, only an agent's own are
 // answered at their own path.
