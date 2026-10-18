@@ -150,7 +150,7 @@ and revokes it with `false`. The setting is independent of `mailToolsEnabled`
 and of the project’s Slack workspace, so each channel is enabled per project.
 
 The tools are `whatsapp_accounts`, `whatsapp_conversations`,
-`whatsapp_messages`, `whatsapp_media`, `whatsapp_send`,
+`whatsapp_messages`, `whatsapp_media`, `whatsapp_send`, `whatsapp_send_voice`,
 `whatsapp_create_group`, `whatsapp_watches`, `whatsapp_watch`,
 `whatsapp_unwatch` and `whatsapp_mark_read`, served under
 `/api/agent/whatsapp` with the session’s
@@ -196,3 +196,19 @@ such a watch stays until those replies are taken, and writing there again
 renews it with them. Watches end with their
 session, or when the project turns WhatsApp tools off, which also drops the
 replies still waiting for the session.
+
+### Sending voice notes
+
+Set `OPENAI_SPEECH_API_KEY` and `OPENAI_SPEECH_MODEL` (for example,
+`gpt-4o-mini-tts`) on the server and restart it. These are separate from
+transcription settings and are removed from child environments.
+`whatsapp_send_voice` takes `account`, `chat`, `text` (1–4096 characters),
+and optional `voice` (default `coral`), `replyTo` and `watch`. It calls
+[OpenAI speech](https://developers.openai.com/api/reference/resources/audio/subresources/speech/methods/create)
+for Ogg/Opus and sends it through
+[WAHA sendVoice](https://waha.devlike.pro/docs/how-to/send-messages/#send-voice-).
+The installed WAHA edition/engine must support voice sending (501 otherwise).
+Recipients must be told the voice is AI-generated; built-in voices do not
+clone a person or a session character. Voice sends have the same permissions,
+reply watches and no automatic retry rule as text sends. The internal route is
+`POST /api/agent/whatsapp/accounts/:id/conversations/:chat/voice`.

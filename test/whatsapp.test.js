@@ -86,6 +86,10 @@ async function setup() {
     if (path.endsWith(`/messages/${MID}`))
       return res.json({ ...RAW_MESSAGE, hasMedia: true, media: { url: mediaUrl } });
     if (path.endsWith('/messages')) return res.json([RAW_MESSAGE]);
+    if (path === '/api/sendVoice')
+      return res
+        .status(201)
+        .json({ ...RAW_MESSAGE, fromMe: true, hasMedia: true, media: { mimetype: req.body.file.mimetype } });
     if (path === '/api/sendText')
       return res.status(201).json({ ...RAW_MESSAGE, body: req.body.text, fromMe: true });
     if (path === '/api/default/groups' && req.method === 'POST')
@@ -536,4 +540,24 @@ describe('the WhatsApp core inbox', () => {
     const service = createWhatsAppService({ config: () => ({ url, apiKey: KEY }) });
     await expect(service.accounts()).rejects.toMatchObject({ status: 502 });
   });
+});
+
+it('sends generated Ogg/Opus through WAHA as a voice note without conversion', async () => {
+  const ctx = await setup();
+  const audio = Buffer.from('OggSfake-opus');
+  const result = await ctx.service.sendVoice('default', CHAT, audio, MID);
+  expect(result.message).toMatchObject({ fromMe: true, hasMedia: true });
+  expect(ctx.calls.find((c) => c.path === '/api/sendVoice').body).toEqual({
+    session: 'default',
+    chatId: CHAT,
+    reply_to: MID,
+    convert: false,
+    file: { mimetype: 'audio/ogg; codecs=opus', filename: 'voice.ogg', data: audio.toString('base64') },
+  });
+  await expect(ctx.service.sendVoice('default', 'bad', audio)).rejects.toMatchObject({ status: 400 });
+  await expect(ctx.service.sendVoice('default', CHAT, Buffer.alloc(0))).rejects.toMatchObject({
+    status: 400,
+  });
+  await expect(ctx.service.sendVoice('default', CHAT, audio, '')).rejects.toMatchObject({ status: 400 });
+  expect(ctx.calls.filter((c) => c.path === '/api/sendVoice')).toHaveLength(1);
 });
