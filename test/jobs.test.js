@@ -811,6 +811,55 @@ describe('loop children waiting for a database slot', () => {
     return child;
   };
 
+  it.each([1, 2])(
+    'reports a retryable failure when %i waiting parents hold the whole pool',
+    async (count) => {
+      const unrelated = devSessionRecords().filter((j) => !ids.slice(0, count).includes(j.id));
+      const statuses = unrelated.map((j) => j.status);
+      for (const job of unrelated) job.status = 'closed';
+      state.capacity = count;
+      try {
+        if (count === 2) await queueReview(ids[0]);
+        const parent = getJob(ids[count - 1]);
+        await retryLoopRound(parent.id);
+        expect(parent.reviewLoop.reviewing).toBe(false);
+        expect(parent.reviewLoop.reviewSessionId).toBeFalsy();
+        expect(parent.reviewLoop.failure).toMatchObject({
+          reason: expect.stringMatching(/parents hold every database slot.*enable another database server/i),
+        });
+        expect(blocked).toEqual([]);
+        state.capacity += 1;
+        const child = await queueReview(parent.id);
+        expect(child).toBeTruthy();
+        expect(parent.reviewLoop.failure).toBeNull();
+      } finally {
+        unrelated.forEach((job, index) => {
+          job.status = statuses[index];
+        });
+      }
+    },
+  );
+
+  it('services existing waiters before a new session can claim added capacity', async () => {
+    const first = await queueReview(ids[0]);
+    const second = await queueReview(ids[1]);
+    state.capacity += 1;
+    expect(() => createDevSession({ provider: 1, repo: 'acme/slots', prompt: 'new worker' })).toThrow(
+      /holding a database server/,
+    );
+    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([first.id]));
+    expect(first.status).toBe('preparing');
+    expect(second.status).toBe('queued');
+    state.capacity += 2;
+    const newcomer = createDevSession({ provider: 1, repo: 'acme/slots', prompt: 'new worker' });
+    children.push(getJob(newcomer.id));
+    expect(second.databaseSlotQueuedAt).toBeNull();
+    expect(second.status).toBe('preparing');
+    await vi.waitFor(() =>
+      expect(blocked.map((j) => j.id).sort()).toEqual([first.id, second.id, newcomer.id].sort()),
+    );
+  });
+
   it('starts accepted loop children during maintenance drain', async () => {
     const child = await queueReview(ids[0]);
     setDraining(true);
