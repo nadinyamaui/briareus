@@ -795,6 +795,7 @@ describe('loop children waiting for a database slot', () => {
     );
   });
   afterEach(async () => {
+    setDraining(false);
     // Retire the parents first, so cleanup cannot start a further round.
     for (const id of ids) getJob(id).status = 'closed';
     for (const child of children) if (child) await closeDevSession(child.id);
@@ -809,6 +810,45 @@ describe('loop children waiting for a database slot', () => {
     children.push(child);
     return child;
   };
+
+  it('starts accepted loop children during maintenance drain', async () => {
+    const child = await queueReview(ids[0]);
+    setDraining(true);
+    expect(maintenanceState(devSessionRecords()).ready).toBe(false);
+    await closeDevSession('slot-holder');
+    expect(blocked.map((j) => j.id)).toEqual([child.id]);
+    expect(child.status).toBe('preparing');
+  });
+
+  it('does not start queued loop children during shutdown', async () => {
+    const child = await queueReview(ids[0]);
+    await stopAllJobProcesses();
+    await closeDevSession('slot-holder');
+    expect(blocked).toEqual([]);
+    expect(child.status).toBe('queued');
+  });
+
+  it('cancels superseded queued QA so the current review gets the next slot', async () => {
+    const parent = getJob(ids[0]);
+    const qa = createDevSession({
+      provider: 1,
+      repo: 'acme/slots',
+      branch: 'task/slots',
+      qaParentId: parent.id,
+      qa: true,
+    });
+    const child = getJob(qa.id);
+    children.push(child);
+    // The later-push transition in reopenLoopForPush keeps running QA tracked as stale.
+    parent.qaLoop = { running: true, sessionId: null, staleSessionId: child.id };
+    const review = await queueReview(parent.id);
+    expect(parent.qaLoop.staleSessionId).toBe(child.id);
+    await closeDevSession('slot-holder');
+    await vi.waitFor(() => expect(child.status).toBe('closed'));
+    expect(blocked.map((j) => j.id)).toEqual([review.id]);
+    expect(review.status).toBe('preparing');
+    expect(parent.qaLoop).toMatchObject({ running: false, staleSessionId: null });
+  });
 
   it('queues rounds at capacity without failure, refuses duplicate retries, and starts them FIFO on close', async () => {
     const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
