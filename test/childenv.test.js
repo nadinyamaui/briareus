@@ -8,6 +8,7 @@ afterEach(() => {
 
 describe('childEnv', () => {
   it("drops the server's own credentials and keeps the rest", () => {
+    vi.stubEnv('OPENAI_SPEECH_API_KEY', 'speech-secret');
     vi.stubEnv('OPENAI_TRANSCRIBE_API_KEY', 'sk-secret');
     vi.stubEnv('OPENAI_TRANSCRIBE_MODEL', 'gpt-4o-transcribe');
     vi.stubEnv('R2_SECRET_ACCESS_KEY', 'r2-secret');
@@ -25,6 +26,7 @@ describe('childEnv', () => {
 
     const env = childEnv();
 
+    expect(env).not.toHaveProperty('OPENAI_SPEECH_API_KEY');
     expect(env).not.toHaveProperty('OPENAI_TRANSCRIBE_API_KEY');
     expect(env).not.toHaveProperty('OPENAI_TRANSCRIBE_MODEL');
     expect(env).not.toHaveProperty('R2_SECRET_ACCESS_KEY');
