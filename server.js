@@ -26,7 +26,7 @@ import { createSlackService } from './lib/slack.js';
 import { slackRoutes, slackEventsRouter } from './lib/slack-routes.js';
 import { createHomeAssistantService } from './lib/home-assistant.js';
 import { homeAssistantRoutes } from './lib/home-assistant-routes.js';
-import { createWhatsAppService } from './lib/whatsapp.js';
+import { createWhatsAppService, readMedia } from './lib/whatsapp.js';
 import { whatsappRoutes } from './lib/whatsapp-routes.js';
 import { whatsappAgentRoutes, whatsappWatchAllowed } from './lib/whatsapp-agent.js';
 import { createWhatsAppWatcher } from './lib/whatsapp-watch.js';
@@ -228,7 +228,7 @@ import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload, getUpload } from './lib/uploads.js';
 import { uploadBody, uploadHandler } from './lib/upload-body.js';
 import { sessionFileEvent, sessionFileRoutes, sessionFileDownloads } from './lib/session-files.js';
-import { transcribe, transcribeAvailable } from './lib/transcribe.js';
+import { transcribable, transcribe, transcribeAvailable } from './lib/transcribe.js';
 import { previewAccess } from './lib/tunnel.js';
 import { projectUsage, overallUsage, jobUsageEstimates, estimateEventCosts } from './lib/usage.js';
 import { agentOnly, apiEnabled } from './lib/auth.js';
@@ -601,6 +601,13 @@ const whatsappWatcher = createWhatsAppWatcher({
   deliver: (id, delivery, group) => deliverToSession(id, delivery, { via: 'whatsapp', ...group }),
   instruct: (id, instruction, group) =>
     instructSessionDurably(id, instruction, { via: 'whatsapp', ...group }),
+  // Voice notes arrive transcribed, with the composer's OpenAI transcription.
+  voiceText: async (account, chat, message) => {
+    const type = message.media?.mimetype || '';
+    if (!transcribeAvailable() || !transcribable(type)) return null;
+    const { data } = await readMedia(await whatsappService.media(account, chat, message.id));
+    return transcribe(data, { type });
+  },
   note: noteSession,
   registryComplete: sessionRegistryComplete,
 });

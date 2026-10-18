@@ -16,19 +16,23 @@ const ROUTES = [
   [`/accounts/default/conversations/${CHAT}/messages`, 'GET'],
   [`/accounts/default/conversations/${CHAT}/messages`, 'POST'],
   [`/accounts/default/conversations/${CHAT}/read`, 'POST'],
+  [`/accounts/default/conversations/${CHAT}/voice`, 'POST'],
   [`/accounts/default/conversations/${CHAT}/messages/m1/media`, 'GET'],
 ];
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-let server, base, job, service, project, watcher;
+let server, base, job, service, project, watcher, generateSpeech;
+const AUDIO = Buffer.from('OggSfake-opus');
 beforeEach(async () => {
   job = { id: 'chat', kind: 'devchat', repo: 'owner/repo', status: 'running' };
+  generateSpeech = vi.fn(async () => AUDIO);
   project = { repo: job.repo, enabled: true, whatsappToolsEnabled: true };
   service = {
     accounts: vi.fn(async () => ({ configured: true, accounts: [{ id: 'default', status: 'WORKING' }] })),
     conversations: vi.fn(async (_id, query) => ({ conversations: [], nextOffset: null, query })),
     messages: vi.fn(async () => ({ messages: [{ id: 'm1', text: 'Untrusted' }], nextOffset: 50 })),
     send: vi.fn(async (_id, _chat, input) => ({ message: { id: 'sent', text: input.text } })),
+    sendVoice: vi.fn(async () => ({ message: { id: 'voice-sent', hasMedia: true } })),
     markRead: vi.fn(async () => ({ ok: true })),
     start: vi.fn(),
     qr: vi.fn(),
@@ -51,6 +55,7 @@ beforeEach(async () => {
     whatsappAgentRoutes({
       service,
       watcher,
+      generateSpeech,
       getProject: (repo) => (project?.repo === repo ? project : null),
       agentSession: (req, res) => {
         if (req.headers.authorization !== 'Bearer session-token') {
@@ -278,6 +283,7 @@ describe('session WhatsApp watches', () => {
     for (const [path, method, body] of [
       [`/accounts/default/conversations/${OTHER}/messages`, 'GET'],
       [`/accounts/default/conversations/${OTHER}/messages`, 'POST', { text: 'x' }],
+      [`/accounts/default/conversations/${OTHER}/voice`, 'POST', { text: 'x' }],
       [`/accounts/default/conversations/${OTHER}/messages/m1/media`, 'GET'],
       [`/accounts/default/conversations/${OTHER}/read`, 'POST'],
       [`/accounts/default/conversations/${OTHER}/watch`, 'PUT', {}],
@@ -326,6 +332,7 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
       'whatsapp_messages',
       'whatsapp_media',
       'whatsapp_send',
+      'whatsapp_send_voice',
       'whatsapp_create_group',
       'whatsapp_watches',
       'whatsapp_watch',
@@ -352,6 +359,19 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
     await tool('whatsapp_send', { account: 'default', chat: CHAT, text: 'Sin cita' });
     expect(service.send).toHaveBeenLastCalledWith('default', CHAT, { text: 'Sin cita' });
     await tool('whatsapp_send', { account: 'default', chat: OTHER, text: 'Sin respuesta', watch: false });
+    const voice = await tool('whatsapp_send_voice', {
+      account: 'default',
+      chat: CHAT,
+      text: 'Hola de voz',
+      voice: 'coral',
+      replyTo: 'm1',
+    });
+    expect(JSON.parse(voice.result.content[0].text).message.id).toBe('voice-sent');
+    expect(generateSpeech).toHaveBeenCalledWith(
+      { text: 'Hola de voz', voice: 'coral' },
+      expect.any(AbortSignal),
+    );
+    expect(service.sendVoice).toHaveBeenCalledWith('default', CHAT, AUDIO, 'm1');
     const group = JSON.parse(
       (await tool('whatsapp_create_group', { account: 'default', name: 'Dudas', participants: [CHAT] }))
         .result.content[0].text,
@@ -376,4 +396,56 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
     lines.close();
     await new Promise((resolve) => child.once('close', resolve));
   }
+});
+
+describe('voice note sends', () => {
+  const endpoint = `/accounts/default/conversations/${CHAT}/voice`;
+  it('watches a successful voice send and accepts watch false', async () => {
+    expect((await request(endpoint, 'POST', { text: 'Hola' })).status).toBe(201);
+    expect(watcher.watching(job.id, 'default', CHAT)).toBe(true);
+    await watcher.unwatch(job.id, 'default', CHAT);
+    expect((await request(endpoint, 'POST', { text: 'Hola', watch: false })).status).toBe(201);
+    expect(watcher.watching(job.id, 'default', CHAT)).toBe(false);
+  });
+  it('rechecks permission after generation', async () => {
+    generateSpeech.mockImplementationOnce(async () => {
+      project.whatsappToolsEnabled = false;
+      return AUDIO;
+    });
+    expect((await request(endpoint, 'POST', { text: 'Hola' })).status).toBe(403);
+    expect(service.sendVoice).not.toHaveBeenCalled();
+    expect(watcher.watching(job.id, 'default', CHAT)).toBe(false);
+  });
+  it('allows voice replies only while an unattended session still watches the chat', async () => {
+    await watcher.watch(job.id, { account: 'default', chat: CHAT });
+    job.unattendedTurn = true;
+    expect((await request(endpoint, 'POST', { text: 'Hola' })).status).toBe(201);
+    expect(service.sendVoice).toHaveBeenCalledTimes(1);
+    generateSpeech.mockImplementationOnce(async () => {
+      await watcher.unwatch(job.id, 'default', CHAT);
+      return AUDIO;
+    });
+    expect((await request(endpoint, 'POST', { text: 'Hola' })).status).toBe(403);
+    expect(service.sendVoice).toHaveBeenCalledTimes(1);
+  });
+  it('rejects invalid watch and reply ids before generation', async () => {
+    for (const body of [
+      { text: 'Hola', watch: 'true' },
+      { text: 'Hola', replyTo: '' },
+    ])
+      expect((await request(endpoint, 'POST', body)).status).toBe(400);
+    expect(generateSpeech).not.toHaveBeenCalled();
+    expect(service.sendVoice).not.toHaveBeenCalled();
+  });
+  it('does not send on a synthesis failure, or retry an uncertain send', async () => {
+    generateSpeech.mockRejectedValueOnce(Object.assign(new Error('Speech disabled'), { status: 503 }));
+    expect((await request(endpoint, 'POST', { text: 'Hola' })).status).toBe(503);
+    expect(service.sendVoice).not.toHaveBeenCalled();
+    service.sendVoice.mockRejectedValueOnce(
+      Object.assign(new Error('WAHA did not confirm'), { status: 502 }),
+    );
+    expect((await request(endpoint, 'POST', { text: 'Hola' })).status).toBe(502);
+    expect(service.sendVoice).toHaveBeenCalledTimes(1);
+    expect(watcher.watching(job.id, 'default', CHAT)).toBe(false);
+  });
 });

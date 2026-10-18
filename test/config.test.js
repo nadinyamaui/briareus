@@ -83,7 +83,7 @@ beforeEach(() => {
   savedEnv = { ...process.env };
   for (const k of Object.keys(process.env))
     if (
-      /^(R2_|CLOUDFLARE_|OPENAI_TRANSCRIBE_|PREVIEW_ACCESS_CLIENT_|GOOGLE_OAUTH_|GMAIL_PUSH_|MICROSOFT_OAUTH_|WAHA_|HOME_ASSISTANT_)/.test(
+      /^(R2_|CLOUDFLARE_|OPENAI_TRANSCRIBE_|OPENAI_SPEECH_|PREVIEW_ACCESS_CLIENT_|GOOGLE_OAUTH_|GMAIL_PUSH_|MICROSOFT_OAUTH_|WAHA_|HOME_ASSISTANT_)/.test(
         k,
       )
     )
@@ -922,5 +922,20 @@ describe('Home Assistant configuration', () => {
   ])('refuses incomplete or unsafe configuration %j', async (values) => {
     const { getConfig } = await loadConfig(complete(values));
     expect(() => getConfig()).toThrow(/HOME_ASSISTANT/);
+  });
+});
+
+describe('speech generation config', () => {
+  it('is off without settings and requires both key and model', async () => {
+    let loaded = await loadConfig(complete());
+    expect(loaded.getConfig().speech).toBeNull();
+    loaded = await loadConfig(complete({ OPENAI_SPEECH_API_KEY: 'sk-speech' }));
+    expect(() => loaded.getConfig()).toThrow(/OPENAI_SPEECH_MODEL/);
+  });
+  it('reads the configured speech model and key', async () => {
+    const { getConfig } = await loadConfig(
+      complete({ OPENAI_SPEECH_API_KEY: 'sk-speech', OPENAI_SPEECH_MODEL: 'gpt-4o-mini-tts' }),
+    );
+    expect(getConfig().speech).toEqual({ apiKey: 'sk-speech', model: 'gpt-4o-mini-tts' });
   });
 });
