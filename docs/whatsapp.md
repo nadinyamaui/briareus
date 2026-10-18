@@ -191,7 +191,8 @@ to OpenAI with the same `OPENAI_TRANSCRIBE_API_KEY` and
 `OPENAI_TRANSCRIBE_MODEL` as the composer’s voice notes, so the session never
 has to download or transcribe audio itself. The delivery shows the text and
 still names the message, for `whatsapp_media` if the recording is wanted. A
-voice note is transcribed once, even while its delivery waits for the session;
+voice note is transcribed once, however many sessions watch the chat and even
+while its delivery waits for one;
 when the transcription fails, the note is delivered with the reason and a
 pointer to `whatsapp_media`. Without those keys, or for an audio format OpenAI
 does not accept, voice notes arrive as before, as media to open. Neither the

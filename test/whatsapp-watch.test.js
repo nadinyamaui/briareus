@@ -471,6 +471,58 @@ describe('WhatsApp watches', () => {
       w.stop();
     });
 
+    it('are transcribed once for every session watching the chat, even while one waits', async () => {
+      const voiceText = vi.fn(async () => 'hola');
+      const w = make({ voiceText });
+      await w.watch('s1', { account: 'default', chat: CHAT });
+      await w.watch('s2', { account: 'default', chat: CHAT });
+      chats[CHAT] = [voice('v', T0 + 1000)];
+      deliver = (id, delivery) => {
+        if (id === 's1') throw Object.assign(new Error('10 automatic turns ran'), { status: 429 });
+        delivered.push({ session: id, ...delivery });
+        return { status: 'running' };
+      };
+      await w.poll();
+      chats[CHAT] = new Error('WAHA down');
+      await w.poll();
+      chats[CHAT] = [voice('v', T0 + 1000)];
+      await w.poll();
+      expect(delivered.map((d) => d.session)).toEqual(['s2']);
+      deliver = (id, delivery) => {
+        delivered.push({ session: id, ...delivery });
+        return { status: 'running' };
+      };
+      await w.poll();
+      expect(delivered.map((d) => d.session)).toEqual(['s2', 's1']);
+      expect(delivered[1].text).toContain('(voice note, transcribed by the core) hola');
+      expect(voiceText).toHaveBeenCalledTimes(1);
+      w.stop();
+    });
+
+    it('are not transcribed again however many wait for their sessions', async () => {
+      const voiceText = vi.fn(async (_account, _chat, m) => `said ${m.id}`);
+      const w = make({ voiceText });
+      deliver = () => {
+        throw Object.assign(new Error('10 automatic turns ran'), { status: 429 });
+      };
+      for (let c = 0; c < 6; c++) {
+        const chat = `3460000000${c}@c.us`;
+        await w.watch('s1', { account: 'default', chat });
+        chats[chat] = Array.from({ length: 20 }, (_, i) => voice(`${c}-${i}`, T0 + 1000 + i * 1000));
+      }
+      await w.poll();
+      await w.poll();
+      expect(voiceText).toHaveBeenCalledTimes(120);
+      deliver = (id, delivery) => {
+        delivered.push({ session: id, ...delivery });
+        return { status: 'running' };
+      };
+      await w.poll();
+      expect(delivered).toHaveLength(6);
+      expect(voiceText).toHaveBeenCalledTimes(120);
+      w.stop();
+    });
+
     it('still arrive when the transcription fails or is off, pointing at the recording', async () => {
       const failing = make({
         voiceText: async () => {
