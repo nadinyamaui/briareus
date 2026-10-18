@@ -467,3 +467,13 @@ Test-run videos are fetched at `/videos/*file` here, with a token. Without an
 R2 bucket that is also where the links a run leaves on a pull request point,
 so they open only for a client holding a token; configure R2 for links anyone
 holding them can watch.
+
+SSH server settings accept separate write-only `password` (SSH login) and
+`sudoPassword` (privilege elevation) fields; omit a field to preserve it or send
+an empty string to clear it. Responses expose only `hasPassword` and
+`hasSudoPassword`. For key-based SSH plus sudo, leave `password` empty and set
+`sudoPassword`. Agent `ssh_execute` calls may set `sudo: true` to execute their
+command as root using the stored sudo password. The approval shows the elevated
+command; the password is sent over SSH stdin and never included in command text.
+Elevated commands have stdin closed, so they cannot consume the password when
+sudo uses cached credentials or a NOPASSWD rule.
