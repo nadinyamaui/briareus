@@ -840,6 +840,65 @@ describe('loop children waiting for a database slot', () => {
     },
   );
 
+  it('fails an accepted wait if pool reduction leaves only its parent holding capacity', async () => {
+    const unrelated = devSessionRecords().filter((j) => ![ids[0], 'slot-holder'].includes(j.id));
+    const statuses = unrelated.map((j) => j.status);
+    for (const job of unrelated) job.status = 'closed';
+    state.capacity = 2;
+    try {
+      const parent = getJob(ids[0]);
+      const child = await queueReview(parent.id);
+      state.capacity = 1;
+      await closeDevSession('slot-holder');
+      expect(blocked).toEqual([]);
+      expect(child.status).toBe('failed');
+      expect(child.databaseSlotQueuedAt).toBeNull();
+      expect(parent.reviewLoop.reviewing).toBe(false);
+      expect(parent.reviewLoop.failure).toMatchObject({
+        reason: expect.stringMatching(/parents hold every database slot.*enable another database server/i),
+      });
+      setDraining(true);
+      expect(maintenanceState(devSessionRecords()).ready).toBe(true);
+      setDraining(false);
+      state.capacity = 2;
+      const retry = await queueReview(parent.id);
+      expect(parent.reviewLoop.failure).toBeNull();
+      await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([retry.id]));
+    } finally {
+      unrelated.forEach((job, index) => {
+        job.status = statuses[index];
+      });
+    }
+  });
+
+  it.each(['fix', 'qa'])('reports a pool-reduction failure to the %s parent', async (kind) => {
+    const parent = getJob(ids[0]);
+    const extra = kind === 'fix' ? { loopFixParentId: parent.id } : { qaParentId: parent.id, qa: true };
+    const child = getJob(
+      createDevSession({ provider: 1, repo: 'acme/slots', branch: 'task/slots', prompt: 'fix', ...extra }).id,
+    );
+    children.push(child);
+    if (kind === 'fix') Object.assign(parent.reviewLoop, { fixing: true, fixSessionId: child.id });
+    else parent.qaLoop = { running: true, sessionId: child.id };
+    const unrelated = devSessionRecords().filter((j) => ![parent.id, child.id].includes(j.id));
+    const statuses = unrelated.map((j) => j.status);
+    state.capacity = 1;
+    try {
+      for (const job of unrelated) if (job.id !== 'slot-holder') job.status = 'closed';
+      await closeDevSession('slot-holder');
+      expect(child.status).toBe('failed');
+      expect(child.databaseSlotQueuedAt).toBeNull();
+      expect(blocked).toEqual([]);
+      const loop = kind === 'fix' ? parent.reviewLoop : parent.qaLoop;
+      expect(kind === 'fix' ? loop.fixing : loop.running).toBe(false);
+      expect(loop.failure.reason).toMatch(/parents hold every database slot/);
+    } finally {
+      unrelated.forEach((job, index) => {
+        job.status = statuses[index];
+      });
+    }
+  });
+
   it('services existing waiters before a new session can claim added capacity', async () => {
     const first = await queueReview(ids[0]);
     const second = await queueReview(ids[1]);
