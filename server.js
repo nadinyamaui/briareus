@@ -105,6 +105,7 @@ import {
   assertWorkerSlot,
   sessionWebhookState,
   setSessionWebhook,
+  instructSessionDurably,
   rotateSessionWebhook,
   triageLoopFindings,
   triageReviewFindings,
@@ -593,8 +594,11 @@ const whatsappService = createWhatsAppService();
 const whatsappWatcher = createWhatsAppWatcher({
   service: whatsappService,
   getJob,
+  listJobs: devSessionRecords,
   allowed: (job) => whatsappWatchAllowed(job, getProject(job.repo)),
-  deliver: (id, delivery) => deliverToSession(id, delivery, { via: 'whatsapp' }),
+  deliver: (id, delivery, group) => deliverToSession(id, delivery, { via: 'whatsapp', ...group }),
+  instruct: (id, instruction, group) =>
+    instructSessionDurably(id, instruction, { via: 'whatsapp', ...group }),
   note: noteSession,
   registryComplete: sessionRegistryComplete,
 });

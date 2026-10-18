@@ -174,6 +174,15 @@ describe('webhook settings', () => {
     expect(publicWebhook(unlimited).maxTurns).toBe(0);
   });
 
+  it('sets and clears a group while keeping its server-owned start time private', () => {
+    const on = normalizeWebhookSettings({ whatsappGroup: '120363000000000000@g.us' });
+    expect(on.whatsappAccount).toBe('default');
+    const saved = { ...on, whatsappSince: 123 };
+    expect(normalizeWebhookSettings({ whatsappSince: 1, perHour: 5 }, saved).whatsappSince).toBe(123);
+    expect(publicWebhook(saved)).not.toHaveProperty('whatsappSince');
+    expect(normalizeWebhookSettings({ whatsappGroup: null }, saved).whatsappGroup).toBeNull();
+  });
+
   it('are not the place to move the key’s epoch', () => {
     expect(normalizeWebhookSettings({ epoch: 9 }, { ...WEBHOOK_DEFAULTS, epoch: 2 }).epoch).toBe(2);
   });
@@ -182,6 +191,10 @@ describe('webhook settings', () => {
     [{ armed: 'yes' }, /armed must be true or false/],
     [{ sshUnattended: 1 }, /sshUnattended must be true or false/],
     [{ instructions: 'on' }, /instructions must be true or false/],
+    [{ whatsappGroup: '34600000000@c.us' }, /WhatsApp group ID/],
+    [{ whatsappGroup: '' }, /WhatsApp group ID/],
+    [{ whatsappGroup: true }, /WhatsApp group ID/],
+    [{ whatsappAccount: '../default' }, /account ID/],
     [{ perHour: 0 }, /perHour must be a whole number from 1 to 600/],
     [{ perHour: 1.5 }, /perHour/],
     [{ perHour: NaN }, /perHour/],
@@ -203,6 +216,8 @@ describe('webhook settings', () => {
       maxTurns: 10,
       sshUnattended: false,
       instructions: false,
+      whatsappGroup: null,
+      whatsappAccount: 'default',
     });
     expect(publicWebhook(null)).toBe(null);
   });

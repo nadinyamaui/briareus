@@ -119,6 +119,23 @@ describe('a session’s webhook in the dashboard', () => {
     expect(off).toMatchObject({ instructions: true, key: null, instructionsKey: null });
   });
 
+  it('saves and reads back the WhatsApp group in the existing webhook settings', async () => {
+    const group = '120363000000000000@g.us';
+    const res = await request('abc123/webhook', {
+      method: 'PUT',
+      body: { armed: true, whatsappGroup: group, whatsappAccount: 'default' },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      whatsappGroup: group,
+      whatsappAccount: 'default',
+      instructions: false,
+    });
+    expect(await (await request('abc123/webhook')).json()).toMatchObject({ whatsappGroup: group });
+    const off = await request('abc123/webhook', { method: 'PUT', body: { whatsappGroup: null } });
+    expect((await off.json()).whatsappGroup).toBeNull();
+  });
+
   it('rotating hands over the key of the next epoch', async () => {
     await request('abc123/webhook', { method: 'PUT', body: { armed: true } });
     const res = await request('abc123/webhook/rotate', { method: 'POST' });
