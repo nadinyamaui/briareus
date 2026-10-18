@@ -300,6 +300,18 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
       { action: 'reply', id: 'message', text: 'yes' },
       expect.any(Function),
     );
+    const replyCalls = service.action.mock.calls.length;
+    const attachedReply = await tool('mail_reply', {
+      account: 7,
+      id: 'message',
+      text: 'yes',
+      attachments: ['/etc/hostname'],
+    });
+    expect(attachedReply.result.isError).toBe(true);
+    expect(attachedReply.result.content[0].text).toMatch(
+      /Only a new email \(mail_send\) can carry attachments/,
+    );
+    expect(service.action).toHaveBeenCalledTimes(replyCalls);
     await tool('mail_update', { account: 7, id: 'message', action: 'archive' });
     expect(service.action).toHaveBeenLastCalledWith(
       7,

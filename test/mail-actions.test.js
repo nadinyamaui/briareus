@@ -212,7 +212,7 @@ describe('email actions', () => {
         contentBytes: Buffer.from('hi').toString('base64'),
       },
     ]);
-    const big = Buffer.alloc(3 * 1024 * 1024 + 1).toString('base64');
+    const big = Buffer.alloc(2.5 * 1024 * 1024 + 1).toString('base64');
     await expect(
       run({
         action: 'send',
