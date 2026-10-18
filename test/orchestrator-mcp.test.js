@@ -287,6 +287,26 @@ describe('the worker tools', () => {
     expect(lines[4]).not.toContain('QA queued');
   });
 
+  it('list_workers explains that review, fix and QA children waiting for database slots start automatically', async () => {
+    stubFetch(
+      reply({
+        body: {
+          sessions: [
+            worker({ reviewLoop: { rounds: 1, reviewing: true, waitingForDatabase: true } }),
+            worker({ id: 'w2', reviewLoop: { rounds: 2, fixing: true, waitingForDatabase: true } }),
+            worker({ id: 'w3', qaLoop: { running: true, waitingForDatabase: true } }),
+          ],
+        },
+      }),
+    );
+    const s = await boot();
+    const [res] = await s.send(callTool('list_workers', {}));
+    const lines = res.result.content[0].text.split('\n');
+    expect(lines[0]).toContain('review loop round 1: waiting for a database slot; starts automatically');
+    expect(lines[1]).toContain('review loop round 2: waiting for a database slot; starts automatically');
+    expect(lines[2]).toContain('QA waiting for a database slot; starts automatically');
+  });
+
   it('list_workers tells a round that could not run from a loop that converged', async () => {
     stubFetch(
       reply({

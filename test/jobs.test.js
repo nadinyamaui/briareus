@@ -759,6 +759,312 @@ describe('devSessionSlots', () => {
   });
 });
 
+describe('loop children waiting for a database slot', () => {
+  const ids = ['slot-review-a', 'slot-review-b', 'slot-holder'];
+  let blocked;
+  let children;
+  beforeEach(async () => {
+    blocked = [];
+    children = [];
+    state.claimsServer = true;
+    state.projects = [{ repo: 'acme/slots' }];
+    state.stored = ids.map((id, index) => ({
+      id,
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/slots',
+      providerId: 1,
+      model: 'claude-fable-5-1',
+      effort: 'high',
+      branch: 'task/slots',
+      startedOnPr: 900 + index,
+      prStatus: { number: 900 + index, state: 'open', headSha: 'slot-sha' },
+      reviewLoop: { rounds: 0 },
+    }));
+    await initJobs();
+    for (const id of ids) {
+      const job = getJob(id);
+      job.status = 'idle';
+      job.prStatus.syncedAt = new Date().toISOString();
+    }
+    // Other blocks' open records share this module's registry and pool.
+    state.capacity = 10000;
+    state.capacity -= devSessionSlots('acme/slots');
+    acquireInstance.mockImplementation(
+      (job) => new Promise((resolve, reject) => blocked.push({ id: job.id, reject })),
+    );
+  });
+  afterEach(async () => {
+    setDraining(false);
+    // Retire the parents first, so cleanup cannot start a further round.
+    for (const id of ids) getJob(id).status = 'closed';
+    for (const child of children) if (child) await closeDevSession(child.id);
+    for (const { reject } of blocked) reject(new Error('closed'));
+    acquireInstance.mockReset();
+  });
+
+  const queueReview = async (id) => {
+    await retryLoopRound(id);
+    const parent = getJob(id);
+    const child = getJob(parent.reviewLoop.reviewSessionId);
+    children.push(child);
+    return child;
+  };
+
+  it.each([1, 2])(
+    'reports a retryable failure when %i waiting parents hold the whole pool',
+    async (count) => {
+      const unrelated = devSessionRecords().filter((j) => !ids.slice(0, count).includes(j.id));
+      const statuses = unrelated.map((j) => j.status);
+      for (const job of unrelated) job.status = 'closed';
+      state.capacity = count;
+      try {
+        if (count === 2) await queueReview(ids[0]);
+        const parent = getJob(ids[count - 1]);
+        await retryLoopRound(parent.id);
+        expect(parent.reviewLoop.reviewing).toBe(false);
+        expect(parent.reviewLoop.reviewSessionId).toBeFalsy();
+        expect(parent.reviewLoop.failure).toMatchObject({
+          reason: expect.stringMatching(/parents hold every database slot.*enable another database server/i),
+        });
+        expect(blocked).toEqual([]);
+        state.capacity += 1;
+        const child = await queueReview(parent.id);
+        expect(child).toBeTruthy();
+        expect(parent.reviewLoop.failure).toBeNull();
+      } finally {
+        unrelated.forEach((job, index) => {
+          job.status = statuses[index];
+        });
+      }
+    },
+  );
+
+  it('fails an accepted wait if pool reduction leaves only its parent holding capacity', async () => {
+    const unrelated = devSessionRecords().filter((j) => ![ids[0], 'slot-holder'].includes(j.id));
+    const statuses = unrelated.map((j) => j.status);
+    for (const job of unrelated) job.status = 'closed';
+    state.capacity = 2;
+    try {
+      const parent = getJob(ids[0]);
+      const child = await queueReview(parent.id);
+      state.capacity = 1;
+      await closeDevSession('slot-holder');
+      expect(blocked).toEqual([]);
+      expect(child.status).toBe('failed');
+      expect(child.databaseSlotQueuedAt).toBeNull();
+      expect(parent.reviewLoop.reviewing).toBe(false);
+      expect(parent.reviewLoop.failure).toMatchObject({
+        reason: expect.stringMatching(/parents hold every database slot.*enable another database server/i),
+      });
+      setDraining(true);
+      expect(maintenanceState(devSessionRecords()).ready).toBe(true);
+      setDraining(false);
+      state.capacity = 2;
+      const retry = await queueReview(parent.id);
+      expect(parent.reviewLoop.failure).toBeNull();
+      await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([retry.id]));
+    } finally {
+      unrelated.forEach((job, index) => {
+        job.status = statuses[index];
+      });
+    }
+  });
+
+  it.each(['fix', 'qa'])('reports a pool-reduction failure to the %s parent', async (kind) => {
+    const parent = getJob(ids[0]);
+    const extra = kind === 'fix' ? { loopFixParentId: parent.id } : { qaParentId: parent.id, qa: true };
+    const child = getJob(
+      createDevSession({ provider: 1, repo: 'acme/slots', branch: 'task/slots', prompt: 'fix', ...extra }).id,
+    );
+    children.push(child);
+    if (kind === 'fix') Object.assign(parent.reviewLoop, { fixing: true, fixSessionId: child.id });
+    else parent.qaLoop = { running: true, sessionId: child.id };
+    const unrelated = devSessionRecords().filter((j) => ![parent.id, child.id].includes(j.id));
+    const statuses = unrelated.map((j) => j.status);
+    state.capacity = 1;
+    try {
+      for (const job of unrelated) if (job.id !== 'slot-holder') job.status = 'closed';
+      await closeDevSession('slot-holder');
+      expect(child.status).toBe('failed');
+      expect(child.databaseSlotQueuedAt).toBeNull();
+      expect(blocked).toEqual([]);
+      const loop = kind === 'fix' ? parent.reviewLoop : parent.qaLoop;
+      expect(kind === 'fix' ? loop.fixing : loop.running).toBe(false);
+      expect(loop.failure.reason).toMatch(/parents hold every database slot/);
+    } finally {
+      unrelated.forEach((job, index) => {
+        job.status = statuses[index];
+      });
+    }
+  });
+
+  it('services existing waiters before a new session can claim added capacity', async () => {
+    const first = await queueReview(ids[0]);
+    const second = await queueReview(ids[1]);
+    state.capacity += 1;
+    expect(() => createDevSession({ provider: 1, repo: 'acme/slots', prompt: 'new worker' })).toThrow(
+      /holding a database server/,
+    );
+    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([first.id]));
+    expect(first.status).toBe('preparing');
+    expect(second.status).toBe('queued');
+    state.capacity += 2;
+    const newcomer = createDevSession({ provider: 1, repo: 'acme/slots', prompt: 'new worker' });
+    children.push(getJob(newcomer.id));
+    expect(second.databaseSlotQueuedAt).toBeNull();
+    expect(second.status).toBe('preparing');
+    await vi.waitFor(() =>
+      expect(blocked.map((j) => j.id).sort()).toEqual([first.id, second.id, newcomer.id].sort()),
+    );
+  });
+
+  it.each(['explicit', 'message'])(
+    'services existing waiters before %s reopening can claim added capacity',
+    async (method) => {
+      const holder = getJob('slot-holder');
+      holder.status = 'closed';
+      state.capacity -= 1;
+      const first = await queueReview(ids[0]);
+      const reopen = () =>
+        method === 'explicit' ? reopenDevSession(holder.id) : sendDevMessage(holder.id, 'continue');
+
+      state.capacity += 1;
+      expect(reopen).toThrow(/holding a database server/);
+      await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([first.id]));
+      expect(holder.status).toBe('closed');
+
+      state.capacity += 1;
+      reopen();
+      await vi.waitFor(() => expect(blocked.map((j) => j.id).sort()).toEqual([first.id, holder.id].sort()));
+    },
+  );
+
+  it('starts accepted loop children during maintenance drain', async () => {
+    const child = await queueReview(ids[0]);
+    setDraining(true);
+    expect(maintenanceState(devSessionRecords()).ready).toBe(false);
+    await closeDevSession('slot-holder');
+    expect(blocked.map((j) => j.id)).toEqual([child.id]);
+    expect(child.status).toBe('preparing');
+  });
+
+  it('does not start queued loop children during shutdown', async () => {
+    const child = await queueReview(ids[0]);
+    await stopAllJobProcesses();
+    await closeDevSession('slot-holder');
+    expect(blocked).toEqual([]);
+    expect(child.status).toBe('queued');
+  });
+
+  it('cancels superseded queued QA so the current review gets the next slot', async () => {
+    const parent = getJob(ids[0]);
+    const qa = createDevSession({
+      provider: 1,
+      repo: 'acme/slots',
+      branch: 'task/slots',
+      qaParentId: parent.id,
+      qa: true,
+    });
+    const child = getJob(qa.id);
+    children.push(child);
+    // The later-push transition in reopenLoopForPush keeps running QA tracked as stale.
+    parent.qaLoop = { running: true, sessionId: null, staleSessionId: child.id };
+    const review = await queueReview(parent.id);
+    expect(parent.qaLoop.staleSessionId).toBe(child.id);
+    await closeDevSession('slot-holder');
+    await vi.waitFor(() => expect(child.status).toBe('closed'));
+    expect(blocked.map((j) => j.id)).toEqual([review.id]);
+    expect(review.status).toBe('preparing');
+    expect(parent.qaLoop).toMatchObject({ running: false, staleSessionId: null });
+  });
+
+  it('queues rounds at capacity without failure, refuses duplicate retries, and starts them FIFO on close', async () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    let first, second;
+    try {
+      first = await queueReview(ids[0]);
+      second = await queueReview(ids[1]);
+    } finally {
+      clock.mockRestore();
+    }
+    expect(second.databaseSlotQueuedAt).toBeGreaterThan(first.databaseSlotQueuedAt);
+    expect(first).toMatchObject({ status: 'queued', workDir: null, dbServerId: null });
+    expect(second.status).toBe('queued');
+    expect(blocked).toEqual([]);
+    expect(getJob(ids[0]).reviewLoop).toMatchObject({ rounds: 1, failure: null, reviewing: true });
+    expect(workerSummary(getJob(ids[0])).reviewLoop.waitingForDatabase).toBe(true);
+    await expect(retryLoopRound(ids[0], { providerId: 99 })).rejects.toThrow(
+      /Nothing to retry: the loop is waiting for a database slot and will start automatically/,
+    );
+    expect(getJob(ids[0]).reviewLoop.reviewSessionId).toBe(first.id);
+    expect(() => createDevSession({ provider: 1, repo: 'acme/slots', prompt: 'new worker' })).toThrow(
+      /holding a database server/,
+    );
+
+    await closeDevSession('slot-holder');
+    expect(blocked.map((j) => j.id)).toEqual([first.id]);
+    expect(first.status).toBe('preparing');
+    expect(second.status).toBe('queued');
+    expect(workerSummary(getJob(ids[0])).reviewLoop.waitingForDatabase).toBe(false);
+    await closeDevSession(first.id);
+    expect(blocked.map((j) => j.id)).toEqual([first.id, second.id]);
+    expect(second.status).toBe('preparing');
+  });
+
+  it('puts fix and QA children in the same FIFO and removes a closed waiter', async () => {
+    for (const extra of [
+      { loopFixParentId: ids[0], prompt: 'fix findings' },
+      { qaParentId: ids[1], qa: true },
+    ]) {
+      const child = createDevSession({ provider: 1, repo: 'acme/slots', branch: 'task/slots', ...extra });
+      children.push(getJob(child.id));
+      if (extra.loopFixParentId) {
+        getJob(ids[0]).reviewLoop.fixSessionId = child.id;
+        getJob(ids[0]).reviewLoop.fixing = true;
+      } else getJob(ids[1]).qaLoop = { running: true, sessionId: child.id };
+      expect(child.status).toBe('queued');
+      expect(child.databaseSlotQueuedAt).toBeTypeOf('number');
+    }
+    await closeDevSession(children[0].id);
+    expect(blocked).toEqual([]);
+    await closeDevSession('slot-holder');
+    expect(blocked.map((j) => j.id)).toEqual([children[1].id]);
+  });
+
+  it('keeps a persisted waiter queued through restart until capacity is released', async () => {
+    const child = await queueReview(ids[0]);
+    const storedChild = { ...child, events: [] };
+    const parent = getJob(ids[0]);
+    // Only the queued child was interrupted in this simulated boot; other owners
+    // are already running, as they are after resource recovery completes.
+    state.stored = [storedChild];
+    await initJobs({ deferPolling: true });
+    const restored = getJob(child.id);
+    children = [restored];
+    expect(restored).toMatchObject({ status: 'interrupted', restartPending: true });
+    const unrelated = devSessionRecords().filter((j) => j.id !== child.id && j.restartPending);
+    for (const job of unrelated) job.restartPending = false;
+    try {
+      resumeRestartedSessions();
+    } finally {
+      for (const job of unrelated) job.restartPending = true;
+    }
+    expect(restored.status).toBe('queued');
+    expect(parent.reviewLoop.failure).toBeNull();
+    expect(blocked).toEqual([]);
+    await closeDevSession('slot-holder');
+    expect(blocked.map((j) => j.id)).toEqual([child.id]);
+  });
+
+  it('does not start queued work after its parent closes', async () => {
+    const child = await queueReview(ids[0]);
+    await closeDevSession(ids[0]);
+    await vi.waitFor(() => expect(child.status).toBe('closed'));
+    expect(blocked).toEqual([]);
+  });
+});
+
 describe('pullRequestHasOpenSession', () => {
   // Own repo and PR numbers, so the rows restored here match nothing the other blocks sync.
   const row = (id, over) => ({
