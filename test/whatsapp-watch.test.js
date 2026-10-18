@@ -98,6 +98,31 @@ describe('WhatsApp watches', () => {
     expect(text).toContain('34611111111@c.us (message g1, replying to message q1):\ntext g1');
   });
 
+  it('says when a long message or transcript is cut, and leaves a short one whole', () => {
+    const w = { account: 'default', chat: CHAT, expiresAt: T0 };
+    const long = 'x'.repeat(4500);
+    const text = replyText(w, [
+      msg('t', T0, { text: long }),
+      msg('v', T0, {
+        text: '',
+        hasMedia: true,
+        media: { mimetype: 'audio/ogg' },
+        voice: { text: long },
+      }),
+      msg('s', T0, { text: 'x'.repeat(4000) }),
+    ]);
+    expect(text).toContain(
+      `(message t):\n${'x'.repeat(4000)}… (cut at 4000 characters; whatsapp_messages has it in full)`,
+    );
+    const said = `(voice note, transcribed by the core) ${long}`.slice(0, 4000);
+    expect(text).toContain(
+      `(message v):\n${said}… (transcript cut at 4000 characters; the rest is only in the recording)\n` +
+        '(the recording is message v, for whatsapp_media)',
+    );
+    expect(text).toContain(`(message s):\n${'x'.repeat(4000)}`);
+    expect(text.match(/cut at 4000/g)).toHaveLength(2);
+  });
+
   it('survives a restart without losing or repeating a reply', async () => {
     const first = make();
     await first.watch('s1', { account: 'default', chat: CHAT });
