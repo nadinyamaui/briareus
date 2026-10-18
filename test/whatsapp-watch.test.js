@@ -7,7 +7,7 @@ const T0 = Date.UTC(2026, 9, 16, 9, 0, 0);
 const sec = (ms) => Math.floor(ms / 1000);
 
 let clock, stored, chats, jobs, delivered, notes, logs, deliver;
-const make = () =>
+const make = (extra = {}) =>
   createWhatsAppWatcher({
     service: {
       messages: vi.fn(async (_account, chat) => {
@@ -26,6 +26,7 @@ const make = () =>
     },
     now: () => clock,
     log: (line) => logs.push(line),
+    ...extra,
   });
 const msg = (id, at, fields = {}) => ({
   id,
@@ -424,5 +425,88 @@ describe('WhatsApp watches', () => {
     await expect(w.watch('s1', { account: 'default', chat: CHAT })).rejects.toMatchObject({ status: 409 });
     await expect(w.watch('s2', { account: 'default', chat: CHAT })).resolves.toBeTruthy();
     w.stop();
+  });
+
+  describe('voice notes', () => {
+    const OGG = 'audio/ogg; codecs=opus';
+    const voice = (id, at) => msg(id, at, { text: '', hasMedia: true, media: { mimetype: OGG } });
+
+    it('arrive transcribed, and only audio is sent for transcription', async () => {
+      const voiceText = vi.fn(async () => 'compra pan y leche');
+      const w = make({ voiceText });
+      await w.watch('s1', { account: 'default', chat: CHAT });
+      chats[CHAT] = [
+        voice('v', T0 + 1000),
+        msg('i', T0 + 2000, { hasMedia: true, media: { mimetype: 'image/jpeg' } }),
+      ];
+      await w.poll();
+      expect(voiceText).toHaveBeenCalledTimes(1);
+      expect(voiceText).toHaveBeenCalledWith('default', CHAT, expect.objectContaining({ id: 'v' }));
+      const text = delivered[0].text;
+      expect(text).toContain(
+        '(message v):\n(voice note, transcribed by the core) compra pan y leche\n(the recording is message v, for whatsapp_media)',
+      );
+      expect(text).toContain('(media image/jpeg: open it with whatsapp_media, message i)');
+      w.stop();
+    });
+
+    it('are transcribed once while their delivery waits for the session', async () => {
+      const voiceText = vi.fn(async () => 'hola');
+      const w = make({ voiceText });
+      await w.watch('s1', { account: 'default', chat: CHAT });
+      chats[CHAT] = [voice('v', T0 + 1000)];
+      deliver = () => {
+        throw Object.assign(new Error('10 automatic turns ran'), { status: 429 });
+      };
+      await w.poll();
+      await w.poll();
+      expect(delivered).toHaveLength(0);
+      deliver = (id, delivery) => {
+        delivered.push({ session: id, ...delivery });
+        return { status: 'running' };
+      };
+      await w.poll();
+      expect(voiceText).toHaveBeenCalledTimes(1);
+      expect(delivered[0].text).toContain('(voice note, transcribed by the core) hola');
+      w.stop();
+    });
+
+    it('still arrive when the transcription fails or is off, pointing at the recording', async () => {
+      const failing = make({
+        voiceText: async () => {
+          throw new Error('OpenAI answered 500 to the transcription: down');
+        },
+      });
+      await failing.watch('s1', { account: 'default', chat: CHAT });
+      chats[CHAT] = [voice('v', T0 + 1000)];
+      await failing.poll();
+      failing.stop();
+      expect(delivered[0].text).toContain(
+        `(voice note ${OGG}, not transcribed: OpenAI answered 500 to the transcription: down; open it with whatsapp_media, message v)`,
+      );
+      expect(logs.some((l) => l.includes('could not transcribe voice note v'))).toBe(true);
+
+      const off = make({ voiceText: async () => null });
+      await off.watch('s2', { account: 'default', chat: GROUP });
+      chats[GROUP] = [voice('g', T0 + 1000)];
+      await off.poll();
+      off.stop();
+      expect(delivered[1].text).toContain(`(media ${OGG}: open it with whatsapp_media, message g)`);
+    });
+
+    it('are not delivered by a watch that ended while they were transcribed', async () => {
+      let w;
+      const voiceText = vi.fn(async () => {
+        await w.unwatch('s1', 'default', CHAT);
+        return 'hola';
+      });
+      w = make({ voiceText });
+      await w.watch('s1', { account: 'default', chat: CHAT });
+      chats[CHAT] = [voice('v', T0 + 1000)];
+      await w.poll();
+      expect(voiceText).toHaveBeenCalledTimes(1);
+      expect(delivered).toHaveLength(0);
+      w.stop();
+    });
   });
 });
