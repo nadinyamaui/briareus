@@ -860,6 +860,27 @@ describe('loop children waiting for a database slot', () => {
     );
   });
 
+  it.each(['explicit', 'message'])(
+    'services existing waiters before %s reopening can claim added capacity',
+    async (method) => {
+      const holder = getJob('slot-holder');
+      holder.status = 'closed';
+      state.capacity -= 1;
+      const first = await queueReview(ids[0]);
+      const reopen = () =>
+        method === 'explicit' ? reopenDevSession(holder.id) : sendDevMessage(holder.id, 'continue');
+
+      state.capacity += 1;
+      expect(reopen).toThrow(/holding a database server/);
+      await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([first.id]));
+      expect(holder.status).toBe('closed');
+
+      state.capacity += 1;
+      reopen();
+      await vi.waitFor(() => expect(blocked.map((j) => j.id).sort()).toEqual([first.id, holder.id].sort()));
+    },
+  );
+
   it('starts accepted loop children during maintenance drain', async () => {
     const child = await queueReview(ids[0]);
     setDraining(true);
