@@ -221,9 +221,9 @@ from now) and `whatsapp_unwatch` ends it. A session keeps at most 20.
 A turn started by a delivery is one nobody is watching, so it gets the
 WhatsApp tools only for the chats this session is watching: it can read,
 open media, mark read and answer there, and cannot list the accounts or the
-inbox, open a group or start a watch on another chat. Such replies share the
-webhook caps: 30 deliveries an hour and 10 automatic turns in a row before the
-session waits for a word from the operator.
+inbox, open a group or add people to one, or start a watch on another chat.
+Such replies share the webhook caps: 30 deliveries an hour and 10 automatic
+turns in a row before the session waits for a word from the operator.
 
 Voice notes arrive already transcribed, the way an email wake carries its body:
 before the delivery, the core downloads the recording from WAHA and sends it
