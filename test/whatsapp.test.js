@@ -561,15 +561,42 @@ describe('the WhatsApp core inbox', () => {
     await expect(
       ctx.service.addParticipants('default', GROUP, { participants: [CHAT] }),
     ).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/no admin rights/) });
-    ctx.setGroupAnswer({});
-    await expect(
-      ctx.service.addParticipants('default', GROUP, { participants: [CHAT] }),
-    ).rejects.toMatchObject({ status: 502 });
+    // NOWEB (Baileys) and GOWS (whatsmeow) answer a list instead.
+    ctx.setGroupAnswer([
+      { status: '200', jid: '34600000000@s.whatsapp.net' },
+      { status: '403', jid: '34611111111@s.whatsapp.net', content: {} },
+    ]);
+    expect(
+      (await ctx.service.addParticipants('default', GROUP, { participants: [CHAT, '34611111111@c.us'] }))
+        .participants,
+    ).toEqual([
+      { id: '34600000000@s.whatsapp.net', code: 200, added: true, inviteSent: false, message: '' },
+      { id: '34611111111@s.whatsapp.net', code: 403, added: false, inviteSent: false, message: '' },
+    ]);
+    ctx.setGroupAnswer([
+      { JID: '34600000000@s.whatsapp.net', Error: 0 },
+      { JID: '34611111111@s.whatsapp.net', Error: 409 },
+    ]);
+    expect(
+      (
+        await ctx.service.addParticipants('default', GROUP, { participants: [CHAT, '34611111111@c.us'] })
+      ).participants.map((p) => [p.id, p.code, p.added]),
+    ).toEqual([
+      ['34600000000@s.whatsapp.net', 200, true],
+      ['34611111111@s.whatsapp.net', 409, false],
+    ]);
+    for (const answer of [{}, [], [{ jid: CHAT }], [{ status: '200' }]]) {
+      ctx.setGroupAnswer(answer);
+      await expect(
+        ctx.service.addParticipants('default', GROUP, { participants: [CHAT] }),
+      ).rejects.toMatchObject({ status: 502, message: expect.stringMatching(/ask the user/) });
+    }
     const before = ctx.calls.length;
     for (const [group, input] of [
       [CHAT, { participants: [CHAT] }],
       ['nobody', { participants: [CHAT] }],
       [GROUP, { participants: [] }],
+      [GROUP, { participants: Array.from({ length: 21 }, (_, i) => `346000000${10 + i}@c.us`) }],
       [GROUP, { participants: [GROUP] }],
       [GROUP, { participants: ['nobody'] }],
       [GROUP, {}],

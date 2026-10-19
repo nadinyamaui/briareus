@@ -309,7 +309,9 @@ describe('session WhatsApp watches', () => {
     ]) {
       const res = await request(path, method, body);
       expect(res.status, `${method} ${path}`).toBe(403);
-      expect((await res.json()).error).toMatch(/only the chats this session is watching/);
+      expect((await res.json()).error).toMatch(
+        /only the chats this session is watching.*adds people to them/,
+      );
     }
     expect(service.send).toHaveBeenCalledTimes(1);
     expect(service.accounts).not.toHaveBeenCalled();

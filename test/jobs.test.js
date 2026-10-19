@@ -13843,6 +13843,7 @@ describe('the shared browser in a session', () => {
       await watched.settled;
       expect(watched.seen.mcp.reviewer_whatsapp.args[0]).toMatch(/whatsapp-mcp\.js$/);
       expect(whatsappProtocol(job)).toContain('reach only the chats this session is watching');
+      expect(whatsappProtocol(job)).toContain('opening groups or adding people to them does not');
       const attended = await turn(job, 'Read my WhatsApp');
       await attended.settled;
       expect(whatsappProtocol(job)).toContain('whatsapp_create_group');
