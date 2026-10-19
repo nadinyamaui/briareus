@@ -161,8 +161,9 @@ media (up to 25 MiB, like mail attachments) to a private temporary file and
 returns its path, so the agent can open images and documents with its file
 tools. `whatsapp_create_group` opens a group with the given contacts, the
 operator as its admin, and `whatsapp_add_participants` adds contacts to an
-existing group the operator administers, reporting a code per contact (WhatsApp
-privately invites those whose privacy settings refuse being added). The tools and instructions appear on the next turn of
+existing group the operator administers, reporting a code per contact (on the WEBJS
+engine, WhatsApp privately invites those whose privacy settings refuse being
+added; NOWEB and GOWS only report the refusal). The tools and instructions appear on the next turn of
 an eligible session, and revocation applies to every request at once,
 including tools loaded earlier and direct HTTP fallback calls.
 
