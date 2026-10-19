@@ -151,7 +151,8 @@ and of the project’s Slack workspace, so each channel is enabled per project.
 
 The tools are `whatsapp_accounts`, `whatsapp_conversations`,
 `whatsapp_messages`, `whatsapp_media`, `whatsapp_send`, `whatsapp_send_voice`,
-`whatsapp_create_group`, `whatsapp_watches`, `whatsapp_watch`,
+`whatsapp_create_group`, `whatsapp_add_participants`, `whatsapp_watches`,
+`whatsapp_watch`,
 `whatsapp_unwatch` and `whatsapp_mark_read`, served under
 `/api/agent/whatsapp` with the session’s
 own token. They use the same WAHA service as the admin inbox; linking, the
@@ -159,7 +160,10 @@ pairing QR and logout stay admin-only. `whatsapp_media` downloads one message’
 media (up to 25 MiB, like mail attachments) to a private temporary file and
 returns its path, so the agent can open images and documents with its file
 tools. `whatsapp_create_group` opens a group with the given contacts, the
-operator as its admin. The tools and instructions appear on the next turn of
+operator as its admin, and `whatsapp_add_participants` adds contacts to an
+existing group the operator administers, reporting a code per contact (on the WEBJS
+engine, WhatsApp privately invites those whose privacy settings refuse being
+added; NOWEB and GOWS only report the refusal). The tools and instructions appear on the next turn of
 an eligible session, and revocation applies to every request at once,
 including tools loaded earlier and direct HTTP fallback calls.
 
@@ -217,9 +221,9 @@ from now) and `whatsapp_unwatch` ends it. A session keeps at most 20.
 A turn started by a delivery is one nobody is watching, so it gets the
 WhatsApp tools only for the chats this session is watching: it can read,
 open media, mark read and answer there, and cannot list the accounts or the
-inbox, open a group or start a watch on another chat. Such replies share the
-webhook caps: 30 deliveries an hour and 10 automatic turns in a row before the
-session waits for a word from the operator.
+inbox, open a group or add people to one, or start a watch on another chat.
+Such replies share the webhook caps: 30 deliveries an hour and 10 automatic
+turns in a row before the session waits for a word from the operator.
 
 Voice notes arrive already transcribed, the way an email wake carries its body:
 before the delivery, the core downloads the recording from WAHA and sends it
