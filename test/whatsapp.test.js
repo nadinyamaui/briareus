@@ -92,6 +92,20 @@ async function setup() {
         .json({ ...RAW_MESSAGE, fromMe: true, hasMedia: true, media: { mimetype: req.body.file.mimetype } });
     if (path === '/api/sendText')
       return res.status(201).json({ ...RAW_MESSAGE, body: req.body.text, fromMe: true });
+    if (path === '/api/default/groups/120363000000000000@g.us/participants/add' && req.method === 'POST')
+      return typeof groupAnswer === 'string'
+        ? res.type('text/html').send(groupAnswer)
+        : res.json(
+            groupAnswer ??
+              Object.fromEntries(
+                req.body.participants.map(({ id }, i) => [
+                  id,
+                  i
+                    ? { code: 403, message: 'Invite only', isInviteV4Sent: true }
+                    : { code: 200, message: 'Added', isInviteV4Sent: false },
+                ]),
+              ),
+          );
     if (path === '/api/default/groups' && req.method === 'POST')
       return res.status(201).json(groupAnswer ?? { gid: { _serialized: '120363000000000000@g.us' } });
     if (path === '/api/files/default/attachment.ogg')
@@ -522,6 +536,47 @@ describe('the WhatsApp core inbox', () => {
       { name: 'x' },
     ])
       await expect(ctx.service.createGroup('default', input)).rejects.toMatchObject({ status: 400 });
+    expect(ctx.calls.length).toBe(before);
+  });
+
+  it('adds contacts to an existing group and reports each one’s outcome', async () => {
+    const ctx = await setup();
+    const GROUP = '120363000000000000@g.us';
+    expect(
+      await ctx.service.addParticipants('default', GROUP, {
+        participants: [CHAT, CHAT, '34611111111@c.us'],
+      }),
+    ).toEqual({
+      group: { id: GROUP },
+      participants: [
+        { id: CHAT, code: 200, added: true, inviteSent: false, message: 'Added' },
+        { id: '34611111111@c.us', code: 403, added: false, inviteSent: true, message: 'Invite only' },
+      ],
+    });
+    expect(ctx.calls.find((c) => c.path.endsWith('/participants/add')).body).toEqual({
+      participants: [{ id: CHAT }, { id: '34611111111@c.us' }],
+    });
+    // WEBJS answers a refusal for the whole group as a bare string.
+    ctx.setGroupAnswer('AddParticipantsError: You have no admin rights to add a participant to a group');
+    await expect(
+      ctx.service.addParticipants('default', GROUP, { participants: [CHAT] }),
+    ).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/no admin rights/) });
+    ctx.setGroupAnswer({});
+    await expect(
+      ctx.service.addParticipants('default', GROUP, { participants: [CHAT] }),
+    ).rejects.toMatchObject({ status: 502 });
+    const before = ctx.calls.length;
+    for (const [group, input] of [
+      [CHAT, { participants: [CHAT] }],
+      ['nobody', { participants: [CHAT] }],
+      [GROUP, { participants: [] }],
+      [GROUP, { participants: [GROUP] }],
+      [GROUP, { participants: ['nobody'] }],
+      [GROUP, {}],
+    ])
+      await expect(ctx.service.addParticipants('default', group, input)).rejects.toMatchObject({
+        status: 400,
+      });
     expect(ctx.calls.length).toBe(before);
   });
 

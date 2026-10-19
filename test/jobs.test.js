@@ -13846,6 +13846,7 @@ describe('the shared browser in a session', () => {
       const attended = await turn(job, 'Read my WhatsApp');
       await attended.settled;
       expect(whatsappProtocol(job)).toContain('whatsapp_create_group');
+      expect(whatsappProtocol(job)).toContain('whatsapp_add_participants');
       expect(whatsappProtocol(job)).not.toContain('reach only the chats');
       job.readOnly = true;
       const analyst = await turn(job, 'Analyze this code');

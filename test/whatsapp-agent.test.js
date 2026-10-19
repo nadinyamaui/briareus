@@ -39,6 +39,10 @@ beforeEach(async () => {
     logout: vi.fn(),
     media: vi.fn(async () => new Response(PNG, { headers: { 'Content-Type': 'image/png' } })),
     createGroup: vi.fn(async (_id, input) => ({ group: { id: GROUP, name: input.name } })),
+    addParticipants: vi.fn(async (_id, group, input) => ({
+      group: { id: group },
+      participants: input.participants.map((id) => ({ id, code: 200, added: true, inviteSent: false })),
+    })),
   };
   watcher = createWhatsAppWatcher({
     service,
@@ -259,6 +263,17 @@ describe('session WhatsApp watches', () => {
     });
   });
 
+  it('adds contacts to an existing group', async () => {
+    const res = await json(
+      await request(`/accounts/default/conversations/${GROUP}/participants`, 'POST', {
+        participants: [OTHER],
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.participants).toEqual([{ id: OTHER, code: 200, added: true, inviteSent: false }]);
+    expect(service.addParticipants).toHaveBeenCalledWith('default', GROUP, { participants: [OTHER] });
+  });
+
   it('starts, extends and ends a watch by hand', async () => {
     let res = await json(await request(`/accounts/default/conversations/${CHAT}/watch`, 'PUT', { hours: 2 }));
     expect(res.body.watch).toMatchObject({ chat: CHAT });
@@ -290,6 +305,7 @@ describe('session WhatsApp watches', () => {
       ['/accounts', 'GET'],
       ['/accounts/default/conversations', 'GET'],
       ['/accounts/default/groups', 'POST', { name: 'x', participants: [OTHER] }],
+      [`/accounts/default/conversations/${CHAT}/participants`, 'POST', { participants: [OTHER] }],
     ]) {
       const res = await request(path, method, body);
       expect(res.status, `${method} ${path}`).toBe(403);
@@ -299,6 +315,7 @@ describe('session WhatsApp watches', () => {
     expect(service.accounts).not.toHaveBeenCalled();
     expect(service.conversations).not.toHaveBeenCalled();
     expect(service.createGroup).not.toHaveBeenCalled();
+    expect(service.addParticipants).not.toHaveBeenCalled();
     // The project's opt-in still governs it.
     project.whatsappToolsEnabled = false;
     expect((await request(`/accounts/default/conversations/${CHAT}/messages`)).status).toBe(403);
@@ -334,6 +351,7 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
       'whatsapp_send',
       'whatsapp_send_voice',
       'whatsapp_create_group',
+      'whatsapp_add_participants',
       'whatsapp_watches',
       'whatsapp_watch',
       'whatsapp_unwatch',
@@ -378,6 +396,12 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
     );
     expect(group.group.id).toBe(GROUP);
     expect(service.createGroup).toHaveBeenCalledWith('default', { name: 'Dudas', participants: [CHAT] });
+    const added = JSON.parse(
+      (await tool('whatsapp_add_participants', { account: 'default', chat: GROUP, participants: [OTHER] }))
+        .result.content[0].text,
+    );
+    expect(added.participants[0]).toMatchObject({ id: OTHER, added: true });
+    expect(service.addParticipants).toHaveBeenCalledWith('default', GROUP, { participants: [OTHER] });
     let watches = JSON.parse((await tool('whatsapp_watches')).result.content[0].text).watches;
     expect(watches.map((w) => w.chat)).toEqual([CHAT, GROUP]);
     await tool('whatsapp_watch', { account: 'default', chat: OTHER, hours: 1 });
