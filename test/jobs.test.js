@@ -15327,6 +15327,52 @@ describe('automatic recovery after a server restart', () => {
     },
   );
 
+  it('names the exception of a failed setup step, without colour codes', async () => {
+    const checkout = path.join(root, 'acme__restart');
+    fs.mkdirSync(checkout);
+    const git = (args) => {
+      const result = spawnSync('git', args, { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git(['-C', checkout, 'init', '-b', 'feature']);
+    git([
+      '-C',
+      checkout,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'fixture',
+    ]);
+    const remote = path.join(root, 'remote.git');
+    git(['clone', '--bare', checkout, remote]);
+    git(['-C', checkout, 'remote', 'add', 'origin', remote]);
+    // Collision's shape: the exception, its message, then frames until the end.
+    state.projects[0].setupCommands = [
+      "printf 'TypeError\\nstrtolower(): null given\\n' && for i in 1 2 3 4 5 6; do printf '\\033[2m+%s vendor frames \\033[22m\\n' $i; done; exit 1",
+    ];
+    state.projects[0].envTemplate = '';
+    const child = row({
+      status: 'preparing',
+      orchestrator: false,
+      workDir: checkout,
+      branch: 'feature',
+      workspacePrepared: false,
+    });
+    state.stored = [child];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(child.error).toMatch(/exited with code 1/));
+    expect(child.error).toContain(
+      'TypeError | strtolower(): null given | … | +2 vendor frames | +3 vendor frames | +4 vendor frames | +5 vendor frames | +6 vendor frames',
+    );
+    expect(child.error).not.toContain('\x1b');
+    expect(child.events.filter((e) => e.kind === 'setup').map((e) => e.text)).toContain('+1 vendor frames');
+  });
+
   it.each(['idle', 'running', 'preparing'])(
     'keeps the prepared revision and dependencies together during %s recovery',
     async (status) => {
