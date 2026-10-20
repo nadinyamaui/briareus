@@ -252,13 +252,23 @@ replies still waiting for the session.
 
 ### Sending voice notes
 
-Set `OPENAI_SPEECH_API_KEY` and `OPENAI_SPEECH_MODEL` (for example,
-`gpt-4o-mini-tts`) on the server and restart it. These are separate from
-transcription settings and are removed from child environments.
+Set `OPENAI_SPEECH_API_KEY` and `OPENAI_SPEECH_MODEL` on the server and
+restart it. These are separate from transcription settings (the key may be
+the same) and are removed from child environments.
 `whatsapp_send_voice` takes `account`, `chat`, `text` (1–4096 characters),
-and optional `voice` (default `coral`), `replyTo` and `watch`. It calls
-[OpenAI speech](https://developers.openai.com/api/reference/resources/audio/subresources/speech/methods/create)
-for Ogg/Opus and sends it through
+and optional `voice` (default `marin`), `replyTo` and `watch`.
+
+`gpt-audio-1.5` sounds the most natural. It is a conversational model, so the
+server asks it through
+[chat completions](https://developers.openai.com/api/docs/guides/audio) to
+read the text aloud, and refuses to send the note when the transcript it
+returns differs from the text (ignoring case, spacing and punctuation). It
+lacks the `fable`, `onyx` and `nova` voices. Any other model, such as
+`gpt-4o-mini-tts` or `tts-1-hd`, goes through
+[OpenAI speech](https://developers.openai.com/api/reference/resources/audio/subresources/speech/methods/create).
+`gpt-4o-mini-tts` can stall mid-stream for minutes; a generation still running
+after 2 minutes is abandoned with a 504 and nothing is sent. Either way the
+server asks for Ogg/Opus and sends it through
 [WAHA sendVoice](https://waha.devlike.pro/docs/how-to/send-messages/#send-voice-).
 The installed WAHA edition/engine must support voice sending (501 otherwise).
 Recipients must be told the voice is AI-generated; built-in voices do not
