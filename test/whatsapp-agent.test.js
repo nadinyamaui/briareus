@@ -18,14 +18,16 @@ const ROUTES = [
   [`/accounts/default/conversations/${CHAT}/read`, 'POST'],
   [`/accounts/default/conversations/${CHAT}/voice`, 'POST'],
   [`/accounts/default/conversations/${CHAT}/messages/m1/media`, 'GET'],
+  [`/accounts/default/conversations/${CHAT}/messages/m1/transcript`, 'GET'],
 ];
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-let server, base, job, service, project, watcher, generateSpeech;
+let server, base, job, service, project, watcher, generateSpeech, transcribeVoice;
 const AUDIO = Buffer.from('OggSfake-opus');
 beforeEach(async () => {
   job = { id: 'chat', kind: 'devchat', repo: 'owner/repo', status: 'running' };
   generateSpeech = vi.fn(async () => AUDIO);
+  transcribeVoice = vi.fn(async () => 'Hola, ¿me escuchas?');
   project = { repo: job.repo, enabled: true, whatsappToolsEnabled: true };
   service = {
     accounts: vi.fn(async () => ({ configured: true, accounts: [{ id: 'default', status: 'WORKING' }] })),
@@ -60,6 +62,7 @@ beforeEach(async () => {
       service,
       watcher,
       generateSpeech,
+      transcribeVoice,
       getProject: (repo) => (project?.repo === repo ? project : null),
       agentSession: (req, res) => {
         if (req.headers.authorization !== 'Bearer session-token') {
@@ -213,6 +216,35 @@ describe('session WhatsApp authorization', () => {
     res = await request(`/accounts/default/conversations/${CHAT}/messages/m1/media`);
     expect(res.status).toBe(413);
   });
+
+  it('transcribes a voice note on the server and refuses media that is not audio', async () => {
+    const voiceNote = () => new Response(AUDIO, { headers: { 'Content-Type': 'audio/ogg; codecs=opus' } });
+    service.media.mockImplementationOnce(async () => voiceNote());
+    let res = await request(`/accounts/default/conversations/${CHAT}/messages/v1/transcript`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ text: 'Hola, ¿me escuchas?' });
+    expect(service.media).toHaveBeenCalledWith('default', CHAT, 'v1', expect.any(AbortSignal));
+    expect(transcribeVoice).toHaveBeenCalledWith(AUDIO, {
+      type: 'audio/ogg',
+      signal: expect.any(AbortSignal),
+    });
+    service.media.mockImplementationOnce(async () => voiceNote());
+    transcribeVoice.mockResolvedValueOnce('');
+    res = await request(`/accounts/default/conversations/${CHAT}/messages/v1/transcript`);
+    expect(await res.json()).toEqual({ text: '(no speech recognised)' });
+    service.media.mockImplementationOnce(async () => voiceNote());
+    transcribeVoice.mockRejectedValueOnce(
+      Object.assign(new Error('Voice notes are off: set OPENAI_TRANSCRIBE_API_KEY'), { status: 503 }),
+    );
+    res = await request(`/accounts/default/conversations/${CHAT}/messages/v1/transcript`);
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(/Voice notes are off/);
+    transcribeVoice.mockClear();
+    res = await request(`/accounts/default/conversations/${CHAT}/messages/m1/transcript`);
+    expect(res.status).toBe(415);
+    expect((await res.json()).error).toBe('This message is not a voice note (image/png)');
+    expect(transcribeVoice).not.toHaveBeenCalled();
+  });
 });
 
 describe('session WhatsApp watches', () => {
@@ -300,6 +332,7 @@ describe('session WhatsApp watches', () => {
       [`/accounts/default/conversations/${OTHER}/messages`, 'POST', { text: 'x' }],
       [`/accounts/default/conversations/${OTHER}/voice`, 'POST', { text: 'x' }],
       [`/accounts/default/conversations/${OTHER}/messages/m1/media`, 'GET'],
+      [`/accounts/default/conversations/${OTHER}/messages/m1/transcript`, 'GET'],
       [`/accounts/default/conversations/${OTHER}/read`, 'POST'],
       [`/accounts/default/conversations/${OTHER}/watch`, 'PUT', {}],
       ['/accounts', 'GET'],
@@ -349,6 +382,7 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
       'whatsapp_accounts',
       'whatsapp_conversations',
       'whatsapp_messages',
+      'whatsapp_transcribe',
       'whatsapp_media',
       'whatsapp_send',
       'whatsapp_send_voice',
@@ -373,6 +407,11 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
     expect(media.path).toMatch(/whatsapp-media-[^/]+\/media\.png$/);
     expect(fs.readFileSync(media.path)).toEqual(PNG);
     fs.rmSync(path.dirname(media.path), { recursive: true });
+    service.media.mockImplementationOnce(
+      async () => new Response(AUDIO, { headers: { 'Content-Type': 'audio/ogg; codecs=opus' } }),
+    );
+    const transcript = await tool('whatsapp_transcribe', { account: 'default', chat: CHAT, message: 'v1' });
+    expect(JSON.parse(transcript.result.content[0].text)).toEqual({ text: 'Hola, ¿me escuchas?' });
     const sent = await tool('whatsapp_send', { account: 'default', chat: CHAT, text: 'Hola', replyTo: 'm1' });
     expect(JSON.parse(sent.result.content[0].text).message.id).toBe('sent');
     expect(service.send).toHaveBeenCalledWith('default', CHAT, { text: 'Hola', replyTo: 'm1' });
