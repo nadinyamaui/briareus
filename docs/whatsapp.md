@@ -150,7 +150,7 @@ and revokes it with `false`. The setting is independent of `mailToolsEnabled`
 and of the project’s Slack workspace, so each channel is enabled per project.
 
 The tools are `whatsapp_accounts`, `whatsapp_conversations`,
-`whatsapp_messages`, `whatsapp_media`, `whatsapp_send`, `whatsapp_send_voice`,
+`whatsapp_messages`, `whatsapp_media`, `whatsapp_transcribe`, `whatsapp_send`, `whatsapp_send_voice`,
 `whatsapp_create_group`, `whatsapp_add_participants`, `whatsapp_watches`,
 `whatsapp_watch`,
 `whatsapp_unwatch` and `whatsapp_mark_read`, served under
@@ -159,7 +159,10 @@ own token. They use the same WAHA service as the admin inbox; linking, the
 pairing QR and logout stay admin-only. `whatsapp_media` downloads one message’s
 media (up to 25 MiB, like mail attachments) to a private temporary file and
 returns its path, so the agent can open images and documents with its file
-tools. `whatsapp_create_group` opens a group with the given contacts, the
+tools. `whatsapp_transcribe` turns one voice note (or other audio message)
+into text on the server, with the transcription settings below, for notes no
+watch delivered: the OpenAI key stays with the core and never reaches the
+session. `whatsapp_create_group` opens a group with the given contacts, the
 operator as its admin, and `whatsapp_add_participants` adds contacts to an
 existing group the operator administers, reporting a code per contact (on the WEBJS
 engine, WhatsApp privately invites those whose privacy settings refuse being
@@ -234,7 +237,7 @@ still names the message, for `whatsapp_media` if the recording is wanted. A
 voice note is transcribed once, however many sessions watch the chat and even
 while its delivery waits for one;
 when the transcription fails, the note is delivered with the reason and a
-pointer to `whatsapp_media`. Without those keys, or for an audio format OpenAI
+pointer to `whatsapp_media`; `whatsapp_transcribe` retries it on demand. Without those keys, or for an audio format OpenAI
 does not accept, voice notes arrive as before, as media to open. Neither the
 recording nor its text is kept by the core.
 
