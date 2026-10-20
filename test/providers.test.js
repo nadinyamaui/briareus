@@ -1819,6 +1819,22 @@ describe('claudeUsage', () => {
     expect(wait).toBeLessThan(2765_000);
   });
 
+  it.each([
+    [
+      Object.assign(new Error('aborted'), { name: 'TimeoutError' }),
+      'Claude usage check timed out. Check usage again.',
+    ],
+    [new TypeError('fetch failed'), 'Claude usage check could not reach Anthropic. Check usage again.'],
+  ])('names an unreachable usage endpoint and holds off briefly (%s)', async (failure, error) => {
+    stub(200).mockRejectedValueOnce(failure);
+    const before = Date.now();
+    const usage = await claudeUsage('/tmp/claude-home');
+    expect(usage).toMatchObject({ windows: [], error, retryable: true });
+    const wait = Date.parse(usage.retryAt) - before;
+    expect(wait).toBeGreaterThanOrEqual(300_000);
+    expect(wait).toBeLessThan(310_000);
+  });
+
   it('reports HTTP failures without exposing the upstream response body', async () => {
     stub(401, { error: { message: 'private upstream details' } });
     expect(await claudeUsage('/tmp/claude-home')).toEqual({
