@@ -6507,7 +6507,8 @@ describe('the review loop: what a closing loop review reports back', () => {
 
   // An author exception (or a label call that failed) leaves the PR without code-approved,
   // but an explicit `[]` findings block is the review's own clean verdict: the loop
-  // converges and the queued QA starts, without the dashboard applying the label itself.
+  // converges and the queued QA starts, without the dashboard applying the label itself,
+  // and says approval was withheld rather than that the PR is ready to merge.
   it('converges an autonomous round that published an empty findings block without the label', async () => {
     state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
     const approvals = addPullRequestLabel.mock.calls.length;
@@ -6525,11 +6526,15 @@ describe('the review loop: what a closing loop review reports back', () => {
       expect(parent.reviewLoop.pendingResult).toBeNull();
       expect(parent.reviewLoop.stalled).toBeFalsy();
       expect(infoTexts(parent).join('\n')).toContain('review round 1 declared no findings');
-      expect(githubRest.mock.calls.slice(reads)).not.toContainEqual([
+      expect(githubRest.mock.calls.slice(reads)).toContainEqual([
         expect.anything(),
         'GET',
         '/repos/acme/loop/pulls/77',
       ]);
+      expect(parent.reviewLoop.approvalWithheld).toBe(true);
+      expect(infoTexts(parent).join('\n')).toContain(
+        'PR #77 does not carry code-approved: the publishing policy withheld approval',
+      );
       expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
       expect(parent.qaLoop.running).toBe(true);
       expect(infoTexts(parent).join('\n')).toContain(
