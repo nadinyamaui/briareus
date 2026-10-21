@@ -9134,6 +9134,8 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       worker('ci-green', 201),
       worker('ci-red', 202),
       worker('ci-loop', 203, { reviewLoop: { rounds: 2, done: false } }),
+      // Converged on an empty block whose publishing policy withheld code-approved.
+      worker('ci-withheld', 214, { reviewLoop: { rounds: 1, done: true, approvalWithheld: true } }),
       // Nothing mirrored yet: the PR's first sync, which must stay quiet.
       worker('ci-first', 204, { prStatus: null }),
       // Head seen moments ago, before its CI registered: an unseen pending run is still awaited.
@@ -9342,6 +9344,15 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     syncSessionsOn('acme/ci', null, 203);
     await vi.waitFor(() => expect(notices('ci-loop')).toContain('PR #203'));
     expect(notices('ci-loop')).toContain('Its review loop is still running (round 2)');
+  });
+
+  it('green after a convergence that withheld approval is not a merge yet', async () => {
+    syncSessionsOn('acme/ci', null, 214);
+    await vi.waitFor(() => expect(notices('ci-withheld')).toContain('PR #214'));
+    expect(notices('ci-withheld')).toContain(
+      'The publishing policy withheld code-approved, so wait for that before merging.',
+    );
+    expect(notices('ci-withheld')).not.toContain('ready to merge');
   });
 
   it('hands over the verdict of a run that registered after the push was first read', async () => {
