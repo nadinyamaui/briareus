@@ -78,4 +78,62 @@ describe('outputTail', () => {
     const output = feed(['App\\Exceptions\\Handler::render()', 'Errors: 0', 'a', 'b', 'c', 'd', 'e']);
     expect(output.summary()).toBe('a | b | c | d | e');
   });
+
+  it('does not read Collision frames of exception classes as headlines', () => {
+    const output = feed([
+      'Illuminate\\Validation\\ValidationException::withMessages()',
+      'PDOException::("SQLSTATE[HY000] [2002] Connection refused")',
+      'a',
+      'b',
+      'c',
+      'd',
+      'e',
+    ]);
+    expect(output.summary()).toBe('a | b | c | d | e');
+  });
+
+  it('reads npm 10+ "npm error" lines as a headline', () => {
+    const output = feed([
+      'npm error code ERESOLVE',
+      'npm error ERESOLVE unable to resolve dependency tree',
+      'npm error',
+      'npm error While resolving: app@1.0.0',
+      'npm error',
+      'npm error For a full report see:',
+      'npm error /home/u/.npm/_logs/eresolve-report.txt',
+      'npm error A complete log of this run can be found in: /home/u/.npm/_logs/debug-0.log',
+    ]);
+    expect(output.summary()).toBe(
+      'npm error code ERESOLVE | npm error ERESOLVE unable to resolve dependency tree | … | ' +
+        'npm error While resolving: app@1.0.0 | npm error | npm error For a full report see: | ' +
+        'npm error /home/u/.npm/_logs/eresolve-report.txt | ' +
+        'npm error A complete log of this run can be found in: /home/u/.npm/_logs/debug-0.log',
+    );
+  });
+
+  it('leads with the last error report, not an earlier tolerated one', () => {
+    const lines = ['Error: retrying connection', 'ok', 'Running migrations'];
+    lines.push('Illuminate\\Database\\QueryException', 'SQLSTATE refused');
+    for (let i = 1; i <= 6; i++) lines.push(`f${i}`);
+    expect(feed(lines).summary()).toBe(
+      'Illuminate\\Database\\QueryException | SQLSTATE refused | … | f2 | f3 | f4 | f5 | f6',
+    );
+  });
+
+  it("does not let npm's closing block replace the failed script's own report", () => {
+    const output = feed([
+      'Error: Cannot find module vite',
+      'Require stack:',
+      '- /app/build.js',
+      'npm error Lifecycle script `build` failed with error:',
+      'npm error code 1',
+      'npm error path /app',
+      'npm error command failed',
+      'npm error command sh -c node build.js',
+    ]);
+    expect(output.summary()).toBe(
+      'Error: Cannot find module vite | Require stack: | … | npm error Lifecycle script `build` failed with error: | ' +
+        'npm error code 1 | npm error path /app | npm error command failed | npm error command sh -c node build.js',
+    );
+  });
 });
