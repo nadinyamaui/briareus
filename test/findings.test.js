@@ -60,6 +60,7 @@ import {
   findingUrl,
   getFindings,
   latestReviewFindings,
+  latestReviewDeclaration,
   latestTestFailures,
   decideFinding,
   queueFindingsForFix,
@@ -194,6 +195,17 @@ describe('latestReviewFindings', () => {
     expect(await latestReviewFindings(repo, 5, { since: '2026-01-01T13:00:00Z' })).toEqual([]);
     gh.comments.push(findingsComment([], 3));
     expect(await latestReviewFindings(repo, 5)).toEqual([]);
+  });
+
+  it('declares a round clean only for a well-formed empty block', async () => {
+    gh.comments = [findingsComment([{ title: 'Older finding' }], 1), findingsComment([], 2)];
+    expect(await latestReviewDeclaration(repo, 5)).toEqual({ findings: [], clean: true });
+    gh.comments = [findingsComment([{ title: 'Found' }], 1)];
+    expect(await latestReviewDeclaration(repo, 5)).toMatchObject({ clean: false });
+    gh.comments = [{ id: 1, body: '<!-- reviewer:findings\nnot json\n-->' }];
+    expect(await latestReviewDeclaration(repo, 5)).toEqual({ findings: [], clean: false });
+    gh.comments = [{ id: 1, body: 'just a human comment' }];
+    expect(await latestReviewDeclaration(repo, 5)).toEqual({ findings: [], clean: false });
   });
 
   it('answers an empty list when no review declared anything', async () => {
