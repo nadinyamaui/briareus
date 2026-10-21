@@ -69,7 +69,7 @@ describe('outputTail', () => {
     );
   });
 
-  it('keeps the first error report, not a later echo of it', () => {
+  it('counts a block of npm error lines as one report', () => {
     const output = feed(['npm ERR! code E404', 'npm ERR! 404 Not Found', 'x', 'y', 'z', 'w', 'v']);
     expect(output.summary()).toBe('npm ERR! code E404 | npm ERR! 404 Not Found | x | y | z | w | v');
   });
