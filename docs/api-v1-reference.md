@@ -1731,6 +1731,34 @@ Remove a project. Needs `admin`.
 
 **Returns** `{ ok: boolean }`
 
+### `GET /settings/shares`
+
+List what is shared with whom. Needs `admin`.
+
+**Query**
+
+| Field  | Type                                                                    |                                    |
+| ------ | ----------------------------------------------------------------------- | ---------------------------------- |
+| `kind` | `project\|dbServer\|sshServer\|mcpServer\|forgeAccount\|envoyerAccount` | Only this kind                     |
+| `id`   | `string`                                                                | Only this resource, by its id      |
+| `user` | `integer`                                                               | Only what is shared with this user |
+
+**Returns** `{ shares: Share[] }`. An admin reaches every project and server whether or not it is shared; a member only what is shared with them. Shares of a resource that was removed are not listed.
+
+### `PUT /settings/shares`
+
+Choose the users one project or server is shared with. Needs `admin`.
+
+**Body**
+
+| Field                  | Type                                                                    |                                                                   |
+| ---------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `kind` **required**    | `project\|dbServer\|sshServer\|mcpServer\|forgeAccount\|envoyerAccount` | What is shared                                                    |
+| `id` **required**      | `string`                                                                | Its id, as its own settings list gives it                         |
+| `userIds` **required** | `integer[]`                                                             | Every user it is shared with; an empty list shares it with nobody |
+
+**Returns** `{ kind: string, id: string, userIds: integer[] }`. Replaces the whole list. A member loses a project from every token they hold as soon as it is no longer shared with them.
+
 ### `GET /settings/projects/{id}/update`
 
 Read how the project’s local checkout last updated itself. Needs `admin`.
@@ -2195,6 +2223,16 @@ A person who shares this server. Every token belongs to one, and acts as them; a
 | `id`   | `integer`       | Its id                                                                                |
 | `name` | `string`        | The name it was given, unique on this server                                          |
 | `role` | `admin\|member` | An admin runs the server and reaches every project; a member only what they are given |
+
+### Share
+
+One project or server shared with one user.
+
+| Field    | Type                                                                    |                            |
+| -------- | ----------------------------------------------------------------------- | -------------------------- |
+| `kind`   | `project\|dbServer\|sshServer\|mcpServer\|forgeAccount\|envoyerAccount` | What is shared             |
+| `id`     | `string`                                                                | Its id, as a string        |
+| `userId` | `integer`                                                               | The user it is shared with |
 
 ### ProjectSummary
 
@@ -3303,6 +3341,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/projects`                                                             | `POST /settings/projects`                                                       |
 | `PUT /api/projects/:id`                                                          | `PUT /settings/projects/{id}`                                                   |
 | `DELETE /api/projects/:id`                                                       | `DELETE /settings/projects/{id}`                                                |
+| `GET /api/shares`                                                                | `GET /settings/shares`                                                          |
+| `PUT /api/shares`                                                                | `PUT /settings/shares`                                                          |
 | `GET /api/projects/:id/update`                                                   | `GET /settings/projects/{id}/update`                                            |
 | `POST /api/projects/:id/update`                                                  | `POST /settings/projects/{id}/update`                                           |
 | `GET /api/templates`                                                             | `GET /settings/templates`                                                       |

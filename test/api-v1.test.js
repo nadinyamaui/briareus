@@ -31,7 +31,8 @@ let auth,
   tokens,
   previewAccess,
   presentEvent,
-  people;
+  people,
+  sharedRepos;
 beforeEach(async () => {
   let saved = [];
   previewAccess = null;
@@ -46,6 +47,7 @@ beforeEach(async () => {
     now: () => clock,
   });
   await auth.init();
+  sharedRepos = {};
   people = [
     { id: 1, name: 'Owner', role: 'admin', createdAt: clock, disabledAt: null },
     { id: 2, name: 'Ana', role: 'member', createdAt: clock, disabledAt: null },
@@ -96,6 +98,7 @@ beforeEach(async () => {
     apiV1Routes({
       auth,
       users: { get: (id) => people.find((u) => u.id === id) || null, list: () => people },
+      memberRepos: (user) => sharedRepos[user.id] || [],
       apiEnabled: () => apiOn,
       ownerSecret: () => secret,
       handlers,
@@ -225,6 +228,24 @@ describe('who gets in', () => {
     expect((await json('/', { token: tokens.admin })).client.permission).toBe('manage');
     expect((await request('/users', { token: tokens.admin })).status).toBe(403);
     expect((await request(`/runtimes?repo=${repo}`, { token: tokens.admin })).status).toBe(403);
+  });
+
+  it('holds a member’s token to the projects shared with them', async () => {
+    const ana = (
+      await auth.create(
+        { userId: 2, label: 'ana', repos: [repo, 'other/project'], permission: 'manage', days: 1 },
+        secret,
+      )
+    ).token;
+    expect((await request(`/runtimes?repo=${repo}`, { token: ana })).status).toBe(403);
+    expect((await json('/sessions', { token: ana })).repos).toEqual([]);
+    expect((await request('/sessions/mine', { token: ana })).status).toBe(404);
+    sharedRepos[2] = [repo, 'third/project'];
+    expect((await json('/sessions', { token: ana })).repos).toEqual([repo]);
+    expect((await request(`/runtimes?repo=${repo}`, { token: ana })).status).toBe(200);
+    expect((await request('/runtimes?repo=other/project', { token: ana })).status).toBe(403);
+    // An admin's narrower token is held to its own list, shared or not.
+    expect((await json('/sessions')).repos).toEqual([repo]);
   });
 
   it('lists the users to an admin only', async () => {
