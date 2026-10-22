@@ -2218,11 +2218,12 @@ A token’s own record. The token itself is shown once, when it is created.
 
 A person who shares this server. Every token belongs to one, and acts as them; a disabled user’s tokens stop working.
 
-| Field  | Type            |                                                                                       |
-| ------ | --------------- | ------------------------------------------------------------------------------------- |
-| `id`   | `integer`       | Its id                                                                                |
-| `name` | `string`        | The name it was given, unique on this server                                          |
-| `role` | `admin\|member` | An admin runs the server and reaches every project; a member only what they are given |
+| Field      | Type            |                                                                                       |
+| ---------- | --------------- | ------------------------------------------------------------------------------------- |
+| `id`       | `integer`       | Its id                                                                                |
+| `name`     | `string`        | The name it was given, unique on this server                                          |
+| `role`     | `admin\|member` | An admin runs the server and reaches every project; a member only what they are given |
+| `disabled` | `boolean`       | Disabled on the server: their tokens answer 401 until they are enabled again          |
 
 ### Share
 

@@ -202,7 +202,7 @@ describe('who gets in', () => {
     expect(await json('/')).toMatchObject({
       version: 1,
       client: { label: 'manage client', userId: 1, permission: 'manage', repos: [repo], lastUsedAt: clock },
-      user: { id: 1, name: 'Owner', role: 'admin' },
+      user: { id: 1, name: 'Owner', role: 'admin', disabled: false },
       transcribe: true,
     });
     expect(await json('/')).not.toHaveProperty('client.user');
@@ -216,7 +216,12 @@ describe('who gets in', () => {
     const ana = (
       await auth.create({ userId: 2, label: 'ana', repos: [repo], permission: 'read', days: 1 }, secret)
     ).token;
-    expect((await json('/', { token: ana })).user).toEqual({ id: 2, name: 'Ana', role: 'member' });
+    expect((await json('/', { token: ana })).user).toEqual({
+      id: 2,
+      name: 'Ana',
+      role: 'member',
+      disabled: false,
+    });
     people[1].disabledAt = clock;
     expect((await request('/', { token: ana })).status).toBe(401);
     people.splice(1, 1);
@@ -248,11 +253,72 @@ describe('who gets in', () => {
     expect((await json('/sessions')).repos).toEqual([repo]);
   });
 
-  it('lists the users to an admin only', async () => {
+  // Sends all but the last byte of a JSON body as an admin token, demotes the token's
+  // user once the request has been admitted, then finishes the body. Answers what came
+  // back by the end of the response, or within 100 ms for a stream that stays open (one
+  // with nothing to send yet has not even sent its status).
+  const demotedMidBody = (route, method, body) =>
+    new Promise((resolve, reject) => {
+      people[0].role = 'admin';
+      const text = JSON.stringify(body);
+      let status;
+      let received = '';
+      let timer;
+      const done = () => {
+        clearTimeout(timer);
+        resolve({ status, text: received });
+        req.destroy();
+      };
+      const req = httpRequest(
+        `${url}${prefix}${route}`,
+        {
+          method,
+          headers: {
+            Authorization: `Bearer ${tokens.admin}`,
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(text),
+          },
+        },
+        (res) => {
+          status = res.statusCode;
+          res.on('data', (chunk) => (received += chunk));
+          res.on('end', done);
+        },
+      );
+      req.on('error', reject);
+      req.write(text.slice(0, 1));
+      setTimeout(() => {
+        people[0].role = 'member';
+        req.end(text.slice(1));
+        timer = setTimeout(done, 100);
+      }, 50);
+    });
+
+  it('refuses an admin route whose user is demoted while its body is arriving', async () => {
+    const answer = await demotedMidBody('/settings/providers', 'POST', { label: 'p' });
+    expect({ status: answer.status, body: JSON.parse(answer.text) }).toEqual({
+      status: 403,
+      body: { error: 'This needs an admin token' },
+    });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('answers the gateway’s own routes with the reach left after a demotion mid-body', async () => {
+    const client = await demotedMidBody('/', 'GET', {});
+    expect(client.status).toBe(200);
+    expect(JSON.parse(client.text)).toMatchObject({
+      client: { permission: 'manage', repos: [] },
+      user: { role: 'member' },
+    });
+    expect((await demotedMidBody('/events', 'GET', {})).text).not.toContain('event: session');
+  });
+
+  it('lists the users to an admin only, the disabled ones marked', async () => {
+    people[1].disabledAt = clock;
     expect(await json('/users', { token: tokens.admin })).toEqual({
       users: [
-        { id: 1, name: 'Owner', role: 'admin' },
-        { id: 2, name: 'Ana', role: 'member' },
+        { id: 1, name: 'Owner', role: 'admin', disabled: false },
+        { id: 2, name: 'Ana', role: 'member', disabled: true },
       ],
     });
     expect((await request('/users')).status).toBe(403);
@@ -803,6 +869,32 @@ describe('the event streams', () => {
         })(),
       ).rejects.toThrow();
     }
+  });
+
+  it('ends an open admin stream once its user is demoted', async () => {
+    for (const route of ['/events?transcripts=1', '/sessions/foreign/events']) {
+      people[0].role = 'admin';
+      const response = await request(route, { token: tokens.admin });
+      expect(response.status).toBe(200);
+      const reader = response.body.getReader();
+      await reader.read();
+      people[0].role = 'member';
+      await expect(
+        (async () => {
+          for (;;) if ((await reader.read()).done) return 'ended';
+        })(),
+      ).rejects.toThrow();
+    }
+  });
+
+  it('keeps a stream open while its token reaches what it did', async () => {
+    const response = await request('/events', { token: tokens.read });
+    const reader = response.body.getReader();
+    await reader.read();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    bus.emit('job', { id: 'mine', repo, kind: 'devchat', status: 'running' });
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('event: session');
+    await reader.cancel();
   });
 
   it.each(['revoked', 'expired', 'API disabled'])('ends an open binary archive when %s', async (reason) => {
