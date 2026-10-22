@@ -253,6 +253,176 @@ describe('workspace quarantine', () => {
       expect(fs.existsSync(quarantineWorkspace(dir))).toBe(true);
     });
 
+    it.each(['detached HEAD', 'lightweight tag', 'annotated tag'])(
+      'keeps unpublished commits reachable from %s',
+      (ref) => {
+        const root = fixture();
+        let saved;
+        const container = quarantined(root, 'acme__saved', (git) => {
+          git('checkout', '-q', '--detach');
+          git('commit', '-q', '--allow-empty', '-m', 'Saved work');
+          saved = git('rev-parse', 'HEAD').trim();
+          if (ref !== 'detached HEAD') {
+            if (ref === 'annotated tag') git('tag', '-a', 'saved-work', '-m', 'Saved');
+            else git('tag', 'saved-work');
+            git('checkout', '-q', '-');
+          }
+        });
+        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        expect(
+          execFileSync('git', ['-C', path.join(container, 'checkout'), 'cat-file', '-t', saved], {
+            encoding: 'utf8',
+          }).trim(),
+        ).toBe('commit');
+      },
+    );
+
+    it('still expires a published detached HEAD and tags', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__published', (git) => {
+        git('tag', '-a', 'published', '-m', 'Published');
+        git('checkout', '-q', '--detach');
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+    });
+
+    it('keeps untracked files when status.showUntrackedFiles is no', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__hidden', (git, dir) => {
+        git('config', 'status.showUntrackedFiles', 'no');
+        fs.writeFileSync(path.join(dir, 'notes'), 'untracked work');
+        expect(git('status', '--porcelain').trim()).toBe('');
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(fs.readFileSync(path.join(container, 'checkout', 'notes'), 'utf8')).toBe('untracked work');
+    });
+
+    it.each(['--assume-unchanged', '--skip-worktree'])('keeps tracked edits hidden by %s', (flag) => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__hidden', (git, dir) => {
+        git('update-index', flag, 'source');
+        fs.writeFileSync(path.join(dir, 'source'), 'hidden work');
+        expect(git('status', '--porcelain').trim()).toBe('');
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(fs.readFileSync(path.join(container, 'checkout', 'source'), 'utf8')).toBe('hidden work');
+    });
+
+    it.each([false, true])('keeps a submodule stash (deinitialized: %s)', (deinitialized) => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__submodule', (git, dir) => {
+        git(
+          '-c',
+          'protocol.file.allow=always',
+          'submodule',
+          'add',
+          '-q',
+          path.join(root, 'acme__submodule.remote.git'),
+          'dependency',
+        );
+        git('commit', '-qm', 'Add submodule');
+        git('push', '-q', 'origin', 'HEAD');
+        fs.writeFileSync(path.join(dir, 'dependency', 'notes'), 'submodule work');
+        git('-C', 'dependency', 'stash', 'push', '-qu');
+        if (deinitialized) git('submodule', 'deinit', '-q', 'dependency');
+        expect(git('status', '--porcelain').trim()).toBe('');
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(
+        execFileSync(
+          'git',
+          [
+            '--git-dir',
+            path.join(container, 'checkout', '.git', 'modules', 'dependency'),
+            'show',
+            'stash^3:notes',
+          ],
+          { encoding: 'utf8' },
+        ),
+      ).toBe('submodule work');
+    });
+
+    it.skipIf(process.platform === 'win32')('does not follow a symlinked checkout', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__linked');
+      const checkout = path.join(container, 'checkout');
+      const outside = path.join(fixture(), 'external-checkout');
+      fs.renameSync(checkout, outside);
+      fs.symlinkSync(outside, checkout);
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(fs.readFileSync(path.join(outside, 'source'), 'utf8')).toBe('pushed');
+      expect(fs.lstatSync(checkout).isSymbolicLink()).toBe(true);
+    });
+
+    it('keeps unchecked files beside the checkout', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__notes');
+      fs.writeFileSync(path.join(container, 'recovery-notes'), 'operator work');
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(fs.readFileSync(path.join(container, 'recovery-notes'), 'utf8')).toBe('operator work');
+      expect(fs.existsSync(path.join(container, 'checkout', '.git'))).toBe(true);
+    });
+
+    it.skipIf(process.platform === 'win32')('does not run a configured fsmonitor hook', () => {
+      const root = fixture();
+      const marker = path.join(root, 'hook-ran');
+      const hook = path.join(root, 'fsmonitor');
+      fs.writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\nexec sleep 2\n`, { mode: 0o755 });
+      const container = quarantined(root, 'acme__hook', (git) => git('config', 'core.fsmonitor', hook));
+      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(fs.existsSync(marker)).toBe(false);
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'bounds a stalled Git probe and keeps the checkout',
+      () => {
+        const root = fixture();
+        const container = quarantined(root, 'acme__stalled');
+        const bin = path.join(root, 'bin');
+        const pidFile = path.join(root, 'git.pid');
+        fs.mkdirSync(bin);
+        fs.writeFileSync(
+          path.join(bin, 'git'),
+          `#!/bin/sh\nprintf '%s' "$$" > '${pidFile}'\nexec sleep 30\n`,
+          { mode: 0o755 },
+        );
+        const module = new URL('../lib/workspace-quarantine.js', import.meta.url).href;
+        try {
+          // An outer deadline makes a missing production timeout fail safely.
+          const child = spawnSync(
+            process.execPath,
+            [
+              '--input-type=module',
+              '-e',
+              `
+          import { expireQuarantine } from ${JSON.stringify(module)};
+          console.log(JSON.stringify(expireQuarantine(${JSON.stringify(root)})));
+        `,
+            ],
+            {
+              encoding: 'utf8',
+              env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` },
+              timeout: 4000,
+              killSignal: 'SIGKILL',
+            },
+          );
+          expect(child.error).toBeUndefined();
+          expect(child.status, child.stderr).toBe(0);
+          expect(JSON.parse(child.stdout)).toEqual({ expired: [], errors: [] });
+          expect(fs.readFileSync(path.join(container, 'checkout', 'source'), 'utf8')).toBe('pushed');
+        } finally {
+          if (fs.existsSync(pidFile)) {
+            try {
+              process.kill(Number(fs.readFileSync(pidFile, 'utf8')), 'SIGKILL');
+            } catch {
+              /* Already exited. */
+            }
+          }
+        }
+      },
+      10000,
+    );
+
     it('does nothing without a recovery directory or through a symlinked one', () => {
       const root = fixture();
       expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
