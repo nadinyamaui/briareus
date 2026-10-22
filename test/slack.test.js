@@ -408,6 +408,46 @@ describe('a session sending', () => {
     expect(slack.posted()).toEqual([]);
   });
 
+  it.each([
+    ['allow', 'disabled'],
+    ['allow', 'reassigned'],
+    ['allow', 'deleted'],
+    ['ask', 'disabled'],
+    ['ask', 'reassigned'],
+    ['ask', 'deleted'],
+  ])('does not post an %s-mode DM when its session is %s during lookup', async (permissionMode, change) => {
+    const { s, slack, jobs } = await service({
+      project: { permissionMode },
+      inboxOwner: (j) => (j.disabled ? null : (j.ownerId ?? 1)),
+    });
+    const original = slack.api.getMockImplementation();
+    let resume;
+    let started;
+    const paused = new Promise((resolve) => {
+      started = resolve;
+    });
+    slack.api.mockImplementation(async (...args) => {
+      if (args[1] === 'conversations.open') {
+        started();
+        await new Promise((resolve) => {
+          resume = resolve;
+        });
+      }
+      return original(...args);
+    });
+    const request = s.request(job(), { to: 'U1', text: 'Hi' });
+    const pending = permissionMode === 'ask' ? s.decide((await request).id, 'approve') : request;
+    await paused;
+    if (change === 'deleted') delete jobs.j1;
+    else jobs.j1 = job(change === 'disabled' ? { disabled: true } : { ownerId: 2 });
+    resume();
+    expect(await pending).toMatchObject({
+      status: 'failed',
+      error: 'The session no longer owns this Slack workspace',
+    });
+    expect(slack.posted()).toEqual([]);
+  });
+
   it('tells the agent where it may send', async () => {
     const { s } = await service({ project: { channels: ['dev', 'nowhere'] } });
     expect(await s.destinations(job())).toEqual({

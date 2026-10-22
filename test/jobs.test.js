@@ -5653,6 +5653,39 @@ describe('standalone code-review findings', () => {
     expect(job.reviewTriage).toMatchObject({ author: 'NadinYamaui', mine: true });
   });
 
+  it.each([
+    [2, '', 'Ana', true],
+    [2, '', 'server-bot', false],
+    [2, 'release-bot', 'release-bot', true],
+    [2, 'release-bot', 'ana', false],
+    [3, '', 'server-bot', true],
+    [null, '', 'server-bot', true],
+  ])(
+    'classifies owner %s with reviewAuthor %s and PR author %s',
+    async (ownerId, reviewAuthor, author, mine) => {
+      const found = [finding('personal', 'Personal finding')];
+      latestReviewFindings.mockResolvedValueOnce(found);
+      sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
+      state.projects = [{ repo: 'acme/standalone', label: 'Standalone', reviewAuthor }];
+      setOwnerGithub((job) => (job.ownerId === 2 ? { token: 'ana-tok', login: 'ana', id: 7 } : null));
+      viewerLogin.mockReset().mockResolvedValue('server-bot');
+      const job = {
+        ...newReview('stand-personal', 37),
+        ownerId,
+        prStatus: { number: 37, author },
+      };
+      try {
+        expect(await holdStandaloneReviewFindings(job)).toBe(true);
+        expect(job.reviewTriage).toMatchObject({ author, mine });
+        if (reviewAuthor || ownerId === 2) expect(viewerLogin).not.toHaveBeenCalled();
+        else expect(viewerLogin).toHaveBeenCalledOnce();
+      } finally {
+        setOwnerGithub(() => null);
+        viewerLogin.mockReset().mockResolvedValue(null);
+      }
+    },
+  );
+
   // The token's user is only the fallback: a project that posts as another account names it in
   // its settings, and that account's pull requests are "mine".
   it('reads the account the app acts as off the project when it names one', async () => {
