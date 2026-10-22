@@ -260,6 +260,23 @@ describe('who gets in', () => {
     expect((await request('/sessions/anas')).status).toBe(200);
   });
 
+  it.each([
+    ['POST', '/sessions/mine/messages', { text: 'use the servers' }],
+    ['PATCH', '/sessions/mine', { title: 'changed' }],
+    ['DELETE', '/sessions/mine', undefined],
+  ])('keeps ownerless sessions readable but refuses member %s mutations', async (method, route, body) => {
+    const ana = (
+      await auth.create({ userId: 2, label: 'ana', repos: [repo], permission: 'manage', days: 1 }, secret)
+    ).token;
+    sharedRepos[2] = [repo];
+    expect((await request('/sessions/mine', { token: ana })).status).toBe(200);
+    handler.mockClear();
+    expect((await request(route, { token: ana, method, body })).status).toBe(404);
+    expect(handler).not.toHaveBeenCalled();
+    expect((await request(route.replace('/mine', '/anas'), { token: ana, method, body })).status).toBe(200);
+    expect((await request(route, { method, body })).status).toBe(200);
+  });
+
   // Sends all but the last byte of a JSON body as an admin token, demotes the token's
   // user once the request has been admitted, then finishes the body. Answers what came
   // back by the end of the response, or within 100 ms for a stream that stays open (one

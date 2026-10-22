@@ -145,6 +145,7 @@ vi.mock('../lib/dbpool.js', () => ({
   sessionDatabaseName: vi.fn(() => 'app'),
   dropSessionDatabase: vi.fn(),
   instanceEnv: vi.fn(() => ({})),
+  assertInstanceAccess: vi.fn(),
   instanceAppPort: vi.fn(() => 8101),
   sessionCapacity: () => state.capacity,
   eligibleDbServers: vi.fn(() => state.eligibleServers),
@@ -246,7 +247,13 @@ vi.mock('../lib/usage.js', () => ({
 
 import { deleteJob, jobEventMaxSeqs, loadJobs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
-import { acquireInstance, reclaimInstance, releaseInstance, dropSessionDatabase } from '../lib/dbpool.js';
+import {
+  acquireInstance,
+  reclaimInstance,
+  releaseInstance,
+  dropSessionDatabase,
+  assertInstanceAccess,
+} from '../lib/dbpool.js';
 import {
   latestReviewFindings,
   latestReviewDeclaration,
@@ -290,6 +297,7 @@ import {
   closeSessionBrowser,
   getJob,
   createDevSession,
+  startDevServe,
   setSessionProjectFilter,
   stepProvider,
   devSessionSlots,
@@ -777,6 +785,99 @@ describe('devSessionSlots', () => {
     state.capacity = 2;
     expect(devSessionSlots('acme/shop')).toBe(2);
   });
+});
+
+describe('database admission across owners', () => {
+  const ids = ['member-db-holder', 'member-db-waiter', 'other-db-start'];
+  beforeEach(async () => {
+    state.stored = ids.map((id) => ({
+      id,
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/shop',
+      providerId: 1,
+    }));
+    await initJobs();
+    state.claimsServer = true;
+    const holder = getJob(ids[0]);
+    Object.assign(holder, { status: 'idle', ownerId: 2, dbServerId: 1 });
+    Object.assign(getJob(ids[1]), { status: 'preparing', ownerId: 2 });
+    Object.assign(getJob(ids[2]), { ownerId: 3 });
+    // Include unrelated open records from other blocks in the global capacity.
+    state.capacity = 10000;
+    state.capacity -= devSessionSlots('acme/shop');
+  });
+  afterEach(() => {
+    for (const id of ids) getJob(id).status = 'closed';
+    acquireInstance.mockReset();
+    assertInstanceAccess.mockReset();
+  });
+
+  it.each(['idle', 'running'])('refuses a message to a %s session after DB access is revoked', (status) => {
+    const job = getJob(ids[0]);
+    job.status = status;
+    const events = [...job.events];
+    assertInstanceAccess.mockImplementationOnce(() => {
+      throw new Error('Database server is no longer shared');
+    });
+    expect(() => sendDevMessage(job.id, 'new work')).toThrow(/no longer shared/);
+    expect(job.events).toEqual(events);
+    expect(job.status).toBe(status);
+    expect(job.dbServerId).toBe(1);
+  });
+
+  it('refuses a preview on an open session after DB access is revoked', async () => {
+    const job = getJob(ids[0]);
+    job.workDir = '/unused/revoked-workspace';
+    assertInstanceAccess.mockImplementationOnce(() => {
+      throw new Error('Database server is no longer shared');
+    });
+    await expect(startDevServe(job.id)).rejects.toThrow(/no longer shared/);
+    expect(job.serveProc).toBeFalsy();
+    expect(job.dbServerId).toBe(1);
+  });
+
+  it('still counts the same owner’s pending sessions against admission', () => {
+    expect(() => createDevSession({ provider: 1, repo: 'acme/shop', prompt: 'another', ownerId: 2 })).toThrow(
+      /holding a database server/,
+    );
+  });
+
+  it('still counts another owner’s waiter once it has a claimed server', () => {
+    getJob(ids[1]).dbServerId = 2;
+    expect(() =>
+      createDevSession({ provider: 1, repo: 'acme/shop', prompt: 'Bob starts', ownerId: 3 }),
+    ).toThrow(/holding a database server/);
+  });
+
+  it.each(['new', 'reopen'])(
+    'another owner’s unallocated waiter cannot block a %s session',
+    async (action) => {
+      let rejectPreparation;
+      acquireInstance.mockImplementation(
+        () =>
+          new Promise((_, reject) => {
+            rejectPreparation = reject;
+          }),
+      );
+      let started;
+      try {
+        if (action === 'new') {
+          started = createDevSession({ provider: 1, repo: 'acme/shop', prompt: 'Bob starts', ownerId: 3 });
+        } else {
+          started = sendDevMessage(ids[2], 'Bob reopens');
+        }
+        await vi.waitFor(() => expect(rejectPreparation).toBeTypeOf('function'));
+        expect(getJob(started.id).status).toBe('preparing');
+      } finally {
+        if (started) {
+          getJob(started.id).status = 'closed';
+          rejectPreparation?.(new Error('closed'));
+          await closeDevSession(started.id);
+        }
+      }
+    },
+  );
 });
 
 describe('loop children waiting for a database slot', () => {

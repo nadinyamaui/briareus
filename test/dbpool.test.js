@@ -1323,6 +1323,24 @@ describe('claiming a server', () => {
     }
   });
 
+  it('refuses fresh credentials and profile DDL after a grant is revoked, retaining cleanup', async () => {
+    const session = { ...job(), repo: 'r/r', ownerId: 2 };
+    await acquire(session);
+    const queries = [...state.mysqlQueries];
+    setDbServerFilter(() => false);
+    try {
+      expect(() => instanceEnv(session)).toThrow(/no longer shared/);
+      await expect(ensureProfileDatabase(session, 'casos_new_profile')).rejects.toThrow(/no longer shared/);
+      expect(state.mysqlQueries).toEqual(queries);
+      expect(claimHolder(1)).toBe(session.id);
+      expect(session.dbServerId).toBe(1);
+      await releaseInstance(session);
+      expect(claimHolder(1)).toBeNull();
+    } finally {
+      setDbServerFilter(() => true);
+    }
+  });
+
   it('claims the first free entry and stamps the session with it', async () => {
     const j = job();
     const events = [];
