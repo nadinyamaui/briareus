@@ -827,6 +827,29 @@ describe('deleteFindingFromReview', () => {
     expect(gh.writes.map((w) => w.method)).toEqual(['DELETE', 'PATCH']);
   });
 
+  it.each(['reviewer-bot', null])(
+    'deletes the personal review author’s follow-up when the server login is %s',
+    async (viewer) => {
+      gh.viewer = viewer;
+      gh.comments = [findingsComment(entries, 7)];
+      gh.reviewComments = [
+        inline({ created_at: '2026-09-01T10:00:00Z' }),
+        inline({ id: 102, in_reply_to_id: 101, user: { login: 'pr-author' } }),
+        inline({ id: 103, in_reply_to_id: 101, user: { login: 'reviewer-bot' } }),
+        inline({ id: 104, in_reply_to_id: 101, user: { login: 'Ana' } }),
+      ];
+
+      const out = await deleteFindingFromReview(repo, 5, race, {
+        since: '2026-09-08T09:00:00Z',
+        authorLogin: 'ana',
+      });
+
+      expect(out).toEqual({ commentDeleted: true, undeclared: true, warning: null });
+      expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/104` });
+      expect(gh.writes.map((w) => w.method)).toEqual(['DELETE', 'PATCH']);
+    },
+  );
+
   // A lineless restated finding must not take the one new comment on its file,
   // which belongs to another finding.
   it("never takes another finding's comment for a lineless restated finding", async () => {
@@ -1091,6 +1114,29 @@ describe('replyOnFindingThread', () => {
       { method: 'POST', url: `/repos/${repo}/pulls/5/comments/101/replies`, body: { body: 'Noted' } },
     ]);
   });
+
+  it.each(['reviewer-bot', null])(
+    'replies on the personal review author’s thread when the server login is %s',
+    async (viewer) => {
+      gh.viewer = viewer;
+      gh.reviewComments = [
+        inline({ id: 90, created_at: '2026-09-01T10:00:00Z' }),
+        inline({ created_at: '2026-09-01T10:00:00Z' }),
+        inline({ id: 102, in_reply_to_id: 90, user: { login: 'pr-author' } }),
+        inline({ id: 103, in_reply_to_id: 90, user: { login: 'reviewer-bot' } }),
+        inline({ id: 104, in_reply_to_id: 101, user: { login: 'Ana' } }),
+      ];
+
+      await replyOnFindingThread(repo, 5, race, 'Noted', {
+        since: '2026-09-08T09:00:00Z',
+        authorLogin: 'ana',
+      });
+
+      expect(gh.writes).toEqual([
+        { method: 'POST', url: `/repos/${repo}/pulls/5/comments/101/replies`, body: { body: 'Noted' } },
+      ]);
+    },
+  );
 
   it('replies under its own new comment, not under a follow-up at the same line', async () => {
     gh.reviewComments = [

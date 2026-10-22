@@ -5591,6 +5591,10 @@ describe('standalone code-review findings', () => {
       queuedReview('mine-fix', [finding('m2', 'Validate the input')], true),
       queuedReview('mine-save', [finding('m3', 'Keep the type')], true),
       queuedReview('stand-dispatch', [finding('k7', 'Rename the flag')]),
+      ...[2, 3, null].map((ownerId) => ({
+        ...queuedReview(`stand-identity-${ownerId}`, [finding('k8', 'Check the owner')]),
+        ownerId,
+      })),
       // A review whose card is already gone (completed elsewhere, or its PR closed).
       { ...queuedReview('stand-none', []), reviewTriage: null },
     ];
@@ -5767,7 +5771,7 @@ describe('standalone code-review findings', () => {
       31,
       expect.objectContaining({ key: 'k5' }),
       '  Fine for me  ', // trimmed where it is written, so nothing is lost here
-      { since: '2026-09-07T10:00:00.000Z' },
+      { since: '2026-09-07T10:00:00.000Z', authorLogin: null },
     );
     expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k5', 'k6']);
   });
@@ -5780,6 +5784,37 @@ describe('standalone code-review findings', () => {
     await expect(replyToReviewFinding('stand-nope', 'k5', 'hi')).rejects.toThrow(/Session not found/);
   });
 
+  it.each([
+    [2, 'ana'],
+    [3, null],
+    [null, null],
+  ])('matches review comments for owner %s using author login %s', async (ownerId, authorLogin) => {
+    setOwnerGithub((job) => (job.ownerId === 2 ? { token: 'ana-tok', login: 'ana', id: 7 } : null));
+    try {
+      const id = `stand-identity-${ownerId}`;
+      const opts = { since: '2026-09-07T10:00:00.000Z', authorLogin };
+
+      await replyToReviewFinding(id, 'k8', 'Noted');
+      expect(replyOnFindingThread).toHaveBeenLastCalledWith(
+        'acme/standalone',
+        31,
+        expect.objectContaining({ key: 'k8' }),
+        'Noted',
+        opts,
+      );
+
+      await deleteReviewFinding(id, 'k8');
+      expect(deleteFindingFromReview).toHaveBeenLastCalledWith(
+        'acme/standalone',
+        31,
+        expect.objectContaining({ key: 'k8' }),
+        opts,
+      );
+    } finally {
+      setOwnerGithub(() => null);
+    }
+  });
+
   it('deletes one finding from the review itself and leaves the rest on the card', async () => {
     deleteFindingFromReview.mockClear();
 
@@ -5790,7 +5825,7 @@ describe('standalone code-review findings', () => {
       'acme/standalone',
       31,
       expect.objectContaining({ key: 'k5', title: 'Guard the id list' }),
-      { since: '2026-09-07T10:00:00.000Z' },
+      { since: '2026-09-07T10:00:00.000Z', authorLogin: null },
     );
     expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
   });
