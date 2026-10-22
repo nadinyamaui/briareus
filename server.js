@@ -107,6 +107,7 @@ import {
   openSessionBrowser,
   closeSessionBrowser,
   spawnWorkerSession,
+  setWorkerProjectAccess,
   workerSessionsFor,
   workerSummary,
   assertWorkerSlot,
@@ -281,8 +282,7 @@ const githubOf = (userId) => {
   }
 };
 setOwnerGithub((job) => githubOf(job.ownerId));
-// Who owns what was the one operator's before users existed (sessions, Slack workspaces):
-// the first admin, the user the users migration made of them.
+// Legacy Slack workspaces are assigned to this user once at startup.
 const firstAdmin = () => {
   try {
     return users.list().find((u) => u.role === 'admin')?.id ?? null;
@@ -317,6 +317,7 @@ const sessionMayUse = (job, kind, id) => {
   }
 };
 setDbServerFilter((job, server) => sessionMayUse(job, 'dbServer', server.id));
+setWorkerProjectAccess((job, project) => sessionMayUse(job, 'project', project.id));
 
 // On every response, including the webhooks': nothing here is a page, and the
 // headers say so (lib/security.js).
@@ -2261,6 +2262,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
 (async () => {
   try {
     await initDb();
+    await users.init();
     await initTemplates();
     await initProjects();
     await initDbServers();
@@ -2270,7 +2272,6 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await envoyerService.init();
     await forgeAccounts.init();
     await mailService.init();
-    await users.init();
     await shares.init();
     await credentials.init();
     await mobileAuth.init();

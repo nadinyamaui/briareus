@@ -307,6 +307,7 @@ import {
   linkPrToSession,
   attachPrForBranch,
   spawnWorkerSession,
+  setWorkerProjectAccess,
   workerSessionsFor,
   workerSummary,
   deliverWorkerNotices,
@@ -3513,6 +3514,31 @@ describe('spawnWorkerSession: tooling fixes', () => {
     ];
     resolveRuntime.mockClear();
     getJob('tool-orch').workerRuntime = null;
+  });
+
+  afterEach(() => {
+    setWorkerProjectAccess(() => true);
+    getJob('tool-orch').ownerId = null;
+  });
+
+  it('checks access to the target project before creating a tooling worker', () => {
+    const orch = getJob('tool-orch');
+    orch.ownerId = 2;
+    const access = vi.fn((_parent, project) => project.repo === 'acme/shop');
+    setWorkerProjectAccess(access);
+    const before = workerSessionsFor(orch).length;
+    expect(() => spawnWorkerSession(orch, { prompt: 'Fix tooling', tooling: true })).toThrow(
+      /project access/,
+    );
+    expect(access).toHaveBeenCalledWith(orch, dashboard);
+    expect(workerSessionsFor(orch)).toHaveLength(before);
+    expect(resolveRuntime).not.toHaveBeenCalled();
+    const plain = spawnWorkerSession(orch, { prompt: 'Fix shop' });
+    expect(plain).toMatchObject({ repo: 'acme/shop', ownerId: 2 });
+    setWorkerProjectAccess(() => true);
+    const shared = spawnWorkerSession(orch, { prompt: 'Fix tooling', tooling: true });
+    expect(shared).toMatchObject({ repo: 'acme/dashboard', ownerId: 2 });
+    expect(workerSessionsFor(orch)).toHaveLength(before + 2);
   });
 
   it('refuses when no project is flagged as the dashboard itself', () => {
