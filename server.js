@@ -678,7 +678,26 @@ api.use(
   }),
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
-api.use(homeAssistantRoutes({ service: createHomeAssistantService() }));
+// Each user's own Home Assistant (lib/me-routes.js). The one in .env was the operator's, so
+// it stands for the first admin until they connect one of their own.
+const homeAssistantOf = (user) => {
+  try {
+    const own = credentials.get(user.id, 'homeAssistant');
+    if (own) return own;
+  } catch {
+    return null;
+  }
+  return user.id === firstAdmin() ? getConfig().homeAssistant : null;
+};
+api.use(
+  homeAssistantRoutes({
+    serviceFor: (user) =>
+      createHomeAssistantService({
+        config: () => homeAssistantOf(user),
+        unconfigured: 'Connect your Home Assistant first: PUT /api/v1/me/home-assistant',
+      }),
+  }),
+);
 const whatsappService = createWhatsAppService();
 // Replies in the chats a session wrote to come back to it (lib/whatsapp-watch.js).
 const whatsappWatcher = createWhatsAppWatcher({

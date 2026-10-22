@@ -80,11 +80,27 @@ async function setup() {
         'owner',
       )
     ).token;
-  const handlers = homeAssistantRoutes({ service });
+  // Ana, a member, has connected no Home Assistant of her own.
+  tokens.member = (
+    await auth.create(
+      { userId: 2, label: 'ana', permission: 'manage', repos: ['owner/repo'], days: 30 },
+      'owner',
+    )
+  ).token;
+  const handlers = homeAssistantRoutes({
+    serviceFor: (user) => (user.id === 1 ? service : createHomeAssistantService({ config: () => null })),
+  });
   const app = express();
   app.use(
     apiV1Routes({
-      users: { get: () => ({ id: 1, name: 'Owner', role: 'admin', disabledAt: null }), list: () => [] },
+      users: {
+        get: (id) =>
+          ({
+            1: { id: 1, name: 'Owner', role: 'admin', disabledAt: null },
+            2: { id: 2, name: 'Ana', role: 'member', disabledAt: null },
+          })[id] || null,
+        list: () => [],
+      },
       auth,
       apiEnabled: () => true,
       ownerSecret: () => 'owner',
@@ -141,13 +157,20 @@ describe('Home Assistant bridge through the real gateway and upstream HTTP', () 
     ).toEqual({ ok: true });
     expect(calls.map((c) => c.body)).toEqual([data, data, { source: 'ios' }]);
   });
-  it('refuses non-admin and agent tokens without contacting Home Assistant', async () => {
+  it('reaches only the caller’s own Home Assistant, acts only with manage, and refuses agent tokens', async () => {
     const { call, calls, tokens, url } = await setup();
-    for (const token of [tokens.read, tokens.manage]) {
-      expect((await call('/entities', { token })).status).toBe(403);
-      expect((await call('/services/light/turn_on', { method: 'POST', body: {}, token })).status).toBe(403);
-      expect((await call('/events/briareus_command', { method: 'POST', body: {}, token })).status).toBe(403);
-    }
+    expect(
+      (await call('/services/light/turn_on', { method: 'POST', body: {}, token: tokens.read })).status,
+    ).toBe(403);
+    expect(
+      (await call('/events/briareus_command', { method: 'POST', body: {}, token: tokens.read })).status,
+    ).toBe(403);
+    expect(await (await call('', { token: tokens.member })).json()).toEqual({
+      configured: false,
+      connected: false,
+    });
+    const unconnected = await call('/entities', { token: tokens.member });
+    expect(unconnected.status).toBe(503);
     expect((await call('', { token: 'invalid' })).status).toBe(401);
     expect(
       (await fetch(`${url}/api/home-assistant/entities`, { headers: { Authorization: 'Bearer agent' } }))
