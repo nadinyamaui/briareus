@@ -5,9 +5,14 @@ import { setDraining } from '../lib/recovery.js';
 
 afterEach(() => setDraining(false));
 
-async function serve(deps) {
+async function serve(deps, user = { id: 1, role: 'admin' }) {
   const app = express();
   app.use(express.json());
+  // The user and projects /api/v1 resolved the token to.
+  app.use((_req, res, next) => {
+    res.locals.apiUser = user;
+    next();
+  });
   app.use(
     operationsRoutes({
       listSessions: () => [{ id: 's', status: 'failed' }],
@@ -97,6 +102,37 @@ it('resumes only the recovery report the operator saw, and never while draining'
     const ok = await call('/api/operations/recovery/s', { body: { fingerprint: report.fingerprint } });
     expect(ok.status).toBe(200);
     expect(sendMessage).toHaveBeenCalledWith('s', expect.stringContaining('Resume the interrupted task'));
+  } finally {
+    await close();
+  }
+});
+
+it('shows a member only what waits on them', async () => {
+  const sessions = [
+    { id: 'mine', repo: 'o/a', status: 'failed', ownerId: 2 },
+    { id: 'theirs', repo: 'o/a', status: 'failed', ownerId: 3 },
+  ];
+  const ssh = {
+    pending: () => [
+      { id: 'r1', jobId: 'mine', repo: 'o/a', status: 'pending', createdAt: 1 },
+      { id: 'r2', jobId: 'theirs', repo: 'o/a', status: 'pending', createdAt: 1 },
+    ],
+    runningCount: () => 0,
+  };
+  const slack = { pending: vi.fn(() => []) };
+  const { call, close } = await serve(
+    {
+      listSessions: () => sessions,
+      ssh,
+      slack,
+      sshVisible: (_user, request) => request.jobId === 'mine',
+    },
+    { id: 2, role: 'member' },
+  );
+  try {
+    const { items } = await (await call('/api/operations/attention')).json();
+    expect([...new Set(items.map((i) => i.sessionId))]).toEqual(['mine']);
+    expect(slack.pending).toHaveBeenCalledWith(2);
   } finally {
     await close();
   }

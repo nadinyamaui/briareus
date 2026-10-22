@@ -663,6 +663,9 @@ function agentSession(req, res) {
   return job;
 }
 
+// Who rules on an SSH command: an admin on every one, a member on their own sessions' only.
+const sshRuledBy = (user, request) =>
+  !!user && (user.role === 'admin' || getJob(request.jobId)?.ownerId === user.id);
 const sshService = createSshService({
   getJob,
   mayUse: (job, server) => sessionMayUse(job, 'sshServer', server.id),
@@ -673,9 +676,7 @@ api.use(
     service: sshService,
     agentSession,
     getProject,
-    // An admin rules on every command; a member on their own sessions' only.
-    mayDecide: (user, request) =>
-      !!user && (user.role === 'admin' || getJob(request.jobId)?.ownerId === user.id),
+    mayDecide: sshRuledBy,
   }),
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
@@ -742,6 +743,7 @@ api.use(
     slack: slackService,
     getJob,
     sendMessage: sendDevMessage,
+    sshVisible: sshRuledBy,
   }),
 );
 
