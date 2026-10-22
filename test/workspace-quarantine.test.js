@@ -253,6 +253,112 @@ describe('workspace quarantine', () => {
       expect(fs.existsSync(quarantineWorkspace(dir))).toBe(true);
     });
 
+    it('expires a clean checkout whose index output exceeds 1 MiB', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__large', (git, dir) => {
+        const files = path.join(dir, 'files');
+        fs.mkdirSync(files);
+        for (let i = 0; i < 14000; i++)
+          fs.writeFileSync(path.join(files, `source-${String(i).padStart(5, '0')}.txt`), 'pushed');
+        git('add', '.');
+        git('commit', '-qm', 'Large index');
+        git('push', '-q', 'origin', 'HEAD');
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(fs.existsSync(container)).toBe(false);
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'reports an exceeded Git output bound and retains the checkout',
+      () => {
+        const root = fixture();
+        const container = quarantined(root, 'acme__oversized');
+        const bin = path.join(root, 'bin');
+        fs.mkdirSync(bin);
+        fs.writeFileSync(
+          path.join(bin, 'git'),
+          `#!/bin/sh\nexec '${process.execPath}' -e 'process.stdout.write(Buffer.alloc(17 * 1024 * 1024, 120))'\n`,
+          { mode: 0o755 },
+        );
+        const module = new URL('../lib/workspace-quarantine.js', import.meta.url).href;
+        const child = spawnSync(
+          process.execPath,
+          [
+            '--input-type=module',
+            '-e',
+            `
+        import { expireQuarantine } from ${JSON.stringify(module)};
+        console.log(JSON.stringify(expireQuarantine(${JSON.stringify(root)})));
+      `,
+          ],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` },
+            timeout: 4000,
+            killSignal: 'SIGKILL',
+          },
+        );
+        expect(child.error).toBeUndefined();
+        expect(child.status, child.stderr).toBe(0);
+        expect(JSON.parse(child.stdout)).toEqual({
+          expired: [],
+          errors: [{ path: container, error: expect.stringMatching(/Git.*output.*limit/i) }],
+        });
+        expect(fs.readFileSync(path.join(container, 'checkout', 'source'), 'utf8')).toBe('pushed');
+      },
+    );
+
+    it('keeps private Git notes', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__notes', (git) =>
+        git('notes', 'add', '-m', 'private recovery notes'),
+      );
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(
+        execFileSync('git', ['-C', path.join(container, 'checkout'), 'notes', 'show'], {
+          encoding: 'utf8',
+        }).trim(),
+      ).toBe('private recovery notes');
+    });
+
+    it('keeps unpublished commits in detached linked worktrees after relocation', () => {
+      const root = fixture();
+      const linked = path.join(root, 'linked');
+      let saved;
+      const container = quarantined(root, 'acme__linked', (git) => {
+        git('worktree', 'add', '-q', '--detach', linked);
+        git('-C', linked, 'commit', '-q', '--allow-empty', '-m', 'Linked work');
+        saved = git('-C', linked, 'rev-parse', 'HEAD').trim();
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(
+        execFileSync(
+          'git',
+          ['--git-dir', path.join(container, 'checkout', '.git'), 'cat-file', '-t', saved],
+          {
+            encoding: 'utf8',
+          },
+        ).trim(),
+      ).toBe('commit');
+    });
+
+    it('inspects the physical checkout when core.worktree points elsewhere', () => {
+      const root = fixture();
+      const outside = fixture();
+      const container = quarantined(root, 'acme__external', (git, dir) => {
+        fs.copyFileSync(path.join(dir, 'source'), path.join(outside, 'source'));
+        fs.copyFileSync(path.join(dir, '.gitignore'), path.join(outside, '.gitignore'));
+        git('config', 'core.worktree', outside);
+        fs.writeFileSync(path.join(dir, 'source'), 'unsaved physical work');
+        expect(git('status', '--porcelain').trim()).toBe('');
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(fs.readFileSync(path.join(container, 'checkout', 'source'), 'utf8')).toBe(
+        'unsaved physical work',
+      );
+      expect(fs.readFileSync(path.join(outside, 'source'), 'utf8')).toBe('pushed');
+    });
+
     it.each(['detached HEAD', 'lightweight tag', 'annotated tag'])(
       'keeps unpublished commits reachable from %s',
       (ref) => {

@@ -285,7 +285,7 @@ describe('actions', () => {
     clearInterval(startWorkspacePruner((line) => lines.push(line), 1000));
     expect(lines).toEqual([
       'Workspace cleanup deleted 2 recovery checkouts that held no local work.',
-      'Workspace cleanup could not delete recovery checkout /c, which holds no local work: EACCES: permission denied. Remove it manually.',
+      'Workspace cleanup could not inspect or delete recovery checkout /c: EACCES: permission denied. Inspect it and recover any local work before removing it manually.',
     ]);
   });
 
