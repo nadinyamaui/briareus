@@ -282,18 +282,18 @@ const githubOf = (userId) => {
 };
 setOwnerGithub((job) => githubOf(job.ownerId));
 // Who owns what was the one operator's before users existed (sessions, Slack workspaces):
-// the first admin, the user the users migration made of them.
-const firstAdmin = () => {
+// the first user, whom the users migration created, regardless of their current role.
+const originalOperator = () => {
   try {
-    return users.list().find((u) => u.role === 'admin')?.id ?? null;
+    return users.list()[0]?.id ?? null;
   } catch {
     return null;
   }
 };
 // Whose personal inboxes (mail, Slack) a session reaches: its owner, or for a session nobody
-// owns the first admin, and none while that user is disabled.
+// owns the original operator, and none while that user is disabled.
 const inboxOwner = (job) => {
-  const id = job.ownerId ?? firstAdmin();
+  const id = job.ownerId ?? originalOperator();
   try {
     const owner = id == null ? null : users.get(id);
     return owner && owner.disabledAt == null ? owner.id : null;
@@ -332,7 +332,7 @@ const slackService = createSlackService({
   unfit: webhookUnfit,
   eventsUrl: (id) => `${getConfig().publicBaseUrl}/webhooks/slack/${id}`,
   inboxOwner,
-  legacyOwner: firstAdmin,
+  legacyOwner: originalOperator,
 });
 setSlackAccess((job) => slackService.briefing(job));
 
@@ -679,7 +679,7 @@ api.use(
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
 // Each user's own Home Assistant (lib/me-routes.js). The one in .env was the operator's, so
-// it stands for the first admin until they connect one of their own.
+// it stands for the original operator until they connect one of their own.
 const homeAssistantOf = (user) => {
   try {
     const own = credentials.get(user.id, 'homeAssistant');
@@ -687,7 +687,7 @@ const homeAssistantOf = (user) => {
   } catch {
     return null;
   }
-  return user.id === firstAdmin() ? getConfig().homeAssistant : null;
+  return user.id === originalOperator() ? getConfig().homeAssistant : null;
 };
 api.use(
   homeAssistantRoutes({
