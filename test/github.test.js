@@ -678,3 +678,40 @@ describe('listRepoBranches', () => {
     );
   });
 });
+
+describe('acting as a user', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('makes changes with the user’s token and reads with the server’s', async () => {
+    const gh = await freshGithub();
+    const fetch = stubFetch(reply(), reply(), reply({ body: { data: {} } }), reply({ body: { data: {} } }));
+    await gh.asGithubUser('user-tok', async () => {
+      await gh.githubRest(cfg, 'GET', '/repos/o/r');
+      await gh.githubRest(cfg, 'POST', '/repos/o/r/issues/1/comments', { body: 'hi' });
+      await gh.githubGraphql(cfg, 'query { viewer { login } }');
+      await gh.githubGraphql(cfg, ' mutation { addStar(input: {}) { clientMutationId } }');
+    });
+    expect(fetch.calls.map((c) => c.init.headers.Authorization)).toEqual([
+      'Bearer tok',
+      'Bearer user-tok',
+      'Bearer tok',
+      'Bearer user-tok',
+    ]);
+  });
+
+  it('runs as the server without a user token, and outside the call', async () => {
+    const gh = await freshGithub();
+    const fetch = stubFetch(reply(), reply());
+    await gh.asGithubUser(null, () => gh.githubRest(cfg, 'POST', '/x'));
+    await gh.githubRest(cfg, 'POST', '/y');
+    expect(fetch.calls.map((c) => c.init.headers.Authorization)).toEqual(['Bearer tok', 'Bearer tok']);
+  });
+
+  it('leaves the server’s rate limit alone when a user’s token is limited', async () => {
+    const gh = await freshGithub();
+    stubFetch(reply({ status: 429, headers: { 'retry-after': '60' } }), reply());
+    const answer = await gh.asGithubUser('user-tok', () => gh.githubRest(cfg, 'POST', '/x'));
+    expect(answer.status).toBe(429);
+    expect((await gh.githubRest(cfg, 'GET', '/y')).status).toBe(200);
+  });
+});

@@ -286,6 +286,8 @@ import {
   closeSessionBrowser,
   getJob,
   createDevSession,
+  agentGithubEnv,
+  setOwnerGithub,
   stepProvider,
   devSessionSlots,
   pullRequestHasOpenSession,
@@ -1119,6 +1121,31 @@ describe('pullRequestHasOpenSession', () => {
     expect(pullRequestHasOpenSession('acme/babysit', 215, 'feature/215')).toBe(false);
     expect(pullRequestHasOpenSession('acme/other', 211, 'feature/213')).toBe(false);
     expect(pullRequestHasOpenSession('acme/babysit', 299, '')).toBe(false);
+  });
+});
+
+describe('the agent’s GitHub identity', () => {
+  afterEach(() => setOwnerGithub(() => null));
+
+  it('is the owner’s account when they connected one, and the server’s otherwise', () => {
+    setOwnerGithub((job) => (job.ownerId === 2 ? { token: 'ana-tok', login: 'ana', id: 7 } : null));
+    expect(agentGithubEnv({ ownerId: 2 }, { githubToken: 'srv' })).toEqual({
+      GITHUB_TOKEN: 'ana-tok',
+      GH_TOKEN: 'ana-tok',
+      REVIEWER_GIT_TOKEN: 'ana-tok',
+      GIT_AUTHOR_NAME: 'ana',
+      GIT_AUTHOR_EMAIL: '7+ana@users.noreply.github.com',
+      GIT_COMMITTER_NAME: 'ana',
+      GIT_COMMITTER_EMAIL: '7+ana@users.noreply.github.com',
+    });
+    expect(agentGithubEnv({ ownerId: 3 }, { githubToken: 'srv' })).toEqual({
+      GITHUB_TOKEN: 'srv',
+      GH_TOKEN: 'srv',
+    });
+    expect(agentGithubEnv({ ownerId: null }, { githubToken: 'srv' })).toEqual({
+      GITHUB_TOKEN: 'srv',
+      GH_TOKEN: 'srv',
+    });
   });
 });
 

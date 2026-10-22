@@ -22,6 +22,9 @@ import { createMobileAuth } from './lib/mobile-auth.js';
 import { createUsers } from './lib/users.js';
 import { createShares } from './lib/shares.js';
 import { seesSession } from './lib/ownership.js';
+import { createUserCredentials } from './lib/user-credentials.js';
+import { meRoutes } from './lib/me-routes.js';
+import { asGithubUser } from './lib/github.js';
 import { shareRoutes } from './lib/share-routes.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
@@ -129,6 +132,7 @@ import {
   webhookUnfit,
   setSlackAccess,
   setExternalMcp,
+  setOwnerGithub,
   DEV_OPEN,
 } from './lib/jobs.js';
 import {
@@ -264,6 +268,18 @@ const api = express.Router();
 // The people sharing this server (lib/users.js) and what is shared with each (lib/shares.js).
 const users = createUsers();
 const shares = createShares();
+const credentials = createUserCredentials();
+// A user's own GitHub identity (lib/me-routes.js), or null: none connected, the user is
+// gone or disabled, or CREDENTIALS_KEY cannot open it, in which case the server's stands.
+const githubOf = (userId) => {
+  try {
+    const user = userId == null ? null : users.get(userId);
+    return user && user.disabledAt == null ? credentials.get(userId, 'github') : null;
+  } catch {
+    return null;
+  }
+};
+setOwnerGithub((job) => githubOf(job.ownerId));
 // The user a /api/v1 request acts as, who owns any session it starts.
 const requestOwner = (res) => res.locals.apiUser?.id ?? null;
 // Whether a session may use a shared server (lib/shares.js): one nobody started works as the
@@ -326,6 +342,7 @@ app.use(
   apiV1Routes({
     auth: mobileAuth,
     users,
+    actAs: (user, fn) => asGithubUser(githubOf(user.id)?.token, fn),
     memberRepos: (user) => {
       const ids = shares.idsFor(user.id, 'project');
       return listProjects()
@@ -708,6 +725,7 @@ api.use(
     getProject,
   }),
 );
+api.use(meRoutes({ credentials }));
 // Who each project and server is shared with (lib/shares.js); ids are compared as strings.
 const hasId = (list) => (id) => list().some((item) => String(item.id) === id);
 api.use(
@@ -2219,6 +2237,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await mailService.init();
     await users.init();
     await shares.init();
+    await credentials.init();
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
