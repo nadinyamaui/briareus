@@ -19,11 +19,10 @@ export async function up({ context: p }) {
     await p.query(
       'ALTER TABLE `turn_usage` ADD COLUMN `user_id` INT UNSIGNED NULL AFTER `job_id`, ADD KEY `turn_usage_user_at` (`user_id`, `at`)',
     );
-    const [admins] = await p.query("SELECT MIN(`id`) AS id FROM `users` WHERE `role` = 'admin'");
-    const owner = /** @type {any[]} */ (admins)[0]?.id;
-    if (owner != null)
-      await p.query('UPDATE `turn_usage` SET `user_id` = ? WHERE `user_id` IS NULL', [owner]);
   }
+  const [admins] = await p.query("SELECT MIN(`id`) AS id FROM `users` WHERE `role` = 'admin'");
+  const owner = /** @type {any[]} */ (admins)[0]?.id;
+  if (owner != null) await p.query('UPDATE `turn_usage` SET `user_id` = ? WHERE `user_id` IS NULL', [owner]);
 }
 
 /** @param {{ context: import('mysql2/promise').Pool }} ctx */

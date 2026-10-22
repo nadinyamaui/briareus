@@ -898,6 +898,49 @@ describe('the event streams', () => {
     }
   });
 
+  it.each(['read', 'manage'])(
+    'ends private streams after demotion with a %s token and unchanged repo scope',
+    async (permission) => {
+      sharedRepos[1] = [repo];
+      for (const route of ['/events?transcripts=1', '/sessions/anas/events']) {
+        people[0] = { ...people[0], role: 'admin' };
+        const response = await request(route, { token: tokens[permission] });
+        expect(response.status).toBe(200);
+        const reader = response.body.getReader();
+        await reader.read();
+        people[0] = { ...people[0], role: 'member' };
+        expect((await request('/sessions/anas', { token: tokens[permission] })).status).toBe(404);
+        try {
+          await expect(reader.read()).rejects.toThrow();
+        } finally {
+          await reader.cancel().catch(() => {});
+        }
+      }
+    },
+  );
+
+  it('filters deleted sessions by the owner carried in the event after removal', async () => {
+    sharedRepos[2] = [repo];
+    const token = (
+      await auth.create({ userId: 2, label: 'ana', repos: [repo], permission: 'read', days: 1 }, secret)
+    ).token;
+    const events = await readEvents('/events', 3, {
+      token,
+      onChunk: (seen) => {
+        if (seen.length !== 1) return;
+        bus.emit('deleted', 'removed-private', repo, 1);
+        bus.emit('deleted', 'removed-other-project', 'other/project', 2);
+        bus.emit('deleted', 'removed-own', repo, 2);
+        bus.emit('deleted', 'removed-ownerless', repo, null);
+      },
+    });
+    expect(events.map((e) => [e.event, e.data.id])).toEqual([
+      ['session', 'mine'],
+      ['session.deleted', 'removed-own'],
+      ['session.deleted', 'removed-ownerless'],
+    ]);
+  });
+
   it('ends an open admin stream once its user is demoted', async () => {
     for (const route of ['/events?transcripts=1', '/sessions/foreign/events']) {
       people[0].role = 'admin';

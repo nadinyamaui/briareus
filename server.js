@@ -68,6 +68,7 @@ import {
 } from './lib/db.js';
 import {
   initJobs,
+  setSessionProjectFilter,
   resumeRestartedSessions,
   setAgentApiBase,
   jobForAgentToken,
@@ -279,6 +280,7 @@ const sessionMayUse = (job, kind, id) => {
   }
 };
 setDbServerFilter((job, server) => sessionMayUse(job, 'dbServer', server.id));
+setSessionProjectFilter((job, project) => sessionMayUse(job, 'project', project.id));
 
 // On every response, including the webhooks': nothing here is a page, and the
 // headers say so (lib/security.js).

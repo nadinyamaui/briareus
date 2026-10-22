@@ -37,6 +37,8 @@ const state = vi.hoisted(() => ({
   catalog: '',
   projects: [],
   claimsServer: false,
+  eligibleServers: [],
+  dbHolders: new Map(),
   capacity: 3,
   // What initJobs loads: the only way to register a session here without spawning one.
   stored: [],
@@ -145,6 +147,8 @@ vi.mock('../lib/dbpool.js', () => ({
   instanceEnv: vi.fn(() => ({})),
   instanceAppPort: vi.fn(() => 8101),
   sessionCapacity: () => state.capacity,
+  eligibleDbServers: vi.fn(() => state.eligibleServers),
+  claimHolder: (id) => state.dbHolders.get(id) || null,
   projectClaimsServer: () => state.claimsServer,
 }));
 
@@ -286,6 +290,7 @@ import {
   closeSessionBrowser,
   getJob,
   createDevSession,
+  setSessionProjectFilter,
   stepProvider,
   devSessionSlots,
   pullRequestHasOpenSession,
@@ -362,6 +367,9 @@ beforeEach(() => {
   state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '' }];
   state.claimsServer = false;
   state.capacity = 3;
+  state.eligibleServers = [];
+  state.dbHolders = new Map();
+  setSessionProjectFilter(() => true);
   state.otherProviders = [];
   state.group = null;
 });
@@ -851,6 +859,40 @@ describe('loop children waiting for a database slot', () => {
       }
     },
   );
+
+  it('refuses a loop when its owner’s only eligible server is held by its waiting parent', async () => {
+    const parent = getJob(ids[0]);
+    parent.ownerId = 2;
+    state.eligibleServers = [{ id: 1 }];
+    state.dbHolders.set(1, parent.id);
+    // Global capacity has a free server, but it is not shared with this owner.
+    state.capacity += 1;
+    await retryLoopRound(parent.id);
+    expect(parent.reviewLoop.reviewing).toBe(false);
+    expect(parent.reviewLoop.reviewSessionId).toBeFalsy();
+    expect(parent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
+    expect(blocked).toEqual([]);
+    state.eligibleServers.push({ id: 2 });
+    const child = await queueReview(parent.id);
+    expect(child.ownerId).toBe(2);
+    expect(parent.reviewLoop.failure).toBeNull();
+    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([child.id]));
+  });
+
+  it('rechecks owner-eligible servers for a queued loop when global capacity frees', async () => {
+    const parent = getJob(ids[0]);
+    parent.ownerId = 2;
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, parent.id);
+    state.dbHolders.set(2, 'slot-holder');
+    const child = await queueReview(parent.id);
+    state.eligibleServers = [{ id: 1 }];
+    await closeDevSession('slot-holder');
+    expect(child.status).toBe('failed');
+    expect(child.databaseSlotQueuedAt).toBeNull();
+    expect(parent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
+    expect(blocked).toEqual([]);
+  });
 
   it('fails an accepted wait if pool reduction leaves only its parent holding capacity', async () => {
     const unrelated = devSessionRecords().filter((j) => ![ids[0], 'slot-holder'].includes(j.id));
@@ -3501,6 +3543,31 @@ describe('spawnWorkerSession: tooling fixes', () => {
     ).toThrow(/worker session of some orchestrator/);
   });
 
+  it('checks the inherited owner’s current project grant before starting a tooling worker', async () => {
+    const orch = getJob('tool-orch');
+    const before = workerSessionsFor(orch).length;
+    const previousOwner = orch.ownerId;
+    orch.ownerId = 2;
+    let shared = false;
+    const allowed = vi.fn((job, project) => job.ownerId !== 2 || project.repo !== dashboard.repo || shared);
+    setSessionProjectFilter(allowed);
+    try {
+      expect(() => spawnWorkerSession(orch, { title: 'Fix', prompt: 'x', tooling: true })).toThrow(
+        /Project unavailable/,
+      );
+      expect(allowed).toHaveBeenLastCalledWith({ ownerId: 2 }, dashboard);
+      expect(workerSessionsFor(orch)).toHaveLength(before);
+      shared = true;
+      const worker = spawnWorkerSession(orch, { title: 'Fix', prompt: 'x', tooling: true });
+      expect(worker).toMatchObject({ repo: dashboard.repo, ownerId: 2 });
+      // Wait for the worker's missing checkout to fail before restoring the owner.
+      await settleWorkers(['tool-orch']);
+    } finally {
+      orch.ownerId = previousOwner;
+      setSessionProjectFilter(() => true);
+    }
+  });
+
   it('runs on the dashboard project’s worker runtime, ahead of the orchestration’s own pick', () => {
     // The shop's runtime and the orchestration's pick say high; the dashboard's says low, and
     // that is the one a tooling fix resolves.
@@ -5820,6 +5887,7 @@ describe('deleting a session that was never closed', () => {
     state.stored = [
       {
         id: 'undropped-1',
+        ownerId: 2,
         kind: 'devchat',
         status: 'failed',
         repo: 'acme/shop',
@@ -5834,7 +5902,10 @@ describe('deleting a session that was never closed', () => {
   // A session that died during setup never reaches closeDevSession, and its
   // record is the only thing that knows the database's name.
   it('drops its database before the record goes', async () => {
+    const deleted = vi.fn((id) => expect(getJob(id)).toBeNull());
+    bus.once('deleted', deleted);
     await deleteJobById('undropped-1');
+    expect(deleted).toHaveBeenCalledWith('undropped-1', 'acme/shop', 2);
 
     expect(dropSessionDatabase).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'undropped-1', sessionDb: 'shop_undropped_1' }),

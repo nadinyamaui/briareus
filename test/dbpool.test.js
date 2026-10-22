@@ -561,6 +561,30 @@ describe('restart database claims', () => {
     expect(claimHolder(2)).toBeNull();
   });
 
+  it.each([false, true])(
+    'rejects a reclaimed unshared server before probing (preparing=%s)',
+    async (dbPreparing) => {
+      state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+      state.servers = [server()];
+      const session = { ...job(), repo: 'acme/app', ownerId: 2, dbPreparing };
+      reclaimInstance(session, 1);
+      const allowed = vi.fn(() => false);
+      setDbServerFilter(allowed);
+      try {
+        await expect(acquireInstance(session, session.repo, vi.fn())).rejects.toThrow(/no longer shared/);
+        expect(allowed).toHaveBeenCalledWith(session, state.servers[0]);
+        expect(claimHolder(1)).toBe(session.id);
+        expect(session.dbServerId).toBe(1);
+        expect(state.mysqlQueries).toEqual([]);
+        expect(state.psqlCalls).toEqual([]);
+      } finally {
+        setDbServerFilter(() => true);
+        await releaseInstance(session);
+      }
+      expect(claimHolder(1)).toBeNull();
+    },
+  );
+
   it('fails reclaimed acquisition when MySQL cannot be reached, retaining the claim until cleanup', async () => {
     state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
     state.servers = [server()];

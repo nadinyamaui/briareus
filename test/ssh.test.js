@@ -181,6 +181,23 @@ describe('SSH permission boundary', () => {
     ).toThrow('unavailable');
     expect(() => service.result({ ...job, id: 'another-session' }, request.id)).toThrow('not found');
   });
+  it.each(['unshared', 'disabled owner'])('cancels approval after access is revoked: %s', async (reason) => {
+    let shared = true;
+    job.ownerId = 2;
+    const mayUse = vi.fn((current) => shared && !current.disabled);
+    service = createSshService({ load: async () => [], save, execute, getJob: () => job, mayUse });
+    await service.init();
+    const { request } = await submit();
+    // The user registry may replace the owner/session object before approval.
+    job = { ...job, disabled: reason === 'disabled owner' };
+    if (reason === 'unshared') shared = false;
+    expect(() => service.decide(request.id, 'approve')).toThrow(/no longer available/);
+    expect(service.result(job, request.id).status).toBe('cancelled');
+    expect(service.pending()).toEqual([]);
+    expect(execute).not.toHaveBeenCalled();
+    expect(mayUse).toHaveBeenLastCalledWith(job, expect.objectContaining({ repo: input.repo }));
+  });
+
   it('holds a session to the servers its owner may use', async () => {
     const mayUse = vi.fn((session, server) => session.ownerId !== 2 || server.label === 'shared');
     service = createSshService({ load: async () => [], save, execute, getJob: () => job, mayUse });
