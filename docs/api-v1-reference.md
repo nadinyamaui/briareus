@@ -1177,37 +1177,37 @@ Approve or deny an SSH command. Needs `manage`.
 
 ### `GET /whatsapp/accounts`
 
-List linked WhatsApp accounts. Needs `admin`.
+List linked WhatsApp accounts. Needs `read`.
 
-**Returns** `{ configured: boolean, accounts: WhatsAppAccount[] }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. When disabled, returns { configured: false, accounts: [] }.
+**Returns** `{ configured: boolean, accounts: WhatsAppAccount[] }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. When disabled, returns { configured: false, accounts: [] }.
 
 ### `GET /whatsapp/accounts/{id}`
 
-Read a WhatsApp account’s connection status. Needs `admin`.
+Read a WhatsApp account’s connection status. Needs `read`.
 
-**Returns** `{ account: WhatsAppAccount }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+**Returns** `{ account: WhatsAppAccount }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
 
 ### `POST /whatsapp/accounts/{id}/start`
 
-Start or reconnect an account; create default when absent. Needs `admin`.
+Start or reconnect an account; create default when absent. Needs `manage`.
 
-**Returns** `{ account: WhatsAppAccount }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+**Returns** `{ account: WhatsAppAccount }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
 
 ### `GET /whatsapp/accounts/{id}/qr`
 
-Get the pairing QR code as a base64 PNG. Needs `admin`.
+Get the pairing QR code as a base64 PNG. Needs `read`.
 
-**Returns** `{ mimetype: string, data: string }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Available in SCAN_QR_CODE; refresh periodically until WORKING. Scan from WhatsApp → Linked devices → Link a device. Do not store QR codes.
+**Returns** `{ mimetype: string, data: string }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Available in SCAN_QR_CODE; refresh periodically until WORKING. Scan from WhatsApp → Linked devices → Link a device. Do not store QR codes.
 
 ### `POST /whatsapp/accounts/{id}/logout`
 
-Unlink the phone from WAHA. Needs `admin`.
+Unlink the phone from WAHA. Needs `manage`.
 
-**Returns** `{ ok: boolean }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+**Returns** `{ ok: boolean }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
 
 ### `GET /whatsapp/accounts/{id}/conversations`
 
-List WhatsApp chats, newest activity first. Needs `admin`.
+List WhatsApp chats, newest activity first. Needs `read`.
 
 **Query**
 
@@ -1216,11 +1216,11 @@ List WhatsApp chats, newest activity first. Needs `admin`.
 | `limit`  | `integer` | Page size, 1–100; 50 by default                                   |
 | `offset` | `integer` | The previous page’s nextOffset, 0–100000; omit for the first page |
 
-**Returns** `{ conversations: object[], nextOffset: integer? }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Each chat is { id, name, unreadCount, lastMessage: WhatsAppMessage|null }; unreadCount may be null when the engine omits it.
+**Returns** `{ conversations: object[], nextOffset: integer? }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Each chat is { id, name, unreadCount, lastMessage: WhatsAppMessage|null }; unreadCount may be null when the engine omits it.
 
 ### `GET /whatsapp/accounts/{id}/conversations/{chat}/messages`
 
-Read WhatsApp history, newest first. Needs `admin`.
+Read WhatsApp history, newest first. Needs `read`.
 
 **Query**
 
@@ -1229,11 +1229,11 @@ Read WhatsApp history, newest first. Needs `admin`.
 | `limit`  | `integer` | Page size, 1–100; 50 by default                                   |
 | `offset` | `integer` | The previous page’s nextOffset, 0–100000; omit for the first page |
 
-**Returns** `{ messages: WhatsAppMessage[], nextOffset: integer? }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Offset pagination can overlap when new messages arrive; deduplicate by ID. nextOffset advances by the requested limit even for short or empty pages, because WAHA filters protocol records after paging. There is no reliable end-of-history indicator; null nextOffset marks the supported offset bound.
+**Returns** `{ messages: WhatsAppMessage[], nextOffset: integer? }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Offset pagination can overlap when new messages arrive; deduplicate by ID. nextOffset advances by the requested limit even for short or empty pages, because WAHA filters protocol records after paging. There is no reliable end-of-history indicator; null nextOffset marks the supported offset bound.
 
 ### `POST /whatsapp/accounts/{id}/conversations/{chat}/messages`
 
-Send a text message or quoted reply as the operator. Needs `admin`.
+Send a text message or quoted reply as the operator. Needs `manage`.
 
 **Body**
 
@@ -1242,19 +1242,19 @@ Send a text message or quoted reply as the operator. Needs `admin`.
 | `text` **required** | `string` | Message text, 1–8000 characters           |
 | `replyTo`           | `string` | Optional quoted message ID from this chat |
 
-**Returns** 201 `{ message: WhatsAppMessage }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+**Returns** 201 `{ message: WhatsAppMessage }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
 
 ### `POST /whatsapp/accounts/{id}/conversations/{chat}/read`
 
-Mark unread WhatsApp messages as read. Needs `admin`.
+Mark unread WhatsApp messages as read. Needs `manage`.
 
-**Returns** `{ ok: boolean }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+**Returns** `{ ok: boolean }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
 
 ### `GET /whatsapp/accounts/{id}/conversations/{chat}/messages/{message}/media`
 
-Download a message attachment through the core. Needs `admin`.
+Download a message attachment through the core. Needs `read`.
 
-**Returns** the file. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Downloads only WAHA local file storage; the API key never reaches clients. Returns the attachment’s media type and Content-Disposition: attachment. Availability depends on the WAHA edition/engine; 501 for unsupported operations.
+**Returns** the file. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Downloads only WAHA local file storage; the API key never reaches clients. Returns the attachment’s media type and Content-Disposition: attachment. Availability depends on the WAHA edition/engine; 501 for unsupported operations.
 
 ### `GET /slack/workspaces`
 

@@ -24,7 +24,8 @@ API changes and their sessions' commits and pushes are made as them. Mailboxes
 belong to the user who connected them, and sessions reach their owner's.
 Slack workspaces likewise belong to whoever connected them, for the inbox,
 approvals and sessions, and each user connects their own Home Assistant
-(`PUT /me/home-assistant`). WhatsApp is not yet per user. See
+(`PUT /me/home-assistant`). WhatsApp accounts belong to one user each (a
+second user needs WAHA Plus to link a phone). See
 [users](api-v1.md#users).
 
 ## Coding sessions
@@ -144,6 +145,7 @@ These additions are present in the server revision documented here:
 - Per-user mailboxes, for the API and for sessions' mail tools.
 - Per-user Slack workspaces, inbox and approvals.
 - Per-user Home Assistant connections.
+- Per-user WhatsApp accounts for the inbox, session tools and watches.
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.
