@@ -19,6 +19,7 @@ import { initMemorySelection } from './lib/memory-selection.js';
 import { memoryMaintenanceRoutes } from './lib/memory-maintenance-routes.js';
 import { operationsRoutes } from './lib/operations-routes.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
+import { createUsers } from './lib/users.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
@@ -294,9 +295,11 @@ app.use('/webhooks', webhookRouter());
 
 // The only client API: owner-issued tokens (`npm run create-token`) in front of the handlers below.
 const mobileAuth = createMobileAuth();
+const users = createUsers();
 app.use(
   apiV1Routes({
     auth: mobileAuth,
+    users,
     apiEnabled,
     ownerSecret: () => getConfig().auth.secret,
     handlers: api,
@@ -2113,6 +2116,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await envoyerService.init();
     await forgeAccounts.init();
     await mailService.init();
+    await users.init();
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
@@ -2151,10 +2155,11 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   await whatsappWatcher
     .init()
     .catch((e) => console.error('Could not load WhatsApp watches (tried again every poll):', e.message));
-  // `npm run create-token` writes the database directly; a revoked token stops new requests
-  // within 15s and open streams within 30s.
+  // `npm run create-token` and `npm run users` write the database directly; a revoked token
+  // or disabled user stops new requests within 15s and open streams within 30s.
   setInterval(() => {
     mobileAuth.refresh().catch((e) => console.error('Could not reload device tokens:', e.message));
+    users.refresh().catch((e) => console.error('Could not reload users:', e.message));
   }, 15000).unref();
   // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
   // a client reads its mail from the database rather than from the provider.

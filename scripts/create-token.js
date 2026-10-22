@@ -2,12 +2,15 @@
 // Issues, lists and revokes client API (/api/v1) tokens from the machine itself.
 //
 //   npm run create-token -- --label Desktop
-//   npm run create-token -- --label iPhone --permission manage --repo owner/name --days 90
+//   npm run create-token -- --label iPhone --user Ana --permission manage --repo owner/name --days 90
 //   npm run create-token -- --list
 //   npm run create-token -- --revoke <id>
 //
 // The API has no route to issue or list tokens, so a leaked token cannot mint more; a
 // client can still revoke its own with `DELETE /token`.
+//
+// Every token belongs to a user (`npm run users` adds them); --user may be left out while
+// the server has only one. Only an admin's token can be an admin token.
 //
 // Tokens are signed with AUTH_SECRET, which the first run writes into .env if missing.
 // Delete that line and rerun to revoke every token at once.
@@ -24,12 +27,13 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import mysql from 'mysql2/promise';
 import { getConfig, ROOT } from '../lib/config.js';
-import { updateAppSetting } from '../lib/db.js';
+import { loadUserRows, updateAppSetting } from '../lib/db.js';
 import { createMobileAuth } from '../lib/mobile-auth.js';
 
 const { values } = parseArgs({
   options: {
     label: { type: 'string' },
+    user: { type: 'string' },
     permission: { type: 'string', default: 'admin' },
     repo: { type: 'string', multiple: true, default: [] },
     days: { type: 'string', default: '365' },
@@ -40,6 +44,7 @@ const { values } = parseArgs({
 
 if (!values.label && !values.list && !values.revoke) {
   console.error('Name the token: npm run create-token -- --label Desktop');
+  console.error('  --user <name>                    whose token; may be left out while there is one user');
   console.error('  --permission read|manage|admin   admin when absent');
   console.error('  --repo owner/name                a project it may use, repeatable; not for admin');
   console.error('  --days 1-365                     365 when absent');
@@ -75,7 +80,24 @@ const auth = createMobileAuth({
 });
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
 
+// The user named by --user, or the only one there is.
+async function owner() {
+  const users = await loadUserRows(pool);
+  if (values.user == null) {
+    if (users.length === 1) return users[0];
+    throw new Error('Name the user the token is for: --user <name> (`npm run users` lists them)');
+  }
+  const user = users.find((u) => u.name.toLowerCase() === values.user?.toLowerCase());
+  if (!user) throw new Error(`No user named ${values.user}: \`npm run users\` lists them`);
+  return user;
+}
+
 async function issue() {
+  const user = await owner();
+  if (user.disabledAt != null)
+    throw new Error(`${user.name} is disabled: \`npm run users -- --enable ${user.name}\` first`);
+  if (values.permission === 'admin' && user.role !== 'admin')
+    throw new Error(`${user.name} is a member: give the token --permission read or manage, and its --repo`);
   if (values.permission !== 'admin') {
     const [rows] = /** @type {any} */ (await pool.query('SELECT `repo` FROM `projects`'));
     const known = new Set(rows.map((row) => row.repo));
@@ -83,12 +105,20 @@ async function issue() {
     if (unknown.length) throw new Error(`No such project: ${unknown.join(', ')}`);
   }
   const { device, token } = await auth.create(
-    { label: values.label, permission: values.permission, repos: values.repo, days: Number(values.days) },
+    {
+      label: values.label,
+      permission: values.permission,
+      repos: values.repo,
+      days: Number(values.days),
+      userId: user.id,
+    },
     secret,
   );
   const scope = device.permission === 'admin' ? 'every project' : device.repos.join(', ');
   console.log(`\n${token}\n`);
-  console.log(`"${device.label}": ${device.permission} on ${scope}, good for ${values.days} days.`);
+  console.log(
+    `"${device.label}" for ${user.name}: ${device.permission} on ${scope}, good for ${values.days} days.`,
+  );
   console.log(
     wroteSecret
       ? 'It is shown this once. Restart the server to load the new AUTH_SECRET:  pm2 restart reviewer'
@@ -96,15 +126,16 @@ async function issue() {
   );
 }
 
-function list() {
+async function list() {
   const devices = auth.list();
+  const names = new Map((await loadUserRows(pool)).map((u) => [u.id, u.name]));
   if (!devices.length) console.log('No tokens.');
   for (const d of devices) {
     const scope = d.permission === 'admin' ? 'every project' : d.repos.join(', ');
     const state = d.expiresAt <= Date.now() ? 'expired' : `until ${day(d.expiresAt)}`;
     const lastUsed = d.lastUsedAt == null ? 'never recorded' : new Date(d.lastUsedAt).toISOString();
     console.log(
-      `${d.id}  ${d.permission.padEnd(6)}  ${state.padEnd(16)}  ${d.label} (${scope})  last used: ${lastUsed}`,
+      `${d.id}  ${d.permission.padEnd(6)}  ${state.padEnd(16)}  ${d.label} (${scope})  user: ${names.get(d.userId) ?? 'none'}  last used: ${lastUsed}`,
     );
   }
 }
@@ -119,7 +150,7 @@ async function revoke(id) {
 
 try {
   await auth.init();
-  if (values.list) list();
+  if (values.list) await list();
   else if (values.revoke) await revoke(values.revoke);
   else await issue();
 } catch (e) {
