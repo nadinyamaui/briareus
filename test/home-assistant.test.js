@@ -75,12 +75,16 @@ async function setup() {
   const tokens = {};
   for (const permission of ['read', 'manage', 'admin'])
     tokens[permission] = (
-      await auth.create({ label: permission, permission, repos: ['owner/repo'], days: 30 }, 'owner')
+      await auth.create(
+        { userId: 1, label: permission, permission, repos: ['owner/repo'], days: 30 },
+        'owner',
+      )
     ).token;
   const handlers = homeAssistantRoutes({ service });
   const app = express();
   app.use(
     apiV1Routes({
+      users: { get: () => ({ id: 1, name: 'Owner', role: 'admin', disabledAt: null }), list: () => [] },
       auth,
       apiEnabled: () => true,
       ownerSecret: () => 'owner',

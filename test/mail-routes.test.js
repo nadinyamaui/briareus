@@ -23,7 +23,8 @@ beforeEach(async () => {
   });
   await auth.init();
   const create = async (permission) =>
-    (await auth.create({ label: permission, repos: ['owner/repo'], permission, days: 30 }, secret)).token;
+    (await auth.create({ userId: 1, label: permission, repos: ['owner/repo'], permission, days: 30 }, secret))
+      .token;
   tokens = { manage: await create('manage'), admin: await create('admin') };
   service = {
     list: vi.fn(async () => [{ id: 1, email: 'me@gmail.com' }]),
@@ -53,6 +54,7 @@ beforeEach(async () => {
   const app = express();
   app.use(
     apiV1Routes({
+      users: { get: () => ({ id: 1, name: 'Owner', role: 'admin', disabledAt: null }), list: () => [] },
       auth,
       apiEnabled: () => true,
       ownerSecret: () => secret,

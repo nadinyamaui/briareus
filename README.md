@@ -802,7 +802,9 @@ streams. `npm run create-token -- --label Desktop` issues the first token, an
 admin one; restart the server once if that run wrote `AUTH_SECRET`, and later
 tokens need no restart. The same command issues the rest (read or manage on
 chosen projects, or admin for everything), lists them and revokes them; the
-API itself cannot issue or list tokens.
+API itself cannot issue or list tokens. Each token belongs to a user, so several
+people can share one server: `npm run users` adds them as admins or members
+(see [Users](docs/api-v1.md#users)).
 
 The routes the removed dashboard called with its login cookie, and the earlier
 `/api/mobile/v1`, are retired and answer 410. The API refuses a request that

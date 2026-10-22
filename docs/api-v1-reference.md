@@ -10,9 +10,15 @@ A type followed by `[]` is a list and by `?` may be null. `a|b` is one of those 
 
 ### `GET /`
 
-The token’s own record, the API version and what this server can do. Needs `read`.
+The token’s own record, the user it belongs to, the API version and what this server can do. Needs `read`.
 
-**Returns** `{ version: integer, client: Client, transcribe: boolean }`
+**Returns** `{ version: integer, client: Client, user: User, transcribe: boolean }`
+
+### `GET /users`
+
+List the people who share this server. Needs `admin`.
+
+**Returns** `{ users: User[] }`. Users are added, changed and disabled on the server with `npm run users`, as tokens are issued with `npm run create-token`.
 
 ### `GET /openapi.json`
 
@@ -2172,12 +2178,23 @@ A token’s own record. The token itself is shown once, when it is created.
 | Field        | Type                  |                                                                                                             |
 | ------------ | --------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `id`         | `string`              | Its id                                                                                                      |
+| `userId`     | `integer`             | The user it belongs to                                                                                      |
 | `label`      | `string`              | The name it was given                                                                                       |
-| `permission` | `read\|manage\|admin` | What it may do                                                                                              |
+| `permission` | `read\|manage\|admin` | What it may do; an admin token held by a member acts as `manage`, held to its projects                      |
 | `repos`      | `string[]`            | The projects it is held to; empty for an admin token, which is held to none                                 |
 | `createdAt`  | `integer`             | When it was issued, epoch milliseconds                                                                      |
 | `expiresAt`  | `integer`             | When it stops working, epoch milliseconds                                                                   |
 | `lastUsedAt` | `integer?`            | Last recorded authenticated request, epoch milliseconds; saved at most once per minute, null until recorded |
+
+### User
+
+A person who shares this server. Every token belongs to one, and acts as them; a disabled user’s tokens stop working.
+
+| Field  | Type            |                                                                                       |
+| ------ | --------------- | ------------------------------------------------------------------------------------- |
+| `id`   | `integer`       | Its id                                                                                |
+| `name` | `string`        | The name it was given, unique on this server                                          |
+| `role` | `admin\|member` | An admin runs the server and reaches every project; a member only what they are given |
 
 ### ProjectSummary
 

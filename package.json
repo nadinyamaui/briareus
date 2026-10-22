@@ -19,6 +19,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "create-token": "node scripts/create-token.js",
+    "users": "node scripts/users.js",
     "migrate": "node scripts/migrate.js up",
     "migrate:rollback": "node scripts/migrate.js rollback",
     "migrate:status": "node scripts/migrate.js status",

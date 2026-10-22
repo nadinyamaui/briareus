@@ -32,13 +32,16 @@ sit in page script, so CORS is off and a web client calls from its own server.
    (1–365) sets the expiry. `--list` shows the tokens there are and
    `--revoke <id>` revokes one, also without a restart.
 
+   Every token belongs to a [user](#users). While the server has only one,
+   the first admin made when it was set up, `--user` can be left out.
+
 2. Give the client the address `https://<your-host>/api/v1` and the token. The
    token is shown once.
 3. Check it: `GET /` answers with the token's own record.
 
 ```sh
 curl -s https://briareus.example.com/api/v1/ -H "Authorization: Bearer brm_..."
-# {"version":1,"client":{"id":"...","label":"Web","repos":[],"permission":"admin",...},"transcribe":false}
+# {"version":1,"client":{"id":"...","userId":1,"label":"Web","repos":[],"permission":"admin",...},"user":{"id":1,"name":"Owner","role":"admin"},"transcribe":false}
 ```
 
 Tokens are stored as hashes only. Revoking one, its expiry, or a changed
@@ -73,9 +76,34 @@ A `read` or `manage` token is held to its project list:
 - A route about one session answers 404 for a session of another project.
 - `/projects`, `/sessions` and `/events` show only the token's projects.
 
-An `admin` token carries no project list and is the operator's own: treat it
+An `admin` token carries no project list and is an admin user's own: treat it
 like a password to the machine. It is what the client you run Briareus from
 needs; give a client that only follows and steers sessions `manage`.
+
+## Users
+
+Several people can share one server. Each token belongs to a user, and the
+server acts as that user: a change it makes (a finding's verdict, a reply) is
+signed with their name. A user is an `admin`, who runs the server and may
+hold admin tokens, or a `member`, whose tokens are `read` or `manage` on the
+projects they were given. An admin token kept through a demotion acts as
+`manage` on its empty project list, so it reaches nothing.
+
+Users are added and changed on the machine, like tokens:
+
+```sh
+npm run users                               # list them
+npm run users -- --add Ana                  # a member; add --role admin for an admin
+npm run users -- --user Ana --role admin    # change a role
+npm run users -- --disable Ana              # her tokens stop; --enable undoes it
+npm run create-token -- --user Ana --label Laptop --permission manage --repo owner/name
+```
+
+A disabled user's tokens answer 401 within 15 seconds, without a restart. The
+last enabled admin cannot be demoted or disabled. When the server was first
+upgraded to users, it created an admin named `Owner` and gave every existing
+token to them. `GET /` names the token's user, and an admin can list
+everyone with `GET /users`.
 
 ## Conventions
 
@@ -453,6 +481,8 @@ access to one file; Briareus does not list published files.
 - Managing tokens. `npm run create-token` issues, lists (`--list`) and revokes
   (`--revoke <id>`) them on the machine; a client can only revoke its own, with
   `DELETE /token`.
+- Managing users. `npm run users` adds, changes and disables them on the
+  machine; the API only lists them.
 - `/api/agent/*`: the calls an agent makes from inside its own session.
 - `/webhooks/*`: deliveries from GitHub and from systems that wake a session.
 - `/files/*`: downloads of explicitly published files and assistant-linked workspace files, authorized by their unguessable URL.

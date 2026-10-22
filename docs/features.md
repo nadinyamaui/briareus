@@ -7,6 +7,16 @@ This repository contains the Briareus server. Its `/api/v1` API supports
 There is no built-in dashboard. Server support does not imply that every
 client has implemented a feature.
 
+## Users and tokens
+
+Several people can share one server. Every `/api/v1` token belongs to a user,
+an admin or a member, and the server acts as that user; disabling a user
+stops all their tokens. Users and tokens are managed on the machine
+(`npm run users`, `npm run create-token`), and admins can list users with
+`GET /users`. Projects, sessions, stats and integrations are not yet scoped to
+users: a member reaches what their tokens' project lists allow. See
+[users](api-v1.md#users).
+
 ## Coding sessions
 
 Sessions run Claude Code, Codex, Grok, opencode or Z.AI in their own workspace
@@ -113,6 +123,9 @@ in the [API reference](api-v1-reference.md#operations).
 ## Recent additions
 
 These additions are present in the server revision documented here:
+
+- Users: every token belongs to an admin or member, and changes made through
+  the API are signed with the user's name.
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.
