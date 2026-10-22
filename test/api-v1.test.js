@@ -232,6 +232,37 @@ describe('who gets in', () => {
     expect((await request(`/runtimes?repo=${repo}`, { token: tokens.admin })).status).toBe(403);
   });
 
+  it('refuses an admin route whose user is demoted while its body is arriving', async () => {
+    const body = JSON.stringify({ label: 'p' });
+    const answer = new Promise((resolve, reject) => {
+      const req = httpRequest(
+        `${url}${prefix}/settings/providers`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${tokens.admin}`,
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          let text = '';
+          res.on('data', (chunk) => (text += chunk));
+          res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(text) }));
+        },
+      );
+      req.on('error', reject);
+      req.write(body.slice(0, 1));
+      // Demoted only once the request has been admitted, then the rest of the body.
+      setTimeout(() => {
+        people[0].role = 'member';
+        req.end(body.slice(1));
+      }, 50);
+    });
+    expect(await answer).toEqual({ status: 403, body: { error: 'This needs an admin token' } });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it('lists the users to an admin only, the disabled ones marked', async () => {
     people[1].disabledAt = clock;
     expect(await json('/users', { token: tokens.admin })).toEqual({

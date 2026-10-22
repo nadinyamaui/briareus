@@ -41,7 +41,7 @@ sit in page script, so CORS is off and a web client calls from its own server.
 
 ```sh
 curl -s https://briareus.example.com/api/v1/ -H "Authorization: Bearer brm_..."
-# {"version":1,"client":{"id":"...","userId":1,"label":"Web","repos":[],"permission":"admin",...},"user":{"id":1,"name":"Owner","role":"admin"},"transcribe":false}
+# {"version":1,"client":{"id":"...","userId":1,"label":"Web","repos":[],"permission":"admin",...},"user":{"id":1,"name":"Owner","role":"admin","disabled":false},"transcribe":false}
 ```
 
 Tokens are stored as hashes only. Revoking one, its expiry, or a changed
