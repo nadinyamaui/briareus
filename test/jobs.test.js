@@ -8943,6 +8943,28 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         loopParentId: 'stk-unmirrored',
         loopReviewDone: true,
       },
+      // Its round on #1 finished; the turn ends on dev-b while the findings are read.
+      // Closed, like the other PR-less ones, except inside its test.
+      row('stk-readout', {
+        repo: 'acme/readout',
+        branch: 'dev-a',
+        prStatus: prOne,
+        prAttachedByBranch: true,
+        reviewLoop: {
+          rounds: 1,
+          reviewing: true,
+          reviewSessionId: 'stk-readout-rev',
+          reviewPr: 1,
+          lastSha: 'sha-a',
+        },
+      }),
+      {
+        ...row('stk-readout-rev', { repo: 'acme/readout' }),
+        branch: 'dev-a',
+        createdAt: '2026-10-22T10:00:00.000Z',
+        loopParentId: 'stk-readout',
+        loopReviewDone: true,
+      },
       // Spotted #1 itself; attaches #2 by branch on dev-b, then comes back to dev-a.
       row('stk-spot', {
         repo: 'acme/spot',
@@ -9325,6 +9347,41 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       // No second round on the same commit.
       expect(job.reviewLoop.rounds).toBe(1);
       expect(job.reviewLoop.lastSha).toBe('sha-u');
+    } finally {
+      job.status = 'closed';
+    }
+  });
+
+  it("drops a round's findings read across a release and a round on the new pull request", async () => {
+    const job = getJob('stk-readout');
+    const review = getJob('stk-readout-rev');
+    let answer;
+    latestReviewDeclaration.mockClear();
+    latestReviewDeclaration.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+    job.status = 'idle';
+    review.status = 'idle';
+    try {
+      await closeDevSession('stk-readout-rev');
+      await vi.waitFor(() => expect(latestReviewDeclaration).toHaveBeenCalled());
+      await onBranch(job, 'dev-b', async () => {
+        refreshJobBranch(job);
+      });
+      expect(job.reviewLoop.releasedPr).toBe(1);
+      // #2 attaches and its first round starts (applyLoopRelease) before #1's read returns.
+      job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', headSha: 'sha-b' };
+      job.reviewLoop.releasedPr = null;
+      job.reviewLoop.reviewPr = 2;
+      answer({
+        findings: [{ key: 'k1', severity: 'medium', title: 'A bug on #1', file: 'a.js', line: 1 }],
+        clean: false,
+      });
+      await vi.waitFor(() =>
+        expect(infoTexts(job).join('\n')).toMatch(
+          /review round 1's findings came back for PR #1, which this session no longer tracks/,
+        ),
+      );
+      expect(job.reviewLoop.triage).toBeFalsy();
+      expect(job.reviewLoop.pendingResult).toBeFalsy();
     } finally {
       job.status = 'closed';
     }
