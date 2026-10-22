@@ -190,23 +190,31 @@ vi.mock('../lib/prtasks.js', () => ({
   implementFeedbackPrompt: vi.fn(() => 'FEEDBACK'),
 }));
 
-vi.mock('../lib/findings.js', () => ({
-  latestReviewFindings: vi.fn(async () => []),
-  latestTestFailures: vi.fn(async () => []),
-  queueFindingsForFix: vi.fn(async (repo, prNumber, findings) => ({
-    kept: findings,
-    parked: [],
-    error: null,
-  })),
-  sortFindingsForFix: vi.fn(async (repo, prNumber, findings) => ({ kept: findings, parked: [] })),
-  recordTriage: vi.fn(async () => ({ error: null })),
-  deleteFindingFromReview: vi.fn(async () => ({ commentDeleted: true, undeclared: true, warning: null })),
-  replyOnFindingThread: vi.fn(async () => ({ url: 'https://gh/r/101#reply' })),
-  postTriageNotes: vi.fn(async () => 'https://github.com/acme/standalone/pull/31#issuecomment-9'),
-  findingKey: vi.fn((title) => `key:${title}`),
-  findingUrl: vi.fn((repo, prNumber, file, line) => `url:${repo}#${prNumber}:${file || ''}:${line || ''}`),
-  PARK_REASONS: { severity: 'below the floor', 'out-of-diff': 'outside the diff' },
-}));
+vi.mock('../lib/findings.js', () => {
+  const latestReviewFindings = vi.fn(async () => []);
+  return {
+    latestReviewFindings,
+    // Delegates, so tests that script latestReviewFindings drive the loop's read too.
+    latestReviewDeclaration: vi.fn(async (...args) => ({
+      findings: await latestReviewFindings(...args),
+      clean: false,
+    })),
+    latestTestFailures: vi.fn(async () => []),
+    queueFindingsForFix: vi.fn(async (repo, prNumber, findings) => ({
+      kept: findings,
+      parked: [],
+      error: null,
+    })),
+    sortFindingsForFix: vi.fn(async (repo, prNumber, findings) => ({ kept: findings, parked: [] })),
+    recordTriage: vi.fn(async () => ({ error: null })),
+    deleteFindingFromReview: vi.fn(async () => ({ commentDeleted: true, undeclared: true, warning: null })),
+    replyOnFindingThread: vi.fn(async () => ({ url: 'https://gh/r/101#reply' })),
+    postTriageNotes: vi.fn(async () => 'https://github.com/acme/standalone/pull/31#issuecomment-9'),
+    findingKey: vi.fn((title) => `key:${title}`),
+    findingUrl: vi.fn((repo, prNumber, file, line) => `url:${repo}#${prNumber}:${file || ''}:${line || ''}`),
+    PARK_REASONS: { severity: 'below the floor', 'out-of-diff': 'outside the diff' },
+  };
+});
 
 vi.mock('../lib/uploads.js', () => ({
   initUploads: vi.fn(),
@@ -237,6 +245,7 @@ import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
 import { acquireInstance, reclaimInstance, releaseInstance, dropSessionDatabase } from '../lib/dbpool.js';
 import {
   latestReviewFindings,
+  latestReviewDeclaration,
   latestTestFailures,
   sortFindingsForFix,
   recordTriage,
@@ -6026,6 +6035,8 @@ describe('the review loop: what a closing loop review reports back', () => {
       reviewRow('auto-clean-rev', 'auto-clean', true),
       parentRow('auto-unapproved', 'auto-unapproved-rev'),
       reviewRow('auto-unapproved-rev', 'auto-unapproved', true),
+      { ...parentRow('auto-declared-clean', 'auto-declared-clean-rev'), qaLoop: { done: false } },
+      reviewRow('auto-declared-clean-rev', 'auto-declared-clean', true),
       parentRow('auto-filtered', 'auto-filtered-rev'),
       reviewRow('auto-filtered-rev', 'auto-filtered', true),
       parentRow('auto-filtered-approved', 'auto-filtered-approved-rev'),
@@ -6136,6 +6147,8 @@ describe('the review loop: what a closing loop review reports back', () => {
       'auto-clean-rev',
       'auto-unapproved',
       'auto-unapproved-rev',
+      'auto-declared-clean',
+      'auto-declared-clean-rev',
       'auto-filtered',
       'auto-filtered-rev',
       'auto-filtered-approved',
@@ -6489,6 +6502,47 @@ describe('the review loop: what a closing loop review reports back', () => {
     } finally {
       state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
       recordTriage.mockClear();
+    }
+  });
+
+  // An author exception (or a label call that failed) leaves the PR without code-approved,
+  // but an explicit `[]` findings block is the review's own clean verdict: the loop
+  // converges and the queued QA starts, without the dashboard applying the label itself,
+  // and says approval was withheld rather than that the PR is ready to merge.
+  it('converges an autonomous round that published an empty findings block without the label', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    const approvals = addPullRequestLabel.mock.calls.length;
+    const reads = githubRest.mock.calls.length;
+    latestReviewDeclaration.mockResolvedValueOnce({ findings: [], clean: true });
+    githubRest.mockResolvedValue({
+      ok: true,
+      json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
+    });
+    try {
+      await closeDevSession('auto-declared-clean-rev');
+      const parent = getJob('auto-declared-clean');
+      await waitFor(() => !!parent.reviewLoop.done || !!parent.reviewLoop.pendingResult?.error);
+      expect(parent.reviewLoop.done).toBe(true);
+      expect(parent.reviewLoop.pendingResult).toBeNull();
+      expect(parent.reviewLoop.stalled).toBeFalsy();
+      expect(infoTexts(parent).join('\n')).toContain('review round 1 declared no findings');
+      expect(githubRest.mock.calls.slice(reads)).toContainEqual([
+        expect.anything(),
+        'GET',
+        '/repos/acme/loop/pulls/77',
+      ]);
+      expect(parent.reviewLoop.approvalWithheld).toBe(true);
+      expect(infoTexts(parent).join('\n')).toContain(
+        'PR #77 does not carry code-approved: the publishing policy withheld approval',
+      );
+      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
+      expect(parent.qaLoop.running).toBe(true);
+      expect(infoTexts(parent).join('\n')).toContain(
+        'QA loop: the review loop converged, so QA started on PR #77',
+      );
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+      githubRest.mockReset();
     }
   });
 
@@ -9080,6 +9134,8 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       worker('ci-green', 201),
       worker('ci-red', 202),
       worker('ci-loop', 203, { reviewLoop: { rounds: 2, done: false } }),
+      // Converged on an empty block whose publishing policy withheld code-approved.
+      worker('ci-withheld', 214, { reviewLoop: { rounds: 1, done: true, approvalWithheld: true } }),
       // Nothing mirrored yet: the PR's first sync, which must stay quiet.
       worker('ci-first', 204, { prStatus: null }),
       // Head seen moments ago, before its CI registered: an unseen pending run is still awaited.
@@ -9288,6 +9344,15 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     syncSessionsOn('acme/ci', null, 203);
     await vi.waitFor(() => expect(notices('ci-loop')).toContain('PR #203'));
     expect(notices('ci-loop')).toContain('Its review loop is still running (round 2)');
+  });
+
+  it('green after a convergence that withheld approval is not a merge yet', async () => {
+    syncSessionsOn('acme/ci', null, 214);
+    await vi.waitFor(() => expect(notices('ci-withheld')).toContain('PR #214'));
+    expect(notices('ci-withheld')).toContain(
+      'The publishing policy withheld code-approved, so wait for that before merging.',
+    );
+    expect(notices('ci-withheld')).not.toContain('ready to merge');
   });
 
   it('hands over the verdict of a run that registered after the push was first read', async () => {
