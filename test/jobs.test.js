@@ -8884,6 +8884,23 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         prAttachedByBranch: true,
         reviewLoop: { rounds: 1, done: true, lastSha: 'sha-b', reviewPr: 2 },
       }),
+      // Owns the lower #1 (dev-a); its turn may end on the upper branch dev-b.
+      // Another repo, so it does not claim acme/shop#1 from the tests above.
+      row('stk-lower', {
+        repo: 'acme/lower',
+        branch: 'dev-a',
+        prStatus: { ...prOne, baseRef: 'main' },
+        prAttachedByBranch: true,
+        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-a', reviewPr: 1 },
+      }),
+      // Converged on #1 (dev-a); releases it, then a second PR before any round.
+      row('stk-twice', {
+        repo: 'acme/lower',
+        branch: 'dev-a',
+        prStatus: { ...prOne, baseRef: 'main' },
+        prAttachedByBranch: true,
+        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-a', reviewPr: 1 },
+      }),
       // Found #1 from dev-a; a sync of it is in flight as it moves off.
       row('stk-sync', { branch: 'dev-a', prStatus: prOne, prAttachedByBranch: true }),
       // Two PR-less sessions on dev-c whose lookups run in parallel.
@@ -8932,6 +8949,8 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       'stk-handed',
       'stk-base',
       'stk-stacked',
+      'stk-lower',
+      'stk-twice',
       'stk-sync',
       'stk-qa',
       'stk-qa-run',
@@ -9163,6 +9182,43 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     expect(job.prAttachedByBranch).toBe(true);
     expect(job.reviewLoop).toMatchObject({ rounds: 1, done: true, lastSha: 'sha-b' });
     expect(job.reviewLoop.releasedPr).toBeFalsy();
+  });
+
+  it("lets go of the sibling's stacked pull request it took when it comes back to its own branch", async () => {
+    const job = getJob('stk-lower');
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    // On dev-b the branch finds the sibling's stacked #2, as attachPrForBranch does
+    // when its owner is idle.
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'dev-a', headSha: 'sha-b' };
+    job.prAttachedByBranch = true;
+    await onBranch(job, 'dev-a', async () => {
+      refreshJobBranch(job);
+    });
+    // dev-a is #2's base, but it is the head of the PR this session released.
+    expect(job.branch).toBe('dev-a');
+    expect(job.prStatus).toBeNull();
+    expect(job.releasedPrAttach).toMatchObject({ number: 2, headRef: 'dev-b' });
+  });
+
+  it('keeps the first released pull request across a second release before any round', async () => {
+    const job = getJob('stk-twice');
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.reviewLoop.releasedPr).toBe(1);
+    // #2 attaches, and the session moves on before the loop reviews it.
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'main', headSha: 'sha-b' };
+    job.prAttachedByBranch = true;
+    await onBranch(job, 'dev-c', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    // The loop still holds #1's converged state, so going back to #1 must not reset it.
+    expect(job.reviewLoop.releasedPr).toBe(1);
+    expect(job.reviewLoop).toMatchObject({ rounds: 1, done: true, lastSha: 'sha-a' });
   });
 
   it('does not let a sync in flight write the released pull request back', async () => {
