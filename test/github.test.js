@@ -714,4 +714,40 @@ describe('acting as a user', () => {
     expect(answer.status).toBe(429);
     expect((await gh.githubRest(cfg, 'GET', '/y')).status).toBe(200);
   });
+
+  it('clears a request identity for detached work and restores it for the request', async () => {
+    const gh = await freshGithub();
+    const fetch = stubFetch(reply(), reply());
+    let background;
+    await gh.asGithubUser('user-tok', async () => {
+      background = gh.asGithubUser(null, async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await gh.githubRest(cfg, 'POST', '/background');
+      });
+      await gh.githubRest(cfg, 'POST', '/request');
+    });
+    await background;
+    expect(fetch.calls.map((c) => [c.url, c.init.headers.Authorization])).toEqual([
+      ['https://api.github.com/request', 'Bearer user-tok'],
+      ['https://api.github.com/background', 'Bearer tok'],
+    ]);
+  });
+
+  it('keeps PAT validation outside the server cooldown in both directions', async () => {
+    const gh = await freshGithub();
+    const limited = () => reply({ status: 429, headers: { 'retry-after': '60' } });
+    const fetch = stubFetch(limited(), reply(), limited(), reply());
+    const validate = () =>
+      gh.githubRest({ githubToken: 'pat' }, 'GET', '/user', undefined, { trackServerRate: false });
+    expect((await validate()).status).toBe(429);
+    expect((await gh.githubRest(cfg, 'GET', '/repos/o/r')).ok).toBe(true);
+    await expect(gh.githubRest(cfg, 'GET', '/repos/o/r')).rejects.toMatchObject({ rateLimited: true });
+    expect((await validate()).ok).toBe(true);
+    expect(fetch.calls.map((c) => c.init.headers.Authorization)).toEqual([
+      'Bearer pat',
+      'Bearer tok',
+      'Bearer tok',
+      'Bearer pat',
+    ]);
+  });
 });

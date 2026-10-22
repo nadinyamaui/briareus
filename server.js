@@ -133,6 +133,7 @@ import {
   setSlackAccess,
   setExternalMcp,
   setOwnerGithub,
+  setSessionProjectAccess,
   DEV_OPEN,
 } from './lib/jobs.js';
 import {
@@ -282,7 +283,7 @@ const githubOf = (userId) => {
 setOwnerGithub((job) => githubOf(job.ownerId));
 // The user a /api/v1 request acts as, who owns any session it starts.
 const requestOwner = (res) => res.locals.apiUser?.id ?? null;
-// Whether a session may use a shared server (lib/shares.js): one nobody started works as the
+// Whether a session may use a shared resource (lib/shares.js): one nobody started works as the
 // admins' and may use what its project is given; one a user owns, only what that user may
 // use, and nothing once they are gone or disabled.
 const sessionMayUse = (job, kind, id) => {
@@ -295,6 +296,7 @@ const sessionMayUse = (job, kind, id) => {
   }
 };
 setDbServerFilter((job, server) => sessionMayUse(job, 'dbServer', server.id));
+setSessionProjectAccess((job, repo) => sessionMayUse(job, 'project', repo));
 
 // On every response, including the webhooks': nothing here is a page, and the
 // headers say so (lib/security.js).

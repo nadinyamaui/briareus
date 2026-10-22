@@ -123,7 +123,8 @@ vi.mock('../lib/db.js', () => ({
   jobEventMaxSeqs: vi.fn(async () => new Map()),
 }));
 
-vi.mock('../lib/github.js', () => ({
+vi.mock('../lib/github.js', async (importOriginal) => ({
+  asGithubUser: (await importOriginal()).asGithubUser,
   githubRest: vi.fn(),
   githubGraphql: vi.fn(),
   upsertPrComment: vi.fn(),
@@ -260,6 +261,7 @@ import {
   removePullRequestLabel,
   githubGraphql,
   githubRest,
+  upsertPrComment,
   viewerLogin,
 } from '../lib/github.js';
 import { resolveRuntime, getProviderForJob, captureProviderAuth } from '../lib/providerstore.js';
@@ -288,6 +290,7 @@ import {
   createDevSession,
   agentGithubEnv,
   setOwnerGithub,
+  setSessionProjectAccess,
   stepProvider,
   devSessionSlots,
   pullRequestHasOpenSession,
@@ -1184,6 +1187,30 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(worker.ownerId).toBe(2);
     expect(createDevSession({ ...base, parentId: orchestrator.id, ownerId: null }).ownerId).toBeNull();
     expect(createDevSession(base).ownerId).toBeNull();
+  });
+
+  it('announces a background review with the server identity outside the request', async () => {
+    const gh = await vi.importActual('../lib/github.js');
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+    upsertPrComment.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await gh.githubRest({ githubToken: 'server-token' }, 'POST', '/background-review');
+    });
+    try {
+      gh.asGithubUser('request-token', () =>
+        createDevSession({
+          ...base,
+          review: true,
+          branch: 'feature/request-context',
+          prNumber: 123,
+          ownerId: 2,
+        }),
+      );
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+      expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer server-token');
+    } finally {
+      fetch.mockRestore();
+    }
   });
 
   it('refuses a provider whose whole group is inactive', () => {
@@ -3513,6 +3540,26 @@ describe('spawnWorkerSession: tooling fixes', () => {
     resolveRuntime.mockClear();
     getJob('tool-orch').workerRuntime = null;
   });
+  afterEach(() => {
+    setSessionProjectAccess(() => true);
+    getJob('tool-orch').ownerId = null;
+  });
+
+  it('authorizes the inherited owner against the final tooling project before creating a worker', () => {
+    const parent = getJob('tool-orch');
+    parent.ownerId = 2;
+    const allowed = vi.fn((_job, repo) => repo === parent.repo);
+    setSessionProjectAccess(allowed);
+    const before = workerSessionsFor(parent).length;
+    expect(() => spawnWorkerSession(parent, { prompt: 'Read private code', tooling: true })).toThrow(
+      /cannot access the target project/,
+    );
+    expect(allowed).toHaveBeenCalledWith({ ownerId: 2 }, dashboard.repo);
+    expect(workerSessionsFor(parent)).toHaveLength(before);
+    allowed.mockReturnValue(true);
+    const worker = spawnWorkerSession(parent, { prompt: 'Fix tooling', tooling: true });
+    expect(worker).toMatchObject({ ownerId: 2, repo: dashboard.repo, parentId: parent.id });
+  });
 
   it('refuses when no project is flagged as the dashboard itself', () => {
     state.projects = [state.projects[0]];
@@ -5612,6 +5659,31 @@ describe('standalone code-review findings', () => {
     expect(job.reviewTriage).toMatchObject({ author: 'NadinYamaui', mine: true });
   });
 
+  it('recognizes the session owner’s PR, with the project override and server fallback', async () => {
+    const found = [finding('owner', 'Owner finding')];
+    const identity = { token: 'ana-token', login: 'ana', id: 42 };
+    setOwnerGithub((job) => (job.ownerId === 2 ? identity : null));
+    try {
+      for (const [ownerId, reviewAuthor, author] of [
+        [2, '', 'Ana'],
+        [2, 'release-bot', 'release-bot'],
+        [3, '', 'server-bot'],
+        [null, '', 'server-bot'],
+      ]) {
+        state.projects = [{ repo: 'acme/standalone', reviewAuthor }];
+        latestReviewFindings.mockResolvedValueOnce(found);
+        sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
+        viewerLogin.mockResolvedValueOnce('server-bot');
+        const job = { ...newReview('stand-owner', 37), ownerId, prStatus: { number: 37, author } };
+        expect(await holdStandaloneReviewFindings(job)).toBe(true);
+        expect(job.reviewTriage).toMatchObject({ author, mine: true });
+        viewerLogin.mockReset().mockResolvedValue(null);
+      }
+    } finally {
+      setOwnerGithub(() => null);
+    }
+  });
+
   // The token's user is only the fallback: a project that posts as another account names it in
   // its settings, and that account's pull requests are "mine".
   it('reads the account the app acts as off the project when it names one', async () => {
@@ -5886,6 +5958,7 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
     state.stored = [
       row('cost-par-1', { costUsd: 1.25, inputTokens: 1000, outputTokens: 100, durationMs: 20_000 }),
       row('cost-rev-1', {
+        ownerId: 2,
         autoClose: true,
         loopParentId: 'cost-par-1',
         costUsd: 0.5,
@@ -5920,7 +5993,14 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
       outputTokens: 130,
       durationMs: 25_000,
     });
-    await closeDevSession('cost-rev-1');
+    const onDeleted = vi.fn();
+    bus.on('deleted', onDeleted);
+    try {
+      await closeDevSession('cost-rev-1');
+      expect(onDeleted).toHaveBeenCalledWith('cost-rev-1', 'acme/cost', 2);
+    } finally {
+      bus.off('deleted', onDeleted);
+    }
     expect(getJob('cost-rev-1')).toBeNull();
     const parent = getJob('cost-par-1');
     expect(sessionUsage(parent)).toEqual(before);

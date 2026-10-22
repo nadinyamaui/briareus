@@ -891,6 +891,54 @@ describe('the event streams', () => {
     await vi.waitFor(() => expect(bus.listenerCount('job') + bus.listenerCount('event')).toBe(0));
   });
 
+  it('filters deletion events by ownership even after the session record is gone', async () => {
+    sharedRepos[2] = [repo];
+    const ana = (
+      await auth.create({ userId: 2, label: 'ana', repos: [repo], permission: 'read', days: 1 }, secret)
+    ).token;
+    for (const [token, expected] of [
+      [ana, ['anas', 'ownerless']],
+      [tokens.read, ['owners', 'anas', 'ownerless']],
+    ]) {
+      const events = await readEvents('/events', 1 + expected.length, {
+        token,
+        onChunk: (seen) => {
+          if (seen.length !== 1) return;
+          bus.emit('deleted', 'owners', repo, 1);
+          bus.emit('deleted', 'anas', repo, 2);
+          bus.emit('deleted', 'ownerless', repo, null);
+          bus.emit('deleted', 'foreign', 'other/project', 2);
+        },
+      });
+      expect(events.filter((e) => e.event === 'session.deleted').map((e) => e.data.id)).toEqual(expected);
+    }
+  });
+
+  it.each(['read', 'manage'])(
+    'ends an admin’s %s streams on demotion with the same project reach',
+    async (permission) => {
+      sharedRepos[1] = [repo];
+      for (const route of ['/events?transcripts=1', '/sessions/anas/events']) {
+        people[0] = { ...people[0], role: 'admin' };
+        const response = await request(route, { token: tokens[permission] });
+        expect(response.status).toBe(200);
+        const reader = response.body.getReader();
+        await reader.read();
+        people[0] = { ...people[0], role: 'member' };
+        // Bound the assertion so a leaked stream fails instead of waiting for a ping.
+        const pending = reader.read().catch(() => 'disconnected');
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        bus.emit('job', { ...jobs.anas, status: 'running' });
+        const result = await Promise.race([
+          pending,
+          new Promise((resolve) => setTimeout(() => resolve('open'), 80)),
+        ]);
+        await reader.cancel().catch(() => {});
+        expect(result).toBe('disconnected');
+      }
+    },
+  );
+
   it('ends an open stream once its token is revoked', async () => {
     for (const route of ['/events', '/sessions/mine/events']) {
       const token = (
