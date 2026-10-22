@@ -67,6 +67,7 @@ import {
   loadTaskSessions,
   loadJobTurnUsage,
   loadAppSetting,
+  saveAppSetting,
   updateAppSetting,
   getProviderRow,
 } from './lib/db.js';
@@ -282,19 +283,13 @@ const githubOf = (userId) => {
   }
 };
 setOwnerGithub((job) => githubOf(job.ownerId));
-// Who owns what was the one operator's before users existed (sessions, Slack workspaces):
-// the first admin, the user the users migration made of them.
-const firstAdmin = () => {
-  try {
-    return users.list().find((u) => u.role === 'admin')?.id ?? null;
-  } catch {
-    return null;
-  }
-};
+// The original operator keeps legacy integrations across role changes and restarts.
+let legacyOwnerId = null;
+const legacyOwner = () => legacyOwnerId;
 // Whose personal inboxes (mail, Slack) a session reaches: its owner, or for a session nobody
-// owns the first admin, and none while that user is disabled.
+// owns the original operator, and none while that user is disabled.
 const inboxOwner = (job) => {
-  const id = job.ownerId ?? firstAdmin();
+  const id = job.ownerId ?? legacyOwner();
   try {
     const owner = id == null ? null : users.get(id);
     return owner && owner.disabledAt == null ? owner.id : null;
@@ -333,7 +328,7 @@ const slackService = createSlackService({
   unfit: webhookUnfit,
   eventsUrl: (id) => `${getConfig().publicBaseUrl}/webhooks/slack/${id}`,
   inboxOwner,
-  legacyOwner: firstAdmin,
+  legacyOwner,
 });
 setSlackAccess((job) => slackService.briefing(job));
 
@@ -680,7 +675,7 @@ api.use(
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
 // Each user's own Home Assistant (lib/me-routes.js). The one in .env was the operator's, so
-// it stands for the first admin until they connect one of their own.
+// it stands for the original operator until they connect one of their own.
 const homeAssistantOf = (user) => {
   try {
     const own = credentials.get(user.id, 'homeAssistant');
@@ -688,7 +683,7 @@ const homeAssistantOf = (user) => {
   } catch {
     return null;
   }
-  return user.id === firstAdmin() ? getConfig().homeAssistant : null;
+  return user.id === legacyOwner() ? getConfig().homeAssistant : null;
 };
 api.use(
   homeAssistantRoutes({
@@ -702,7 +697,7 @@ api.use(
 const whatsappService = createWhatsAppService();
 // Replies in the chats a session wrote to come back to it (lib/whatsapp-watch.js).
 // Whose each WhatsApp account is (lib/whatsapp-owners.js); a session reaches its inbox owner's.
-const whatsappOwners = createWhatsAppOwners({ legacyOwner: firstAdmin });
+const whatsappOwners = createWhatsAppOwners({ legacyOwner, lookupAccount: whatsappService.account });
 const whatsappMayUse = (job, account) => whatsappOwners.owns(inboxOwner(job), account);
 const whatsappWatcher = createWhatsAppWatcher({
   service: whatsappService,
@@ -2301,6 +2296,11 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await forgeAccounts.init();
     await mailService.init();
     await users.init();
+    // The users migration assigned the original operator the first user id.
+    const storedOwner = await loadAppSetting('legacy_owner_id', null);
+    const originalOwner = storedOwner ?? users.list()[0]?.id ?? null;
+    if (storedOwner == null && originalOwner != null) await saveAppSetting('legacy_owner_id', originalOwner);
+    legacyOwnerId = originalOwner;
     await shares.init();
     await credentials.init();
     await whatsappOwners.init();

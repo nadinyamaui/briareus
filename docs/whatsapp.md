@@ -3,7 +3,8 @@
 Briareus core exposes each user’s WhatsApp inbox at `/api/v1/whatsapp`,
 independently of projects and agent sessions. An account (a WAHA session with a
 phone linked to it) belongs to one user: `default`, linked before Briareus had
-users, is the first admin’s; any other belongs to whoever starts it first. Every
+users, and other existing WAHA sessions belong to the original operator, even after
+a role change. A new account belongs to whoever starts it first. Every
 user, admin or member, reaches only their own accounts, and their sessions only
 theirs. WAHA keeps the phone link and chat history;
 Briareus does not copy messages into its database or agent transcripts.

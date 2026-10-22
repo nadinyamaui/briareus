@@ -69,7 +69,8 @@ async function setup() {
       };
       return res.status(201).json(current);
     }
-    if (path === '/api/sessions/default') return current ? res.json(current) : res.sendStatus(404);
+    if (/^\/api\/sessions\/[^/]+$/.test(path))
+      return current && path === `/api/sessions/${current.name}` ? res.json(current) : res.sendStatus(404);
     if (/\/api\/sessions\/default\/(start|restart)$/.test(path)) {
       current.status = 'STARTING';
       return res.json(current);
@@ -140,6 +141,7 @@ async function setup() {
       stored = value;
     },
     legacyOwner: () => 1,
+    lookupAccount: service.account,
   });
   await owners.init();
   const app = express();
@@ -172,6 +174,7 @@ async function setup() {
     });
   return {
     service,
+    owners,
     request,
     calls,
     tokens,
@@ -279,6 +282,38 @@ describe('the WhatsApp core inbox', () => {
     ctx.setCurrent({ name: 'default', status: 'WORKING' });
     expect((await (await ctx.request('', { token: ctx.tokens.member })).json()).accounts).toEqual([]);
     expect((await (await ctx.request('')).json()).accounts.map((a) => a.id)).toEqual(['default']);
+  });
+
+  it('reserves an existing Plus account for the original operator before a member can start it', async () => {
+    const ctx = await setup();
+    const phone = { id: '49111111111@c.us', pushName: 'Original operator' };
+    ctx.setCurrent({ name: 'business', status: 'WORKING', me: phone });
+    const response = await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'WhatsApp account not found' });
+    expect(ctx.owners.ownerOf('business')).toBe(1);
+    expect(ctx.calls.map(({ method, path }) => [method, path])).toEqual([['GET', '/api/sessions/business']]);
+    expect((await ctx.request('/business/conversations', { token: ctx.tokens.member })).status).toBe(404);
+    expect(ctx.calls).toHaveLength(1);
+    expect((await ctx.request('/business/start', { method: 'POST' })).status).toBe(200);
+    expect((await (await ctx.request()).json()).accounts.map((a) => a.id)).toEqual(['business']);
+    await ctx.owners.init();
+    expect(ctx.owners.ownerOf('business')).toBe(1);
+  });
+
+  it('does not claim an unknown account when WAHA cannot confirm whether it exists', async () => {
+    const ctx = await setup();
+    ctx.setFailure(500);
+    expect((await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member })).status).toBe(
+      502,
+    );
+    expect(ctx.owners.ownerOf('business')).toBeNull();
+    ctx.setFailure(0);
+    ctx.setCurrent({ name: 'business', status: 'STOPPED' });
+    expect((await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member })).status).toBe(
+      404,
+    );
+    expect(ctx.owners.ownerOf('business')).toBe(1);
   });
 
   it('rejects malformed IDs, pagination and messages before touching WAHA', async () => {
