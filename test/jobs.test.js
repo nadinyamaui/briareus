@@ -8830,10 +8830,77 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       }),
       // Spawned on dev-a as well, and has not cut its own branch yet.
       row('stk-sibling', { branch: 'dev-a', startBranch: 'dev-a' }),
+      // Moves off dev-a while its loop's round on #1 is still being reviewed.
+      row('stk-inflight', {
+        branch: 'dev-a',
+        prStatus: prOne,
+        prAttachedByBranch: true,
+        reviewLoop: {
+          rounds: 2,
+          reviewing: true,
+          reviewSessionId: 'stk-inflight-rev',
+          reviewPr: 1,
+          lastSha: 'sha-a',
+        },
+      }),
+      {
+        ...row('stk-inflight-rev'),
+        branch: 'dev-a',
+        createdAt: '2026-10-22T10:00:00.000Z',
+        loopParentId: 'stk-inflight',
+        loopReviewDone: true,
+      },
+      // Moves off dev-a with a finished round on #1 not yet read.
+      row('stk-pending', {
+        branch: 'dev-a',
+        prStatus: prOne,
+        prAttachedByBranch: true,
+        reviewLoop: { rounds: 1, lastSha: 'sha-a', pendingResult: { prNumber: 1, round: 1, since: null } },
+      }),
+      // Handed #1 (startedOnPr), not found from its branch.
+      row('stk-handed', {
+        branch: 'dev-a',
+        startedOnPr: 1,
+        prStatus: prOne,
+        reviewLoop: { rounds: 1, done: true },
+      }),
+      // Found #1 from dev-a; its turn may end on the base branch.
+      row('stk-base', { branch: 'dev-a', prStatus: prOne, prAttachedByBranch: true }),
+      // Found #1 from dev-a; a sync of it is in flight as it moves off.
+      row('stk-sync', { branch: 'dev-a', prStatus: prOne, prAttachedByBranch: true }),
+      // Two PR-less sessions on dev-c whose lookups run in parallel.
+      row('stk-race-1', { branch: 'dev-c' }),
+      row('stk-race-2', { branch: 'dev-c' }),
     ];
     await initJobs();
-    for (const id of ['stk-owner', 'stk-worker', 'stk-sibling']) getJob(id).status = 'idle';
+    for (const id of [
+      'stk-owner',
+      'stk-worker',
+      'stk-sibling',
+      'stk-inflight',
+      'stk-inflight-rev',
+      'stk-pending',
+      'stk-handed',
+      'stk-base',
+      'stk-sync',
+      'stk-race-1',
+      'stk-race-2',
+    ])
+      getJob(id).status = 'idle';
   });
+
+  // Puts the job's working tree on `branch` for the length of `fn`.
+  const onBranch = async (job, branch, fn) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `${job.id}-`));
+    spawnSync('git', ['init', '-q', '-b', branch, dir]);
+    job.workDir = dir;
+    try {
+      return await fn();
+    } finally {
+      job.workDir = null;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
 
   beforeEach(() => {
     githubRest.mockReset();
@@ -8877,9 +8944,10 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       expect(job.branch).toBe('dev-b');
       expect(job.prStatus).toBeNull();
       expect(job.startedOnPr).toBeNull();
-      expect(job.reviewLoop).toMatchObject({ rounds: 0, done: false, lastSha: null });
+      // The reset waits for the round on a different PR.
+      expect(job.reviewLoop).toMatchObject({ rounds: 1, done: true, lastSha: 'sha-a', releasedPr: 1 });
       expect(infoTexts(job).join('\n')).toMatch(
-        /PR #1 is open from dev-a, not dev-b, so this session no longer tracks it/,
+        /PR #1 is open from dev-a, not dev-b, so this session no longer tracks it\. The review loop starts over once a different pull request is open from this branch\.$/m,
       );
 
       expect(await attachPrForBranch(job, { fresh: true })).toBe(2);
@@ -8887,6 +8955,7 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       // The attach offers the armed loop its first round, on #2 and not on #1.
       await vi.waitFor(() => expect(job.reviewLoop.reviewSessionId).toBeTruthy());
       expect(infoTexts(job).join('\n')).toMatch(/started code review round 1 of PR #2/);
+      expect(job.reviewLoop).toMatchObject({ rounds: 1, reviewPr: 2, releasedPr: null, done: false });
       expect(getJob(job.reviewLoop.reviewSessionId).startedOnPr).toBe(2);
       // The owner of #1 is untouched.
       expect(getJob('stk-owner').prStatus.number).toBe(1);
@@ -8913,16 +8982,172 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     }
   });
 
-  it('does not claim a pull request another open session already tracks', async () => {
+  it('lets an errand attach a pull request its owner is still working on', async () => {
     githubRest.mockImplementation(async (_cfg, _method, url) => {
       if (url.startsWith('/repos/acme/shop/pulls?'))
         return { ok: true, json: async () => [{ number: 1, base: { ref: 'main' } }] };
       return { ok: false, status: 404, json: async () => ({}) };
     });
-    const job = getJob('stk-sibling');
-    expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
+    const owner = getJob('stk-owner');
+    const errand = getJob('stk-race-1');
+    owner.status = 'running';
+    Object.assign(errand, { preview: true, branch: 'dev-a' });
+    try {
+      expect(await attachPrForBranch(errand, { fresh: true })).toBe(1);
+      expect(infoTexts(errand).join('\n')).not.toMatch(/still being worked on/);
+    } finally {
+      owner.status = 'idle';
+      Object.assign(errand, { preview: false, branch: 'dev-c' });
+    }
+  });
+
+  it('lets only one of two parallel lookups claim a pull request', async () => {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url.startsWith('/repos/acme/shop/pulls?'))
+        return { ok: true, json: async () => [{ number: 1907, base: { ref: 'main' } }] };
+      if (/\/pulls\/1907$/.test(url)) {
+        await gate;
+        return {
+          ok: true,
+          json: async () => ({
+            number: 1907,
+            state: 'open',
+            head: { ref: 'dev-c', sha: 'sha-c' },
+            base: { ref: 'main' },
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    const one = getJob('stk-race-1');
+    const two = getJob('stk-race-2');
+    // Each stays busy, as a session whose loop starts on the PR would.
+    one.status = 'running';
+    two.status = 'running';
+    try {
+      const both = Promise.all([
+        attachPrForBranch(one, { fresh: true }),
+        attachPrForBranch(two, { fresh: true }),
+      ]);
+      await new Promise((r) => setTimeout(r, 20));
+      release();
+      const results = await both;
+      expect(results.filter((n) => n === 1907)).toHaveLength(1);
+      expect([one, two].filter((j) => j.prStatus && j.prStatus.number === 1907)).toHaveLength(1);
+    } finally {
+      one.status = 'idle';
+      two.status = 'idle';
+    }
+  });
+
+  it('drops a round still out on the released pull request instead of reading it off the new one', async () => {
+    const job = getJob('stk-inflight');
+    latestReviewDeclaration.mockClear();
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
     expect(job.prStatus).toBeNull();
-    expect(infoTexts(job).join('\n')).toMatch(/PR #1 on dev-a is already tracked by session stk-owner/);
+    expect(infoTexts(job).join('\n')).toMatch(
+      /the review round still running for #1 finishes, but nothing it reports is applied here/,
+    );
+    // #2 attaches before the #1 review closes.
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', headSha: 'sha-b' };
+    await closeDevSession('stk-inflight-rev');
+    await vi.waitFor(() =>
+      expect(infoTexts(job).join('\n')).toMatch(
+        /review round 2 finished for PR #1, which this session no longer tracks/,
+      ),
+    );
+    expect(latestReviewDeclaration).not.toHaveBeenCalled();
+    expect(job.reviewLoop.reviewing).toBe(false);
+    expect(job.reviewLoop.done).toBeFalsy();
+    expect(job.reviewLoop.pendingResult).toBeFalsy();
+    expect(infoTexts(job).join('\n')).not.toMatch(/declared no findings/);
+  });
+
+  it('drops a finished round not yet read off the released pull request', async () => {
+    const job = getJob('stk-pending');
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.reviewLoop.pendingResult).toBeNull();
+    expect(job.reviewLoop.releasedPr).toBe(1);
+    expect(infoTexts(job).join('\n')).toMatch(/waiting for its findings to be read off PR #1 is dropped/);
+  });
+
+  it('keeps a handed pull request and its loop across a branch move', async () => {
+    const job = getJob('stk-handed');
+    await onBranch(job, 'dev-elsewhere', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.branch).toBe('dev-elsewhere');
+    expect(job.startedOnPr).toBe(1);
+    expect(job.prStatus.number).toBe(1);
+    expect(job.reviewLoop).toMatchObject({ rounds: 1, done: true });
+  });
+
+  it('keeps the pull request across a checkout of the base branch', async () => {
+    const job = getJob('stk-base');
+    await onBranch(job, 'main', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.branch).toBe('main');
+    expect(job.prStatus.number).toBe(1);
+    expect(job.prAttachedByBranch).toBe(true);
+  });
+
+  it('does not let a sync in flight write the released pull request back', async () => {
+    const job = getJob('stk-sync');
+    let release;
+    const gate = new Promise((r) => (release = r));
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (/\/pulls\/1$/.test(url)) {
+        await gate;
+        return {
+          ok: true,
+          json: async () => ({
+            number: 1,
+            state: 'open',
+            head: { ref: 'dev-a', sha: 'sha-a' },
+            base: { ref: 'main' },
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    // A webhook names #1.
+    expect(syncSessionsOn('acme/shop', null, 1)).toBeGreaterThan(0);
+    await new Promise((r) => setTimeout(r, 0));
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(job.prStatus).toBeNull();
+  });
+  it('does not claim a pull request another open session is still working on, and takes it once that one settles', async () => {
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url.startsWith('/repos/acme/shop/pulls?'))
+        return { ok: true, json: async () => [{ number: 1, base: { ref: 'main' } }] };
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    const owner = getJob('stk-owner');
+    const job = getJob('stk-sibling');
+    owner.status = 'running';
+    try {
+      expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
+      expect(job.prStatus).toBeNull();
+      expect(infoTexts(job).join('\n')).toMatch(
+        /PR #1 on dev-a is still being worked on by session stk-owner/,
+      );
+    } finally {
+      owner.status = 'idle';
+    }
+    // An idle owner hands it over: continuing somebody's branch picks up its PR.
+    expect(await attachPrForBranch(job, { fresh: true })).toBe(1);
   });
 });
 
