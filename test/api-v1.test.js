@@ -17,6 +17,8 @@ const jobs = {
   mine: { id: 'mine', repo, kind: 'devchat' },
   foreign: { id: 'foreign', repo: 'other/project', kind: 'devchat' },
   review: { id: 'review', repo, kind: 'review' },
+  owners: { id: 'owners', repo, kind: 'devchat', ownerId: 1 },
+  anas: { id: 'anas', repo, kind: 'devchat', ownerId: 2 },
 };
 
 let auth,
@@ -246,6 +248,11 @@ describe('who gets in', () => {
     expect((await request('/runtimes?repo=other/project', { token: ana })).status).toBe(403);
     // An admin's narrower token is held to its own list, shared or not.
     expect((await json('/sessions')).repos).toEqual([repo]);
+    // Her own sessions and the ownerless ones of a shared project; not another user's.
+    expect((await request('/sessions/anas', { token: ana })).status).toBe(200);
+    expect((await request('/sessions/mine', { token: ana })).status).toBe(200);
+    expect((await request('/sessions/owners', { token: ana })).status).toBe(404);
+    expect((await request('/sessions/anas')).status).toBe(200);
   });
 
   it('lists the users to an admin only', async () => {
@@ -780,6 +787,26 @@ describe('the event streams', () => {
     ]);
   });
 
+  it('streams a member only their own sessions and ownerless ones of their projects', async () => {
+    sharedRepos[2] = [repo];
+    sessions.push({ id: 'owners', repo, kind: 'devchat', status: 'idle', ownerId: 1 });
+    const ana = (
+      await auth.create({ userId: 2, label: 'ana', repos: [repo], permission: 'read', days: 1 }, secret)
+    ).token;
+    const events = await readEvents('/events', 2, {
+      token: ana,
+      onChunk: (seen) => {
+        if (seen.length !== 1) return;
+        bus.emit('job', { id: 'owners', repo, kind: 'devchat', status: 'running', ownerId: 1 });
+        bus.emit('job', { id: 'anas', repo, kind: 'devchat', status: 'running', ownerId: 2 });
+      },
+    });
+    expect(events.map((e) => [e.event, e.data.id])).toEqual([
+      ['session', 'mine'],
+      ['session', 'anas'],
+    ]);
+  });
+
   it('stops listening when the client hangs up', async () => {
     await readEvents('/events?transcripts=1', 1);
     await vi.waitFor(() => expect(bus.listenerCount('job') + bus.listenerCount('event')).toBe(0));
@@ -971,6 +998,8 @@ describe('the contract', () => {
       'preview.access',
       'projects.list',
       'sessions.list',
+      'ssh.decide',
+      'ssh.requests',
       'stats.server',
       'stats.sessions',
       'token.revoke',

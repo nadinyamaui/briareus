@@ -122,6 +122,7 @@ const {
   ensureProfileDatabase,
   profileDbElsewhere,
   sessionDatabaseName,
+  setDbServerFilter,
   _resetForTests,
 } = await import('../lib/dbpool.js');
 
@@ -1283,6 +1284,19 @@ describe('claiming a server', () => {
     state.project = { dbPoolEnabled: false };
 
     expect(await acquire(job(), 'r/r', () => {})).toBeNull();
+  });
+
+  it('claims only a server shared with the session’s owner', async () => {
+    setDbServerFilter((session, s) => session.ownerId !== 2 || s.id === 2);
+    try {
+      expect(await acquire({ ...job(), ownerId: 2 })).toBe(2);
+      setDbServerFilter(() => false);
+      await expect(acquire(job('other'))).rejects.toThrow(
+        /none is shared with the user who owns this session/,
+      );
+    } finally {
+      setDbServerFilter(() => true);
+    }
   });
 
   it('claims the first free entry and stamps the session with it', async () => {

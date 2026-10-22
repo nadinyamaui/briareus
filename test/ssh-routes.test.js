@@ -7,7 +7,7 @@ import { agentOnly } from '../lib/auth.js';
 vi.mock('../lib/config.js', () => ({
   getConfig: () => ({ auth: { secret: 'secret' }, credentialsKey: 'k'.repeat(32) }),
 }));
-let server, base, service, job, execute;
+let server, base, service, job, execute, apiUser, apiRepos;
 const input = {
   repo: 'owner/repo',
   host: 'server.example',
@@ -15,7 +15,9 @@ const input = {
   identityFile: '/keys/deploy',
 };
 beforeEach(async () => {
-  job = { id: 'one', repo: input.repo, status: 'running', turns: 0 };
+  job = { id: 'one', repo: input.repo, status: 'running', turns: 0, ownerId: 1 };
+  apiUser = { id: 1, role: 'admin' };
+  apiRepos = null;
   execute = vi.fn(async () => ({ stdout: 'done', exitCode: 0 }));
   service = createSshService({ load: async () => [], save: async () => {}, execute, getJob: () => job });
   await service.init();
@@ -25,6 +27,8 @@ beforeEach(async () => {
   // only an agent's own routes answer at their own path, and the rest of /api is retired.
   const routes = sshRoutes({
     service,
+    mayDecide: (user, request) =>
+      user.role === 'admin' || (request.jobId === job.id && job.ownerId === user.id),
     getProject: (repo) => (repo === input.repo ? { repo } : null),
     agentSession: (req, res) => {
       if (req.headers.authorization === 'Bearer session-token') return job;
@@ -32,9 +36,11 @@ beforeEach(async () => {
       return null;
     },
   });
-  app.use((req, res, next) =>
-    req.headers['x-test-operator'] ? routes(req, res, next) : agentOnly(routes)(req, res, next),
-  );
+  app.use((req, res, next) => {
+    res.locals.apiUser = apiUser;
+    res.locals.apiRepos = apiRepos;
+    return req.headers['x-test-operator'] ? routes(req, res, next) : agentOnly(routes)(req, res, next);
+  });
   app.use('/api', (req, res) => res.status(410).json({ error: 'This route is retired' }));
   server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
@@ -226,4 +232,32 @@ it('keeps sudo credentials private and applies elevation only through the existi
     body: { sudoPassword: '' },
   });
   expect((await edited.json()).server.hasSudoPassword).toBe(false);
+});
+
+describe('SSH approvals for members', () => {
+  it('shows and lets a member rule only on their own sessions’ commands', async () => {
+    const created = await request('/api/ssh/servers', { operator: true, method: 'POST', body: input });
+    const { server: registered } = await created.json();
+    const asked = await request('/api/agent/ssh/execute', {
+      token: 'session-token',
+      method: 'POST',
+      body: { serverId: registered.id, command: 'uptime' },
+    });
+    const { request: pending } = await asked.json();
+    const decide = () =>
+      request(`/api/ssh/requests/${pending.id}/decision`, {
+        operator: true,
+        method: 'POST',
+        body: { decision: 'deny' },
+      });
+    apiUser = { id: 2, role: 'member' };
+    expect((await (await request('/api/ssh/requests', { operator: true })).json()).requests).toEqual([]);
+    expect((await decide()).status).toBe(400);
+    job.ownerId = 2;
+    apiRepos = ['other/repo'];
+    expect((await (await request('/api/ssh/requests', { operator: true })).json()).requests).toEqual([]);
+    apiRepos = [input.repo];
+    expect((await (await request('/api/ssh/requests', { operator: true })).json()).requests).toHaveLength(1);
+    expect((await (await decide()).json()).request.status).toBe('denied');
+  });
 });

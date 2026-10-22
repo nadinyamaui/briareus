@@ -15,8 +15,11 @@ stops all their tokens. Users and tokens are managed on the machine
 (`npm run users`, `npm run create-token`), and admins can list users with
 `GET /users`. Admins share projects and servers with members
 (`PUT /settings/shares`): a member's tokens reach only the projects shared
-with them, and Envoyer accounts only once shared. Sessions, stats and
-integrations are not yet scoped to users. See [users](api-v1.md#users).
+with them, and Envoyer accounts only once shared. Sessions belong to the
+user who started them: members see their own (and ownerless system work),
+their sessions use only the database, SSH and MCP servers shared with them,
+they approve their own sessions' SSH commands, and usage breaks down by user.
+Integrations are not yet per user. See [users](api-v1.md#users).
 
 ## Coding sessions
 
@@ -129,6 +132,8 @@ These additions are present in the server revision documented here:
   the API are signed with the user's name.
 - Sharing: projects and servers can be shared with several users; members
   reach only what is shared with them.
+- Sessions belong to users, with per-user visibility, server access, SSH
+  approvals and spend.
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.
