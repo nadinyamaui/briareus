@@ -8814,6 +8814,11 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     ...extra,
   });
   const prOne = { number: 1, state: 'open', headRef: 'dev-a', headSha: 'sha-a' };
+  // Every earlier initJobs() leaves a real 20s syncDevPrs tick running: it resolves a due
+  // pendingResult and runs attachPrForBranch for an idle PR-less session, under whatever
+  // mocks another test has installed. So pending rounds stay parked, and the PR-less
+  // sessions stay closed (the tick only looks up idle ones) except inside their own test.
+  const PARKED = '2999-01-01T00:00:00.000Z';
 
   beforeAll(async () => {
     state.stored = [
@@ -8855,7 +8860,11 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         branch: 'dev-a',
         prStatus: prOne,
         prAttachedByBranch: true,
-        reviewLoop: { rounds: 1, lastSha: 'sha-a', pendingResult: { prNumber: 1, round: 1, since: null } },
+        reviewLoop: {
+          rounds: 1,
+          lastSha: 'sha-a',
+          pendingResult: { prNumber: 1, round: 1, since: null, nextRetryAt: PARKED },
+        },
       }),
       // Handed #1 (startedOnPr), not found from its branch.
       row('stk-handed', {
@@ -8900,7 +8909,7 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
           rounds: 1,
           lastSha: 'sha-a',
           reviewPr: 1,
-          pendingResult: { prNumber: 1, round: 1, since: null },
+          pendingResult: { prNumber: 1, round: 1, since: null, nextRetryAt: PARKED },
         },
       }),
     ];
@@ -8908,15 +8917,12 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     for (const id of [
       'stk-owner',
       'stk-worker',
-      'stk-sibling',
       'stk-inflight',
       'stk-inflight-rev',
       'stk-pending',
       'stk-handed',
       'stk-base',
       'stk-sync',
-      'stk-race-1',
-      'stk-race-2',
       'stk-qa',
       'stk-qa-run',
       'stk-detour',
@@ -9072,8 +9078,8 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       expect(results.filter((n) => n === 1907)).toHaveLength(1);
       expect([one, two].filter((j) => j.prStatus && j.prStatus.number === 1907)).toHaveLength(1);
     } finally {
-      one.status = 'idle';
-      two.status = 'idle';
+      one.status = 'closed';
+      two.status = 'closed';
     }
   });
 
@@ -9175,6 +9181,7 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     });
     const owner = getJob('stk-owner');
     const job = getJob('stk-sibling');
+    job.status = 'running';
     owner.status = 'running';
     try {
       expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
@@ -9185,8 +9192,12 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     } finally {
       owner.status = 'idle';
     }
-    // An idle owner hands it over: continuing somebody's branch picks up its PR.
-    expect(await attachPrForBranch(job, { fresh: true })).toBe(1);
+    try {
+      // An idle owner hands it over: continuing somebody's branch picks up its PR.
+      expect(await attachPrForBranch(job, { fresh: true })).toBe(1);
+    } finally {
+      job.status = 'closed';
+    }
   });
 
   it('drops a QA run on the released pull request instead of reading its verdict off the new one', async () => {
