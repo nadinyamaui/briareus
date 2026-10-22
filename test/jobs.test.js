@@ -8875,6 +8875,15 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       }),
       // Found #1 from dev-a; its turn may end on the base branch.
       row('stk-base', { branch: 'dev-a', prStatus: prOne, prAttachedByBranch: true }),
+      // Found its stacked #2 (base dev-a) from dev-b; its turn may end on dev-a.
+      // Another repo, so it does not claim acme/shop#2 from the tests above.
+      row('stk-stacked', {
+        repo: 'acme/side',
+        branch: 'dev-b',
+        prStatus: { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'dev-a', headSha: 'sha-b' },
+        prAttachedByBranch: true,
+        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-b', reviewPr: 2 },
+      }),
       // Found #1 from dev-a; a sync of it is in flight as it moves off.
       row('stk-sync', { branch: 'dev-a', prStatus: prOne, prAttachedByBranch: true }),
       // Two PR-less sessions on dev-c whose lookups run in parallel.
@@ -8922,6 +8931,7 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       'stk-pending',
       'stk-handed',
       'stk-base',
+      'stk-stacked',
       'stk-sync',
       'stk-qa',
       'stk-qa-run',
@@ -9141,6 +9151,18 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     expect(job.branch).toBe('main');
     expect(job.prStatus.number).toBe(1);
     expect(job.prAttachedByBranch).toBe(true);
+  });
+
+  it("keeps a stacked pull request across a checkout of its base, the sibling's branch", async () => {
+    const job = getJob('stk-stacked');
+    await onBranch(job, 'dev-a', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.branch).toBe('dev-a');
+    expect(job.prStatus.number).toBe(2);
+    expect(job.prAttachedByBranch).toBe(true);
+    expect(job.reviewLoop).toMatchObject({ rounds: 1, done: true, lastSha: 'sha-b' });
+    expect(job.reviewLoop.releasedPr).toBeFalsy();
   });
 
   it('does not let a sync in flight write the released pull request back', async () => {
