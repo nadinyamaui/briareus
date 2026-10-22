@@ -342,6 +342,70 @@ describe('workspace quarantine', () => {
       ).toBe('commit');
     });
 
+    it('keeps linked-worktree indexes and staged-only contents after relocation', () => {
+      const root = fixture();
+      const linked = path.join(root, 'linked');
+      const container = quarantined(root, 'acme__staged', (git) => {
+        git('worktree', 'add', '-q', '--detach', linked);
+        fs.writeFileSync(path.join(linked, 'source'), 'private staged work');
+        git('-C', linked, 'add', 'source');
+        fs.writeFileSync(path.join(linked, 'source'), 'pushed');
+        expect(git('status', '--porcelain').trim()).toBe('');
+        expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(
+        execFileSync(
+          'git',
+          ['--git-dir', path.join(container, 'checkout', '.git', 'worktrees', 'linked'), 'show', ':source'],
+          { encoding: 'utf8' },
+        ),
+      ).toBe('private staged work');
+      expect(fs.readFileSync(path.join(linked, 'source'), 'utf8')).toBe('pushed');
+    });
+
+    it.each([
+      ['blob', 'lightweight'],
+      ['blob', 'annotated'],
+      ['blob', 'nested'],
+      ['tree', 'lightweight'],
+      ['tree', 'annotated'],
+      ['tree', 'nested'],
+    ])('keeps private %s contents retained by a %s tag', (type, tag) => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__tagged', (git, dir) => {
+        fs.writeFileSync(path.join(dir, 'private'), 'private tagged work');
+        let target = git('hash-object', '-w', 'private').trim();
+        if (type === 'tree') {
+          git('add', 'private');
+          target = git('write-tree').trim();
+          git('reset', '-q', 'HEAD');
+        }
+        if (tag === 'nested') {
+          git('tag', '-a', 'inner', target, '-m', 'Inner tag');
+          target = 'inner';
+        }
+        if (tag === 'lightweight') git('tag', 'saved-private', target);
+        else git('-c', 'advice.nestedTag=false', 'tag', '-a', 'saved-private', target, '-m', 'Saved');
+        fs.unlinkSync(path.join(dir, 'private'));
+        expect(git('status', '--porcelain').trim()).toBe('');
+        expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(
+        execFileSync(
+          'git',
+          [
+            '-C',
+            path.join(container, 'checkout'),
+            'show',
+            type === 'tree' ? 'saved-private:private' : 'saved-private^{}',
+          ],
+          { encoding: 'utf8' },
+        ),
+      ).toBe('private tagged work');
+    });
+
     it('inspects the physical checkout when core.worktree points elsewhere', () => {
       const root = fixture();
       const outside = fixture();
@@ -387,6 +451,7 @@ describe('workspace quarantine', () => {
       const root = fixture();
       const container = quarantined(root, 'acme__published', (git) => {
         git('tag', '-a', 'published', '-m', 'Published');
+        git('-c', 'advice.nestedTag=false', 'tag', '-a', 'nested', 'published', '-m', 'Nested');
         git('checkout', '-q', '--detach');
       });
       expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
