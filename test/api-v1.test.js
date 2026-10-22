@@ -232,35 +232,64 @@ describe('who gets in', () => {
     expect((await request(`/runtimes?repo=${repo}`, { token: tokens.admin })).status).toBe(403);
   });
 
-  it('refuses an admin route whose user is demoted while its body is arriving', async () => {
-    const body = JSON.stringify({ label: 'p' });
-    const answer = new Promise((resolve, reject) => {
+  // Sends all but the last byte of a JSON body as an admin token, demotes the token's
+  // user once the request has been admitted, then finishes the body. Answers what came
+  // back by the end of the response, or within 100 ms for a stream that stays open (one
+  // with nothing to send yet has not even sent its status).
+  const demotedMidBody = (route, method, body) =>
+    new Promise((resolve, reject) => {
+      people[0].role = 'admin';
+      const text = JSON.stringify(body);
+      let status;
+      let received = '';
+      let timer;
+      const done = () => {
+        clearTimeout(timer);
+        resolve({ status, text: received });
+        req.destroy();
+      };
       const req = httpRequest(
-        `${url}${prefix}/settings/providers`,
+        `${url}${prefix}${route}`,
         {
-          method: 'POST',
+          method,
           headers: {
             Authorization: `Bearer ${tokens.admin}`,
             'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(body),
+            'Content-Length': Buffer.byteLength(text),
           },
         },
         (res) => {
-          let text = '';
-          res.on('data', (chunk) => (text += chunk));
-          res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(text) }));
+          status = res.statusCode;
+          res.on('data', (chunk) => (received += chunk));
+          res.on('end', done);
         },
       );
       req.on('error', reject);
-      req.write(body.slice(0, 1));
-      // Demoted only once the request has been admitted, then the rest of the body.
+      req.write(text.slice(0, 1));
       setTimeout(() => {
         people[0].role = 'member';
-        req.end(body.slice(1));
+        req.end(text.slice(1));
+        timer = setTimeout(done, 100);
       }, 50);
     });
-    expect(await answer).toEqual({ status: 403, body: { error: 'This needs an admin token' } });
+
+  it('refuses an admin route whose user is demoted while its body is arriving', async () => {
+    const answer = await demotedMidBody('/settings/providers', 'POST', { label: 'p' });
+    expect({ status: answer.status, body: JSON.parse(answer.text) }).toEqual({
+      status: 403,
+      body: { error: 'This needs an admin token' },
+    });
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('answers the gateway’s own routes with the reach left after a demotion mid-body', async () => {
+    const client = await demotedMidBody('/', 'GET', {});
+    expect(client.status).toBe(200);
+    expect(JSON.parse(client.text)).toMatchObject({
+      client: { permission: 'manage', repos: [] },
+      user: { role: 'member' },
+    });
+    expect((await demotedMidBody('/events', 'GET', {})).text).not.toContain('event: session');
   });
 
   it('lists the users to an admin only, the disabled ones marked', async () => {
