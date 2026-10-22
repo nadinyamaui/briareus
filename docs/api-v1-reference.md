@@ -600,13 +600,13 @@ Close a session and delete its record and transcript. Needs `manage`, held to th
 
 ### `GET /sessions/{id}/mail-wake`
 
-Read a session’s email wake rules. Needs `admin`.
+Read a session’s email wake rules. Needs `read`, held to the session’s project.
 
 **Returns** `{ rules: object[], perHour: integer, maxTurns: integer }`
 
 ### `PUT /sessions/{id}/mail-wake`
 
-Replace a session’s email wake rules. Needs `admin`.
+Replace a session’s email wake rules. Needs `manage`, held to the session’s project.
 
 **Body**
 
@@ -1672,7 +1672,7 @@ Fire an event for Home Assistant automations. Needs `admin`.
 
 ### `GET /mail/messages`
 
-List the synced mail, newest first, of every connected mailbox or one. Needs `admin`.
+List the synced mail, newest first, of every connected mailbox or one. Needs `read`.
 
 **Query**
 
@@ -1692,19 +1692,19 @@ List the synced mail, newest first, of every connected mailbox or one. Needs `ad
 
 ### `GET /mail/accounts/{account}/messages/{id}`
 
-Read one synced message with its body. Needs `admin`.
+Read one synced message with its body. Needs `read`.
 
 **Returns** `{ message: MailMessage }`. URL-encode the message’s `id`: an Outlook id may hold `/`, `+` and `=`. 404 when the account or the message is not there, which a message deleted or moved to the trash is from the next sync on.
 
 ### `DELETE /mail/accounts/{account}/messages/{id}`
 
-Move one synced message to the provider trash and remove the synced copy. Needs `admin`.
+Move one synced message to the provider trash and remove the synced copy. Needs `manage`.
 
 **Returns** `{ ok: boolean }`. Moves only this message, not its thread, to Gmail Trash or Outlook Deleted Items; it does not permanently erase it. URL-encode `id`. Existing read-only connections need reconnecting with access: manage for gmail.modify or Mail.ReadWrite; otherwise 409. 404 for a missing account or cached message. Provider failures keep the synced copy; an uncertain write is not automatically retried.
 
 ### `POST /mail/accounts/{account}/messages/{id}/reply`
 
-Send a plain-text reply to one synced message as the mailbox owner. Needs `admin`.
+Send a plain-text reply to one synced message as the mailbox owner. Needs `manage`.
 
 **Body**
 
@@ -2113,13 +2113,13 @@ Remove a workspace. Needs `admin`.
 
 ### `GET /settings/mail/accounts`
 
-List the connected mailboxes, which providers this server can connect, and the values a new one starts from. Needs `admin`.
+List the connected mailboxes, which providers this server can connect, and the values a new one starts from. Needs `read`.
 
 **Returns** `{ accounts: MailAccount[], providers: string[], callbackUrl: string, defaults: object }`. `providers` holds `gmail` when the server has a Google OAuth client (`GOOGLE_OAUTH_*`) and `outlook` when it has a Microsoft one (`MICROSOFT_OAUTH_*`). `callbackUrl` is this server’s own sign-in callback (`PUBLIC_BASE_URL/oauth/mail/callback`): register it as the OAuth client’s redirect URI and set it as `*_OAUTH_REDIRECT_URI` for sign-ins the server finishes itself. `defaults` is `{ label, enabled, syncDays }`.
 
 ### `POST /settings/mail/accounts/connect`
 
-Start connecting a mailbox: where to sign in. Needs `admin`.
+Start connecting a mailbox: where to sign in. Needs `manage`.
 
 **Body**
 
@@ -2136,7 +2136,7 @@ Start connecting a mailbox: where to sign in. Needs `admin`.
 
 ### `POST /settings/mail/accounts/connect/finish`
 
-Finish connecting a mailbox with the address its sign-in ended on. Needs `admin`.
+Finish connecting a mailbox with the address its sign-in ended on. Needs `manage`.
 
 **Body**
 
@@ -2150,7 +2150,7 @@ Finish connecting a mailbox with the address its sign-in ended on. Needs `admin`
 
 ### `PUT /settings/mail/accounts/{id}`
 
-Change a mailbox’s label, switch or window. Needs `admin`.
+Change a mailbox’s label, switch or window. Needs `manage`.
 
 **Body**
 
@@ -2164,13 +2164,13 @@ Change a mailbox’s label, switch or window. Needs `admin`.
 
 ### `DELETE /settings/mail/accounts/{id}`
 
-Remove a mailbox, its tokens and every message synced from it. Needs `admin`.
+Remove a mailbox, its tokens and every message synced from it. Needs `manage`.
 
 **Returns** `{ ok: boolean }`. The provider lists the app as having access until it is removed there too: myaccount.google.com/permissions, or myapps.microsoft.com.
 
 ### `POST /settings/mail/accounts/{id}/sync`
 
-Sync a mailbox now. Needs `admin`.
+Sync a mailbox now. Needs `manage`.
 
 **Returns** 202 `{ account: MailAccount }`. Answers as the pass starts, with `syncing` true; read the account again for `lastSyncAt` or `lastSyncError`. A pass already running is not started twice. 409 for an account in `reauth`.
 
@@ -2793,7 +2793,7 @@ A project’s full settings. A body may carry any of these; what it leaves out k
 | `repo`                      | `string`   | `owner/name`                                                                                                                                                                                                                                                                                                                                                       |
 | `label`                     | `string`   | Its display name                                                                                                                                                                                                                                                                                                                                                   |
 | `enabled`                   | `boolean`  | Whether sessions can start on it                                                                                                                                                                                                                                                                                                                                   |
-| `mailToolsEnabled`          | `boolean`  | Allow interactive sessions in this project to access the operator’s connected mailboxes; false by default                                                                                                                                                                                                                                                          |
+| `mailToolsEnabled`          | `boolean`  | Allow interactive sessions in this project to access their owner’s connected mailboxes; false by default                                                                                                                                                                                                                                                           |
 | `whatsappToolsEnabled`      | `boolean`  | Allow interactive sessions in this project to read, answer and mark read the operator’s WhatsApp chats; false by default                                                                                                                                                                                                                                           |
 | `sortOrder`                 | `integer`  | Its place in the list                                                                                                                                                                                                                                                                                                                                              |
 | `setupCommands`             | `string[]` | Run to prepare a checkout                                                                                                                                                                                                                                                                                                                                          |
