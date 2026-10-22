@@ -308,6 +308,36 @@ describe('workspace quarantine', () => {
       },
     );
 
+    it.each(['source', 'deep/source', 'deep\twith\nspace/source'])(
+      'keeps embedded repository history for tracked src/%s',
+      (source) => {
+        const root = fixture();
+        const container = quarantined(root, 'acme__embedded', (git, dir) => {
+          const file = path.join(dir, 'src', source);
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          fs.writeFileSync(file, 'pushed');
+          git('add', 'src');
+          git('commit', '-qm', 'Track ordinary source directory');
+          git('push', '-q', 'origin', 'HEAD');
+          git('-C', 'src', 'init', '-q');
+          fs.writeFileSync(file, 'private embedded work');
+          git('-C', 'src', 'add', '.');
+          git('-C', 'src', 'commit', '-qm', 'Private embedded history');
+          fs.writeFileSync(file, 'pushed');
+          expect(git('status', '--porcelain').trim()).toBe('');
+          expect(git('stash', 'list').trim()).toBe('');
+          expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
+        });
+        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        expect(
+          execFileSync('git', ['-C', path.join(container, 'checkout', 'src'), 'show', `HEAD:${source}`], {
+            encoding: 'utf8',
+          }),
+        ).toBe('private embedded work');
+        expect(fs.readFileSync(path.join(container, 'checkout', 'src', source), 'utf8')).toBe('pushed');
+      },
+    );
+
     it('keeps private Git notes', () => {
       const root = fixture();
       const container = quarantined(root, 'acme__notes', (git) =>
