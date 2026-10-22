@@ -24,11 +24,16 @@ export async function up({ context: p }) {
     ]);
     ownerId = /** @type {any} */ (result).insertId;
   }
+  // A token whose user is not here belongs to Owner too: after a rollback and re-run the
+  // table starts over, and a token left naming an old id would pass to whoever takes it next.
+  const [idRows] = await p.query('SELECT id FROM users');
+  const ids = new Set(/** @type {any[]} */ (idRows).map((u) => Number(u.id)));
   const [rows] = await p.query("SELECT `value` FROM app_settings WHERE `name` = 'mobile_devices'");
   const stored = /** @type {any[]} */ (rows)[0]?.value;
   const devices = stored ? JSON.parse(stored) : null;
-  if (Array.isArray(devices) && devices.some((d) => d.userId == null)) {
-    for (const d of devices) d.userId ??= Number(ownerId);
+  const orphan = (d) => d.userId == null || !ids.has(Number(d.userId));
+  if (Array.isArray(devices) && devices.some(orphan)) {
+    for (const d of devices) if (orphan(d)) d.userId = Number(ownerId);
     await p.query("UPDATE app_settings SET `value` = ?, updated_at = ? WHERE `name` = 'mobile_devices'", [
       JSON.stringify(devices),
       Date.now(),
@@ -36,7 +41,8 @@ export async function up({ context: p }) {
   }
 }
 
-// Tokens keep their userId: older code ignores the field.
+// Tokens keep their userId: older code ignores the field, and a re-run hands any
+// whose user is gone back to the first admin.
 /** @param {{ context: import('mysql2/promise').Pool }} ctx */
 export async function down({ context: p }) {
   await p.query('DROP TABLE IF EXISTS users');
