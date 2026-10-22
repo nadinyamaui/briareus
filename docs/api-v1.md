@@ -87,7 +87,10 @@ server acts as that user: a change it makes (a finding's verdict, a reply) is
 signed with their name. A user is an `admin`, who runs the server and may
 hold admin tokens, or a `member`, whose tokens are `read` or `manage` on the
 projects they were given. An admin token kept through a demotion acts as
-`manage` on its empty project list, so it reaches nothing.
+`manage` on its empty project list: it loses every project and admin route,
+but still reaches the routes not tied to a project (uploads, transcription,
+the ▶ Run preview access token, server stats), and a stream it had open is
+ended. Revoke it to cut it off entirely.
 
 Users are added and changed on the machine, like tokens:
 

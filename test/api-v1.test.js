@@ -199,7 +199,7 @@ describe('who gets in', () => {
     expect(await json('/')).toMatchObject({
       version: 1,
       client: { label: 'manage client', userId: 1, permission: 'manage', repos: [repo], lastUsedAt: clock },
-      user: { id: 1, name: 'Owner', role: 'admin' },
+      user: { id: 1, name: 'Owner', role: 'admin', disabled: false },
       transcribe: true,
     });
     expect(await json('/')).not.toHaveProperty('client.user');
@@ -213,7 +213,12 @@ describe('who gets in', () => {
     const ana = (
       await auth.create({ userId: 2, label: 'ana', repos: [repo], permission: 'read', days: 1 }, secret)
     ).token;
-    expect((await json('/', { token: ana })).user).toEqual({ id: 2, name: 'Ana', role: 'member' });
+    expect((await json('/', { token: ana })).user).toEqual({
+      id: 2,
+      name: 'Ana',
+      role: 'member',
+      disabled: false,
+    });
     people[1].disabledAt = clock;
     expect((await request('/', { token: ana })).status).toBe(401);
     people.splice(1, 1);
@@ -227,11 +232,12 @@ describe('who gets in', () => {
     expect((await request(`/runtimes?repo=${repo}`, { token: tokens.admin })).status).toBe(403);
   });
 
-  it('lists the users to an admin only', async () => {
+  it('lists the users to an admin only, the disabled ones marked', async () => {
+    people[1].disabledAt = clock;
     expect(await json('/users', { token: tokens.admin })).toEqual({
       users: [
-        { id: 1, name: 'Owner', role: 'admin' },
-        { id: 2, name: 'Ana', role: 'member' },
+        { id: 1, name: 'Owner', role: 'admin', disabled: false },
+        { id: 2, name: 'Ana', role: 'member', disabled: true },
       ],
     });
     expect((await request('/users')).status).toBe(403);
@@ -782,6 +788,32 @@ describe('the event streams', () => {
         })(),
       ).rejects.toThrow();
     }
+  });
+
+  it('ends an open admin stream once its user is demoted', async () => {
+    for (const route of ['/events?transcripts=1', '/sessions/foreign/events']) {
+      people[0].role = 'admin';
+      const response = await request(route, { token: tokens.admin });
+      expect(response.status).toBe(200);
+      const reader = response.body.getReader();
+      await reader.read();
+      people[0].role = 'member';
+      await expect(
+        (async () => {
+          for (;;) if ((await reader.read()).done) return 'ended';
+        })(),
+      ).rejects.toThrow();
+    }
+  });
+
+  it('keeps a stream open while its token reaches what it did', async () => {
+    const response = await request('/events', { token: tokens.read });
+    const reader = response.body.getReader();
+    await reader.read();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    bus.emit('job', { id: 'mine', repo, kind: 'devchat', status: 'running' });
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('event: session');
+    await reader.cancel();
   });
 
   it.each(['revoked', 'expired', 'API disabled'])('ends an open binary archive when %s', async (reason) => {
