@@ -8871,6 +8871,38 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       // Two PR-less sessions on dev-c whose lookups run in parallel.
       row('stk-race-1', { branch: 'dev-c' }),
       row('stk-race-2', { branch: 'dev-c' }),
+      // Converged on #1, with QA running on it as it moves off dev-a.
+      // Another repo, so these do not claim acme/shop#1 from the tests above.
+      row('stk-qa', {
+        repo: 'acme/side',
+        branch: 'dev-a',
+        prStatus: prOne,
+        prAttachedByBranch: true,
+        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-a', reviewPr: 1 },
+        qaLoop: { running: true, sessionId: 'stk-qa-run', done: false, failedScenarios: null },
+      }),
+      {
+        ...row('stk-qa-run', { repo: 'acme/side' }),
+        turns: 2,
+        qaBranch: 'dev-a',
+        autoClose: true,
+        startedOnPr: 1,
+        qaParentId: 'stk-qa',
+        qaLoopDone: true,
+      },
+      // Spotted #1 itself; checks out another branch for a moment with a finished
+      // round on #1 not yet read.
+      row('stk-detour', {
+        repo: 'acme/side',
+        branch: 'dev-a',
+        prStatus: prOne,
+        reviewLoop: {
+          rounds: 1,
+          lastSha: 'sha-a',
+          reviewPr: 1,
+          pendingResult: { prNumber: 1, round: 1, since: null },
+        },
+      }),
     ];
     await initJobs();
     for (const id of [
@@ -8885,6 +8917,9 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       'stk-sync',
       'stk-race-1',
       'stk-race-2',
+      'stk-qa',
+      'stk-qa-run',
+      'stk-detour',
     ])
       getJob(id).status = 'idle';
   });
@@ -9061,10 +9096,14 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       ),
     );
     expect(latestReviewDeclaration).not.toHaveBeenCalled();
-    expect(job.reviewLoop.reviewing).toBe(false);
     expect(job.reviewLoop.done).toBeFalsy();
     expect(job.reviewLoop.pendingResult).toBeFalsy();
     expect(infoTexts(job).join('\n')).not.toMatch(/declared no findings/);
+    // #2 found the loop busy when it attached; dropping the round starts #2's first.
+    await vi.waitFor(() => expect(job.reviewLoop.reviewPr).toBe(2));
+    expect(job.reviewLoop.reviewing).toBe(true);
+    expect(job.reviewLoop.rounds).toBe(1);
+    expect(job.reviewLoop.lastSha).toBe('sha-b');
   });
 
   it('drops a finished round not yet read off the released pull request', async () => {
@@ -9148,6 +9187,67 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     }
     // An idle owner hands it over: continuing somebody's branch picks up its PR.
     expect(await attachPrForBranch(job, { fresh: true })).toBe(1);
+  });
+
+  it('drops a QA run on the released pull request instead of reading its verdict off the new one', async () => {
+    const job = getJob('stk-qa');
+    latestTestFailures.mockClear();
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    // #2 attaches (a webhook) before the #1 QA run closes.
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', headSha: 'sha-b' };
+    await closeDevSession('stk-qa-run');
+    await vi.waitFor(() =>
+      expect(infoTexts(job).join('\n')).toMatch(
+        /QA run finished for PR #1, which this session no longer tracks/,
+      ),
+    );
+    expect(latestTestFailures).not.toHaveBeenCalled();
+    expect(job.qaLoop.done).toBe(false);
+    expect(job.qaLoop.pendingVerdict).toBeFalsy();
+    expect(infoTexts(job).join('\n')).not.toMatch(/no QA actions are required/);
+  });
+
+  it('reviews the same commit again after a detour that dropped its round, and keeps a spotted pull request closing on merge', async () => {
+    const job = getJob('stk-detour');
+    await onBranch(job, 'dev-tmp', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    expect(job.reviewLoop.pendingResult).toBeNull();
+    expect(job.reviewLoop.lastSha).toBeNull();
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url.startsWith('/repos/acme/side/pulls?'))
+        return {
+          ok: true,
+          json: async () => (url.includes('head=acme:dev-a') ? [{ number: 1, base: { ref: 'main' } }] : []),
+        };
+      if (/\/pulls\/1$/.test(url))
+        return {
+          ok: true,
+          json: async () => ({
+            number: 1,
+            state: 'open',
+            head: { ref: 'dev-a', sha: 'sha-a' },
+            base: { ref: 'main' },
+          }),
+        };
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    // Back on dev-a: no other session is busy on #1, so the branch finds it again.
+    job.status = 'running';
+    try {
+      await onBranch(job, 'dev-a', async () => {
+        refreshJobBranch(job);
+        expect(await attachPrForBranch(job, { fresh: true })).toBe(1);
+      });
+    } finally {
+      job.status = 'idle';
+    }
+    expect(job.prAttachedByBranch).toBe(false);
+    expect(job.reviewLoop.lastSha).toBeNull();
   });
 });
 
