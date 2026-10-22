@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createWhatsAppService } from '../lib/whatsapp.js';
 import { whatsappRoutes } from '../lib/whatsapp-routes.js';
+import { createWhatsAppOwners } from '../lib/whatsapp-owners.js';
 import { apiV1Routes } from '../lib/api-v1.js';
 import { createMobileAuth } from '../lib/mobile-auth.js';
 
@@ -128,14 +129,34 @@ async function setup() {
     tokens[permission] = (
       await auth.create({ userId: 1, label: permission, permission, repos: ['o/r'], days: 30 }, 'owner')
     ).token;
+  // Ana, a member: `default` is the first admin's, so none of it is hers.
+  tokens.member = (
+    await auth.create({ userId: 2, label: 'ana', permission: 'manage', repos: ['o/r'], days: 30 }, 'owner')
+  ).token;
+  let stored = {};
+  const owners = createWhatsAppOwners({
+    load: async () => stored,
+    save: async (_key, value) => {
+      stored = value;
+    },
+    legacyOwner: () => 1,
+  });
+  await owners.init();
   const app = express();
   app.use(
     apiV1Routes({
-      users: { get: () => ({ id: 1, name: 'Owner', role: 'admin', disabledAt: null }), list: () => [] },
+      users: {
+        get: (id) =>
+          ({
+            1: { id: 1, name: 'Owner', role: 'admin', disabledAt: null },
+            2: { id: 2, name: 'Ana', role: 'member', disabledAt: null },
+          })[id] || null,
+        list: () => [],
+      },
       auth,
       apiEnabled: () => true,
       ownerSecret: () => 'owner',
-      handlers: whatsappRoutes({ service }),
+      handlers: whatsappRoutes({ service, owners }),
       getJob: () => null,
       getProject: () => null,
       listSessions: () => [],
@@ -225,10 +246,9 @@ describe('the WhatsApp core inbox', () => {
     expect(await (await ctx.request('/default/logout', { method: 'POST' })).json()).toEqual({ ok: true });
   });
 
-  it('refuses every inbox route to read/manage tokens before touching WAHA', async () => {
+  it('keeps another user’s account and a read token’s writes from WAHA', async () => {
     const ctx = await setup();
     const routes = [
-      ['', 'GET'],
       ['/default', 'GET'],
       ['/default/start', 'POST'],
       ['/default/qr', 'GET'],
@@ -239,18 +259,26 @@ describe('the WhatsApp core inbox', () => {
       [`/default/conversations/${CHAT}/read`, 'POST'],
       [`/default/conversations/${CHAT}/messages/${MID}/media`, 'GET'],
     ];
-    for (const token of [ctx.tokens.read, ctx.tokens.manage])
-      for (const [path, method] of routes)
-        expect(
-          (
-            await ctx.request(path, {
-              method,
-              token,
-              body: method === 'POST' ? { text: 'hello' } : undefined,
-            })
-          ).status,
-        ).toBe(403);
+    for (const [path, method] of routes)
+      expect(
+        (
+          await ctx.request(path, {
+            method,
+            token: ctx.tokens.member,
+            body: method === 'POST' ? { text: 'hello' } : undefined,
+          })
+        ).status,
+      ).toBe(404);
+    for (const [path, method] of routes.filter(([, method]) => method === 'POST'))
+      expect(
+        (await ctx.request(path, { method, token: ctx.tokens.read, body: { text: 'hello' } })).status,
+      ).toBe(403);
     expect(ctx.calls).toEqual([]);
+    // Her list leaves out the first admin's `default`; starting an account nobody owns makes it hers.
+    expect((await (await ctx.request('', { token: ctx.tokens.member })).json()).accounts).toEqual([]);
+    ctx.setCurrent({ name: 'default', status: 'WORKING' });
+    expect((await (await ctx.request('', { token: ctx.tokens.member })).json()).accounts).toEqual([]);
+    expect((await (await ctx.request('')).json()).accounts.map((a) => a.id)).toEqual(['default']);
   });
 
   it('rejects malformed IDs, pagination and messages before touching WAHA', async () => {

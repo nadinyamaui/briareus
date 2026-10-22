@@ -23,6 +23,7 @@ import { createUsers } from './lib/users.js';
 import { createShares } from './lib/shares.js';
 import { seesSession } from './lib/ownership.js';
 import { createUserCredentials } from './lib/user-credentials.js';
+import { createWhatsAppOwners } from './lib/whatsapp-owners.js';
 import { meRoutes } from './lib/me-routes.js';
 import { asGithubUser } from './lib/github.js';
 import { shareRoutes } from './lib/share-routes.js';
@@ -700,11 +701,15 @@ api.use(
 );
 const whatsappService = createWhatsAppService();
 // Replies in the chats a session wrote to come back to it (lib/whatsapp-watch.js).
+// Whose each WhatsApp account is (lib/whatsapp-owners.js); a session reaches its inbox owner's.
+const whatsappOwners = createWhatsAppOwners({ legacyOwner: firstAdmin });
+const whatsappMayUse = (job, account) => whatsappOwners.owns(inboxOwner(job), account);
 const whatsappWatcher = createWhatsAppWatcher({
   service: whatsappService,
   getJob,
   listJobs: devSessionRecords,
   allowed: (job) => whatsappWatchAllowed(job, getProject(job.repo)),
+  mayUse: whatsappMayUse,
   deliver: (id, delivery, group) => deliverToSession(id, delivery, { via: 'whatsapp', ...group }),
   instruct: (id, instruction, group) =>
     instructSessionDurably(id, instruction, { via: 'whatsapp', ...group }),
@@ -719,9 +724,15 @@ const whatsappWatcher = createWhatsAppWatcher({
   registryComplete: sessionRegistryComplete,
 });
 setWhatsAppWatchAccess((id) => whatsappWatcher.watching(id));
-api.use(whatsappRoutes({ service: whatsappService }));
+api.use(whatsappRoutes({ service: whatsappService, owners: whatsappOwners }));
 api.use(
-  whatsappAgentRoutes({ service: whatsappService, agentSession, getProject, watcher: whatsappWatcher }),
+  whatsappAgentRoutes({
+    service: whatsappService,
+    agentSession,
+    getProject,
+    watcher: whatsappWatcher,
+    mayUse: whatsappMayUse,
+  }),
 );
 api.use(mcpRoutes({ service: mcpService, getProject }));
 api.use(
@@ -2292,6 +2303,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await users.init();
     await shares.init();
     await credentials.init();
+    await whatsappOwners.init();
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
