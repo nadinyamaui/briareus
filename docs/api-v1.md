@@ -122,6 +122,15 @@ shared with them. An Envoyer account must also be shared with a member before
 they can list or deploy with it. `GET /settings/shares` lists the shares, by
 kind, resource or user.
 
+### What waits on you
+
+`GET /attention` lists what waits on the caller: an admin sees every
+session's questions, findings and failures, a member their own and the
+ownerless ones of their projects. SSH commands appear for whoever rules on
+them, and Slack messages only for the owner of the workspace they would go out
+through. `GET /tasks/{id}`, a task's history kept after its sessions are
+deleted, answers any user for the tasks they may see and 404 otherwise.
+
 ### Sessions belong to users
 
 A session belongs to the user who started it (`ownerId`). A loop's review,
@@ -201,22 +210,22 @@ What is there, by area:
 
 See the [feature overview](features.md) for server capabilities and recent additions.
 
-| Area                     | Paths                                                                                                                                                                                                | Needs           |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| The token                | `/`, `/openapi.json`, `/token`, `/events`, `/me/github`, `/me/home-assistant`; `/users`                                                                                                              | read; admin     |
-| Projects                 | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                                                                                                                                          | read / manage   |
-| Pull requests and issues | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits`; `/repo/tree`, `/repo/file`, `/repo/archive`; `/issues/{number}` and its timeline, close; `/project-board` | read / manage   |
-| Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops; `/preview/access`                                                                                                  | read / manage   |
-| Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                                                                                                  | read to admin   |
-| Memory                   | `/memories`, `/memories/health`                                                                                                                                                                      | read / admin    |
-| Slack inbox              | `/slack/workspaces`, `/slack/workspaces/{id}/conversations`, `people`, `direct-messages`, `events`; conversation history, threads, replies and read positions                                        | your own        |
-| WhatsApp inbox           | `/whatsapp/accounts`, account linking, QR codes, conversations, messages, read receipts and media downloads                                                                                          | your own        |
-| Operations               | `/attention`, `/maintenance`, `/deployments`, `/tasks`, `/videos`; `/ssh/requests`, `/slack/requests`                                                                                                | admin; manage   |
-| Home Assistant           | `/home-assistant`, `/home-assistant/entities`, `/home-assistant/services`, `/home-assistant/events/{type}`; `/me/home-assistant`                                                                     | your own        |
-| Mail                     | `/mail/messages`, `/mail/accounts/{account}/messages/{id}`                                                                                                                                           | your own        |
-| Laravel Forge            | `/forge/accounts/{account}/servers`, sites, deployment scripts and environment files                                                                                                                 | admin           |
-| Laravel Envoyer          | `/envoyer/accounts`, account projects, servers and deployments                                                                                                                                       | read / manage   |
-| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `mcp/servers`, `forge/accounts`, `envoyer/accounts`, `templates`, `shares`; `slack/workspaces`, `mail/accounts`        | admin; your own |
+| Area                     | Paths                                                                                                                                                                                                | Needs               |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| The token                | `/`, `/openapi.json`, `/token`, `/events`, `/me/github`, `/me/home-assistant`; `/users`                                                                                                              | read; admin         |
+| Projects                 | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                                                                                                                                          | read / manage       |
+| Pull requests and issues | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits`; `/repo/tree`, `/repo/file`, `/repo/archive`; `/issues/{number}` and its timeline, close; `/project-board` | read / manage       |
+| Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops; `/preview/access`                                                                                                  | read / manage       |
+| Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                                                                                                  | read to admin       |
+| Memory                   | `/memories`, `/memories/health`                                                                                                                                                                      | read / admin        |
+| Slack inbox              | `/slack/workspaces`, `/slack/workspaces/{id}/conversations`, `people`, `direct-messages`, `events`; conversation history, threads, replies and read positions                                        | your own            |
+| WhatsApp inbox           | `/whatsapp/accounts`, account linking, QR codes, conversations, messages, read receipts and media downloads                                                                                          | your own            |
+| Operations               | `/maintenance`, `/deployments`, `/videos`; `/ssh/requests`, `/slack/requests`; `/attention`, `/tasks`                                                                                                | admin; manage; read |
+| Home Assistant           | `/home-assistant`, `/home-assistant/entities`, `/home-assistant/services`, `/home-assistant/events/{type}`; `/me/home-assistant`                                                                     | your own            |
+| Mail                     | `/mail/messages`, `/mail/accounts/{account}/messages/{id}`                                                                                                                                           | your own            |
+| Laravel Forge            | `/forge/accounts/{account}/servers`, sites, deployment scripts and environment files                                                                                                                 | admin               |
+| Laravel Envoyer          | `/envoyer/accounts`, account projects, servers and deployments                                                                                                                                       | read / manage       |
+| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `mcp/servers`, `forge/accounts`, `envoyer/accounts`, `templates`, `shares`; `slack/workspaces`, `mail/accounts`        | admin; your own     |
 
 Everything the removed dashboard could do has a route, except its browser push
 notifications, which went with it. The reference ends with a table from each of
