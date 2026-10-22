@@ -99,10 +99,27 @@ async function issue() {
   if (values.permission === 'admin' && user.role !== 'admin')
     throw new Error(`${user.name} is a member: give the token --permission read or manage, and its --repo`);
   if (values.permission !== 'admin') {
-    const [rows] = /** @type {any} */ (await pool.query('SELECT `repo` FROM `projects`'));
+    const [rows] = /** @type {any} */ (await pool.query('SELECT `id`, `repo` FROM `projects`'));
     const known = new Set(rows.map((row) => row.repo));
     const unknown = values.repo.filter((repo) => !known.has(repo));
     if (unknown.length) throw new Error(`No such project: ${unknown.join(', ')}`);
+    // A member's token would reach none of a project not shared with them (lib/shares.js),
+    // so say so now rather than issue a token that answers 403.
+    if (user.role !== 'admin') {
+      const [shared] = /** @type {any} */ (
+        await pool.query("SELECT `resource_id` FROM `shares` WHERE `kind` = 'project' AND `user_id` = ?", [
+          user.id,
+        ])
+      );
+      const ids = new Set(shared.map((row) => row.resource_id));
+      const missing = values.repo.filter(
+        (repo) => !rows.some((r) => r.repo === repo && ids.has(String(r.id))),
+      );
+      if (missing.length)
+        throw new Error(
+          `${missing.join(', ')} ${missing.length > 1 ? 'are' : 'is'} not shared with ${user.name}: share it with PUT /api/v1/settings/shares first`,
+        );
+    }
   }
   const { device, token } = await auth.create(
     {

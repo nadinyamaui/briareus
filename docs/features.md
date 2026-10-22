@@ -13,9 +13,10 @@ Several people can share one server. Every `/api/v1` token belongs to a user,
 an admin or a member, and the server acts as that user; disabling a user
 stops all their tokens. Users and tokens are managed on the machine
 (`npm run users`, `npm run create-token`), and admins can list users with
-`GET /users`. Projects, sessions, stats and integrations are not yet scoped to
-users: a member reaches what their tokens' project lists allow. See
-[users](api-v1.md#users).
+`GET /users`. Admins share projects and servers with members
+(`PUT /settings/shares`): a member's tokens reach only the projects shared
+with them, and Envoyer accounts only once shared. Sessions, stats and
+integrations are not yet scoped to users. See [users](api-v1.md#users).
 
 ## Coding sessions
 
@@ -126,6 +127,8 @@ These additions are present in the server revision documented here:
 
 - Users: every token belongs to an admin or member, and changes made through
   the API are signed with the user's name.
+- Sharing: projects and servers can be shared with several users; members
+  reach only what is shared with them.
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.

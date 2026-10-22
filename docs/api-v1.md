@@ -102,6 +102,27 @@ npm run users -- --disable Ana              # her tokens stop; --enable undoes i
 npm run create-token -- --user Ana --label Laptop --permission manage --repo owner/name
 ```
 
+### Sharing
+
+An admin reaches every project and server. A member reaches only what an admin
+shared with them, through `PUT /settings/shares` with the resource's `kind`
+(`project`, `dbServer`, `sshServer`, `mcpServer`, `forgeAccount` or
+`envoyerAccount`), its `id` and the `userIds` it is shared with:
+
+```sh
+curl -s -X PUT https://briareus.example.com/api/v1/settings/shares \
+  -H "Authorization: Bearer brm_..." -H 'Content-Type: application/json' \
+  -d '{"kind":"project","id":"2","userIds":[2]}'
+```
+
+A member's token reaches the projects it was issued with that are also shared
+with them; unsharing a project takes it from all their tokens at once, and
+`npm run create-token` refuses to issue a member a token on a project not
+shared with them. An Envoyer account must also be shared with a member before
+they can list or deploy with it. `GET /settings/shares` lists the shares, by
+kind, resource or user. Shared database, SSH and MCP servers and Forge
+accounts take effect once sessions belong to users.
+
 A disabled user's tokens answer 401 within 15 seconds, without a restart. The
 last enabled admin cannot be demoted or disabled. When the server was first
 upgraded to users, it created an admin named `Owner` and gave every existing

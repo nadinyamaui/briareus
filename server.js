@@ -20,6 +20,8 @@ import { memoryMaintenanceRoutes } from './lib/memory-maintenance-routes.js';
 import { operationsRoutes } from './lib/operations-routes.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
 import { createUsers } from './lib/users.js';
+import { createShares } from './lib/shares.js';
+import { shareRoutes } from './lib/share-routes.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
@@ -258,6 +260,9 @@ app.set('trust proxy', 'loopback');
 // API handlers live on their own router: /api/v1 dispatches to them once the bearer token is
 // judged (lib/api-v1.js), and an agent reaches its own under /api/agent/.
 const api = express.Router();
+// The people sharing this server (lib/users.js) and what is shared with each (lib/shares.js).
+const users = createUsers();
+const shares = createShares();
 
 // On every response, including the webhooks': nothing here is a page, and the
 // headers say so (lib/security.js).
@@ -295,11 +300,16 @@ app.use('/webhooks', webhookRouter());
 
 // The only client API: owner-issued tokens (`npm run create-token`) in front of the handlers below.
 const mobileAuth = createMobileAuth();
-const users = createUsers();
 app.use(
   apiV1Routes({
     auth: mobileAuth,
     users,
+    memberRepos: (user) => {
+      const ids = shares.idsFor(user.id, 'project');
+      return listProjects()
+        .filter((p) => ids.includes(String(p.id)))
+        .map((p) => p.repo);
+    },
     apiEnabled,
     ownerSecret: () => getConfig().auth.secret,
     handlers: api,
@@ -649,13 +659,35 @@ api.use(
   }),
 );
 const envoyerService = createEnvoyerService();
-api.use(envoyerRoutes({ service: envoyerService, getProject }));
+api.use(
+  envoyerRoutes({
+    service: envoyerService,
+    getProject,
+    mayUse: (user, id) => shares.allows(user, 'envoyerAccount', id),
+  }),
+);
 const forgeAccounts = createForgeAccounts();
 api.use(
   forgeRoutes({
     accounts: forgeAccounts,
     client: createForgeClient({ account: (id) => forgeAccounts.credentials(id) }),
     getProject,
+  }),
+);
+// Who each project and server is shared with (lib/shares.js); ids are compared as strings.
+const hasId = (list) => (id) => list().some((item) => String(item.id) === id);
+api.use(
+  shareRoutes({
+    shares,
+    users,
+    exists: {
+      project: hasId(listProjects),
+      dbServer: hasId(listDbServers),
+      sshServer: hasId(() => sshService.list()),
+      mcpServer: hasId(() => mcpService.list()),
+      forgeAccount: hasId(() => forgeAccounts.list()),
+      envoyerAccount: hasId(() => envoyerService.list()),
+    },
   }),
 );
 api.use(mailRoutes({ service: mailService }));
@@ -2117,6 +2149,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await forgeAccounts.init();
     await mailService.init();
     await users.init();
+    await shares.init();
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
