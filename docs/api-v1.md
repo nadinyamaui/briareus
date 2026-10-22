@@ -139,6 +139,22 @@ breaks spend down by `users` and filters by `user`, and `GET /usage` adds a
 first admin; sessions that already existed have no owner. Forge accounts are
 still used only by admins.
 
+### Your own GitHub account
+
+Without one, everything goes to GitHub as the server's account
+(`GITHUB_TOKEN`). A user can connect their own with a personal access token
+(`PUT /me/github`, stored encrypted under `CREDENTIALS_KEY`; `GET /me/github`
+shows only the login, `DELETE /me/github` removes it). After that:
+
+- Changes they make through the API, such as comments, merges, labels, finding
+  verdicts and board moves, are made as them. Reads keep the server's token,
+  so lists and caches stay the same for everyone.
+- Their sessions run `gh`, commit and push as them (`GH_TOKEN`, the git
+  credential, and the author and committer set to their login and GitHub
+  no-reply address). The server's own clones, fetches and setup steps, and the
+  automatic review loop's labels and comments, stay on the server's account.
+- A disabled user's token is no longer used.
+
 A disabled user's tokens answer 401 within 15 seconds, without a restart. The
 last enabled admin cannot be demoted or disabled. When the server was first
 upgraded to users, it created an admin named `Owner` and gave every existing

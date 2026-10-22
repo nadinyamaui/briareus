@@ -34,7 +34,8 @@ let auth,
   previewAccess,
   presentEvent,
   people,
-  sharedRepos;
+  sharedRepos,
+  actAs;
 beforeEach(async () => {
   let saved = [];
   previewAccess = null;
@@ -50,6 +51,7 @@ beforeEach(async () => {
   });
   await auth.init();
   sharedRepos = {};
+  actAs = vi.fn((_user, fn) => fn());
   people = [
     { id: 1, name: 'Owner', role: 'admin', createdAt: clock, disabledAt: null },
     { id: 2, name: 'Ana', role: 'member', createdAt: clock, disabledAt: null },
@@ -101,6 +103,7 @@ beforeEach(async () => {
       auth,
       users: { get: (id) => people.find((u) => u.id === id) || null, list: () => people },
       memberRepos: (user) => sharedRepos[user.id] || [],
+      actAs: (user, fn) => actAs(user, fn),
       apiEnabled: () => apiOn,
       ownerSecret: () => secret,
       handlers,
@@ -555,6 +558,16 @@ describe('handing a request to the dashboard’s handler', () => {
     ).toBe('/api/templates/1');
   });
 
+  it('runs the handler as the token’s user', async () => {
+    const seen = [];
+    actAs.mockImplementation((user, fn) => {
+      seen.push(user.name);
+      return fn();
+    });
+    await json('/sessions/mine/messages', { method: 'POST', body: { text: 'go' } });
+    expect(seen).toEqual(['Owner']);
+  });
+
   it('spends the token at the gateway and names the client as the author', async () => {
     const seen = await json('/sessions/mine/messages', { method: 'POST', body: { text: 'go' } });
     expect(seen).toMatchObject({
@@ -994,6 +1007,9 @@ describe('the contract', () => {
       'actions.list',
       'client.get',
       'events.stream',
+      'me.github.delete',
+      'me.github.get',
+      'me.github.set',
       'openapi.get',
       'preview.access',
       'projects.list',

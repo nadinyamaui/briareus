@@ -14,6 +14,30 @@ The token’s own record, the user it belongs to, the API version and what this 
 
 **Returns** `{ version: integer, client: Client, user: User, transcribe: boolean }`
 
+### `GET /me/github`
+
+Whether you connected your own GitHub account. Needs `read`.
+
+**Returns** `GithubIdentity`
+
+### `PUT /me/github`
+
+Connect your own GitHub account with a token. Needs `manage`.
+
+**Body**
+
+| Field                | Type     |                                                                        |
+| -------------------- | -------- | ---------------------------------------------------------------------- |
+| `token` **required** | `string` | A GitHub personal access token; stored encrypted and never shown again |
+
+**Returns** `GithubIdentity`. Changes you then make through the API (comments, merges, labels, finding verdicts) are made as you, and your sessions commit, push and run `gh` as you. Reads keep the server’s token. Needs CREDENTIALS_KEY on the server.
+
+### `DELETE /me/github`
+
+Disconnect your GitHub account. Needs `manage`.
+
+**Returns** `GithubIdentity`. Your changes and sessions go back to the server’s GitHub account.
+
 ### `GET /users`
 
 List the people who share this server. Needs `admin`.
@@ -2225,6 +2249,15 @@ A person who shares this server. Every token belongs to one, and acts as them; a
 | `name` | `string`        | The name it was given, unique on this server                                          |
 | `role` | `admin\|member` | An admin runs the server and reaches every project; a member only what they are given |
 
+### GithubIdentity
+
+Your own GitHub account on this server, if you connected one. The token is never sent back.
+
+| Field       | Type      |                                |
+| ----------- | --------- | ------------------------------ |
+| `connected` | `boolean` | Whether a token is stored      |
+| `login`     | `string?` | The GitHub login it belongs to |
+
 ### Share
 
 One project or server shared with one user.
@@ -3190,6 +3223,9 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 
 | Dashboard                                                                        | API                                                                             |
 | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `GET /api/me/github`                                                             | `GET /me/github`                                                                |
+| `PUT /api/me/github`                                                             | `PUT /me/github`                                                                |
+| `DELETE /api/me/github`                                                          | `DELETE /me/github`                                                             |
 | `GET /api/dev/projects`                                                          | `GET /projects`                                                                 |
 | `GET /api/dev/branches`                                                          | `GET /branches`                                                                 |
 | `POST /api/dev/branches/serve`                                                   | `POST /branches/serve`                                                          |

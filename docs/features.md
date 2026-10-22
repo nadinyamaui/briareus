@@ -19,7 +19,10 @@ with them, and Envoyer accounts only once shared. Sessions belong to the
 user who started them: members see their own (and ownerless system work),
 their sessions use only the database, SSH and MCP servers shared with them,
 they approve their own sessions' SSH commands, and usage breaks down by user.
-Integrations are not yet per user. See [users](api-v1.md#users).
+Each user can connect their own GitHub account (`PUT /me/github`) so their
+API changes and their sessions' commits and pushes are made as them. Mail,
+Slack, WhatsApp and Home Assistant are not yet per user. See
+[users](api-v1.md#users).
 
 ## Coding sessions
 
@@ -134,6 +137,7 @@ These additions are present in the server revision documented here:
   reach only what is shared with them.
 - Sessions belong to users, with per-user visibility, server access, SSH
   approvals and spend.
+- Per-user GitHub identity for API changes and session commits.
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.
