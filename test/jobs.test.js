@@ -1151,6 +1151,15 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(() => createDevSession({ ...base, provider: 99 })).toThrow(/Unknown provider: 99/);
   });
 
+  it('files a session under its starter, and a worker under its orchestrator’s owner', () => {
+    const orchestrator = createDevSession({ ...base, orchestrator: true, ownerId: 2 });
+    expect(orchestrator.ownerId).toBe(2);
+    const worker = createDevSession({ ...base, parentId: orchestrator.id });
+    expect(worker.ownerId).toBe(2);
+    expect(createDevSession({ ...base, parentId: orchestrator.id, ownerId: null }).ownerId).toBeNull();
+    expect(createDevSession(base).ownerId).toBeNull();
+  });
+
   it('refuses a provider whose whole group is inactive', () => {
     state.provider = { ...state.provider, active: false };
     state.group = [];
