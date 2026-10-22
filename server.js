@@ -134,6 +134,7 @@ import {
   setSlackAccess,
   setExternalMcp,
   setOwnerGithub,
+  setInboxOwner,
   DEV_OPEN,
 } from './lib/jobs.js';
 import {
@@ -283,6 +284,21 @@ const githubOf = (userId) => {
   }
 };
 setOwnerGithub((job) => githubOf(job.ownerId));
+// Whose personal inboxes (mail, lib/mail-agent.js) a session reaches: its owner while they
+// are enabled, or for a session nobody owns, one from before users, the first admin, who was
+// its operator.
+const inboxOwner = (job) => {
+  try {
+    if (job.ownerId != null) {
+      const owner = users.get(job.ownerId);
+      return owner && owner.disabledAt == null ? owner.id : null;
+    }
+    return users.list().find((u) => u.role === 'admin' && u.disabledAt == null)?.id ?? null;
+  } catch {
+    return null;
+  }
+};
+setInboxOwner(inboxOwner);
 // The user a /api/v1 request acts as, who owns any session it starts.
 const requestOwner = (res) => res.locals.apiUser?.id ?? null;
 // Whether a session may use a shared resource (lib/shares.js): one nobody started works as the
@@ -754,10 +770,21 @@ api.use(
     getProject,
     wakeState: sessionMailWakeState,
     wakeUpdate: setSessionMailWake,
+    inboxOwner,
   }),
 );
 api.use(
-  sessionMailWakeRoutes({ service: mailService, state: sessionMailWakeState, update: setSessionMailWake }),
+  sessionMailWakeRoutes({
+    service: mailService,
+    state: sessionMailWakeState,
+    update: setSessionMailWake,
+    mailFor: (id) => {
+      const job = getJob(id);
+      const owner = job ? inboxOwner(job) : null;
+      if (owner == null) throw Object.assign(new Error('Session not found'), { status: 404 });
+      return mailService.forUser(owner);
+    },
+  }),
 );
 
 api.get('/api/agent/memories', (req, res) => {

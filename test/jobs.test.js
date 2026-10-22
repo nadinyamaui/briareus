@@ -331,6 +331,7 @@ import {
   deliverWorkerNotices,
   deliverToSession,
   mailReceived,
+  setInboxOwner,
   mailReceivedDurably,
   cancelMailWakes,
   setSessionMailWake,
@@ -4876,6 +4877,20 @@ describe('webhook deliveries', () => {
       expect(publicJob(job).mailWake).not.toHaveProperty('seen');
       await cli.finish(job);
     });
+    it('never wakes a session with another user’s mailbox', () => {
+      const job = getJob('hk-mail');
+      const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }] }).rules[0];
+      job.awaitingAnswer = true;
+      setInboxOwner(() => 2);
+      try {
+        expect(mailReceived({ ...account, userId: 3 }, email('elsewhere', rule.since))).toEqual([]);
+        expect(job.pendingDeliveries || []).toHaveLength(0);
+        expect(mailReceived({ ...account, userId: 2 }, email('mine', rule.since))).toEqual([job.id]);
+      } finally {
+        setInboxOwner((session) => session.ownerId ?? null);
+      }
+    });
+
     it('holds matching email behind an unanswered question, keeps it with the webhook off and flushes when free', async () => {
       const { prompts } = fakeCli();
       const job = getJob('hk-mail');

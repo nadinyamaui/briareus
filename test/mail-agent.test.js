@@ -7,7 +7,7 @@ import readline from 'node:readline';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { mailActionPath, mailAgentRoutes, mailSessionAllowed } from '../lib/mail-agent.js';
 
-let server, base, job, service, project, wakeState, wakeUpdate;
+let server, base, job, service, project, wakeState, wakeUpdate, inboxOwner;
 const interactive = () => ({ id: 'chat', kind: 'devchat', repo: 'owner/repo', status: 'running' });
 beforeEach(async () => {
   job = interactive();
@@ -30,6 +30,9 @@ beforeEach(async () => {
       data: Buffer.from('PDF').toString('base64'),
     })),
   };
+  // The session reaches its inbox owner's mailboxes; here that view is the fake itself.
+  service.forUser = vi.fn(() => service);
+  inboxOwner = vi.fn(() => 1);
   wakeState = vi.fn(() => ({ rules: [] }));
   wakeUpdate = vi.fn((id, input) => input);
   const app = express();
@@ -39,6 +42,7 @@ beforeEach(async () => {
   app.use(
     mailAgentRoutes({
       service,
+      inboxOwner: (session) => inboxOwner(session),
       wakeState,
       wakeUpdate,
       getProject: (repo) => (project?.repo === repo ? project : null),
@@ -97,7 +101,8 @@ describe('session mailbox authorization', () => {
       expect(res.status).toBe(403);
     }
     expect(service.list).toHaveBeenCalledTimes(1);
-    for (const [name, fn] of Object.entries(service)) if (name !== 'list') expect(fn).not.toHaveBeenCalled();
+    for (const [name, fn] of Object.entries(service))
+      if (!['list', 'forUser'].includes(name)) expect(fn).not.toHaveBeenCalled();
   });
   it('rejects unknown tokens', async () => {
     expect((await get('/accounts', 'bad')).status).toBe(401);
@@ -329,4 +334,16 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
     lines.close();
     await new Promise((resolve) => child.once('close', resolve));
   }
+});
+
+describe('whose mail a session reaches', () => {
+  it('reaches its inbox owner’s mailboxes, and none when it has no owner', async () => {
+    const headers = { Authorization: 'Bearer session-token' };
+    expect((await fetch(`${base}/api/agent/mail/accounts`, { headers })).status).toBe(200);
+    expect(service.forUser).toHaveBeenCalledWith(1);
+    inboxOwner.mockReturnValue(null);
+    const refused = await fetch(`${base}/api/agent/mail/accounts`, { headers });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: 'This session has no user whose mail it could reach' });
+  });
 });

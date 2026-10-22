@@ -158,6 +158,14 @@ shows only the login, `DELETE /me/github` removes it). After that:
   automatic review loop's labels and comments, stay on the server's account.
 - A disabled user's token is no longer used.
 
+### Your own mail
+
+Mailboxes belong to the user who connected them. `GET /mail/messages` and
+the mail settings routes answer any user, held to their own mailboxes (a
+`read` token reads, `manage` connects, changes and sends); an admin has no
+access to a member's mail. Sessions reach their owner's mailboxes; see the
+[email guide](email-mcp.md).
+
 A disabled user's tokens answer 401 within 15 seconds, without a restart. The
 last enabled admin cannot be demoted or disabled. When the server was first
 upgraded to users, it created an admin named `Owner` and gave every existing
