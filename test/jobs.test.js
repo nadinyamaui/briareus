@@ -304,6 +304,7 @@ import {
   setDevSessionCompactInstructions,
   linkPrToSession,
   attachPrForBranch,
+  refreshJobBranch,
   spawnWorkerSession,
   workerSessionsFor,
   workerSummary,
@@ -8795,6 +8796,133 @@ describe('attachPrForBranch', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('a worker that leaves the branch it was spawned on for one of its own', () => {
+  const row = (id, extra = {}) => ({
+    id,
+    kind: 'devchat',
+    status: 'closed', // flipped after the restore, like the rows above
+    repo: 'acme/shop',
+    providerId: 1,
+    provider: 'Claude entry',
+    turns: 1,
+    baseBranch: 'main',
+    startedOnPr: null,
+    prStatus: null,
+    ...extra,
+  });
+  const prOne = { number: 1, state: 'open', headRef: 'dev-a', headSha: 'sha-a' };
+
+  beforeAll(async () => {
+    state.stored = [
+      // Owns PR #1, opened from its own branch dev-a.
+      row('stk-owner', { branch: 'dev-a', prStatus: prOne, prAttachedByBranch: true }),
+      // Spawned with branch dev-a for a stacked PR: found #1 at checkout, and its loop
+      // already converged there.
+      row('stk-worker', {
+        branch: 'dev-a',
+        startBranch: 'dev-a',
+        prStatus: prOne,
+        prAttachedByBranch: true,
+        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-a' },
+      }),
+      // Spawned on dev-a as well, and has not cut its own branch yet.
+      row('stk-sibling', { branch: 'dev-a', startBranch: 'dev-a' }),
+    ];
+    await initJobs();
+    for (const id of ['stk-owner', 'stk-worker', 'stk-sibling']) getJob(id).status = 'idle';
+  });
+
+  beforeEach(() => {
+    githubRest.mockReset();
+    githubGraphql.mockReset();
+  });
+
+  const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
+
+  it('tracks the pull request of the branch it moved to, and its loop reviews that one', async () => {
+    const job = getJob('stk-worker');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk-worker-'));
+    const git = (...args) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+    spawnSync('git', ['init', '-q', '-b', 'dev-b', dir]);
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'stacked');
+    const sha = git('rev-parse', 'HEAD').stdout.trim();
+    git('update-ref', 'refs/remotes/origin/dev-b', sha); // pushed
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url.startsWith('/repos/acme/shop/pulls?')) {
+        return {
+          ok: true,
+          json: async () => (url.includes('head=acme:dev-b') ? [{ number: 2, base: { ref: 'dev-a' } }] : []),
+        };
+      }
+      if (/\/pulls\/2$/.test(url)) {
+        return {
+          ok: true,
+          json: async () => ({
+            number: 2,
+            state: 'open',
+            head: { ref: 'dev-b', sha },
+            base: { ref: 'dev-a' },
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    job.workDir = dir;
+    try {
+      // The turn that cut dev-b and opened #2 off it ends: HEAD is re-read.
+      refreshJobBranch(job);
+      expect(job.branch).toBe('dev-b');
+      expect(job.prStatus).toBeNull();
+      expect(job.startedOnPr).toBeNull();
+      expect(job.reviewLoop).toMatchObject({ rounds: 0, done: false, lastSha: null });
+      expect(infoTexts(job).join('\n')).toMatch(
+        /PR #1 is open from dev-a, not dev-b, so this session no longer tracks it/,
+      );
+
+      expect(await attachPrForBranch(job, { fresh: true })).toBe(2);
+      expect(job.prStatus).toMatchObject({ number: 2, headRef: 'dev-b' });
+      // The attach offers the armed loop its first round, on #2 and not on #1.
+      await vi.waitFor(() => expect(job.reviewLoop.reviewSessionId).toBeTruthy());
+      expect(infoTexts(job).join('\n')).toMatch(/started code review round 1 of PR #2/);
+      expect(getJob(job.reviewLoop.reviewSessionId).startedOnPr).toBe(2);
+      // The owner of #1 is untouched.
+      expect(getJob('stk-owner').prStatus.number).toBe(1);
+      closeDevSession(job.reviewLoop.reviewSessionId);
+    } finally {
+      job.workDir = null;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a pull request still open from its branch', () => {
+    const job = getJob('stk-owner');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk-owner-'));
+    spawnSync('git', ['init', '-q', '-b', 'dev-a', dir]);
+    job.workDir = dir;
+    job.branch = 'dev-a-old'; // a rename back onto the PR's head
+    try {
+      refreshJobBranch(job);
+      expect(job.branch).toBe('dev-a');
+      expect(job.prStatus.number).toBe(1);
+    } finally {
+      job.workDir = null;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not claim a pull request another open session already tracks', async () => {
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url.startsWith('/repos/acme/shop/pulls?'))
+        return { ok: true, json: async () => [{ number: 1, base: { ref: 'main' } }] };
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    const job = getJob('stk-sibling');
+    expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
+    expect(job.prStatus).toBeNull();
+    expect(infoTexts(job).join('\n')).toMatch(/PR #1 on dev-a is already tracked by session stk-owner/);
   });
 });
 
