@@ -1154,3 +1154,42 @@ describe('replyOnFindingThread', () => {
     );
   });
 });
+
+describe('review follow-ups posted by the session owner', () => {
+  it.each(['reply', 'delete'])(
+    'uses the review author for %s and ignores unrelated replies',
+    async (action) => {
+      const finding = { title: 'Race in the retry loop', file: 'lib/x.js', line: 12 };
+      const comment = {
+        path: finding.file,
+        line: finding.line,
+        body: finding.title,
+        created_at: '2026-09-08T10:00:00Z',
+      };
+      gh.reviewComments = [
+        { ...comment, id: 90, created_at: '2026-09-01T10:00:00Z' },
+        { ...comment, id: 91, in_reply_to_id: 90, user: { login: 'unrelated-user' } },
+        { ...comment, id: 92, in_reply_to_id: 90, user: { login: 'Ana' } },
+      ];
+      const options = { since: '2026-09-08T09:00:00Z', authorLogin: 'ana' };
+      if (action === 'reply') {
+        await replyOnFindingThread(repo, 5, finding, 'Noted', options);
+        expect(gh.writes[0]).toMatchObject({
+          method: 'POST',
+          url: `/repos/${repo}/pulls/5/comments/90/replies`,
+        });
+      } else {
+        expect((await deleteFindingFromReview(repo, 5, finding, options)).commentDeleted).toBe(true);
+        expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/92` });
+      }
+      gh.writes = [];
+      gh.reviewComments.pop();
+      if (action === 'reply') {
+        await expect(replyOnFindingThread(repo, 5, finding, 'Noted', options)).rejects.toThrow(/no comment/);
+      } else {
+        expect((await deleteFindingFromReview(repo, 5, finding, options)).commentDeleted).toBe(false);
+      }
+      expect(gh.writes).toEqual([]);
+    },
+  );
+});

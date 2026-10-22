@@ -79,3 +79,28 @@ it('finishes saving and publishing a credential before a queued disconnect', asy
   await restarted.init();
   expect(restarted.get(2, 'github')).toBeNull();
 });
+
+it('keeps unavailable credentials distinct from disconnected accounts and retries initialization once', async () => {
+  let finishLoad;
+  const loading = new Promise((resolve) => {
+    finishLoad = resolve;
+  });
+  const load = vi.fn().mockRejectedValueOnce(new Error('DB down')).mockReturnValueOnce(loading);
+  const save = vi.fn(async () => {});
+  const credentials = createUserCredentials({ load, save });
+  await expect(credentials.init()).rejects.toThrow('DB down');
+  expect(() => credentials.get(2, 'github')).toThrow(expect.objectContaining({ status: 503 }));
+  await expect(credentials.set(2, 'github', { token: 'too-early' })).rejects.toMatchObject({ status: 503 });
+  expect(save).not.toHaveBeenCalled();
+  await expect(credentials.remove(2, 'github')).rejects.toMatchObject({ status: 503 });
+  const first = credentials.init();
+  const second = credentials.init();
+  finishLoad([]);
+  await Promise.all([first, second]);
+  expect(load).toHaveBeenCalledTimes(2);
+  expect(credentials.get(2, 'github')).toBeNull();
+  await credentials.set(2, 'github', { token: 'connected' });
+  await credentials.init();
+  expect(load).toHaveBeenCalledTimes(2);
+  expect(credentials.get(2, 'github')).toEqual({ token: 'connected' });
+});

@@ -5754,21 +5754,30 @@ describe('standalone code-review findings', () => {
     await expect(saveReviewFindingsDrafts('stand-nope', {})).rejects.toThrow(/Session not found/);
   });
 
-  it("replies on one finding's thread and keeps it on the card", async () => {
-    replyOnFindingThread.mockClear();
-
-    const out = await replyToReviewFinding('stand-delete', 'k5', '  Fine for me  ');
-
-    expect(out).toEqual({ replied: 'k5', url: 'https://gh/r/101#reply' });
-    expect(replyOnFindingThread).toHaveBeenCalledWith(
-      'acme/standalone',
-      31,
-      expect.objectContaining({ key: 'k5' }),
-      '  Fine for me  ', // trimmed where it is written, so nothing is lost here
-      { since: '2026-09-07T10:00:00.000Z' },
-    );
-    expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k5', 'k6']);
-  });
+  it.each([null, 2])(
+    "replies on one finding's thread as owner %s and keeps it on the card",
+    async (ownerId) => {
+      replyOnFindingThread.mockClear();
+      const job = getJob('stand-delete');
+      job.ownerId = ownerId;
+      setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
+      try {
+        const out = await replyToReviewFinding('stand-delete', 'k5', '  Fine for me  ');
+        expect(out).toEqual({ replied: 'k5', url: 'https://gh/r/101#reply' });
+        expect(replyOnFindingThread).toHaveBeenCalledWith(
+          'acme/standalone',
+          31,
+          expect.objectContaining({ key: 'k5' }),
+          '  Fine for me  ', // trimmed where it is written, so nothing is lost here
+          { since: '2026-09-07T10:00:00.000Z', authorLogin: ownerId == null ? null : 'ana' },
+        );
+        expect(job.reviewTriage.findings.map((f) => f.key)).toEqual(['k5', 'k6']);
+      } finally {
+        job.ownerId = null;
+        setOwnerGithub(() => null);
+      }
+    },
+  );
 
   it('refuses a reply on a finding, or a session, that is not there', async () => {
     await expect(replyToReviewFinding('stand-delete', 'nope', 'hi')).rejects.toThrow(
@@ -5778,19 +5787,25 @@ describe('standalone code-review findings', () => {
     await expect(replyToReviewFinding('stand-nope', 'k5', 'hi')).rejects.toThrow(/Session not found/);
   });
 
-  it('deletes one finding from the review itself and leaves the rest on the card', async () => {
+  it('deletes one finding posted by the owner and leaves the rest on the card', async () => {
     deleteFindingFromReview.mockClear();
-
-    const out = await deleteReviewFinding('stand-delete', 'k5');
-
-    expect(out).toMatchObject({ deleted: 'k5', remaining: 1, commentDeleted: true, undeclared: true });
-    expect(deleteFindingFromReview).toHaveBeenCalledWith(
-      'acme/standalone',
-      31,
-      expect.objectContaining({ key: 'k5', title: 'Guard the id list' }),
-      { since: '2026-09-07T10:00:00.000Z' },
-    );
-    expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
+    const job = getJob('stand-delete');
+    job.ownerId = 2;
+    setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
+    try {
+      const out = await deleteReviewFinding('stand-delete', 'k5');
+      expect(out).toMatchObject({ deleted: 'k5', remaining: 1, commentDeleted: true, undeclared: true });
+      expect(deleteFindingFromReview).toHaveBeenCalledWith(
+        'acme/standalone',
+        31,
+        expect.objectContaining({ key: 'k5', title: 'Guard the id list' }),
+        { since: '2026-09-07T10:00:00.000Z', authorLogin: 'ana' },
+      );
+      expect(job.reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
+    } finally {
+      job.ownerId = null;
+      setOwnerGithub(() => null);
+    }
   });
 
   it('keeps the finding on the card when GitHub refuses to delete its comment', async () => {

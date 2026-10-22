@@ -107,3 +107,26 @@ describe('the share routes', () => {
     expect((await fetch(`${base}?kind=printer`)).status).toBe(400);
   });
 });
+
+it('retries failed initialization without reloading successful stores or overwriting changes', async () => {
+  let table = [{ kind: 'project', id: '3', userId: 2 }];
+  const load = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('DB down'))
+    .mockImplementation(async () => structuredClone(table));
+  const shares = createShares({
+    load,
+    replace: async () => {
+      table = [];
+    },
+  });
+  await expect(shares.init()).rejects.toThrow('DB down');
+  expect(() => shares.allows(ana, 'project', 3)).toThrow(expect.objectContaining({ status: 503 }));
+  await Promise.all([shares.init(), shares.init()]);
+  expect(load).toHaveBeenCalledTimes(2);
+  expect(shares.allows(ana, 'project', 3)).toBe(true);
+  await shares.set('project', '3', []);
+  await shares.init();
+  expect(load).toHaveBeenCalledTimes(3); // the only reload is the mutation's
+  expect(shares.allows(ana, 'project', 3)).toBe(false);
+});

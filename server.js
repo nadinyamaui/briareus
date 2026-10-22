@@ -272,11 +272,13 @@ const shares = createShares();
 const credentials = createUserCredentials();
 // A user's own GitHub identity (lib/me-routes.js), or null: none connected, the user is
 // gone or disabled, or CREDENTIALS_KEY cannot open it, in which case the server's stands.
+// An unloaded store must fail the action instead of silently changing its GitHub account.
 const githubOf = (userId) => {
   try {
     const user = userId == null ? null : users.get(userId);
     return user && user.disabledAt == null ? credentials.get(userId, 'github') : null;
-  } catch {
+  } catch (e) {
+    if (e.status === 503) throw e;
     return null;
   }
 };
@@ -2283,6 +2285,9 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   setInterval(() => {
     mobileAuth.refresh().catch((e) => console.error('Could not reload device tokens:', e.message));
     users.refresh().catch((e) => console.error('Could not reload users:', e.message));
+    // Successful stores skip initialization; failed loads retry without overwriting mutations.
+    shares.init().catch((e) => console.error('Could not load sharing:', e.message));
+    credentials.init().catch((e) => console.error('Could not load user credentials:', e.message));
   }, 15000).unref();
   // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
   // a client reads its mail from the database rather than from the provider.
