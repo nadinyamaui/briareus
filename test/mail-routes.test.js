@@ -25,7 +25,7 @@ beforeEach(async () => {
   const create = async (permission) =>
     (await auth.create({ userId: 1, label: permission, repos: ['owner/repo'], permission, days: 30 }, secret))
       .token;
-  tokens = { manage: await create('manage'), admin: await create('admin') };
+  tokens = { read: await create('read'), manage: await create('manage'), admin: await create('admin') };
   service = {
     list: vi.fn(async () => [{ id: 1, email: 'me@gmail.com' }]),
     providers: vi.fn(() => ['gmail']),
@@ -49,6 +49,8 @@ beforeEach(async () => {
       return { accountId: account, id };
     }),
   };
+  // Every request reaches the mailboxes of the user its token belongs to.
+  service.forUser = vi.fn(() => service);
   const handlers = express.Router();
   handlers.use(mailRoutes({ service }));
   const app = express();
@@ -87,11 +89,13 @@ const call = (path, { token = tokens.admin, method = 'GET', body } = {}) =>
   });
 
 describe('mail through /api/v1', () => {
-  it('answers an admin token only', async () => {
-    const res = await call('/api/v1/mail/messages', { token: tokens.manage });
-    expect(res.status).toBe(403);
-    expect(service.messages).not.toHaveBeenCalled();
-    expect((await call('/api/v1/settings/mail/accounts', { token: tokens.manage })).status).toBe(403);
+  it('answers any user, held to the mailboxes of the user the token belongs to', async () => {
+    expect((await call('/api/v1/mail/messages', { token: tokens.read })).status).toBe(200);
+    expect(service.forUser).toHaveBeenCalledWith(1);
+    expect((await call('/api/v1/settings/mail/accounts', { token: tokens.read })).status).toBe(200);
+    expect(
+      (await call('/api/v1/settings/mail/accounts/1/sync', { method: 'POST', token: tokens.read })).status,
+    ).toBe(403);
     expect((await call('/api/v1/mail/messages', { token: '' })).status).toBe(401);
   });
 
@@ -101,12 +105,12 @@ describe('mail through /api/v1', () => {
     expect(await res.json()).toEqual({ error: 'Mail is reached through /api/v1' });
   });
 
-  it('deletes an encoded message only through the admin gateway', async () => {
+  it('deletes an encoded message only through the gateway, with a manage token', async () => {
     const path = `/api/v1/mail/accounts/7/messages/${encodeURIComponent('same/+=')}`;
-    expect((await call(path, { method: 'DELETE', token: tokens.manage })).status).toBe(403);
+    expect((await call(path, { method: 'DELETE', token: tokens.read })).status).toBe(403);
     expect((await call(path, { method: 'DELETE', token: '' })).status).toBe(401);
     expect(service.trashMessage).not.toHaveBeenCalled();
-    const res = await call(path, { method: 'DELETE' });
+    const res = await call(path, { method: 'DELETE', token: tokens.manage });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
     expect(service.trashMessage).toHaveBeenCalledWith(7, 'same/+=');
@@ -115,12 +119,12 @@ describe('mail through /api/v1', () => {
     );
   });
 
-  it('replies to an encoded message only through the admin gateway', async () => {
+  it('replies to an encoded message only through the gateway, with a manage token', async () => {
     const path = `/api/v1/mail/accounts/7/messages/${encodeURIComponent('same/+=')}/reply`;
     const body = { text: 'Tuesday works' };
-    expect((await call(path, { method: 'POST', body, token: tokens.manage })).status).toBe(403);
+    expect((await call(path, { method: 'POST', body, token: tokens.read })).status).toBe(403);
     expect(service.action).not.toHaveBeenCalled();
-    const res = await call(path, { method: 'POST', body });
+    const res = await call(path, { method: 'POST', body, token: tokens.manage });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: 'accepted', action: 'reply' });
     expect(service.action).toHaveBeenCalledWith(7, { action: 'reply', id: 'same/+=', text: 'Tuesday works' });
