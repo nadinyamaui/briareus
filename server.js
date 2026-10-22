@@ -281,16 +281,22 @@ const githubOf = (userId) => {
   }
 };
 setOwnerGithub((job) => githubOf(job.ownerId));
-// Whose personal inboxes (mail, lib/mail-agent.js) a session reaches: its owner while they
-// are enabled, or for a session nobody owns, one from before users, the first admin, who was
-// its operator.
-const inboxOwner = (job) => {
+// Who owns what was the one operator's before users existed (sessions, Slack workspaces):
+// the first admin, the user the users migration made of them.
+const firstAdmin = () => {
   try {
-    if (job.ownerId != null) {
-      const owner = users.get(job.ownerId);
-      return owner && owner.disabledAt == null ? owner.id : null;
-    }
-    return users.list().find((u) => u.role === 'admin' && u.disabledAt == null)?.id ?? null;
+    return users.list().find((u) => u.role === 'admin')?.id ?? null;
+  } catch {
+    return null;
+  }
+};
+// Whose personal inboxes (mail, Slack) a session reaches: its owner, or for a session nobody
+// owns the first admin, and none while that user is disabled.
+const inboxOwner = (job) => {
+  const id = job.ownerId ?? firstAdmin();
+  try {
+    const owner = id == null ? null : users.get(id);
+    return owner && owner.disabledAt == null ? owner.id : null;
   } catch {
     return null;
   }
@@ -325,8 +331,10 @@ const slackService = createSlackService({
   note: noteSession,
   unfit: webhookUnfit,
   eventsUrl: (id) => `${getConfig().publicBaseUrl}/webhooks/slack/${id}`,
+  inboxOwner,
+  legacyOwner: firstAdmin,
 });
-setSlackAccess((repo) => slackService.briefing(repo));
+setSlackAccess((job) => slackService.briefing(job));
 
 // Webhooks go ahead of the JSON body parser: GitHub and Slack sign the raw bytes with an HMAC,
 // and a re-serialized body verifies against nothing (lib/webhooks.js).
