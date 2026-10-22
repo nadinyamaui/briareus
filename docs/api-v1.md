@@ -120,8 +120,27 @@ with them; unsharing a project takes it from all their tokens at once, and
 `npm run create-token` refuses to issue a member a token on a project not
 shared with them. An Envoyer account must also be shared with a member before
 they can list or deploy with it. `GET /settings/shares` lists the shares, by
-kind, resource or user. Shared database, SSH and MCP servers and Forge
-accounts take effect once sessions belong to users.
+kind, resource or user.
+
+### Sessions belong to users
+
+A session belongs to the user who started it (`ownerId`). A loop's review,
+QA run and fix, and an orchestrator's workers, belong to the owner of the
+session they were started for; the babysitter's errands belong to nobody. An
+admin sees every session; a member sees their own and the ownerless ones of
+projects shared with them, in `/sessions`, `/events`, the stats routes and
+every session route (another user's session answers 404).
+
+A session a member owns uses only the database servers, SSH servers and MCP
+servers shared with that member, on top of what its project is given; one
+nobody owns uses what its project is given. If the owner is disabled, their
+sessions lose those servers. A member sees and rules on the SSH commands of
+their own sessions with a `manage` token (`GET /ssh/requests`); an admin on
+all of them. Usage records whose session each turn ran in: `GET /usage/all`
+breaks spend down by `users` and filters by `user`, and `GET /usage` adds a
+`users` breakdown. Turns spent before users existed are filed under the
+first admin; sessions that already existed have no owner. Forge accounts are
+still used only by admins.
 
 A disabled user's tokens answer 401 within 15 seconds, without a restart. The
 last enabled admin cannot be demoted or disabled. When the server was first

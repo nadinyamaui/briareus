@@ -30,6 +30,7 @@ const {
   projectFilterKey,
   modelFilterKey,
   filterUsageRows,
+  userUsage,
   usageFilterOptions,
   modelUsage,
   providerUsage,
@@ -52,6 +53,7 @@ describe('turnUsageRecord', () => {
     expect(turnUsageRecord(job, turn, { binary: 'codex' }, 'gpt-5', 123)).toEqual({
       projectId: 7,
       jobId: 'j1',
+      userId: null,
       repo: 'o/r',
       provider: 'codex',
       accountId: null,
@@ -66,6 +68,10 @@ describe('turnUsageRecord', () => {
       durationMs: 2500,
       at: 123,
     });
+  });
+  it('files the row under the session’s owner', () => {
+    const turn = { inputTokens: 1, outputTokens: 1, costUsd: 0.25 };
+    expect(turnUsageRecord({ ...job, ownerId: 2 }, turn, { binary: 'claude' }, 'x').userId).toBe(2);
   });
   it('files the row under the session’s kind of work', () => {
     const turn = { inputTokens: 1, outputTokens: 1, costUsd: 0.25 };
@@ -1156,5 +1162,42 @@ describe('dashboard filters and insights', () => {
     expect(
       (await overallUsage([], 'custom', now, { from: '2026-10-01', to: '2026-10-02' })).comparison,
     ).toBeNull();
+  });
+});
+
+describe('spend by user', () => {
+  const at = +new Date(2026, 8, 10);
+  const turns = [
+    { jobId: 'a', userId: 1, repo: 'o/r', costUsd: 2, inputTokens: 1, outputTokens: 1, at },
+    { jobId: 'b', userId: 2, repo: 'o/r', costUsd: 5, inputTokens: 1, outputTokens: 1, at },
+    { jobId: 'c', userId: null, repo: 'o/r', costUsd: 1, inputTokens: 1, outputTokens: 1, at },
+    { jobId: 'd', userId: 9, repo: 'o/r', costUsd: 0.5, inputTokens: 1, outputTokens: 1, at },
+  ];
+  const people = [
+    { id: 1, name: 'Owner' },
+    { id: 2, name: 'Ana' },
+  ];
+
+  it('groups turns by the session owner, most spent first, naming those it knows', () => {
+    expect(userUsage(turns, people).map((u) => [u.key, u.userId, u.label, u.costUsd])).toEqual([
+      ['2', 2, 'Ana', 5],
+      ['1', 1, 'Owner', 2],
+      ['unknown', null, 'No user', 1],
+      ['9', 9, 'User #9', 0.5],
+    ]);
+  });
+
+  it('filters the overall ledger by user and offers every user in the window', async () => {
+    db.all = turns;
+    const result = await overallUsage(
+      [{ id: 7, repo: 'o/r' }],
+      'all',
+      at,
+      { user: ['1', 'unknown'] },
+      people,
+    );
+    expect(result.costUsd).toBe(3);
+    expect(result.users.map((u) => u.key)).toEqual(['1', 'unknown']);
+    expect(result.options.users.map((u) => u.label)).toEqual(['Ana', 'Owner', 'No user', 'User #9']);
   });
 });

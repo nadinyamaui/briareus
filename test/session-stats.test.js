@@ -287,8 +287,8 @@ describe('createSessionStats', () => {
 describe('sessionStatsRoutes', () => {
   it('answers per session and holds lists and totals to the token’s projects', async () => {
     const jobs = {
-      a: { id: 'a', kind: 'devchat', repo: 'o/a', status: 'idle' },
-      b: { id: 'b', kind: 'devchat', repo: 'o/b', status: 'idle' },
+      a: { id: 'a', kind: 'devchat', repo: 'o/a', status: 'idle', ownerId: 1 },
+      b: { id: 'b', kind: 'devchat', repo: 'o/b', status: 'idle', ownerId: 2 },
       r: { id: 'r', kind: 'review', repo: 'o/a' },
     };
     const sample = (id) => ({ sessionId: id, cpuPercent: 1, memoryBytes: 1, processes: 1, disk: null });
@@ -300,9 +300,11 @@ describe('sessionStatsRoutes', () => {
       server: (keep) => ({ sessions: { open: ['a', 'b'].filter(keep).length } }),
     };
     let repos = null;
+    let user = { id: 1, role: 'admin' };
     const app = express();
     app.use((_req, res, next) => {
       res.locals.apiRepos = repos;
+      res.locals.apiUser = user;
       next();
     });
     app.use(
@@ -332,6 +334,11 @@ describe('sessionStatsRoutes', () => {
       repos = ['o/b'];
       expect((await get('/api/dev/stats/sessions')).body.sessions.map((s) => s.sessionId)).toEqual(['b']);
       expect((await get('/api/dev/stats/server')).body.sessions.open).toBe(1);
+      // A member counts only their own sessions.
+      repos = ['o/a', 'o/b'];
+      user = { id: 2, role: 'member' };
+      expect((await get('/api/dev/stats/sessions')).body.sessions.map((s) => s.sessionId)).toEqual(['b']);
+      user = { id: 1, role: 'admin' };
       // Closed since the last sample, which still holds it: answered as closed at once.
       repos = null;
       jobs.a.status = 'closed';

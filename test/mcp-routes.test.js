@@ -6,7 +6,7 @@ import { agentOnly } from '../lib/auth.js';
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ credentialsKey: 'k'.repeat(32) }) }));
 
-let server, base, service, upstream, job;
+let server, base, service, upstream, job, mayUse;
 beforeEach(async () => {
   job = { id: 'one', repo: 'o/r' };
   upstream = vi.fn();
@@ -29,7 +29,8 @@ beforeEach(async () => {
   };
   const app = express();
   app.use(mcpOAuthCallbackRouter({ service }));
-  app.use(mcpProxyRouter({ service, agentSession, fetchImpl: upstream }));
+  mayUse = vi.fn(() => true);
+  app.use(mcpProxyRouter({ service, agentSession, fetchImpl: upstream, mayUse }));
   app.use(express.json());
   const routes = mcpRoutes({ service, getProject: (repo) => (repo === 'o/r' ? { repo } : null) });
   // The operator reaches these through /api/v1 (a header stands in for the
@@ -296,5 +297,20 @@ describe('the operator routes', () => {
     });
     expect(res.status).toBe(403);
     expect((await fetch(`${base}/api/mcp/servers`)).status).toBe(410);
+  });
+});
+
+describe('a session owned by a member', () => {
+  it('cannot call an MCP server not shared with its owner', async () => {
+    mayUse.mockReturnValue(false);
+    const res = await fetch(`${base}/api/agent/mcp/5`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer session-token', 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    expect(res.status).toBe(404);
+    expect(mayUse).toHaveBeenCalledWith(job, 5);
+    expect(service.upstream).not.toHaveBeenCalled();
+    expect(upstream).not.toHaveBeenCalled();
   });
 });
