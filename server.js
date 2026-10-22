@@ -697,7 +697,11 @@ api.use(
 const whatsappService = createWhatsAppService();
 // Replies in the chats a session wrote to come back to it (lib/whatsapp-watch.js).
 // Whose each WhatsApp account is (lib/whatsapp-owners.js); a session reaches its inbox owner's.
-const whatsappOwners = createWhatsAppOwners({ legacyOwner, lookupAccount: whatsappService.account });
+const whatsappOwners = createWhatsAppOwners({
+  legacyOwner,
+  lookupAccount: whatsappService.account,
+  listAccounts: whatsappService.accounts,
+});
 const whatsappMayUse = (job, account) => whatsappOwners.owns(inboxOwner(job), account);
 const whatsappWatcher = createWhatsAppWatcher({
   service: whatsappService,
@@ -2347,6 +2351,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   setInterval(() => {
     mobileAuth.refresh().catch((e) => console.error('Could not reload device tokens:', e.message));
     users.refresh().catch((e) => console.error('Could not reload users:', e.message));
+    whatsappOwners.init().catch((e) => console.error('Could not initialize WhatsApp ownership:', e.message));
   }, 15000).unref();
   // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
   // a client reads its mail from the database rather than from the provider.

@@ -46,9 +46,9 @@ async function mediaService(fileHandler, timeoutMs = 150) {
   return createWhatsAppService({ config: () => ({ url, apiKey: KEY }), timeoutMs });
 }
 
-async function setup() {
+async function setup({ initialAccount = null } = {}) {
   const calls = [];
-  let current = null;
+  let current = initialAccount;
   let failure = 0;
   let mediaUrl = '';
   let groupAnswer = null;
@@ -142,8 +142,10 @@ async function setup() {
     },
     legacyOwner: () => 1,
     lookupAccount: service.account,
+    listAccounts: service.accounts,
   });
   await owners.init();
+  calls.length = 0;
   const app = express();
   app.use(
     apiV1Routes({
@@ -282,6 +284,19 @@ describe('the WhatsApp core inbox', () => {
     ctx.setCurrent({ name: 'default', status: 'WORKING' });
     expect((await (await ctx.request('', { token: ctx.tokens.member })).json()).accounts).toEqual([]);
     expect((await (await ctx.request('')).json()).accounts.map((a) => a.id)).toEqual(['default']);
+  });
+
+  it('lists and reads an existing Plus account for its original operator without starting it', async () => {
+    const ctx = await setup({ initialAccount: { name: 'business', status: 'WORKING' } });
+    expect((await (await ctx.request()).json()).accounts.map((a) => a.id)).toEqual(['business']);
+    expect((await ctx.request('/business')).status).toBe(200);
+    expect((await (await ctx.request('', { token: ctx.tokens.member })).json()).accounts).toEqual([]);
+    ctx.calls.length = 0;
+    expect((await ctx.request('/business', { token: ctx.tokens.member })).status).toBe(404);
+    expect((await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member })).status).toBe(
+      404,
+    );
+    expect(ctx.calls).toEqual([]);
   });
 
   it('reserves an existing Plus account for the original operator before a member can start it', async () => {
