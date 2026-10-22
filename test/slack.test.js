@@ -87,6 +87,8 @@ async function service({ project = {}, unfit = () => null, jobs = { j1: job() } 
     note,
     unfit,
     eventsUrl: (id) => `https://briareus.example/webhooks/slack/${id}`,
+    // Workspaces and sessions from before users belong to the first admin.
+    legacyOwner: () => 1,
     log: () => {},
   });
   await s.init();
@@ -119,6 +121,7 @@ describe('the Slack workspaces', () => {
       hasToken: true,
       hasSigningSecret: true,
       eventsUrl: `https://briareus.example/webhooks/slack/${w.id}`,
+      ownerId: 1,
     });
     const row = stored.slack_workspaces[0];
     expect(row.token).toMatch(/^v1:/);
@@ -191,7 +194,7 @@ describe('the Slack workspaces', () => {
     const { s } = await service();
     expect(s.list('o/a')).toHaveLength(1);
     expect(s.list('o/b')).toEqual([]);
-    expect(s.briefing('o/a')).toEqual({
+    expect(s.briefing({ repo: 'o/a' })).toEqual({
       team: 'Okanet',
       user: 'nadin',
       permissionMode: 'ask',
@@ -199,7 +202,7 @@ describe('the Slack workspaces', () => {
       channels: ['dev'],
       replies: true,
     });
-    expect(s.briefing('o/b')).toBeNull();
+    expect(s.briefing({ repo: 'o/b' })).toBeNull();
   });
 });
 
@@ -217,6 +220,22 @@ describe('a session sending', () => {
     });
     expect((await s.findPeople(job(), 'andr')).map((p) => p.id)).toEqual(['U2', 'U1']);
     expect((await s.findPeople(job(), 'Pérez')).map((p) => p.id)).toEqual(['U1']);
+  });
+
+  it('lets only the workspace’s owner rule on what it sends, and each user’s sessions use their own', async () => {
+    const { s } = await service();
+    const r = await s.request(job(), { to: 'U1', text: 'hi' });
+    expect(s.pending(2)).toEqual([]);
+    await expect(s.decide(r.id, 'deny', 2)).rejects.toThrow('no longer waiting');
+    expect(s.pending(1).map((p) => p.id)).toEqual([r.id]);
+    // Ana connects her own workspace for the same project: a claim of hers, not a clash.
+    await s.create({ token: TOKEN, projects: [{ repo: 'o/a', channels: [] }] }, 2);
+    expect(s.list(undefined, 2)).toHaveLength(1);
+    expect(s.briefing({ repo: 'o/a', ownerId: 2 })).toMatchObject({ channels: [] });
+    expect(s.briefing({ repo: 'o/a', ownerId: 3 })).toBeNull();
+    await expect(s.create({ token: TOKEN, projects: [{ repo: 'o/a' }] }, 2)).rejects.toThrow('already sends');
+    expect(() => s.owns(s.list(undefined, 2)[0].id, 1)).toThrow('Slack workspace not found');
+    await expect(s.remove(s.list(undefined, 2)[0].id, 1)).rejects.toThrow('Slack workspace not found');
   });
 
   it('holds a message for approval in ask mode, and approving it opens the DM and sends it', async () => {
@@ -1499,7 +1518,7 @@ describe('replies through the Events API', () => {
         ts: '1.2',
       }),
     );
-    expect(s.briefing('o/a')).toBeNull();
+    expect(s.briefing({ repo: 'o/a' })).toBeNull();
     expect(s.receive(String(w.id), reply.raw, reply.headers).then).toBeUndefined();
     expect(deliver).not.toHaveBeenCalled();
   });
@@ -1593,6 +1612,11 @@ describe('the wire', () => {
     const app = express();
     app.use('/webhooks/slack', slackEventsRouter({ service: s, log: () => {} }));
     app.use(express.json());
+    // The user /api/v1 would have resolved the operator's token to.
+    app.use((_req, res, next) => {
+      res.locals.apiUser = { id: 1, role: 'admin' };
+      next();
+    });
     const agentSession = (req, res) => {
       if (req.headers.authorization === 'Bearer agent') return job();
       res.status(401).json({ error: 'Unknown session token' });
