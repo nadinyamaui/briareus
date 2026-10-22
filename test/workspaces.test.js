@@ -14,6 +14,9 @@ const state = vi.hoisted(() => ({
   registryComplete: true,
   removed: [],
   quarantineError: null,
+  /** @type {string[]} */
+  calls: [],
+  expireResult: { expired: [], errors: [] },
 }));
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ workspaceDir: state.root }) }));
@@ -24,7 +27,12 @@ vi.mock('../lib/jobs.js', () => ({
 }));
 
 vi.mock('../lib/workspace-quarantine.js', () => ({
+  expireQuarantine: (root) => {
+    state.calls.push(`expire ${root}`);
+    return state.expireResult;
+  },
   quarantineWorkspace: (p) => {
+    state.calls.push(`quarantine ${p}`);
     if (state.quarantineError) throw state.quarantineError;
     state.removed.push(p);
     delete state.files[p];
@@ -107,6 +115,8 @@ beforeEach(() => {
   state.registryComplete = true;
   state.removed = [];
   state.quarantineError = null;
+  state.calls = [];
+  state.expireResult = { expired: [], errors: [] };
 });
 
 describe('parseSlotName / slotDir', () => {
@@ -250,6 +260,33 @@ describe('actions', () => {
     expect(state.removed).toEqual([idle]);
     expect(state.files[claimed]).toBeDefined();
     expect(state.files[path.join(state.root, 'notes')]).toBeDefined();
+  });
+
+  it('expires recovery checkouts before quarantining, so freed capacity is used the same run', () => {
+    const idle = slot('acme__app');
+    state.expireResult = {
+      expired: [`${state.root}/.briareus-recovery/acme__app-x`],
+      errors: [{ path: `${state.root}/.briareus-recovery/acme__app-y`, error: 'EACCES' }],
+    };
+    expect(pruneUnusedWorkspaces()).toMatchObject({
+      removed: ['acme__app'],
+      expired: state.expireResult.expired,
+      expireErrors: state.expireResult.errors,
+    });
+    expect(state.calls).toEqual([`expire ${state.root}`, `quarantine ${idle}`]);
+  });
+
+  it('logs expired recovery checkouts and the ones it could not delete', () => {
+    state.expireResult = {
+      expired: ['/a', '/b'],
+      errors: [{ path: '/c', error: 'EACCES: permission denied' }],
+    };
+    const lines = [];
+    clearInterval(startWorkspacePruner((line) => lines.push(line), 1000));
+    expect(lines).toEqual([
+      'Workspace cleanup deleted 2 recovery checkouts that held no local work.',
+      'Workspace cleanup could not delete recovery checkout /c, which holds no local work: EACCES: permission denied. Remove it manually.',
+    ]);
   });
 
   it('leaves a failed quarantine in place and reports the error without deleting files', () => {

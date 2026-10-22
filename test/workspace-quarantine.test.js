@@ -4,7 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { quarantineWorkspace, QUARANTINE_NAME, QUARANTINE_LIMIT } from '../lib/workspace-quarantine.js';
+import {
+  quarantineWorkspace,
+  expireQuarantine,
+  QUARANTINE_NAME,
+  QUARANTINE_LIMIT,
+} from '../lib/workspace-quarantine.js';
 
 const roots = [];
 function fixture() {
@@ -173,4 +178,107 @@ describe('workspace quarantine', () => {
       expect(fs.readdirSync(outside)).toEqual([]);
     },
   );
+
+  describe('expiry', () => {
+    // A slot cloned from a bare "remote", committed and pushed, then quarantined;
+    // `change` leaves (or not) local work in it before it is moved.
+    function quarantined(root, name, change = () => {}) {
+      const remote = path.join(root, `${name}.remote.git`);
+      execFileSync('git', ['init', '-q', '--bare', remote]);
+      const dir = path.join(root, name);
+      execFileSync('git', ['clone', '-q', remote, dir], { stdio: 'ignore' });
+      const git = (...args) =>
+        execFileSync('git', ['-C', dir, '-c', 'user.name=F', '-c', 'user.email=f@example.com', ...args], {
+          encoding: 'utf8',
+        });
+      fs.writeFileSync(path.join(dir, '.gitignore'), 'build/\n');
+      fs.writeFileSync(path.join(dir, 'source'), 'pushed');
+      git('add', '.');
+      git('commit', '-qm', 'Pushed');
+      git('push', '-q', 'origin', 'HEAD');
+      fs.mkdirSync(path.join(dir, 'build'));
+      fs.writeFileSync(path.join(dir, 'build', 'output'), 'ignored artifact');
+      change(git, dir);
+      return path.dirname(quarantineWorkspace(dir));
+    }
+
+    it('deletes checkouts with no local work and keeps every kind of work', () => {
+      const root = fixture();
+      const clean = quarantined(root, 'acme__clean');
+      const modified = quarantined(root, 'acme__modified', (git, dir) =>
+        fs.writeFileSync(path.join(dir, 'source'), 'edited'),
+      );
+      const untracked = quarantined(root, 'acme__untracked', (git, dir) =>
+        fs.writeFileSync(path.join(dir, 'notes'), 'new file'),
+      );
+      const unpushed = quarantined(root, 'acme__unpushed', (git) =>
+        git('commit', '-q', '--allow-empty', '-m', 'Local'),
+      );
+      const otherBranch = quarantined(root, 'acme__branch', (git) => {
+        git('checkout', '-qb', 'side');
+        git('commit', '-q', '--allow-empty', '-m', 'Local');
+        git('checkout', '-q', '-');
+      });
+      const stashed = quarantined(root, 'acme__stash', (git, dir) => {
+        fs.writeFileSync(path.join(dir, 'source'), 'stashed');
+        git('stash', '-q');
+      });
+      const noGit = path.dirname(
+        quarantineWorkspace(
+          (() => {
+            const dir = path.join(root, 'acme__nogit');
+            fs.mkdirSync(dir);
+            fs.writeFileSync(path.join(dir, 'work'), 'preserve');
+            return dir;
+          })(),
+        ),
+      );
+
+      expect(expireQuarantine(root)).toEqual({ expired: [clean], errors: [] });
+      expect(fs.existsSync(clean)).toBe(false);
+      for (const kept of [modified, untracked, unpushed, otherBranch, stashed, noGit])
+        expect(fs.existsSync(path.join(kept, 'checkout')), kept).toBe(true);
+    });
+
+    it('frees capacity at the retention bound', () => {
+      const root = fixture();
+      const recovery = path.join(root, QUARANTINE_NAME);
+      quarantined(root, 'acme__clean');
+      for (let i = 1; i < QUARANTINE_LIMIT; i++)
+        fs.mkdirSync(path.join(recovery, `backup-${i}`, 'checkout'), { recursive: true });
+      const dir = path.join(root, 'acme__app');
+      fs.mkdirSync(dir);
+      expect(() => quarantineWorkspace(dir)).toThrow(/Recovery limit/);
+      expect(expireQuarantine(root).expired).toHaveLength(1);
+      expect(fs.existsSync(quarantineWorkspace(dir))).toBe(true);
+    });
+
+    it('does nothing without a recovery directory or through a symlinked one', () => {
+      const root = fixture();
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      const outside = fixture();
+      quarantined(outside, 'acme__clean');
+      fs.symlinkSync(path.join(outside, QUARANTINE_NAME), path.join(root, QUARANTINE_NAME));
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(fs.readdirSync(path.join(outside, QUARANTINE_NAME))).toHaveLength(1);
+    });
+
+    it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+      'reports a checkout whose build output refuses removal and keeps its history',
+      () => {
+        const root = fixture();
+        const container = quarantined(root, 'acme__clean');
+        const build = path.join(container, 'checkout', 'build');
+        fs.chmodSync(build, 0o555);
+        try {
+          const result = expireQuarantine(root);
+          expect(result.expired).toEqual([]);
+          expect(result.errors).toEqual([{ path: container, error: expect.stringMatching(/EACCES|EPERM/) }]);
+          expect(fs.existsSync(path.join(container, 'checkout', '.git', 'HEAD'))).toBe(true);
+        } finally {
+          fs.chmodSync(build, 0o755);
+        }
+      },
+    );
+  });
 });
