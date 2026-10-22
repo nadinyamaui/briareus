@@ -296,7 +296,7 @@ const sessionMayUse = (job, kind, id) => {
   }
 };
 setDbServerFilter((job, server) => sessionMayUse(job, 'dbServer', server.id));
-setSessionProjectAccess((job, repo) => sessionMayUse(job, 'project', repo));
+setSessionProjectAccess((job, repo) => sessionMayUse(job, 'project', getProject(repo)?.id));
 
 // On every response, including the webhooks': nothing here is a page, and the
 // headers say so (lib/security.js).

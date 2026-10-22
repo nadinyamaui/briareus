@@ -14890,6 +14890,71 @@ describe('automatic recovery after a server restart', () => {
     child.emit('close', 0);
   };
 
+  it('uses server GitHub identity for automatic triage after reopening a failed queued session', async () => {
+    const gh = await vi.importActual('../lib/github.js');
+    Object.assign(state.projects[0], { autonomousReviewLoop: true, envTemplate: '', setupCommands: [] });
+    const originalSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, args, opts) => {
+      if (cmd !== 'git') return originalSpawn(cmd, args, opts);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      if (args[0] === 'clone') fs.mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      setImmediate(() => child.emit('close', 0));
+      return child;
+    });
+    const gitProbe = vi
+      .spyOn(await import('child_process'), 'spawnSync')
+      .mockReturnValue({ status: 0, stdout: '', stderr: '' });
+    const saved = row({
+      status: 'failed',
+      orchestrator: false,
+      branch: 'feature',
+      startedOnPr: 77,
+      prStatus: { number: 77, state: 'open' },
+      recoveryTurn: null,
+      recoveryQueue: [{ prompt: 'Queued instruction', shown: 'Queued instruction', files: [] }],
+      reviewLoop: { rounds: 1, reviewing: false, lastSha: 'a', pendingResult: { prNumber: 77, round: 1 } },
+    });
+    state.stored = [saved];
+    await initJobs({ deferPolling: true });
+    latestReviewFindings.mockResolvedValueOnce([
+      {
+        key: 'optional',
+        title: 'Small issue',
+        severity: 'low',
+        assessment: { verified: true, evidence: 'Reproduced', worthFixing: false, reason: 'Optional' },
+      },
+    ]);
+    githubRest.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ number: 77, state: 'open', labels: [{ name: 'code-approved' }] })),
+    );
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+    recordTriage.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await gh.githubRest({ githubToken: 'server-token' }, 'POST', '/automatic-triage');
+      return { error: null };
+    });
+    try {
+      gh.asGithubUser('request-token', () => reopenDevSession(saved.id));
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(children[0].prompt).toContain('Queued instruction');
+      finish(children[0]);
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+      expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer server-token');
+      await vi.waitFor(() => expect(saved.reviewLoop.done).toBe(true));
+    } finally {
+      gitProbe.mockRestore();
+      spawn.mockImplementation(originalSpawn);
+      fetch.mockRestore();
+      githubRest.mockReset();
+      recordTriage.mockReset();
+      recordTriage.mockResolvedValue({ error: null });
+    }
+  });
+
   it('resumes the saved conversation, preserves dirty files and delivers queued instructions', async () => {
     const checkout = path.join(root, 'checkout');
     fs.mkdirSync(checkout);

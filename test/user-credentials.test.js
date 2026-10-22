@@ -35,13 +35,47 @@ it('keeps each user’s credentials sealed, by kind, across a restart', async ()
 });
 
 it('keeps the cache unchanged when the write fails', async () => {
+  const save = vi.fn().mockRejectedValueOnce(new Error('DB down')).mockResolvedValue(undefined);
   const credentials = createUserCredentials({
     load: async () => [],
-    save: async () => {
-      throw new Error('DB down');
-    },
+    save,
   });
   await credentials.init();
   await expect(credentials.set(2, 'github', { token: 't' })).rejects.toThrow('DB down');
   expect(credentials.get(2, 'github')).toBeNull();
+  await credentials.set(2, 'github', { token: 'new' });
+  expect(credentials.get(2, 'github')).toEqual({ token: 'new' });
+});
+
+it('finishes saving and publishing a credential before a queued disconnect', async () => {
+  let row = null;
+  let acknowledgeSave;
+  const acknowledgement = new Promise((resolve) => {
+    acknowledgeSave = resolve;
+  });
+  const remove = vi.fn(async () => {
+    row = null;
+  });
+  const options = {
+    load: async () => (row ? [{ userId: 2, kind: 'github', value: row }] : []),
+    save: vi.fn(async (_userId, _kind, sealed) => {
+      row = sealed;
+      await acknowledgement;
+    }),
+    remove,
+  };
+  const credentials = createUserCredentials(options);
+  await credentials.init();
+  const saving = credentials.set(2, 'github', { token: 'old' });
+  await vi.waitFor(() => expect(options.save).toHaveBeenCalledOnce());
+  const disconnecting = credentials.remove(2, 'github');
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(remove).not.toHaveBeenCalled();
+  acknowledgeSave();
+  await Promise.all([saving, disconnecting]);
+  expect(row).toBeNull();
+  expect(credentials.get(2, 'github')).toBeNull();
+  const restarted = createUserCredentials(options);
+  await restarted.init();
+  expect(restarted.get(2, 'github')).toBeNull();
 });
