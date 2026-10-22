@@ -8909,6 +8909,40 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         prStatus: { ...prOne, baseRef: 'main' },
         prAttachedByBranch: true,
       }),
+      // Owns the sibling #1 that stk-cutter holds by branch as well.
+      row('stk-cut-owner', {
+        repo: 'acme/cut',
+        branch: 'dev-a',
+        prStatus: { ...prOne, baseRef: 'main' },
+        prAttachedByBranch: true,
+      }),
+      // Owns #1 (dev-a) alone; on dev-b it takes a stacked #2 no open session tracks.
+      row('stk-alone', {
+        repo: 'acme/alone',
+        branch: 'dev-a',
+        prStatus: { ...prOne, baseRef: 'main' },
+        prAttachedByBranch: true,
+      }),
+      // Its round on #77 is out while #77 is not mirrored (found by GraphQL, REST
+      // read failed). Closed, like the other PR-less ones, except inside its test.
+      row('stk-unmirrored', {
+        repo: 'acme/unmirror',
+        branch: 'dev-u',
+        reviewLoop: {
+          rounds: 1,
+          reviewing: true,
+          reviewSessionId: 'stk-unmirrored-rev',
+          reviewPr: 77,
+          lastSha: 'sha-u',
+        },
+      }),
+      {
+        ...row('stk-unmirrored-rev', { repo: 'acme/unmirror' }),
+        branch: 'dev-u',
+        createdAt: '2026-10-22T10:00:00.000Z',
+        loopParentId: 'stk-unmirrored',
+        loopReviewDone: true,
+      },
       // Spotted #1 itself; attaches #2 by branch on dev-b, then comes back to dev-a.
       row('stk-spot', {
         repo: 'acme/spot',
@@ -8981,6 +9015,8 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       'stk-lower',
       'stk-upper',
       'stk-cutter',
+      'stk-cut-owner',
+      'stk-alone',
       'stk-spot',
       'stk-sync-queued',
       'stk-twice',
@@ -9252,6 +9288,46 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     expect(job.branch).toBe('dev-a');
     expect(job.prStatus.number).toBe(2);
     expect(job.prAttachedByBranch).toBe(true);
+  });
+
+  it('lets go of an unowned stacked pull request it took when it comes back to its own branch', async () => {
+    const job = getJob('stk-alone');
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    expect(job.releasedPrAttach).toMatchObject({ number: 1, headRef: 'dev-a', shared: false });
+    // A person opened #2, or its worker closed: no open session tracks it.
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'dev-a', headSha: 'sha-b' };
+    job.prAttachedByBranch = true;
+    await onBranch(job, 'dev-a', async () => {
+      refreshJobBranch(job);
+    });
+    // #1 was this session's alone, so coming back to it lets go of #2.
+    expect(job.branch).toBe('dev-a');
+    expect(job.prStatus).toBeNull();
+    expect(job.releasedPrAttach).toMatchObject({ number: 2, headRef: 'dev-b' });
+  });
+
+  it('reads a round off a pull request found but not mirrored yet, rather than dropping it as released', async () => {
+    const job = getJob('stk-unmirrored');
+    const review = getJob('stk-unmirrored-rev');
+    latestReviewDeclaration.mockClear();
+    latestReviewDeclaration.mockResolvedValueOnce({ findings: [], clean: true });
+    githubRest.mockResolvedValue({ ok: false, status: 403, json: async () => ({}) });
+    job.status = 'idle';
+    review.status = 'idle';
+    try {
+      await closeDevSession('stk-unmirrored-rev');
+      await vi.waitFor(() => expect(latestReviewDeclaration).toHaveBeenCalled());
+      expect(latestReviewDeclaration.mock.calls[0].slice(0, 2)).toEqual(['acme/unmirror', 77]);
+      expect(infoTexts(job).join('\n')).not.toMatch(/no longer tracks/);
+      // No second round on the same commit.
+      expect(job.reviewLoop.rounds).toBe(1);
+      expect(job.reviewLoop.lastSha).toBe('sha-u');
+    } finally {
+      job.status = 'closed';
+    }
   });
 
   it('keeps a spotted pull request closing on merge after another one was attached and released on the way', async () => {
