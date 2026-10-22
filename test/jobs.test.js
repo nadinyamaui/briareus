@@ -8893,6 +8893,35 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         prAttachedByBranch: true,
         reviewLoop: { rounds: 1, done: true, lastSha: 'sha-a', reviewPr: 1 },
       }),
+      // Owns the upper stacked #2 (dev-b, base dev-a) that stk-lower takes on the way.
+      row('stk-upper', {
+        repo: 'acme/lower',
+        branch: 'dev-b',
+        prStatus: { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'dev-a', headSha: 'sha-b' },
+        prAttachedByBranch: true,
+      }),
+      // Spawned on dev-a, holding the sibling's #1 by branch; cuts dev-b for its own
+      // stacked #2 and may later end a turn on dev-a.
+      row('stk-cutter', {
+        repo: 'acme/cut',
+        branch: 'dev-a',
+        startBranch: 'dev-a',
+        prStatus: { ...prOne, baseRef: 'main' },
+        prAttachedByBranch: true,
+      }),
+      // Spotted #1 itself; attaches #2 by branch on dev-b, then comes back to dev-a.
+      row('stk-spot', {
+        repo: 'acme/spot',
+        branch: 'dev-a',
+        prStatus: { ...prOne, baseRef: 'main' },
+      }),
+      // Found #1 from dev-a; two webhook syncs of it are queued as it moves off.
+      row('stk-sync-queued', {
+        repo: 'acme/queue',
+        branch: 'dev-a',
+        prStatus: prOne,
+        prAttachedByBranch: true,
+      }),
       // Converged on #1 (dev-a); releases it, then a second PR before any round.
       row('stk-twice', {
         repo: 'acme/lower',
@@ -8950,6 +8979,10 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       'stk-base',
       'stk-stacked',
       'stk-lower',
+      'stk-upper',
+      'stk-cutter',
+      'stk-spot',
+      'stk-sync-queued',
       'stk-twice',
       'stk-sync',
       'stk-qa',
@@ -9203,6 +9236,63 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     expect(job.releasedPrAttach).toMatchObject({ number: 2, headRef: 'dev-b' });
   });
 
+  it('keeps its own stacked pull request on the base it cut its branch from', async () => {
+    const job = getJob('stk-cutter');
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    expect(job.releasedPrAttach).toMatchObject({ number: 1, headRef: 'dev-a' });
+    // Its own stacked #2 attaches by branch; no other session has it.
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'dev-a', headSha: 'sha-b' };
+    job.prAttachedByBranch = true;
+    await onBranch(job, 'dev-a', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.branch).toBe('dev-a');
+    expect(job.prStatus.number).toBe(2);
+    expect(job.prAttachedByBranch).toBe(true);
+  });
+
+  it('keeps a spotted pull request closing on merge after another one was attached and released on the way', async () => {
+    const job = getJob('stk-spot');
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'main', headSha: 'sha-b' };
+    job.prAttachedByBranch = true;
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url.startsWith('/repos/acme/spot/pulls?'))
+        return {
+          ok: true,
+          json: async () => (url.includes('head=acme:dev-a') ? [{ number: 1, base: { ref: 'main' } }] : []),
+        };
+      if (/\/pulls\/1$/.test(url))
+        return {
+          ok: true,
+          json: async () => ({
+            number: 1,
+            state: 'open',
+            head: { ref: 'dev-a', sha: 'sha-a' },
+            base: { ref: 'main' },
+          }),
+        };
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    job.status = 'running';
+    try {
+      await onBranch(job, 'dev-a', async () => {
+        refreshJobBranch(job);
+        expect(job.prStatus).toBeNull();
+        expect(await attachPrForBranch(job, { fresh: true })).toBe(1);
+      });
+    } finally {
+      job.status = 'idle';
+    }
+    expect(job.prAttachedByBranch).toBe(false);
+  });
+
   it('keeps the first released pull request across a second release before any round', async () => {
     const job = getJob('stk-twice');
     await onBranch(job, 'dev-b', async () => {
@@ -9251,6 +9341,38 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     await new Promise((r) => setTimeout(r, 20));
     expect(job.prStatus).toBeNull();
   });
+  it('does not let a sync queued behind one in flight write the released pull request back', async () => {
+    const job = getJob('stk-sync-queued');
+    let release;
+    const gate = new Promise((r) => (release = r));
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (/\/pulls\/1$/.test(url)) {
+        await gate;
+        return {
+          ok: true,
+          json: async () => ({
+            number: 1,
+            state: 'open',
+            head: { ref: 'dev-a', sha: 'sha-a' },
+            base: { ref: 'main' },
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    // Two webhooks name #1 back to back: the second waits for the first.
+    expect(syncSessionsOn('acme/queue', null, 1)).toBe(1);
+    expect(syncSessionsOn('acme/queue', null, 1)).toBe(1);
+    await new Promise((r) => setTimeout(r, 0));
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(job.prStatus).toBeNull();
+  });
+
   it('does not claim a pull request another open session is still working on, and takes it once that one settles', async () => {
     githubRest.mockImplementation(async (_cfg, _method, url) => {
       if (url.startsWith('/repos/acme/shop/pulls?'))
