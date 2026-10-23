@@ -1171,7 +1171,14 @@ describe('review follow-ups posted by the session owner', () => {
         { ...comment, id: 91, in_reply_to_id: 90, user: { login: 'unrelated-user' } },
         { ...comment, id: 92, in_reply_to_id: 90, user: { login: 'Ana' } },
       ];
-      const options = { since: '2026-09-08T09:00:00Z', authorLogin: 'ana' };
+      gh.comments = [{ ...findingsComment([finding]), user: { login: 'ana' } }];
+      const [published] = await latestReviewFindings(repo, 5);
+      expect(published.reviewAuthorLogin).toBe('ana');
+      gh.comments = [];
+      const options = {
+        since: '2026-09-08T09:00:00Z',
+        authorLogin: published.reviewAuthorLogin,
+      };
       if (action === 'reply') {
         await replyOnFindingThread(repo, 5, finding, 'Noted', options);
         expect(gh.writes[0]).toMatchObject({

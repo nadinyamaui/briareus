@@ -5993,6 +5993,9 @@ describe('standalone code-review findings', () => {
       queuedReview('mine-fix', [finding('m2', 'Validate the input')], true),
       queuedReview('mine-save', [finding('m3', 'Keep the type')], true),
       queuedReview('stand-dispatch', [finding('k7', 'Rename the flag')]),
+      ...['reply', 'delete'].flatMap((action) =>
+        ['disconnected', 'changed'].map((connection) => queuedReview(`stand-${action}-${connection}`, [])),
+      ),
       // A review whose card is already gone (completed elsewhere, or its PR closed).
       { ...queuedReview('stand-none', []), reviewTriage: null },
     ];
@@ -6181,6 +6184,37 @@ describe('standalone code-review findings', () => {
     );
     await expect(replyToReviewFinding('stand-none', 'k5', 'hi')).rejects.toThrow(/no findings waiting/);
     await expect(replyToReviewFinding('stand-nope', 'k5', 'hi')).rejects.toThrow(/Session not found/);
+  });
+
+  it.each([
+    ['reply', 'disconnected'],
+    ['reply', 'changed'],
+    ['delete', 'disconnected'],
+    ['delete', 'changed'],
+  ])('uses the published author for %s after the owner connection is %s', async (action, connection) => {
+    const job = getJob(`stand-${action}-${connection}`);
+    job.reviewTriage = null;
+    job.ownerId = 2;
+    job.prStatus.author = 'a-colleague';
+    const published = { ...finding('published', 'Published finding'), reviewAuthorLogin: 'ana' };
+    latestReviewFindings.mockResolvedValueOnce([published]);
+    sortFindingsForFix.mockResolvedValueOnce({ kept: [published], parked: [] });
+    setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
+    try {
+      expect(await holdStandaloneReviewFindings(job)).toBe(true);
+      // The held result survives serialization without retaining a credential.
+      job.reviewTriage = JSON.parse(JSON.stringify(job.reviewTriage));
+      setOwnerGithub(() => (connection === 'changed' ? { token: 'bob-token', login: 'bob', id: 43 } : null));
+      const operation = action === 'reply' ? replyOnFindingThread : deleteFindingFromReview;
+      operation.mockClear();
+      if (action === 'reply') await replyToReviewFinding(job.id, 'published', 'Noted');
+      else await deleteReviewFinding(job.id, 'published');
+      const options = operation.mock.lastCall.at(-1);
+      expect(options).toEqual({ since: job.createdAt, authorLogin: 'ana' });
+      expect(job.reviewTriage.findings).toHaveLength(action === 'reply' ? 1 : 0);
+    } finally {
+      setOwnerGithub(() => null);
+    }
   });
 
   it('deletes one finding posted by the owner and leaves the rest on the card', async () => {
