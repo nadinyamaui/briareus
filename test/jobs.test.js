@@ -6002,6 +6002,7 @@ describe('standalone code-review findings', () => {
       ),
       // A review whose card is already gone (completed elsewhere, or its PR closed).
       { ...queuedReview('stand-none', []), reviewTriage: null },
+      { ...queuedReview('stand-deferred', []), reviewTriage: null },
     ];
     await initJobs();
     getJob('stand-close').status = 'idle';
@@ -6033,6 +6034,30 @@ describe('standalone code-review findings', () => {
       standalone: true,
       findings: [{ key: 'fresh', title: 'Fresh finding', parked: null }],
     });
+  });
+
+  it('keeps deferred publication lookups and earlier turn identities on the held card', async () => {
+    const found = [
+      {
+        ...finding('pending', 'Published finding'),
+        reviewPublication: { after: 1, before: 2, authors: ['alice', 'bob'] },
+      },
+    ];
+    latestReviewFindings.mockResolvedValueOnce(found);
+    sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
+    const job = getJob('stand-deferred');
+    job.status = 'idle';
+    job.reviewAuthorLogins = ['alice', 'bob'];
+
+    expect(await holdStandaloneReviewFindings(job)).toBe(true);
+    expect(latestReviewFindings.mock.lastCall.at(-1)).toEqual({
+      since: job.createdAt,
+      authorLogins: ['alice', 'bob'],
+    });
+    expect(JSON.parse(JSON.stringify(job.reviewTriage)).findings[0]).toMatchObject(found[0]);
+    await closeDevSession(job.id);
+    expect(getJob(job.id).reviewTriage.findings[0]).toMatchObject(found[0]);
+    expect(deleteJob).not.toHaveBeenCalledWith(job.id, null);
   });
 
   // Whose pull request it is (GitHub's author vs the account the app acts as) decides the
@@ -7210,6 +7235,7 @@ describe('the review loop: what a closing loop review reports back', () => {
   it('a finished review that declared no findings ends the round cleanly', async () => {
     const parent = getJob('par-2');
     parent.ownerId = 2;
+    getJob('rev-2').reviewAuthorLogins = ['earlier-owner', 'ana'];
     setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
     try {
       await closeDevSession('rev-2');
@@ -7220,6 +7246,7 @@ describe('the review loop: what a closing loop review reports back', () => {
       expect(latestReviewFindings).toHaveBeenCalledWith('acme/loop', 77, {
         since: '2026-08-25T13:00:00.000Z',
         authorLogin: 'ana',
+        authorLogins: ['earlier-owner', 'ana'],
       });
     } finally {
       parent.ownerId = null;
@@ -13562,6 +13589,29 @@ describe('Codex turn usage', () => {
     return recordTurnUsage.mock.lastCall[1];
   };
   const walks = (spy) => spy.mock.calls.filter(([dir]) => String(dir).includes('.codex-provider-2')).length;
+
+  it('persists the GitHub accounts actually used by successive review turns', async () => {
+    const job = getJob('codex-usage');
+    job.ownerId = 2;
+    job.reviewBranch = 'feature';
+    let login = 'alice';
+    setOwnerGithub(() => ({ token: `${login}-token`, login, id: 42 }));
+    try {
+      const usage = { input_tokens: 500100, cached_input_tokens: 450050, output_tokens: 20010 };
+      await turn(job, 'Review the change', usage);
+      login = 'bob';
+      await turn(job, 'Publish the review', usage);
+      await turn(job, 'Finish publishing', usage);
+      expect(job.reviewAuthorLogins).toEqual(['alice', 'bob']);
+      await flushJobs();
+      const saved = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
+      expect(JSON.parse(JSON.stringify(saved)).reviewAuthorLogins).toEqual(['alice', 'bob']);
+      const calls = spawn.mock.calls.filter(([cmd]) => cmd === '/mock/agent');
+      expect(calls.map(([, , opts]) => opts.env.GH_TOKEN)).toEqual(['alice-token', 'bob-token', 'bob-token']);
+    } finally {
+      setOwnerGithub(() => null);
+    }
+  });
 
   it('prices a running turn and updates the same checkpoint at close', async () => {
     vi.useFakeTimers();

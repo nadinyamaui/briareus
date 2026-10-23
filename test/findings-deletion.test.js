@@ -265,3 +265,116 @@ it.each([
     expect(request.mock.calls.some(([, init]) => ['POST', 'DELETE'].includes(init.method))).toBe(false);
   },
 );
+
+it.each(['location', 'earlier account'])(
+  'binds the actual follow-up across a differing summary %s',
+  async (scenario) => {
+    const since = '2026-09-08T09:00:00Z';
+    const login = scenario === 'location' ? 'server-account' : 'alice';
+    const restatement = {
+      ...inline,
+      user: { login },
+      in_reply_to_id: 99,
+      created_at: '2026-09-08T10:00:00Z',
+    };
+    const unrelated = {
+      ...restatement,
+      id: 102,
+      in_reply_to_id: 88,
+      line: 71,
+      user: { login: 'bob' },
+      body: `Regarding "${finding.title}"`,
+    };
+    const request = vi.fn(async (url, init) => {
+      if (url.endsWith('/user')) return Response.json({ login: 'server-account' });
+      if (url.includes('/issues/5/comments?')) {
+        return Response.json([{ ...summary, user: { login: 'bob' }, created_at: '2026-09-08T11:00:00Z' }]);
+      }
+      if (url.includes('/pulls/5/comments?')) return Response.json([unrelated, restatement]);
+      if (init.method === 'POST' || init.method === 'PATCH') return Response.json({});
+      if (init.method === 'DELETE') return new Response(null, { status: 204 });
+      throw new Error(`Unexpected GitHub request: ${init.method} ${url}`);
+    });
+    vi.stubGlobal('fetch', request);
+
+    const [published] = await latestReviewFindings(repo, 5, {
+      since,
+      authorLogin: 'bob',
+      authorLogins: ['alice', 'bob'],
+    });
+    const held = JSON.parse(JSON.stringify(published));
+    expect(held.reviewAuthorLogin).toBe(login);
+    expect(held.reviewCommentId).toBe(101);
+    await replyOnFindingThread(repo, 5, held, 'Noted', { since });
+    await deleteFindingFromReview(repo, 5, held, { since });
+    expect(request.mock.calls.find(([, init]) => init.method === 'POST')[0]).toBe(
+      `https://api.github.com/repos/${repo}/pulls/5/comments/99/replies`,
+    );
+    expect(request.mock.calls.find(([, init]) => init.method === 'DELETE')[0]).toBe(
+      `https://api.github.com/repos/${repo}/pulls/comments/101`,
+    );
+  },
+);
+
+it.each([403, 500, 'network'])(
+  'retains findings through an inline lookup failure (%s) and retries actions safely',
+  async (failure) => {
+    const since = '2026-09-08T09:00:00Z';
+    let unavailable = true;
+    const request = vi.fn(async (url, init) => {
+      if (url.endsWith('/user')) return Response.json({ login: 'server-account' });
+      if (url.includes('/issues/5/comments?')) {
+        return Response.json([{ ...summary, user: { login: 'bob' }, created_at: '2026-09-08T11:00:00Z' }]);
+      }
+      if (url.includes('/pulls/5/comments?')) {
+        if (unavailable) {
+          if (failure === 'network') throw new Error('Network unavailable');
+          return new Response(null, { status: failure });
+        }
+        return Response.json([
+          {
+            ...inline,
+            id: 102,
+            in_reply_to_id: 88,
+            user: { login: 'unrelated' },
+            created_at: '2026-09-08T10:00:00Z',
+          },
+          {
+            ...inline,
+            id: 103,
+            in_reply_to_id: 88,
+            user: { login: 'alice' },
+            created_at: '2026-09-08T12:00:00Z',
+          },
+          { ...inline, in_reply_to_id: 99, user: { login: 'alice' }, created_at: '2026-09-08T10:00:00Z' },
+        ]);
+      }
+      if (init.method === 'POST' || init.method === 'PATCH') return Response.json({});
+      if (init.method === 'DELETE') return new Response(null, { status: 204 });
+      throw new Error(`Unexpected GitHub request: ${init.method} ${url}`);
+    });
+    vi.stubGlobal('fetch', request);
+
+    const findings = await latestReviewFindings(repo, 5, {
+      since,
+      authorLogin: 'bob',
+      authorLogins: ['alice', 'bob'],
+    });
+    expect(findings).toHaveLength(1);
+    const held = JSON.parse(JSON.stringify(findings[0]));
+    expect(held.title).toBe(finding.title);
+    await expect(replyOnFindingThread(repo, 5, held, 'Noted', { since })).rejects.toThrow();
+    await expect(deleteFindingFromReview(repo, 5, held, { since })).rejects.toThrow();
+    expect(request.mock.calls.some(([, init]) => init.method !== 'GET')).toBe(false);
+
+    unavailable = false;
+    await replyOnFindingThread(repo, 5, held, 'Noted', { since });
+    await deleteFindingFromReview(repo, 5, held, { since });
+    expect(request.mock.calls.find(([, init]) => init.method === 'POST')[0]).toBe(
+      `https://api.github.com/repos/${repo}/pulls/5/comments/99/replies`,
+    );
+    expect(request.mock.calls.find(([, init]) => init.method === 'DELETE')[0]).toBe(
+      `https://api.github.com/repos/${repo}/pulls/comments/101`,
+    );
+  },
+);
