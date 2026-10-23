@@ -6264,12 +6264,12 @@ describe('standalone code-review findings', () => {
     }
   });
 
-  it('keeps the finding on the card when GitHub refuses to delete its comment', async () => {
+  it.each([403, 404])('keeps the finding on the card when GitHub refuses deletion (%i)', async (status) => {
     deleteFindingFromReview.mockRejectedValueOnce(
-      new Error("GitHub answered 403 deleting the finding's review comment"),
+      new Error(`GitHub answered ${status} deleting the finding's review comment`),
     );
 
-    await expect(deleteReviewFinding('stand-delete', 'k6')).rejects.toThrow(/answered 403/);
+    await expect(deleteReviewFinding('stand-delete', 'k6')).rejects.toThrow(`answered ${status}`);
     expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
   });
 
