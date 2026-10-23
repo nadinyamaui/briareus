@@ -86,6 +86,7 @@ vi.mock('../lib/db.js', () => ({
 }));
 
 vi.mock('../lib/github.js', () => ({
+  asGithubUser: (_token, fn) => fn(),
   githubRest: vi.fn(),
   githubGraphql: vi.fn(),
   upsertPrComment: vi.fn(),

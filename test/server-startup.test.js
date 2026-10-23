@@ -11,7 +11,7 @@ const startup = source.slice(
 );
 
 describe('startup store loading', () => {
-  it.each(['users', 'shares'])(
+  it.each(['users', 'shares', 'credentials'])(
     'continues startup after %s fails and allows later recovery',
     async (failed) => {
       const member = { id: 2, name: 'Ana', role: 'member', createdAt: 1, disabledAt: null };
@@ -19,7 +19,7 @@ describe('startup store loading', () => {
         users: vi.fn().mockResolvedValue([member]),
         shares: vi.fn().mockResolvedValue([{ kind: 'project', id: '3', userId: 2 }]),
       };
-      loads[failed].mockRejectedValueOnce(new Error('transient read failure'));
+      if (failed !== 'credentials') loads[failed].mockRejectedValueOnce(new Error('transient read failure'));
       const users = createUsers({ load: loads.users });
       const shares = createShares({ load: loads.shares });
       const deps = { users, shares, console: { error: vi.fn() } };
@@ -43,8 +43,11 @@ describe('startup store loading', () => {
         'forgeAccounts',
         'mailService',
         'mobileAuth',
+        'credentials',
       ])
         deps[name] = { init: vi.fn().mockResolvedValue(undefined) };
+      if (failed === 'credentials')
+        deps.credentials.init.mockRejectedValueOnce(new Error('transient read failure'));
       deps.listProviders = () => [];
 
       await new Function(...Object.keys(deps), `return (async () => {${startup}})();`)(
@@ -62,9 +65,12 @@ describe('startup store loading', () => {
         expect(deps[name]).toHaveBeenCalledOnce();
       expect(loads.users).toHaveBeenCalledOnce();
       expect(loads.shares).toHaveBeenCalledOnce();
-      expect(deps.console.error).toHaveBeenCalledWith(`Could not load ${failed}:`, 'transient read failure');
+      expect(deps.console.error).toHaveBeenCalledWith(
+        `Could not load ${failed === 'credentials' ? 'user credentials' : failed}:`,
+        'transient read failure',
+      );
       if (failed === 'users') expect(() => users.get(2)).toThrow(expect.objectContaining({ status: 503 }));
-      else
+      else if (failed === 'shares')
         expect(() => shares.allows(member, 'project', '3')).toThrow(expect.objectContaining({ status: 503 }));
 
       await users.refresh();

@@ -22,6 +22,9 @@ import { createMobileAuth } from './lib/mobile-auth.js';
 import { createUsers } from './lib/users.js';
 import { createShares } from './lib/shares.js';
 import { seesSession } from './lib/ownership.js';
+import { createUserCredentials } from './lib/user-credentials.js';
+import { meRoutes } from './lib/me-routes.js';
+import { asGithubUser } from './lib/github.js';
 import { shareRoutes } from './lib/share-routes.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
@@ -130,6 +133,7 @@ import {
   webhookUnfit,
   setSlackAccess,
   setExternalMcp,
+  setOwnerGithub,
   DEV_OPEN,
 } from './lib/jobs.js';
 import {
@@ -265,9 +269,23 @@ const api = express.Router();
 // The people sharing this server (lib/users.js) and what is shared with each (lib/shares.js).
 const users = createUsers();
 const shares = createShares();
+const credentials = createUserCredentials();
+// A user's own GitHub identity (lib/me-routes.js), or null: none connected, the user is
+// gone or disabled, or CREDENTIALS_KEY cannot open it, in which case the server's stands.
+// An unloaded store must fail the action instead of silently changing its GitHub account.
+const githubOf = (userId) => {
+  try {
+    const user = userId == null ? null : users.get(userId);
+    return user && user.disabledAt == null ? credentials.get(userId, 'github') : null;
+  } catch (e) {
+    if (e.status === 503) throw e;
+    return null;
+  }
+};
+setOwnerGithub((job) => githubOf(job.ownerId));
 // The user a /api/v1 request acts as, who owns any session it starts.
 const requestOwner = (res) => res.locals.apiUser?.id ?? null;
-// Whether a session may use a shared server (lib/shares.js): one nobody started works as the
+// Whether a session may use a shared resource (lib/shares.js): one nobody started works as the
 // admins' and may use what its project is given; one a user owns, only what that user may
 // use, and nothing once they are gone or disabled.
 const sessionMayUse = (job, kind, id) => {
@@ -328,6 +346,7 @@ app.use(
   apiV1Routes({
     auth: mobileAuth,
     users,
+    actAs: (user, fn) => asGithubUser(githubOf(user.id)?.token, fn),
     memberRepos: (user) => {
       const ids = shares.idsFor(user.id, 'project');
       return listProjects()
@@ -710,6 +729,7 @@ api.use(
     getProject,
   }),
 );
+api.use(meRoutes({ credentials }));
 // Who each project and server is shared with (lib/shares.js); ids are compared as strings.
 const hasId = (list) => (id) => list().some((item) => String(item.id) === id);
 api.use(
@@ -2221,6 +2241,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await mailService.init();
     await users.init().catch((e) => console.error('Could not load users:', e.message));
     await shares.init().catch((e) => console.error('Could not load shares:', e.message));
+    await credentials.init().catch((e) => console.error('Could not load user credentials:', e.message));
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
@@ -2261,11 +2282,12 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     .catch((e) => console.error('Could not load WhatsApp watches (tried again every poll):', e.message));
   // `npm run create-token` and `npm run users` write the database directly; a revoked token
   // or disabled user stops new requests within 15s and open streams within 30s.
-  // Shares follow the same cadence to pick up changes from other server instances.
+  // Shares and credentials follow the same cadence for changes from other server instances.
   setInterval(() => {
     mobileAuth.refresh().catch((e) => console.error('Could not reload device tokens:', e.message));
     users.refresh().catch((e) => console.error('Could not reload users:', e.message));
     shares.refresh().catch((e) => console.error('Could not reload shares:', e.message));
+    credentials.refresh().catch((e) => console.error('Could not load user credentials:', e.message));
   }, 15000).unref();
   // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
   // a client reads its mail from the database rather than from the provider.
