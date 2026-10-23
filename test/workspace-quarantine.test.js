@@ -282,6 +282,39 @@ describe('workspace quarantine', () => {
       },
     );
 
+    it('keeps the private detached starting commit of an unfinished bisect', () => {
+      const root = fixture();
+      let saved;
+      const container = quarantined(root, 'acme__bisect', (git, dir) => {
+        const good = git('rev-parse', 'HEAD').trim();
+        git('commit', '-qm', 'Published middle', '--allow-empty');
+        git('commit', '-qm', 'Published bad', '--allow-empty');
+        git('push', '-q', 'origin', 'HEAD');
+        const bad = git('rev-parse', 'HEAD').trim();
+        git('checkout', '-q', '--detach');
+        fs.writeFileSync(path.join(dir, 'source'), 'private bisect starting contents');
+        git('commit', '-qam', 'Private detached start');
+        saved = git('rev-parse', 'HEAD').trim();
+        git('bisect', 'start', bad, good);
+        git('reflog', 'expire', '--expire=now', '--all');
+        expect(fs.readFileSync(path.join(dir, '.git', 'BISECT_START'), 'utf8').trim()).toBe(saved);
+        expect(git('status', '--porcelain', '--untracked-files=normal').trim()).toBe('');
+        expect(git('stash', 'list').trim()).toBe('');
+        expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
+        expect(git('log', '--all', '--reflog', '--format=%H')).not.toContain(saved);
+        expect(() =>
+          git('--git-dir', path.join(root, 'acme__bisect.remote.git'), 'cat-file', '-e', saved),
+        ).toThrow();
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      const checkout = path.join(container, 'checkout');
+      execFileSync('git', ['-C', checkout, 'bisect', 'reset']);
+      expect(execFileSync('git', ['-C', checkout, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()).toBe(
+        saved,
+      );
+      expect(fs.readFileSync(path.join(checkout, 'source'), 'utf8')).toBe('private bisect starting contents');
+    });
+
     it('keeps unpublished source commits held by an unfinished cherry-pick', () => {
       const root = fixture();
       let saved;
