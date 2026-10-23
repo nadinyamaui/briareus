@@ -338,6 +338,51 @@ describe('workspace quarantine', () => {
       },
     );
 
+    it.skipIf(process.platform !== 'linux').each([Buffer.from([0xff]), Buffer.from([0xe2, 0x82])])(
+      'keeps embedded history under a tracked directory with invalid UTF-8 bytes %s',
+      (bytes) => {
+        const root = fixture();
+        const dirname = Buffer.concat([Buffer.from('src-'), bytes]);
+        const container = quarantined(root, 'acme__invalid', (git, dir) => {
+          const rawDir = Buffer.concat([Buffer.from(`${dir}/`), dirname]);
+          fs.mkdirSync(rawDir);
+          fs.writeFileSync(Buffer.concat([rawDir, Buffer.from('/source')]), 'pushed');
+          git('add', '.');
+          git('commit', '-qm', 'Track raw pathname');
+          git('push', '-q', 'origin', 'HEAD');
+          const nested = path.join(root, 'nested');
+          fs.mkdirSync(nested);
+          git('-C', nested, 'init', '-q');
+          fs.writeFileSync(path.join(nested, 'source'), 'private embedded work');
+          git('-C', nested, 'add', '.');
+          git('-C', nested, 'commit', '-qm', 'Private embedded history');
+          fs.renameSync(path.join(nested, '.git'), Buffer.concat([rawDir, Buffer.from('/.git')]));
+          expect(git('status', '--porcelain').trim()).toBe('');
+          expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
+        });
+        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        const alias = path.join(root, 'retained');
+        fs.symlinkSync(Buffer.concat([Buffer.from(`${container}/checkout/`), dirname]), alias);
+        expect(execFileSync('git', ['-C', alias, 'show', 'HEAD:source'], { encoding: 'utf8' })).toBe(
+          'private embedded work',
+        );
+        expect(fs.readFileSync(path.join(alias, 'source'), 'utf8')).toBe('pushed');
+      },
+    );
+
+    it('expires clean checkouts with valid UTF-8 replacement characters in tracked paths', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__unicode', (git, dir) => {
+        fs.mkdirSync(path.join(dir, 'src-\uFFFD'));
+        fs.writeFileSync(path.join(dir, 'src-\uFFFD', 'source'), 'pushed');
+        git('add', '.');
+        git('commit', '-qm', 'Track valid Unicode pathname');
+        git('push', '-q', 'origin', 'HEAD');
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(fs.existsSync(container)).toBe(false);
+    });
+
     it('keeps private Git notes', () => {
       const root = fixture();
       const container = quarantined(root, 'acme__notes', (git) =>
