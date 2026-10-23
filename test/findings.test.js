@@ -1156,6 +1156,39 @@ describe('replyOnFindingThread', () => {
 });
 
 describe('review follow-ups posted by the session owner', () => {
+  it.each([
+    ['reply', { in_reply_to_id: 99 }],
+    ['different file', { path: 'lib/unrelated.js' }],
+    ['different author', { user: { login: 'someone-else' } }],
+    ['before the review', { created_at: '2026-09-08T08:00:00Z' }],
+    ['after the summary', { created_at: '2026-09-08T12:00:00Z' }],
+  ])('does not bind a title match from a %s as the inline publication', async (_label, overrides) => {
+    const finding = { title: 'Race in the retry loop', file: 'lib/x.js', line: 12 };
+    gh.comments = [
+      {
+        ...findingsComment([finding]),
+        user: { login: 'server-account' },
+        created_at: '2026-09-08T11:00:00Z',
+      },
+    ];
+    gh.reviewComments = [
+      {
+        id: 101,
+        path: finding.file,
+        line: finding.line,
+        body: finding.title,
+        user: { login: 'owner-account' },
+        created_at: '2026-09-08T10:00:00Z',
+        ...overrides,
+      },
+    ];
+    const [published] = await latestReviewFindings(repo, 5, {
+      since: '2026-09-08T09:00:00Z',
+      authorLogin: 'owner-account',
+    });
+    expect(published).not.toHaveProperty('reviewCommentId');
+  });
+
   it('does not bind an unrelated reply that only shares the declared location', async () => {
     const finding = { title: 'Race in the retry loop', file: 'lib/x.js', line: 12 };
     gh.comments = [{ ...findingsComment([finding]), user: { login: 'ana' } }];

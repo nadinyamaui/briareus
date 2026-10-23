@@ -6079,6 +6079,10 @@ describe('standalone code-review findings', () => {
         viewerLogin.mockResolvedValueOnce('server-bot');
         const job = { ...newReview('stand-owner', 37), ownerId, prStatus: { number: 37, author } };
         expect(await holdStandaloneReviewFindings(job)).toBe(true);
+        expect(latestReviewFindings.mock.lastCall.at(-1)).toEqual({
+          since: job.createdAt,
+          ...(ownerId != null ? { authorLogin: ownerId === 2 ? 'ana' : null } : {}),
+        });
         expect(job.reviewTriage).toMatchObject({ author, mine: true });
         viewerLogin.mockReset().mockResolvedValue(null);
       }
@@ -7204,16 +7208,23 @@ describe('the review loop: what a closing loop review reports back', () => {
   });
 
   it('a finished review that declared no findings ends the round cleanly', async () => {
-    await closeDevSession('rev-2');
-    await new Promise((r) => setTimeout(r, 0));
     const parent = getJob('par-2');
-    expect(parent.reviewLoop.reviewing).toBe(false);
-    expect(infoTexts(parent).join('\n')).toMatch(/declared no findings/);
-    // Scoped to what this review itself could have posted, so a round that
-    // published nothing does not hand back the previous round's findings.
-    expect(latestReviewFindings).toHaveBeenCalledWith('acme/loop', 77, {
-      since: '2026-08-25T13:00:00.000Z',
-    });
+    parent.ownerId = 2;
+    setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
+    try {
+      await closeDevSession('rev-2');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(parent.reviewLoop.reviewing).toBe(false);
+      expect(infoTexts(parent).join('\n')).toMatch(/declared no findings/);
+      // The review window and owner identity constrain its inline publications.
+      expect(latestReviewFindings).toHaveBeenCalledWith('acme/loop', 77, {
+        since: '2026-08-25T13:00:00.000Z',
+        authorLogin: 'ana',
+      });
+    } finally {
+      parent.ownerId = null;
+      setOwnerGithub(() => null);
+    }
   });
 
   it('a round is held for triage even while the session stands on a question', async () => {
