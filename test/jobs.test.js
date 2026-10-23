@@ -3616,7 +3616,15 @@ describe('spawnWorkerSession: tooling fixes', () => {
   };
 
   beforeAll(async () => {
-    state.stored = [row('tool-orch', { orchestrator: true })];
+    state.stored = [
+      row('tool-orch', { orchestrator: true }),
+      row('tool-closed', {
+        repo: dashboard.repo,
+        parentId: 'tool-orch',
+        toolingFor: 'acme/shop',
+        ownerId: 2,
+      }),
+    ];
     await initJobs();
     getJob('tool-orch').status = 'idle';
   });
@@ -3668,6 +3676,29 @@ describe('spawnWorkerSession: tooling fixes', () => {
       setSessionProjectFilter(() => true);
     }
   });
+
+  it.each(['message', 'reopen', 'recovery'])(
+    'refuses a closed tooling worker’s %s after its target project is unshared',
+    (action) => {
+      const worker = getJob('tool-closed');
+      const events = [...worker.events];
+      const allowed = vi.fn((job, project) => job.ownerId !== 2 || project.repo !== dashboard.repo);
+      setSessionProjectFilter(allowed);
+      spawn.mockClear();
+      acquireInstance.mockClear();
+      expect(() =>
+        action === 'message'
+          ? sendDevMessage(worker.id, 'Continue fixing the dashboard')
+          : reopenDevSession(worker.id, { recovering: action === 'recovery' }),
+      ).toThrow(/Project unavailable/);
+      expect(allowed).toHaveBeenCalledWith(expect.objectContaining({ ownerId: 2 }), dashboard);
+      expect(worker.status).toBe('closed');
+      expect(worker.events).toEqual(events);
+      expect(worker.workDir).toBeFalsy();
+      expect(acquireInstance).not.toHaveBeenCalled();
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
 
   it('runs on the dashboard project’s worker runtime, ahead of the orchestration’s own pick', () => {
     // The shop's runtime and the orchestration's pick say high; the dashboard's says low, and
@@ -15794,6 +15825,38 @@ describe('automatic recovery after a server restart', () => {
         restartPending: false,
       }),
     );
+  });
+
+  it('reopens work only after the owner’s project grant is restored', async () => {
+    const checkout = path.join(root, 'checkout');
+    fs.mkdirSync(checkout);
+    spawnSync('git', ['-C', checkout, 'init', '-b', 'feature'], { stdio: 'ignore' });
+    state.projects[0].localDir = checkout;
+    const saved = row({
+      status: 'closed',
+      ownerId: 2,
+      orchestrator: false,
+      local: true,
+      workDir: checkout,
+      branch: 'feature',
+    });
+    state.stored = [saved];
+    await initJobs();
+    let shared = false;
+    const allowed = vi.fn((job, project) => job.ownerId !== 2 || project.id !== 1 || shared);
+    setSessionProjectFilter(allowed);
+    expect(() => sendDevMessage(saved.id, 'Continue')).toThrow(/Project unavailable/);
+    expect(children).toHaveLength(0);
+    expect(saved.status).toBe('closed');
+    shared = true;
+    sendDevMessage(saved.id, 'Continue');
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].cwd).toBe(checkout);
+    expect(children[0].rpc.find((m) => m.method === 'turn/start').params.input).toEqual([
+      { type: 'text', text: expect.stringContaining('Continue') },
+    ]);
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
   });
 
   it('reopens waiting questions without inventing answers and leaves previously failed or closed sessions alone', async () => {
