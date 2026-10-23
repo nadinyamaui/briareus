@@ -38,6 +38,7 @@ const state = vi.hoisted(() => ({
   projects: [],
   claimsServer: false,
   eligibleServers: [],
+  dbWaiters: new Set(),
   dbHolders: new Map(),
   capacity: 3,
   // What initJobs loads: the only way to register a session here without spawning one.
@@ -149,6 +150,7 @@ vi.mock('../lib/dbpool.js', () => ({
   instanceAppPort: vi.fn(() => 8101),
   sessionCapacity: () => state.capacity,
   eligibleDbServers: vi.fn(() => state.eligibleServers),
+  waitingForInstance: (id) => state.dbWaiters.has(id),
   claimHolder: (id) => state.dbHolders.get(id) || null,
   projectClaimsServer: () => state.claimsServer,
 }));
@@ -271,6 +273,7 @@ import {
   removePullRequestLabel,
   githubGraphql,
   githubRest,
+  upsertPrComment,
   viewerLogin,
 } from '../lib/github.js';
 import { resolveRuntime, getProviderForJob, captureProviderAuth } from '../lib/providerstore.js';
@@ -376,6 +379,7 @@ beforeEach(() => {
   state.claimsServer = false;
   state.capacity = 3;
   state.eligibleServers = [];
+  state.dbWaiters = new Set();
   state.dbHolders = new Map();
   setSessionProjectFilter(() => true);
   state.otherProviders = [];
@@ -911,9 +915,12 @@ describe('loop children waiting for a database slot', () => {
     // Other blocks' open records share this module's registry and pool.
     state.capacity = 10000;
     state.capacity -= devSessionSlots('acme/slots');
-    acquireInstance.mockImplementation(
-      (job) => new Promise((resolve, reject) => blocked.push({ id: job.id, reject })),
-    );
+    acquireInstance.mockImplementation((job) => {
+      state.dbWaiters.add(job.id);
+      return new Promise((resolve, reject) => blocked.push({ id: job.id, reject })).finally(() =>
+        state.dbWaiters.delete(job.id),
+      );
+    });
   });
   afterEach(async () => {
     setDraining(false);
@@ -993,6 +1000,109 @@ describe('loop children waiting for a database slot', () => {
     expect(child.databaseSlotQueuedAt).toBeNull();
     expect(parent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
     expect(blocked).toEqual([]);
+  });
+
+  it.each([2, 3])('counts a preparing review waiting on acquisition (second owner=%i)', async (ownerId) => {
+    const firstParent = getJob(ids[0]);
+    const secondParent = getJob(ids[1]);
+    Object.assign(firstParent, { ownerId: 2, dbServerId: 1 });
+    Object.assign(secondParent, { ownerId, dbServerId: 2 });
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, firstParent.id);
+    state.dbHolders.set(2, secondParent.id);
+    // Server 3 is free globally, but neither owner may use it.
+    getJob('slot-holder').status = 'closed';
+    const first = await queueReview(firstParent.id);
+    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([first.id]));
+    expect(first.status).toBe('preparing');
+    expect(first.databaseSlotQueuedAt).toBeNull();
+
+    await retryLoopRound(secondParent.id);
+    const second = getJob(secondParent.reviewLoop.reviewSessionId);
+    if (second) children.push(second);
+    expect(secondParent.reviewLoop.reviewing).toBe(false);
+    expect(secondParent.reviewLoop.reviewSessionId).toBeFalsy();
+    expect(secondParent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
+    expect(blocked.map((j) => j.id)).toEqual([first.id]);
+  });
+
+  it('rechecks progress after review announcement when another child has begun acquisition', async () => {
+    const firstParent = getJob(ids[0]);
+    const secondParent = getJob(ids[1]);
+    Object.assign(firstParent, { ownerId: 2, dbServerId: 1 });
+    Object.assign(secondParent, { ownerId: 3, dbServerId: 2 });
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, firstParent.id);
+    state.dbHolders.set(2, secondParent.id);
+    getJob('slot-holder').status = 'closed';
+    let finishAnnouncement;
+    upsertPrComment.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishAnnouncement = resolve;
+        }),
+    );
+    try {
+      const first = await queueReview(firstParent.id);
+      expect(finishAnnouncement).toBeTypeOf('function');
+      expect(blocked).toEqual([]);
+      const second = await queueReview(secondParent.id);
+      await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([second.id]));
+      finishAnnouncement();
+      await vi.waitFor(() => expect(firstParent.reviewLoop.reviewing).toBe(false));
+      expect(first.status).toBe('failed');
+      expect(firstParent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
+      expect(blocked.map((j) => j.id)).toEqual([second.id]);
+    } finally {
+      finishAnnouncement?.();
+    }
+  });
+
+  it.each(['review', 'fix', 'qa'])('fails a queued %s when every database share is revoked', async (kind) => {
+    const parent = getJob(ids[0]);
+    Object.assign(parent, { ownerId: 2, dbServerId: 1 });
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, parent.id);
+    state.dbHolders.set(2, 'slot-holder');
+    let child;
+    if (kind === 'review') child = await queueReview(parent.id);
+    else {
+      const extra = kind === 'fix' ? { loopFixParentId: parent.id } : { qaParentId: parent.id, qa: true };
+      child = getJob(
+        createDevSession({ provider: 1, repo: 'acme/slots', branch: 'task/slots', prompt: 'fix', ...extra })
+          .id,
+      );
+      children.push(child);
+      if (kind === 'fix') Object.assign(parent.reviewLoop, { fixing: true, fixSessionId: child.id });
+      else parent.qaLoop = { running: true, sessionId: child.id };
+    }
+    expect(child.status).toBe('queued');
+    state.eligibleServers = [];
+    // Drive waiter processing without releasing any global capacity.
+    expect(() => createDevSession({ provider: 1, repo: 'acme/slots', prompt: 'another' })).toThrow(
+      /holding a database server/,
+    );
+    expect(child.status).toBe('failed');
+    expect(child.databaseSlotQueuedAt).toBeNull();
+    const loop = kind === 'qa' ? parent.qaLoop : parent.reviewLoop;
+    expect(kind === 'fix' ? loop.fixing : kind === 'qa' ? loop.running : loop.reviewing).toBe(false);
+    expect(loop.failure.reason).toMatch(/none is shared/);
+    expect(blocked).toEqual([]);
+  });
+
+  it('ignores ordinary acquisition waiters when a loop has a free eligible server', async () => {
+    const parent = getJob(ids[0]);
+    Object.assign(parent, { ownerId: 2, dbServerId: 1 });
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, parent.id);
+    const ordinary = getJob('slot-holder');
+    Object.assign(ordinary, { ownerId: 3, status: 'preparing', qaParentId: null });
+    state.dbWaiters.add(ordinary.id);
+    state.capacity += 1;
+    const child = await queueReview(parent.id);
+    expect(child.status).toBe('preparing');
+    expect(parent.reviewLoop.failure).toBeNull();
+    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([child.id]));
   });
 
   it('fails an accepted wait if pool reduction leaves only its parent holding capacity', async () => {

@@ -113,6 +113,7 @@ const {
   stopDatabaseProcesses,
   releaseInstance,
   claimHolder,
+  waitingForInstance,
   sessionCapacity,
   projectClaimsServer,
   probeDbServer,
@@ -1406,6 +1407,45 @@ describe('claiming a server', () => {
     await expect(pending).resolves.toBe(1);
     expect(events.filter((e) => e.includes('waiting for one to free up'))).toHaveLength(1);
   });
+
+  it.each(['claim', 'cancel', 'revoke', 'timeout'])(
+    'tracks an acquisition wait until it ends with %s',
+    async (outcome) => {
+      state.servers = [server({ id: 1 })];
+      state.project.dbPoolEnabled = true;
+      const holder = job('holder');
+      await acquire(holder);
+      const waiter = job('waiter');
+      const pending = acquire(waiter).catch((e) => e);
+      expect(waitingForInstance(waiter.id)).toBe(true);
+      expect(waitingForInstance(holder.id)).toBe(false);
+      try {
+        if (outcome === 'claim') await releaseInstance(holder);
+        else if (outcome === 'cancel') waiter.status = 'closed';
+        else if (outcome === 'revoke') setDbServerFilter(() => false);
+        // The deadline was captured at entry, so advance time only for timeout.
+        const clock =
+          outcome === 'timeout' ? vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 11 * 60_000) : null;
+        try {
+          const result = await pending;
+          if (outcome === 'claim') expect(result).toBe(1);
+          else
+            expect(result.message).toMatch(
+              outcome === 'cancel'
+                ? /canceled/
+                : outcome === 'revoke'
+                  ? /none is shared/
+                  : /no database server became free/,
+            );
+          expect(waitingForInstance(waiter.id)).toBe(false);
+        } finally {
+          clock?.mockRestore();
+        }
+      } finally {
+        setDbServerFilter(() => true);
+      }
+    },
+  );
 
   it('gives up once the wait timeout has passed', async () => {
     state.servers = [server({ id: 1 })];
