@@ -24,7 +24,10 @@ const summary = { id: 7, body: `<!-- reviewer:findings ${JSON.stringify([finding
 const checklist = { id: 77, body: `${FIXES_ANCHOR}\n- [ ] ${finding.title} <!-- fix:${key} -->` };
 
 beforeEach(() => db.decisions.clear());
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 function github({ deleteStatus, readStatus = 200, patchStatus = 200, inlineComments = [inline] }) {
   const fetchMock = vi.fn(async (url, init) => {
@@ -319,6 +322,7 @@ it.each(['location', 'earlier account'])(
 it.each([403, 500, 'network'])(
   'retains findings through an inline lookup failure (%s) and retries actions safely',
   async (failure) => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-08T11:05:00Z'));
     const since = '2026-09-08T09:00:00Z';
     let unavailable = true;
     const request = vi.fn(async (url, init) => {
@@ -370,6 +374,66 @@ it.each([403, 500, 'network'])(
     unavailable = false;
     await replyOnFindingThread(repo, 5, held, 'Noted', { since });
     await deleteFindingFromReview(repo, 5, held, { since });
+    expect(request.mock.calls.find(([, init]) => init.method === 'POST')[0]).toBe(
+      `https://api.github.com/repos/${repo}/pulls/5/comments/99/replies`,
+    );
+    expect(request.mock.calls.find(([, init]) => init.method === 'DELETE')[0]).toBe(
+      `https://api.github.com/repos/${repo}/pulls/comments/101`,
+    );
+  },
+);
+
+it.each([200, 403, 500, 'network'])(
+  'includes inline comments posted after the summary in the completed review (%s)',
+  async (status) => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-08T11:05:00Z'));
+    const since = '2026-09-08T09:00:00Z';
+    const publishedInline = {
+      ...inline,
+      in_reply_to_id: 99,
+      user: { login: 'alice' },
+      created_at: '2026-09-08T11:01:00Z',
+    };
+    let unavailable = status !== 200;
+    const request = vi.fn(async (url, init) => {
+      if (url.endsWith('/user')) return Response.json({ login: 'server-account' });
+      if (url.includes('/issues/5/comments?')) {
+        return Response.json([{ ...summary, user: { login: 'alice' }, created_at: '2026-09-08T11:00:00Z' }]);
+      }
+      if (url.includes('/pulls/5/comments?')) {
+        if (unavailable) {
+          if (status === 'network') throw new Error('Network unavailable');
+          return new Response(null, { status });
+        }
+        return Response.json([
+          { ...publishedInline, id: 102, user: { login: 'unrelated' } },
+          { ...publishedInline, id: 103, path: 'lib/unrelated.js' },
+          { ...publishedInline, id: 104, created_at: '2026-09-08T08:00:00Z' },
+          { ...publishedInline, id: 105, created_at: '2026-09-08T12:00:00Z' },
+          publishedInline,
+        ]);
+      }
+      if (init.method === 'POST' || init.method === 'PATCH') return Response.json({});
+      if (init.method === 'DELETE') return new Response(null, { status: 204 });
+      throw new Error(`Unexpected GitHub request: ${init.method} ${url}`);
+    });
+    vi.stubGlobal('fetch', request);
+
+    const [published] = await latestReviewFindings(repo, 5, { since });
+    const held = JSON.parse(JSON.stringify(published));
+    if (unavailable) {
+      expect(held.reviewPublication.before).toBe(Date.parse('2026-09-08T11:05:00Z'));
+    } else {
+      expect(held.reviewCommentId).toBe(101);
+    }
+    now.mockReturnValue(Date.parse('2026-09-08T12:05:00Z'));
+    unavailable = false;
+    await replyOnFindingThread(repo, 5, held, 'Noted', { since });
+    await expect(deleteFindingFromReview(repo, 5, held, { since })).resolves.toEqual({
+      commentDeleted: true,
+      undeclared: true,
+      warning: null,
+    });
     expect(request.mock.calls.find(([, init]) => init.method === 'POST')[0]).toBe(
       `https://api.github.com/repos/${repo}/pulls/5/comments/99/replies`,
     );

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TEST_SHEET_ANCHOR, FIXES_ANCHOR } from '../lib/markers.js';
 
 // The GitHub mock, per test: the PR's issue comments and a log of every write back. `fail`
@@ -1156,15 +1156,20 @@ describe('replyOnFindingThread', () => {
 });
 
 describe('review follow-ups posted by the session owner', () => {
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-08T11:05:00Z'));
+  });
+  afterEach(() => vi.restoreAllMocks());
+
   it.each([
     ['unrelated reply', { in_reply_to_id: 99, user: { login: 'someone-else' } }],
     ['different file', { path: 'lib/unrelated.js' }],
     ['different author', { user: { login: 'someone-else' } }],
     ['before the review', { created_at: '2026-09-08T08:00:00Z' }],
-    ['after the summary', { created_at: '2026-09-08T12:00:00Z' }],
+    ['after review capture', { created_at: '2026-09-08T12:00:00Z' }],
     ['reply on a different file', { in_reply_to_id: 99, path: 'lib/unrelated.js' }],
     ['reply before the review', { in_reply_to_id: 99, created_at: '2026-09-08T08:00:00Z' }],
-    ['reply after the summary', { in_reply_to_id: 99, created_at: '2026-09-08T12:00:00Z' }],
+    ['reply after review capture', { in_reply_to_id: 99, created_at: '2026-09-08T12:00:00Z' }],
     ['reply without the title', { in_reply_to_id: 99, body: 'Done.' }],
   ])('does not bind a %s as the inline publication', async (_label, overrides) => {
     const finding = { title: 'Race in the retry loop', file: 'lib/x.js', line: 12 };
