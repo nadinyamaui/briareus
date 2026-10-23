@@ -375,6 +375,26 @@ describe('latestTestVerdict', () => {
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
+  it.each(['**2**', '2.', '_2_', '`2`', '~~2~~', '**2.**'])(
+    'preserves failed and subsequent scenarios after formatted number %s',
+    async (number) => {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl /api | 200 | ✅ | response.json |',
+          `| ${number} | Failure | curl /api | 200 | ❌ | saw 500 |`,
+          '| 3 | UI | Open profile | Permission | ⬜ | |',
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [{ number: '2', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+        total: 3,
+        passed: 1,
+        manual: 0,
+        incomplete: true,
+      });
+    },
+  );
+
   it('keeps escaped Markdown pipes inside their cells', async () => {
     gh.comments = [
       sheet([
@@ -490,6 +510,8 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ request from blocked user was blocked',
+    '✅ payment remains pending',
     '✅ unknown route returns 404',
     '✅ blocked user receives 403',
     '✅ pending payment is displayed',
@@ -516,6 +538,15 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI blocked: browser unavailable',
+    '✅ API; UI pending (needs browser)',
+    '✅ API; UI skipped due to unavailable credentials',
+    '✅ API (UI blocked: browser unavailable)',
+    '✅ API/UI pending (needs browser)',
+    '✅ API<br>UI skipped due to unavailable credentials',
+    '✅ API; blocked UI: browser unavailable',
+    '✅ API; pending: needs browser',
+    '✅ API; skipped because credentials are unavailable',
     '✅ API (UI not run)',
     '✅ API/UI not run',
     '✅ API and UI manual',
