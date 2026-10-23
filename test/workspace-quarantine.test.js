@@ -316,6 +316,56 @@ describe('workspace quarantine', () => {
       expect(fs.readFileSync(path.join(container, 'checkout', 'source'), 'utf8')).toBe('published main');
     });
 
+    it.each(['cherry-pick sequence', 'revert'])(
+      'keeps unpublished source commits held by an unfinished %s',
+      (operation) => {
+        const root = fixture();
+        let saved;
+        const container = quarantined(root, 'acme__operation', (git, dir) => {
+          const branch = git('symbolic-ref', '--short', 'HEAD').trim();
+          git('checkout', '-qb', 'side');
+          fs.writeFileSync(path.join(dir, 'source'), 'private first source');
+          git('commit', '-qam', 'Private first commit');
+          const first = git('rev-parse', 'HEAD').trim();
+          fs.writeFileSync(path.join(dir, 'source'), 'private second source');
+          git('commit', '-qam', 'Private second commit');
+          saved = git('rev-parse', 'HEAD').trim();
+          git('checkout', '-q', branch);
+          fs.writeFileSync(path.join(dir, 'source'), 'published main');
+          git('commit', '-qam', 'Published main');
+          git('push', '-q', 'origin', 'HEAD');
+          git('branch', '-D', 'side');
+          if (operation === 'cherry-pick sequence') {
+            expect(() => git('cherry-pick', '--no-commit', first, saved)).toThrow();
+            const todo = fs.readFileSync(path.join(dir, '.git', 'sequencer', 'todo'), 'utf8');
+            expect(todo).toContain(git('rev-parse', '--short', saved).trim());
+          } else {
+            expect(() => git('revert', saved)).toThrow();
+            expect(git('rev-parse', 'REVERT_HEAD').trim()).toBe(saved);
+            expect(fs.existsSync(path.join(dir, '.git', 'sequencer'))).toBe(false);
+          }
+          expect(fs.existsSync(path.join(dir, '.git', 'CHERRY_PICK_HEAD'))).toBe(false);
+          git('checkout', '--ours', 'source');
+          git('add', 'source');
+          expect(git('status', '--porcelain', '--untracked-files=normal').trim()).toBe('');
+          expect(git('stash', 'list').trim()).toBe('');
+          expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
+          expect(() =>
+            git('--git-dir', path.join(root, 'acme__operation.remote.git'), 'cat-file', '-e', saved),
+          ).toThrow();
+        });
+        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        const checkout = path.join(container, 'checkout');
+        expect(execFileSync('git', ['-C', checkout, 'show', `${saved}:source`], { encoding: 'utf8' })).toBe(
+          'private second source',
+        );
+        expect(fs.readFileSync(path.join(checkout, 'source'), 'utf8')).toBe('published main');
+        expect(
+          fs.existsSync(path.join(checkout, '.git', operation === 'revert' ? 'REVERT_HEAD' : 'sequencer')),
+        ).toBe(true);
+      },
+    );
+
     it('keeps recoverable staged contents in an interrupted index write', () => {
       const root = fixture();
       const container = quarantined(root, 'acme__pending', (git, dir) => {
