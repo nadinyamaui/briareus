@@ -104,6 +104,7 @@ vi.mock('../lib/dbpool.js', () => ({
   sessionDatabaseName: () => state.database,
   dropSessionDatabase: vi.fn(async () => false),
   instanceEnv: vi.fn(() => ({})),
+  assertInstanceAccess: vi.fn(),
   instanceAppPort: vi.fn(() => 8101),
   sessionCapacity: () => 3,
   projectClaimsServer: () => false,

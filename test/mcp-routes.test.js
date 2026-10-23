@@ -30,7 +30,7 @@ beforeEach(async () => {
   const app = express();
   app.use(mcpOAuthCallbackRouter({ service }));
   mayUse = vi.fn(() => true);
-  app.use(mcpProxyRouter({ service, agentSession, fetchImpl: upstream, mayUse }));
+  app.use(mcpProxyRouter({ service, agentSession, fetchImpl: upstream, mayUse, recheckMs: 20 }));
   app.use(express.json());
   const routes = mcpRoutes({ service, getProject: (repo) => (repo === 'o/r' ? { repo } : null) });
   // The operator reaches these through /api/v1 (a header stands in for the
@@ -202,6 +202,43 @@ describe('the session proxy', () => {
       controller.close();
     }
   });
+
+  it.each(['unshared', 'disabled owner', 'sharing unavailable'])(
+    'ends an admitted MCP stream when %s',
+    async (reason) => {
+      const cancelled = vi.fn();
+      upstream.mockResolvedValue(
+        new Response(
+          new ReadableStream({
+            start(c) {
+              c.enqueue(new TextEncoder().encode(': connected\n\n'));
+            },
+            cancel: cancelled,
+          }),
+          { headers: { 'content-type': 'text/event-stream' } },
+        ),
+      );
+      const res = await fetch(`${base}/api/agent/mcp/5`, {
+        headers: { Authorization: 'Bearer session-token' },
+        signal: AbortSignal.timeout(2000),
+      });
+      const reader = res.body.getReader();
+      await reader.read();
+      if (reason === 'sharing unavailable')
+        mayUse.mockImplementation(() => {
+          throw new Error('unavailable');
+        });
+      else mayUse.mockReturnValue(false);
+      await expect(reader.read()).rejects.toThrow();
+      await vi.waitFor(() => {
+        expect(upstream.mock.calls[0][1].signal.aborted).toBe(true);
+        expect(cancelled).toHaveBeenCalledOnce();
+      });
+      const checks = mayUse.mock.calls.length;
+      await new Promise((r) => setTimeout(r, 60));
+      expect(mayUse).toHaveBeenCalledTimes(checks);
+    },
+  );
 
   it('streams an event stream through as it comes', async () => {
     const enc = new TextEncoder();

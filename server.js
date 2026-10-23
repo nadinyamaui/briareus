@@ -71,6 +71,7 @@ import {
 } from './lib/db.js';
 import {
   initJobs,
+  setSessionProjectFilter,
   resumeRestartedSessions,
   setAgentApiBase,
   jobForAgentToken,
@@ -133,7 +134,6 @@ import {
   setSlackAccess,
   setExternalMcp,
   setOwnerGithub,
-  setSessionProjectAccess,
   DEV_OPEN,
 } from './lib/jobs.js';
 import {
@@ -298,7 +298,7 @@ const sessionMayUse = (job, kind, id) => {
   }
 };
 setDbServerFilter((job, server) => sessionMayUse(job, 'dbServer', server.id));
-setSessionProjectAccess((job, repo) => sessionMayUse(job, 'project', getProject(repo)?.id));
+setSessionProjectFilter((job, project) => sessionMayUse(job, 'project', project.id));
 
 // On every response, including the webhooks': nothing here is a page, and the
 // headers say so (lib/security.js).
@@ -2239,9 +2239,9 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await envoyerService.init();
     await forgeAccounts.init();
     await mailService.init();
-    await users.init();
-    await shares.init();
-    await credentials.init();
+    await users.init().catch((e) => console.error('Could not load users:', e.message));
+    await shares.init().catch((e) => console.error('Could not load shares:', e.message));
+    await credentials.init().catch((e) => console.error('Could not load user credentials:', e.message));
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
@@ -2282,11 +2282,12 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     .catch((e) => console.error('Could not load WhatsApp watches (tried again every poll):', e.message));
   // `npm run create-token` and `npm run users` write the database directly; a revoked token
   // or disabled user stops new requests within 15s and open streams within 30s.
+  // Shares follow the same cadence to pick up changes from other server instances.
   setInterval(() => {
     mobileAuth.refresh().catch((e) => console.error('Could not reload device tokens:', e.message));
     users.refresh().catch((e) => console.error('Could not reload users:', e.message));
-    // Successful stores skip initialization; failed loads retry without overwriting mutations.
-    shares.init().catch((e) => console.error('Could not load sharing:', e.message));
+    shares.refresh().catch((e) => console.error('Could not reload shares:', e.message));
+    // Retry failed credential loads without replacing an initialized cache.
     credentials.init().catch((e) => console.error('Could not load user credentials:', e.message));
   }, 15000).unref();
   // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so

@@ -32,26 +32,25 @@ it('checks session project access against the shared project ID', async () => {
     { id: 4, repo: 'acme/private' },
   ];
   let allowed;
-  new Function('users', 'shares', 'getProject', 'setDbServerFilter', 'setSessionProjectAccess', wiring)(
+  new Function('users', 'shares', 'setDbServerFilter', 'setSessionProjectFilter', wiring)(
     users,
     shares,
-    (repo) => projects.find((p) => p.repo === repo),
     vi.fn(),
     (fn) => {
       allowed = fn;
     },
   );
-  expect(allowed({ ownerId: 2 }, 'acme/shared')).toBe(true);
-  expect(allowed({ ownerId: 2 }, 'acme/private')).toBe(false);
-  expect(allowed({ ownerId: 1 }, 'acme/private')).toBe(true);
-  expect(allowed({ ownerId: null }, 'acme/private')).toBe(true);
+  expect(allowed({ ownerId: 2 }, projects[0])).toBe(true);
+  expect(allowed({ ownerId: 2 }, projects[1])).toBe(false);
+  expect(allowed({ ownerId: 1 }, projects[1])).toBe(true);
+  expect(allowed({ ownerId: null }, projects[1])).toBe(true);
   owners[1].disabledAt = 1;
-  expect(allowed({ ownerId: 2 }, 'acme/shared')).toBe(false);
-  expect(allowed({ ownerId: 99 }, 'acme/shared')).toBe(false);
+  expect(allowed({ ownerId: 2 }, projects[0])).toBe(false);
+  expect(allowed({ ownerId: 99 }, projects[0])).toBe(false);
 });
 
 it.each(['shares', 'credentials'])(
-  'recovers a failed %s startup load without using the server identity',
+  'continues startup after a failed %s load and recovers without changing identity',
   async (failedStore) => {
     const loadShares = vi.fn(async () => [{ kind: 'project', id: '3', userId: 2 }]);
     const savedIdentity = { token: 'stored-token', login: 'ana' };
@@ -61,21 +60,23 @@ it.each(['shares', 'credentials'])(
     (failedStore === 'shares' ? loadShares : loadCredentials).mockRejectedValueOnce(new Error('DB down'));
     const shares = createShares({ load: loadShares });
     const credentials = createUserCredentials({ load: loadCredentials, save: async () => {} });
-    const users = { init: vi.fn(), refresh: vi.fn(async () => {}), get: () => ({ id: 2, disabledAt: null }) };
-    const mobileAuth = { init: vi.fn(), refresh: vi.fn(async () => {}) };
+    const users = {
+      init: vi.fn(async () => {}),
+      refresh: vi.fn(async () => {}),
+      get: () => ({ id: 2, disabledAt: null }),
+    };
+    const mobileAuth = { init: vi.fn(async () => {}), refresh: vi.fn(async () => {}) };
     const boot = source.slice(
-      source.indexOf('    await users.init();'),
+      source.indexOf('    await users.init().catch('),
       source.indexOf('    await initSavedPrompts();'),
     );
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-    await expect(
-      new AsyncFunction('users', 'shares', 'credentials', 'mobileAuth', boot)(
-        users,
-        shares,
-        credentials,
-        mobileAuth,
-      ),
-    ).rejects.toThrow('DB down');
+    await new AsyncFunction('users', 'shares', 'credentials', 'mobileAuth', boot)(
+      users,
+      shares,
+      credentials,
+      mobileAuth,
+    );
     const identityWiring = source.slice(
       source.indexOf('const githubOf ='),
       source.indexOf('setOwnerGithub('),
@@ -84,7 +85,14 @@ it.each(['shares', 'credentials'])(
       users,
       credentials,
     );
-    expect(() => githubOf(2)).toThrow(expect.objectContaining({ status: 503 }));
+    if (failedStore === 'credentials')
+      expect(() => githubOf(2)).toThrow(expect.objectContaining({ status: 503 }));
+    else {
+      expect(() => shares.allows({ id: 2, role: 'member' }, 'project', 3)).toThrow(
+        expect.objectContaining({ status: 503 }),
+      );
+      expect(githubOf(2)).toEqual(savedIdentity);
+    }
     let refresh;
     const timer = source.slice(
       source.indexOf('  setInterval(() => {\n    mobileAuth.refresh()'),
@@ -109,7 +117,7 @@ it.each(['shares', 'credentials'])(
     refresh();
     await new Promise((resolve) => setImmediate(resolve));
     expect(githubOf(2)).toEqual({ token: 'ana-token', login: 'ana' });
-    expect(loadShares).toHaveBeenCalledTimes(failedStore === 'shares' ? 2 : 1);
+    expect(loadShares).toHaveBeenCalledTimes(3);
     expect(loadCredentials).toHaveBeenCalledTimes(failedStore === 'credentials' ? 2 : 1);
   },
 );
