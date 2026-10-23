@@ -126,12 +126,16 @@ describe('migrator', () => {
 });
 
 describe('turn usage owner migration retries', () => {
-  it('backfills after ALTER committed but the first admin lookup failed', async () => {
+  it('backfills for the demoted operator after ALTER committed but lookup failed', async () => {
     const { up } = await import('../migrations/2026_10_22_140000_add_user_id_to_turn_usage.js');
     let column = false;
     let failed = false;
     let alters = 0;
     const usage = [{ userId: null }, { userId: 7 }];
+    const users = [
+      { id: 1, role: 'member' },
+      { id: 7, role: 'admin' },
+    ];
     const pool = {
       async query(sql, params) {
         if (sql.includes('information_schema')) return [column ? [{}] : []];
@@ -145,7 +149,10 @@ describe('turn usage owner migration retries', () => {
             failed = true;
             throw new Error('connection lost');
           }
-          return [[{ id: 1 }]];
+          const eligible = sql.includes("WHERE `role` = 'admin'")
+            ? users.filter((user) => user.role === 'admin')
+            : users;
+          return [[{ id: Math.min(...eligible.map((user) => user.id)) }]];
         }
         if (sql.startsWith('UPDATE')) {
           for (const row of usage) if (row.userId === null) row.userId = params[0];
