@@ -142,11 +142,21 @@ it.each([200, 500])(
 );
 
 it.each([
-  [null, null, 200],
-  [null, null, 500],
-  ['lib/x.js', null, 200],
-  ['lib/x.js', 12, 200],
-])('recognizes a review heading with location %s:%s and lookup %i', async (file, line, lookupStatus) => {
+  ...[
+    `**Medium — follow-up: ${finding.title}**`,
+    `## High — ${finding.title}`,
+    `**Low — optional: ${finding.title}**`,
+    `### Critical – ${finding.title}`,
+    `Medium - ${finding.title}`,
+  ].flatMap((heading) =>
+    [
+      [null, null, 200],
+      [null, null, 500],
+      ['lib/x.js', null, 200],
+      ['lib/x.js', 12, 200],
+    ].map((location) => [heading, ...location]),
+  ),
+])('recognizes heading %s at %s:%s with lookup %i', async (heading, file, line, lookupStatus) => {
   vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-08T11:05:00Z'));
   const since = '2026-09-08T09:00:00Z';
   const entry = { ...finding, file, line };
@@ -170,7 +180,7 @@ it.each([
           line: 90,
           in_reply_to_id: 99,
           user: { login: 'alice' },
-          body: `**Medium — follow-up: ${finding.title}**\n\nStill needs fixing.`,
+          body: `${heading}\n\nStill needs fixing.`,
           created_at: '2026-09-08T10:00:00Z',
         },
       ]);
@@ -183,6 +193,8 @@ it.each([
 
   const [published] = await latestReviewFindings(repo, 5, { since, authorLogin: 'alice' });
   const held = JSON.parse(JSON.stringify(published));
+  if (lookupStatus === 200) expect(held.reviewCommentId).toBe(101);
+  else expect(held).not.toHaveProperty('reviewCommentId');
   unavailable = false;
   await asGithubUser('personal-token', () => replyOnFindingThread(repo, 5, held, 'Noted', { since }));
   await expect(
