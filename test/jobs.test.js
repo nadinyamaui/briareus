@@ -8698,7 +8698,7 @@ describe('the QA loop: reporting a finished QA run', () => {
     vi.useRealTimers();
   });
 
-  it.each(['new-push', 'released-pr'])(
+  it.each(['new-push', 'released-pr', 'closed-parent'])(
     'discards a pending verdict invalidated by %s before label writes or saving',
     async (change) => {
       vi.useFakeTimers();
@@ -8722,15 +8722,18 @@ describe('the QA loop: reporting a finished QA run', () => {
       await vi.advanceTimersByTimeAsync(20_000);
       expect(finishRead).toBeTypeOf('function');
       if (change === 'new-push') parent.qaLoop.pendingVerdict = null;
+      else if (change === 'closed-parent') await closeDevSession(parent.id);
       else {
         parent.startedOnPr = 99;
         parent.prStatus.number = 99;
       }
       const writes = removePullRequestLabel.mock.calls.length;
+      const events = parent.events.length;
       finishRead({ failures: [], total: 10, passed: 1, manual: 9, incomplete: true });
       await vi.advanceTimersByTimeAsync(0);
       expect(removePullRequestLabel.mock.calls).toHaveLength(writes);
       expect(parent.qaLoop.done).toBe(false);
+      if (change === 'closed-parent') expect(parent.events).toHaveLength(events);
       parent.status = 'closed';
       vi.useRealTimers();
     },

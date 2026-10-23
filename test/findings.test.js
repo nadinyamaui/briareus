@@ -333,6 +333,8 @@ describe('latestTestVerdict', () => {
     '2 | API | curl /api | 200 | ⬜',
     '2 | API | curl /api | 200 | ✅ | response.json',
     '| 2 | API | curl /api | 200 | ✅ |',
+    '| 2 | API | curl /api | 200 |',
+    '2 | API | curl /api | 200',
   ])('counts shortened scenario rows: %s', async (row) => {
     gh.comments = [sheet(['| 1 | API | curl /api | 200 | ✅ | response.json |', row])];
     const verdict = await latestTestVerdict(repo, 5);
@@ -403,6 +405,31 @@ describe('latestTestVerdict', () => {
       manual: 0,
       incomplete: true,
     });
+  });
+
+  it.each(['—', '–', '-', '...', '…', 'N/A', 'none', 'TBD', 'TODO'])(
+    'keeps placeholder evidence incomplete: %s',
+    async (evidence) => {
+      gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    },
+  );
+
+  it.each(['⚠️ UI blocked', '⏭️ UI skipped', 'UI blocked', 'UI skipped', '⬜ UI', '❓ UI unknown'])(
+    'keeps a partially executed row incomplete: %s',
+    async (procedure) => {
+      gh.comments = [
+        sheet([`| 1 | Mixed | API and UI | Both work | ✅ API; ${procedure} | response.json |`]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    },
+  );
+
+  it('accepts multiple evidenced passing subprocedures', async () => {
+    gh.comments = [
+      sheet(['| 1 | Mixed | API and UI | Both work | ✅ API; ✅ UI | response.json and video |']),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
   it('does not fall back to an older passing sheet when the newest is empty', async () => {
