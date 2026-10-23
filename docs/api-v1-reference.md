@@ -1195,7 +1195,7 @@ Start or reconnect an account; create default when absent. Needs `manage`.
 
 ### `GET /whatsapp/accounts/{id}/qr`
 
-Get the pairing QR code as a base64 PNG. Needs `read`.
+Get the pairing QR code as a base64 PNG. Needs `manage`.
 
 **Returns** `{ mimetype: string, data: string }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Available in SCAN_QR_CODE; refresh periodically until WORKING. Scan from WhatsApp → Linked devices → Link a device. Do not store QR codes.
 

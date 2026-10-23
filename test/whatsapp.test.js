@@ -251,6 +251,20 @@ describe('the WhatsApp core inbox', () => {
     expect(await (await ctx.request('/default/logout', { method: 'POST' })).json()).toEqual({ ok: true });
   });
 
+  it('requires manage access for a pairing QR while allowing read-only inbox access', async () => {
+    const ctx = await setup({ initialAccount: { name: 'default', status: 'SCAN_QR_CODE' } });
+    expect((await ctx.request('/default/qr', { token: ctx.tokens.read })).status).toBe(403);
+    expect(ctx.calls).toEqual([]);
+
+    for (const path of ['', '/default', '/default/conversations', `/default/conversations/${CHAT}/messages`])
+      expect((await ctx.request(path, { token: ctx.tokens.read })).status).toBe(200);
+    for (const token of [ctx.tokens.manage, ctx.tokens.admin]) {
+      const qr = await ctx.request('/default/qr', { token });
+      expect(qr.status).toBe(200);
+      expect(await qr.json()).toEqual({ mimetype: 'image/png', data: 'cXJjb2Rl' });
+    }
+  });
+
   it('keeps another user’s account and a read token’s writes from WAHA', async () => {
     const ctx = await setup();
     const routes = [
