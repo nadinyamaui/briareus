@@ -459,6 +459,48 @@ describe('latestTestVerdict', () => {
     });
   });
 
+  it.each([
+    '✅ unknown route returns 404',
+    '✅ blocked user receives 403',
+    '✅ pending payment is displayed',
+    '✅ manual payment is displayed',
+    '✅ GET /api/unknown returns 404',
+    '✅ unknown route returns 404; ✅ blocked user receives 403',
+    '✅ API, ✅ UI',
+    '✅ API / ✅ UI',
+    '✅ API<br>✅ UI',
+  ])('accepts evidenced passing scenario descriptions: %s', async (status) => {
+    gh.comments = [sheet([`| 1 | Procedure | Steps | Expected | ${status} | response.json |`])];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
+  it.each([
+    '✅ API, UI manual',
+    '✅ API / 🚧 UI',
+    '✅ API / UI not verified',
+    '✅ API<br>UI manual',
+    '✅ API; UI in progress',
+    '✅ API / ✅ 🚧 UI',
+    '✅ unknown route returns 404, UI manual',
+    '✅ blocked user receives 403 / UI not verified',
+    '✅ pending payment is displayed<br/>UI skipped',
+  ])('keeps unexecuted subprocedures incomplete: %s', async (status) => {
+    gh.comments = [sheet([`| 1 | Mixed | API and UI | Both work | ${status} | response.json |`])];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
   it.each(['_response.json_', '**asserted HTTP 200**', '`response.json`'])(
     'accepts formatted execution evidence: %s',
     async (evidence) => {
