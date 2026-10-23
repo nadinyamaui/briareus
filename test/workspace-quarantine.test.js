@@ -742,6 +742,34 @@ describe('workspace quarantine', () => {
       expect(fs.readFileSync(path.join(container, 'checkout', 'notes'), 'utf8')).toBe('untracked work');
     });
 
+    it.skipIf(process.platform !== 'linux')(
+      'keeps distinct untracked files hidden by core.ignoreCase',
+      () => {
+        const root = fixture();
+        const container = quarantined(root, 'acme__case', (git, dir) => {
+          git('config', 'core.ignoreCase', 'true');
+          fs.writeFileSync(path.join(dir, 'SOURCE'), 'private untracked work');
+          expect(fs.readFileSync(path.join(dir, 'source'), 'utf8')).toBe('pushed');
+          expect(git('status', '--porcelain', '--untracked-files=normal').trim()).toBe('');
+          expect(
+            git('-c', 'core.ignoreCase=false', 'status', '--porcelain', '--untracked-files=normal').trim(),
+          ).toBe('?? SOURCE');
+        });
+        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        expect(fs.readFileSync(path.join(container, 'checkout', 'SOURCE'), 'utf8')).toBe(
+          'private untracked work',
+        );
+        expect(fs.readFileSync(path.join(container, 'checkout', 'source'), 'utf8')).toBe('pushed');
+      },
+    );
+
+    it('still expires a clean checkout configured with core.ignoreCase', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__case', (git) => git('config', 'core.ignoreCase', 'true'));
+      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(fs.existsSync(container)).toBe(false);
+    });
+
     it.each(['--assume-unchanged', '--skip-worktree'])('keeps tracked edits hidden by %s', (flag) => {
       const root = fixture();
       const container = quarantined(root, 'acme__hidden', (git, dir) => {
