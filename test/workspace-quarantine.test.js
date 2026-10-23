@@ -266,6 +266,53 @@ describe('workspace quarantine', () => {
       expect(fs.readFileSync(path.join(checkout, 'source'), 'utf8')).toBe('pushed');
     });
 
+    it('keeps unpublished branch history hidden by local grafts', () => {
+      const root = fixture();
+      let privateHead;
+      const container = quarantined(root, 'acme__grafted', (git, dir) => {
+        const published = git('rev-parse', 'HEAD').trim();
+        const branch = git('symbolic-ref', '--short', 'HEAD').trim();
+        git('checkout', '-q', '--orphan', 'private');
+        fs.writeFileSync(path.join(dir, 'source'), 'private unpublished work');
+        git('add', 'source');
+        git('commit', '-qm', 'Private root');
+        privateHead = git('rev-parse', 'HEAD').trim();
+        git('checkout', '-q', branch);
+        git('config', 'advice.graftFileDeprecated', 'false');
+        fs.writeFileSync(path.join(dir, '.git', 'info', 'grafts'), `${published} ${privateHead}\n`);
+        expect(git('status', '--porcelain').trim()).toBe('');
+        expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
+        expect(
+          spawnSync('git', [
+            '--git-dir',
+            path.join(root, 'acme__grafted.remote.git'),
+            'cat-file',
+            '-e',
+            privateHead,
+          ]).status,
+        ).not.toBe(0);
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(
+        execFileSync('git', ['-C', path.join(container, 'checkout'), 'show', 'private:source'], {
+          encoding: 'utf8',
+        }),
+      ).toBe('private unpublished work');
+    });
+
+    it('reports a nonzero Git inspection exit and retains the checkout', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__corrupt', (git, dir) => {
+        fs.writeFileSync(path.join(dir, '.git', 'index'), 'corrupt');
+      });
+      expect(expireQuarantine(root)).toEqual({
+        expired: [],
+        errors: [{ path: container, error: expect.stringMatching(/Git ls-files.*128.*index/i) }],
+      });
+      expect(fs.readFileSync(path.join(container, 'checkout', 'source'), 'utf8')).toBe('pushed');
+      expect(fs.existsSync(path.join(container, 'checkout', '.git', 'HEAD'))).toBe(true);
+    });
+
     it('frees capacity at the retention bound', () => {
       const root = fixture();
       const recovery = path.join(root, QUARANTINE_NAME);
@@ -680,7 +727,10 @@ describe('workspace quarantine', () => {
           );
           expect(child.error).toBeUndefined();
           expect(child.status, child.stderr).toBe(0);
-          expect(JSON.parse(child.stdout)).toEqual({ expired: [], errors: [] });
+          expect(JSON.parse(child.stdout)).toEqual({
+            expired: [],
+            errors: [{ path: container, error: expect.stringMatching(/Git ls-files.*ETIMEDOUT/i) }],
+          });
           expect(fs.readFileSync(path.join(container, 'checkout', 'source'), 'utf8')).toBe('pushed');
         } finally {
           if (fs.existsSync(pidFile)) {
