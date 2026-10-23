@@ -198,6 +198,51 @@ it('does not bind or delete someone else’s title-quoting reply on an unrelated
   expect(request.mock.calls.some(([, init]) => ['POST', 'DELETE'].includes(init.method))).toBe(false);
 });
 
+it.each(['Unrelated discussion', `Regarding "${finding.title}"`])(
+  'does not target a later personal-account reply after a summary-only capture (%s)',
+  async (body) => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-08T11:05:00Z'));
+    const since = '2026-09-08T09:00:00Z';
+    const root = { ...inline, id: 99, created_at: '2026-09-01T10:00:00Z' };
+    const comments = [root];
+    const request = vi.fn(async (url, init) => {
+      if (url.endsWith('/user')) return Response.json({ login: 'server-account' });
+      if (url.includes('/issues/5/comments?')) {
+        return Response.json([{ ...summary, user: { login: 'alice' }, created_at: '2026-09-08T11:00:00Z' }]);
+      }
+      if (url.includes('/pulls/5/comments?')) return Response.json(comments);
+      if (init.method === 'POST' || init.method === 'PATCH') return Response.json({});
+      if (init.method === 'DELETE') return new Response(null, { status: 204 });
+      throw new Error(`Unexpected GitHub request: ${init.method} ${url}`);
+    });
+    vi.stubGlobal('fetch', request);
+
+    const [published] = await latestReviewFindings(repo, 5, { since, authorLogin: 'alice' });
+    const held = JSON.parse(JSON.stringify(published));
+    comments.push({
+      ...inline,
+      in_reply_to_id: root.id,
+      user: { login: 'alice' },
+      created_at: '2026-09-08T12:00:00Z',
+      body,
+    });
+    now.mockReturnValue(Date.parse('2026-09-08T12:05:00Z'));
+    const options = { since, authorLogin: held.reviewAuthorLogin };
+    await expect(
+      asGithubUser('personal-token', () => replyOnFindingThread(repo, 5, held, 'Noted', options)),
+    ).rejects.toThrow(/no comment/);
+    await expect(
+      asGithubUser('personal-token', () => deleteFindingFromReview(repo, 5, held, options)),
+    ).resolves.toEqual({ commentDeleted: false, undeclared: true, warning: null });
+
+    expect(request.mock.calls.some(([, init]) => ['POST', 'DELETE'].includes(init.method))).toBe(false);
+    const patches = request.mock.calls.filter(([, init]) => init.method === 'PATCH');
+    expect(patches).toHaveLength(1);
+    expect(patches[0][1].headers.Authorization).toBe('Bearer personal-token');
+    expect(JSON.parse(patches[0][1].body).body).not.toContain(finding.title);
+  },
+);
+
 it.each([
   ['server-account', 'server-account', false],
   ['owner-account', 'server-account', false],
