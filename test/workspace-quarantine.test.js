@@ -282,6 +282,40 @@ describe('workspace quarantine', () => {
       },
     );
 
+    it('keeps unpublished source commits held by an unfinished cherry-pick', () => {
+      const root = fixture();
+      let saved;
+      const container = quarantined(root, 'acme__cherry-pick', (git, dir) => {
+        const branch = git('symbolic-ref', '--short', 'HEAD').trim();
+        git('checkout', '-qb', 'side');
+        fs.writeFileSync(path.join(dir, 'source'), 'private cherry-pick source');
+        git('commit', '-qam', 'Private side commit');
+        saved = git('rev-parse', 'HEAD').trim();
+        git('checkout', '-q', branch);
+        fs.writeFileSync(path.join(dir, 'source'), 'published main');
+        git('commit', '-qam', 'Published main');
+        git('push', '-q', 'origin', 'HEAD');
+        git('branch', '-D', 'side');
+        expect(() => git('cherry-pick', saved)).toThrow();
+        git('checkout', '--ours', 'source');
+        git('add', 'source');
+        expect(git('status', '--porcelain', '--untracked-files=normal').trim()).toBe('');
+        expect(git('stash', 'list').trim()).toBe('');
+        expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
+        expect(git('rev-parse', 'CHERRY_PICK_HEAD').trim()).toBe(saved);
+        expect(() =>
+          git('--git-dir', path.join(root, 'acme__cherry-pick.remote.git'), 'cat-file', '-e', saved),
+        ).toThrow();
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(
+        execFileSync('git', ['-C', path.join(container, 'checkout'), 'show', 'CHERRY_PICK_HEAD:source'], {
+          encoding: 'utf8',
+        }),
+      ).toBe('private cherry-pick source');
+      expect(fs.readFileSync(path.join(container, 'checkout', 'source'), 'utf8')).toBe('published main');
+    });
+
     it('keeps recoverable staged contents in an interrupted index write', () => {
       const root = fixture();
       const container = quarantined(root, 'acme__pending', (git, dir) => {
