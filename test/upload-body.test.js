@@ -36,6 +36,7 @@ beforeEach(async () => {
   });
   app.use(
     apiV1Routes({
+      users: { get: () => ({ id: 1, name: 'Owner', role: 'admin', disabledAt: null }), list: () => [] },
       auth: {
         authenticate: () => ({ id: 'client', permission: 'admin' }),
         recordUsage: () => recordUsage(),

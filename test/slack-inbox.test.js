@@ -65,7 +65,7 @@ async function setup({ signingSecret = SECRET } = {}) {
   const tokens = {};
   for (const permission of ['read', 'manage', 'admin'])
     tokens[permission] = (
-      await auth.create({ label: permission, permission, repos: ['o/a'], days: 30 }, OWNER)
+      await auth.create({ userId: 1, label: permission, permission, repos: ['o/a'], days: 30 }, OWNER)
     ).token;
 
   const handlers = slackRoutes({ service: s, agentSession: () => null, getProject: () => null });
@@ -73,6 +73,7 @@ async function setup({ signingSecret = SECRET } = {}) {
   app.use('/webhooks/slack', slackEventsRouter({ service: s, log: () => {} }));
   app.use(
     apiV1Routes({
+      users: { get: () => ({ id: 1, name: 'Owner', role: 'admin', disabledAt: null }), list: () => [] },
       auth,
       apiEnabled: () => true,
       ownerSecret: () => OWNER,

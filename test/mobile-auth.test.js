@@ -2,7 +2,7 @@ import { beforeEach, it, expect, vi } from 'vitest';
 import { createMobileAuth } from '../lib/mobile-auth.js';
 
 const secret = 'owner-secret';
-const input = { label: 'Desktop', repos: ['owner/project'], permission: 'manage', days: 90 };
+const input = { label: 'Desktop', repos: ['owner/project'], permission: 'manage', days: 90, userId: 1 };
 let auth, saved, save, load, clock, issued;
 beforeEach(async () => {
   saved = [];
@@ -136,9 +136,17 @@ it('validates the name, the permission, the projects and the expiry', () => {
     { label: '' },
     { repos: [] },
     { repos: ['not a repo'] },
+    { userId: undefined },
+    { userId: 0 },
+    { userId: '1' },
   ])
     expect(() => auth.create({ ...input, ...overrides }, secret)).toThrow();
   expect(() => auth.create(input, '')).toThrow('AUTH_SECRET');
+});
+
+it('keeps whose token it is', async () => {
+  expect(issued.device.userId).toBe(1);
+  expect(auth.authenticate(bearer(issued), secret).userId).toBe(1);
 });
 
 // Two processes over one stored row: the server, and `npm run create-token`.

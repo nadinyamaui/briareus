@@ -83,6 +83,7 @@ beforeEach(async () => {
   app.use(sessionFileDownloads());
   app.use(
     apiV1Routes({
+      users: { get: () => ({ id: 1, name: 'Owner', role: 'admin', disabledAt: null }), list: () => [] },
       auth,
       apiEnabled: () => true,
       ownerSecret: () => cfg.auth.secret,
