@@ -20,12 +20,12 @@ const checklist = { id: 77, body: `${FIXES_ANCHOR}\n- [ ] ${finding.title} <!-- 
 beforeEach(() => db.decisions.clear());
 afterEach(() => vi.unstubAllGlobals());
 
-function github({ deleteStatus, readStatus = 200 }) {
+function github({ deleteStatus, readStatus = 200, patchStatus = 200, inlineComments = [inline] }) {
   const fetchMock = vi.fn(async (url, init) => {
     if (init.method === 'DELETE') return new Response(null, { status: deleteStatus });
-    if (init.method === 'PATCH') return Response.json({});
+    if (init.method === 'PATCH') return Response.json({}, { status: patchStatus });
     if (url.endsWith('/pulls/comments/101')) return Response.json(inline, { status: readStatus });
-    if (url.includes('/pulls/5/comments?')) return Response.json([inline]);
+    if (url.includes('/pulls/5/comments?')) return Response.json(inlineComments);
     if (url.includes('/issues/5/comments?')) return Response.json([summary, checklist]);
     throw new Error(`Unexpected GitHub request: ${init.method} ${url}`);
   });
@@ -103,5 +103,49 @@ it.each([204, 404])(
     const patch = request.mock.calls.find(([, init]) => init.method === 'PATCH');
     expect(patch[1].headers.Authorization).toBe('Bearer personal-token');
     expect(JSON.parse(patch[1].body).body).not.toContain(finding.title);
+  },
+);
+
+it.each([403, 404, 500])(
+  'fails summary-only withdrawal when the declaration rewrite is refused (%i)',
+  async (patchStatus) => {
+    const request = github({ patchStatus, inlineComments: [] });
+
+    await expect(
+      asGithubUser('personal-token', () => deleteFindingFromReview(repo, 5, finding)),
+    ).rejects.toThrow(`GitHub answered ${patchStatus} rewriting the review's findings block`);
+
+    expect(request.mock.calls.map(([, init]) => [init.method, init.headers.Authorization])).toEqual([
+      ['GET', 'Bearer server-token'],
+      ['GET', 'Bearer server-token'],
+      ['PATCH', 'Bearer personal-token'],
+    ]);
+  },
+);
+
+it('withdraws a summary-only finding when the declaration rewrite succeeds', async () => {
+  const request = github({ inlineComments: [] });
+
+  await expect(
+    asGithubUser('personal-token', () => deleteFindingFromReview(repo, 5, finding)),
+  ).resolves.toEqual({ commentDeleted: false, undeclared: true, warning: null });
+
+  const patch = request.mock.calls.find(([, init]) => init.method === 'PATCH');
+  expect(patch[1].headers.Authorization).toBe('Bearer personal-token');
+  expect(JSON.parse(patch[1].body).body).not.toContain(finding.title);
+});
+
+it.each([204, 404])(
+  'keeps the rewrite warning after a successful or confirmed-absent inline deletion (%i)',
+  async (deleteStatus) => {
+    github({ deleteStatus, readStatus: 404, patchStatus: 403 });
+
+    await expect(
+      asGithubUser('personal-token', () => deleteFindingFromReview(repo, 5, finding)),
+    ).resolves.toEqual({
+      commentDeleted: true,
+      undeclared: false,
+      warning: "GitHub answered 403 rewriting the review's findings block",
+    });
   },
 );
