@@ -95,7 +95,7 @@ for setup and access details.
    Git state shows no local work: no modified or untracked files, stash, or
    unpublished commits reachable from refs or HEAD. Ignored files and reflog-only
    history do not prevent expiry; remote-tracking refs determine what is published.
-   Checkouts with pending index writes, inspection-suppressing index flags,
+   Checkouts with unfinished merges/rebases, pending index writes, inspection-suppressing index flags,
    noncommit refs, submodule/linked-worktree registrations, or embedded repositories
    along tracked paths are retained, as are checkouts that cannot be safely
    inspected. Logs name preserved checkouts and inspection/deletion failures;

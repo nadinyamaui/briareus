@@ -240,6 +240,48 @@ describe('workspace quarantine', () => {
         expect(fs.existsSync(path.join(kept, 'checkout')), kept).toBe(true);
     });
 
+    it.each(['rebase-merge', 'rebase-apply', 'merge'])(
+      'keeps private autostash contents held by an unfinished %s',
+      (operation) => {
+        const root = fixture();
+        let autostash;
+        const container = quarantined(root, 'acme__autostash', (git, dir) => {
+          const branch = git('symbolic-ref', '--short', 'HEAD').trim();
+          git('checkout', '-qb', 'side');
+          if (operation !== 'merge') fs.writeFileSync(path.join(dir, 'source'), 'side');
+          git('commit', '-qam', 'Side', '--allow-empty');
+          git('checkout', '-q', branch);
+          if (operation !== 'merge') {
+            fs.writeFileSync(path.join(dir, 'source'), 'main');
+            git('commit', '-qam', 'Main');
+          }
+          git('push', '-q', 'origin', '--all');
+          fs.writeFileSync(path.join(dir, '.gitignore'), 'build/\nprivate saved work\n');
+          if (operation === 'merge') {
+            git('merge', '--autostash', '--no-commit', '--no-ff', 'side');
+            autostash = git('rev-parse', 'MERGE_AUTOSTASH').trim();
+          } else {
+            expect(() =>
+              git('rebase', operation === 'rebase-apply' ? '--apply' : '--merge', '--autostash', 'side'),
+            ).toThrow();
+            autostash = fs.readFileSync(path.join(dir, '.git', operation, 'autostash'), 'utf8').trim();
+          }
+          // Clear rebase conflicts so only operation metadata preserves the private edit.
+          if (operation !== 'merge') git('reset', '--hard', 'HEAD');
+          expect(git('status', '--porcelain', '--untracked-files=normal').trim()).toBe('');
+          expect(git('stash', 'list').trim()).toBe('');
+          expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
+          expect(git('show', `${autostash}:.gitignore`)).toBe('build/\nprivate saved work\n');
+        });
+        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        expect(
+          execFileSync('git', ['-C', path.join(container, 'checkout'), 'show', `${autostash}:.gitignore`], {
+            encoding: 'utf8',
+          }),
+        ).toBe('build/\nprivate saved work\n');
+      },
+    );
+
     it('keeps recoverable staged contents in an interrupted index write', () => {
       const root = fixture();
       const container = quarantined(root, 'acme__pending', (git, dir) => {
