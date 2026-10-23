@@ -347,6 +347,34 @@ describe('latestTestVerdict', () => {
     expect(verdict.incomplete).toBe(!row.includes('response.json'));
   });
 
+  it.each(['', '\n', '\nSaved response summary\n'])(
+    'ignores a separate evidence table after scenarios: %j',
+    async (gap) => {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl /api | 200 | ✅ | response.json |',
+          ...(gap ? [gap] : []),
+          '| Status | Meaning |',
+          '|---|---|',
+          '| 200 | Expected OK |',
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    },
+  );
+
+  it('ignores numeric prose rows outside the scenario table', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl /api | 200 | ✅ | response.json |',
+        '',
+        'Saved responses:',
+        '| 200 | Expected OK |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
   it('keeps escaped Markdown pipes inside their cells', async () => {
     gh.comments = [
       sheet([
@@ -426,6 +454,8 @@ describe('latestTestVerdict', () => {
     '`N/A`',
     '***—***',
     '**`none`**',
+    '~~TBD~~',
+    '~~**N/A**~~',
   ])('keeps placeholder evidence incomplete: %s', async (evidence) => {
     gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
@@ -469,6 +499,11 @@ describe('latestTestVerdict', () => {
     '✅ API, ✅ UI',
     '✅ API / ✅ UI',
     '✅ API<br>✅ UI',
+    '✅ HTTP 200, response body verified',
+    '✅ returns 200; JSON matches',
+    '✅ Chromium, Firefox',
+    '✅ returns name, email and status',
+    '✅ blocked user receives 403; response verified',
   ])('accepts evidenced passing scenario descriptions: %s', async (status) => {
     gh.comments = [sheet([`| 1 | Procedure | Steps | Expected | ${status} | response.json |`])];
     expect(await latestTestVerdict(repo, 5)).toEqual({
@@ -481,6 +516,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API (UI not run)',
+    '✅ API/UI not run',
+    '✅ API and UI manual',
+    '✅ API 🟡 UI pending',
     '✅ API, UI manual',
     '✅ API / 🚧 UI',
     '✅ API / UI not verified',
@@ -501,7 +540,7 @@ describe('latestTestVerdict', () => {
     });
   });
 
-  it.each(['_response.json_', '**asserted HTTP 200**', '`response.json`'])(
+  it.each(['_response.json_', '**asserted HTTP 200**', '`response.json`', '~~response.json~~'])(
     'accepts formatted execution evidence: %s',
     async (evidence) => {
       gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
