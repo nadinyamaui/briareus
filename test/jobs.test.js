@@ -5993,6 +5993,10 @@ describe('standalone code-review findings', () => {
       queuedReview('mine-fix', [finding('m2', 'Validate the input')], true),
       queuedReview('mine-save', [finding('m3', 'Keep the type')], true),
       queuedReview('stand-dispatch', [finding('k7', 'Rename the flag')]),
+      ...['reply', 'delete'].map((action) => ({
+        ...queuedReview(`stand-legacy-${action}`, [finding('legacy', 'Persisted finding')]),
+        ownerId: 2,
+      })),
       ...['reply', 'delete'].flatMap((action) =>
         ['disconnected', 'changed'].map((connection) => queuedReview(`stand-${action}-${connection}`, [])),
       ),
@@ -6159,6 +6163,7 @@ describe('standalone code-review findings', () => {
       replyOnFindingThread.mockClear();
       const job = getJob('stand-delete');
       job.ownerId = ownerId;
+      job.reviewTriage.findings[0].reviewAuthorLogin = ownerId == null ? null : 'ana';
       setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
       try {
         const out = await replyToReviewFinding('stand-delete', 'k5', '  Fine for me  ');
@@ -6185,6 +6190,26 @@ describe('standalone code-review findings', () => {
     await expect(replyToReviewFinding('stand-none', 'k5', 'hi')).rejects.toThrow(/no findings waiting/);
     await expect(replyToReviewFinding('stand-nope', 'k5', 'hi')).rejects.toThrow(/Session not found/);
   });
+
+  it.each(['reply', 'delete'])(
+    'keeps the server fallback for %s on restored findings without publication metadata',
+    async (action) => {
+      const job = getJob(`stand-legacy-${action}`);
+      expect(job.reviewTriage.findings[0]).not.toHaveProperty('reviewAuthorLogin');
+      setOwnerGithub(() => ({ token: 'new-token', login: 'new-account', id: 43 }));
+      try {
+        await holdStandaloneReviewFindings(job);
+        const operation = action === 'reply' ? replyOnFindingThread : deleteFindingFromReview;
+        operation.mockClear();
+        if (action === 'reply') await replyToReviewFinding(job.id, 'legacy', 'Noted');
+        else await deleteReviewFinding(job.id, 'legacy');
+        expect(operation.mock.lastCall.at(-1)).toEqual({ since: job.createdAt, authorLogin: null });
+        expect(job.reviewTriage.findings).toHaveLength(action === 'reply' ? 1 : 0);
+      } finally {
+        setOwnerGithub(() => null);
+      }
+    },
+  );
 
   it.each([
     ['reply', 'disconnected'],
@@ -6221,6 +6246,7 @@ describe('standalone code-review findings', () => {
     deleteFindingFromReview.mockClear();
     const job = getJob('stand-delete');
     job.ownerId = 2;
+    job.reviewTriage.findings[0].reviewAuthorLogin = 'ana';
     setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
     try {
       const out = await deleteReviewFinding('stand-delete', 'k5');

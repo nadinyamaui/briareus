@@ -2282,13 +2282,12 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     .catch((e) => console.error('Could not load WhatsApp watches (tried again every poll):', e.message));
   // `npm run create-token` and `npm run users` write the database directly; a revoked token
   // or disabled user stops new requests within 15s and open streams within 30s.
-  // Shares follow the same cadence to pick up changes from other server instances.
+  // Shares and credentials follow the same cadence for changes from other server instances.
   setInterval(() => {
     mobileAuth.refresh().catch((e) => console.error('Could not reload device tokens:', e.message));
     users.refresh().catch((e) => console.error('Could not reload users:', e.message));
     shares.refresh().catch((e) => console.error('Could not reload shares:', e.message));
-    // Retry failed credential loads without replacing an initialized cache.
-    credentials.init().catch((e) => console.error('Could not load user credentials:', e.message));
+    credentials.refresh().catch((e) => console.error('Could not load user credentials:', e.message));
   }, 15000).unref();
   // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
   // a client reads its mail from the database rather than from the provider.

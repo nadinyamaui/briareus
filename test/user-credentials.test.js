@@ -47,6 +47,83 @@ it('keeps the cache unchanged when the write fails', async () => {
   expect(credentials.get(2, 'github')).toEqual({ token: 'new' });
 });
 
+it('refreshes connections, replacements and disconnects made through another server', async () => {
+  let table = [];
+  const options = {
+    load: async () => structuredClone(table),
+    save: async (userId, kind, value) => {
+      table = [{ userId, kind, value }];
+    },
+    remove: async () => {
+      table = [];
+    },
+  };
+  const a = createUserCredentials(options);
+  const b = createUserCredentials(options);
+  await Promise.all([a.init(), b.init()]);
+  for (const login of ['ana', 'bea']) {
+    const identity = { token: `${login}-token`, login };
+    await a.set(2, 'github', identity);
+    await b.refresh();
+    expect(b.get(2, 'github')).toEqual(identity);
+  }
+  await a.remove(2, 'github');
+  await b.refresh();
+  expect(b.get(2, 'github')).toBeNull();
+});
+
+it('recovers initialization on refresh and keeps the queue usable after a failed refresh', async () => {
+  const load = vi.fn().mockRejectedValueOnce(new Error('DB down')).mockResolvedValue([]);
+  const credentials = createUserCredentials({ load, save: async () => {} });
+  await expect(credentials.init()).rejects.toThrow('DB down');
+  await credentials.refresh();
+  expect(credentials.get(2, 'github')).toBeNull();
+  load.mockRejectedValueOnce(new Error('DB down'));
+  await expect(credentials.refresh()).rejects.toThrow('DB down');
+  await credentials.set(2, 'github', { token: 'new' });
+  expect(credentials.get(2, 'github')).toEqual({ token: 'new' });
+});
+
+it('orders refreshes and mutations so a delayed snapshot cannot restore a disconnected PAT', async () => {
+  let table = [];
+  const load = vi.fn(async () => structuredClone(table));
+  const disconnect = Promise.withResolvers();
+  const disconnectStarted = Promise.withResolvers();
+  const remove = vi.fn(async () => {
+    disconnectStarted.resolve();
+    await disconnect.promise;
+    table = [];
+  });
+  const credentials = createUserCredentials({
+    load,
+    save: async (userId, kind, value) => {
+      table = [{ userId, kind, value }];
+    },
+    remove,
+  });
+  await credentials.init();
+  await credentials.set(2, 'github', { token: 'old' });
+  const snapshot = Promise.withResolvers();
+  const loadStarted = Promise.withResolvers();
+  load.mockImplementationOnce(() => {
+    loadStarted.resolve();
+    return snapshot.promise;
+  });
+  const firstRefresh = credentials.refresh();
+  await loadStarted.promise;
+  const removing = credentials.remove(2, 'github');
+  const nextRefresh = credentials.refresh();
+  await Promise.resolve();
+  expect(remove).not.toHaveBeenCalled();
+  snapshot.resolve(structuredClone(table));
+  await disconnectStarted.promise;
+  expect(load).toHaveBeenCalledTimes(2);
+  disconnect.resolve();
+  await Promise.all([firstRefresh, removing, nextRefresh]);
+  expect(credentials.get(2, 'github')).toBeNull();
+  expect(table).toEqual([]);
+});
+
 it('finishes saving and publishing a credential before a queued disconnect', async () => {
   let row = null;
   let acknowledgeSave;

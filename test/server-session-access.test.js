@@ -54,12 +54,16 @@ it.each(['shares', 'credentials'])(
   async (failedStore) => {
     const loadShares = vi.fn(async () => [{ kind: 'project', id: '3', userId: 2 }]);
     const savedIdentity = { token: 'stored-token', login: 'ana' };
-    const loadCredentials = vi.fn(async () => [
-      { userId: 2, kind: 'github', value: seal(JSON.stringify(savedIdentity)) },
-    ]);
+    let credentialRows = [{ userId: 2, kind: 'github', value: seal(JSON.stringify(savedIdentity)) }];
+    const loadCredentials = vi.fn(async () => structuredClone(credentialRows));
     (failedStore === 'shares' ? loadShares : loadCredentials).mockRejectedValueOnce(new Error('DB down'));
     const shares = createShares({ load: loadShares });
-    const credentials = createUserCredentials({ load: loadCredentials, save: async () => {} });
+    const credentials = createUserCredentials({
+      load: loadCredentials,
+      save: async (userId, kind, value) => {
+        credentialRows = [{ userId, kind, value }];
+      },
+    });
     const users = {
       init: vi.fn(async () => {}),
       refresh: vi.fn(async () => {}),
@@ -118,6 +122,14 @@ it.each(['shares', 'credentials'])(
     await new Promise((resolve) => setImmediate(resolve));
     expect(githubOf(2)).toEqual({ token: 'ana-token', login: 'ana' });
     expect(loadShares).toHaveBeenCalledTimes(3);
-    expect(loadCredentials).toHaveBeenCalledTimes(failedStore === 'credentials' ? 2 : 1);
+    expect(loadCredentials).toHaveBeenCalledTimes(3);
+    // A different server replaces, then disconnects the account in shared storage.
+    const replacement = { token: 'bea-token', login: 'bea' };
+    credentialRows = [{ userId: 2, kind: 'github', value: seal(JSON.stringify(replacement)) }];
+    refresh();
+    await vi.waitFor(() => expect(githubOf(2)).toEqual(replacement));
+    credentialRows = [];
+    refresh();
+    await vi.waitFor(() => expect(githubOf(2)).toBeNull());
   },
 );
