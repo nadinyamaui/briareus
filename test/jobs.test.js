@@ -16993,6 +16993,86 @@ describe('automatic recovery after a server restart', () => {
     expect(children).toHaveLength(1);
   });
 
+  it.each([
+    ['project', false],
+    ['database', false],
+    ['project', true],
+    ['database', true],
+  ])('keeps the reviewer after %s access denies publishing (answer: %s)', async (access, answering) => {
+    state.projects[0].reviewProviderId = 2;
+    const runtime = { providerId: 2, model: 'gpt-6.1-sol', effort: 'high' };
+    const parent = row({
+      status: 'closed',
+      recoveryTurn: null,
+      providerId: 1,
+      provider: 'Claude entry',
+      ownerId: 2,
+      branch: 'feature',
+      startedOnPr: 77,
+      prStatus: { number: 77, state: 'open', headSha: 'review-sha', syncedAt: new Date().toISOString() },
+    });
+    const review = row({
+      status: answering ? 'idle' : 'running',
+      awaitingAnswer: answering,
+      ownerId: 2,
+      reviewBranch: 'feature',
+      autoClose: true,
+      loopParentId: parent.id,
+      recoveryTurn: {
+        prompt: 'Review the change',
+        opts: { review: true },
+        phase: 'initial',
+        completed: false,
+      },
+    });
+    parent.reviewLoop = {
+      rounds: 1,
+      reviewing: true,
+      reviewerRound: true,
+      reviewSessionId: review.id,
+      lastSha: 'review-sha',
+      runtime: { ...runtime },
+      reviewRuntime: { ...runtime },
+    };
+    state.stored = [parent, review];
+    await initJobs({ deferPolling: true });
+    resumeRestartedSessions();
+    if (answering) {
+      await vi.waitFor(() => expect(review.status).toBe('idle'));
+      sendDevMessage(review.id, 'Continue the review');
+    }
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    const denial = access === 'project' ? 'Project unavailable' : 'Database server no longer shared';
+    if (access === 'project') setSessionProjectFilter(() => false);
+    else
+      assertInstanceAccess.mockImplementation(() => {
+        throw new Error(denial);
+      });
+    try {
+      finish(children[0]);
+      await vi.waitFor(() => expect(parent.reviewLoop.reviewing).toBe(false));
+      expect(review.error).toContain(denial);
+      expect(review.recoveryTurn.phase).toBe('publish');
+      expect(children).toHaveLength(1);
+      expect(parent.reviewLoop.reviewerFailed).not.toBe(true);
+      expect(parent.reviewLoop.runtime).toEqual(runtime);
+      expect(parent.reviewLoop.reviewRuntime).toEqual(runtime);
+      setSessionProjectFilter(() => true);
+      assertInstanceAccess.mockReset();
+      // Observe retry's selected runtime, stopping before real checkout/provider work.
+      parent.status = 'idle';
+      acquireInstance.mockRejectedValueOnce(new Error('fixture: retry admitted'));
+      await retryLoopRound(parent.id);
+      const retried = getJob(parent.reviewLoop.reviewSessionId);
+      expect(retried.providerId).toBe(2);
+      await vi.waitFor(() => expect(retried.status).toBe('failed'));
+      expect(retried.error).toBe('fixture: retry admitted');
+    } finally {
+      setSessionProjectFilter(() => true);
+      assertInstanceAccess.mockReset();
+    }
+  });
+
   it('continues after a completed discovery turn without running discovery again', async () => {
     const saved = row({
       reviewBranch: 'feature',
