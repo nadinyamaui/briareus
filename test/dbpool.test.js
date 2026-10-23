@@ -1426,6 +1426,32 @@ describe('claiming a server', () => {
     expect(events.filter((e) => e.includes('waiting for one to free up'))).toHaveLength(1);
   });
 
+  it('checks waiting progress on every poll and stops checking once a server is claimed', async () => {
+    state.servers = [server()];
+    state.project.dbPoolEnabled = true;
+    const holder = job('holder');
+    await acquire(holder);
+    const waiter = job('waiter');
+    claimed.push(waiter);
+    const onWait = vi.fn();
+    const onClaim = () => {
+      onWait.mockImplementation(() => {
+        throw new Error('already claimed');
+      });
+    };
+    const pending = acquireInstance(waiter, 'r/r', vi.fn(), onClaim, onWait);
+    try {
+      await vi.waitFor(() => expect(onWait.mock.calls.length).toBeGreaterThan(1));
+      await releaseInstance(holder);
+      await expect(pending).resolves.toBe(1);
+      expect(waitingForInstance(waiter.id)).toBe(false);
+      expect(claimHolder(1)).toBe(waiter.id);
+    } finally {
+      waiter.status = 'closed';
+      await pending.catch(() => {});
+    }
+  });
+
   it.each(['claim', 'cancel', 'revoke', 'timeout'])(
     'tracks an acquisition wait until it ends with %s',
     async (outcome) => {

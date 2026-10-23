@@ -1106,6 +1106,89 @@ describe('loop children waiting for a database slot', () => {
     await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([child.id]));
   });
 
+  it.each(['review', 'fix', 'qa'])(
+    'fails a polling %s child promptly when a grant change leaves only waiting parents',
+    async (kind) => {
+      const pool = await vi.importActual('../lib/dbpool.js');
+      const poolExports = await import('../lib/dbpool.js');
+      const servers = await import('../lib/dbservers.js');
+      const config = await import('../lib/config.js');
+      const cfg = config.getConfig();
+      const entries = [1, 2, 3].map((id) => ({ id, host: '127.0.0.1', port: 3306 + id }));
+      const spies = [
+        vi.spyOn(config, 'getConfig').mockReturnValue({
+          ...cfg,
+          dbPool: { enabled: true, waitTimeoutMin: 30, pollSeconds: 0.001 },
+        }),
+        vi.spyOn(servers, 'activeDbServers').mockReturnValue(entries),
+        vi.spyOn(poolExports, 'claimHolder').mockImplementation(pool.claimHolder),
+        vi.spyOn(poolExports, 'waitingForInstance').mockImplementation(pool.waitingForInstance),
+      ];
+      const parent = getJob(ids[0]);
+      const unrelated = getJob('slot-holder');
+      Object.assign(parent, { ownerId: 2, dbServerId: 1 });
+      unrelated.dbServerId = 2;
+      state.projects[0].dbPoolEnabled = true;
+      state.capacity += 1;
+      pool.reclaimInstance(parent, 1);
+      pool.reclaimInstance(unrelated, 2);
+      let shared = true;
+      const policy = vi.fn((job, server) => server.id === 1 || (server.id === 2 && shared));
+      pool.setDbServerFilter(policy);
+      poolExports.eligibleDbServers.mockImplementation(pool.eligibleDbServers);
+      acquireInstance.mockImplementation(pool.acquireInstance);
+      releaseInstance.mockImplementation(pool.releaseInstance);
+      let child;
+      try {
+        if (kind === 'review') child = await queueReview(parent.id);
+        else {
+          const extra = kind === 'fix' ? { loopFixParentId: parent.id } : { qaParentId: parent.id, qa: true };
+          child = getJob(
+            createDevSession({
+              provider: 1,
+              repo: 'acme/slots',
+              branch: 'task/slots',
+              prompt: kind,
+              ...extra,
+            }).id,
+          );
+          children.push(child);
+          if (kind === 'fix') Object.assign(parent.reviewLoop, { fixing: true, fixSessionId: child.id });
+          else parent.qaLoop = { running: true, sessionId: child.id };
+        }
+        await vi.waitFor(() => expect(pool.waitingForInstance(child.id)).toBe(true));
+        expect(child.status).toBe('preparing');
+        shared = false;
+        policy.mockClear();
+        // Prove acquisition actually polls the changed policy before checking its outcome.
+        await vi.waitFor(() =>
+          expect(policy.mock.calls.filter(([, s]) => s.id === 2).length).toBeGreaterThan(1),
+        );
+        await vi.waitFor(() => expect(child.status).toBe('failed'));
+        expect(child.error).toMatch(/parents hold every database slot.*share it with the owner/i);
+        const loop = kind === 'qa' ? parent.qaLoop : parent.reviewLoop;
+        expect(kind === 'fix' ? loop.fixing : kind === 'qa' ? loop.running : loop.reviewing).toBe(false);
+        expect(loop.failure.reason).toBe(child.error);
+        expect(loop.reviewerFailed).not.toBe(true);
+        expect(pool.waitingForInstance(child.id)).toBe(false);
+        expect(child.dbServerId).toBeFalsy();
+        expect(releaseInstance).toHaveBeenCalledWith(child);
+        expect(pool.claimHolder(1)).toBe(parent.id);
+        expect(pool.claimHolder(2)).toBe(unrelated.id);
+      } finally {
+        if (child) await closeDevSession(child.id);
+        await pool.releaseInstance(parent);
+        await pool.releaseInstance(unrelated);
+        pool.setDbServerFilter(() => true);
+        pool._resetForTests();
+        poolExports.eligibleDbServers.mockReset().mockImplementation(() => state.eligibleServers);
+        acquireInstance.mockReset();
+        releaseInstance.mockReset();
+        for (const spy of spies.reverse()) spy.mockRestore();
+      }
+    },
+  );
+
   it('fails an accepted wait if pool reduction leaves only its parent holding capacity', async () => {
     const unrelated = devSessionRecords().filter((j) => ![ids[0], 'slot-holder'].includes(j.id));
     const statuses = unrelated.map((j) => j.status);
