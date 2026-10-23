@@ -61,7 +61,7 @@ import {
   getFindings,
   latestReviewFindings,
   latestReviewDeclaration,
-  latestTestFailures,
+  latestTestVerdict,
   decideFinding,
   queueFindingsForFix,
   sortFindingsForFix,
@@ -285,7 +285,7 @@ describe('getFindings', () => {
   });
 });
 
-describe('latestTestFailures', () => {
+describe('latestTestVerdict', () => {
   const sheet = (rows) => ({
     id: 3,
     body: [
@@ -306,15 +306,86 @@ describe('latestTestFailures', () => {
         '| 3 | Manual only | — | — | 🖐 | |',
       ]),
     ];
-    const failures = await latestTestFailures(repo, 5);
+    const { failures } = await latestTestVerdict(repo, 5);
     expect(failures).toEqual([
       { number: '2', scenario: 'Bad password', expected: 'Error shown', evidence: 'typed wrong error' },
     ]);
   });
 
+  it('reproduces one browser pass plus nine manual API rows without inventing failures', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | Profile | Open profile | Permission | ✅ | [video](u) |',
+        ...Array.from({ length: 9 }, (_, i) => `| ${i + 2} | API | GET /api | 200 | 🖐 | |`),
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 10,
+      passed: 1,
+      manual: 9,
+      incomplete: true,
+    });
+  });
+
+  it('accepts a fully executed API and UI sheet with evidence', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl /api | 200 with expected JSON | ✅ | [responses and assertions](u) |',
+        '| 2 | UI | Open profile | Permission | ✅ | [video](u) |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 2,
+      passed: 2,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
+  it.each([
+    ['🖐️', 'Intentionally excluded: requires a physical device', 1],
+    ['⬜', '', 0],
+    ['unknown', '', 0],
+    ['✅', '', 0],
+  ])('keeps %s incomplete even with an intentional exemption reason', async (status, evidence, manual) => {
+    gh.comments = [sheet([`| 1 | Procedure | Steps | Expected | ${status} | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 0,
+      manual,
+      incomplete: true,
+    });
+  });
+
+  it('accepts annotated passes but keeps mixed executed/unexecuted rows incomplete', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl /api | 200 | ✅ API curl | response.json |',
+        '| 2 | Mixed | API and UI | Both work | ✅ API curl; ⬜ profile UI | response.json |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 2,
+      passed: 1,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it('does not fall back to an older passing sheet when the newest is empty', async () => {
+    gh.comments = [sheet(['| 1 | Old | Steps | Expected | ✅ | evidence |']), sheet([])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 0, incomplete: true });
+  });
+
   it('reads a row with stray pipes in its prose from both ends', async () => {
     gh.comments = [sheet(['| 4 | Piped | Run `a | b` then `c | d` | Output shown | ❌ | saw nothing |'])];
-    const [failure] = await latestTestFailures(repo, 5);
+    const {
+      failures: [failure],
+    } = await latestTestVerdict(repo, 5);
     expect(failure.number).toBe('4');
     expect(failure.expected).toBe('Output shown');
     expect(failure.evidence).toBe('saw nothing');
@@ -322,13 +393,13 @@ describe('latestTestFailures', () => {
 
   it('never reports the header row, even with a ❌ elsewhere in the table', async () => {
     gh.comments = [sheet(['| 1 | Fails | steps | Expected | ❌ | note |'])];
-    const failures = await latestTestFailures(repo, 5);
+    const { failures } = await latestTestVerdict(repo, 5);
     expect(failures.every((f) => /^\d+$/.test(f.number))).toBe(true);
   });
 
-  it('no sheet at all answers with an empty list', async () => {
+  it('no sheet at all is incomplete', async () => {
     gh.comments = [{ id: 1, body: 'no sheet here' }];
-    expect(await latestTestFailures(repo, 5)).toEqual([]);
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ failures: [], total: 0, incomplete: true });
   });
 });
 
