@@ -364,6 +364,52 @@ describe('latestTestVerdict', () => {
     });
   });
 
+  it('keeps failed scenarios after empty table spacer rows', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl /api | 200 | ✅ | response.json |',
+        '| | | | | | |',
+        '| 2 | Failure | curl /api | 200 | ❌ | saw 500 |',
+        '| | | | | | |',
+        '| 3 | UI | Open profile | Permission | ⬜ | |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '2', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+      total: 3,
+      passed: 1,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it.each([
+    '| # | Scenario | Request | Expected | Status | Evidence |',
+    '| **#** | Case | Request | Response | **Status** | _Evidence_ |',
+    '| `#` | Scenario | Steps | Expected | ~~Status~~ | **`Evidence`** |',
+  ])('recognizes custom and formatted results headers: %s', async (header) => {
+    const rows = [header, '|---|---|---|---|---|---|'];
+    gh.comments = [
+      sheet([
+        '| 1 | Browser | Open profile | Permission | ✅ | video |',
+        '',
+        ...rows,
+        '| 2 | Failure | curl /api | 200 | ❌ | saw 500 |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '2', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+      total: 2,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+    gh.comments = [
+      { body: [TEST_SHEET_ANCHOR, ...rows, '| 1 | API | curl | 200 | ✅ | response.json |'].join('\n') },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
   it.each(['', '\n', '\nSaved response summary\n'])(
     'ignores a separate evidence table after scenarios: %j',
     async (gap) => {
@@ -567,6 +613,20 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI not run on this host',
+    '✅ API; UI blocked by missing credentials',
+    '✅ API; UI blocked by unavailable credentials',
+    '✅ API; UI was skipped for this run',
+    '✅ API; browser not run',
+    '✅ API; UI could not be tested',
+    '✅ API; UI not yet tested',
+    '✅ API; UI pending execution',
+    '✅ API; UI not run — no browser',
+    '✅ API; UI not run while browser starts',
+    '✅ API; UI was not tested after setup failed',
+    '✅ API; browser could not be verified without credentials',
+    '✅ API; UI skipped for lack of access',
+    '✅ API; UI blocked by setup failure',
     '✅ API; UI was skipped',
     '✅ API; UI: skipped',
     '✅ API; UI is pending',
