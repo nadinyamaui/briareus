@@ -240,6 +240,32 @@ describe('workspace quarantine', () => {
         expect(fs.existsSync(path.join(kept, 'checkout')), kept).toBe(true);
     });
 
+    it('keeps recoverable staged contents in an interrupted index write', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__pending', (git, dir) => {
+        const index = path.join(dir, '.git', 'index');
+        const publishedIndex = fs.readFileSync(index);
+        fs.writeFileSync(path.join(dir, 'source'), 'private staged work');
+        git('add', 'source');
+        // Recreate a completed index write interrupted before the lock is renamed.
+        fs.renameSync(index, `${index}.lock`);
+        fs.writeFileSync(index, publishedIndex);
+        fs.writeFileSync(path.join(dir, 'source'), 'pushed');
+        expect(git('show', ':source')).toBe('pushed');
+        expect(git('status', '--porcelain').trim()).toBe('');
+        expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      const checkout = path.join(container, 'checkout');
+      expect(
+        execFileSync('git', ['-C', checkout, 'show', ':source'], {
+          encoding: 'utf8',
+          env: { ...process.env, GIT_INDEX_FILE: path.join(checkout, '.git', 'index.lock') },
+        }),
+      ).toBe('private staged work');
+      expect(fs.readFileSync(path.join(checkout, 'source'), 'utf8')).toBe('pushed');
+    });
+
     it('frees capacity at the retention bound', () => {
       const root = fixture();
       const recovery = path.join(root, QUARANTINE_NAME);
