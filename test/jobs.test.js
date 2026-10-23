@@ -3679,18 +3679,22 @@ describe('spawnWorkerSession: tooling fixes', () => {
 
   it.each(['message', 'reopen', 'recovery'])(
     'refuses a closed tooling worker’s %s after its target project is unshared',
-    (action) => {
+    async (action) => {
       const worker = getJob('tool-closed');
       const events = [...worker.events];
       const allowed = vi.fn((job, project) => job.ownerId !== 2 || project.repo !== dashboard.repo);
       setSessionProjectFilter(allowed);
       spawn.mockClear();
       acquireInstance.mockClear();
-      expect(() =>
+      const attempt = () =>
         action === 'message'
           ? sendDevMessage(worker.id, 'Continue fixing the dashboard')
-          : reopenDevSession(worker.id, { recovering: action === 'recovery' }),
-      ).toThrow(/Project unavailable/);
+          : reopenDevSession(worker.id, { recovering: action === 'recovery' });
+      if (action === 'recovery') {
+        expect(attempt).not.toThrow();
+        await vi.waitFor(() => expect(worker.restartPending).toBe(false));
+        expect(releaseInstance).toHaveBeenCalledWith(worker);
+      } else expect(attempt).toThrow(/Project unavailable/);
       expect(allowed).toHaveBeenCalledWith(expect.objectContaining({ ownerId: 2 }), dashboard);
       expect(worker.status).toBe('closed');
       expect(worker.events).toEqual(events);
@@ -15885,6 +15889,54 @@ describe('automatic recovery after a server restart', () => {
     ]);
     finish(children[0]);
     await vi.waitFor(() => expect(saved.status).toBe('idle'));
+  });
+
+  it('fails denied idle recovery without blocking other sessions or repeating it on restart', async () => {
+    const checkout = path.join(root, 'denied-checkout');
+    fs.mkdirSync(checkout);
+    fs.writeFileSync(path.join(checkout, 'unfinished.txt'), 'keep this work');
+    const denied = row({
+      status: 'idle',
+      ownerId: 2,
+      orchestrator: false,
+      dbServerId: 7,
+      workDir: checkout,
+      recoveryTurn: null,
+    });
+    const allowed = row({ status: 'idle', recoveryTurn: null });
+    state.stored = [denied, allowed];
+    setSessionProjectFilter((job) => job.ownerId !== 2);
+    releaseInstance.mockClear();
+    acquireInstance.mockClear();
+    await initJobs({ deferPolling: true });
+    expect(denied).toMatchObject({ status: 'interrupted', restartPending: true, restartDbServerId: 7 });
+    expect(() => resumeRestartedSessions()).not.toThrow();
+    await vi.waitFor(() => {
+      expect(denied).toMatchObject({
+        status: 'failed',
+        error: 'Project unavailable for the user who owns this session',
+        restartPending: false,
+        restartDbServerId: null,
+      });
+      expect(allowed.status).toBe('idle');
+    });
+    expect(reclaimInstance).toHaveBeenCalledWith(denied, 7);
+    expect(releaseInstance).toHaveBeenCalledWith(denied);
+    expect(acquireInstance).not.toHaveBeenCalled();
+    expect(children).toHaveLength(0);
+    expect(fs.readFileSync(path.join(checkout, 'unfinished.txt'), 'utf8')).toBe('keep this work');
+    await vi.waitFor(() =>
+      expect(saveJob.mock.calls.findLast(([j]) => j.id === denied.id)?.[0]).toMatchObject({
+        status: 'failed',
+        restartPending: false,
+        restartDbServerId: null,
+      }),
+    );
+    await initJobs({ deferPolling: true });
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(allowed.status).toBe('idle'));
+    expect(denied.status).toBe('failed');
+    expect(children).toHaveLength(0);
   });
 
   it('reopens waiting questions without inventing answers and leaves previously failed or closed sessions alone', async () => {
