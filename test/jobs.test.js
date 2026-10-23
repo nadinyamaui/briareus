@@ -255,6 +255,7 @@ import {
   releaseInstance,
   dropSessionDatabase,
   assertInstanceAccess,
+  instanceEnv,
 } from '../lib/dbpool.js';
 import {
   latestReviewFindings,
@@ -16998,6 +16999,8 @@ describe('automatic recovery after a server restart', () => {
     ['database', false],
     ['project', true],
     ['database', true],
+    ['database during browser startup', false],
+    ['database during browser startup', true],
   ])('keeps the reviewer after %s access denies publishing (answer: %s)', async (access, answering) => {
     state.projects[0].reviewProviderId = 2;
     const runtime = { providerId: 2, model: 'gpt-6.1-sol', effort: 'high' };
@@ -17043,15 +17046,38 @@ describe('automatic recovery after a server restart', () => {
     }
     await vi.waitFor(() => expect(children).toHaveLength(1));
     const denial = access === 'project' ? 'Project unavailable' : 'Database server no longer shared';
+    let pool;
+    let serverSpy;
+    let launched;
+    let shared = true;
+    const browserStart = startBrowser.getMockImplementation();
     if (access === 'project') setSessionProjectFilter(() => false);
-    else
+    else if (access === 'database')
       assertInstanceAccess.mockImplementation(() => {
         throw new Error(denial);
       });
+    else {
+      pool = await vi.importActual('../lib/dbpool.js');
+      const servers = await import('../lib/dbservers.js');
+      serverSpy = vi.spyOn(servers, 'getDbServer').mockReturnValue({ id: 7 });
+      pool.setDbServerFilter(() => shared);
+      assertInstanceAccess.mockImplementation(pool.assertInstanceAccess);
+      instanceEnv.mockImplementation(pool.instanceEnv);
+      review.dbServerId = 7;
+      review.browser = true;
+      browserState.endpoint = null;
+      launched = Promise.withResolvers();
+      startBrowser.mockReturnValueOnce(launched.promise);
+    }
     try {
       finish(children[0]);
+      if (launched) {
+        await vi.waitFor(() => expect(startBrowser).toHaveBeenCalledWith(review.id));
+        shared = false;
+        launched.resolve();
+      }
       await vi.waitFor(() => expect(parent.reviewLoop.reviewing).toBe(false));
-      expect(review.error).toContain(denial);
+      expect(review.error).toContain(launched ? 'Database server is no longer shared' : denial);
       expect(review.recoveryTurn.phase).toBe('publish');
       expect(children).toHaveLength(1);
       expect(parent.reviewLoop.reviewerFailed).not.toBe(true);
@@ -17059,6 +17085,7 @@ describe('automatic recovery after a server restart', () => {
       expect(parent.reviewLoop.reviewRuntime).toEqual(runtime);
       setSessionProjectFilter(() => true);
       assertInstanceAccess.mockReset();
+      shared = true;
       // Observe retry's selected runtime, stopping before real checkout/provider work.
       parent.status = 'idle';
       acquireInstance.mockRejectedValueOnce(new Error('fixture: retry admitted'));
@@ -17068,6 +17095,11 @@ describe('automatic recovery after a server restart', () => {
       await vi.waitFor(() => expect(retried.status).toBe('failed'));
       expect(retried.error).toBe('fixture: retry admitted');
     } finally {
+      launched?.resolve();
+      pool?.setDbServerFilter(() => true);
+      serverSpy?.mockRestore();
+      instanceEnv.mockReset().mockReturnValue({});
+      startBrowser.mockReset().mockImplementation(browserStart);
       setSessionProjectFilter(() => true);
       assertInstanceAccess.mockReset();
     }

@@ -119,6 +119,7 @@ const {
   probeDbServer,
   instanceAppPort,
   instanceEnv,
+  assertInstanceAccess,
   dropSessionDatabase,
   ensureProfileDatabase,
   profileDbElsewhere,
@@ -1337,6 +1338,23 @@ describe('claiming a server', () => {
       expect(session.dbServerId).toBe(1);
       await releaseInstance(session);
       expect(claimHolder(1)).toBeNull();
+    } finally {
+      setDbServerFilter(() => true);
+    }
+  });
+
+  it.each([false, true])('classifies database admission errors as non-provider (missing: %s)', (missing) => {
+    const session = { ...job(), ownerId: 2, dbServerId: missing ? 99 : 1 };
+    setDbServerFilter(() => false);
+    try {
+      expect(() => assertInstanceAccess(session)).toThrow(
+        expect.objectContaining({
+          message: missing
+            ? "The session's database server (99) is unavailable"
+            : 'Database server is no longer shared with the session owner',
+          fromProvider: false,
+        }),
+      );
     } finally {
       setDbServerFilter(() => true);
     }
