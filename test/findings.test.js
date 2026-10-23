@@ -347,6 +347,23 @@ describe('latestTestVerdict', () => {
     expect(verdict.incomplete).toBe(!row.includes('response.json'));
   });
 
+  it.each(['| 2 |', '2 |', '| **2** |'])('keeps scanning after number-only row %s', async (row) => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl /api | 200 | ✅ | response.json |',
+        row,
+        '| 3 | Failure | curl /api | 200 | ❌ | saw 500 |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '3', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+      total: 3,
+      passed: 1,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
   it.each(['', '\n', '\nSaved response summary\n'])(
     'ignores a separate evidence table after scenarios: %j',
     async (gap) => {
@@ -375,7 +392,7 @@ describe('latestTestVerdict', () => {
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
-  it.each(['**2**', '2.', '_2_', '`2`', '~~2~~', '**2.**'])(
+  it.each(['**2**', '2.', '_2_', '`2`', '~~2~~', '**2.**', '#2', '2a', '2.1', '**2.1**'])(
     'preserves failed and subsequent scenarios after formatted number %s',
     async (number) => {
       gh.comments = [
@@ -386,7 +403,14 @@ describe('latestTestVerdict', () => {
         ]),
       ];
       expect(await latestTestVerdict(repo, 5)).toEqual({
-        failures: [{ number: '2', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+        failures: [
+          {
+            number: number.replace(/[^0-9]/g, ''),
+            scenario: 'Failure',
+            expected: '200',
+            evidence: 'saw 500',
+          },
+        ],
         total: 3,
         passed: 1,
         manual: 0,
@@ -511,6 +535,11 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '✅ request from blocked user was blocked',
+    '✅ user not verified is denied',
+    '✅ API blocked user returns 403',
+    '✅ UI pending payment is shown',
+    '✅ API: blocked user returns 403',
+    '✅ UI: pending payment is shown',
     '✅ payment remains pending',
     '✅ unknown route returns 404',
     '✅ blocked user receives 403',
@@ -538,6 +567,14 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI was skipped',
+    '✅ API; UI: skipped',
+    '✅ API; UI is pending',
+    '✅ API; UI: skipped (browser unavailable)',
+    '✅ API; UI unavailable',
+    '✅ API; Firefox not attempted',
+    '✅ API; UI was not tested: browser unavailable',
+    '✅ API; UI is blocked because credentials are unavailable',
     '✅ API; UI blocked: browser unavailable',
     '✅ API; UI pending (needs browser)',
     '✅ API; UI skipped due to unavailable credentials',
