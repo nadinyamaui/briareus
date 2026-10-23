@@ -117,10 +117,14 @@ describe('the Envoyer routes', () => {
   let server;
   afterEach(() => new Promise((resolve) => server.close(resolve)));
 
-  async function serve(service) {
+  async function serve(service, { user = null, mayUse } = {}) {
     const app = express();
     app.use(express.json());
-    app.use(envoyerRoutes({ service, getProject: (repo) => (repo === REPO ? { repo } : null) }));
+    app.use((_req, res, next) => {
+      res.locals.apiUser = user;
+      next();
+    });
+    app.use(envoyerRoutes({ service, getProject: (repo) => (repo === REPO ? { repo } : null), mayUse }));
     server = app.listen(0, '127.0.0.1');
     await new Promise((resolve) => server.once('listening', resolve));
     return `http://127.0.0.1:${server.address().port}`;
@@ -141,5 +145,25 @@ describe('the Envoyer routes', () => {
     expect(bad.status).toBe(400);
     const listed = await fetch(`${base}/api/envoyer/available?repo=${REPO}`);
     expect(await listed.json()).toEqual({ accounts: [account] });
+  });
+
+  it('keeps a member to the accounts shared with them', async () => {
+    const { service, account } = await envoyer([200, { projects: [] }]);
+    const ana = { id: 2, role: 'member' };
+    let shared = false;
+    const mayUse = (user, id) => user === ana && id === account.id && shared;
+    const base = await serve(service, { user: ana, mayUse });
+    expect(await (await fetch(`${base}/api/envoyer/available?repo=${REPO}`)).json()).toEqual({
+      accounts: [],
+    });
+    const hidden = await fetch(`${base}/api/envoyer/accounts/${account.id}/projects?repo=${REPO}`);
+    expect(hidden.status).toBe(404);
+    shared = true;
+    expect(await (await fetch(`${base}/api/envoyer/available?repo=${REPO}`)).json()).toEqual({
+      accounts: [account],
+    });
+    expect((await fetch(`${base}/api/envoyer/accounts/${account.id}/projects?repo=${REPO}`)).status).toBe(
+      200,
+    );
   });
 });
