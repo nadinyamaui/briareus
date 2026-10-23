@@ -770,6 +770,31 @@ describe('workspace quarantine', () => {
       expect(fs.existsSync(container)).toBe(false);
     });
 
+    it.skipIf(process.platform === 'win32')('keeps executable-bit edits hidden by core.fileMode', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__mode', (git, dir) => {
+        fs.chmodSync(path.join(dir, 'source'), 0o644);
+        git('update-index', '--chmod=-x', 'source');
+        git('config', 'core.fileMode', 'false');
+        fs.chmodSync(path.join(dir, 'source'), 0o755);
+        expect(git('status', '--porcelain', '--untracked-files=normal').trim()).toBe('');
+        expect(
+          git('-c', 'core.fileMode=true', 'status', '--porcelain', '--untracked-files=normal').trim(),
+        ).toBe('M source');
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      const source = path.join(container, 'checkout', 'source');
+      expect(fs.statSync(source).mode & 0o777).toBe(0o755);
+      expect(fs.readFileSync(source, 'utf8')).toBe('pushed');
+    });
+
+    it('still expires a clean checkout configured with core.fileMode=false', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__mode', (git) => git('config', 'core.fileMode', 'false'));
+      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(fs.existsSync(container)).toBe(false);
+    });
+
     it.each(['--assume-unchanged', '--skip-worktree'])('keeps tracked edits hidden by %s', (flag) => {
       const root = fixture();
       const container = quarantined(root, 'acme__hidden', (git, dir) => {
