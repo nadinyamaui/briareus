@@ -37,6 +37,9 @@ const state = vi.hoisted(() => ({
   catalog: '',
   projects: [],
   claimsServer: false,
+  eligibleServers: [],
+  dbWaiters: new Set(),
+  dbHolders: new Map(),
   capacity: 3,
   // What initJobs loads: the only way to register a session here without spawning one.
   stored: [],
@@ -143,8 +146,12 @@ vi.mock('../lib/dbpool.js', () => ({
   sessionDatabaseName: vi.fn(() => 'app'),
   dropSessionDatabase: vi.fn(),
   instanceEnv: vi.fn(() => ({})),
+  assertInstanceAccess: vi.fn(),
   instanceAppPort: vi.fn(() => 8101),
   sessionCapacity: () => state.capacity,
+  eligibleDbServers: vi.fn(() => state.eligibleServers),
+  waitingForInstance: (id) => state.dbWaiters.has(id),
+  claimHolder: (id) => state.dbHolders.get(id) || null,
   projectClaimsServer: () => state.claimsServer,
 }));
 
@@ -242,7 +249,14 @@ vi.mock('../lib/usage.js', () => ({
 
 import { deleteJob, jobEventMaxSeqs, loadJobs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
-import { acquireInstance, reclaimInstance, releaseInstance, dropSessionDatabase } from '../lib/dbpool.js';
+import {
+  acquireInstance,
+  reclaimInstance,
+  releaseInstance,
+  dropSessionDatabase,
+  assertInstanceAccess,
+  instanceEnv,
+} from '../lib/dbpool.js';
 import {
   latestReviewFindings,
   latestReviewDeclaration,
@@ -260,6 +274,7 @@ import {
   removePullRequestLabel,
   githubGraphql,
   githubRest,
+  upsertPrComment,
   viewerLogin,
 } from '../lib/github.js';
 import { resolveRuntime, getProviderForJob, captureProviderAuth } from '../lib/providerstore.js';
@@ -286,6 +301,8 @@ import {
   closeSessionBrowser,
   getJob,
   createDevSession,
+  startDevServe,
+  setSessionProjectFilter,
   stepProvider,
   devSessionSlots,
   pullRequestHasOpenSession,
@@ -362,6 +379,10 @@ beforeEach(() => {
   state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '' }];
   state.claimsServer = false;
   state.capacity = 3;
+  state.eligibleServers = [];
+  state.dbWaiters = new Set();
+  state.dbHolders = new Map();
+  setSessionProjectFilter(() => true);
   state.otherProviders = [];
   state.group = null;
 });
@@ -771,6 +792,99 @@ describe('devSessionSlots', () => {
   });
 });
 
+describe('database admission across owners', () => {
+  const ids = ['member-db-holder', 'member-db-waiter', 'other-db-start'];
+  beforeEach(async () => {
+    state.stored = ids.map((id) => ({
+      id,
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/shop',
+      providerId: 1,
+    }));
+    await initJobs();
+    state.claimsServer = true;
+    const holder = getJob(ids[0]);
+    Object.assign(holder, { status: 'idle', ownerId: 2, dbServerId: 1 });
+    Object.assign(getJob(ids[1]), { status: 'preparing', ownerId: 2 });
+    Object.assign(getJob(ids[2]), { ownerId: 3 });
+    // Include unrelated open records from other blocks in the global capacity.
+    state.capacity = 10000;
+    state.capacity -= devSessionSlots('acme/shop');
+  });
+  afterEach(() => {
+    for (const id of ids) getJob(id).status = 'closed';
+    acquireInstance.mockReset();
+    assertInstanceAccess.mockReset();
+  });
+
+  it.each(['idle', 'running'])('refuses a message to a %s session after DB access is revoked', (status) => {
+    const job = getJob(ids[0]);
+    job.status = status;
+    const events = [...job.events];
+    assertInstanceAccess.mockImplementationOnce(() => {
+      throw new Error('Database server is no longer shared');
+    });
+    expect(() => sendDevMessage(job.id, 'new work')).toThrow(/no longer shared/);
+    expect(job.events).toEqual(events);
+    expect(job.status).toBe(status);
+    expect(job.dbServerId).toBe(1);
+  });
+
+  it('refuses a preview on an open session after DB access is revoked', async () => {
+    const job = getJob(ids[0]);
+    job.workDir = '/unused/revoked-workspace';
+    assertInstanceAccess.mockImplementationOnce(() => {
+      throw new Error('Database server is no longer shared');
+    });
+    await expect(startDevServe(job.id)).rejects.toThrow(/no longer shared/);
+    expect(job.serveProc).toBeFalsy();
+    expect(job.dbServerId).toBe(1);
+  });
+
+  it('still counts the same owner’s pending sessions against admission', () => {
+    expect(() => createDevSession({ provider: 1, repo: 'acme/shop', prompt: 'another', ownerId: 2 })).toThrow(
+      /holding a database server/,
+    );
+  });
+
+  it('still counts another owner’s waiter once it has a claimed server', () => {
+    getJob(ids[1]).dbServerId = 2;
+    expect(() =>
+      createDevSession({ provider: 1, repo: 'acme/shop', prompt: 'Bob starts', ownerId: 3 }),
+    ).toThrow(/holding a database server/);
+  });
+
+  it.each(['new', 'reopen'])(
+    'another owner’s unallocated waiter cannot block a %s session',
+    async (action) => {
+      let rejectPreparation;
+      acquireInstance.mockImplementation(
+        () =>
+          new Promise((_, reject) => {
+            rejectPreparation = reject;
+          }),
+      );
+      let started;
+      try {
+        if (action === 'new') {
+          started = createDevSession({ provider: 1, repo: 'acme/shop', prompt: 'Bob starts', ownerId: 3 });
+        } else {
+          started = sendDevMessage(ids[2], 'Bob reopens');
+        }
+        await vi.waitFor(() => expect(rejectPreparation).toBeTypeOf('function'));
+        expect(getJob(started.id).status).toBe('preparing');
+      } finally {
+        if (started) {
+          getJob(started.id).status = 'closed';
+          rejectPreparation?.(new Error('closed'));
+          await closeDevSession(started.id);
+        }
+      }
+    },
+  );
+});
+
 describe('loop children waiting for a database slot', () => {
   const ids = ['slot-review-a', 'slot-review-b', 'slot-holder'];
   let blocked;
@@ -802,9 +916,12 @@ describe('loop children waiting for a database slot', () => {
     // Other blocks' open records share this module's registry and pool.
     state.capacity = 10000;
     state.capacity -= devSessionSlots('acme/slots');
-    acquireInstance.mockImplementation(
-      (job) => new Promise((resolve, reject) => blocked.push({ id: job.id, reject })),
-    );
+    acquireInstance.mockImplementation((job) => {
+      state.dbWaiters.add(job.id);
+      return new Promise((resolve, reject) => blocked.push({ id: job.id, reject })).finally(() =>
+        state.dbWaiters.delete(job.id),
+      );
+    });
   });
   afterEach(async () => {
     setDraining(false);
@@ -848,6 +965,226 @@ describe('loop children waiting for a database slot', () => {
         unrelated.forEach((job, index) => {
           job.status = statuses[index];
         });
+      }
+    },
+  );
+
+  it('refuses a loop when its owner’s only eligible server is held by its waiting parent', async () => {
+    const parent = getJob(ids[0]);
+    parent.ownerId = 2;
+    state.eligibleServers = [{ id: 1 }];
+    state.dbHolders.set(1, parent.id);
+    // Global capacity has a free server, but it is not shared with this owner.
+    state.capacity += 1;
+    await retryLoopRound(parent.id);
+    expect(parent.reviewLoop.reviewing).toBe(false);
+    expect(parent.reviewLoop.reviewSessionId).toBeFalsy();
+    expect(parent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
+    expect(blocked).toEqual([]);
+    state.eligibleServers.push({ id: 2 });
+    const child = await queueReview(parent.id);
+    expect(child.ownerId).toBe(2);
+    expect(parent.reviewLoop.failure).toBeNull();
+    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([child.id]));
+  });
+
+  it('rechecks owner-eligible servers for a queued loop when global capacity frees', async () => {
+    const parent = getJob(ids[0]);
+    parent.ownerId = 2;
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, parent.id);
+    state.dbHolders.set(2, 'slot-holder');
+    const child = await queueReview(parent.id);
+    state.eligibleServers = [{ id: 1 }];
+    await closeDevSession('slot-holder');
+    expect(child.status).toBe('failed');
+    expect(child.databaseSlotQueuedAt).toBeNull();
+    expect(parent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
+    expect(blocked).toEqual([]);
+  });
+
+  it.each([2, 3])('counts a preparing review waiting on acquisition (second owner=%i)', async (ownerId) => {
+    const firstParent = getJob(ids[0]);
+    const secondParent = getJob(ids[1]);
+    Object.assign(firstParent, { ownerId: 2, dbServerId: 1 });
+    Object.assign(secondParent, { ownerId, dbServerId: 2 });
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, firstParent.id);
+    state.dbHolders.set(2, secondParent.id);
+    // Server 3 is free globally, but neither owner may use it.
+    getJob('slot-holder').status = 'closed';
+    const first = await queueReview(firstParent.id);
+    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([first.id]));
+    expect(first.status).toBe('preparing');
+    expect(first.databaseSlotQueuedAt).toBeNull();
+
+    await retryLoopRound(secondParent.id);
+    const second = getJob(secondParent.reviewLoop.reviewSessionId);
+    if (second) children.push(second);
+    expect(secondParent.reviewLoop.reviewing).toBe(false);
+    expect(secondParent.reviewLoop.reviewSessionId).toBeFalsy();
+    expect(secondParent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
+    expect(blocked.map((j) => j.id)).toEqual([first.id]);
+  });
+
+  it('rechecks progress after review announcement when another child has begun acquisition', async () => {
+    const firstParent = getJob(ids[0]);
+    const secondParent = getJob(ids[1]);
+    Object.assign(firstParent, { ownerId: 2, dbServerId: 1 });
+    Object.assign(secondParent, { ownerId: 3, dbServerId: 2 });
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, firstParent.id);
+    state.dbHolders.set(2, secondParent.id);
+    getJob('slot-holder').status = 'closed';
+    let finishAnnouncement;
+    upsertPrComment.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishAnnouncement = resolve;
+        }),
+    );
+    try {
+      const first = await queueReview(firstParent.id);
+      expect(finishAnnouncement).toBeTypeOf('function');
+      expect(blocked).toEqual([]);
+      const second = await queueReview(secondParent.id);
+      await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([second.id]));
+      finishAnnouncement();
+      await vi.waitFor(() => expect(firstParent.reviewLoop.reviewing).toBe(false));
+      expect(first.status).toBe('failed');
+      expect(firstParent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
+      expect(blocked.map((j) => j.id)).toEqual([second.id]);
+    } finally {
+      finishAnnouncement?.();
+    }
+  });
+
+  it.each(['review', 'fix', 'qa'])('fails a queued %s when every database share is revoked', async (kind) => {
+    const parent = getJob(ids[0]);
+    Object.assign(parent, { ownerId: 2, dbServerId: 1 });
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, parent.id);
+    state.dbHolders.set(2, 'slot-holder');
+    let child;
+    if (kind === 'review') child = await queueReview(parent.id);
+    else {
+      const extra = kind === 'fix' ? { loopFixParentId: parent.id } : { qaParentId: parent.id, qa: true };
+      child = getJob(
+        createDevSession({ provider: 1, repo: 'acme/slots', branch: 'task/slots', prompt: 'fix', ...extra })
+          .id,
+      );
+      children.push(child);
+      if (kind === 'fix') Object.assign(parent.reviewLoop, { fixing: true, fixSessionId: child.id });
+      else parent.qaLoop = { running: true, sessionId: child.id };
+    }
+    expect(child.status).toBe('queued');
+    state.eligibleServers = [];
+    // Drive waiter processing without releasing any global capacity.
+    expect(() => createDevSession({ provider: 1, repo: 'acme/slots', prompt: 'another' })).toThrow(
+      /holding a database server/,
+    );
+    expect(child.status).toBe('failed');
+    expect(child.databaseSlotQueuedAt).toBeNull();
+    const loop = kind === 'qa' ? parent.qaLoop : parent.reviewLoop;
+    expect(kind === 'fix' ? loop.fixing : kind === 'qa' ? loop.running : loop.reviewing).toBe(false);
+    expect(loop.failure.reason).toMatch(/none is shared/);
+    expect(blocked).toEqual([]);
+  });
+
+  it('ignores ordinary acquisition waiters when a loop has a free eligible server', async () => {
+    const parent = getJob(ids[0]);
+    Object.assign(parent, { ownerId: 2, dbServerId: 1 });
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, parent.id);
+    const ordinary = getJob('slot-holder');
+    Object.assign(ordinary, { ownerId: 3, status: 'preparing', qaParentId: null });
+    state.dbWaiters.add(ordinary.id);
+    state.capacity += 1;
+    const child = await queueReview(parent.id);
+    expect(child.status).toBe('preparing');
+    expect(parent.reviewLoop.failure).toBeNull();
+    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([child.id]));
+  });
+
+  it.each(['review', 'fix', 'qa'])(
+    'fails a polling %s child promptly when a grant change leaves only waiting parents',
+    async (kind) => {
+      const pool = await vi.importActual('../lib/dbpool.js');
+      const poolExports = await import('../lib/dbpool.js');
+      const servers = await import('../lib/dbservers.js');
+      const config = await import('../lib/config.js');
+      const cfg = config.getConfig();
+      const entries = [1, 2, 3].map((id) => ({ id, host: '127.0.0.1', port: 3306 + id }));
+      const spies = [
+        vi.spyOn(config, 'getConfig').mockReturnValue({
+          ...cfg,
+          dbPool: { enabled: true, waitTimeoutMin: 30, pollSeconds: 0.001 },
+        }),
+        vi.spyOn(servers, 'activeDbServers').mockReturnValue(entries),
+        vi.spyOn(poolExports, 'claimHolder').mockImplementation(pool.claimHolder),
+        vi.spyOn(poolExports, 'waitingForInstance').mockImplementation(pool.waitingForInstance),
+      ];
+      const parent = getJob(ids[0]);
+      const unrelated = getJob('slot-holder');
+      Object.assign(parent, { ownerId: 2, dbServerId: 1 });
+      unrelated.dbServerId = 2;
+      state.projects[0].dbPoolEnabled = true;
+      state.capacity += 1;
+      pool.reclaimInstance(parent, 1);
+      pool.reclaimInstance(unrelated, 2);
+      let shared = true;
+      const policy = vi.fn((job, server) => server.id === 1 || (server.id === 2 && shared));
+      pool.setDbServerFilter(policy);
+      poolExports.eligibleDbServers.mockImplementation(pool.eligibleDbServers);
+      acquireInstance.mockImplementation(pool.acquireInstance);
+      releaseInstance.mockImplementation(pool.releaseInstance);
+      let child;
+      try {
+        if (kind === 'review') child = await queueReview(parent.id);
+        else {
+          const extra = kind === 'fix' ? { loopFixParentId: parent.id } : { qaParentId: parent.id, qa: true };
+          child = getJob(
+            createDevSession({
+              provider: 1,
+              repo: 'acme/slots',
+              branch: 'task/slots',
+              prompt: kind,
+              ...extra,
+            }).id,
+          );
+          children.push(child);
+          if (kind === 'fix') Object.assign(parent.reviewLoop, { fixing: true, fixSessionId: child.id });
+          else parent.qaLoop = { running: true, sessionId: child.id };
+        }
+        await vi.waitFor(() => expect(pool.waitingForInstance(child.id)).toBe(true));
+        expect(child.status).toBe('preparing');
+        shared = false;
+        policy.mockClear();
+        // Prove acquisition actually polls the changed policy before checking its outcome.
+        await vi.waitFor(() =>
+          expect(policy.mock.calls.filter(([, s]) => s.id === 2).length).toBeGreaterThan(1),
+        );
+        await vi.waitFor(() => expect(child.status).toBe('failed'));
+        expect(child.error).toMatch(/parents hold every database slot.*share it with the owner/i);
+        const loop = kind === 'qa' ? parent.qaLoop : parent.reviewLoop;
+        expect(kind === 'fix' ? loop.fixing : kind === 'qa' ? loop.running : loop.reviewing).toBe(false);
+        expect(loop.failure.reason).toBe(child.error);
+        expect(loop.reviewerFailed).not.toBe(true);
+        expect(pool.waitingForInstance(child.id)).toBe(false);
+        expect(child.dbServerId).toBeFalsy();
+        expect(releaseInstance).toHaveBeenCalledWith(child);
+        expect(pool.claimHolder(1)).toBe(parent.id);
+        expect(pool.claimHolder(2)).toBe(unrelated.id);
+      } finally {
+        if (child) await closeDevSession(child.id);
+        await pool.releaseInstance(parent);
+        await pool.releaseInstance(unrelated);
+        pool.setDbServerFilter(() => true);
+        pool._resetForTests();
+        poolExports.eligibleDbServers.mockReset().mockImplementation(() => state.eligibleServers);
+        acquireInstance.mockReset();
+        releaseInstance.mockReset();
+        for (const spy of spies.reverse()) spy.mockRestore();
       }
     },
   );
@@ -1149,6 +1486,15 @@ describe('createDevSession: the validation gauntlet', () => {
 
   it('refuses a provider nobody configured', () => {
     expect(() => createDevSession({ ...base, provider: 99 })).toThrow(/Unknown provider: 99/);
+  });
+
+  it('files a session under its starter, and a worker under its orchestrator’s owner', () => {
+    const orchestrator = createDevSession({ ...base, orchestrator: true, ownerId: 2 });
+    expect(orchestrator.ownerId).toBe(2);
+    const worker = createDevSession({ ...base, parentId: orchestrator.id });
+    expect(worker.ownerId).toBe(2);
+    expect(createDevSession({ ...base, parentId: orchestrator.id, ownerId: null }).ownerId).toBeNull();
+    expect(createDevSession(base).ownerId).toBeNull();
   });
 
   it('refuses a provider whose whole group is inactive', () => {
@@ -3464,7 +3810,15 @@ describe('spawnWorkerSession: tooling fixes', () => {
   };
 
   beforeAll(async () => {
-    state.stored = [row('tool-orch', { orchestrator: true })];
+    state.stored = [
+      row('tool-orch', { orchestrator: true }),
+      row('tool-closed', {
+        repo: dashboard.repo,
+        parentId: 'tool-orch',
+        toolingFor: 'acme/shop',
+        ownerId: 2,
+      }),
+    ];
     await initJobs();
     getJob('tool-orch').status = 'idle';
   });
@@ -3491,6 +3845,58 @@ describe('spawnWorkerSession: tooling fixes', () => {
       createDevSession({ provider: 1, prompt: 'x', repo: 'acme/shop', toolingFor: 'acme/shop' }),
     ).toThrow(/worker session of some orchestrator/);
   });
+
+  it('checks the inherited owner’s current project grant before starting a tooling worker', async () => {
+    const orch = getJob('tool-orch');
+    const before = workerSessionsFor(orch).length;
+    const previousOwner = orch.ownerId;
+    orch.ownerId = 2;
+    let shared = false;
+    const allowed = vi.fn((job, project) => job.ownerId !== 2 || project.repo !== dashboard.repo || shared);
+    setSessionProjectFilter(allowed);
+    try {
+      expect(() => spawnWorkerSession(orch, { title: 'Fix', prompt: 'x', tooling: true })).toThrow(
+        /Project unavailable/,
+      );
+      expect(allowed).toHaveBeenLastCalledWith({ ownerId: 2 }, dashboard);
+      expect(workerSessionsFor(orch)).toHaveLength(before);
+      shared = true;
+      const worker = spawnWorkerSession(orch, { title: 'Fix', prompt: 'x', tooling: true });
+      expect(worker).toMatchObject({ repo: dashboard.repo, ownerId: 2 });
+      // Wait for the worker's missing checkout to fail before restoring the owner.
+      await settleWorkers(['tool-orch']);
+    } finally {
+      orch.ownerId = previousOwner;
+      setSessionProjectFilter(() => true);
+    }
+  });
+
+  it.each(['message', 'reopen', 'recovery'])(
+    'refuses a closed tooling worker’s %s after its target project is unshared',
+    async (action) => {
+      const worker = getJob('tool-closed');
+      const events = [...worker.events];
+      const allowed = vi.fn((job, project) => job.ownerId !== 2 || project.repo !== dashboard.repo);
+      setSessionProjectFilter(allowed);
+      spawn.mockClear();
+      acquireInstance.mockClear();
+      const attempt = () =>
+        action === 'message'
+          ? sendDevMessage(worker.id, 'Continue fixing the dashboard')
+          : reopenDevSession(worker.id, { recovering: action === 'recovery' });
+      if (action === 'recovery') {
+        expect(attempt).not.toThrow();
+        await vi.waitFor(() => expect(worker.restartPending).toBe(false));
+        expect(releaseInstance).toHaveBeenCalledWith(worker);
+      } else expect(attempt).toThrow(/Project unavailable/);
+      expect(allowed).toHaveBeenCalledWith(expect.objectContaining({ ownerId: 2 }), dashboard);
+      expect(worker.status).toBe('closed');
+      expect(worker.events).toEqual(events);
+      expect(worker.workDir).toBeFalsy();
+      expect(acquireInstance).not.toHaveBeenCalled();
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
 
   it('runs on the dashboard project’s worker runtime, ahead of the orchestration’s own pick', () => {
     // The shop's runtime and the orchestration's pick say high; the dashboard's says low, and
@@ -5811,6 +6217,7 @@ describe('deleting a session that was never closed', () => {
     state.stored = [
       {
         id: 'undropped-1',
+        ownerId: 2,
         kind: 'devchat',
         status: 'failed',
         repo: 'acme/shop',
@@ -5825,7 +6232,10 @@ describe('deleting a session that was never closed', () => {
   // A session that died during setup never reaches closeDevSession, and its
   // record is the only thing that knows the database's name.
   it('drops its database before the record goes', async () => {
+    const deleted = vi.fn((id) => expect(getJob(id)).toBeNull());
+    bus.once('deleted', deleted);
     await deleteJobById('undropped-1');
+    expect(deleted).toHaveBeenCalledWith('undropped-1', 'acme/shop', 2);
 
     expect(dropSessionDatabase).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'undropped-1', sessionDb: 'shop_undropped_1' }),
@@ -14891,6 +15301,34 @@ describe('/btw side questions', () => {
     expect(btwQuestion(undefined)).toBeNull();
   });
 
+  it.each(['idle', 'running'])(
+    'refuses direct and message side questions after project revocation on a %s worker',
+    async (status) => {
+      const job = getJob('btw-session');
+      job.status = status;
+      job.ownerId = 2;
+      job.parentId = 'orchestrator';
+      const allowed = vi.fn(() => false);
+      setSessionProjectFilter(allowed);
+      const before = job.events.length;
+
+      expect(() => askDevSessionBtw(job.id, 'Which file?')).toThrow(/Project unavailable/);
+      expect(() => sendDevMessage(job.id, '/btw Which file?')).toThrow(/Project unavailable/);
+      expect(allowed).toHaveBeenCalledWith(job, expect.objectContaining({ repo: job.repo }));
+      expect(askClaudeSideQuestion).not.toHaveBeenCalled();
+      expect(recordTurnUsage).not.toHaveBeenCalled();
+      expect(job.events).toHaveLength(before);
+      expect(job.status).toBe(status);
+
+      allowed.mockReturnValue(true);
+      askClaudeSideQuestion.mockResolvedValueOnce({ text: 'lib/jobs.js', costUsd: 0.02 });
+      await expect(askDevSessionBtw(job.id, 'Which file?').answer).resolves.toMatchObject({
+        text: 'lib/jobs.js',
+      });
+      expect(askClaudeSideQuestion).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('answers beside a running turn: no queue, no user line, the answer paired by id', async () => {
     const job = getJob('btw-session');
     job.status = 'running';
@@ -15613,6 +16051,86 @@ describe('automatic recovery after a server restart', () => {
         restartPending: false,
       }),
     );
+  });
+
+  it('reopens work only after the owner’s project grant is restored', async () => {
+    const checkout = path.join(root, 'checkout');
+    fs.mkdirSync(checkout);
+    spawnSync('git', ['-C', checkout, 'init', '-b', 'feature'], { stdio: 'ignore' });
+    state.projects[0].localDir = checkout;
+    const saved = row({
+      status: 'closed',
+      ownerId: 2,
+      orchestrator: false,
+      local: true,
+      workDir: checkout,
+      branch: 'feature',
+    });
+    state.stored = [saved];
+    await initJobs();
+    let shared = false;
+    const allowed = vi.fn((job, project) => job.ownerId !== 2 || project.id !== 1 || shared);
+    setSessionProjectFilter(allowed);
+    expect(() => sendDevMessage(saved.id, 'Continue')).toThrow(/Project unavailable/);
+    expect(children).toHaveLength(0);
+    expect(saved.status).toBe('closed');
+    shared = true;
+    sendDevMessage(saved.id, 'Continue');
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].cwd).toBe(checkout);
+    expect(children[0].rpc.find((m) => m.method === 'turn/start').params.input).toEqual([
+      { type: 'text', text: expect.stringContaining('Continue') },
+    ]);
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+  });
+
+  it('fails denied idle recovery without blocking other sessions or repeating it on restart', async () => {
+    const checkout = path.join(root, 'denied-checkout');
+    fs.mkdirSync(checkout);
+    fs.writeFileSync(path.join(checkout, 'unfinished.txt'), 'keep this work');
+    const denied = row({
+      status: 'idle',
+      ownerId: 2,
+      orchestrator: false,
+      dbServerId: 7,
+      workDir: checkout,
+      recoveryTurn: null,
+    });
+    const allowed = row({ status: 'idle', recoveryTurn: null });
+    state.stored = [denied, allowed];
+    setSessionProjectFilter((job) => job.ownerId !== 2);
+    releaseInstance.mockClear();
+    acquireInstance.mockClear();
+    await initJobs({ deferPolling: true });
+    expect(denied).toMatchObject({ status: 'interrupted', restartPending: true, restartDbServerId: 7 });
+    expect(() => resumeRestartedSessions()).not.toThrow();
+    await vi.waitFor(() => {
+      expect(denied).toMatchObject({
+        status: 'failed',
+        error: 'Project unavailable for the user who owns this session',
+        restartPending: false,
+        restartDbServerId: null,
+      });
+      expect(allowed.status).toBe('idle');
+    });
+    expect(reclaimInstance).toHaveBeenCalledWith(denied, 7);
+    expect(releaseInstance).toHaveBeenCalledWith(denied);
+    expect(acquireInstance).not.toHaveBeenCalled();
+    expect(children).toHaveLength(0);
+    expect(fs.readFileSync(path.join(checkout, 'unfinished.txt'), 'utf8')).toBe('keep this work');
+    await vi.waitFor(() =>
+      expect(saveJob.mock.calls.findLast(([j]) => j.id === denied.id)?.[0]).toMatchObject({
+        status: 'failed',
+        restartPending: false,
+        restartDbServerId: null,
+      }),
+    );
+    await initJobs({ deferPolling: true });
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(allowed.status).toBe('idle'));
+    expect(denied.status).toBe('failed');
+    expect(children).toHaveLength(0);
   });
 
   it('reopens waiting questions without inventing answers and leaves previously failed or closed sessions alone', async () => {
@@ -16557,6 +17075,117 @@ describe('automatic recovery after a server restart', () => {
     finish(children[0]);
     await vi.waitFor(() => expect(review.status).toBe('closed'));
     expect(children).toHaveLength(1);
+  });
+
+  it.each([
+    ['project', false],
+    ['database', false],
+    ['project', true],
+    ['database', true],
+    ['database during browser startup', false],
+    ['database during browser startup', true],
+  ])('keeps the reviewer after %s access denies publishing (answer: %s)', async (access, answering) => {
+    state.projects[0].reviewProviderId = 2;
+    const runtime = { providerId: 2, model: 'gpt-6.1-sol', effort: 'high' };
+    const parent = row({
+      status: 'closed',
+      recoveryTurn: null,
+      providerId: 1,
+      provider: 'Claude entry',
+      ownerId: 2,
+      branch: 'feature',
+      startedOnPr: 77,
+      prStatus: { number: 77, state: 'open', headSha: 'review-sha', syncedAt: new Date().toISOString() },
+    });
+    const review = row({
+      status: answering ? 'idle' : 'running',
+      awaitingAnswer: answering,
+      ownerId: 2,
+      reviewBranch: 'feature',
+      autoClose: true,
+      loopParentId: parent.id,
+      recoveryTurn: {
+        prompt: 'Review the change',
+        opts: { review: true },
+        phase: 'initial',
+        completed: false,
+      },
+    });
+    parent.reviewLoop = {
+      rounds: 1,
+      reviewing: true,
+      reviewerRound: true,
+      reviewSessionId: review.id,
+      lastSha: 'review-sha',
+      runtime: { ...runtime },
+      reviewRuntime: { ...runtime },
+    };
+    state.stored = [parent, review];
+    await initJobs({ deferPolling: true });
+    resumeRestartedSessions();
+    if (answering) {
+      await vi.waitFor(() => expect(review.status).toBe('idle'));
+      sendDevMessage(review.id, 'Continue the review');
+    }
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    const denial = access === 'project' ? 'Project unavailable' : 'Database server no longer shared';
+    let pool;
+    let serverSpy;
+    let launched;
+    let shared = true;
+    const browserStart = startBrowser.getMockImplementation();
+    if (access === 'project') setSessionProjectFilter(() => false);
+    else if (access === 'database')
+      assertInstanceAccess.mockImplementation(() => {
+        throw new Error(denial);
+      });
+    else {
+      pool = await vi.importActual('../lib/dbpool.js');
+      const servers = await import('../lib/dbservers.js');
+      serverSpy = vi.spyOn(servers, 'getDbServer').mockReturnValue({ id: 7 });
+      pool.setDbServerFilter(() => shared);
+      assertInstanceAccess.mockImplementation(pool.assertInstanceAccess);
+      instanceEnv.mockImplementation(pool.instanceEnv);
+      review.dbServerId = 7;
+      review.browser = true;
+      browserState.endpoint = null;
+      launched = Promise.withResolvers();
+      startBrowser.mockReturnValueOnce(launched.promise);
+    }
+    try {
+      finish(children[0]);
+      if (launched) {
+        await vi.waitFor(() => expect(startBrowser).toHaveBeenCalledWith(review.id));
+        shared = false;
+        launched.resolve();
+      }
+      await vi.waitFor(() => expect(parent.reviewLoop.reviewing).toBe(false));
+      expect(review.error).toContain(launched ? 'Database server is no longer shared' : denial);
+      expect(review.recoveryTurn.phase).toBe('publish');
+      expect(children).toHaveLength(1);
+      expect(parent.reviewLoop.reviewerFailed).not.toBe(true);
+      expect(parent.reviewLoop.runtime).toEqual(runtime);
+      expect(parent.reviewLoop.reviewRuntime).toEqual(runtime);
+      setSessionProjectFilter(() => true);
+      assertInstanceAccess.mockReset();
+      shared = true;
+      // Observe retry's selected runtime, stopping before real checkout/provider work.
+      parent.status = 'idle';
+      acquireInstance.mockRejectedValueOnce(new Error('fixture: retry admitted'));
+      await retryLoopRound(parent.id);
+      const retried = getJob(parent.reviewLoop.reviewSessionId);
+      expect(retried.providerId).toBe(2);
+      await vi.waitFor(() => expect(retried.status).toBe('failed'));
+      expect(retried.error).toBe('fixture: retry admitted');
+    } finally {
+      launched?.resolve();
+      pool?.setDbServerFilter(() => true);
+      serverSpy?.mockRestore();
+      instanceEnv.mockReset().mockReturnValue({});
+      startBrowser.mockReset().mockImplementation(browserStart);
+      setSessionProjectFilter(() => true);
+      assertInstanceAccess.mockReset();
+    }
   });
 
   it('continues after a completed discovery turn without running discovery again', async () => {

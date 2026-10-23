@@ -17,6 +17,8 @@ const jobs = {
   mine: { id: 'mine', repo, kind: 'devchat' },
   foreign: { id: 'foreign', repo: 'other/project', kind: 'devchat' },
   review: { id: 'review', repo, kind: 'review' },
+  owners: { id: 'owners', repo, kind: 'devchat', ownerId: 1 },
+  anas: { id: 'anas', repo, kind: 'devchat', ownerId: 2 },
 };
 
 let auth,
@@ -251,6 +253,28 @@ describe('who gets in', () => {
     expect((await request('/runtimes?repo=other/project', { token: ana })).status).toBe(403);
     // An admin's narrower token is held to its own list, shared or not.
     expect((await json('/sessions')).repos).toEqual([repo]);
+    // Her own sessions and the ownerless ones of a shared project; not another user's.
+    expect((await request('/sessions/anas', { token: ana })).status).toBe(200);
+    expect((await request('/sessions/mine', { token: ana })).status).toBe(200);
+    expect((await request('/sessions/owners', { token: ana })).status).toBe(404);
+    expect((await request('/sessions/anas')).status).toBe(200);
+  });
+
+  it.each([
+    ['POST', '/sessions/mine/messages', { text: 'use the servers' }],
+    ['PATCH', '/sessions/mine', { title: 'changed' }],
+    ['DELETE', '/sessions/mine', undefined],
+  ])('keeps ownerless sessions readable but refuses member %s mutations', async (method, route, body) => {
+    const ana = (
+      await auth.create({ userId: 2, label: 'ana', repos: [repo], permission: 'manage', days: 1 }, secret)
+    ).token;
+    sharedRepos[2] = [repo];
+    expect((await request('/sessions/mine', { token: ana })).status).toBe(200);
+    handler.mockClear();
+    expect((await request(route, { token: ana, method, body })).status).toBe(404);
+    expect(handler).not.toHaveBeenCalled();
+    expect((await request(route.replace('/mine', '/anas'), { token: ana, method, body })).status).toBe(200);
+    expect((await request(route, { method, body })).status).toBe(200);
   });
 
   // Sends all but the last byte of a JSON body as an admin token, demotes the token's
@@ -846,6 +870,26 @@ describe('the event streams', () => {
     ]);
   });
 
+  it('streams a member only their own sessions and ownerless ones of their projects', async () => {
+    sharedRepos[2] = [repo];
+    sessions.push({ id: 'owners', repo, kind: 'devchat', status: 'idle', ownerId: 1 });
+    const ana = (
+      await auth.create({ userId: 2, label: 'ana', repos: [repo], permission: 'read', days: 1 }, secret)
+    ).token;
+    const events = await readEvents('/events', 2, {
+      token: ana,
+      onChunk: (seen) => {
+        if (seen.length !== 1) return;
+        bus.emit('job', { id: 'owners', repo, kind: 'devchat', status: 'running', ownerId: 1 });
+        bus.emit('job', { id: 'anas', repo, kind: 'devchat', status: 'running', ownerId: 2 });
+      },
+    });
+    expect(events.map((e) => [e.event, e.data.id])).toEqual([
+      ['session', 'mine'],
+      ['session', 'anas'],
+    ]);
+  });
+
   it('stops listening when the client hangs up', async () => {
     await readEvents('/events?transcripts=1', 1);
     await vi.waitFor(() => expect(bus.listenerCount('job') + bus.listenerCount('event')).toBe(0));
@@ -869,6 +913,49 @@ describe('the event streams', () => {
         })(),
       ).rejects.toThrow();
     }
+  });
+
+  it.each(['read', 'manage'])(
+    'ends private streams after demotion with a %s token and unchanged repo scope',
+    async (permission) => {
+      sharedRepos[1] = [repo];
+      for (const route of ['/events?transcripts=1', '/sessions/anas/events']) {
+        people[0] = { ...people[0], role: 'admin' };
+        const response = await request(route, { token: tokens[permission] });
+        expect(response.status).toBe(200);
+        const reader = response.body.getReader();
+        await reader.read();
+        people[0] = { ...people[0], role: 'member' };
+        expect((await request('/sessions/anas', { token: tokens[permission] })).status).toBe(404);
+        try {
+          await expect(reader.read()).rejects.toThrow();
+        } finally {
+          await reader.cancel().catch(() => {});
+        }
+      }
+    },
+  );
+
+  it('filters deleted sessions by the owner carried in the event after removal', async () => {
+    sharedRepos[2] = [repo];
+    const token = (
+      await auth.create({ userId: 2, label: 'ana', repos: [repo], permission: 'read', days: 1 }, secret)
+    ).token;
+    const events = await readEvents('/events', 3, {
+      token,
+      onChunk: (seen) => {
+        if (seen.length !== 1) return;
+        bus.emit('deleted', 'removed-private', repo, 1);
+        bus.emit('deleted', 'removed-other-project', 'other/project', 2);
+        bus.emit('deleted', 'removed-own', repo, 2);
+        bus.emit('deleted', 'removed-ownerless', repo, null);
+      },
+    });
+    expect(events.map((e) => [e.event, e.data.id])).toEqual([
+      ['session', 'mine'],
+      ['session.deleted', 'removed-own'],
+      ['session.deleted', 'removed-ownerless'],
+    ]);
   });
 
   it('ends an open admin stream once its user is demoted', async () => {
@@ -1063,6 +1150,8 @@ describe('the contract', () => {
       'preview.access',
       'projects.list',
       'sessions.list',
+      'ssh.decide',
+      'ssh.requests',
       'stats.server',
       'stats.sessions',
       'token.revoke',

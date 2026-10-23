@@ -21,6 +21,7 @@ import { operationsRoutes } from './lib/operations-routes.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
 import { createUsers } from './lib/users.js';
 import { createShares } from './lib/shares.js';
+import { seesSession } from './lib/ownership.js';
 import { shareRoutes } from './lib/share-routes.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
@@ -67,6 +68,7 @@ import {
 } from './lib/db.js';
 import {
   initJobs,
+  setSessionProjectFilter,
   resumeRestartedSessions,
   setAgentApiBase,
   jobForAgentToken,
@@ -195,7 +197,7 @@ import {
   removeDbServer,
   DB_SERVER_DEFAULTS,
 } from './lib/dbservers.js';
-import { probeDbServer, claimHolder, sessionCapacity } from './lib/dbpool.js';
+import { probeDbServer, claimHolder, sessionCapacity, setDbServerFilter } from './lib/dbpool.js';
 import { listActions, getAction, actionSessionSpec } from './lib/actions.js';
 import {
   initSavedPrompts,
@@ -263,6 +265,22 @@ const api = express.Router();
 // The people sharing this server (lib/users.js) and what is shared with each (lib/shares.js).
 const users = createUsers();
 const shares = createShares();
+// The user a /api/v1 request acts as, who owns any session it starts.
+const requestOwner = (res) => res.locals.apiUser?.id ?? null;
+// Whether a session may use a shared server (lib/shares.js): one nobody started works as the
+// admins' and may use what its project is given; one a user owns, only what that user may
+// use, and nothing once they are gone or disabled.
+const sessionMayUse = (job, kind, id) => {
+  if (job?.ownerId == null) return true;
+  try {
+    const owner = users.get(job.ownerId);
+    return !!owner && owner.disabledAt == null && shares.allows(owner, kind, id);
+  } catch {
+    return false;
+  }
+};
+setDbServerFilter((job, server) => sessionMayUse(job, 'dbServer', server.id));
+setSessionProjectFilter((job, project) => sessionMayUse(job, 'project', project.id));
 
 // On every response, including the webhooks': nothing here is a page, and the
 // headers say so (lib/security.js).
@@ -293,9 +311,15 @@ app.use('/webhooks/slack', slackEventsRouter({ service: slackService }));
 const mcpService = createMcpService({
   callbackUrl: () => `${getConfig().publicBaseUrl}${MCP_OAUTH_CALLBACK_PATH}`,
 });
-setExternalMcp((repo) => mcpService.mounts(repo));
+setExternalMcp((repo, job) => mcpService.mounts(repo).filter((s) => sessionMayUse(job, 'mcpServer', s.id)));
 app.use(mcpOAuthCallbackRouter({ service: mcpService }));
-app.use(mcpProxyRouter({ service: mcpService, agentSession }));
+app.use(
+  mcpProxyRouter({
+    service: mcpService,
+    agentSession,
+    mayUse: (job, id) => sessionMayUse(job, 'mcpServer', id),
+  }),
+);
 app.use('/webhooks', webhookRouter());
 
 // The only client API: owner-issued tokens (`npm run create-token`) in front of the handlers below.
@@ -599,9 +623,21 @@ function agentSession(req, res) {
   return job;
 }
 
-const sshService = createSshService({ getJob });
+const sshService = createSshService({
+  getJob,
+  mayUse: (job, server) => sessionMayUse(job, 'sshServer', server.id),
+});
 api.use(sessionFileRoutes({ agentSession, getJob }));
-api.use(sshRoutes({ service: sshService, agentSession, getProject }));
+api.use(
+  sshRoutes({
+    service: sshService,
+    agentSession,
+    getProject,
+    // An admin rules on every command; a member on their own sessions' only.
+    mayDecide: (user, request) =>
+      !!user && (user.role === 'admin' || getJob(request.jobId)?.ownerId === user.id),
+  }),
+);
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
 api.use(homeAssistantRoutes({ service: createHomeAssistantService() }));
 const whatsappService = createWhatsAppService();
@@ -1497,19 +1533,37 @@ api.post('/api/dev/project-board/move', async (req, res) => {
 api.get('/api/dev/usage', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
-  res.json(await projectUsage(project));
+  res.json(await projectUsage(project, Date.now(), users.list()));
 });
 
 // The whole ledger over one of lib/usage.js's windows. Disabled projects are included so the
 // per-project rows still add up to the headline totals.
 api.get('/api/dev/usage/all', async (req, res) => {
   const filter = {};
-  for (const key of ['project', 'model', 'provider', 'activity', 'account', 'session', 'from', 'to']) {
+  for (const key of [
+    'project',
+    'model',
+    'provider',
+    'activity',
+    'account',
+    'session',
+    'user',
+    'from',
+    'to',
+  ]) {
     const value = req.query[key];
     if (value != null) filter[key] = Array.isArray(value) ? value.map(String) : String(value);
   }
   try {
-    res.json(await overallUsage(listProjects(), String(req.query.period || 'month'), Date.now(), filter));
+    res.json(
+      await overallUsage(
+        listProjects(),
+        String(req.query.period || 'month'),
+        Date.now(),
+        filter,
+        users.list(),
+      ),
+    );
   } catch (error) {
     if (/^Choose a/.test(error.message)) return res.status(400).json({ error: error.message });
     throw error;
@@ -1699,7 +1753,9 @@ api.post('/api/dev/actions', async (req, res) => {
     };
     // A prompt that refuses fails the request rather than starting an empty errand.
     const spec = await actionSessionSpec(action, context);
-    res.status(201).json({ session: createDevSession({ provider, model, effort, ...spec }) });
+    res.status(201).json({
+      session: createDevSession({ provider, model, effort, ...spec, ownerId: requestOwner(res) }),
+    });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1752,6 +1808,7 @@ api.post('/api/dev/pulls/:number/serve', async (req, res) => {
         branch,
         prNumber: number,
         title: pr.title || '',
+        ownerId: requestOwner(res),
       }),
     );
   } catch (e) {
@@ -1785,7 +1842,16 @@ api.post('/api/dev/branches/serve', async (req, res) => {
     return res.status(404).json({ error: `${project.repo} has no branch ${branch}` });
   }
   try {
-    res.status(201).json(await startBranchPreview({ provider, model, effort, repo: project.repo, branch }));
+    res.status(201).json(
+      await startBranchPreview({
+        provider,
+        model,
+        effort,
+        repo: project.repo,
+        branch,
+        ownerId: requestOwner(res),
+      }),
+    );
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -1805,9 +1871,13 @@ async function currentJobUsageEstimates() {
 api.get('/api/dev/sessions', async (req, res) => {
   const estimates = await currentJobUsageEstimates();
   const sessions = listDevSessions(estimates);
-  // A project-limited token sees only its projects (lib/api-v1.js).
+  // A project-limited token sees only its projects (lib/api-v1.js), and a member only the
+  // sessions they may see (lib/ownership.js).
   const repos = res.locals.apiRepos;
-  res.json({ sessions: repos ? sessions.filter((s) => repos.includes(s.repo)) : sessions });
+  const user = res.locals.apiUser;
+  res.json({
+    sessions: sessions.filter((s) => (!repos || repos.includes(s.repo)) && seesSession(user, s)),
+  });
 });
 
 // Activities only the client can know (▶ Start on an issue looks like plain chat server-side);
@@ -1858,6 +1928,7 @@ api.post('/api/dev/sessions', (req, res) => {
         reviewLoop: reviewLoop === true,
         qaLoop: qaLoop === true,
         activity: COMPOSER_ACTIVITIES.has(activity) ? activity : undefined,
+        ownerId: requestOwner(res),
       }),
     });
   } catch (e) {

@@ -6,7 +6,7 @@ import { agentOnly } from '../lib/auth.js';
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ credentialsKey: 'k'.repeat(32) }) }));
 
-let server, base, service, upstream, job;
+let server, base, service, upstream, job, mayUse;
 beforeEach(async () => {
   job = { id: 'one', repo: 'o/r' };
   upstream = vi.fn();
@@ -29,7 +29,8 @@ beforeEach(async () => {
   };
   const app = express();
   app.use(mcpOAuthCallbackRouter({ service }));
-  app.use(mcpProxyRouter({ service, agentSession, fetchImpl: upstream }));
+  mayUse = vi.fn(() => true);
+  app.use(mcpProxyRouter({ service, agentSession, fetchImpl: upstream, mayUse, recheckMs: 20 }));
   app.use(express.json());
   const routes = mcpRoutes({ service, getProject: (repo) => (repo === 'o/r' ? { repo } : null) });
   // The operator reaches these through /api/v1 (a header stands in for the
@@ -202,6 +203,43 @@ describe('the session proxy', () => {
     }
   });
 
+  it.each(['unshared', 'disabled owner', 'sharing unavailable'])(
+    'ends an admitted MCP stream when %s',
+    async (reason) => {
+      const cancelled = vi.fn();
+      upstream.mockResolvedValue(
+        new Response(
+          new ReadableStream({
+            start(c) {
+              c.enqueue(new TextEncoder().encode(': connected\n\n'));
+            },
+            cancel: cancelled,
+          }),
+          { headers: { 'content-type': 'text/event-stream' } },
+        ),
+      );
+      const res = await fetch(`${base}/api/agent/mcp/5`, {
+        headers: { Authorization: 'Bearer session-token' },
+        signal: AbortSignal.timeout(2000),
+      });
+      const reader = res.body.getReader();
+      await reader.read();
+      if (reason === 'sharing unavailable')
+        mayUse.mockImplementation(() => {
+          throw new Error('unavailable');
+        });
+      else mayUse.mockReturnValue(false);
+      await expect(reader.read()).rejects.toThrow();
+      await vi.waitFor(() => {
+        expect(upstream.mock.calls[0][1].signal.aborted).toBe(true);
+        expect(cancelled).toHaveBeenCalledOnce();
+      });
+      const checks = mayUse.mock.calls.length;
+      await new Promise((r) => setTimeout(r, 60));
+      expect(mayUse).toHaveBeenCalledTimes(checks);
+    },
+  );
+
   it('streams an event stream through as it comes', async () => {
     const enc = new TextEncoder();
     let push;
@@ -296,5 +334,20 @@ describe('the operator routes', () => {
     });
     expect(res.status).toBe(403);
     expect((await fetch(`${base}/api/mcp/servers`)).status).toBe(410);
+  });
+});
+
+describe('a session owned by a member', () => {
+  it('cannot call an MCP server not shared with its owner', async () => {
+    mayUse.mockReturnValue(false);
+    const res = await fetch(`${base}/api/agent/mcp/5`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer session-token', 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    expect(res.status).toBe(404);
+    expect(mayUse).toHaveBeenCalledWith(job, 5);
+    expect(service.upstream).not.toHaveBeenCalled();
+    expect(upstream).not.toHaveBeenCalled();
   });
 });
