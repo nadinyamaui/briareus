@@ -392,6 +392,42 @@ describe('workspace quarantine', () => {
       expect(fs.readFileSync(path.join(checkout, 'source'), 'utf8')).toBe('pushed');
     });
 
+    it.each(['refs/heads/saved', 'refs/tags/deep/saved', 'HEAD', 'ORIG_HEAD', 'packed-refs'])(
+      'keeps unpublished history in a pending %s update',
+      (ref) => {
+        const root = fixture();
+        let saved;
+        const container = quarantined(root, 'acme__pending_ref', (git, dir) => {
+          const publishedHead = fs.readFileSync(path.join(dir, '.git', 'HEAD'));
+          fs.writeFileSync(path.join(dir, 'source'), 'private pending history');
+          git('add', 'source');
+          saved = git('commit-tree', git('write-tree').trim(), '-p', 'HEAD', '-m', 'Private').trim();
+          git('reset', '--hard', '-q', 'HEAD');
+          git('update-ref', '--no-deref', ref === 'packed-refs' ? 'refs/heads/saved' : ref, saved);
+          if (ref === 'packed-refs') {
+            git('pack-refs', '--all', '--no-prune');
+            fs.unlinkSync(path.join(dir, '.git', 'refs', 'heads', 'saved'));
+          }
+          // Recreate a completed ref write interrupted before its lock is renamed.
+          const file = path.join(dir, '.git', ref);
+          fs.renameSync(file, `${file}.lock`);
+          if (ref === 'HEAD') fs.writeFileSync(file, publishedHead);
+          expect(git('status', '--porcelain', '--untracked-files=normal').trim()).toBe('');
+          expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
+          expect(() =>
+            git('--git-dir', path.join(root, 'acme__pending_ref.remote.git'), 'cat-file', '-e', saved),
+          ).toThrow();
+        });
+        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        const checkout = path.join(container, 'checkout');
+        expect(fs.readFileSync(path.join(checkout, '.git', `${ref}.lock`), 'utf8')).toContain(saved);
+        expect(execFileSync('git', ['-C', checkout, 'show', `${saved}:source`], { encoding: 'utf8' })).toBe(
+          'private pending history',
+        );
+        expect(fs.readFileSync(path.join(checkout, 'source'), 'utf8')).toBe('pushed');
+      },
+    );
+
     it('keeps unpublished branch history hidden by local grafts', () => {
       const root = fixture();
       let privateHead;
@@ -794,6 +830,64 @@ describe('workspace quarantine', () => {
       expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
       expect(fs.existsSync(container)).toBe(false);
     });
+
+    it('keeps same-length edits with restored mtimes hidden by core.trustctime', async () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__mtime', (git, dir) => {
+        git('config', 'core.trustctime', 'false');
+        const source = path.join(dir, 'source');
+        fs.utimesSync(source, 946684800, 946684800);
+        git('update-index', '--refresh');
+      });
+      const checkout = path.join(container, 'checkout');
+      const source = path.join(checkout, 'source');
+      const before = fs.statSync(source);
+      // Cross a full timestamp second so ctime is the only changed cache field.
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      fs.writeFileSync(source, 'secret');
+      fs.utimesSync(source, before.atime, before.mtime);
+      expect(Math.floor(fs.statSync(source).ctimeMs / 1000)).toBeGreaterThan(
+        Math.floor(before.ctimeMs / 1000),
+      );
+      expect(
+        execFileSync('git', ['-C', checkout, 'status', '--porcelain'], { encoding: 'utf8' }).trim(),
+      ).toBe('');
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(fs.readFileSync(source, 'utf8')).toBe('secret');
+    });
+
+    it('still expires a clean checkout configured with core.trustctime=false', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__mtime', (git) => git('config', 'core.trustctime', 'false'));
+      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(fs.existsSync(container)).toBe(false);
+    });
+
+    it.skipIf(process.platform === 'win32').each([false, true])(
+      'inspects symlink types with core.symlinks=false (replaced: %s)',
+      (replaced) => {
+        const root = fixture();
+        const container = quarantined(root, 'acme__symlink', (git, dir) => {
+          const link = path.join(dir, 'link');
+          fs.symlinkSync('source', link);
+          git('add', 'link');
+          git('commit', '-qm', 'Publish symlink');
+          git('push', '-q', 'origin', 'HEAD');
+          git('config', 'core.symlinks', 'false');
+          if (replaced) {
+            fs.unlinkSync(link);
+            fs.writeFileSync(link, 'source');
+          }
+          expect(git('status', '--porcelain', '--untracked-files=normal').trim()).toBe('');
+        });
+        expect(expireQuarantine(root)).toEqual({ expired: replaced ? [] : [container], errors: [] });
+        if (replaced) {
+          const link = path.join(container, 'checkout', 'link');
+          expect(fs.lstatSync(link).isFile()).toBe(true);
+          expect(fs.readFileSync(link, 'utf8')).toBe('source');
+        } else expect(fs.existsSync(container)).toBe(false);
+      },
+    );
 
     it.each(['--assume-unchanged', '--skip-worktree'])('keeps tracked edits hidden by %s', (flag) => {
       const root = fixture();
