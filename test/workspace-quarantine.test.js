@@ -573,6 +573,59 @@ describe('workspace quarantine', () => {
       },
     );
 
+    it.each(['src', 'src/deep'])('keeps bare repository history in tracked %s', (nested) => {
+      const root = fixture();
+      let privateCommit;
+      const container = quarantined(root, 'acme__bare', (git, dir) => {
+        const bare = path.join(dir, nested);
+        fs.mkdirSync(bare, { recursive: true });
+        fs.writeFileSync(path.join(bare, 'source'), 'pushed');
+        fs.appendFileSync(path.join(dir, '.gitignore'), `/${nested}/*\n!/${nested}/source\n`);
+        git('add', '.');
+        git('commit', '-qm', 'Track source beside bare metadata');
+        git('push', '-q', 'origin', 'HEAD');
+        git('init', '-q', '--bare', bare);
+        fs.writeFileSync(path.join(bare, 'source'), 'private bare work');
+        git('--git-dir', bare, '--work-tree', bare, 'add', 'source');
+        git('--git-dir', bare, '--work-tree', bare, 'commit', '-qm', 'Private bare history');
+        privateCommit = git('--git-dir', bare, 'rev-parse', 'HEAD').trim();
+        fs.writeFileSync(path.join(bare, 'source'), 'pushed');
+        expect(git('ls-files', '--stage', `${nested}/source`)).toMatch(/^100644 /);
+        expect(git('status', '--porcelain', '--untracked-files=normal').trim()).toBe('');
+        expect(git('stash', 'list').trim()).toBe('');
+        expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
+        expect(
+          spawnSync('git', [
+            '--git-dir',
+            path.join(root, 'acme__bare.remote.git'),
+            'cat-file',
+            '-e',
+            privateCommit,
+          ]).status,
+        ).not.toBe(0);
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      const bare = path.join(container, 'checkout', nested);
+      expect(
+        execFileSync('git', ['--git-dir', bare, 'show', `${privateCommit}:source`], { encoding: 'utf8' }),
+      ).toBe('private bare work');
+      expect(fs.readFileSync(path.join(bare, 'source'), 'utf8')).toBe('pushed');
+    });
+
+    it('expires tracked source directories with only some bare repository filenames', () => {
+      const root = fixture();
+      const container = quarantined(root, 'acme__ordinary', (git, dir) => {
+        fs.mkdirSync(path.join(dir, 'src', 'objects'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'src', 'HEAD'), 'ordinary source');
+        fs.writeFileSync(path.join(dir, 'src', 'objects', 'source'), 'pushed');
+        git('add', 'src');
+        git('commit', '-qm', 'Track ordinary source');
+        git('push', '-q', 'origin', 'HEAD');
+      });
+      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(fs.existsSync(container)).toBe(false);
+    });
+
     it.skipIf(process.platform !== 'linux').each([Buffer.from([0xff]), Buffer.from([0xe2, 0x82])])(
       'keeps embedded history under a tracked directory with invalid UTF-8 bytes %s',
       (bytes) => {
