@@ -89,8 +89,8 @@ core does not support yet). Paths below are relative to `/api/v1`.
 1. `GET /whatsapp/accounts` returns `{ configured, accounts }`; each account
    has `{ id, status, me: { id, name } | null }`.
 2. `POST /whatsapp/accounts/default/start` creates and starts the free WAHA
-   Core account, or reconnects it when stopped/failed. Existing Plus accounts
-   are available by their own IDs.
+   Core account, or reconnects it when stopped/failed. With Plus, use a new
+   account ID in place of `default` to create and link your own phone.
 3. Poll `GET /whatsapp/accounts/default` until `status` is `SCAN_QR_CODE`.
 4. `GET /whatsapp/accounts/default/qr` returns `{ mimetype: "image/png", data }`
    with base64 PNG data. Display the QR and refresh it periodically while the

@@ -146,6 +146,84 @@ it('never watches a group bound to an account its session’s owner does not own
   expect(watcher.watching('j1', 'bob', '1203@g.us')).toBe(true);
 });
 
+it.each(['load', 'discovery'])(
+  'preserves saved watches during an ownership %s failure and resumes safely',
+  async (stage) => {
+    const { createWhatsAppWatcher } = await import('../lib/whatsapp-watch.js');
+    const initial = { default: 1, ana: 2 };
+    const load = vi.fn(async () => initial);
+    const listAccounts = vi.fn(async () => ({ accounts: [] }));
+    (stage === 'load' ? load : listAccounts).mockRejectedValueOnce(new Error('Unavailable'));
+    const { store } = owners(initial, { load, listAccounts });
+    const job = { id: 'j1', ownerId: 1 };
+    let now = 1700000000000;
+    let saved = ['default', 'ana'].map((account) => ({
+      jobId: job.id,
+      account,
+      chat: '49123456789@c.us',
+      since: now / 1000,
+      expiresAt: now + 3600_000,
+      seen: [],
+    }));
+    const original = structuredClone(saved);
+    const messages = vi.fn(async () => ({
+      messages: [
+        {
+          id: 'reply',
+          timestamp: now / 1000,
+          text: 'Hello',
+          fromMe: false,
+        },
+      ],
+    }));
+    const deliver = vi.fn();
+    const save = vi.fn(async (_key, rows) => {
+      saved = structuredClone(rows);
+    });
+    const watcher = createWhatsAppWatcher({
+      service: { messages },
+      getJob: () => job,
+      allowed: () => true,
+      mayUse: (job, account) => store.owns(job.ownerId, account),
+      ownershipReady: () => store.ready(),
+      deliver,
+      load: async () => saved,
+      save,
+      now: () => now,
+      log: () => {},
+    });
+    await expect(store.init()).rejects.toThrow('Unavailable');
+    await watcher.init();
+    try {
+      await watcher.poll();
+      expect(saved).toEqual(original);
+      expect(save).not.toHaveBeenCalled();
+      expect(messages).not.toHaveBeenCalled();
+      expect(deliver).not.toHaveBeenCalled();
+      // Recovery after expiry must still give the saved watch its final read.
+      now += 3601_000;
+      await store.init();
+      messages.mockResolvedValueOnce({
+        messages: [
+          {
+            id: 'reply',
+            timestamp: original[0].since + 1,
+            text: 'Hello',
+            fromMe: false,
+          },
+        ],
+      });
+      await watcher.poll();
+      expect(messages).toHaveBeenCalledExactlyOnceWith('default', original[0].chat, { limit: '20' });
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(deliver.mock.calls[0][1].text).toContain('Hello');
+      expect(saved).toEqual([]);
+    } finally {
+      watcher.stop();
+    }
+  },
+);
+
 it.each(['constructor', 'toString', '__proto__'])('claims and reloads the valid name %s', async (account) => {
   const { store, stored } = owners();
   await store.init();

@@ -299,6 +299,46 @@ describe('the WhatsApp core inbox', () => {
     expect(ctx.calls).toEqual([]);
   });
 
+  it('creates a member’s new Plus account and keeps it private to that member', async () => {
+    const ctx = await setup();
+    const response = await ctx.request('/ana/start', { method: 'POST', token: ctx.tokens.member });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ account: { id: 'ana', status: 'STARTING' } });
+    expect(ctx.calls.find((c) => c.path === '/api/sessions' && c.method === 'POST').body).toEqual({
+      name: 'ana',
+      start: true,
+      config: { noweb: { store: { enabled: true, fullSync: true } } },
+    });
+    expect(ctx.owners.ownerOf('ana')).toBe(2);
+    expect(
+      (await (await ctx.request('', { token: ctx.tokens.member })).json()).accounts.map((a) => a.id),
+    ).toEqual(['ana']);
+    ctx.calls.length = 0;
+    expect((await ctx.request('/ana')).status).toBe(404);
+    expect((await ctx.request('/ana/start', { method: 'POST' })).status).toBe(404);
+    expect(ctx.calls).toEqual([]);
+  });
+
+  it('lets WAHA reject non-default creation when its edition does not support it', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('', { status: 404 }))
+      .mockResolvedValueOnce(new Response('private edition error', { status: 422 }));
+    const service = createWhatsAppService({
+      config: () => ({ url: 'http://waha.test', apiKey: KEY }),
+      fetcher,
+    });
+    await expect(service.start('ana')).rejects.toMatchObject({
+      status: 409,
+      message: 'WAHA refused the operation; check the account connection and chat',
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[1][1]).toMatchObject({
+      method: 'POST',
+      body: expect.stringContaining('"name":"ana"'),
+    });
+  });
+
   it('reserves an existing Plus account for the original operator before a member can start it', async () => {
     const ctx = await setup();
     const phone = { id: '49111111111@c.us', pushName: 'Original operator' };

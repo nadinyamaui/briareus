@@ -709,6 +709,7 @@ const whatsappWatcher = createWhatsAppWatcher({
   listJobs: devSessionRecords,
   allowed: (job) => whatsappWatchAllowed(job, getProject(job.repo)),
   mayUse: whatsappMayUse,
+  ownershipReady: whatsappOwners.ready,
   deliver: (id, delivery, group) => deliverToSession(id, delivery, { via: 'whatsapp', ...group }),
   instruct: (id, instruction, group) =>
     instructSessionDurably(id, instruction, { via: 'whatsapp', ...group }),
@@ -2307,7 +2308,9 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     legacyOwnerId = originalOwner;
     await shares.init();
     await credentials.init();
-    await whatsappOwners.init();
+    await whatsappOwners
+      .init()
+      .catch((e) => console.error('Could not initialize WhatsApp ownership:', e.message));
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
