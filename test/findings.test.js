@@ -383,7 +383,45 @@ describe('latestTestVerdict', () => {
     });
   });
 
+  it('counts an unnumbered result row and retains a later failure', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        '| | UI | Open profile | Profile visible | ⬜ | |',
+        '| 3 | Failure | curl | 200 | ❌ | saw 500 |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '3', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+      total: 3,
+      passed: 1,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
   it.each([
+    ['✅ Verified API blocked by authorization policy; expected 403 received', true],
+    ['✅ Verified API blocked by authorization policy; expected 403 received; UI not run', false],
+  ])(
+    'preserves verified authorization results while checking remaining coverage: %s',
+    async (status, passed) => {
+      gh.comments = [
+        sheet([
+          `| 1 | Authorization | curl without permission | 403 blocked by policy | ${status} | response.json |`,
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        total: 1,
+        passed: passed ? 1 : 0,
+        incomplete: !passed,
+      });
+    },
+  );
+
+  it.each([
+    '| No. | Scenario | Steps | Expected | Status | Evidence |',
+    '| **No.** | Case | Request | Response | **Status** | _Evidence_ |',
     '| # | Scenario | Request | Expected | Status | Evidence |',
     '| **#** | Case | Request | Response | **Status** | _Evidence_ |',
     '| `#` | Scenario | Steps | Expected | ~~Status~~ | **`Evidence`** |',
@@ -613,6 +651,13 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI unavailable on this host',
+    '✅ API; UI not available',
+    '✅ API; UI could not run',
+    "✅ API; UI couldn't run",
+    '✅ API; **UI blocked**',
+    '✅ API; _UI unavailable_ on this host',
+    "✅ API; `UI couldn't run`",
     '✅ API; UI not run on this host',
     '✅ API; UI blocked by missing credentials',
     '✅ API; UI blocked by unavailable credentials',

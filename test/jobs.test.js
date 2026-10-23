@@ -6539,6 +6539,12 @@ describe('the review loop: what a closing loop review reports back', () => {
       },
       reviewRow('rev-12', 'par-12', true),
       {
+        ...parentRow('qa-retry-par', 'qa-retry-rev', { done: true, reviewing: false, reviewSessionId: null }),
+        parentId: 'loop-orch',
+        qaLoop: { done: true, incomplete: true, failedScenarios: 0 },
+      },
+      reviewRow('qa-retry-rev', 'qa-retry-par', true),
+      {
         ...parentRow('par-13', 'rev-13', { rounds: 2, lastFindings: 'k1' }),
         parentId: 'loop-orch',
         title: 'Fix the filter',
@@ -6582,6 +6588,8 @@ describe('the review loop: what a closing loop review reports back', () => {
       'auto-fail',
       'auto-fail-rev',
       'loop-orch',
+      'qa-retry-par',
+      'qa-retry-rev',
       'par-12',
       'rev-12',
       'par-13',
@@ -7327,6 +7335,25 @@ describe('the review loop: what a closing loop review reports back', () => {
     expect(notice.text).toMatch(/^Worker par-12 \(Add the export\): the review loop converged on PR #77/);
     expect(notice.text).toMatch(/declared no findings/);
     expect(notice.text).toMatch(/ready to merge/);
+  });
+
+  it('keeps completed incomplete QA authoritative after a review retry converges', async () => {
+    const parent = getJob('qa-retry-par');
+    const qa = parent.qaLoop;
+    parent.awaitingAnswer = true; // Retry opens the gate; the review starts after the answer.
+    await retryLoopRound(parent.id);
+    expect(parent.reviewLoop.done).toBe(false);
+    expect(parent.qaLoop).toBe(qa);
+    parent.awaitingAnswer = false;
+    Object.assign(parent.reviewLoop, { reviewing: true, reviewSessionId: 'qa-retry-rev' });
+    await closeDevSession('qa-retry-rev');
+    await waitFor(() => parent.reviewLoop.done);
+    const notice = getJob('loop-orch').pendingWorkerNotices.find((n) => n.workerId === parent.id);
+    expect(notice.text).toContain('QA coverage is incomplete');
+    expect(notice.text).not.toContain('ready to merge');
+    expect(parent.qaLoop).toBe(qa);
+    expect(qa).toMatchObject({ done: true, incomplete: true, failedScenarios: 0 });
+    expect(qa.running).toBeFalsy();
   });
 
   it('a worker’s round is held for the user too, and its orchestrator is told to wait', async () => {
