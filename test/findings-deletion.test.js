@@ -168,6 +168,7 @@ it('does not bind or delete someone else’s title-quoting reply on an unrelated
     created_at: '2026-09-08T10:00:00Z',
   };
   const request = vi.fn(async (url, init) => {
+    if (url.endsWith('/user')) return Response.json({ login: 'server-account' });
     if (url.includes('/issues/5/comments?')) {
       return Response.json([
         { ...summary, user: { login: 'server-account' }, created_at: '2026-09-08T11:00:00Z' },
@@ -195,12 +196,15 @@ it('does not bind or delete someone else’s title-quoting reply on an unrelated
 });
 
 it.each([
-  ['server-account', false],
-  ['owner-account', false],
-  ['owner-account', true],
+  ['server-account', 'server-account', false],
+  ['owner-account', 'server-account', false],
+  ['owner-account', 'server-account', true],
+  ['server-account', 'server-account', true],
+  ['server-account', 'owner-account', true],
+  ['owner-account', 'other-owner', true],
 ])(
-  'retains the %s review comment (follow-up: %s) with a server-authored summary',
-  async (login, followUp) => {
+  'retains the %s review comment with a %s summary (follow-up: %s)',
+  async (login, summaryLogin, followUp) => {
     const since = '2026-09-08T09:00:00Z';
     const root = { ...inline, created_at: '2026-09-01T10:00:00Z' };
     const restatement = {
@@ -219,9 +223,10 @@ it.each([
     const request = vi.fn(async (url, init) => {
       if (url.includes('/issues/5/comments?')) {
         return Response.json([
-          { ...summary, user: { login: 'server-account' }, created_at: '2026-09-08T11:00:00Z' },
+          { ...summary, user: { login: summaryLogin }, created_at: '2026-09-08T11:00:00Z' },
         ]);
       }
+      if (url.endsWith('/user')) return Response.json({ login: 'server-account' });
       if (url.includes('/pulls/5/comments?')) return Response.json(comments);
       if (init.method === 'POST') return Response.json({ html_url: 'https://gh/reply' });
       if (init.method === 'DELETE') return new Response(null, { status: 204 });
@@ -232,8 +237,7 @@ it.each([
 
     const [published] = await latestReviewFindings(repo, 5, { since, authorLogin: 'owner-account' });
     expect(published.reviewAuthorLogin).toBe(login);
-    if (followUp) expect(published).not.toHaveProperty('reviewCommentId');
-    else expect(published.reviewCommentId).toBe(102);
+    expect(published.reviewCommentId).toBe(102);
     // The held finding survives restart and another account change.
     const held = JSON.parse(JSON.stringify(published));
     const options = { since, authorLogin: held.reviewAuthorLogin };

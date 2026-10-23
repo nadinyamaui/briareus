@@ -1157,12 +1157,16 @@ describe('replyOnFindingThread', () => {
 
 describe('review follow-ups posted by the session owner', () => {
   it.each([
-    ['reply', { in_reply_to_id: 99 }],
+    ['unrelated reply', { in_reply_to_id: 99, user: { login: 'someone-else' } }],
     ['different file', { path: 'lib/unrelated.js' }],
     ['different author', { user: { login: 'someone-else' } }],
     ['before the review', { created_at: '2026-09-08T08:00:00Z' }],
     ['after the summary', { created_at: '2026-09-08T12:00:00Z' }],
-  ])('does not bind a title match from a %s as the inline publication', async (_label, overrides) => {
+    ['reply on a different file', { in_reply_to_id: 99, path: 'lib/unrelated.js' }],
+    ['reply before the review', { in_reply_to_id: 99, created_at: '2026-09-08T08:00:00Z' }],
+    ['reply after the summary', { in_reply_to_id: 99, created_at: '2026-09-08T12:00:00Z' }],
+    ['reply without the title', { in_reply_to_id: 99, body: 'Done.' }],
+  ])('does not bind a %s as the inline publication', async (_label, overrides) => {
     const finding = { title: 'Race in the retry loop', file: 'lib/x.js', line: 12 };
     gh.comments = [
       {
@@ -1186,6 +1190,7 @@ describe('review follow-ups posted by the session owner', () => {
       since: '2026-09-08T09:00:00Z',
       authorLogin: 'owner-account',
     });
+    expect(published.reviewAuthorLogin).toBe('server-account');
     expect(published).not.toHaveProperty('reviewCommentId');
   });
 
