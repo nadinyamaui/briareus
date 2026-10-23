@@ -328,6 +328,35 @@ describe('latestTestVerdict', () => {
     });
   });
 
+  it.each([
+    '| 2 | API | curl /api | 200 | ⬜ |',
+    '2 | API | curl /api | 200 | ⬜',
+    '2 | API | curl /api | 200 | ✅ | response.json',
+    '| 2 | API | curl /api | 200 | ✅ |',
+  ])('counts shortened scenario rows: %s', async (row) => {
+    gh.comments = [sheet(['| 1 | API | curl /api | 200 | ✅ | response.json |', row])];
+    const verdict = await latestTestVerdict(repo, 5);
+    expect(verdict.total).toBe(2);
+    expect(verdict.passed).toBe(row.includes('response.json') ? 2 : 1);
+    expect(verdict.incomplete).toBe(!row.includes('response.json'));
+  });
+
+  it('keeps escaped Markdown pipes inside their cells', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl /api | 200 | ✅ | Asserted `name=a\\|b` in [response](https://example.com/ok) |',
+        '| 2 | API | curl /api | name=a\\|b | ❌ | saw a\\|c |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '2', scenario: 'API', expected: 'name=a\\|b', evidence: 'saw a\\|c' }],
+      total: 2,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
   it('accepts a fully executed API and UI sheet with evidence', async () => {
     gh.comments = [
       sheet([

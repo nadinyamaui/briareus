@@ -8736,6 +8736,107 @@ describe('the QA loop: reporting a finished QA run', () => {
     },
   );
 
+  it.each(['read', 'label-write'])('discards a replaced QA loop during the %s', async (stage) => {
+    vi.useFakeTimers();
+    const parent = {
+      ...parentRow('qa-replaced', 'qa-replaced-run'),
+      qaLoop: {
+        done: false,
+        pendingVerdict: { prNumber: 88, nextRetryAt: new Date(Date.now() + 20_000).toISOString() },
+      },
+    };
+    state.stored = [parent];
+    await initJobs();
+    parent.status = 'idle';
+    const oldLoop = parent.qaLoop;
+    const verdict = { failures: [], total: 10, passed: 1, manual: 9, incomplete: true };
+    let finish;
+    if (stage === 'read') {
+      latestTestVerdict.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+    } else {
+      latestTestVerdict.mockResolvedValueOnce(verdict);
+      removePullRequestLabel.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+    }
+    try {
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(finish).toBeTypeOf('function');
+      const writes = removePullRequestLabel.mock.calls.length;
+      const events = parent.events.length;
+      setQaLoop(parent.id, false);
+      // Also cover an off/on cycle without starting a replacement QA worker.
+      parent.qaLoop = { done: false };
+      const replacement = parent.qaLoop;
+      const afterDisarmEvents = parent.events.length;
+      finish(stage === 'read' ? verdict : undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(removePullRequestLabel.mock.calls).toHaveLength(writes);
+      expect(oldLoop.done).toBe(false);
+      expect(parent.qaLoop).toBe(replacement);
+      expect(parent.qaLoop).toEqual({ done: false });
+      expect(parent.events).toHaveLength(afterDisarmEvents);
+      expect(afterDisarmEvents).toBeGreaterThanOrEqual(events);
+    } finally {
+      parent.status = 'closed';
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])(
+    'retains a known verdict when label removal fails (incomplete: %s)',
+    async (incomplete) => {
+      vi.useFakeTimers();
+      const parent = {
+        ...parentRow('qa-label-failed', 'qa-label-failed-run'),
+        qaLoop: {
+          done: false,
+          pendingVerdict: {
+            prNumber: 88,
+            nextRetryAt: new Date(Date.now() + 20_000).toISOString(),
+            failingSince: new Date(Date.now() - 31 * 60_000).toISOString(),
+          },
+        },
+      };
+      state.stored = [parent];
+      await initJobs();
+      parent.status = 'idle';
+      latestTestVerdict.mockResolvedValueOnce({
+        failures: incomplete ? [] : [{ number: '2', scenario: 'API failed' }],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete,
+      });
+      removePullRequestLabel.mockRejectedValueOnce(new Error('403 label write denied'));
+      try {
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(parent.qaLoop).toMatchObject({
+          done: true,
+          failedScenarios: incomplete ? 0 : 1,
+          incomplete,
+          verdictError: null,
+          pendingVerdict: null,
+        });
+        const text = infoTexts(parent).join('\n');
+        expect(text).toContain('403 label write denied');
+        expect(text).toContain(incomplete ? 'QA has not passed' : '1 scenario(s) failed');
+        expect(text).not.toContain('verdict could not be read');
+      } finally {
+        parent.status = 'closed';
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('resumes a pending verdict from an idle restored session', async () => {
     vi.useFakeTimers();
     state.stored = [
