@@ -95,6 +95,29 @@ describe('githubRest', () => {
   });
 });
 
+describe('viewerLogin', () => {
+  it.each([500, 403, 'network', 'cooldown'])('retries an unknown identity after %s', async (failure) => {
+    const { viewerLogin, githubRest } = await freshGithub();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-08T11:00:00Z'));
+    if (failure === 'network') {
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network unavailable')));
+    } else if (failure === 'cooldown') {
+      stubFetch(reply({ status: 429, headers: { 'retry-after': '60' } }));
+      await expect(githubRest(cfg, 'GET', '/repos/a/b')).rejects.toMatchObject({ rateLimited: true });
+    } else {
+      stubFetch(reply({ status: failure }));
+    }
+    expect(await viewerLogin(cfg)).toBeNull();
+
+    vi.setSystemTime(new Date('2026-09-08T11:02:00Z'));
+    const request = stubFetch(reply({ body: { login: 'server-account' } }));
+    expect(await viewerLogin(cfg)).toBe('server-account');
+    expect(await viewerLogin(cfg)).toBe('server-account');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('rate limiting', () => {
   it('lets a plain 403 through: a missing scope is not a rate limit', async () => {
     const { githubRest } = await freshGithub();

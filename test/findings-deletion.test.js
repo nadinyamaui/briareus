@@ -442,3 +442,102 @@ it.each([200, 403, 500, 'network'])(
     );
   },
 );
+
+it.each([500, 429, 'network'])(
+  'retries incomplete publication identity after a server lookup failure (%s)',
+  async (failure) => {
+    vi.resetModules();
+    const { latestReviewFindings, replyOnFindingThread, deleteFindingFromReview } =
+      await import('../lib/findings.js');
+    const { asGithubUser } = await import('../lib/github.js');
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-08T11:05:00Z'));
+    const since = '2026-09-08T09:00:00Z';
+    let unavailable = true;
+    const publishedInline = {
+      ...inline,
+      in_reply_to_id: 99,
+      user: { login: 'server-account' },
+      created_at: '2026-09-08T10:00:00Z',
+    };
+    const request = vi.fn(async (url, init) => {
+      if (url.endsWith('/user')) {
+        if (unavailable) {
+          if (failure === 'network') throw new Error('Network unavailable');
+          return new Response(null, { status: failure, headers: { 'retry-after': '60' } });
+        }
+        return Response.json({ login: 'server-account' });
+      }
+      if (url.includes('/issues/5/comments?')) {
+        return Response.json([{ ...summary, user: { login: 'bob' }, created_at: since }]);
+      }
+      if (url.includes('/pulls/5/comments?')) {
+        return Response.json([
+          { ...publishedInline, id: 102, user: { login: 'unrelated' } },
+          { ...publishedInline, id: 103, path: 'lib/unrelated.js' },
+          { ...publishedInline, id: 104, created_at: '2026-09-08T12:00:00Z' },
+          publishedInline,
+        ]);
+      }
+      if (init.method === 'POST' || init.method === 'PATCH') return Response.json({});
+      if (init.method === 'DELETE') return new Response(null, { status: 204 });
+      throw new Error(`Unexpected GitHub request: ${init.method} ${url}`);
+    });
+    vi.stubGlobal('fetch', request);
+
+    const [published] = await latestReviewFindings(repo, 5, {
+      since,
+      authorLogin: 'bob',
+      authorLogins: ['bob'],
+    });
+    const held = JSON.parse(JSON.stringify(published));
+    expect(held.reviewPublication).toMatchObject({
+      after: Date.parse(since),
+      before: now(),
+      resolveServerAuthor: true,
+    });
+    await expect(replyOnFindingThread(repo, 5, held, 'Noted', { since })).rejects.toThrow();
+    await expect(deleteFindingFromReview(repo, 5, held, { since })).rejects.toThrow();
+    expect(request.mock.calls.some(([, init]) => init.method !== 'GET')).toBe(false);
+
+    unavailable = false;
+    now.mockReturnValue(Date.parse('2026-09-08T12:05:00Z'));
+    await asGithubUser('current-token', () => replyOnFindingThread(repo, 5, held, 'Noted', { since }));
+    await expect(
+      asGithubUser('current-token', () => deleteFindingFromReview(repo, 5, held, { since })),
+    ).resolves.toEqual({ commentDeleted: true, undeclared: true, warning: null });
+    expect(request.mock.calls.find(([, init]) => init.method === 'POST')[0]).toBe(
+      `https://api.github.com/repos/${repo}/pulls/5/comments/99/replies`,
+    );
+    expect(request.mock.calls.find(([, init]) => init.method === 'DELETE')[0]).toBe(
+      `https://api.github.com/repos/${repo}/pulls/comments/101`,
+    );
+    for (const [, init] of request.mock.calls) {
+      expect(init.headers.Authorization).toBe(
+        init.method === 'GET' ? 'Bearer server-token' : 'Bearer current-token',
+      );
+    }
+  },
+);
+
+it('keeps the server identity available when inline capture enters cooldown', async () => {
+  vi.resetModules();
+  const { latestReviewFindings } = await import('../lib/findings.js');
+  const { viewerLogin } = await import('../lib/github.js');
+  const now = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-08T11:05:00Z'));
+  const request = vi.fn(async (url) => {
+    if (url.endsWith('/user')) return Response.json({ login: 'server-account' });
+    if (url.includes('/issues/5/comments?')) return Response.json([summary]);
+    if (url.includes('/pulls/5/comments?')) {
+      return new Response(null, { status: 429, headers: { 'retry-after': '60' } });
+    }
+    throw new Error(`Unexpected GitHub request: ${url}`);
+  });
+  vi.stubGlobal('fetch', request);
+
+  const [held] = await latestReviewFindings(repo, 5, { since: '2026-09-08T09:00:00Z' });
+  expect(held.reviewPublication.authors).toContain('server-account');
+  expect(await viewerLogin({ githubToken: 'server-token' })).toBe('server-account');
+  now.mockReturnValue(Date.parse('2026-09-08T12:05:00Z'));
+  expect(await viewerLogin({ githubToken: 'server-token' })).toBe('server-account');
+  expect(request.mock.calls.filter(([url]) => url.endsWith('/user'))).toHaveLength(1);
+});
