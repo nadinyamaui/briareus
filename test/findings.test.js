@@ -1156,6 +1156,32 @@ describe('replyOnFindingThread', () => {
 });
 
 describe('review follow-ups posted by the session owner', () => {
+  it('does not bind an unrelated reply that only shares the declared location', async () => {
+    const finding = { title: 'Race in the retry loop', file: 'lib/x.js', line: 12 };
+    gh.comments = [{ ...findingsComment([finding]), user: { login: 'ana' } }];
+    gh.reviewComments = [
+      {
+        id: 91,
+        in_reply_to_id: 90,
+        path: finding.file,
+        line: finding.line,
+        body: 'Done.',
+        user: { login: 'unrelated-user' },
+        created_at: '2026-09-08T10:00:00Z',
+      },
+    ];
+    const [published] = await latestReviewFindings(repo, 5, { since: '2026-09-08T09:00:00Z' });
+    expect(published.reviewAuthorLogin).toBe('ana');
+    expect(published).not.toHaveProperty('reviewCommentId');
+    await expect(
+      replyOnFindingThread(repo, 5, published, 'Noted', {
+        since: '2026-09-08T09:00:00Z',
+        authorLogin: published.reviewAuthorLogin,
+      }),
+    ).rejects.toThrow(/no comment/);
+    expect(gh.writes).toEqual([]);
+  });
+
   it.each(['reply', 'delete'])(
     'uses the review author for %s and ignores unrelated replies',
     async (action) => {

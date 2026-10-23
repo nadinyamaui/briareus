@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { FIXES_ANCHOR } from '../lib/markers.js';
 import { asGithubUser } from '../lib/github.js';
-import { decideFinding, deleteFindingFromReview, findingKey } from '../lib/findings.js';
+import {
+  decideFinding,
+  deleteFindingFromReview,
+  findingKey,
+  latestReviewFindings,
+  replyOnFindingThread,
+} from '../lib/findings.js';
 
 const db = vi.hoisted(() => ({ decisions: new Map() }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ githubToken: 'server-token' }) }));
@@ -147,5 +153,67 @@ it.each([204, 404])(
       undeclared: false,
       warning: "GitHub answered 403 rewriting the review's findings block",
     });
+  },
+);
+
+it.each(['server-account', 'previous-owner'])(
+  'retains the %s inline publication when another account publishes the summary',
+  async (login) => {
+    const since = '2026-09-08T09:00:00Z';
+    const root = { ...inline, path: 'lib/old.js', created_at: '2026-09-01T10:00:00Z' };
+    const restatement = {
+      ...root,
+      id: 102,
+      in_reply_to_id: root.id,
+      user: { login },
+      created_at: '2026-09-08T10:00:00Z',
+    };
+    let comments = [
+      root,
+      { ...restatement, id: 103, body: 'Done.', user: { login: 'unrelated' } },
+      restatement,
+      { ...restatement, id: 104, created_at: '2026-09-08T12:00:00Z' },
+    ];
+    const request = vi.fn(async (url, init) => {
+      if (url.includes('/issues/5/comments?')) {
+        return Response.json([
+          { ...summary, user: { login: 'new-owner' }, created_at: '2026-09-08T11:00:00Z' },
+        ]);
+      }
+      if (url.includes('/pulls/5/comments?')) return Response.json(comments);
+      if (init.method === 'POST') return Response.json({ html_url: 'https://gh/reply' });
+      if (init.method === 'DELETE') return new Response(null, { status: 204 });
+      if (init.method === 'PATCH') return Response.json({});
+      throw new Error(`Unexpected GitHub request: ${init.method} ${url}`);
+    });
+    vi.stubGlobal('fetch', request);
+
+    const [published] = await latestReviewFindings(repo, 5, { since });
+    expect(published).toMatchObject({ reviewAuthorLogin: login, reviewCommentId: 102 });
+    // The held finding survives restart and another account change.
+    const held = JSON.parse(JSON.stringify(published));
+    const options = { since, authorLogin: held.reviewAuthorLogin };
+    await asGithubUser('current-token', () => replyOnFindingThread(repo, 5, held, 'Noted', options));
+    expect(request.mock.calls.find(([, init]) => init.method === 'POST')[0]).toBe(
+      `https://api.github.com/repos/${repo}/pulls/5/comments/101/replies`,
+    );
+    await expect(
+      asGithubUser('current-token', () => deleteFindingFromReview(repo, 5, held, options)),
+    ).resolves.toEqual({ commentDeleted: true, undeclared: true, warning: null });
+    expect(request.mock.calls.find(([, init]) => init.method === 'DELETE')[0]).toBe(
+      `https://api.github.com/repos/${repo}/pulls/comments/102`,
+    );
+    for (const [, init] of request.mock.calls) {
+      expect(init.headers.Authorization).toBe(
+        init.method === 'GET' ? 'Bearer server-token' : 'Bearer current-token',
+      );
+    }
+
+    // A later reply quoting the title must not replace the deleted publication.
+    comments = [root, { ...restatement, id: 104, user: { login: 'unrelated' } }];
+    request.mockClear();
+    await expect(replyOnFindingThread(repo, 5, held, 'Noted', options)).rejects.toThrow(/no comment/);
+    expect((await deleteFindingFromReview(repo, 5, held, options)).commentDeleted).toBe(false);
+    expect(request.mock.calls.some(([, init]) => ['POST', 'DELETE'].includes(init.method))).toBe(false);
   },
 );
