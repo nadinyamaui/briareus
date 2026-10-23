@@ -335,6 +335,10 @@ describe('latestTestVerdict', () => {
     '| 2 | API | curl /api | 200 | ✅ |',
     '| 2 | API | curl /api | 200 |',
     '2 | API | curl /api | 200',
+    '| 2 | UI pending | Open /settings |',
+    '2 | UI pending | Open /settings',
+    '| 2 | UI pending |',
+    '2 | UI pending',
   ])('counts shortened scenario rows: %s', async (row) => {
     gh.comments = [sheet(['| 1 | API | curl /api | 200 | ✅ | response.json |', row])];
     const verdict = await latestTestVerdict(repo, 5);
@@ -407,13 +411,25 @@ describe('latestTestVerdict', () => {
     });
   });
 
-  it.each(['—', '–', '-', '...', '…', 'N/A', 'none', 'TBD', 'TODO'])(
-    'keeps placeholder evidence incomplete: %s',
-    async (evidence) => {
-      gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
-      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
-    },
-  );
+  it.each([
+    '—',
+    '–',
+    '-',
+    '...',
+    '…',
+    'N/A',
+    'none',
+    'TBD',
+    'TODO',
+    '_N/A_',
+    '**TODO**',
+    '`N/A`',
+    '***—***',
+    '**`none`**',
+  ])('keeps placeholder evidence incomplete: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
 
   it.each(['⚠️ UI blocked', '⏭️ UI skipped', 'UI blocked', 'UI skipped', '⬜ UI', '❓ UI unknown'])(
     'keeps a partially executed row incomplete: %s',
@@ -422,6 +438,32 @@ describe('latestTestVerdict', () => {
         sheet([`| 1 | Mixed | API and UI | Both work | ✅ API; ${procedure} | response.json |`]),
       ];
       expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    },
+  );
+
+  it.each([
+    '✅ API<br>UI blocked',
+    '✅ API<br/>UI blocked',
+    '✅ API, UI skipped',
+    '✅ API / unknown UI',
+    '✅ API / UI pending',
+    '✅ API, UI not run',
+  ])('keeps explicit incomplete annotations incomplete: %s', async (status) => {
+    gh.comments = [sheet([`| 1 | Mixed | API and UI | Both work | ${status} | response.json |`])];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it.each(['_response.json_', '**asserted HTTP 200**', '`response.json`'])(
+    'accepts formatted execution evidence: %s',
+    async (evidence) => {
+      gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ passed: 1, incomplete: false });
     },
   );
 
