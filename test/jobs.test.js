@@ -15103,6 +15103,34 @@ describe('/btw side questions', () => {
     expect(btwQuestion(undefined)).toBeNull();
   });
 
+  it.each(['idle', 'running'])(
+    'refuses direct and message side questions after project revocation on a %s worker',
+    async (status) => {
+      const job = getJob('btw-session');
+      job.status = status;
+      job.ownerId = 2;
+      job.parentId = 'orchestrator';
+      const allowed = vi.fn(() => false);
+      setSessionProjectFilter(allowed);
+      const before = job.events.length;
+
+      expect(() => askDevSessionBtw(job.id, 'Which file?')).toThrow(/Project unavailable/);
+      expect(() => sendDevMessage(job.id, '/btw Which file?')).toThrow(/Project unavailable/);
+      expect(allowed).toHaveBeenCalledWith(job, expect.objectContaining({ repo: job.repo }));
+      expect(askClaudeSideQuestion).not.toHaveBeenCalled();
+      expect(recordTurnUsage).not.toHaveBeenCalled();
+      expect(job.events).toHaveLength(before);
+      expect(job.status).toBe(status);
+
+      allowed.mockReturnValue(true);
+      askClaudeSideQuestion.mockResolvedValueOnce({ text: 'lib/jobs.js', costUsd: 0.02 });
+      await expect(askDevSessionBtw(job.id, 'Which file?').answer).resolves.toMatchObject({
+        text: 'lib/jobs.js',
+      });
+      expect(askClaudeSideQuestion).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('answers beside a running turn: no queue, no user line, the answer paired by id', async () => {
     const job = getJob('btw-session');
     job.status = 'running';
