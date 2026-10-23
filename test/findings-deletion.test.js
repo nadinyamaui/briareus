@@ -6,6 +6,7 @@ import {
   deleteFindingFromReview,
   findingKey,
   latestReviewFindings,
+  postTriageNotes,
   replyOnFindingThread,
 } from '../lib/findings.js';
 
@@ -68,6 +69,131 @@ it('accepts a successful checklist deletion', async () => {
   await expect(
     asGithubUser('personal-token', () => decideFinding(repo, 5, key, 'dismissed')),
   ).resolves.toBeDefined();
+});
+
+it.each([403, 404, 500, 204])(
+  'reports an unconfirmed triage-notes removal (%i) using the connected identity',
+  async (status) => {
+    const request = vi.fn(async (url, init) => {
+      if (url.includes('/issues/5/comments?')) {
+        return Response.json([{ id: 41, body: '<!-- reviewer:triage-notes sess-1 -->\nOld notes' }]);
+      }
+      if (init.method === 'DELETE') return new Response(null, { status });
+      throw new Error(`Unexpected GitHub request: ${init.method} ${url}`);
+    });
+    vi.stubGlobal('fetch', request);
+
+    const result = asGithubUser('personal-token', () => postTriageNotes(repo, 5, 'sess-1', [], {}));
+    if (status === 204) await expect(result).resolves.toBeNull();
+    else await expect(result).rejects.toThrow(`GitHub answered ${status} removing the triage notes comment`);
+    expect(request.mock.calls.map(([url, init]) => [init.method, url, init.headers.Authorization])).toEqual([
+      [
+        'GET',
+        `https://api.github.com/repos/${repo}/issues/5/comments?per_page=100&page=1`,
+        'Bearer server-token',
+      ],
+      ['DELETE', `https://api.github.com/repos/${repo}/issues/comments/41`, 'Bearer personal-token'],
+    ]);
+  },
+);
+
+it.each([200, 500])(
+  'rejects an owner quotation during publication capture and recovery (%i)',
+  async (lookupStatus) => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-08T11:05:00Z'));
+    const since = '2026-09-08T09:00:00Z';
+    let unavailable = lookupStatus !== 200;
+    const request = vi.fn(async (url, init) => {
+      if (url.endsWith('/user')) return Response.json({ login: 'server-account' });
+      if (url.includes('/issues/5/comments?')) {
+        return Response.json([{ ...summary, user: { login: 'alice' }, created_at: since }]);
+      }
+      if (url.includes('/pulls/5/comments?')) {
+        if (unavailable) return new Response(null, { status: lookupStatus });
+        return Response.json([
+          {
+            ...inline,
+            line: 90,
+            in_reply_to_id: 99,
+            user: { login: 'alice' },
+            body: `I disagree with "${finding.title}" from the other review.`,
+            created_at: '2026-09-08T10:00:00Z',
+          },
+        ]);
+      }
+      if (init.method === 'PATCH' || init.method === 'POST') return Response.json({});
+      if (init.method === 'DELETE') return new Response(null, { status: 204 });
+      throw new Error(`Unexpected GitHub request: ${init.method} ${url}`);
+    });
+    vi.stubGlobal('fetch', request);
+
+    const [published] = await latestReviewFindings(repo, 5, { since, authorLogin: 'alice' });
+    const held = JSON.parse(JSON.stringify(published));
+    expect(held).not.toHaveProperty('reviewCommentId');
+    unavailable = false;
+    await expect(replyOnFindingThread(repo, 5, held, 'Noted', { since })).rejects.toThrow(/no comment/);
+    await expect(deleteFindingFromReview(repo, 5, held, { since })).resolves.toEqual({
+      commentDeleted: false,
+      undeclared: true,
+      warning: null,
+    });
+    expect(request.mock.calls.some(([, init]) => ['POST', 'DELETE'].includes(init.method))).toBe(false);
+  },
+);
+
+it.each([
+  [null, null, 200],
+  [null, null, 500],
+  ['lib/x.js', null, 200],
+  ['lib/x.js', 12, 200],
+])('recognizes a review heading with location %s:%s and lookup %i', async (file, line, lookupStatus) => {
+  vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-08T11:05:00Z'));
+  const since = '2026-09-08T09:00:00Z';
+  const entry = { ...finding, file, line };
+  let unavailable = lookupStatus !== 200;
+  const request = vi.fn(async (url, init) => {
+    if (url.endsWith('/user')) return Response.json({ login: 'server-account' });
+    if (url.includes('/issues/5/comments?'))
+      return Response.json([
+        {
+          ...summary,
+          body: `<!-- reviewer:findings ${JSON.stringify([entry])} -->`,
+          user: { login: 'alice' },
+          created_at: since,
+        },
+      ]);
+    if (url.includes('/pulls/5/comments?')) {
+      if (unavailable) return new Response(null, { status: lookupStatus });
+      return Response.json([
+        {
+          ...inline,
+          line: 90,
+          in_reply_to_id: 99,
+          user: { login: 'alice' },
+          body: `**Medium — follow-up: ${finding.title}**\n\nStill needs fixing.`,
+          created_at: '2026-09-08T10:00:00Z',
+        },
+      ]);
+    }
+    if (init.method === 'PATCH' || init.method === 'POST') return Response.json({});
+    if (init.method === 'DELETE') return new Response(null, { status: 204 });
+    throw new Error(`Unexpected GitHub request: ${init.method} ${url}`);
+  });
+  vi.stubGlobal('fetch', request);
+
+  const [published] = await latestReviewFindings(repo, 5, { since, authorLogin: 'alice' });
+  const held = JSON.parse(JSON.stringify(published));
+  unavailable = false;
+  await asGithubUser('personal-token', () => replyOnFindingThread(repo, 5, held, 'Noted', { since }));
+  await expect(
+    asGithubUser('personal-token', () => deleteFindingFromReview(repo, 5, held, { since })),
+  ).resolves.toEqual({ commentDeleted: true, undeclared: true, warning: null });
+  const writes = request.mock.calls.filter(([, init]) => ['POST', 'DELETE'].includes(init.method));
+  expect(writes.map(([url]) => url)).toEqual([
+    `https://api.github.com/repos/${repo}/pulls/5/comments/99/replies`,
+    `https://api.github.com/repos/${repo}/pulls/comments/101`,
+  ]);
+  expect(writes.every(([, init]) => init.headers.Authorization === 'Bearer personal-token')).toBe(true);
 });
 
 it.each([200, 403, 500])(
