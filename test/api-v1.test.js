@@ -1257,6 +1257,16 @@ describe('the contract', () => {
       'transcribe.create',
       'transcribe.status',
       'uploads.create',
+      'whatsapp.account',
+      'whatsapp.accounts',
+      'whatsapp.conversations',
+      'whatsapp.logout',
+      'whatsapp.media',
+      'whatsapp.messages',
+      'whatsapp.qr',
+      'whatsapp.read',
+      'whatsapp.send',
+      'whatsapp.start',
     ]);
   });
 

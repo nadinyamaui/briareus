@@ -23,6 +23,7 @@ import { createUsers } from './lib/users.js';
 import { createShares } from './lib/shares.js';
 import { seesSession } from './lib/ownership.js';
 import { createUserCredentials } from './lib/user-credentials.js';
+import { createWhatsAppOwners } from './lib/whatsapp-owners.js';
 import { meRoutes } from './lib/me-routes.js';
 import { asGithubUser } from './lib/github.js';
 import { shareRoutes } from './lib/share-routes.js';
@@ -701,11 +702,20 @@ api.use(
 );
 const whatsappService = createWhatsAppService();
 // Replies in the chats a session wrote to come back to it (lib/whatsapp-watch.js).
+// Whose each WhatsApp account is (lib/whatsapp-owners.js); a session reaches its inbox owner's.
+const whatsappOwners = createWhatsAppOwners({
+  legacyOwner: originalOperator,
+  lookupAccount: whatsappService.account,
+  listAccounts: whatsappService.accounts,
+});
+const whatsappMayUse = (job, account) => whatsappOwners.owns(inboxOwner(job), account);
 const whatsappWatcher = createWhatsAppWatcher({
   service: whatsappService,
   getJob,
   listJobs: devSessionRecords,
   allowed: (job) => whatsappWatchAllowed(job, getProject(job.repo)),
+  mayUse: whatsappMayUse,
+  ownershipReady: whatsappOwners.ready,
   deliver: (id, delivery, group) => deliverToSession(id, delivery, { via: 'whatsapp', ...group }),
   instruct: (id, instruction, group) =>
     instructSessionDurably(id, instruction, { via: 'whatsapp', ...group }),
@@ -720,9 +730,15 @@ const whatsappWatcher = createWhatsAppWatcher({
   registryComplete: sessionRegistryComplete,
 });
 setWhatsAppWatchAccess((id) => whatsappWatcher.watching(id));
-api.use(whatsappRoutes({ service: whatsappService }));
+api.use(whatsappRoutes({ service: whatsappService, owners: whatsappOwners }));
 api.use(
-  whatsappAgentRoutes({ service: whatsappService, agentSession, getProject, watcher: whatsappWatcher }),
+  whatsappAgentRoutes({
+    service: whatsappService,
+    agentSession,
+    getProject,
+    watcher: whatsappWatcher,
+    mayUse: whatsappMayUse,
+  }),
 );
 api.use(mcpRoutes({ service: mcpService, getProject }));
 api.use(
@@ -2293,6 +2309,9 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await mailService.init();
     await shares.init().catch((e) => console.error('Could not load shares:', e.message));
     await credentials.init().catch((e) => console.error('Could not load user credentials:', e.message));
+    await whatsappOwners
+      .init()
+      .catch((e) => console.error('Could not initialize WhatsApp ownership:', e.message));
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
@@ -2342,6 +2361,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
       .catch((e) => console.error('Could not reload users or Slack ownership:', e.message));
     shares.refresh().catch((e) => console.error('Could not reload shares:', e.message));
     credentials.refresh().catch((e) => console.error('Could not load user credentials:', e.message));
+    whatsappOwners.init().catch((e) => console.error('Could not initialize WhatsApp ownership:', e.message));
   }, 15000).unref();
   // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
   // a client reads its mail from the database rather than from the provider.

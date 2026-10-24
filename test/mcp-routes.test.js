@@ -151,6 +151,34 @@ describe('the session proxy', () => {
     }
   });
 
+  it.each(['initial credentials', 'OAuth refresh'])(
+    'rechecks access after awaiting %s before dispatching upstream',
+    async (phase) => {
+      const target = {
+        url: 'https://remote.example/mcp',
+        headers: { Authorization: 'Bearer fresh' },
+        oauth: true,
+      };
+      if (phase === 'OAuth refresh') upstream.mockResolvedValueOnce(new Response('no', { status: 401 }));
+      service.upstream.mockImplementation(async (_id, _repo, opts) => {
+        if (phase === 'initial credentials' || opts?.force) mayUse.mockReturnValue(false);
+        return target;
+      });
+      upstream.mockResolvedValue(new Response('{}', { headers: { 'content-type': 'application/json' } }));
+
+      const res = await fetch(`${base}/api/agent/mcp/5`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer session-token', 'Content-Type': 'application/json' },
+        body: JSON.stringify(rpc),
+      });
+
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'MCP server unavailable for this project' });
+      expect(upstream).toHaveBeenCalledTimes(phase === 'OAuth refresh' ? 1 : 0);
+      expect(service.upstream).toHaveBeenCalledTimes(phase === 'OAuth refresh' ? 2 : 1);
+    },
+  );
+
   it('refreshes once and retries when the remote refuses the token', async () => {
     upstream
       .mockResolvedValueOnce(new Response('no', { status: 401 }))
