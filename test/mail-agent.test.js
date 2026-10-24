@@ -337,6 +337,36 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
 });
 
 describe('whose mail a session reaches', () => {
+  it.each([
+    ['action', '/accounts/7/action', 'POST', null],
+    ['trashMessage', '/accounts/7/messages/id/trash', 'POST', null],
+    ['attachment', '/accounts/7/messages/id/attachments/file', 'GET', null],
+    ['action', '/accounts/7/action', 'POST', 2],
+  ])(
+    'rechecks the owner before delayed %s executes (%s, %s, owner %s)',
+    async (name, path, method, owner) => {
+      const started = Promise.withResolvers();
+      const resume = Promise.withResolvers();
+      const execute = vi.fn();
+      service[name].mockImplementation(async (...args) => {
+        started.resolve();
+        await resume.promise;
+        args.at(-1)();
+        execute();
+        return {};
+      });
+      const response = fetch(`${base}/api/agent/mail${path}`, {
+        method,
+        headers: { Authorization: 'Bearer session-token' },
+      });
+      await started.promise;
+      inboxOwner.mockReturnValue(owner);
+      resume.resolve();
+      expect((await response).status).toBe(403);
+      expect(execute).not.toHaveBeenCalled();
+    },
+  );
+
   it('reaches its inbox owner’s mailboxes, and none when it has no owner', async () => {
     const headers = { Authorization: 'Bearer session-token' };
     expect((await fetch(`${base}/api/agent/mail/accounts`, { headers })).status).toBe(200);

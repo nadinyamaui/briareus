@@ -4,6 +4,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { createSlackService, createSlackApi, verifySlackSignature } from '../lib/slack.js';
 import { slackRoutes, slackEventsRouter } from '../lib/slack-routes.js';
+import { createUsers } from '../lib/users.js';
+import { createMobileAuth } from '../lib/mobile-auth.js';
+import { apiV1Routes } from '../lib/api-v1.js';
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ credentialsKey: 'k'.repeat(32) }) }));
 
@@ -70,7 +73,7 @@ function fakeSlack() {
 
 const job = (over = {}) => ({ id: 'j1', repo: 'o/a', status: 'running', title: 'Fix the importer', ...over });
 
-async function service({ project = {}, unfit = () => null, jobs = { j1: job() } } = {}) {
+async function service({ project = {}, unfit = () => null, jobs = { j1: job() }, inboxOwner } = {}) {
   const slack = fakeSlack();
   const stored = {};
   const save = vi.fn(async (key, value) => {
@@ -89,6 +92,7 @@ async function service({ project = {}, unfit = () => null, jobs = { j1: job() } 
     eventsUrl: (id) => `https://briareus.example/webhooks/slack/${id}`,
     // Workspaces and sessions from before users belong to the first admin.
     legacyOwner: () => 1,
+    inboxOwner,
     log: () => {},
   });
   await s.init();
@@ -107,6 +111,105 @@ function signed(body, secret = SECRET, at = Math.floor(Date.now() / 1000)) {
 }
 
 describe('the Slack workspaces', () => {
+  it('persists legacy ownership once, across admin changes and restarts', async () => {
+    const { stored } = await service();
+    delete stored.slack_workspaces[0].ownerId;
+    stored.slack_workspaces.push({ ...stored.slack_workspaces[0], id: 2, ownerId: 3 });
+    let admin = 1;
+    const save = vi.fn(async (key, rows) => {
+      stored[key] = structuredClone(rows);
+    });
+    const deps = {
+      load: async (key, fallback) => structuredClone(stored[key] ?? fallback),
+      save,
+      legacyOwner: () => admin,
+    };
+    const s = createSlackService(deps);
+    await s.init();
+    expect(stored.slack_workspaces.map((w) => w.ownerId)).toEqual([1, 3]);
+    admin = 2;
+    await s.migrateLegacyOwnership();
+    expect(s.list(undefined, 1)).toHaveLength(1);
+    expect(s.list(undefined, 2)).toEqual([]);
+    expect(() => s.owns(stored.slack_workspaces[0].id, 2)).toThrow('not found');
+    const restarted = createSlackService(deps);
+    await restarted.init();
+    expect(restarted.list(undefined, 1)).toHaveLength(1);
+    expect(restarted.list(undefined, 2)).toEqual([]);
+    expect(restarted.list(undefined, 3)).toHaveLength(1);
+    expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['owner unavailable', 'save failed'])(
+    'keeps legacy workspaces private if migration fails: %s',
+    async (failure) => {
+      const { stored } = await service();
+      delete stored.slack_workspaces[0].ownerId;
+      const log = vi.fn();
+      let recovered = false;
+      const s = createSlackService({
+        load: async (key, fallback) => structuredClone(stored[key] ?? fallback),
+        legacyOwner: () => (!recovered && failure === 'owner unavailable' ? null : 1),
+        save: async (key, rows) => {
+          if (!recovered) throw new Error('save failed');
+          stored[key] = rows;
+        },
+        inboxOwner: () => null,
+        log,
+      });
+      await s.init();
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('legacy ownership migration deferred:'));
+      await expect(s.migrateLegacyOwnership()).rejects.toThrow(
+        failure === 'owner unavailable' ? 'Cannot determine' : 'save failed',
+      );
+      expect(s.list(undefined, 1)).toEqual([]);
+      expect(s.list(undefined, 2)).toEqual([]);
+      expect(s.briefing(job())).toBeNull();
+      recovered = true;
+      await s.migrateLegacyOwnership();
+      expect(s.list(undefined, 1)).toHaveLength(1);
+      expect(stored.slack_workspaces[0].ownerId).toBe(1);
+    },
+  );
+
+  it('preserves active project claims when legacy ownership is retried', async () => {
+    const { stored, w } = await service();
+    delete stored.slack_workspaces[0].ownerId;
+    stored.slack_workspaces[0].projects.push({ ...w.projects[0], repo: 'o/b' });
+    stored.slack_workspaces.push({ ...stored.slack_workspaces[0], id: 2, ownerId: 3 });
+    let recovered = false;
+    const deps = {
+      load: async (key, fallback) => structuredClone(stored[key] ?? fallback),
+      save: async (key, rows) => {
+        if (!recovered) throw new Error('save failed');
+        stored[key] = structuredClone(rows);
+      },
+      api: fakeSlack().api,
+      legacyOwner: () => 1,
+      log: () => {},
+    };
+    const s = createSlackService(deps);
+    await s.init();
+    expect(s.list(undefined, 1)).toEqual([]);
+    recovered = true;
+    const active = await s.create(
+      { token: TOKEN, label: 'Reconnected', projects: [{ repo: 'o/a', permissionMode: 'allow' }] },
+      1,
+    );
+    expect(s.briefing(job())).toMatchObject({ permissionMode: 'allow' });
+
+    await s.migrateLegacyOwnership();
+    expect(s.list('o/a', 1)).toEqual([active]);
+    expect(s.briefing(job())).toMatchObject({ permissionMode: 'allow' });
+    expect(s.list('o/b', 1)).toMatchObject([{ id: w.id, ownerId: 1 }]);
+    expect(s.list('o/a', 3)).toMatchObject([{ id: 2, ownerId: 3 }]);
+    expect(stored.slack_workspaces[0].projects.map((p) => p.repo)).toEqual(['o/b']);
+    const restarted = createSlackService(deps);
+    await restarted.init();
+    expect(restarted.list('o/a', 1)).toEqual([active]);
+    expect(restarted.briefing(job())).toMatchObject({ permissionMode: 'allow' });
+  });
+
   it('checks the token with Slack, stores it and the secret sealed, and never hands them back', async () => {
     const { w, stored } = await service();
     expect(w).toEqual({
@@ -353,6 +456,46 @@ describe('a session sending', () => {
     expect(await s.request(job(), { to: 'U1', text: 'Hi' })).toMatchObject({
       status: 'failed',
       error: 'Slack settings changed; send the message again',
+    });
+    expect(slack.posted()).toEqual([]);
+  });
+
+  it.each([
+    ['allow', 'disabled'],
+    ['allow', 'reassigned'],
+    ['allow', 'deleted'],
+    ['ask', 'disabled'],
+    ['ask', 'reassigned'],
+    ['ask', 'deleted'],
+  ])('does not post an %s-mode DM when its session is %s during lookup', async (permissionMode, change) => {
+    const { s, slack, jobs } = await service({
+      project: { permissionMode },
+      inboxOwner: (j) => (j.disabled ? null : (j.ownerId ?? 1)),
+    });
+    const original = slack.api.getMockImplementation();
+    let resume;
+    let started;
+    const paused = new Promise((resolve) => {
+      started = resolve;
+    });
+    slack.api.mockImplementation(async (...args) => {
+      if (args[1] === 'conversations.open') {
+        started();
+        await new Promise((resolve) => {
+          resume = resolve;
+        });
+      }
+      return original(...args);
+    });
+    const request = s.request(job(), { to: 'U1', text: 'Hi' });
+    const pending = permissionMode === 'ask' ? s.decide((await request).id, 'approve') : request;
+    await paused;
+    if (change === 'deleted') delete jobs.j1;
+    else jobs.j1 = job(change === 'disabled' ? { disabled: true } : { ownerId: 2 });
+    resume();
+    expect(await pending).toMatchObject({
+      status: 'failed',
+      error: 'The session no longer owns this Slack workspace',
     });
     expect(slack.posted()).toEqual([]);
   });
@@ -1393,6 +1536,47 @@ describe('replies through the Events API', () => {
     expect(s.receive(String(w.id), reply.raw, reply.headers).then).toBeUndefined();
   });
 
+  it('retries the same signed reply after the users store recovers, then deduplicates it', async () => {
+    const load = vi.fn(async () => [{ id: 1, disabledAt: null }]);
+    let users = createUsers({ load });
+    await users.init();
+    const { s, w, deliver } = await sentTo('U1', { inboxOwner: () => users.get(1)?.id ?? null });
+    users = createUsers({ load });
+    load.mockRejectedValueOnce(new Error('DB down'));
+    await expect(users.init()).rejects.toThrow('DB down');
+    await s.init(); // Already-owned workspaces and saved replies load despite the users outage.
+    const reply = signed(
+      event({ channel: 'D-U1', channel_type: 'im', user: 'U1', text: 'private reply', ts: '1.2' }),
+    );
+    const app = express();
+    app.use('/webhooks/slack', slackEventsRouter({ service: s, log: () => {} }));
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    const send = () =>
+      fetch(`http://127.0.0.1:${server.address().port}/webhooks/slack/${w.id}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Slack-Request-Timestamp': reply.headers.timestamp,
+          'X-Slack-Signature': reply.headers.signature,
+        },
+        body: reply.raw,
+      });
+    try {
+      expect((await send()).status).toBe(503);
+      expect(deliver).not.toHaveBeenCalled();
+      await users.refresh();
+      expect((await send()).status).toBe(200);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect(deliver.mock.calls[0][1].text).toContain('private reply');
+      expect((await send()).status).toBe(200);
+      expect(deliver).toHaveBeenCalledOnce();
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it('persists human DM supersession, preserves agent threads, and lets a later agent send reclaim replies', async () => {
     const { s, w, deliver, slack } = await service({ project: { permissionMode: 'allow' } });
     const original = slack.api.getMockImplementation();
@@ -1552,6 +1736,68 @@ describe('replies through the Events API', () => {
     expect(deliver).not.toHaveBeenCalled();
   });
 
+  it.each([null, 2])('ignores saved-thread replies when the current inbox owner is %s', async (owner) => {
+    let currentOwner = 1;
+    const { s, w, deliver } = await sentTo('U1', { inboxOwner: () => currentOwner });
+    currentOwner = owner;
+    const reply = signed(
+      event({
+        channel: 'D-U1',
+        channel_type: 'im',
+        user: 'U1',
+        text: 'private reply',
+        thread_ts: '1700000000.000100',
+        ts: '1.2',
+      }),
+    );
+    expect(s.briefing(job())).toBeNull();
+    expect(s.receive(String(w.id), reply.raw, reply.headers).then).toBeUndefined();
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it.each(['disabled', 'reassigned', 'deleted'])(
+    'rechecks the current job after the sender lookup: %s',
+    async (change) => {
+      const { s, w, deliver, slack, jobs } = await sentTo('U1', {
+        jobs: { j1: job({ ownerId: 1 }) },
+        inboxOwner: (j) => (j.disabled ? null : (j.ownerId ?? 1)),
+      });
+      await s.update(w.id, { token: TOKEN });
+      const original = slack.api.getMockImplementation();
+      let resume;
+      let started;
+      const paused = new Promise((resolve) => {
+        started = resolve;
+      });
+      slack.api.mockImplementation(async (...args) => {
+        if (args[1] === 'users.list') {
+          started();
+          await new Promise((resolve) => {
+            resume = resolve;
+          });
+        }
+        return original(...args);
+      });
+      const reply = signed(
+        event({
+          channel: 'D-U1',
+          channel_type: 'im',
+          user: 'U1',
+          text: 'private reply',
+          thread_ts: '1700000000.000100',
+          ts: '1.2',
+        }),
+      );
+      const delivering = s.receive(String(w.id), reply.raw, reply.headers).then();
+      await paused;
+      if (change === 'deleted') delete jobs.j1;
+      else jobs.j1 = job(change === 'disabled' ? { ownerId: 1, disabled: true } : { ownerId: 2 });
+      resume();
+      await delivering;
+      expect(deliver).not.toHaveBeenCalled();
+    },
+  );
+
   it('says in the session when a reply could not reach the agent', async () => {
     const { s, w, deliver, note } = await sentTo();
     deliver.mockImplementationOnce(() => {
@@ -1606,6 +1852,91 @@ describe('the wire', () => {
     expect(init.headers.Authorization).toBe(`Bearer ${TOKEN}`);
     expect(String(init.body)).toBe('channel=C1&text=hi');
   });
+
+  it.each([
+    { role: 'member', repos: ['o/private'], shared: [], visible: false },
+    { role: 'member', repos: ['o/a', 'o/private'], shared: [], visible: false },
+    { role: 'member', repos: ['o/private'], shared: ['o/a'], visible: false },
+    { role: 'member', repos: ['o/a', 'o/private'], shared: ['o/a'], visible: true },
+    { role: 'member', repos: ['o/a'], shared: ['o/a', 'o/private'], visible: true },
+    { role: 'admin', repos: [], shared: [], visible: true },
+  ])(
+    'validates Slack projects within the caller’s API scope (%j)',
+    async ({ role, repos, shared, visible }) => {
+      const { s, w } = await service();
+      let devices = [];
+      const auth = createMobileAuth({
+        load: async () => structuredClone(devices),
+        save: async (_key, value) => {
+          devices = structuredClone(value);
+        },
+      });
+      await auth.init();
+      const { token } = await auth.create(
+        { userId: 1, label: 'Slack test', repos, permission: role === 'admin' ? 'admin' : 'manage', days: 1 },
+        'secret',
+      );
+      const getProject = (repo) => (['o/a', 'o/private'].includes(repo) ? { repo } : null);
+      const handlers = slackRoutes({ service: s, agentSession: () => null, getProject });
+      const app = express();
+      app.use(
+        apiV1Routes({
+          auth,
+          users: { get: () => ({ id: 1, role, disabledAt: null }) },
+          memberRepos: () => shared,
+          apiEnabled: () => true,
+          ownerSecret: () => 'secret',
+          handlers,
+          getProject,
+        }),
+      );
+      const server = app.listen(0, '127.0.0.1');
+      await new Promise((resolve) => server.once('listening', resolve));
+      const base = `http://127.0.0.1:${server.address().port}/api/v1/settings/slack/workspaces`;
+      try {
+        for (const [method, suffix] of [
+          ['POST', ''],
+          ['PUT', '/9999'],
+          ['PUT', `/${w.id}`],
+        ]) {
+          for (const repo of [['o/private'], ['o/a'], { name: 'o/private' }, 123, null]) {
+            const response = await fetch(`${base}${suffix}`, {
+              method,
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ token: TOKEN, projects: [{ repo }] }),
+            });
+            expect(response.status).toBe(400);
+            expect(await response.json()).toEqual({ error: 'Choose projects as owner/name' });
+          }
+          expect(s.list()).toEqual([w]);
+          for (const repo of ['o/absent', 'o/private', 'o/a']) {
+            const response = await fetch(`${base}${suffix}`, {
+              method,
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ projects: [{ repo }] }),
+            });
+            const allowed = repo !== 'o/absent' && (role === 'admin' || (repo === 'o/a' && visible));
+            if (!allowed) {
+              expect(response.status).toBe(400);
+              expect(await response.json()).toEqual({ error: `${repo} is not a project` });
+            } else if (method === 'POST') {
+              // Passed project validation and reached normal workspace validation.
+              expect(await response.json()).toEqual({ error: 'Enter a Slack user token' });
+            } else if (suffix === '/9999') {
+              expect(response.status).toBe(404);
+              expect(await response.json()).toEqual({ error: 'Slack workspace not found' });
+            } else {
+              expect(response.status).toBe(200);
+              expect((await response.json()).workspace.projects[0].repo).toBe(repo);
+            }
+          }
+        }
+      } finally {
+        server.closeAllConnections();
+        await new Promise((resolve) => server.close(resolve));
+      }
+    },
+  );
 
   it('serves the agent’s calls on its session token, and the events route on the raw body', async () => {
     const { s, w, deliver } = await service();

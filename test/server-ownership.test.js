@@ -32,6 +32,7 @@ it('keeps legacy Slack and Home Assistant with the original operator across role
     )(users, credentials, () => ({ homeAssistant: environment }));
     const slack = createSlackService({
       load: async (key, fallback) => (key === 'slack_workspaces' ? [{ id: 9, projects: [] }] : fallback),
+      save: async () => {},
       legacyOwner: resolvers.legacyOwner,
       inboxOwner: resolvers.inboxOwner,
     });

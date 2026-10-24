@@ -1,8 +1,8 @@
 // @ts-check
 // Who each turn was spent for: the user who owns the session (lib/users.js), so spend can
 // be read per user. Every turn before this ran for the server's one operator, so they are
-// filed under the first user, the operator the users migration created, regardless of role; later turns of
-// sessions nobody started have none.
+// filed under the earliest user, the original operator, regardless of their current role;
+// later turns of sessions nobody started have none.
 
 /** @param {import('mysql2/promise').Pool} p */
 async function hasColumn(p) {
@@ -19,11 +19,10 @@ export async function up({ context: p }) {
     await p.query(
       'ALTER TABLE `turn_usage` ADD COLUMN `user_id` INT UNSIGNED NULL AFTER `job_id`, ADD KEY `turn_usage_user_at` (`user_id`, `at`)',
     );
-    const [users] = await p.query('SELECT MIN(`id`) AS id FROM `users`');
-    const owner = /** @type {any[]} */ (users)[0]?.id;
-    if (owner != null)
-      await p.query('UPDATE `turn_usage` SET `user_id` = ? WHERE `user_id` IS NULL', [owner]);
   }
+  const [users] = await p.query('SELECT MIN(`id`) AS id FROM `users`');
+  const owner = /** @type {any[]} */ (users)[0]?.id;
+  if (owner != null) await p.query('UPDATE `turn_usage` SET `user_id` = ? WHERE `user_id` IS NULL', [owner]);
 }
 
 /** @param {{ context: import('mysql2/promise').Pool }} ctx */

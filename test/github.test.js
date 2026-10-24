@@ -95,6 +95,29 @@ describe('githubRest', () => {
   });
 });
 
+describe('viewerLogin', () => {
+  it.each([500, 403, 'network', 'cooldown'])('retries an unknown identity after %s', async (failure) => {
+    const { viewerLogin, githubRest } = await freshGithub();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-08T11:00:00Z'));
+    if (failure === 'network') {
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network unavailable')));
+    } else if (failure === 'cooldown') {
+      stubFetch(reply({ status: 429, headers: { 'retry-after': '60' } }));
+      await expect(githubRest(cfg, 'GET', '/repos/a/b')).rejects.toMatchObject({ rateLimited: true });
+    } else {
+      stubFetch(reply({ status: failure }));
+    }
+    expect(await viewerLogin(cfg)).toBeNull();
+
+    vi.setSystemTime(new Date('2026-09-08T11:02:00Z'));
+    const request = stubFetch(reply({ body: { login: 'server-account' } }));
+    expect(await viewerLogin(cfg)).toBe('server-account');
+    expect(await viewerLogin(cfg)).toBe('server-account');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('rate limiting', () => {
   it('lets a plain 403 through: a missing scope is not a rate limit', async () => {
     const { githubRest } = await freshGithub();
@@ -713,5 +736,41 @@ describe('acting as a user', () => {
     const answer = await gh.asGithubUser('user-tok', () => gh.githubRest(cfg, 'POST', '/x'));
     expect(answer.status).toBe(429);
     expect((await gh.githubRest(cfg, 'GET', '/y')).status).toBe(200);
+  });
+
+  it('clears a request identity for detached work and restores it for the request', async () => {
+    const gh = await freshGithub();
+    const fetch = stubFetch(reply(), reply());
+    let background;
+    await gh.asGithubUser('user-tok', async () => {
+      background = gh.asGithubUser(null, async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await gh.githubRest(cfg, 'POST', '/background');
+      });
+      await gh.githubRest(cfg, 'POST', '/request');
+    });
+    await background;
+    expect(fetch.calls.map((c) => [c.url, c.init.headers.Authorization])).toEqual([
+      ['https://api.github.com/request', 'Bearer user-tok'],
+      ['https://api.github.com/background', 'Bearer tok'],
+    ]);
+  });
+
+  it('keeps PAT validation outside the server cooldown in both directions', async () => {
+    const gh = await freshGithub();
+    const limited = () => reply({ status: 429, headers: { 'retry-after': '60' } });
+    const fetch = stubFetch(limited(), reply(), limited(), reply());
+    const validate = () =>
+      gh.githubRest({ githubToken: 'pat' }, 'GET', '/user', undefined, { trackServerRate: false });
+    expect((await validate()).status).toBe(429);
+    expect((await gh.githubRest(cfg, 'GET', '/repos/o/r')).ok).toBe(true);
+    await expect(gh.githubRest(cfg, 'GET', '/repos/o/r')).rejects.toMatchObject({ rateLimited: true });
+    expect((await validate()).ok).toBe(true);
+    expect(fetch.calls.map((c) => c.init.headers.Authorization)).toEqual([
+      'Bearer pat',
+      'Bearer tok',
+      'Bearer tok',
+      'Bearer pat',
+    ]);
   });
 });

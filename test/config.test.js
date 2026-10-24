@@ -888,7 +888,23 @@ describe('WhatsApp configuration', () => {
     );
     process.env.WAHA_API_KEY = 'rotated-secret';
     const cfg = await loadConfig(complete({ WAHA_CONFIG_FILE: '/private/waha.env' }));
-    expect(cfg.getConfig().whatsapp).toEqual({ url: 'http://127.0.0.1:8203', apiKey: 'rotated-secret' });
+    expect(cfg.getConfig().whatsapp).toEqual({
+      url: 'http://127.0.0.1:8203',
+      apiKey: 'rotated-secret',
+      accounts: [],
+    });
+  });
+  it('reads the accounts a shared WAHA may be used through, and rejects malformed names', async () => {
+    disk.privateFiles.set(
+      '/private/waha.env',
+      'WAHA_URL=https://waha.example\nWAHA_API_KEY=k\nWAHA_ACCOUNTS=mine, ops,mine',
+    );
+    const cfg = await loadConfig(complete({ WAHA_CONFIG_FILE: '/private/waha.env' }));
+    expect(cfg.getConfig().whatsapp.accounts).toEqual(['mine', 'ops']);
+    const bad = await loadConfig(
+      complete({ WAHA_URL: 'https://waha.example', WAHA_API_KEY: 'k', WAHA_ACCOUNTS: 'a/b' }),
+    );
+    expect(() => bad.getConfig()).toThrow(/WAHA_ACCOUNTS/);
   });
   it('rejects unsafe URL schemes and embedded credentials', async () => {
     for (const url of ['file:///private', 'http://user:secret@localhost', 'http://localhost?apiKey=secret']) {

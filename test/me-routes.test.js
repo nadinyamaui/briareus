@@ -55,6 +55,13 @@ it('connects a GitHub token after GitHub names its account, and never shows it b
   expect((await put({ token: 'bad' })).status).toBe(400);
   expect((await put({ token: '' })).status).toBe(400);
   const saved = await put({ token: 'good' });
+  expect(request).toHaveBeenLastCalledWith(
+    'https://api.github.com/user',
+    expect.objectContaining({
+      method: 'GET',
+      headers: expect.objectContaining({ Authorization: 'Bearer good' }),
+    }),
+  );
   expect(await saved.json()).toEqual({ connected: true, login: 'ana-gh' });
   expect(stored.get('2:github')).toEqual({ token: 'good', login: 'ana-gh', id: 42 });
   expect(JSON.stringify(await (await fetch(base)).json())).not.toContain('good');
