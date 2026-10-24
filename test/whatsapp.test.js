@@ -46,7 +46,7 @@ async function mediaService(fileHandler, timeoutMs = 150) {
   return createWhatsAppService({ config: () => ({ url, apiKey: KEY }), timeoutMs });
 }
 
-async function setup({ initialAccount = null } = {}) {
+async function setup({ initialAccount = null, accounts = undefined } = {}) {
   const calls = [];
   let current = initialAccount;
   let failure = 0;
@@ -116,7 +116,7 @@ async function setup({ initialAccount = null } = {}) {
   });
   const wahaUrl = await serve(upstream);
   mediaUrl = `${wahaUrl}/api/files/default/attachment.ogg`;
-  const service = createWhatsAppService({ config: () => ({ url: wahaUrl, apiKey: KEY }) });
+  const service = createWhatsAppService({ config: () => ({ url: wahaUrl, apiKey: KEY, accounts }) });
   let devices = [];
   const auth = createMobileAuth({
     load: async () => structuredClone(devices),
@@ -136,9 +136,12 @@ async function setup({ initialAccount = null } = {}) {
   ).token;
   let stored = {};
   const owners = createWhatsAppOwners({
-    load: async () => stored,
-    save: async (_key, value) => {
+    load: async () => structuredClone(stored),
+    update: async (_key, _fallback, fn) => {
+      const value = structuredClone(stored);
+      const result = await fn(value);
       stored = value;
+      return { value, result };
     },
     legacyOwner: () => 1,
     lookupAccount: service.account,
@@ -383,6 +386,18 @@ describe('the WhatsApp core inbox', () => {
       404,
     );
     expect(ctx.owners.ownerOf('business')).toBe(1);
+  });
+
+  it('rejects starting an excluded account without granting ownership or contacting WAHA', async () => {
+    const ctx = await setup({
+      initialAccount: { name: 'business', status: 'WORKING' },
+      accounts: ['default'],
+    });
+    const response = await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'WhatsApp account, chat or message not found' });
+    expect(ctx.owners.ownerOf('business')).toBeNull();
+    expect(ctx.calls).toEqual([]);
   });
 
   it('rejects malformed IDs, pagination and messages before touching WAHA', async () => {
