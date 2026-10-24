@@ -172,6 +172,44 @@ describe('the Slack workspaces', () => {
     },
   );
 
+  it('preserves active project claims when legacy ownership is retried', async () => {
+    const { stored, w } = await service();
+    delete stored.slack_workspaces[0].ownerId;
+    stored.slack_workspaces[0].projects.push({ ...w.projects[0], repo: 'o/b' });
+    stored.slack_workspaces.push({ ...stored.slack_workspaces[0], id: 2, ownerId: 3 });
+    let recovered = false;
+    const deps = {
+      load: async (key, fallback) => structuredClone(stored[key] ?? fallback),
+      save: async (key, rows) => {
+        if (!recovered) throw new Error('save failed');
+        stored[key] = structuredClone(rows);
+      },
+      api: fakeSlack().api,
+      legacyOwner: () => 1,
+      log: () => {},
+    };
+    const s = createSlackService(deps);
+    await s.init();
+    expect(s.list(undefined, 1)).toEqual([]);
+    recovered = true;
+    const active = await s.create(
+      { token: TOKEN, label: 'Reconnected', projects: [{ repo: 'o/a', permissionMode: 'allow' }] },
+      1,
+    );
+    expect(s.briefing(job())).toMatchObject({ permissionMode: 'allow' });
+
+    await s.migrateLegacyOwnership();
+    expect(s.list('o/a', 1)).toEqual([active]);
+    expect(s.briefing(job())).toMatchObject({ permissionMode: 'allow' });
+    expect(s.list('o/b', 1)).toMatchObject([{ id: w.id, ownerId: 1 }]);
+    expect(s.list('o/a', 3)).toMatchObject([{ id: 2, ownerId: 3 }]);
+    expect(stored.slack_workspaces[0].projects.map((p) => p.repo)).toEqual(['o/b']);
+    const restarted = createSlackService(deps);
+    await restarted.init();
+    expect(restarted.list('o/a', 1)).toEqual([active]);
+    expect(restarted.briefing(job())).toMatchObject({ permissionMode: 'allow' });
+  });
+
   it('checks the token with Slack, stores it and the secret sealed, and never hands them back', async () => {
     const { w, stored } = await service();
     expect(w).toEqual({
@@ -1820,6 +1858,7 @@ describe('the wire', () => {
     { role: 'member', repos: ['o/a', 'o/private'], shared: [], visible: false },
     { role: 'member', repos: ['o/private'], shared: ['o/a'], visible: false },
     { role: 'member', repos: ['o/a', 'o/private'], shared: ['o/a'], visible: true },
+    { role: 'member', repos: ['o/a'], shared: ['o/a', 'o/private'], visible: true },
     { role: 'admin', repos: [], shared: [], visible: true },
   ])(
     'validates Slack projects within the caller’s API scope (%j)',
@@ -1860,6 +1899,16 @@ describe('the wire', () => {
           ['PUT', '/9999'],
           ['PUT', `/${w.id}`],
         ]) {
+          for (const repo of [['o/private'], ['o/a'], { name: 'o/private' }, 123, null]) {
+            const response = await fetch(`${base}${suffix}`, {
+              method,
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ token: TOKEN, projects: [{ repo }] }),
+            });
+            expect(response.status).toBe(400);
+            expect(await response.json()).toEqual({ error: 'Choose projects as owner/name' });
+          }
+          expect(s.list()).toEqual([w]);
           for (const repo of ['o/absent', 'o/private', 'o/a']) {
             const response = await fetch(`${base}${suffix}`, {
               method,
