@@ -285,15 +285,12 @@ const githubOf = (userId) => {
 };
 setOwnerGithub((job) => githubOf(job.ownerId));
 // Whose personal inboxes (mail, lib/mail-agent.js) a session reaches: its owner while they
-// are enabled, or for a session nobody owns, one from before users, the first admin, who was
-// its operator.
+// are enabled, or for a session nobody owns, one from before users, the earliest user,
+// its original operator regardless of their current role.
 const inboxOwner = (job) => {
   try {
-    if (job.ownerId != null) {
-      const owner = users.get(job.ownerId);
-      return owner && owner.disabledAt == null ? owner.id : null;
-    }
-    return users.list().find((u) => u.role === 'admin' && u.disabledAt == null)?.id ?? null;
+    const owner = job.ownerId != null ? users.get(job.ownerId) : users.list()[0];
+    return owner && owner.disabledAt == null ? owner.id : null;
   } catch {
     return null;
   }

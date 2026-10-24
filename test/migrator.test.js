@@ -125,9 +125,12 @@ describe('migrator', () => {
   });
 });
 
-describe('turn usage owner migration retries', () => {
+describe.each([
+  '2026_10_22_140000_add_user_id_to_turn_usage',
+  '2026_10_22_160000_add_user_id_to_mail_accounts',
+])('%s owner migration retries', (name) => {
   it('backfills for the demoted operator after ALTER committed but lookup failed', async () => {
-    const { up } = await import('../migrations/2026_10_22_140000_add_user_id_to_turn_usage.js');
+    const { up } = await import(`../migrations/${name}.js`);
     let column = false;
     let failed = false;
     let alters = 0;

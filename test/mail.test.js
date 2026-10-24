@@ -399,6 +399,19 @@ describe('Outlook expired continuations', () => {
 });
 
 describe('mailboxes belong to users', () => {
+  it('limits pending sign-ins per user without evicting another user’s sign-in', async () => {
+    const ana = service.forUser(2);
+    const bob = service.forUser(3);
+    const mine = ana.connectStart({ provider: 'gmail' });
+    const oldest = bob.connectStart({ provider: 'gmail' });
+    let newest;
+    for (let i = 0; i < 20; i++) newest = bob.connectStart({ provider: 'gmail' });
+    await expect(bob.connectFinish({ state: oldest.state, code: 'old' })).rejects.toThrow(/expired/);
+    expect(await ana.connectFinish({ state: mine.state, code: 'ana' })).toMatchObject({ userId: 2 });
+    mailbox.email = 'bob@gmail.com';
+    expect(await bob.connectFinish({ state: newest.state, code: 'bob' })).toMatchObject({ userId: 3 });
+  });
+
   // As lib/mail-routes.js and lib/mail-agent.js reach it: held to one user.
   async function connectAs(userId, email) {
     mailbox.email = email;

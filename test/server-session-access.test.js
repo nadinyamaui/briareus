@@ -17,6 +17,26 @@ const { createShares } = await import('../lib/shares.js');
 const source = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
 const wiring = source.slice(source.indexOf('const sessionMayUse ='), source.indexOf('// On every response,'));
 
+it('keeps legacy inbox access with the original operator through demotion and disable', () => {
+  const owners = [
+    { id: 1, role: 'admin', disabledAt: null },
+    { id: 2, role: 'admin', disabledAt: null },
+  ];
+  const users = { list: () => owners, get: (id) => owners.find((u) => u.id === id) };
+  const inboxWiring = source.slice(source.indexOf('const inboxOwner ='), source.indexOf('setInboxOwner('));
+  const inboxOwner = new Function('users', inboxWiring + 'return inboxOwner;')(users);
+  expect(inboxOwner({ ownerId: null })).toBe(1);
+  owners[0].role = 'member';
+  expect(inboxOwner({ ownerId: null })).toBe(1);
+  owners[0].disabledAt = 1;
+  expect(inboxOwner({ ownerId: null })).toBeNull();
+  expect(inboxOwner({ ownerId: 1 })).toBeNull();
+  expect(inboxOwner({ ownerId: 2 })).toBe(2);
+  expect(inboxOwner({ ownerId: 99 })).toBeNull();
+  owners.length = 0;
+  expect(inboxOwner({ ownerId: null })).toBeNull();
+});
+
 it('checks session project access against the shared project ID', async () => {
   const shares = createShares({
     load: async () => [{ kind: 'project', id: '3', userId: 2 }],
