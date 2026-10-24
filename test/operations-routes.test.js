@@ -149,3 +149,52 @@ it('shows a member only what waits on them', async () => {
     await close();
   }
 });
+
+it.each(['admin', 'member'])('keeps cross-project supervisor context for a %s', async (role) => {
+  const supervisor = {
+    id: 'supervisor',
+    repo: 'client/app',
+    ownerId: 2,
+    orchestrator: true,
+    status: 'idle',
+    awaitingAnswer: true,
+  };
+  const worker = {
+    id: 'worker',
+    repo: 'team/briareus',
+    ownerId: 2,
+    parentId: supervisor.id,
+    status: 'failed',
+    awaitingAnswer: true,
+    noticeUnheard: false,
+    reviewLoop: { failure: { reason: 'quota' }, stalled: true },
+    qaLoop: { failedScenarios: 1, verdictError: 'sheet 404' },
+  };
+  const { call, close } = await serve({ listSessions: () => [supervisor, worker] }, { id: 2, role }, [
+    'team/briareus',
+  ]);
+  try {
+    expect((await (await call('/api/operations/attention')).json()).items).toEqual([]);
+
+    const workerItems = [
+      'worker:question',
+      'worker:recovery',
+      'worker:review-failed',
+      'worker:review-stalled',
+      'worker:qa-failed',
+      'worker:qa-verdict',
+    ];
+    worker.noticeUnheard = true;
+    expect((await (await call('/api/operations/attention')).json()).items.map((item) => item.id)).toEqual(
+      workerItems,
+    );
+
+    worker.noticeUnheard = false;
+    supervisor.status = 'closed';
+    expect((await (await call('/api/operations/attention')).json()).items.map((item) => item.id)).toEqual(
+      workerItems,
+    );
+  } finally {
+    await close();
+  }
+});
