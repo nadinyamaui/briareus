@@ -19,6 +19,7 @@ vi.mock('../lib/claude-session.js', async (original) => ({
   transferClaudeSession: vi.fn(),
   askClaudeSideQuestion: vi.fn(),
 }));
+import { testSheetPrompt } from '../lib/prtasks.js';
 import { recordTurnUsage } from '../lib/usage.js';
 import { claimSlot, maintenanceState, setDraining } from '../lib/recovery.js';
 vi.mock('../lib/codex-session.js', async (original) => ({
@@ -209,7 +210,13 @@ vi.mock('../lib/findings.js', () => {
       findings: await latestReviewFindings(...args),
       clean: false,
     })),
-    latestTestFailures: vi.fn(async () => []),
+    latestTestVerdict: vi.fn(async () => ({
+      failures: [],
+      total: 1,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    })),
     queueFindingsForFix: vi.fn(async (repo, prNumber, findings) => ({
       kept: findings,
       parked: [],
@@ -263,7 +270,7 @@ import {
 import {
   latestReviewFindings,
   latestReviewDeclaration,
-  latestTestFailures,
+  latestTestVerdict,
   sortFindingsForFix,
   recordTriage,
   postTriageNotes,
@@ -6901,6 +6908,12 @@ describe('the review loop: what a closing loop review reports back', () => {
       },
       reviewRow('rev-12', 'par-12', true),
       {
+        ...parentRow('qa-retry-par', 'qa-retry-rev', { done: true, reviewing: false, reviewSessionId: null }),
+        parentId: 'loop-orch',
+        qaLoop: { done: true, incomplete: true, failedScenarios: 0 },
+      },
+      reviewRow('qa-retry-rev', 'qa-retry-par', true),
+      {
         ...parentRow('par-13', 'rev-13', { rounds: 2, lastFindings: 'k1' }),
         parentId: 'loop-orch',
         title: 'Fix the filter',
@@ -6944,6 +6957,8 @@ describe('the review loop: what a closing loop review reports back', () => {
       'auto-fail',
       'auto-fail-rev',
       'loop-orch',
+      'qa-retry-par',
+      'qa-retry-rev',
       'par-12',
       'rev-12',
       'par-13',
@@ -7698,6 +7713,25 @@ describe('the review loop: what a closing loop review reports back', () => {
     expect(notice.text).toMatch(/^Worker par-12 \(Add the export\): the review loop converged on PR #77/);
     expect(notice.text).toMatch(/declared no findings/);
     expect(notice.text).toMatch(/ready to merge/);
+  });
+
+  it('keeps completed incomplete QA authoritative after a review retry converges', async () => {
+    const parent = getJob('qa-retry-par');
+    const qa = parent.qaLoop;
+    parent.awaitingAnswer = true; // Retry opens the gate; the review starts after the answer.
+    await retryLoopRound(parent.id);
+    expect(parent.reviewLoop.done).toBe(false);
+    expect(parent.qaLoop).toBe(qa);
+    parent.awaitingAnswer = false;
+    Object.assign(parent.reviewLoop, { reviewing: true, reviewSessionId: 'qa-retry-rev' });
+    await closeDevSession('qa-retry-rev');
+    await waitFor(() => parent.reviewLoop.done);
+    const notice = getJob('loop-orch').pendingWorkerNotices.find((n) => n.workerId === parent.id);
+    expect(notice.text).toContain('QA coverage is incomplete');
+    expect(notice.text).not.toContain('ready to merge');
+    expect(parent.qaLoop).toBe(qa);
+    expect(qa).toMatchObject({ done: true, incomplete: true, failedScenarios: 0 });
+    expect(qa.running).toBeFalsy();
   });
 
   it('a worker’s round is held for the user too, and its orchestrator is told to wait', async () => {
@@ -8893,6 +8927,8 @@ describe('the QA loop: reporting a finished QA run', () => {
       qaRow('qa-run-7', 'qa-par-7', false),
       { ...parentRow('qa-par-8', 'qa-run-8'), parentId: 'qa-orch' },
       qaRow('qa-run-8', 'qa-par-8', false),
+      { ...parentRow('qa-par-9', 'qa-run-9'), parentId: 'qa-orch' },
+      qaRow('qa-run-9', 'qa-par-9', true),
     ];
     await initJobs();
     for (const id of [
@@ -8913,6 +8949,8 @@ describe('the QA loop: reporting a finished QA run', () => {
       'qa-run-7',
       'qa-par-8',
       'qa-run-8',
+      'qa-par-9',
+      'qa-run-9',
     ]) {
       getJob(id).status = 'idle';
     }
@@ -8921,17 +8959,29 @@ describe('the QA loop: reporting a finished QA run', () => {
   const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
 
   it('a clean sheet stops the loop: no QA action is required', async () => {
-    latestTestFailures.mockResolvedValueOnce([]);
+    latestTestVerdict.mockResolvedValueOnce({
+      failures: [],
+      total: 1,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
     await closeDevSession('qa-run-1');
     await new Promise((r) => setTimeout(r, 0));
     const parent = getJob('qa-par-1');
     expect(parent.qaLoop).toMatchObject({ running: false, done: true, failedScenarios: 0 });
     expect(infoTexts(parent).join('\n')).toMatch(/no QA actions are required/);
-    expect(latestTestFailures).toHaveBeenCalledWith('acme/qa-loop', 88);
+    expect(latestTestVerdict).toHaveBeenCalledWith('acme/qa-loop', 88);
   });
 
   it('failed scenarios are reported as feedback, and the loop stops there', async () => {
-    latestTestFailures.mockResolvedValueOnce([{ number: '2', scenario: 'Filters invoices' }]);
+    latestTestVerdict.mockResolvedValueOnce({
+      failures: [{ number: '2', scenario: 'Filters invoices' }],
+      total: 1,
+      passed: 0,
+      manual: 0,
+      incomplete: false,
+    });
     await closeDevSession('qa-run-2');
     await new Promise((r) => setTimeout(r, 0));
     const parent = getJob('qa-par-2');
@@ -8940,8 +8990,30 @@ describe('the QA loop: reporting a finished QA run', () => {
     expect(infoTexts(parent).join('\n')).toMatch(/stops here for now/);
   });
 
+  it('reports one pass plus nine manual scenarios as incomplete in events, summaries and wakes', async () => {
+    latestTestVerdict.mockResolvedValueOnce({
+      failures: [],
+      total: 10,
+      passed: 1,
+      manual: 9,
+      incomplete: true,
+    });
+    await closeDevSession('qa-run-9');
+    await new Promise((r) => setTimeout(r, 0));
+    const parent = getJob('qa-par-9');
+    expect(parent.qaLoop).toMatchObject({ done: true, incomplete: true, failedScenarios: 0 });
+    expect(workerSummary(parent).qaLoop).toMatchObject({ done: true, incomplete: true, failedScenarios: 0 });
+    expect(infoTexts(parent).join('\n')).toContain(
+      'incomplete (1/10 scenario(s) passed with evidence; 9 manual-only)',
+    );
+    const notice = getJob('qa-orch').pendingWorkerNotices.find((n) => n.workerId === parent.id);
+    expect(notice.text).toContain('QA has not passed');
+    expect(notice.text).not.toContain('ready to merge');
+    expect(removePullRequestLabel).toHaveBeenCalledWith(expect.anything(), parent.repo, 88, 'qa-test-passed');
+  });
+
   it('a QA run stopped before finishing stays retryable rather than reading as a verdict', async () => {
-    latestTestFailures.mockClear();
+    latestTestVerdict.mockClear();
     await closeDevSession('qa-run-3');
     await new Promise((r) => setTimeout(r, 0));
     const parent = getJob('qa-par-3');
@@ -8951,7 +9023,7 @@ describe('the QA loop: reporting a finished QA run', () => {
       reason: 'the QA session was stopped before it finished',
     });
     expect(infoTexts(parent).join('\n')).toMatch(/stopped before it finished/);
-    expect(latestTestFailures).not.toHaveBeenCalledWith('acme/qa-loop', 88);
+    expect(latestTestVerdict).not.toHaveBeenCalledWith('acme/qa-loop', 88);
   });
 
   it('does not overwrite a provider failure when the failed QA session is subsequently closed', async () => {
@@ -8979,7 +9051,7 @@ describe('the QA loop: reporting a finished QA run', () => {
   });
 
   it('a QA run staled by a later push closes without recording its verdict', async () => {
-    latestTestFailures.mockClear();
+    latestTestVerdict.mockClear();
     await closeDevSession('qa-run-4');
     await new Promise((r) => setTimeout(r, 0));
     const parent = getJob('qa-par-4');
@@ -8989,11 +9061,17 @@ describe('the QA loop: reporting a finished QA run', () => {
       staleSessionId: null,
       done: false,
     });
-    expect(latestTestFailures).not.toHaveBeenCalledWith('acme/qa-loop', 88);
+    expect(latestTestVerdict).not.toHaveBeenCalledWith('acme/qa-loop', 88);
   });
 
   it('a worker’s QA verdict reaches its orchestrator', async () => {
-    latestTestFailures.mockResolvedValueOnce([]);
+    latestTestVerdict.mockResolvedValueOnce({
+      failures: [],
+      total: 1,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
     await closeDevSession('qa-run-5');
     await new Promise((r) => setTimeout(r, 0));
     const notice = getJob('qa-orch').pendingWorkerNotices.find((n) => n.workerId === 'qa-par-5');
@@ -9004,20 +9082,168 @@ describe('the QA loop: reporting a finished QA run', () => {
 
   it('retries a rate-limited verdict at the primary reset without rerunning QA', async () => {
     vi.useFakeTimers();
-    latestTestFailures.mockClear();
+    latestTestVerdict.mockClear();
     const retryAt = Date.now() + 100;
-    latestTestFailures
+    latestTestVerdict
       .mockRejectedValueOnce(Object.assign(new Error('core exhausted'), { rateLimited: true, retryAt }))
-      .mockResolvedValueOnce([{ number: '2', scenario: 'Filters invoices' }]);
+      .mockResolvedValueOnce({
+        failures: [{ number: '2', scenario: 'Filters invoices' }],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: false,
+      });
     await closeDevSession('qa-run-6');
     const parent = getJob('qa-par-6');
     expect(parent.qaLoop).toMatchObject({ running: false, done: false });
     expect(parent.qaLoop.pendingVerdict).toMatchObject({ prNumber: 88 });
     await vi.advanceTimersByTimeAsync(100);
     expect(parent.qaLoop).toMatchObject({ running: false, done: true, failedScenarios: 1 });
-    expect(latestTestFailures.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(latestTestVerdict.mock.calls.length).toBeGreaterThanOrEqual(2);
     vi.useRealTimers();
   });
+
+  it.each(['new-push', 'released-pr', 'closed-parent'])(
+    'discards a pending verdict invalidated by %s before label writes or saving',
+    async (change) => {
+      vi.useFakeTimers();
+      const parent = {
+        ...parentRow('qa-race', 'qa-race-run'),
+        qaLoop: {
+          done: false,
+          pendingVerdict: { prNumber: 88, nextRetryAt: new Date(Date.now() + 20_000).toISOString() },
+        },
+      };
+      state.stored = [parent];
+      await initJobs();
+      parent.status = 'idle';
+      let finishRead;
+      latestTestVerdict.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishRead = resolve;
+          }),
+      );
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(finishRead).toBeTypeOf('function');
+      if (change === 'new-push') parent.qaLoop.pendingVerdict = null;
+      else if (change === 'closed-parent') await closeDevSession(parent.id);
+      else {
+        parent.startedOnPr = 99;
+        parent.prStatus.number = 99;
+      }
+      const writes = removePullRequestLabel.mock.calls.length;
+      const events = parent.events.length;
+      finishRead({ failures: [], total: 10, passed: 1, manual: 9, incomplete: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(removePullRequestLabel.mock.calls).toHaveLength(writes);
+      expect(parent.qaLoop.done).toBe(false);
+      if (change === 'closed-parent') expect(parent.events).toHaveLength(events);
+      parent.status = 'closed';
+      vi.useRealTimers();
+    },
+  );
+
+  it.each(['read', 'label-write'])('discards a replaced QA loop during the %s', async (stage) => {
+    vi.useFakeTimers();
+    const parent = {
+      ...parentRow('qa-replaced', 'qa-replaced-run'),
+      qaLoop: {
+        done: false,
+        pendingVerdict: { prNumber: 88, nextRetryAt: new Date(Date.now() + 20_000).toISOString() },
+      },
+    };
+    state.stored = [parent];
+    await initJobs();
+    parent.status = 'idle';
+    const oldLoop = parent.qaLoop;
+    const verdict = { failures: [], total: 10, passed: 1, manual: 9, incomplete: true };
+    let finish;
+    if (stage === 'read') {
+      latestTestVerdict.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+    } else {
+      latestTestVerdict.mockResolvedValueOnce(verdict);
+      removePullRequestLabel.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+    }
+    try {
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(finish).toBeTypeOf('function');
+      const writes = removePullRequestLabel.mock.calls.length;
+      const events = parent.events.length;
+      setQaLoop(parent.id, false);
+      // Also cover an off/on cycle without starting a replacement QA worker.
+      parent.qaLoop = { done: false };
+      const replacement = parent.qaLoop;
+      const afterDisarmEvents = parent.events.length;
+      finish(stage === 'read' ? verdict : undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(removePullRequestLabel.mock.calls).toHaveLength(writes);
+      expect(oldLoop.done).toBe(false);
+      expect(parent.qaLoop).toBe(replacement);
+      expect(parent.qaLoop).toEqual({ done: false });
+      expect(parent.events).toHaveLength(afterDisarmEvents);
+      expect(afterDisarmEvents).toBeGreaterThanOrEqual(events);
+    } finally {
+      parent.status = 'closed';
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])(
+    'retains a known verdict when label removal fails (incomplete: %s)',
+    async (incomplete) => {
+      vi.useFakeTimers();
+      const parent = {
+        ...parentRow('qa-label-failed', 'qa-label-failed-run'),
+        qaLoop: {
+          done: false,
+          pendingVerdict: {
+            prNumber: 88,
+            nextRetryAt: new Date(Date.now() + 20_000).toISOString(),
+            failingSince: new Date(Date.now() - 31 * 60_000).toISOString(),
+          },
+        },
+      };
+      state.stored = [parent];
+      await initJobs();
+      parent.status = 'idle';
+      latestTestVerdict.mockResolvedValueOnce({
+        failures: incomplete ? [] : [{ number: '2', scenario: 'API failed' }],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete,
+      });
+      removePullRequestLabel.mockRejectedValueOnce(new Error('403 label write denied'));
+      try {
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(parent.qaLoop).toMatchObject({
+          done: true,
+          failedScenarios: incomplete ? 0 : 1,
+          incomplete,
+          verdictError: null,
+          pendingVerdict: null,
+        });
+        const text = infoTexts(parent).join('\n');
+        expect(text).toContain('403 label write denied');
+        expect(text).toContain(incomplete ? 'QA has not passed' : '1 scenario(s) failed');
+        expect(text).not.toContain('verdict could not be read');
+      } finally {
+        parent.status = 'closed';
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('resumes a pending verdict from an idle restored session', async () => {
     vi.useFakeTimers();
@@ -9033,7 +9259,13 @@ describe('the QA loop: reporting a finished QA run', () => {
         },
       },
     ];
-    latestTestFailures.mockResolvedValueOnce([]);
+    latestTestVerdict.mockResolvedValueOnce({
+      failures: [],
+      total: 1,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
     await initJobs();
     const parent = getJob('qa-restart-1');
     parent.status = 'idle';
@@ -9047,7 +9279,7 @@ describe('the QA loop: reporting a finished QA run', () => {
   // there too, like the review loop's round.
   it('resumes a pending verdict from an interrupted (restarted) session, not just an idle one', async () => {
     vi.useFakeTimers();
-    latestTestFailures.mockClear();
+    latestTestVerdict.mockClear();
     state.stored = [
       {
         ...parentRow('qa-restart-2', 'qa-restart-run-2'),
@@ -9066,7 +9298,13 @@ describe('the QA loop: reporting a finished QA run', () => {
         },
       },
     ];
-    latestTestFailures.mockResolvedValueOnce([]);
+    latestTestVerdict.mockResolvedValueOnce({
+      failures: [],
+      total: 1,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
     await initJobs();
     const parent = getJob('qa-restart-2');
     // The real restart transition (restoreFromDb -> markInterrupted), not a hand-set status.
@@ -10323,7 +10561,7 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
 
   it('drops a QA run on the released pull request instead of reading its verdict off the new one', async () => {
     const job = getJob('stk-qa');
-    latestTestFailures.mockClear();
+    latestTestVerdict.mockClear();
     await onBranch(job, 'dev-b', async () => {
       refreshJobBranch(job);
     });
@@ -10336,7 +10574,7 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         /QA run finished for PR #1, which this session no longer tracks/,
       ),
     );
-    expect(latestTestFailures).not.toHaveBeenCalled();
+    expect(latestTestVerdict).not.toHaveBeenCalled();
     expect(job.qaLoop.done).toBe(false);
     expect(job.qaLoop.pendingVerdict).toBeFalsy();
     expect(infoTexts(job).join('\n')).not.toMatch(/no QA actions are required/);
@@ -10717,6 +10955,14 @@ describe('the CI verdict a worker hands its orchestrator', () => {
         awaitingAnswer: true,
       },
       worker('ci-green', 201),
+      worker('ci-qa-incomplete', 215, {
+        reviewLoop: { done: true },
+        qaLoop: { done: true, incomplete: true, failedScenarios: 0 },
+      }),
+      worker('ci-qa-failed', 216, {
+        reviewLoop: { done: true },
+        qaLoop: { done: true, incomplete: false, failedScenarios: 1 },
+      }),
       worker('ci-red', 202),
       worker('ci-loop', 203, { reviewLoop: { rounds: 2, done: false } }),
       // Converged on an empty block whose publishing policy withheld code-approved.
@@ -10916,6 +11162,16 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     expect(getJob('ci-green').prStatus.checks.runs[0].url).toBe(
       'https://github.com/acme/ci/runs/Fast checks',
     );
+  });
+
+  it.each([
+    ['ci-qa-incomplete', 215, 'QA coverage is incomplete'],
+    ['ci-qa-failed', 216, 'QA failed 1 scenario(s)'],
+  ])('green CI cannot certify %s as ready to merge', async (id, pr, reason) => {
+    syncSessionsOn('acme/ci', null, pr);
+    await vi.waitFor(() => expect(notices(id)).toContain(`PR #${pr}`));
+    expect(notices(id)).toContain(reason);
+    expect(notices(id)).not.toContain('ready to merge');
   });
 
   it('names the failing checks and says not to merge', async () => {
@@ -16409,6 +16665,39 @@ describe('automatic recovery after a server restart', () => {
       );
     child.emit('close', 0);
   };
+
+  it('carries the original worker curl brief into QA sheet generation and execution', async () => {
+    const taskBrief = 'Use curl and save bodies, headers and statuses; assert JSON response values.';
+    const parent = row({ id: 'curl-task-parent', status: 'closed', taskBrief });
+    state.stored = [parent];
+    await initJobs();
+    acquireInstance.mockRejectedValueOnce(new Error('fixture: allocation observed'));
+    const publicChild = createDevSession({
+      provider: 2,
+      repo: 'acme/restart',
+      branch: 'feature',
+      qa: true,
+      qaParentId: parent.id,
+    });
+    const created = getJob(publicChild.id);
+    expect(created.taskBrief).toBe(taskBrief);
+    expect(testSheetPrompt).toHaveBeenLastCalledWith(expect.objectContaining({ qaInstructions: taskBrief }));
+    await vi.waitFor(() => expect(created.status).toBe('failed'));
+    // Restore the child's persisted task context after its sheet turn completed.
+    const child = row({
+      qaBranch: 'feature',
+      taskBrief: created.taskBrief,
+      recoveryTurn: { prompt: 'SHEET', phase: 'initial', completed: true },
+    });
+    state.stored = [child];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    const { testRunPrompt } = await import('../lib/prtasks.js');
+    expect(testRunPrompt).toHaveBeenLastCalledWith(expect.objectContaining({ qaInstructions: taskBrief }));
+    finish(children[0]);
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+  });
 
   it('uses server GitHub identity for automatic triage after reopening a failed queued session', async () => {
     const gh = await vi.importActual('../lib/github.js');

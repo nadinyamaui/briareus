@@ -61,7 +61,7 @@ import {
   getFindings,
   latestReviewFindings,
   latestReviewDeclaration,
-  latestTestFailures,
+  latestTestVerdict,
   decideFinding,
   queueFindingsForFix,
   sortFindingsForFix,
@@ -285,7 +285,7 @@ describe('getFindings', () => {
   });
 });
 
-describe('latestTestFailures', () => {
+describe('latestTestVerdict', () => {
   const sheet = (rows) => ({
     id: 3,
     body: [
@@ -306,15 +306,477 @@ describe('latestTestFailures', () => {
         '| 3 | Manual only | — | — | 🖐 | |',
       ]),
     ];
-    const failures = await latestTestFailures(repo, 5);
+    const { failures } = await latestTestVerdict(repo, 5);
     expect(failures).toEqual([
       { number: '2', scenario: 'Bad password', expected: 'Error shown', evidence: 'typed wrong error' },
     ]);
   });
 
+  it('reproduces one browser pass plus nine manual API rows without inventing failures', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | Profile | Open profile | Permission | ✅ | [video](u) |',
+        ...Array.from({ length: 9 }, (_, i) => `| ${i + 2} | API | GET /api | 200 | 🖐 | |`),
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 10,
+      passed: 1,
+      manual: 9,
+      incomplete: true,
+    });
+  });
+
+  it.each([
+    '| 2 | API | curl /api | 200 | ⬜ |',
+    '2 | API | curl /api | 200 | ⬜',
+    '2 | API | curl /api | 200 | ✅ | response.json',
+    '| 2 | API | curl /api | 200 | ✅ |',
+    '| 2 | API | curl /api | 200 |',
+    '2 | API | curl /api | 200',
+    '| 2 | UI pending | Open /settings |',
+    '2 | UI pending | Open /settings',
+    '| 2 | UI pending |',
+    '2 | UI pending',
+  ])('counts shortened scenario rows: %s', async (row) => {
+    gh.comments = [sheet(['| 1 | API | curl /api | 200 | ✅ | response.json |', row])];
+    const verdict = await latestTestVerdict(repo, 5);
+    expect(verdict.total).toBe(2);
+    expect(verdict.passed).toBe(row.includes('response.json') ? 2 : 1);
+    expect(verdict.incomplete).toBe(!row.includes('response.json'));
+  });
+
+  it.each(['| 2 |', '2 |', '| **2** |'])('keeps scanning after number-only row %s', async (row) => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl /api | 200 | ✅ | response.json |',
+        row,
+        '| 3 | Failure | curl /api | 200 | ❌ | saw 500 |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '3', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+      total: 3,
+      passed: 1,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it('keeps failed scenarios after empty table spacer rows', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl /api | 200 | ✅ | response.json |',
+        '| | | | | | |',
+        '| 2 | Failure | curl /api | 200 | ❌ | saw 500 |',
+        '| | | | | | |',
+        '| 3 | UI | Open profile | Permission | ⬜ | |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '2', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+      total: 3,
+      passed: 1,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it('counts an unnumbered result row and retains a later failure', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        '| | UI | Open profile | Profile visible | ⬜ | |',
+        '| 3 | Failure | curl | 200 | ❌ | saw 500 |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '3', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+      total: 3,
+      passed: 1,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it.each(['', 'A', '**API**'])('retains results after scenario identifier %j', async (identifier) => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        `| ${identifier} | UI | Open | Shown | ⬜ | |`,
+        '| 3 | Bad | curl | 200 | ❌ | 500 |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '3', scenario: 'Bad', expected: '200', evidence: '500' }],
+      total: 3,
+      passed: 1,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it.each([
+    '✅ API; UI never tested',
+    '✅ API; UI not covered',
+    '✅ API; UI skipped on this host',
+    '✅ API; UI blocked waiting for credentials',
+    '✅ API; Firefox was never executed after setup',
+    '✅ API; browser skipped until credentials arrive',
+    '✅ API; **UI blocked** awaiting a test account',
+    '✅ Verified API blocked by authorization policy; expected 403 received; UI never tested',
+  ])('does not certify missing execution regardless of its explanation: %s', async (status) => {
+    gh.comments = [
+      sheet([`| 1 | Mixed API/UI | curl then browser | Both work | ${status} | response.json |`]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it.each([
+    ['✅ Verified API blocked by authorization policy; expected 403 received', true],
+    ['✅ Verified API blocked by authorization policy; expected 403 received; UI not run', false],
+  ])(
+    'preserves verified authorization results while checking remaining coverage: %s',
+    async (status, passed) => {
+      gh.comments = [
+        sheet([
+          `| 1 | Authorization | curl without permission | 403 blocked by policy | ${status} | response.json |`,
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        total: 1,
+        passed: passed ? 1 : 0,
+        incomplete: !passed,
+      });
+    },
+  );
+
+  it.each([
+    '| No. | Scenario | Steps | Expected | Status | Evidence |',
+    '| **No.** | Case | Request | Response | **Status** | _Evidence_ |',
+    '| # | Scenario | Request | Expected | Status | Evidence |',
+    '| **#** | Case | Request | Response | **Status** | _Evidence_ |',
+    '| `#` | Scenario | Steps | Expected | ~~Status~~ | **`Evidence`** |',
+  ])('recognizes custom and formatted results headers: %s', async (header) => {
+    const rows = [header, '|---|---|---|---|---|---|'];
+    gh.comments = [
+      sheet([
+        '| 1 | Browser | Open profile | Permission | ✅ | video |',
+        '',
+        ...rows,
+        '| 2 | Failure | curl /api | 200 | ❌ | saw 500 |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '2', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+      total: 2,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+    gh.comments = [
+      { body: [TEST_SHEET_ANCHOR, ...rows, '| 1 | API | curl | 200 | ✅ | response.json |'].join('\n') },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it.each(['', '\n', '\nSaved response summary\n'])(
+    'ignores a separate evidence table after scenarios: %j',
+    async (gap) => {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl /api | 200 | ✅ | response.json |',
+          ...(gap ? [gap] : []),
+          '| Status | Meaning |',
+          '|---|---|',
+          '| 200 | Expected OK |',
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    },
+  );
+
+  it('ignores numeric prose rows outside the scenario table', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl /api | 200 | ✅ | response.json |',
+        '',
+        'Saved responses:',
+        '| 200 | Expected OK |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it.each(['**2**', '2.', '_2_', '`2`', '~~2~~', '**2.**', '#2', '2a', '2.1', '**2.1**'])(
+    'preserves failed and subsequent scenarios after formatted number %s',
+    async (number) => {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl /api | 200 | ✅ | response.json |',
+          `| ${number} | Failure | curl /api | 200 | ❌ | saw 500 |`,
+          '| 3 | UI | Open profile | Permission | ⬜ | |',
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [
+          {
+            number: number.replace(/[^0-9]/g, ''),
+            scenario: 'Failure',
+            expected: '200',
+            evidence: 'saw 500',
+          },
+        ],
+        total: 3,
+        passed: 1,
+        manual: 0,
+        incomplete: true,
+      });
+    },
+  );
+
+  it('keeps escaped Markdown pipes inside their cells', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl /api | 200 | ✅ | Asserted `name=a\\|b` in [response](https://example.com/ok) |',
+        '| 2 | API | curl /api | name=a\\|b | ❌ | saw a\\|c |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '2', scenario: 'API', expected: 'name=a\\|b', evidence: 'saw a\\|c' }],
+      total: 2,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
+  it('accepts a fully executed API and UI sheet with evidence', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl /api | 200 with expected JSON | ✅ | [responses and assertions](u) |',
+        '| 2 | UI | Open profile | Permission | ✅ | [video](u) |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 2,
+      passed: 2,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
+  it.each([
+    ['🖐️', 'Intentionally excluded: requires a physical device', 1],
+    ['⬜', '', 0],
+    ['unknown', '', 0],
+    ['✅', '', 0],
+  ])('keeps %s incomplete even with an intentional exemption reason', async (status, evidence, manual) => {
+    gh.comments = [sheet([`| 1 | Procedure | Steps | Expected | ${status} | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 0,
+      manual,
+      incomplete: true,
+    });
+  });
+
+  it('accepts annotated passes but keeps mixed executed/unexecuted rows incomplete', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl /api | 200 | ✅ API curl | response.json |',
+        '| 2 | Mixed | API and UI | Both work | ✅ API curl; ⬜ profile UI | response.json |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 2,
+      passed: 1,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it.each([
+    '—',
+    '–',
+    '-',
+    '...',
+    '…',
+    'N/A',
+    'none',
+    'TBD',
+    'TODO',
+    '_N/A_',
+    '**TODO**',
+    '`N/A`',
+    '***—***',
+    '**`none`**',
+    '~~TBD~~',
+    '~~**N/A**~~',
+  ])('keeps placeholder evidence incomplete: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
+  it.each(['⚠️ UI blocked', '⏭️ UI skipped', 'UI blocked', 'UI skipped', '⬜ UI', '❓ UI unknown'])(
+    'keeps a partially executed row incomplete: %s',
+    async (procedure) => {
+      gh.comments = [
+        sheet([`| 1 | Mixed | API and UI | Both work | ✅ API; ${procedure} | response.json |`]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    },
+  );
+
+  it.each([
+    '✅ API<br>UI blocked',
+    '✅ API<br/>UI blocked',
+    '✅ API, UI skipped',
+    '✅ API / unknown UI',
+    '✅ API / UI pending',
+    '✅ API, UI not run',
+  ])('keeps explicit incomplete annotations incomplete: %s', async (status) => {
+    gh.comments = [sheet([`| 1 | Mixed | API and UI | Both work | ${status} | response.json |`])];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it.each([
+    '✅ request from blocked user was blocked',
+    '✅ user not verified is denied',
+    '✅ API blocked user returns 403',
+    '✅ UI pending payment is shown',
+    '✅ API: blocked user returns 403',
+    '✅ UI: pending payment is shown',
+    '✅ payment remains pending',
+    '✅ unknown route returns 404',
+    '✅ blocked user receives 403',
+    '✅ pending payment is displayed',
+    '✅ manual payment is displayed',
+    '✅ GET /api/unknown returns 404',
+    '✅ unknown route returns 404; ✅ blocked user receives 403',
+    '✅ API, ✅ UI',
+    '✅ API / ✅ UI',
+    '✅ API<br>✅ UI',
+    '✅ HTTP 200, response body verified',
+    '✅ returns 200; JSON matches',
+    '✅ Chromium, Firefox',
+    '✅ returns name, email and status',
+    '✅ blocked user receives 403; response verified',
+  ])('accepts evidenced passing scenario descriptions: %s', async (status) => {
+    gh.comments = [sheet([`| 1 | Procedure | Steps | Expected | ${status} | response.json |`])];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
+  it.each([
+    '✅ API; UI unavailable on this host',
+    '✅ API; UI not available',
+    '✅ API; UI could not run',
+    "✅ API; UI couldn't run",
+    '✅ API; **UI blocked**',
+    '✅ API; _UI unavailable_ on this host',
+    "✅ API; `UI couldn't run`",
+    '✅ API; UI not run on this host',
+    '✅ API; UI blocked by missing credentials',
+    '✅ API; UI blocked by unavailable credentials',
+    '✅ API; UI was skipped for this run',
+    '✅ API; browser not run',
+    '✅ API; UI could not be tested',
+    '✅ API; UI not yet tested',
+    '✅ API; UI pending execution',
+    '✅ API; UI not run — no browser',
+    '✅ API; UI not run while browser starts',
+    '✅ API; UI was not tested after setup failed',
+    '✅ API; browser could not be verified without credentials',
+    '✅ API; UI skipped for lack of access',
+    '✅ API; UI blocked by setup failure',
+    '✅ API; UI was skipped',
+    '✅ API; UI: skipped',
+    '✅ API; UI is pending',
+    '✅ API; UI: skipped (browser unavailable)',
+    '✅ API; UI unavailable',
+    '✅ API; Firefox not attempted',
+    '✅ API; UI was not tested: browser unavailable',
+    '✅ API; UI is blocked because credentials are unavailable',
+    '✅ API; UI blocked: browser unavailable',
+    '✅ API; UI pending (needs browser)',
+    '✅ API; UI skipped due to unavailable credentials',
+    '✅ API (UI blocked: browser unavailable)',
+    '✅ API/UI pending (needs browser)',
+    '✅ API<br>UI skipped due to unavailable credentials',
+    '✅ API; blocked UI: browser unavailable',
+    '✅ API; pending: needs browser',
+    '✅ API; skipped because credentials are unavailable',
+    '✅ API (UI not run)',
+    '✅ API/UI not run',
+    '✅ API and UI manual',
+    '✅ API 🟡 UI pending',
+    '✅ API, UI manual',
+    '✅ API / 🚧 UI',
+    '✅ API / UI not verified',
+    '✅ API<br>UI manual',
+    '✅ API; UI in progress',
+    '✅ API / ✅ 🚧 UI',
+    '✅ unknown route returns 404, UI manual',
+    '✅ blocked user receives 403 / UI not verified',
+    '✅ pending payment is displayed<br/>UI skipped',
+  ])('keeps unexecuted subprocedures incomplete: %s', async (status) => {
+    gh.comments = [sheet([`| 1 | Mixed | API and UI | Both work | ${status} | response.json |`])];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it.each(['_response.json_', '**asserted HTTP 200**', '`response.json`', '~~response.json~~'])(
+    'accepts formatted execution evidence: %s',
+    async (evidence) => {
+      gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ passed: 1, incomplete: false });
+    },
+  );
+
+  it('accepts multiple evidenced passing subprocedures', async () => {
+    gh.comments = [
+      sheet(['| 1 | Mixed | API and UI | Both work | ✅ API; ✅ UI | response.json and video |']),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it('does not fall back to an older passing sheet when the newest is empty', async () => {
+    gh.comments = [sheet(['| 1 | Old | Steps | Expected | ✅ | evidence |']), sheet([])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 0, incomplete: true });
+  });
+
   it('reads a row with stray pipes in its prose from both ends', async () => {
     gh.comments = [sheet(['| 4 | Piped | Run `a | b` then `c | d` | Output shown | ❌ | saw nothing |'])];
-    const [failure] = await latestTestFailures(repo, 5);
+    const {
+      failures: [failure],
+    } = await latestTestVerdict(repo, 5);
     expect(failure.number).toBe('4');
     expect(failure.expected).toBe('Output shown');
     expect(failure.evidence).toBe('saw nothing');
@@ -322,13 +784,13 @@ describe('latestTestFailures', () => {
 
   it('never reports the header row, even with a ❌ elsewhere in the table', async () => {
     gh.comments = [sheet(['| 1 | Fails | steps | Expected | ❌ | note |'])];
-    const failures = await latestTestFailures(repo, 5);
+    const { failures } = await latestTestVerdict(repo, 5);
     expect(failures.every((f) => /^\d+$/.test(f.number))).toBe(true);
   });
 
-  it('no sheet at all answers with an empty list', async () => {
+  it('no sheet at all is incomplete', async () => {
     gh.comments = [{ id: 1, body: 'no sheet here' }];
-    expect(await latestTestFailures(repo, 5)).toEqual([]);
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ failures: [], total: 0, incomplete: true });
   });
 });
 
