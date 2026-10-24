@@ -284,7 +284,7 @@ const githubOf = (userId) => {
   }
 };
 setOwnerGithub((job) => githubOf(job.ownerId));
-// Whose personal inboxes (mail, lib/mail-agent.js) a session reaches: its owner while they
+// Whose personal inboxes (mail, Slack) a session reaches: its owner while they
 // are enabled, or for a session nobody owns, one from before users, the earliest user,
 // its original operator regardless of their current role.
 const inboxOwner = (job) => {
@@ -323,8 +323,11 @@ const slackService = createSlackService({
   note: noteSession,
   unfit: webhookUnfit,
   eventsUrl: (id) => `${getConfig().publicBaseUrl}/webhooks/slack/${id}`,
+  inboxOwner,
+  // Persist legacy workspaces to the original operator, regardless of their current role.
+  legacyOwner: () => users.list()[0]?.id ?? null,
 });
-setSlackAccess((repo) => slackService.briefing(repo));
+setSlackAccess((job) => slackService.briefing(job));
 
 // Webhooks go ahead of the JSON body parser: GitHub and Slack sign the raw bytes with an HMAC,
 // and a re-serialized body verifies against nothing (lib/webhooks.js).
@@ -2254,6 +2257,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
 (async () => {
   try {
     await initDb();
+    await users.init().catch((e) => console.error('Could not load users:', e.message));
     await initTemplates();
     await initProjects();
     await initDbServers();
@@ -2263,7 +2267,6 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await envoyerService.init();
     await forgeAccounts.init();
     await mailService.init();
-    await users.init().catch((e) => console.error('Could not load users:', e.message));
     await shares.init().catch((e) => console.error('Could not load shares:', e.message));
     await credentials.init().catch((e) => console.error('Could not load user credentials:', e.message));
     await mobileAuth.init();
@@ -2309,7 +2312,10 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   // Shares and credentials follow the same cadence for changes from other server instances.
   setInterval(() => {
     mobileAuth.refresh().catch((e) => console.error('Could not reload device tokens:', e.message));
-    users.refresh().catch((e) => console.error('Could not reload users:', e.message));
+    users
+      .refresh()
+      .then(() => slackService.migrateLegacyOwnership())
+      .catch((e) => console.error('Could not reload users or Slack ownership:', e.message));
     shares.refresh().catch((e) => console.error('Could not reload shares:', e.message));
     credentials.refresh().catch((e) => console.error('Could not load user credentials:', e.message));
   }, 15000).unref();

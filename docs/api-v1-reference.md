@@ -1233,13 +1233,13 @@ Download a message attachment through the core. Needs `admin`.
 
 ### `GET /slack/workspaces`
 
-List the workspaces available to the operator’s Slack inbox. Needs `admin`.
+List the workspaces available to the operator’s Slack inbox. Needs `read`.
 
-**Returns** `{ workspaces: SlackWorkspace[] }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ workspaces: SlackWorkspace[] }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `GET /slack/workspaces/{id}/conversations`
 
-List channels, DMs and group DMs. Needs `admin`.
+List channels, DMs and group DMs. Needs `read`.
 
 **Query**
 
@@ -1249,17 +1249,17 @@ List channels, DMs and group DMs. Needs `admin`.
 | `limit`  | `integer` | Items to request, 1–200; 100 for directories and 15 for message history by default |
 | `types`  | `string`  | Comma-separated public_channel, private_channel, im and mpim; all four by default  |
 
-**Returns** `{ conversations: object[], nextCursor: string }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ conversations: object[], nextCursor: string }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `GET /slack/workspaces/{id}/conversations/{channel}`
 
-Read a conversation’s details. Needs `admin`.
+Read a conversation’s details. Needs `read`.
 
-**Returns** `{ conversation: object }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ conversation: object }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `GET /slack/workspaces/{id}/people`
 
-Read the workspace’s directory to resolve message authors. Needs `admin`.
+Read the workspace’s directory to resolve message authors. Needs `read`.
 
 **Query**
 
@@ -1268,11 +1268,11 @@ Read the workspace’s directory to resolve message authors. Needs `admin`.
 | `cursor` | `string`  | The `nextCursor` of the previous page; omit for the first page                     |
 | `limit`  | `integer` | Items to request, 1–200; 100 for directories and 15 for message history by default |
 
-**Returns** `{ people: object[], nextCursor: string }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ people: object[], nextCursor: string }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `POST /slack/workspaces/{id}/direct-messages`
 
-Open a direct message with a Slack user. Needs `admin`.
+Open a direct message with a Slack user. Needs `manage`.
 
 **Body**
 
@@ -1280,11 +1280,11 @@ Open a direct message with a Slack user. Needs `admin`.
 | --------------------- | -------- | -------------------------------------------- |
 | `userId` **required** | `string` | A Slack user ID from the workspace directory |
 
-**Returns** 201 `{ conversation: object }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** 201 `{ conversation: object }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `GET /slack/workspaces/{id}/conversations/{channel}/messages`
 
-Read a page of conversation history. Needs `admin`.
+Read a page of conversation history. Needs `read`.
 
 **Query**
 
@@ -1295,11 +1295,11 @@ Read a page of conversation history. Needs `admin`.
 | `oldest` | `string`  | Only messages after this Slack timestamp, exclusive                                |
 | `latest` | `string`  | Only messages before this Slack timestamp, exclusive                               |
 
-**Returns** `{ messages: object[], nextCursor: string, hasMore: boolean }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ messages: object[], nextCursor: string, hasMore: boolean }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `GET /slack/workspaces/{id}/conversations/{channel}/threads/{ts}`
 
-Read a thread’s parent and replies. Needs `admin`.
+Read a thread’s parent and replies. Needs `read`.
 
 **Query**
 
@@ -1310,11 +1310,11 @@ Read a thread’s parent and replies. Needs `admin`.
 | `oldest` | `string`  | Only messages after this Slack timestamp, exclusive                                |
 | `latest` | `string`  | Only messages before this Slack timestamp, exclusive                               |
 
-**Returns** `{ messages: object[], nextCursor: string, hasMore: boolean }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ messages: object[], nextCursor: string, hasMore: boolean }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `POST /slack/workspaces/{id}/conversations/{channel}/messages`
 
-Send a message or thread reply as the operator. Needs `admin`.
+Send a message or thread reply as the operator. Needs `manage`.
 
 **Body**
 
@@ -1323,11 +1323,11 @@ Send a message or thread reply as the operator. Needs `admin`.
 | `text` **required** | `string` | The message in Slack mrkdwn, 1–8000 characters                                        |
 | `threadTs`          | `string` | The parent message’s Slack timestamp for a thread reply; omit for a top-level message |
 
-**Returns** 201 `{ channel: string, ts: string, message: object }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits. Human-authored messages send immediately, without an agent approval. If credentials change or the workspace is removed during a confirmed send, returns 201 with only { channel, ts, workspaceChanged: true }; refresh the workspace and do not resend. Do not automatically retry an ambiguous failed send.
+**Returns** 201 `{ channel: string, ts: string, message: object }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits. Human-authored messages send immediately, without an agent approval. If credentials change or the workspace is removed during a confirmed send, returns 201 with only { channel, ts, workspaceChanged: true }; refresh the workspace and do not resend. Do not automatically retry an ambiguous failed send.
 
 ### `POST /slack/workspaces/{id}/conversations/{channel}/read`
 
-Mark a conversation read through a message. Needs `admin`.
+Mark a conversation read through a message. Needs `manage`.
 
 **Body**
 
@@ -1335,23 +1335,23 @@ Mark a conversation read through a message. Needs `admin`.
 | ----------------- | -------- | ------------------------------------------------------------------------------ |
 | `ts` **required** | `string` | The latest viewed message’s Slack timestamp; debounce updates per conversation |
 
-**Returns** `{ ok: boolean }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ ok: boolean }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `GET /slack/workspaces/{id}/events`
 
-Follow new Slack messages, edits and deletions live. Needs `admin`.
+Follow new Slack messages, edits and deletions live. Needs `read`.
 
 **Returns** a server-sent event stream; see the guide’s Events section.
 
 ### `GET /slack/requests`
 
-List the Slack messages agents are waiting for approval to send. Needs `admin`.
+List the Slack messages agents are waiting for approval to send. Needs `manage`.
 
-**Returns** `{ requests: object[] }`. A request is `{ id, workspaceLabel, sendsAs, repo, jobId, sessionTitle, to: { kind, id, label }, text, threadTs, status, createdAt, expiresAt, unattended }`. One waits a day at most.
+**Returns** `{ requests: object[] }`. Only messages that would go out through your own workspaces: whoever connected a workspace rules on what is sent in their name. A request is `{ id, workspaceLabel, sendsAs, repo, jobId, sessionTitle, to: { kind, id, label }, text, threadTs, status, createdAt, expiresAt, unattended }`. One waits a day at most.
 
 ### `POST /slack/requests/{id}/decision`
 
-Approve or deny a Slack message; approving sends it. Needs `admin`.
+Approve or deny a Slack message; approving sends it. Needs `manage`.
 
 **Body**
 
@@ -2079,7 +2079,7 @@ Finish a loopback sign-in with the address the browser was sent to. Needs `admin
 
 ### `GET /settings/slack/workspaces`
 
-List every workspace, with the values a new one starts from. Needs `admin`.
+List your Slack workspaces, with the values a new one starts from. Needs `read`.
 
 **Query**
 
@@ -2091,7 +2091,7 @@ List every workspace, with the values a new one starts from. Needs `admin`.
 
 ### `POST /settings/slack/workspaces`
 
-Add a workspace. Needs `admin`.
+Add a workspace. Needs `manage`.
 
 **Body**: a [SlackWorkspace](#slackworkspace), whole or in part.
 
@@ -2099,7 +2099,7 @@ Add a workspace. Needs `admin`.
 
 ### `PUT /settings/slack/workspaces/{id}`
 
-Change a workspace. Needs `admin`.
+Change a workspace. Needs `manage`.
 
 **Body**: a [SlackWorkspace](#slackworkspace), whole or in part.
 
@@ -2107,7 +2107,7 @@ Change a workspace. Needs `admin`.
 
 ### `DELETE /settings/slack/workspaces/{id}`
 
-Remove a workspace. Needs `admin`.
+Remove a workspace. Needs `manage`.
 
 **Returns** `{ ok: boolean }`
 
