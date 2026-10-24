@@ -1422,6 +1422,7 @@ describe('loop children waiting for a database slot', () => {
 });
 
 describe('pullRequestHasOpenSession', () => {
+  const openIds = ['bs-number', 'bs-synced', 'bs-borrowed', 'bs-own-branch', 'bs-preparing'];
   // Own repo and PR numbers, so the rows restored here match nothing the other blocks sync.
   const row = (id, over) => ({
     id,
@@ -1442,8 +1443,12 @@ describe('pullRequestHasOpenSession', () => {
       row('bs-closed', { branch: 'feature/215', startedOnPr: 215 }),
     ];
     await initJobs();
-    for (const id of ['bs-number', 'bs-synced', 'bs-borrowed', 'bs-own-branch', 'bs-preparing'])
-      getJob(id).status = 'idle';
+    for (const id of openIds) getJob(id).status = 'idle';
+  });
+
+  // Retire fixtures so later poll ticks cannot discover their branches under another test's mocks.
+  afterAll(() => {
+    for (const id of openIds) getJob(id).status = 'closed';
   });
 
   it('finds an open session by the pull request it was started on or synced to', () => {
@@ -4266,6 +4271,10 @@ describe('webhook deliveries', () => {
     for (const id of IDLE) getJob(id).status = 'idle';
     getJob('hk-ask').awaitingAnswer = true;
     getJob('hk-stop').turnCanceled = true;
+  });
+
+  afterAll(() => {
+    for (const id of IDLE) getJob(id).status = 'closed';
   });
 
   // Queue-only provider by default; live delivery is exercised separately for Claude and Codex.
@@ -9468,6 +9477,15 @@ describe('attachPrForBranch', () => {
   it('keeps its short backoff when the GraphQL fallback also fails', async () => {
     vi.useFakeTimers();
     try {
+      state.stored = [];
+      const intervals = vi.spyOn(globalThis, 'setInterval');
+      let pollPrs;
+      try {
+        await initJobs();
+        pollPrs = intervals.mock.calls.find(([fn]) => fn.name === 'syncDevPrs')[0];
+      } finally {
+        intervals.mockRestore();
+      }
       githubRest.mockRejectedValue(
         Object.assign(new Error('GitHub core rate limit exhausted'), { rateLimited: true }),
       );
@@ -9482,6 +9500,8 @@ describe('attachPrForBranch', () => {
       expect(job.reviewLoop.discoveryRetries).toBe(1);
       expect(githubGraphql).toHaveBeenCalledTimes(1);
 
+      // A real poll tick used to discover PRs for idle fixtures left by prior blocks.
+      pollPrs();
       await vi.advanceTimersByTimeAsync(5_000);
       expect(githubGraphql).toHaveBeenCalledTimes(2);
     } finally {

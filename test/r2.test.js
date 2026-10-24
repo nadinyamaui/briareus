@@ -85,6 +85,23 @@ describe('syncVideos', () => {
     expect(sent).toHaveLength(4);
   });
 
+  it('reports a safe network cause code without logging its potentially sensitive message', async () => {
+    const file = 'acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm';
+    drop(file);
+    fetchMock.mockRejectedValueOnce(
+      new TypeError('fetch failed', {
+        cause: Object.assign(new Error('https://signed.invalid/?secret=private'), { code: 'ETIMEDOUT' }),
+      }),
+    );
+    expect((await syncVideos([RUN])).failed).toEqual([{ file, error: 'fetch failed (ETIMEDOUT)' }]);
+    fetchMock.mockRejectedValueOnce(
+      new TypeError('fetch failed', {
+        cause: { code: 'https://signed.invalid/?secret=private' },
+      }),
+    );
+    expect((await syncVideos([RUN])).failed).toEqual([{ file, error: 'fetch failed' }]);
+  });
+
   it('does nothing without a bucket configured', async () => {
     cfgState.r2 = null;
     drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm');
