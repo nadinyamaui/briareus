@@ -332,7 +332,10 @@ setSlackAccess((repo) => slackService.briefing(repo));
 // Webhooks go ahead of the JSON body parser: GitHub and Slack sign the raw bytes with an HMAC,
 // and a re-serialized body verifies against nothing (lib/webhooks.js).
 const mailService = createMailService({ onReceived: mailReceivedDurably, onDisabled: cancelMailWakes });
-setMailWakeAccess((id) => mailService.wakeAccountEnabled(id));
+setMailWakeAccess((id, job) => {
+  const owner = inboxOwner(job);
+  return owner != null && mailService.forUser(owner).wakeAccountEnabled(id);
+});
 app.use(mailPushRoutes({ service: mailService }));
 app.use('/webhooks/slack', slackEventsRouter({ service: slackService }));
 

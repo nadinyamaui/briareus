@@ -427,6 +427,9 @@ describe('mailboxes belong to users', () => {
     expect(mine.userId).toBe(2);
     const ana = service.forUser(2);
     expect((await ana.list()).map((a) => a.email)).toEqual(['ana@gmail.com']);
+    expect(ana.wakeAccountEnabled(mine.id)).toBe(true);
+    expect(ana.wakeAccountEnabled(theirs.id)).toBe(false);
+    expect(ana.wakeAccountEnabled(999)).toBe(false);
     await expect(ana.message(theirs.id, 'm1')).rejects.toMatchObject({ status: 404 });
     await expect(ana.sync(theirs.id)).rejects.toMatchObject({ status: 404 });
     await expect(ana.remove(theirs.id)).rejects.toMatchObject({ status: 404 });
@@ -436,6 +439,8 @@ describe('mailboxes belong to users', () => {
     expect(() => ana.connectStart({ provider: 'gmail', accountId: theirs.id })).toThrow(
       'Mail account not found',
     );
+    await ana.update(mine.id, { enabled: false });
+    expect(ana.wakeAccountEnabled(mine.id)).toBe(false);
   });
 
   it('keeps a mailbox with its user when another signs in to it, and their sign-in theirs', async () => {

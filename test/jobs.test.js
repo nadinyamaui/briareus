@@ -4891,6 +4891,68 @@ describe('webhook deliveries', () => {
       }
     });
 
+    it.each([
+      ['pendingMailWakes', 'reassigned'],
+      ['pendingDeliveries', 'reassigned'],
+      ['pendingMailWakes', 'disabled legacy owner'],
+      ['pendingDeliveries', 'disabled legacy owner'],
+    ])('rechecks ownership of %s after %s and persists cancellation', async (queue, change) => {
+      const { prompts } = fakeCli();
+      const job = getJob('hk-mail');
+      const originalOwnerId = job.ownerId;
+      const owner = { id: 1, disabledAt: null };
+      const users = { get: (id) => (id === 1 ? owner : { id, disabledAt: null }), list: () => [owner] };
+      const source = fs.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+      const inboxOwner = new Function(
+        'users',
+        source.slice(source.indexOf('const inboxOwner ='), source.indexOf('setInboxOwner(')) +
+          'return inboxOwner;',
+      )(users);
+      setInboxOwner(inboxOwner);
+      const mailService = {
+        wakeAccountEnabled: () => true,
+        forUser: (id) => ({ wakeAccountEnabled: (accountId) => accountId === 7 && id === 1 }),
+      };
+      new Function(
+        'inboxOwner',
+        'mailService',
+        'setMailWakeAccess',
+        source.slice(source.indexOf('setMailWakeAccess('), source.indexOf('app.use(mailPushRoutes(')),
+      )(inboxOwner, mailService, setMailWakeAccess);
+      try {
+        job.ownerId = change === 'reassigned' ? 1 : null;
+        const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }], maxTurns: 1 }).rules[0];
+        job.awaitingAnswer = true;
+        if (queue === 'pendingMailWakes') job.unattendedTurns = 1;
+        await mailReceivedDurably({ ...account, userId: 1 }, email('private-queued', rule.since));
+        expect(job[queue]).toHaveLength(1);
+        expect(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0][queue]).toHaveLength(1);
+        if (change === 'reassigned') job.ownerId = 2;
+        else owner.disabledAt = 1;
+        job.awaitingAnswer = false;
+        job.unattendedTurns = 0;
+        flushDeliveries(job);
+        await flushJobs();
+        expect(job.pendingMailWakes).toEqual([]);
+        expect(job.pendingDeliveries).toEqual([]);
+        expect(prompts).toHaveLength(0);
+        const saved = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
+        expect(saved).not.toHaveProperty('pendingMailWakes');
+        expect(saved).not.toHaveProperty('pendingDeliveries');
+        expect(() =>
+          deliverToSession(
+            job.id,
+            { text: 'private-direct' },
+            { via: 'mail', ruleId: rule.id, ruleSince: rule.since },
+          ),
+        ).toThrow(/no longer enabled/);
+      } finally {
+        if (prompts.length) await cli.finish(job);
+        job.ownerId = originalOwnerId;
+        setInboxOwner((session) => session.ownerId ?? null);
+      }
+    });
+
     it('holds matching email behind an unanswered question, keeps it with the webhook off and flushes when free', async () => {
       const { prompts } = fakeCli();
       const job = getJob('hk-mail');
