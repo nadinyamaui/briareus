@@ -85,6 +85,67 @@ describe('syncVideos', () => {
     expect(sent).toHaveLength(4);
   });
 
+  it('bounds queued owners from enqueue time and skips already published files', async () => {
+    const otherRun = 'other__app/pr-<pr-number>-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const otherFile = 'other__app/pr-34-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/login.webm';
+    const ownFile = 'acme__shop/pr-12-0123456789abcdef0123456789abcdef/login.webm';
+    drop(ownFile);
+    await syncVideos([RUN]);
+    drop(otherFile);
+    let release;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ ok: true });
+        }),
+    );
+    const first = syncVideos([otherRun]);
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    vi.useFakeTimers();
+    try {
+      const unchanged = syncVideos([RUN]);
+      const pendingRun = 'third__app/pr-<pr-number>-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      drop('third__app/pr-56-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/login.webm');
+      const pending = syncVideos([pendingRun]);
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(await unchanged).toEqual({ uploaded: [], failed: [], deferred: 0 });
+      expect(await pending).toEqual({ uploaded: [], failed: [], deferred: 1 });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      release();
+      await first;
+      // Drain the expired passes, which must not publish after their caller left.
+      expect((await syncVideos([RUN])).uploaded).toEqual([]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect((await syncVideos([pendingRun])).uploaded).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])('cancels publication while queued or uploading (active=%s)', async (active) => {
+    const ownFile = 'acme__shop/pr-12-0123456789abcdef0123456789abcdef/login.webm';
+    const otherRun = 'other__app/pr-<pr-number>-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    drop(ownFile);
+    drop('other__app/pr-34-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/login.webm');
+    let release;
+    fetchMock.mockImplementationOnce(
+      (_url, opts) =>
+        new Promise((resolve, reject) => {
+          release = () => resolve({ ok: true });
+          opts.signal.addEventListener('abort', () => reject(opts.signal.reason), { once: true });
+        }),
+    );
+    const controller = new AbortController();
+    const first = active ? syncVideos([RUN], controller.signal) : syncVideos([otherRun]);
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    const canceled = active ? first : syncVideos([RUN], controller.signal);
+    controller.abort();
+    expect(await canceled).toEqual({ uploaded: [], failed: [], deferred: 1 });
+    if (!active) release();
+    await first;
+    expect((await syncVideos([RUN])).uploaded).toEqual([ownFile]);
+  });
+
   it('reports a safe network cause code without logging its potentially sensitive message', async () => {
     const file = 'acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm';
     drop(file);

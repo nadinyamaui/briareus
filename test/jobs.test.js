@@ -4386,6 +4386,65 @@ describe('webhook deliveries', () => {
     }
   });
 
+  it.each(['failed', 'deferred', 'rejected'])(
+    'retains automatic QA retry ownership when publication is %s',
+    async (kind) => {
+      fakeCli();
+      const owner = getJob('hk-video-owner');
+      owner.status = 'idle';
+      owner.autoClose = true;
+      owner.qaParentId = 'hk-video-other';
+      owner.videoRuns = ['acme__hook/pr-<pr-number>-0123456789abcdef0123456789abcdef'];
+      const sync = vi.spyOn(r2, 'syncVideos');
+      if (kind === 'rejected') sync.mockRejectedValueOnce(new Error('offline'));
+      else
+        sync.mockResolvedValueOnce({
+          uploaded: [],
+          failed: kind === 'failed' ? [{ file: 'login.webm', error: 'offline' }] : [],
+          deferred: kind === 'deferred' ? 1 : 0,
+        });
+      try {
+        sendDevMessage(owner.id, 'Finish automatic QA');
+        await cli.finish(owner);
+        await vi.waitFor(() => expect(owner.status).toBe('closed'));
+        expect(getJob(owner.id)).toBe(owner);
+        await flushJobs();
+        const saved = saveJob.mock.calls.findLast(([row]) => row.id === owner.id)[0];
+        expect(saved.videoRuns).toEqual(owner.videoRuns);
+        expect(saved.videoPublicationPending).toBe(true);
+      } finally {
+        sync.mockRestore();
+        owner.autoClose = false;
+        delete owner.qaParentId;
+      }
+    },
+  );
+
+  it('Stop cancels an upload wait without losing retry ownership', async () => {
+    fakeCli();
+    const owner = getJob('hk-video-owner');
+    owner.status = 'idle';
+    const sync = vi.spyOn(r2, 'syncVideos').mockImplementationOnce(
+      (_runs, signal) =>
+        new Promise((resolve) => {
+          signal.addEventListener('abort', () => resolve({ uploaded: [], failed: [], deferred: 1 }), {
+            once: true,
+          });
+        }),
+    );
+    try {
+      sendDevMessage(owner.id, 'Publish then stop');
+      const finishing = cli.finish(owner);
+      await vi.waitFor(() => expect(sync).toHaveBeenCalled());
+      cancelDevTurn(owner.id);
+      await finishing;
+      expect(owner.videoPublicationPending).toBe(true);
+    } finally {
+      sync.mockRestore();
+      owner.status = 'closed';
+    }
+  });
+
   it('is refused by a session nobody armed, and by one that does not exist', () => {
     expect(refused(() => deliverToSession('hk-off', { text: 'hi' }))).toMatchObject({
       status: 409,
@@ -5921,6 +5980,33 @@ describe('webhook deliveries', () => {
       await cli.finish(job);
       job.webhook = { ...job.webhook, instructions: false };
     });
+  });
+  it('checkpoints a completed provider turn during publication before shutdown', async () => {
+    fakeCli();
+    const owner = getJob('hk-video-owner');
+    owner.status = 'idle';
+    let release;
+    const sync = vi.spyOn(r2, 'syncVideos').mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    try {
+      sendDevMessage(owner.id, 'Complete before upload');
+      cli.children[0].emit('close', 0);
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      await stopAllJobProcesses();
+      await flushJobs();
+      const saved = saveJob.mock.calls.findLast(([row]) => row.id === owner.id)[0];
+      expect(saved.recoveryTurn).toMatchObject({ completed: true });
+      release({ uploaded: [], failed: [], deferred: 0 });
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      sync.mockRestore();
+      setDraining(false);
+      owner.status = 'closed';
+    }
   });
 });
 
