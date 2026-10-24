@@ -5993,13 +5993,35 @@ describe('webhook deliveries', () => {
         }),
     );
     try {
+      const cost = owner.costUsd || 0;
+      const duration = owner.durationMs || 0;
+      recordTurnUsage.mockClear();
       sendDevMessage(owner.id, 'Complete before upload');
+      cli.children[0].stdout.write(
+        JSON.stringify({ type: 'text', timestamp: 1000, part: { text: 'Done' } }) +
+          '\n' +
+          JSON.stringify({
+            type: 'step_finish',
+            timestamp: 2000,
+            part: { cost: 0.25, tokens: { input: 100, output: 20 } },
+          }) +
+          '\n',
+      );
       cli.children[0].emit('close', 0);
       await vi.waitFor(() => expect(release).toBeTypeOf('function'));
       await stopAllJobProcesses();
       await flushJobs();
       const saved = saveJob.mock.calls.findLast(([row]) => row.id === owner.id)[0];
       expect(saved.recoveryTurn).toMatchObject({ completed: true });
+      expect(saved.costUsd).toBeCloseTo(cost + 0.25);
+      expect(saved.durationMs).toBe(duration + 1000);
+      expect(recordTurnUsage).toHaveBeenCalledOnce();
+      expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+        costUsd: 0.25,
+        durationMs: 1000,
+        inputTokens: 100,
+        outputTokens: 20,
+      });
       release({ uploaded: [], failed: [], deferred: 0 });
       await new Promise((resolve) => setImmediate(resolve));
     } finally {
@@ -13986,6 +14008,36 @@ describe('Codex turn usage', () => {
       expect(job.pendingCodexUsage).toBeUndefined();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('records Codex usage before publication and excludes upload time from duration', async () => {
+    const job = getJob('codex-usage');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1800000000000);
+    let release;
+    const sync = vi.spyOn(r2, 'syncVideos').mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    try {
+      sendDevMessage(job.id, 'One second of work');
+      clock.mockReturnValue(1800000001000);
+      children.at(-1).complete({ input_tokens: 500100, cached_input_tokens: 450050, output_tokens: 20010 });
+      children.at(-1).emit('close', 0);
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      expect(recordTurnUsage).toHaveBeenCalledOnce();
+      expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({ durationMs: 1000, inputTokens: 100 });
+      clock.mockReturnValue(1800000121000);
+      release({ uploaded: [], failed: [], deferred: 0 });
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      expect(recordTurnUsage).toHaveBeenCalledOnce();
+      expect(recordTurnUsage.mock.lastCall[1].durationMs).toBe(1000);
+    } finally {
+      release?.({ uploaded: [], failed: [], deferred: 0 });
+      clock.mockRestore();
+      sync.mockRestore();
     }
   });
 

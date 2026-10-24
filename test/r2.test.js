@@ -140,10 +140,56 @@ describe('syncVideos', () => {
     await vi.waitFor(() => expect(release).toBeTypeOf('function'));
     const canceled = active ? first : syncVideos([RUN], controller.signal);
     controller.abort();
-    expect(await canceled).toEqual({ uploaded: [], failed: [], deferred: 1 });
+    expect(await canceled).toEqual(
+      active
+        ? { uploaded: [], failed: [{ file: ownFile, error: 'This operation was aborted' }], deferred: 0 }
+        : { uploaded: [], failed: [], deferred: 1 },
+    );
     if (!active) release();
     await first;
     expect((await syncVideos([RUN])).uploaded).toEqual([ownFile]);
+  });
+
+  it.each(['deadline', 'cancel'])('preserves active results after %s', async (reason) => {
+    const files = ['1-success', '2-denied', '3-timeout', '4-stalled', '5-deferred'].map(
+      (name) => `acme__shop/pr-12-0123456789abcdef0123456789abcdef/${name}.webm`,
+    );
+    for (const file of files) drop(file);
+    let uploading = false;
+    fetchMock
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: false, status: 403, text: async () => 'AccessDenied' })
+      .mockRejectedValueOnce(new TypeError('fetch failed', { cause: { code: 'ETIMEDOUT' } }))
+      .mockImplementationOnce(
+        (_url, opts) =>
+          new Promise((_resolve, reject) => {
+            uploading = true;
+            opts.signal.addEventListener('abort', () => reject(opts.signal.reason), { once: true });
+          }),
+      );
+    const controller = new AbortController();
+    vi.useFakeTimers();
+    try {
+      const result = syncVideos([RUN], controller.signal);
+      await vi.waitFor(() => expect(uploading).toBe(true));
+      if (reason === 'deadline') await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      else controller.abort();
+      expect(await result).toEqual({
+        uploaded: [files[0]],
+        failed: [
+          { file: files[1], error: `PUT ${files[1]}: 403 AccessDenied` },
+          { file: files[2], error: 'fetch failed (ETIMEDOUT)' },
+          { file: files[3], error: 'This operation was aborted' },
+        ],
+        deferred: 1,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      const retry = await syncVideos([RUN]);
+      expect(retry.uploaded).toEqual(expect.arrayContaining(files.slice(1)));
+      expect(retry.uploaded).toHaveLength(4);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reports a safe network cause code without logging its potentially sensitive message', async () => {
