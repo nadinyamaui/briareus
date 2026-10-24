@@ -85,6 +85,35 @@ describe('syncVideos', () => {
     expect(sent).toHaveLength(4);
   });
 
+  it.each([false, true])('skips the queue for published owners (signal=%s)', async (withSignal) => {
+    const ownFile = 'acme__shop/pr-12-0123456789abcdef0123456789abcdef/login.webm';
+    const otherRun = 'other__app/pr-<pr-number>-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    drop(ownFile);
+    await syncVideos([RUN]);
+    drop('other__app/pr-34-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/login.webm');
+    let release;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ ok: true });
+        }),
+    );
+    const other = syncVideos([otherRun]);
+    try {
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      const signal = withSignal ? new AbortController().signal : undefined;
+      expect(await Promise.race([syncVideos([RUN], signal), Promise.resolve('queued')])).toEqual({
+        uploaded: [],
+        failed: [],
+        deferred: 0,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      release();
+      await other;
+    }
+  });
+
   it('bounds queued owners from enqueue time and skips already published files', async () => {
     const otherRun = 'other__app/pr-<pr-number>-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     const otherFile = 'other__app/pr-34-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/login.webm';
