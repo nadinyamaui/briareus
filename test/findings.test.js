@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TEST_SHEET_ANCHOR, FIXES_ANCHOR } from '../lib/markers.js';
 
 // The GitHub mock, per test: the PR's issue comments and a log of every write back. `fail`
@@ -827,29 +827,6 @@ describe('deleteFindingFromReview', () => {
     expect(gh.writes.map((w) => w.method)).toEqual(['DELETE', 'PATCH']);
   });
 
-  it.each(['reviewer-bot', null])(
-    'deletes the personal review author’s follow-up when the server login is %s',
-    async (viewer) => {
-      gh.viewer = viewer;
-      gh.comments = [findingsComment(entries, 7)];
-      gh.reviewComments = [
-        inline({ created_at: '2026-09-01T10:00:00Z' }),
-        inline({ id: 102, in_reply_to_id: 101, user: { login: 'pr-author' } }),
-        inline({ id: 103, in_reply_to_id: 101, user: { login: 'reviewer-bot' } }),
-        inline({ id: 104, in_reply_to_id: 101, user: { login: 'Ana' } }),
-      ];
-
-      const out = await deleteFindingFromReview(repo, 5, race, {
-        since: '2026-09-08T09:00:00Z',
-        authorLogin: 'ana',
-      });
-
-      expect(out).toEqual({ commentDeleted: true, undeclared: true, warning: null });
-      expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/104` });
-      expect(gh.writes.map((w) => w.method)).toEqual(['DELETE', 'PATCH']);
-    },
-  );
-
   // A lineless restated finding must not take the one new comment on its file,
   // which belongs to another finding.
   it("never takes another finding's comment for a lineless restated finding", async () => {
@@ -1115,29 +1092,6 @@ describe('replyOnFindingThread', () => {
     ]);
   });
 
-  it.each(['reviewer-bot', null])(
-    'replies on the personal review author’s thread when the server login is %s',
-    async (viewer) => {
-      gh.viewer = viewer;
-      gh.reviewComments = [
-        inline({ id: 90, created_at: '2026-09-01T10:00:00Z' }),
-        inline({ created_at: '2026-09-01T10:00:00Z' }),
-        inline({ id: 102, in_reply_to_id: 90, user: { login: 'pr-author' } }),
-        inline({ id: 103, in_reply_to_id: 90, user: { login: 'reviewer-bot' } }),
-        inline({ id: 104, in_reply_to_id: 101, user: { login: 'Ana' } }),
-      ];
-
-      await replyOnFindingThread(repo, 5, race, 'Noted', {
-        since: '2026-09-08T09:00:00Z',
-        authorLogin: 'ana',
-      });
-
-      expect(gh.writes).toEqual([
-        { method: 'POST', url: `/repos/${repo}/pulls/5/comments/101/replies`, body: { body: 'Noted' } },
-      ]);
-    },
-  );
-
   it('replies under its own new comment, not under a follow-up at the same line', async () => {
     gh.reviewComments = [
       inline({ id: 90, body: 'Old thread', created_at: '2026-09-01T10:00:00Z' }),
@@ -1199,4 +1153,119 @@ describe('replyOnFindingThread', () => {
       /answered 500 replying on the finding's thread/,
     );
   });
+});
+
+describe('review follow-ups posted by the session owner', () => {
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-08T11:05:00Z'));
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([
+    ['unrelated reply', { in_reply_to_id: 99, user: { login: 'someone-else' } }],
+    ['different file', { path: 'lib/unrelated.js' }],
+    ['different author', { user: { login: 'someone-else' } }],
+    ['before the review', { created_at: '2026-09-08T08:00:00Z' }],
+    ['after review capture', { created_at: '2026-09-08T12:00:00Z' }],
+    ['reply on a different file', { in_reply_to_id: 99, path: 'lib/unrelated.js' }],
+    ['reply before the review', { in_reply_to_id: 99, created_at: '2026-09-08T08:00:00Z' }],
+    ['reply after review capture', { in_reply_to_id: 99, created_at: '2026-09-08T12:00:00Z' }],
+    ['reply without the title', { in_reply_to_id: 99, body: 'Done.' }],
+  ])('does not bind a %s as the inline publication', async (_label, overrides) => {
+    const finding = { title: 'Race in the retry loop', file: 'lib/x.js', line: 12 };
+    gh.comments = [
+      {
+        ...findingsComment([finding]),
+        user: { login: 'server-account' },
+        created_at: '2026-09-08T11:00:00Z',
+      },
+    ];
+    gh.reviewComments = [
+      {
+        id: 101,
+        path: finding.file,
+        line: finding.line,
+        body: finding.title,
+        user: { login: 'owner-account' },
+        created_at: '2026-09-08T10:00:00Z',
+        ...overrides,
+      },
+    ];
+    const [published] = await latestReviewFindings(repo, 5, {
+      since: '2026-09-08T09:00:00Z',
+      authorLogin: 'owner-account',
+    });
+    expect(published.reviewAuthorLogin).toBe('server-account');
+    expect(published).not.toHaveProperty('reviewCommentId');
+  });
+
+  it('does not bind an unrelated reply that only shares the declared location', async () => {
+    const finding = { title: 'Race in the retry loop', file: 'lib/x.js', line: 12 };
+    gh.comments = [{ ...findingsComment([finding]), user: { login: 'ana' } }];
+    gh.reviewComments = [
+      {
+        id: 91,
+        in_reply_to_id: 90,
+        path: finding.file,
+        line: finding.line,
+        body: 'Done.',
+        user: { login: 'unrelated-user' },
+        created_at: '2026-09-08T10:00:00Z',
+      },
+    ];
+    const [published] = await latestReviewFindings(repo, 5, { since: '2026-09-08T09:00:00Z' });
+    expect(published.reviewAuthorLogin).toBe('ana');
+    expect(published).not.toHaveProperty('reviewCommentId');
+    await expect(
+      replyOnFindingThread(repo, 5, published, 'Noted', {
+        since: '2026-09-08T09:00:00Z',
+        authorLogin: published.reviewAuthorLogin,
+      }),
+    ).rejects.toThrow(/no comment/);
+    expect(gh.writes).toEqual([]);
+  });
+
+  it.each(['reply', 'delete'])(
+    'uses the review author for %s and ignores unrelated replies',
+    async (action) => {
+      const finding = { title: 'Race in the retry loop', file: 'lib/x.js', line: 12 };
+      const comment = {
+        path: finding.file,
+        line: finding.line,
+        body: finding.title,
+        created_at: '2026-09-08T10:00:00Z',
+      };
+      gh.reviewComments = [
+        { ...comment, id: 90, created_at: '2026-09-01T10:00:00Z' },
+        { ...comment, id: 91, in_reply_to_id: 90, user: { login: 'unrelated-user' } },
+        { ...comment, id: 92, in_reply_to_id: 90, user: { login: 'Ana' } },
+      ];
+      gh.comments = [{ ...findingsComment([finding]), user: { login: 'ana' } }];
+      const [published] = await latestReviewFindings(repo, 5);
+      expect(published.reviewAuthorLogin).toBe('ana');
+      gh.comments = [];
+      const options = {
+        since: '2026-09-08T09:00:00Z',
+        authorLogin: published.reviewAuthorLogin,
+      };
+      if (action === 'reply') {
+        await replyOnFindingThread(repo, 5, finding, 'Noted', options);
+        expect(gh.writes[0]).toMatchObject({
+          method: 'POST',
+          url: `/repos/${repo}/pulls/5/comments/90/replies`,
+        });
+      } else {
+        expect((await deleteFindingFromReview(repo, 5, finding, options)).commentDeleted).toBe(true);
+        expect(gh.writes[0]).toMatchObject({ method: 'DELETE', url: `/repos/${repo}/pulls/comments/92` });
+      }
+      gh.writes = [];
+      gh.reviewComments.pop();
+      if (action === 'reply') {
+        await expect(replyOnFindingThread(repo, 5, finding, 'Noted', options)).rejects.toThrow(/no comment/);
+      } else {
+        expect((await deleteFindingFromReview(repo, 5, finding, options)).commentDeleted).toBe(false);
+      }
+      expect(gh.writes).toEqual([]);
+    },
+  );
 });

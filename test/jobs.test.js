@@ -12,6 +12,7 @@ import { compactCodexThread } from '../lib/codex-session.js';
 import { askClaudeSideQuestion, transferClaudeSession } from '../lib/claude-session.js';
 import { forgetProviderUsage, providerUsage } from '../lib/balancer.js';
 import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
+import { createUsers } from '../lib/users.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
@@ -37,6 +38,9 @@ const state = vi.hoisted(() => ({
   catalog: '',
   projects: [],
   claimsServer: false,
+  eligibleServers: [],
+  dbWaiters: new Set(),
+  dbHolders: new Map(),
   capacity: 3,
   // What initJobs loads: the only way to register a session here without spawning one.
   stored: [],
@@ -123,7 +127,8 @@ vi.mock('../lib/db.js', () => ({
   jobEventMaxSeqs: vi.fn(async () => new Map()),
 }));
 
-vi.mock('../lib/github.js', () => ({
+vi.mock('../lib/github.js', async (importOriginal) => ({
+  asGithubUser: (await importOriginal()).asGithubUser,
   githubRest: vi.fn(),
   githubGraphql: vi.fn(),
   upsertPrComment: vi.fn(),
@@ -143,8 +148,12 @@ vi.mock('../lib/dbpool.js', () => ({
   sessionDatabaseName: vi.fn(() => 'app'),
   dropSessionDatabase: vi.fn(),
   instanceEnv: vi.fn(() => ({})),
+  assertInstanceAccess: vi.fn(),
   instanceAppPort: vi.fn(() => 8101),
   sessionCapacity: () => state.capacity,
+  eligibleDbServers: vi.fn(() => state.eligibleServers),
+  waitingForInstance: (id) => state.dbWaiters.has(id),
+  claimHolder: (id) => state.dbHolders.get(id) || null,
   projectClaimsServer: () => state.claimsServer,
 }));
 
@@ -242,7 +251,14 @@ vi.mock('../lib/usage.js', () => ({
 
 import { deleteJob, jobEventMaxSeqs, loadJobs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
-import { acquireInstance, reclaimInstance, releaseInstance, dropSessionDatabase } from '../lib/dbpool.js';
+import {
+  acquireInstance,
+  reclaimInstance,
+  releaseInstance,
+  dropSessionDatabase,
+  assertInstanceAccess,
+  instanceEnv,
+} from '../lib/dbpool.js';
 import {
   latestReviewFindings,
   latestReviewDeclaration,
@@ -260,6 +276,7 @@ import {
   removePullRequestLabel,
   githubGraphql,
   githubRest,
+  upsertPrComment,
   viewerLogin,
 } from '../lib/github.js';
 import { resolveRuntime, getProviderForJob, captureProviderAuth } from '../lib/providerstore.js';
@@ -288,6 +305,8 @@ import {
   createDevSession,
   agentGithubEnv,
   setOwnerGithub,
+  startDevServe,
+  setSessionProjectFilter,
   stepProvider,
   devSessionSlots,
   pullRequestHasOpenSession,
@@ -306,8 +325,8 @@ import {
   setDevSessionCompactInstructions,
   linkPrToSession,
   attachPrForBranch,
+  refreshJobBranch,
   spawnWorkerSession,
-  setWorkerProjectAccess,
   workerSessionsFor,
   workerSummary,
   deliverWorkerNotices,
@@ -365,6 +384,10 @@ beforeEach(() => {
   state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '' }];
   state.claimsServer = false;
   state.capacity = 3;
+  state.eligibleServers = [];
+  state.dbWaiters = new Set();
+  state.dbHolders = new Map();
+  setSessionProjectFilter(() => true);
   state.otherProviders = [];
   state.group = null;
 });
@@ -774,6 +797,99 @@ describe('devSessionSlots', () => {
   });
 });
 
+describe('database admission across owners', () => {
+  const ids = ['member-db-holder', 'member-db-waiter', 'other-db-start'];
+  beforeEach(async () => {
+    state.stored = ids.map((id) => ({
+      id,
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/shop',
+      providerId: 1,
+    }));
+    await initJobs();
+    state.claimsServer = true;
+    const holder = getJob(ids[0]);
+    Object.assign(holder, { status: 'idle', ownerId: 2, dbServerId: 1 });
+    Object.assign(getJob(ids[1]), { status: 'preparing', ownerId: 2 });
+    Object.assign(getJob(ids[2]), { ownerId: 3 });
+    // Include unrelated open records from other blocks in the global capacity.
+    state.capacity = 10000;
+    state.capacity -= devSessionSlots('acme/shop');
+  });
+  afterEach(() => {
+    for (const id of ids) getJob(id).status = 'closed';
+    acquireInstance.mockReset();
+    assertInstanceAccess.mockReset();
+  });
+
+  it.each(['idle', 'running'])('refuses a message to a %s session after DB access is revoked', (status) => {
+    const job = getJob(ids[0]);
+    job.status = status;
+    const events = [...job.events];
+    assertInstanceAccess.mockImplementationOnce(() => {
+      throw new Error('Database server is no longer shared');
+    });
+    expect(() => sendDevMessage(job.id, 'new work')).toThrow(/no longer shared/);
+    expect(job.events).toEqual(events);
+    expect(job.status).toBe(status);
+    expect(job.dbServerId).toBe(1);
+  });
+
+  it('refuses a preview on an open session after DB access is revoked', async () => {
+    const job = getJob(ids[0]);
+    job.workDir = '/unused/revoked-workspace';
+    assertInstanceAccess.mockImplementationOnce(() => {
+      throw new Error('Database server is no longer shared');
+    });
+    await expect(startDevServe(job.id)).rejects.toThrow(/no longer shared/);
+    expect(job.serveProc).toBeFalsy();
+    expect(job.dbServerId).toBe(1);
+  });
+
+  it('still counts the same owner’s pending sessions against admission', () => {
+    expect(() => createDevSession({ provider: 1, repo: 'acme/shop', prompt: 'another', ownerId: 2 })).toThrow(
+      /holding a database server/,
+    );
+  });
+
+  it('still counts another owner’s waiter once it has a claimed server', () => {
+    getJob(ids[1]).dbServerId = 2;
+    expect(() =>
+      createDevSession({ provider: 1, repo: 'acme/shop', prompt: 'Bob starts', ownerId: 3 }),
+    ).toThrow(/holding a database server/);
+  });
+
+  it.each(['new', 'reopen'])(
+    'another owner’s unallocated waiter cannot block a %s session',
+    async (action) => {
+      let rejectPreparation;
+      acquireInstance.mockImplementation(
+        () =>
+          new Promise((_, reject) => {
+            rejectPreparation = reject;
+          }),
+      );
+      let started;
+      try {
+        if (action === 'new') {
+          started = createDevSession({ provider: 1, repo: 'acme/shop', prompt: 'Bob starts', ownerId: 3 });
+        } else {
+          started = sendDevMessage(ids[2], 'Bob reopens');
+        }
+        await vi.waitFor(() => expect(rejectPreparation).toBeTypeOf('function'));
+        expect(getJob(started.id).status).toBe('preparing');
+      } finally {
+        if (started) {
+          getJob(started.id).status = 'closed';
+          rejectPreparation?.(new Error('closed'));
+          await closeDevSession(started.id);
+        }
+      }
+    },
+  );
+});
+
 describe('loop children waiting for a database slot', () => {
   const ids = ['slot-review-a', 'slot-review-b', 'slot-holder'];
   let blocked;
@@ -805,9 +921,12 @@ describe('loop children waiting for a database slot', () => {
     // Other blocks' open records share this module's registry and pool.
     state.capacity = 10000;
     state.capacity -= devSessionSlots('acme/slots');
-    acquireInstance.mockImplementation(
-      (job) => new Promise((resolve, reject) => blocked.push({ id: job.id, reject })),
-    );
+    acquireInstance.mockImplementation((job) => {
+      state.dbWaiters.add(job.id);
+      return new Promise((resolve, reject) => blocked.push({ id: job.id, reject })).finally(() =>
+        state.dbWaiters.delete(job.id),
+      );
+    });
   });
   afterEach(async () => {
     setDraining(false);
@@ -851,6 +970,226 @@ describe('loop children waiting for a database slot', () => {
         unrelated.forEach((job, index) => {
           job.status = statuses[index];
         });
+      }
+    },
+  );
+
+  it('refuses a loop when its owner’s only eligible server is held by its waiting parent', async () => {
+    const parent = getJob(ids[0]);
+    parent.ownerId = 2;
+    state.eligibleServers = [{ id: 1 }];
+    state.dbHolders.set(1, parent.id);
+    // Global capacity has a free server, but it is not shared with this owner.
+    state.capacity += 1;
+    await retryLoopRound(parent.id);
+    expect(parent.reviewLoop.reviewing).toBe(false);
+    expect(parent.reviewLoop.reviewSessionId).toBeFalsy();
+    expect(parent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
+    expect(blocked).toEqual([]);
+    state.eligibleServers.push({ id: 2 });
+    const child = await queueReview(parent.id);
+    expect(child.ownerId).toBe(2);
+    expect(parent.reviewLoop.failure).toBeNull();
+    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([child.id]));
+  });
+
+  it('rechecks owner-eligible servers for a queued loop when global capacity frees', async () => {
+    const parent = getJob(ids[0]);
+    parent.ownerId = 2;
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, parent.id);
+    state.dbHolders.set(2, 'slot-holder');
+    const child = await queueReview(parent.id);
+    state.eligibleServers = [{ id: 1 }];
+    await closeDevSession('slot-holder');
+    expect(child.status).toBe('failed');
+    expect(child.databaseSlotQueuedAt).toBeNull();
+    expect(parent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
+    expect(blocked).toEqual([]);
+  });
+
+  it.each([2, 3])('counts a preparing review waiting on acquisition (second owner=%i)', async (ownerId) => {
+    const firstParent = getJob(ids[0]);
+    const secondParent = getJob(ids[1]);
+    Object.assign(firstParent, { ownerId: 2, dbServerId: 1 });
+    Object.assign(secondParent, { ownerId, dbServerId: 2 });
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, firstParent.id);
+    state.dbHolders.set(2, secondParent.id);
+    // Server 3 is free globally, but neither owner may use it.
+    getJob('slot-holder').status = 'closed';
+    const first = await queueReview(firstParent.id);
+    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([first.id]));
+    expect(first.status).toBe('preparing');
+    expect(first.databaseSlotQueuedAt).toBeNull();
+
+    await retryLoopRound(secondParent.id);
+    const second = getJob(secondParent.reviewLoop.reviewSessionId);
+    if (second) children.push(second);
+    expect(secondParent.reviewLoop.reviewing).toBe(false);
+    expect(secondParent.reviewLoop.reviewSessionId).toBeFalsy();
+    expect(secondParent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
+    expect(blocked.map((j) => j.id)).toEqual([first.id]);
+  });
+
+  it('rechecks progress after review announcement when another child has begun acquisition', async () => {
+    const firstParent = getJob(ids[0]);
+    const secondParent = getJob(ids[1]);
+    Object.assign(firstParent, { ownerId: 2, dbServerId: 1 });
+    Object.assign(secondParent, { ownerId: 3, dbServerId: 2 });
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, firstParent.id);
+    state.dbHolders.set(2, secondParent.id);
+    getJob('slot-holder').status = 'closed';
+    let finishAnnouncement;
+    upsertPrComment.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishAnnouncement = resolve;
+        }),
+    );
+    try {
+      const first = await queueReview(firstParent.id);
+      expect(finishAnnouncement).toBeTypeOf('function');
+      expect(blocked).toEqual([]);
+      const second = await queueReview(secondParent.id);
+      await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([second.id]));
+      finishAnnouncement();
+      await vi.waitFor(() => expect(firstParent.reviewLoop.reviewing).toBe(false));
+      expect(first.status).toBe('failed');
+      expect(firstParent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
+      expect(blocked.map((j) => j.id)).toEqual([second.id]);
+    } finally {
+      finishAnnouncement?.();
+    }
+  });
+
+  it.each(['review', 'fix', 'qa'])('fails a queued %s when every database share is revoked', async (kind) => {
+    const parent = getJob(ids[0]);
+    Object.assign(parent, { ownerId: 2, dbServerId: 1 });
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, parent.id);
+    state.dbHolders.set(2, 'slot-holder');
+    let child;
+    if (kind === 'review') child = await queueReview(parent.id);
+    else {
+      const extra = kind === 'fix' ? { loopFixParentId: parent.id } : { qaParentId: parent.id, qa: true };
+      child = getJob(
+        createDevSession({ provider: 1, repo: 'acme/slots', branch: 'task/slots', prompt: 'fix', ...extra })
+          .id,
+      );
+      children.push(child);
+      if (kind === 'fix') Object.assign(parent.reviewLoop, { fixing: true, fixSessionId: child.id });
+      else parent.qaLoop = { running: true, sessionId: child.id };
+    }
+    expect(child.status).toBe('queued');
+    state.eligibleServers = [];
+    // Drive waiter processing without releasing any global capacity.
+    expect(() => createDevSession({ provider: 1, repo: 'acme/slots', prompt: 'another' })).toThrow(
+      /holding a database server/,
+    );
+    expect(child.status).toBe('failed');
+    expect(child.databaseSlotQueuedAt).toBeNull();
+    const loop = kind === 'qa' ? parent.qaLoop : parent.reviewLoop;
+    expect(kind === 'fix' ? loop.fixing : kind === 'qa' ? loop.running : loop.reviewing).toBe(false);
+    expect(loop.failure.reason).toMatch(/none is shared/);
+    expect(blocked).toEqual([]);
+  });
+
+  it('ignores ordinary acquisition waiters when a loop has a free eligible server', async () => {
+    const parent = getJob(ids[0]);
+    Object.assign(parent, { ownerId: 2, dbServerId: 1 });
+    state.eligibleServers = [{ id: 1 }, { id: 2 }];
+    state.dbHolders.set(1, parent.id);
+    const ordinary = getJob('slot-holder');
+    Object.assign(ordinary, { ownerId: 3, status: 'preparing', qaParentId: null });
+    state.dbWaiters.add(ordinary.id);
+    state.capacity += 1;
+    const child = await queueReview(parent.id);
+    expect(child.status).toBe('preparing');
+    expect(parent.reviewLoop.failure).toBeNull();
+    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([child.id]));
+  });
+
+  it.each(['review', 'fix', 'qa'])(
+    'fails a polling %s child promptly when a grant change leaves only waiting parents',
+    async (kind) => {
+      const pool = await vi.importActual('../lib/dbpool.js');
+      const poolExports = await import('../lib/dbpool.js');
+      const servers = await import('../lib/dbservers.js');
+      const config = await import('../lib/config.js');
+      const cfg = config.getConfig();
+      const entries = [1, 2, 3].map((id) => ({ id, host: '127.0.0.1', port: 3306 + id }));
+      const spies = [
+        vi.spyOn(config, 'getConfig').mockReturnValue({
+          ...cfg,
+          dbPool: { enabled: true, waitTimeoutMin: 30, pollSeconds: 0.001 },
+        }),
+        vi.spyOn(servers, 'activeDbServers').mockReturnValue(entries),
+        vi.spyOn(poolExports, 'claimHolder').mockImplementation(pool.claimHolder),
+        vi.spyOn(poolExports, 'waitingForInstance').mockImplementation(pool.waitingForInstance),
+      ];
+      const parent = getJob(ids[0]);
+      const unrelated = getJob('slot-holder');
+      Object.assign(parent, { ownerId: 2, dbServerId: 1 });
+      unrelated.dbServerId = 2;
+      state.projects[0].dbPoolEnabled = true;
+      state.capacity += 1;
+      pool.reclaimInstance(parent, 1);
+      pool.reclaimInstance(unrelated, 2);
+      let shared = true;
+      const policy = vi.fn((job, server) => server.id === 1 || (server.id === 2 && shared));
+      pool.setDbServerFilter(policy);
+      poolExports.eligibleDbServers.mockImplementation(pool.eligibleDbServers);
+      acquireInstance.mockImplementation(pool.acquireInstance);
+      releaseInstance.mockImplementation(pool.releaseInstance);
+      let child;
+      try {
+        if (kind === 'review') child = await queueReview(parent.id);
+        else {
+          const extra = kind === 'fix' ? { loopFixParentId: parent.id } : { qaParentId: parent.id, qa: true };
+          child = getJob(
+            createDevSession({
+              provider: 1,
+              repo: 'acme/slots',
+              branch: 'task/slots',
+              prompt: kind,
+              ...extra,
+            }).id,
+          );
+          children.push(child);
+          if (kind === 'fix') Object.assign(parent.reviewLoop, { fixing: true, fixSessionId: child.id });
+          else parent.qaLoop = { running: true, sessionId: child.id };
+        }
+        await vi.waitFor(() => expect(pool.waitingForInstance(child.id)).toBe(true));
+        expect(child.status).toBe('preparing');
+        shared = false;
+        policy.mockClear();
+        // Prove acquisition actually polls the changed policy before checking its outcome.
+        await vi.waitFor(() =>
+          expect(policy.mock.calls.filter(([, s]) => s.id === 2).length).toBeGreaterThan(1),
+        );
+        await vi.waitFor(() => expect(child.status).toBe('failed'));
+        expect(child.error).toMatch(/parents hold every database slot.*share it with the owner/i);
+        const loop = kind === 'qa' ? parent.qaLoop : parent.reviewLoop;
+        expect(kind === 'fix' ? loop.fixing : kind === 'qa' ? loop.running : loop.reviewing).toBe(false);
+        expect(loop.failure.reason).toBe(child.error);
+        expect(loop.reviewerFailed).not.toBe(true);
+        expect(pool.waitingForInstance(child.id)).toBe(false);
+        expect(child.dbServerId).toBeFalsy();
+        expect(releaseInstance).toHaveBeenCalledWith(child);
+        expect(pool.claimHolder(1)).toBe(parent.id);
+        expect(pool.claimHolder(2)).toBe(unrelated.id);
+      } finally {
+        if (child) await closeDevSession(child.id);
+        await pool.releaseInstance(parent);
+        await pool.releaseInstance(unrelated);
+        pool.setDbServerFilter(() => true);
+        pool._resetForTests();
+        poolExports.eligibleDbServers.mockReset().mockImplementation(() => state.eligibleServers);
+        acquireInstance.mockReset();
+        releaseInstance.mockReset();
+        for (const spy of spies.reverse()) spy.mockRestore();
       }
     },
   );
@@ -1186,6 +1525,30 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(worker.ownerId).toBe(2);
     expect(createDevSession({ ...base, parentId: orchestrator.id, ownerId: null }).ownerId).toBeNull();
     expect(createDevSession(base).ownerId).toBeNull();
+  });
+
+  it('announces a background review with the server identity outside the request', async () => {
+    const gh = await vi.importActual('../lib/github.js');
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+    upsertPrComment.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await gh.githubRest({ githubToken: 'server-token' }, 'POST', '/background-review');
+    });
+    try {
+      gh.asGithubUser('request-token', () =>
+        createDevSession({
+          ...base,
+          review: true,
+          branch: 'feature/request-context',
+          prNumber: 123,
+          ownerId: 2,
+        }),
+      );
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+      expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer server-token');
+    } finally {
+      fetch.mockRestore();
+    }
   });
 
   it('refuses a provider whose whole group is inactive', () => {
@@ -3501,7 +3864,15 @@ describe('spawnWorkerSession: tooling fixes', () => {
   };
 
   beforeAll(async () => {
-    state.stored = [row('tool-orch', { orchestrator: true })];
+    state.stored = [
+      row('tool-orch', { orchestrator: true }),
+      row('tool-closed', {
+        repo: dashboard.repo,
+        parentId: 'tool-orch',
+        toolingFor: 'acme/shop',
+        ownerId: 2,
+      }),
+    ];
     await initJobs();
     getJob('tool-orch').status = 'idle';
   });
@@ -3515,30 +3886,25 @@ describe('spawnWorkerSession: tooling fixes', () => {
     resolveRuntime.mockClear();
     getJob('tool-orch').workerRuntime = null;
   });
-
   afterEach(() => {
-    setWorkerProjectAccess(() => true);
+    setSessionProjectFilter(() => true);
     getJob('tool-orch').ownerId = null;
   });
 
-  it('checks access to the target project before creating a tooling worker', () => {
-    const orch = getJob('tool-orch');
-    orch.ownerId = 2;
-    const access = vi.fn((_parent, project) => project.repo === 'acme/shop');
-    setWorkerProjectAccess(access);
-    const before = workerSessionsFor(orch).length;
-    expect(() => spawnWorkerSession(orch, { prompt: 'Fix tooling', tooling: true })).toThrow(
-      /project access/,
+  it('authorizes the inherited owner against the final tooling project before creating a worker', () => {
+    const parent = getJob('tool-orch');
+    parent.ownerId = 2;
+    const allowed = vi.fn((_job, project) => project.repo === parent.repo);
+    setSessionProjectFilter(allowed);
+    const before = workerSessionsFor(parent).length;
+    expect(() => spawnWorkerSession(parent, { prompt: 'Read private code', tooling: true })).toThrow(
+      /Project unavailable/,
     );
-    expect(access).toHaveBeenCalledWith(orch, dashboard);
-    expect(workerSessionsFor(orch)).toHaveLength(before);
-    expect(resolveRuntime).not.toHaveBeenCalled();
-    const plain = spawnWorkerSession(orch, { prompt: 'Fix shop' });
-    expect(plain).toMatchObject({ repo: 'acme/shop', ownerId: 2 });
-    setWorkerProjectAccess(() => true);
-    const shared = spawnWorkerSession(orch, { prompt: 'Fix tooling', tooling: true });
-    expect(shared).toMatchObject({ repo: 'acme/dashboard', ownerId: 2 });
-    expect(workerSessionsFor(orch)).toHaveLength(before + 2);
+    expect(allowed).toHaveBeenCalledWith({ ownerId: 2 }, dashboard);
+    expect(workerSessionsFor(parent)).toHaveLength(before);
+    allowed.mockReturnValue(true);
+    const worker = spawnWorkerSession(parent, { prompt: 'Fix tooling', tooling: true });
+    expect(worker).toMatchObject({ ownerId: 2, repo: dashboard.repo, parentId: parent.id });
   });
 
   it('refuses when no project is flagged as the dashboard itself', () => {
@@ -3553,6 +3919,58 @@ describe('spawnWorkerSession: tooling fixes', () => {
       createDevSession({ provider: 1, prompt: 'x', repo: 'acme/shop', toolingFor: 'acme/shop' }),
     ).toThrow(/worker session of some orchestrator/);
   });
+
+  it('checks the inherited owner’s current project grant before starting a tooling worker', async () => {
+    const orch = getJob('tool-orch');
+    const before = workerSessionsFor(orch).length;
+    const previousOwner = orch.ownerId;
+    orch.ownerId = 2;
+    let shared = false;
+    const allowed = vi.fn((job, project) => job.ownerId !== 2 || project.repo !== dashboard.repo || shared);
+    setSessionProjectFilter(allowed);
+    try {
+      expect(() => spawnWorkerSession(orch, { title: 'Fix', prompt: 'x', tooling: true })).toThrow(
+        /Project unavailable/,
+      );
+      expect(allowed).toHaveBeenLastCalledWith({ ownerId: 2 }, dashboard);
+      expect(workerSessionsFor(orch)).toHaveLength(before);
+      shared = true;
+      const worker = spawnWorkerSession(orch, { title: 'Fix', prompt: 'x', tooling: true });
+      expect(worker).toMatchObject({ repo: dashboard.repo, ownerId: 2 });
+      // Wait for the worker's missing checkout to fail before restoring the owner.
+      await settleWorkers(['tool-orch']);
+    } finally {
+      orch.ownerId = previousOwner;
+      setSessionProjectFilter(() => true);
+    }
+  });
+
+  it.each(['message', 'reopen', 'recovery'])(
+    'refuses a closed tooling worker’s %s after its target project is unshared',
+    async (action) => {
+      const worker = getJob('tool-closed');
+      const events = [...worker.events];
+      const allowed = vi.fn((job, project) => job.ownerId !== 2 || project.repo !== dashboard.repo);
+      setSessionProjectFilter(allowed);
+      spawn.mockClear();
+      acquireInstance.mockClear();
+      const attempt = () =>
+        action === 'message'
+          ? sendDevMessage(worker.id, 'Continue fixing the dashboard')
+          : reopenDevSession(worker.id, { recovering: action === 'recovery' });
+      if (action === 'recovery') {
+        expect(attempt).not.toThrow();
+        await vi.waitFor(() => expect(worker.restartPending).toBe(false));
+        expect(releaseInstance).toHaveBeenCalledWith(worker);
+      } else expect(attempt).toThrow(/Project unavailable/);
+      expect(allowed).toHaveBeenCalledWith(expect.objectContaining({ ownerId: 2 }), dashboard);
+      expect(worker.status).toBe('closed');
+      expect(worker.events).toEqual(events);
+      expect(worker.workDir).toBeFalsy();
+      expect(acquireInstance).not.toHaveBeenCalled();
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
 
   it('runs on the dashboard project’s worker runtime, ahead of the orchestration’s own pick', () => {
     // The shop's runtime and the orchestration's pick say high; the dashboard's says low, and
@@ -3815,8 +4233,10 @@ describe('webhook deliveries', () => {
     'hk-whatsapp',
     'hk-mail',
     'hk-mail-cap',
+    'hk-mail-recovery',
   ];
 
+  let heldDeliveryTick;
   beforeAll(async () => {
     state.stored = [
       ...IDLE.filter((id) => !['hk-off', 'hk-orch', 'hk-brief', 'hk-slack', 'hk-whatsapp'].includes(id)).map(
@@ -3835,7 +4255,10 @@ describe('webhook deliveries', () => {
       row('hk-loopfix', { loopFixParentId: 'hk-free' }),
       row('hk-analyst', { readOnly: true }),
     ];
+    const intervals = vi.spyOn(globalThis, 'setInterval');
     await initJobs();
+    heldDeliveryTick = intervals.mock.calls.find(([fn]) => fn.name === 'flushHeldDeliveries')[0];
+    intervals.mockRestore();
     for (const id of IDLE) getJob(id).status = 'idle';
     getJob('hk-ask').awaitingAnswer = true;
     getJob('hk-stop').turnCanceled = true;
@@ -4474,6 +4897,139 @@ describe('webhook deliveries', () => {
       }
     });
 
+    it.each([
+      ['pendingMailWakes', 'reassigned'],
+      ['pendingDeliveries', 'reassigned'],
+      ['pendingMailWakes', 'disabled legacy owner'],
+      ['pendingDeliveries', 'disabled legacy owner'],
+    ])('rechecks ownership of %s after %s and persists cancellation', async (queue, change) => {
+      const { prompts } = fakeCli();
+      const job = getJob('hk-mail');
+      const originalOwnerId = job.ownerId;
+      const owner = { id: 1, disabledAt: null };
+      const users = { get: (id) => (id === 1 ? owner : { id, disabledAt: null }), list: () => [owner] };
+      const source = fs.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+      const inboxOwner = new Function(
+        'users',
+        source.slice(source.indexOf('const inboxOwner ='), source.indexOf('setInboxOwner(')) +
+          'return inboxOwner;',
+      )(users);
+      setInboxOwner(inboxOwner);
+      const mailService = {
+        wakeAccountEnabled: () => true,
+        forUser: (id) => ({ wakeAccountEnabled: (accountId) => accountId === 7 && id === 1 }),
+      };
+      new Function(
+        'inboxOwner',
+        'mailService',
+        'setMailWakeAccess',
+        source.slice(source.indexOf('setMailWakeAccess('), source.indexOf('app.use(mailPushRoutes(')),
+      )(inboxOwner, mailService, setMailWakeAccess);
+      try {
+        job.ownerId = change === 'reassigned' ? 1 : null;
+        const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }], maxTurns: 1 }).rules[0];
+        job.awaitingAnswer = true;
+        if (queue === 'pendingMailWakes') job.unattendedTurns = 1;
+        await mailReceivedDurably({ ...account, userId: 1 }, email('private-queued', rule.since));
+        expect(job[queue]).toHaveLength(1);
+        expect(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0][queue]).toHaveLength(1);
+        if (change === 'reassigned') job.ownerId = 2;
+        else owner.disabledAt = 1;
+        job.awaitingAnswer = false;
+        job.unattendedTurns = 0;
+        flushDeliveries(job);
+        await flushJobs();
+        expect(job.pendingMailWakes).toEqual([]);
+        expect(job.pendingDeliveries).toEqual([]);
+        expect(prompts).toHaveLength(0);
+        const saved = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
+        expect(saved).not.toHaveProperty('pendingMailWakes');
+        expect(saved).not.toHaveProperty('pendingDeliveries');
+        expect(() =>
+          deliverToSession(
+            job.id,
+            { text: 'private-direct' },
+            { via: 'mail', ruleId: rule.id, ruleSince: rule.since },
+          ),
+        ).toThrow(/no longer enabled/);
+      } finally {
+        if (prompts.length) await cli.finish(job);
+        job.ownerId = originalOwnerId;
+        setInboxOwner((session) => session.ownerId ?? null);
+      }
+    });
+
+    it.each([
+      ['receipt', 1],
+      ['receipt', null],
+      ['pendingMailWakes', 1],
+      ['pendingMailWakes', null],
+      ['pendingDeliveries', 1],
+      ['pendingDeliveries', null],
+    ])('retries %s after the first user load recovers (owner %s)', async (queue, ownerId) => {
+      const { prompts } = fakeCli();
+      const job = getJob('hk-mail-recovery');
+      const originalOwnerId = job.ownerId;
+      const source = fs.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+      const users = createUsers({ load: async () => [{ id: 1, disabledAt: null }] });
+      const inboxOwner = new Function(
+        'users',
+        source.slice(source.indexOf('const inboxOwner ='), source.indexOf('setInboxOwner(')) +
+          'return inboxOwner;',
+      )(users);
+      const mailService = {
+        forUser: (id) => ({ wakeAccountEnabled: (accountId) => id === 1 && accountId === 7 }),
+      };
+      try {
+        job.unattendedTurns = 0;
+        job.ownerId = ownerId;
+        job.awaitingAnswer = true;
+        const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }], maxTurns: 1 }).rules[0];
+        const message = email('retry-after-users', rule.since);
+        if (queue !== 'receipt') {
+          if (queue === 'pendingMailWakes') job.unattendedTurns = 1;
+          await mailReceivedDurably(account, message);
+          expect(job[queue]).toHaveLength(1);
+        }
+        // Restore durable queues before the users store has completed its first load.
+        setInboxOwner(inboxOwner);
+        new Function(
+          'inboxOwner',
+          'mailService',
+          'setMailWakeAccess',
+          source.slice(source.indexOf('setMailWakeAccess('), source.indexOf('app.use(mailPushRoutes(')),
+        )(inboxOwner, mailService, setMailWakeAccess);
+        job.awaitingAnswer = false;
+        job.unattendedTurns = 0;
+        if (queue === 'receipt') {
+          await expect(mailReceivedDurably({ ...account, userId: 1 }, message)).rejects.toMatchObject({
+            status: 503,
+          });
+        } else {
+          const held = structuredClone(job[queue]);
+          expect(() => heldDeliveryTick()).not.toThrow();
+          expect(job[queue]).toEqual(held);
+        }
+        expect(prompts).toHaveLength(0);
+        await users.init();
+        if (queue === 'receipt') await mailReceivedDurably({ ...account, userId: 1 }, message);
+        else heldDeliveryTick();
+        await vi.waitFor(() => expect(prompts).toHaveLength(1));
+        expect(prompts[0]).toContain('retry-after-users');
+        expect(job.pendingMailWakes).toEqual([]);
+        expect(job.pendingDeliveries).toEqual([]);
+        await mailReceivedDurably({ ...account, userId: 1 }, message);
+        expect(prompts).toHaveLength(1);
+      } finally {
+        if (prompts.length) await cli.finish(job);
+        job.ownerId = originalOwnerId;
+        job.mailWake = undefined;
+        job.pendingMailWakes = [];
+        job.pendingDeliveries = [];
+        setInboxOwner((session) => session.ownerId ?? null);
+      }
+    });
+
     it('holds matching email behind an unanswered question, keeps it with the webhook off and flushes when free', async () => {
       const { prompts } = fakeCli();
       const job = getJob('hk-mail');
@@ -4809,9 +5365,11 @@ describe('webhook deliveries', () => {
       channels: ['dev'],
       replies: true,
     };
-    setSlackAccess(() => slack);
+    const access = vi.fn(() => slack);
+    setSlackAccess(access);
     try {
       const told = slackProtocol(getJob('hk-free'));
+      expect(access).toHaveBeenCalledWith(getJob('hk-free'));
       expect(told).toContain('in the Okanet workspace as nadin');
       expect(told).toContain('direct messages to people and the channels #dev');
       expect(told).toContain('Each message waits for the user');
@@ -5591,12 +6149,16 @@ describe('standalone code-review findings', () => {
       queuedReview('mine-fix', [finding('m2', 'Validate the input')], true),
       queuedReview('mine-save', [finding('m3', 'Keep the type')], true),
       queuedReview('stand-dispatch', [finding('k7', 'Rename the flag')]),
-      ...[2, 3, null].map((ownerId) => ({
-        ...queuedReview(`stand-identity-${ownerId}`, [finding('k8', 'Check the owner')]),
-        ownerId,
+      ...['reply', 'delete'].map((action) => ({
+        ...queuedReview(`stand-legacy-${action}`, [finding('legacy', 'Persisted finding')]),
+        ownerId: 2,
       })),
+      ...['reply', 'delete'].flatMap((action) =>
+        ['disconnected', 'changed'].map((connection) => queuedReview(`stand-${action}-${connection}`, [])),
+      ),
       // A review whose card is already gone (completed elsewhere, or its PR closed).
       { ...queuedReview('stand-none', []), reviewTriage: null },
+      { ...queuedReview('stand-deferred', []), reviewTriage: null },
     ];
     await initJobs();
     getJob('stand-close').status = 'idle';
@@ -5630,6 +6192,30 @@ describe('standalone code-review findings', () => {
     });
   });
 
+  it('keeps deferred publication lookups and earlier turn identities on the held card', async () => {
+    const found = [
+      {
+        ...finding('pending', 'Published finding'),
+        reviewPublication: { after: 1, before: 2, authors: ['alice', 'bob'] },
+      },
+    ];
+    latestReviewFindings.mockResolvedValueOnce(found);
+    sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
+    const job = getJob('stand-deferred');
+    job.status = 'idle';
+    job.reviewAuthorLogins = ['alice', 'bob'];
+
+    expect(await holdStandaloneReviewFindings(job)).toBe(true);
+    expect(latestReviewFindings.mock.lastCall.at(-1)).toEqual({
+      since: job.createdAt,
+      authorLogins: ['alice', 'bob'],
+    });
+    expect(JSON.parse(JSON.stringify(job.reviewTriage)).findings[0]).toMatchObject(found[0]);
+    await closeDevSession(job.id);
+    expect(getJob(job.id).reviewTriage.findings[0]).toMatchObject(found[0]);
+    expect(deleteJob).not.toHaveBeenCalledWith(job.id, null);
+  });
+
   // Whose pull request it is (GitHub's author vs the account the app acts as) decides the
   // card, so the hold works it out.
   it('holds a review of somebody else’s pull request as not the user’s own', async () => {
@@ -5657,38 +6243,34 @@ describe('standalone code-review findings', () => {
     expect(job.reviewTriage).toMatchObject({ author: 'NadinYamaui', mine: true });
   });
 
-  it.each([
-    [2, '', 'Ana', true],
-    [2, '', 'server-bot', false],
-    [2, 'release-bot', 'release-bot', true],
-    [2, 'release-bot', 'ana', false],
-    [3, '', 'server-bot', true],
-    [null, '', 'server-bot', true],
-  ])(
-    'classifies owner %s with reviewAuthor %s and PR author %s',
-    async (ownerId, reviewAuthor, author, mine) => {
-      const found = [finding('personal', 'Personal finding')];
-      latestReviewFindings.mockResolvedValueOnce(found);
-      sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
-      state.projects = [{ repo: 'acme/standalone', label: 'Standalone', reviewAuthor }];
-      setOwnerGithub((job) => (job.ownerId === 2 ? { token: 'ana-tok', login: 'ana', id: 7 } : null));
-      viewerLogin.mockReset().mockResolvedValue('server-bot');
-      const job = {
-        ...newReview('stand-personal', 37),
-        ownerId,
-        prStatus: { number: 37, author },
-      };
-      try {
+  it('recognizes the session owner’s PR, with the project override and server fallback', async () => {
+    const found = [finding('owner', 'Owner finding')];
+    const identity = { token: 'ana-token', login: 'ana', id: 42 };
+    setOwnerGithub((job) => (job.ownerId === 2 ? identity : null));
+    try {
+      for (const [ownerId, reviewAuthor, author] of [
+        [2, '', 'Ana'],
+        [2, 'release-bot', 'release-bot'],
+        [3, '', 'server-bot'],
+        [null, '', 'server-bot'],
+      ]) {
+        state.projects = [{ repo: 'acme/standalone', reviewAuthor }];
+        latestReviewFindings.mockResolvedValueOnce(found);
+        sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
+        viewerLogin.mockResolvedValueOnce('server-bot');
+        const job = { ...newReview('stand-owner', 37), ownerId, prStatus: { number: 37, author } };
         expect(await holdStandaloneReviewFindings(job)).toBe(true);
-        expect(job.reviewTriage).toMatchObject({ author, mine });
-        if (reviewAuthor || ownerId === 2) expect(viewerLogin).not.toHaveBeenCalled();
-        else expect(viewerLogin).toHaveBeenCalledOnce();
-      } finally {
-        setOwnerGithub(() => null);
+        expect(latestReviewFindings.mock.lastCall.at(-1)).toEqual({
+          since: job.createdAt,
+          ...(ownerId != null ? { authorLogin: ownerId === 2 ? 'ana' : null } : {}),
+        });
+        expect(job.reviewTriage).toMatchObject({ author, mine: true });
         viewerLogin.mockReset().mockResolvedValue(null);
       }
-    },
-  );
+    } finally {
+      setOwnerGithub(() => null);
+    }
+  });
 
   // The token's user is only the fallback: a project that posts as another account names it in
   // its settings, and that account's pull requests are "mine".
@@ -5760,21 +6342,31 @@ describe('standalone code-review findings', () => {
     await expect(saveReviewFindingsDrafts('stand-nope', {})).rejects.toThrow(/Session not found/);
   });
 
-  it("replies on one finding's thread and keeps it on the card", async () => {
-    replyOnFindingThread.mockClear();
-
-    const out = await replyToReviewFinding('stand-delete', 'k5', '  Fine for me  ');
-
-    expect(out).toEqual({ replied: 'k5', url: 'https://gh/r/101#reply' });
-    expect(replyOnFindingThread).toHaveBeenCalledWith(
-      'acme/standalone',
-      31,
-      expect.objectContaining({ key: 'k5' }),
-      '  Fine for me  ', // trimmed where it is written, so nothing is lost here
-      { since: '2026-09-07T10:00:00.000Z', authorLogin: null },
-    );
-    expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k5', 'k6']);
-  });
+  it.each([null, 2])(
+    "replies on one finding's thread as owner %s and keeps it on the card",
+    async (ownerId) => {
+      replyOnFindingThread.mockClear();
+      const job = getJob('stand-delete');
+      job.ownerId = ownerId;
+      job.reviewTriage.findings[0].reviewAuthorLogin = ownerId == null ? null : 'ana';
+      setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
+      try {
+        const out = await replyToReviewFinding('stand-delete', 'k5', '  Fine for me  ');
+        expect(out).toEqual({ replied: 'k5', url: 'https://gh/r/101#reply' });
+        expect(replyOnFindingThread).toHaveBeenCalledWith(
+          'acme/standalone',
+          31,
+          expect.objectContaining({ key: 'k5' }),
+          '  Fine for me  ', // trimmed where it is written, so nothing is lost here
+          { since: '2026-09-07T10:00:00.000Z', authorLogin: ownerId == null ? null : 'ana' },
+        );
+        expect(job.reviewTriage.findings.map((f) => f.key)).toEqual(['k5', 'k6']);
+      } finally {
+        job.ownerId = null;
+        setOwnerGithub(() => null);
+      }
+    },
+  );
 
   it('refuses a reply on a finding, or a session, that is not there', async () => {
     await expect(replyToReviewFinding('stand-delete', 'nope', 'hi')).rejects.toThrow(
@@ -5784,58 +6376,88 @@ describe('standalone code-review findings', () => {
     await expect(replyToReviewFinding('stand-nope', 'k5', 'hi')).rejects.toThrow(/Session not found/);
   });
 
+  it.each(['reply', 'delete'])(
+    'keeps the server fallback for %s on restored findings without publication metadata',
+    async (action) => {
+      const job = getJob(`stand-legacy-${action}`);
+      expect(job.reviewTriage.findings[0]).not.toHaveProperty('reviewAuthorLogin');
+      setOwnerGithub(() => ({ token: 'new-token', login: 'new-account', id: 43 }));
+      try {
+        await holdStandaloneReviewFindings(job);
+        const operation = action === 'reply' ? replyOnFindingThread : deleteFindingFromReview;
+        operation.mockClear();
+        if (action === 'reply') await replyToReviewFinding(job.id, 'legacy', 'Noted');
+        else await deleteReviewFinding(job.id, 'legacy');
+        expect(operation.mock.lastCall.at(-1)).toEqual({ since: job.createdAt, authorLogin: null });
+        expect(job.reviewTriage.findings).toHaveLength(action === 'reply' ? 1 : 0);
+      } finally {
+        setOwnerGithub(() => null);
+      }
+    },
+  );
+
   it.each([
-    [2, 'ana'],
-    [3, null],
-    [null, null],
-  ])('matches review comments for owner %s using author login %s', async (ownerId, authorLogin) => {
-    setOwnerGithub((job) => (job.ownerId === 2 ? { token: 'ana-tok', login: 'ana', id: 7 } : null));
+    ['reply', 'disconnected'],
+    ['reply', 'changed'],
+    ['delete', 'disconnected'],
+    ['delete', 'changed'],
+  ])('uses the published author for %s after the owner connection is %s', async (action, connection) => {
+    const job = getJob(`stand-${action}-${connection}`);
+    job.reviewTriage = null;
+    job.ownerId = 2;
+    job.prStatus.author = 'a-colleague';
+    const published = { ...finding('published', 'Published finding'), reviewAuthorLogin: 'ana' };
+    latestReviewFindings.mockResolvedValueOnce([published]);
+    sortFindingsForFix.mockResolvedValueOnce({ kept: [published], parked: [] });
+    setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
     try {
-      const id = `stand-identity-${ownerId}`;
-      const opts = { since: '2026-09-07T10:00:00.000Z', authorLogin };
-
-      await replyToReviewFinding(id, 'k8', 'Noted');
-      expect(replyOnFindingThread).toHaveBeenLastCalledWith(
-        'acme/standalone',
-        31,
-        expect.objectContaining({ key: 'k8' }),
-        'Noted',
-        opts,
-      );
-
-      await deleteReviewFinding(id, 'k8');
-      expect(deleteFindingFromReview).toHaveBeenLastCalledWith(
-        'acme/standalone',
-        31,
-        expect.objectContaining({ key: 'k8' }),
-        opts,
-      );
+      expect(await holdStandaloneReviewFindings(job)).toBe(true);
+      // The held result survives serialization without retaining a credential.
+      job.reviewTriage = JSON.parse(JSON.stringify(job.reviewTriage));
+      setOwnerGithub(() => (connection === 'changed' ? { token: 'bob-token', login: 'bob', id: 43 } : null));
+      const operation = action === 'reply' ? replyOnFindingThread : deleteFindingFromReview;
+      operation.mockClear();
+      if (action === 'reply') await replyToReviewFinding(job.id, 'published', 'Noted');
+      else await deleteReviewFinding(job.id, 'published');
+      const options = operation.mock.lastCall.at(-1);
+      expect(options).toEqual({ since: job.createdAt, authorLogin: 'ana' });
+      expect(job.reviewTriage.findings).toHaveLength(action === 'reply' ? 1 : 0);
     } finally {
       setOwnerGithub(() => null);
     }
   });
 
-  it('deletes one finding from the review itself and leaves the rest on the card', async () => {
+  it('deletes one finding posted by the owner and leaves the rest on the card', async () => {
     deleteFindingFromReview.mockClear();
-
-    const out = await deleteReviewFinding('stand-delete', 'k5');
-
-    expect(out).toMatchObject({ deleted: 'k5', remaining: 1, commentDeleted: true, undeclared: true });
-    expect(deleteFindingFromReview).toHaveBeenCalledWith(
-      'acme/standalone',
-      31,
-      expect.objectContaining({ key: 'k5', title: 'Guard the id list' }),
-      { since: '2026-09-07T10:00:00.000Z', authorLogin: null },
-    );
-    expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
+    const job = getJob('stand-delete');
+    job.ownerId = 2;
+    job.reviewTriage.findings[0].reviewAuthorLogin = 'ana';
+    setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
+    try {
+      const out = await deleteReviewFinding('stand-delete', 'k5');
+      expect(out).toMatchObject({ deleted: 'k5', remaining: 1, commentDeleted: true, undeclared: true });
+      expect(deleteFindingFromReview).toHaveBeenCalledWith(
+        'acme/standalone',
+        31,
+        expect.objectContaining({ key: 'k5', title: 'Guard the id list' }),
+        { since: '2026-09-07T10:00:00.000Z', authorLogin: 'ana' },
+      );
+      expect(job.reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
+    } finally {
+      job.ownerId = null;
+      setOwnerGithub(() => null);
+    }
   });
 
-  it('keeps the finding on the card when GitHub refuses to delete its comment', async () => {
-    deleteFindingFromReview.mockRejectedValueOnce(
-      new Error("GitHub answered 403 deleting the finding's review comment"),
-    );
+  it.each([
+    [403, "deleting the finding's review comment"],
+    [404, "deleting the finding's review comment"],
+    [403, "rewriting the review's findings block"],
+    [404, "rewriting the review's findings block"],
+  ])('keeps the finding on the card when GitHub answers %i %s', async (status, action) => {
+    deleteFindingFromReview.mockRejectedValueOnce(new Error(`GitHub answered ${status} ${action}`));
 
-    await expect(deleteReviewFinding('stand-delete', 'k6')).rejects.toThrow(/answered 403/);
+    await expect(deleteReviewFinding('stand-delete', 'k6')).rejects.toThrow(`answered ${status}`);
     expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
   });
 
@@ -5955,6 +6577,7 @@ describe('deleting a session that was never closed', () => {
     state.stored = [
       {
         id: 'undropped-1',
+        ownerId: 2,
         kind: 'devchat',
         status: 'failed',
         repo: 'acme/shop',
@@ -5969,7 +6592,10 @@ describe('deleting a session that was never closed', () => {
   // A session that died during setup never reaches closeDevSession, and its
   // record is the only thing that knows the database's name.
   it('drops its database before the record goes', async () => {
+    const deleted = vi.fn((id) => expect(getJob(id)).toBeNull());
+    bus.once('deleted', deleted);
     await deleteJobById('undropped-1');
+    expect(deleted).toHaveBeenCalledWith('undropped-1', 'acme/shop', 2);
 
     expect(dropSessionDatabase).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'undropped-1', sessionDb: 'shop_undropped_1' }),
@@ -5995,6 +6621,7 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
     state.stored = [
       row('cost-par-1', { costUsd: 1.25, inputTokens: 1000, outputTokens: 100, durationMs: 20_000 }),
       row('cost-rev-1', {
+        ownerId: 2,
         autoClose: true,
         loopParentId: 'cost-par-1',
         costUsd: 0.5,
@@ -6029,7 +6656,14 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
       outputTokens: 130,
       durationMs: 25_000,
     });
-    await closeDevSession('cost-rev-1');
+    const onDeleted = vi.fn();
+    bus.on('deleted', onDeleted);
+    try {
+      await closeDevSession('cost-rev-1');
+      expect(onDeleted).toHaveBeenCalledWith('cost-rev-1', 'acme/cost', 2);
+    } finally {
+      bus.off('deleted', onDeleted);
+    }
     expect(getJob('cost-rev-1')).toBeNull();
     const parent = getJob('cost-par-1');
     expect(sessionUsage(parent)).toEqual(before);
@@ -6755,16 +7389,25 @@ describe('the review loop: what a closing loop review reports back', () => {
   });
 
   it('a finished review that declared no findings ends the round cleanly', async () => {
-    await closeDevSession('rev-2');
-    await new Promise((r) => setTimeout(r, 0));
     const parent = getJob('par-2');
-    expect(parent.reviewLoop.reviewing).toBe(false);
-    expect(infoTexts(parent).join('\n')).toMatch(/declared no findings/);
-    // Scoped to what this review itself could have posted, so a round that
-    // published nothing does not hand back the previous round's findings.
-    expect(latestReviewFindings).toHaveBeenCalledWith('acme/loop', 77, {
-      since: '2026-08-25T13:00:00.000Z',
-    });
+    parent.ownerId = 2;
+    getJob('rev-2').reviewAuthorLogins = ['earlier-owner', 'ana'];
+    setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
+    try {
+      await closeDevSession('rev-2');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(parent.reviewLoop.reviewing).toBe(false);
+      expect(infoTexts(parent).join('\n')).toMatch(/declared no findings/);
+      // The review window and owner identity constrain its inline publications.
+      expect(latestReviewFindings).toHaveBeenCalledWith('acme/loop', 77, {
+        since: '2026-08-25T13:00:00.000Z',
+        authorLogin: 'ana',
+        authorLogins: ['earlier-owner', 'ana'],
+      });
+    } finally {
+      parent.ownerId = null;
+      setOwnerGithub(() => null);
+    }
   });
 
   it('a round is held for triage even while the session stands on a question', async () => {
@@ -8940,6 +9583,802 @@ describe('attachPrForBranch', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('a worker that leaves the branch it was spawned on for one of its own', () => {
+  const row = (id, extra = {}) => ({
+    id,
+    kind: 'devchat',
+    status: 'closed', // flipped after the restore, like the rows above
+    repo: 'acme/shop',
+    providerId: 1,
+    provider: 'Claude entry',
+    turns: 1,
+    baseBranch: 'main',
+    startedOnPr: null,
+    prStatus: null,
+    ...extra,
+  });
+  const prOne = { number: 1, state: 'open', headRef: 'dev-a', headSha: 'sha-a' };
+  // Every earlier initJobs() leaves a real 20s syncDevPrs tick running: it resolves a due
+  // pendingResult and runs attachPrForBranch for an idle PR-less session, under whatever
+  // mocks another test has installed. So pending rounds stay parked, and the PR-less
+  // sessions stay closed (the tick only looks up idle ones) except inside their own test.
+  const PARKED = '2999-01-01T00:00:00.000Z';
+
+  beforeAll(async () => {
+    state.stored = [
+      // Owns PR #1, opened from its own branch dev-a.
+      row('stk-owner', { branch: 'dev-a', prStatus: prOne, prAttachedByBranch: true }),
+      // Spawned with branch dev-a for a stacked PR: found #1 at checkout, and its loop
+      // already converged there.
+      row('stk-worker', {
+        branch: 'dev-a',
+        startBranch: 'dev-a',
+        prStatus: prOne,
+        prAttachedByBranch: true,
+        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-a' },
+      }),
+      // Spawned on dev-a as well, and has not cut its own branch yet.
+      row('stk-sibling', { branch: 'dev-a', startBranch: 'dev-a' }),
+      // Moves off dev-a while its loop's round on #1 is still being reviewed.
+      row('stk-inflight', {
+        branch: 'dev-a',
+        prStatus: prOne,
+        prAttachedByBranch: true,
+        reviewLoop: {
+          rounds: 2,
+          reviewing: true,
+          reviewSessionId: 'stk-inflight-rev',
+          reviewPr: 1,
+          lastSha: 'sha-a',
+        },
+      }),
+      {
+        ...row('stk-inflight-rev'),
+        branch: 'dev-a',
+        createdAt: '2026-10-22T10:00:00.000Z',
+        loopParentId: 'stk-inflight',
+        loopReviewDone: true,
+      },
+      // Moves off dev-a with a finished round on #1 not yet read.
+      row('stk-pending', {
+        branch: 'dev-a',
+        prStatus: prOne,
+        prAttachedByBranch: true,
+        reviewLoop: {
+          rounds: 1,
+          lastSha: 'sha-a',
+          pendingResult: { prNumber: 1, round: 1, since: null, nextRetryAt: PARKED },
+        },
+      }),
+      // Handed #1 (startedOnPr), not found from its branch.
+      row('stk-handed', {
+        branch: 'dev-a',
+        startedOnPr: 1,
+        prStatus: prOne,
+        reviewLoop: { rounds: 1, done: true },
+      }),
+      // Found #1 from dev-a; its turn may end on the base branch.
+      row('stk-base', { branch: 'dev-a', prStatus: prOne, prAttachedByBranch: true }),
+      // Found its stacked #2 (base dev-a) from dev-b; its turn may end on dev-a.
+      // Another repo, so it does not claim acme/shop#2 from the tests above.
+      row('stk-stacked', {
+        repo: 'acme/side',
+        branch: 'dev-b',
+        prStatus: { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'dev-a', headSha: 'sha-b' },
+        prAttachedByBranch: true,
+        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-b', reviewPr: 2 },
+      }),
+      // Owns the lower #1 (dev-a); its turn may end on the upper branch dev-b.
+      // Another repo, so it does not claim acme/shop#1 from the tests above.
+      row('stk-lower', {
+        repo: 'acme/lower',
+        branch: 'dev-a',
+        prStatus: { ...prOne, baseRef: 'main' },
+        prAttachedByBranch: true,
+        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-a', reviewPr: 1 },
+      }),
+      // Owns the upper stacked #2 (dev-b, base dev-a) that stk-lower takes on the way.
+      row('stk-upper', {
+        repo: 'acme/lower',
+        branch: 'dev-b',
+        prStatus: { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'dev-a', headSha: 'sha-b' },
+        prAttachedByBranch: true,
+      }),
+      // Spawned on dev-a, holding the sibling's #1 by branch; cuts dev-b for its own
+      // stacked #2 and may later end a turn on dev-a.
+      row('stk-cutter', {
+        repo: 'acme/cut',
+        branch: 'dev-a',
+        startBranch: 'dev-a',
+        prStatus: { ...prOne, baseRef: 'main' },
+        prAttachedByBranch: true,
+      }),
+      // Owns the sibling #1 that stk-cutter holds by branch as well.
+      row('stk-cut-owner', {
+        repo: 'acme/cut',
+        branch: 'dev-a',
+        prStatus: { ...prOne, baseRef: 'main' },
+        prAttachedByBranch: true,
+      }),
+      // Owns #1 (dev-a) alone; on dev-b it takes a stacked #2 no open session tracks.
+      row('stk-alone', {
+        repo: 'acme/alone',
+        branch: 'dev-a',
+        prStatus: { ...prOne, baseRef: 'main' },
+        prAttachedByBranch: true,
+      }),
+      // Its round on #77 is out while #77 is not mirrored (found by GraphQL, REST
+      // read failed). Closed, like the other PR-less ones, except inside its test.
+      row('stk-unmirrored', {
+        repo: 'acme/unmirror',
+        branch: 'dev-u',
+        reviewLoop: {
+          rounds: 1,
+          reviewing: true,
+          reviewSessionId: 'stk-unmirrored-rev',
+          reviewPr: 77,
+          lastSha: 'sha-u',
+        },
+      }),
+      {
+        ...row('stk-unmirrored-rev', { repo: 'acme/unmirror' }),
+        branch: 'dev-u',
+        createdAt: '2026-10-22T10:00:00.000Z',
+        loopParentId: 'stk-unmirrored',
+        loopReviewDone: true,
+      },
+      // Its round on #1 finished; the turn ends on dev-b while the findings are read.
+      // Closed, like the other PR-less ones, except inside its test.
+      row('stk-readout', {
+        repo: 'acme/readout',
+        branch: 'dev-a',
+        prStatus: prOne,
+        prAttachedByBranch: true,
+        reviewLoop: {
+          rounds: 1,
+          reviewing: true,
+          reviewSessionId: 'stk-readout-rev',
+          reviewPr: 1,
+          lastSha: 'sha-a',
+        },
+      }),
+      {
+        ...row('stk-readout-rev', { repo: 'acme/readout' }),
+        branch: 'dev-a',
+        createdAt: '2026-10-22T10:00:00.000Z',
+        loopParentId: 'stk-readout',
+        loopReviewDone: true,
+      },
+      // Spotted #1 itself; attaches #2 by branch on dev-b, then comes back to dev-a.
+      row('stk-spot', {
+        repo: 'acme/spot',
+        branch: 'dev-a',
+        prStatus: { ...prOne, baseRef: 'main' },
+      }),
+      // Found #1 from dev-a; two webhook syncs of it are queued as it moves off.
+      row('stk-sync-queued', {
+        repo: 'acme/queue',
+        branch: 'dev-a',
+        prStatus: prOne,
+        prAttachedByBranch: true,
+      }),
+      // Converged on #1 (dev-a); releases it, then a second PR before any round.
+      row('stk-twice', {
+        repo: 'acme/lower',
+        branch: 'dev-a',
+        prStatus: { ...prOne, baseRef: 'main' },
+        prAttachedByBranch: true,
+        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-a', reviewPr: 1 },
+      }),
+      // Found #1 from dev-a; a sync of it is in flight as it moves off.
+      row('stk-sync', { branch: 'dev-a', prStatus: prOne, prAttachedByBranch: true }),
+      // Two PR-less sessions on dev-c whose lookups run in parallel.
+      row('stk-race-1', { branch: 'dev-c' }),
+      row('stk-race-2', { branch: 'dev-c' }),
+      // Converged on #1, with QA running on it as it moves off dev-a.
+      // Another repo, so these do not claim acme/shop#1 from the tests above.
+      row('stk-qa', {
+        repo: 'acme/side',
+        branch: 'dev-a',
+        prStatus: prOne,
+        prAttachedByBranch: true,
+        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-a', reviewPr: 1 },
+        qaLoop: { running: true, sessionId: 'stk-qa-run', done: false, failedScenarios: null },
+      }),
+      {
+        ...row('stk-qa-run', { repo: 'acme/side' }),
+        turns: 2,
+        qaBranch: 'dev-a',
+        autoClose: true,
+        startedOnPr: 1,
+        qaParentId: 'stk-qa',
+        qaLoopDone: true,
+      },
+      // Spotted #1 itself; checks out another branch for a moment with a finished
+      // round on #1 not yet read.
+      row('stk-detour', {
+        repo: 'acme/side',
+        branch: 'dev-a',
+        prStatus: prOne,
+        reviewLoop: {
+          rounds: 1,
+          lastSha: 'sha-a',
+          reviewPr: 1,
+          pendingResult: { prNumber: 1, round: 1, since: null, nextRetryAt: PARKED },
+        },
+      }),
+    ];
+    await initJobs();
+    for (const id of [
+      'stk-owner',
+      'stk-worker',
+      'stk-inflight',
+      'stk-inflight-rev',
+      'stk-pending',
+      'stk-handed',
+      'stk-base',
+      'stk-stacked',
+      'stk-lower',
+      'stk-upper',
+      'stk-cutter',
+      'stk-cut-owner',
+      'stk-alone',
+      'stk-spot',
+      'stk-sync-queued',
+      'stk-twice',
+      'stk-sync',
+      'stk-qa',
+      'stk-qa-run',
+      'stk-detour',
+    ])
+      getJob(id).status = 'idle';
+  });
+
+  // Puts the job's working tree on `branch` for the length of `fn`.
+  const onBranch = async (job, branch, fn) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `${job.id}-`));
+    spawnSync('git', ['init', '-q', '-b', branch, dir]);
+    job.workDir = dir;
+    try {
+      return await fn();
+    } finally {
+      job.workDir = null;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  beforeEach(() => {
+    githubRest.mockReset();
+    githubGraphql.mockReset();
+  });
+
+  const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
+
+  it('tracks the pull request of the branch it moved to, and its loop reviews that one', async () => {
+    const job = getJob('stk-worker');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk-worker-'));
+    const git = (...args) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+    spawnSync('git', ['init', '-q', '-b', 'dev-b', dir]);
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'stacked');
+    const sha = git('rev-parse', 'HEAD').stdout.trim();
+    git('update-ref', 'refs/remotes/origin/dev-b', sha); // pushed
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url.startsWith('/repos/acme/shop/pulls?')) {
+        return {
+          ok: true,
+          json: async () => (url.includes('head=acme:dev-b') ? [{ number: 2, base: { ref: 'dev-a' } }] : []),
+        };
+      }
+      if (/\/pulls\/2$/.test(url)) {
+        return {
+          ok: true,
+          json: async () => ({
+            number: 2,
+            state: 'open',
+            head: { ref: 'dev-b', sha },
+            base: { ref: 'dev-a' },
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    job.workDir = dir;
+    try {
+      // The turn that cut dev-b and opened #2 off it ends: HEAD is re-read.
+      refreshJobBranch(job);
+      expect(job.branch).toBe('dev-b');
+      expect(job.prStatus).toBeNull();
+      expect(job.startedOnPr).toBeNull();
+      // The reset waits for the round on a different PR.
+      expect(job.reviewLoop).toMatchObject({ rounds: 1, done: true, lastSha: 'sha-a', releasedPr: 1 });
+      expect(infoTexts(job).join('\n')).toMatch(
+        /PR #1 is open from dev-a, not dev-b, so this session no longer tracks it\. The review loop starts over once a different pull request is open from this branch\.$/m,
+      );
+
+      expect(await attachPrForBranch(job, { fresh: true })).toBe(2);
+      expect(job.prStatus).toMatchObject({ number: 2, headRef: 'dev-b' });
+      // The attach offers the armed loop its first round, on #2 and not on #1.
+      await vi.waitFor(() => expect(job.reviewLoop.reviewSessionId).toBeTruthy());
+      expect(infoTexts(job).join('\n')).toMatch(/started code review round 1 of PR #2/);
+      expect(job.reviewLoop).toMatchObject({ rounds: 1, reviewPr: 2, releasedPr: null, done: false });
+      expect(getJob(job.reviewLoop.reviewSessionId).startedOnPr).toBe(2);
+      // The owner of #1 is untouched.
+      expect(getJob('stk-owner').prStatus.number).toBe(1);
+      closeDevSession(job.reviewLoop.reviewSessionId);
+    } finally {
+      job.workDir = null;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a pull request still open from its branch', () => {
+    const job = getJob('stk-owner');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk-owner-'));
+    spawnSync('git', ['init', '-q', '-b', 'dev-a', dir]);
+    job.workDir = dir;
+    job.branch = 'dev-a-old'; // a rename back onto the PR's head
+    try {
+      refreshJobBranch(job);
+      expect(job.branch).toBe('dev-a');
+      expect(job.prStatus.number).toBe(1);
+    } finally {
+      job.workDir = null;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lets an errand attach a pull request its owner is still working on', async () => {
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url.startsWith('/repos/acme/shop/pulls?'))
+        return { ok: true, json: async () => [{ number: 1, base: { ref: 'main' } }] };
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    const owner = getJob('stk-owner');
+    const errand = getJob('stk-race-1');
+    owner.status = 'running';
+    Object.assign(errand, { preview: true, branch: 'dev-a' });
+    try {
+      expect(await attachPrForBranch(errand, { fresh: true })).toBe(1);
+      expect(infoTexts(errand).join('\n')).not.toMatch(/still being worked on/);
+    } finally {
+      owner.status = 'idle';
+      Object.assign(errand, { preview: false, branch: 'dev-c' });
+    }
+  });
+
+  it('lets only one of two parallel lookups claim a pull request', async () => {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url.startsWith('/repos/acme/shop/pulls?'))
+        return { ok: true, json: async () => [{ number: 1907, base: { ref: 'main' } }] };
+      if (/\/pulls\/1907$/.test(url)) {
+        await gate;
+        return {
+          ok: true,
+          json: async () => ({
+            number: 1907,
+            state: 'open',
+            head: { ref: 'dev-c', sha: 'sha-c' },
+            base: { ref: 'main' },
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    const one = getJob('stk-race-1');
+    const two = getJob('stk-race-2');
+    // Each stays busy, as a session whose loop starts on the PR would.
+    one.status = 'running';
+    two.status = 'running';
+    try {
+      const both = Promise.all([
+        attachPrForBranch(one, { fresh: true }),
+        attachPrForBranch(two, { fresh: true }),
+      ]);
+      await new Promise((r) => setTimeout(r, 20));
+      release();
+      const results = await both;
+      expect(results.filter((n) => n === 1907)).toHaveLength(1);
+      expect([one, two].filter((j) => j.prStatus && j.prStatus.number === 1907)).toHaveLength(1);
+    } finally {
+      one.status = 'closed';
+      two.status = 'closed';
+    }
+  });
+
+  it('drops a round still out on the released pull request instead of reading it off the new one', async () => {
+    const job = getJob('stk-inflight');
+    latestReviewDeclaration.mockClear();
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    expect(infoTexts(job).join('\n')).toMatch(
+      /the review round still running for #1 finishes, but nothing it reports is applied here/,
+    );
+    // #2 attaches before the #1 review closes.
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', headSha: 'sha-b' };
+    await closeDevSession('stk-inflight-rev');
+    await vi.waitFor(() =>
+      expect(infoTexts(job).join('\n')).toMatch(
+        /review round 2 finished for PR #1, which this session no longer tracks/,
+      ),
+    );
+    expect(latestReviewDeclaration).not.toHaveBeenCalled();
+    expect(job.reviewLoop.done).toBeFalsy();
+    expect(job.reviewLoop.pendingResult).toBeFalsy();
+    expect(infoTexts(job).join('\n')).not.toMatch(/declared no findings/);
+    // #2 found the loop busy when it attached; dropping the round starts #2's first.
+    await vi.waitFor(() => expect(job.reviewLoop.reviewPr).toBe(2));
+    expect(job.reviewLoop.reviewing).toBe(true);
+    expect(job.reviewLoop.rounds).toBe(1);
+    expect(job.reviewLoop.lastSha).toBe('sha-b');
+  });
+
+  it('drops a finished round not yet read off the released pull request', async () => {
+    const job = getJob('stk-pending');
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.reviewLoop.pendingResult).toBeNull();
+    expect(job.reviewLoop.releasedPr).toBe(1);
+    expect(infoTexts(job).join('\n')).toMatch(/waiting for its findings to be read off PR #1 is dropped/);
+  });
+
+  it('keeps a handed pull request and its loop across a branch move', async () => {
+    const job = getJob('stk-handed');
+    await onBranch(job, 'dev-elsewhere', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.branch).toBe('dev-elsewhere');
+    expect(job.startedOnPr).toBe(1);
+    expect(job.prStatus.number).toBe(1);
+    expect(job.reviewLoop).toMatchObject({ rounds: 1, done: true });
+  });
+
+  it('keeps the pull request across a checkout of the base branch', async () => {
+    const job = getJob('stk-base');
+    await onBranch(job, 'main', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.branch).toBe('main');
+    expect(job.prStatus.number).toBe(1);
+    expect(job.prAttachedByBranch).toBe(true);
+  });
+
+  it("keeps a stacked pull request across a checkout of its base, the sibling's branch", async () => {
+    const job = getJob('stk-stacked');
+    await onBranch(job, 'dev-a', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.branch).toBe('dev-a');
+    expect(job.prStatus.number).toBe(2);
+    expect(job.prAttachedByBranch).toBe(true);
+    expect(job.reviewLoop).toMatchObject({ rounds: 1, done: true, lastSha: 'sha-b' });
+    expect(job.reviewLoop.releasedPr).toBeFalsy();
+  });
+
+  it("lets go of the sibling's stacked pull request it took when it comes back to its own branch", async () => {
+    const job = getJob('stk-lower');
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    // On dev-b the branch finds the sibling's stacked #2, as attachPrForBranch does
+    // when its owner is idle.
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'dev-a', headSha: 'sha-b' };
+    job.prAttachedByBranch = true;
+    await onBranch(job, 'dev-a', async () => {
+      refreshJobBranch(job);
+    });
+    // dev-a is #2's base, but it is the head of the PR this session released.
+    expect(job.branch).toBe('dev-a');
+    expect(job.prStatus).toBeNull();
+    expect(job.releasedPrAttach).toMatchObject({ number: 2, headRef: 'dev-b' });
+  });
+
+  it('keeps its own stacked pull request on the base it cut its branch from', async () => {
+    const job = getJob('stk-cutter');
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    expect(job.releasedPrAttach).toMatchObject({ number: 1, headRef: 'dev-a' });
+    // Its own stacked #2 attaches by branch; no other session has it.
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'dev-a', headSha: 'sha-b' };
+    job.prAttachedByBranch = true;
+    await onBranch(job, 'dev-a', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.branch).toBe('dev-a');
+    expect(job.prStatus.number).toBe(2);
+    expect(job.prAttachedByBranch).toBe(true);
+  });
+
+  it('lets go of an unowned stacked pull request it took when it comes back to its own branch', async () => {
+    const job = getJob('stk-alone');
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    expect(job.releasedPrAttach).toMatchObject({ number: 1, headRef: 'dev-a', shared: false });
+    // A person opened #2, or its worker closed: no open session tracks it.
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'dev-a', headSha: 'sha-b' };
+    job.prAttachedByBranch = true;
+    await onBranch(job, 'dev-a', async () => {
+      refreshJobBranch(job);
+    });
+    // #1 was this session's alone, so coming back to it lets go of #2.
+    expect(job.branch).toBe('dev-a');
+    expect(job.prStatus).toBeNull();
+    expect(job.releasedPrAttach).toMatchObject({ number: 2, headRef: 'dev-b' });
+  });
+
+  it('reads a round off a pull request found but not mirrored yet, rather than dropping it as released', async () => {
+    const job = getJob('stk-unmirrored');
+    const review = getJob('stk-unmirrored-rev');
+    latestReviewDeclaration.mockClear();
+    latestReviewDeclaration.mockResolvedValueOnce({ findings: [], clean: true });
+    githubRest.mockResolvedValue({ ok: false, status: 403, json: async () => ({}) });
+    job.status = 'idle';
+    review.status = 'idle';
+    try {
+      await closeDevSession('stk-unmirrored-rev');
+      await vi.waitFor(() => expect(latestReviewDeclaration).toHaveBeenCalled());
+      expect(latestReviewDeclaration.mock.calls[0].slice(0, 2)).toEqual(['acme/unmirror', 77]);
+      expect(infoTexts(job).join('\n')).not.toMatch(/no longer tracks/);
+      // No second round on the same commit.
+      expect(job.reviewLoop.rounds).toBe(1);
+      expect(job.reviewLoop.lastSha).toBe('sha-u');
+    } finally {
+      job.status = 'closed';
+    }
+  });
+
+  it("drops a round's findings read across a release and a round on the new pull request", async () => {
+    const job = getJob('stk-readout');
+    const review = getJob('stk-readout-rev');
+    let answer;
+    latestReviewDeclaration.mockClear();
+    latestReviewDeclaration.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+    job.status = 'idle';
+    review.status = 'idle';
+    try {
+      await closeDevSession('stk-readout-rev');
+      await vi.waitFor(() => expect(latestReviewDeclaration).toHaveBeenCalled());
+      await onBranch(job, 'dev-b', async () => {
+        refreshJobBranch(job);
+      });
+      expect(job.reviewLoop.releasedPr).toBe(1);
+      // #2 attaches and its first round starts (applyLoopRelease) before #1's read returns.
+      job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', headSha: 'sha-b' };
+      job.reviewLoop.releasedPr = null;
+      job.reviewLoop.reviewPr = 2;
+      answer({
+        findings: [{ key: 'k1', severity: 'medium', title: 'A bug on #1', file: 'a.js', line: 1 }],
+        clean: false,
+      });
+      await vi.waitFor(() =>
+        expect(infoTexts(job).join('\n')).toMatch(
+          /review round 1's findings came back for PR #1, which this session no longer tracks/,
+        ),
+      );
+      expect(job.reviewLoop.triage).toBeFalsy();
+      expect(job.reviewLoop.pendingResult).toBeFalsy();
+    } finally {
+      job.status = 'closed';
+    }
+  });
+
+  it('keeps a spotted pull request closing on merge after another one was attached and released on the way', async () => {
+    const job = getJob('stk-spot');
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'main', headSha: 'sha-b' };
+    job.prAttachedByBranch = true;
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url.startsWith('/repos/acme/spot/pulls?'))
+        return {
+          ok: true,
+          json: async () => (url.includes('head=acme:dev-a') ? [{ number: 1, base: { ref: 'main' } }] : []),
+        };
+      if (/\/pulls\/1$/.test(url))
+        return {
+          ok: true,
+          json: async () => ({
+            number: 1,
+            state: 'open',
+            head: { ref: 'dev-a', sha: 'sha-a' },
+            base: { ref: 'main' },
+          }),
+        };
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    job.status = 'running';
+    try {
+      await onBranch(job, 'dev-a', async () => {
+        refreshJobBranch(job);
+        expect(job.prStatus).toBeNull();
+        expect(await attachPrForBranch(job, { fresh: true })).toBe(1);
+      });
+    } finally {
+      job.status = 'idle';
+    }
+    expect(job.prAttachedByBranch).toBe(false);
+  });
+
+  it('keeps the first released pull request across a second release before any round', async () => {
+    const job = getJob('stk-twice');
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.reviewLoop.releasedPr).toBe(1);
+    // #2 attaches, and the session moves on before the loop reviews it.
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'main', headSha: 'sha-b' };
+    job.prAttachedByBranch = true;
+    await onBranch(job, 'dev-c', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    // The loop still holds #1's converged state, so going back to #1 must not reset it.
+    expect(job.reviewLoop.releasedPr).toBe(1);
+    expect(job.reviewLoop).toMatchObject({ rounds: 1, done: true, lastSha: 'sha-a' });
+  });
+
+  it('does not let a sync in flight write the released pull request back', async () => {
+    const job = getJob('stk-sync');
+    let release;
+    const gate = new Promise((r) => (release = r));
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (/\/pulls\/1$/.test(url)) {
+        await gate;
+        return {
+          ok: true,
+          json: async () => ({
+            number: 1,
+            state: 'open',
+            head: { ref: 'dev-a', sha: 'sha-a' },
+            base: { ref: 'main' },
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    // A webhook names #1.
+    expect(syncSessionsOn('acme/shop', null, 1)).toBeGreaterThan(0);
+    await new Promise((r) => setTimeout(r, 0));
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(job.prStatus).toBeNull();
+  });
+  it('does not let a sync queued behind one in flight write the released pull request back', async () => {
+    const job = getJob('stk-sync-queued');
+    let release;
+    const gate = new Promise((r) => (release = r));
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (/\/pulls\/1$/.test(url)) {
+        await gate;
+        return {
+          ok: true,
+          json: async () => ({
+            number: 1,
+            state: 'open',
+            head: { ref: 'dev-a', sha: 'sha-a' },
+            base: { ref: 'main' },
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    // Two webhooks name #1 back to back: the second waits for the first.
+    expect(syncSessionsOn('acme/queue', null, 1)).toBe(1);
+    expect(syncSessionsOn('acme/queue', null, 1)).toBe(1);
+    await new Promise((r) => setTimeout(r, 0));
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(job.prStatus).toBeNull();
+  });
+
+  it('does not claim a pull request another open session is still working on, and takes it once that one settles', async () => {
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url.startsWith('/repos/acme/shop/pulls?'))
+        return { ok: true, json: async () => [{ number: 1, base: { ref: 'main' } }] };
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    const owner = getJob('stk-owner');
+    const job = getJob('stk-sibling');
+    job.status = 'running';
+    owner.status = 'running';
+    try {
+      expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
+      expect(job.prStatus).toBeNull();
+      expect(infoTexts(job).join('\n')).toMatch(
+        /PR #1 on dev-a is still being worked on by session stk-owner/,
+      );
+    } finally {
+      owner.status = 'idle';
+    }
+    try {
+      // An idle owner hands it over: continuing somebody's branch picks up its PR.
+      expect(await attachPrForBranch(job, { fresh: true })).toBe(1);
+    } finally {
+      job.status = 'closed';
+    }
+  });
+
+  it('drops a QA run on the released pull request instead of reading its verdict off the new one', async () => {
+    const job = getJob('stk-qa');
+    latestTestFailures.mockClear();
+    await onBranch(job, 'dev-b', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    // #2 attaches (a webhook) before the #1 QA run closes.
+    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', headSha: 'sha-b' };
+    await closeDevSession('stk-qa-run');
+    await vi.waitFor(() =>
+      expect(infoTexts(job).join('\n')).toMatch(
+        /QA run finished for PR #1, which this session no longer tracks/,
+      ),
+    );
+    expect(latestTestFailures).not.toHaveBeenCalled();
+    expect(job.qaLoop.done).toBe(false);
+    expect(job.qaLoop.pendingVerdict).toBeFalsy();
+    expect(infoTexts(job).join('\n')).not.toMatch(/no QA actions are required/);
+  });
+
+  it('reviews the same commit again after a detour that dropped its round, and keeps a spotted pull request closing on merge', async () => {
+    const job = getJob('stk-detour');
+    await onBranch(job, 'dev-tmp', async () => {
+      refreshJobBranch(job);
+    });
+    expect(job.prStatus).toBeNull();
+    expect(job.reviewLoop.pendingResult).toBeNull();
+    expect(job.reviewLoop.lastSha).toBeNull();
+    githubRest.mockImplementation(async (_cfg, _method, url) => {
+      if (url.startsWith('/repos/acme/side/pulls?'))
+        return {
+          ok: true,
+          json: async () => (url.includes('head=acme:dev-a') ? [{ number: 1, base: { ref: 'main' } }] : []),
+        };
+      if (/\/pulls\/1$/.test(url))
+        return {
+          ok: true,
+          json: async () => ({
+            number: 1,
+            state: 'open',
+            head: { ref: 'dev-a', sha: 'sha-a' },
+            base: { ref: 'main' },
+          }),
+        };
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    // Back on dev-a: no other session is busy on #1, so the branch finds it again.
+    job.status = 'running';
+    try {
+      await onBranch(job, 'dev-a', async () => {
+        refreshJobBranch(job);
+        expect(await attachPrForBranch(job, { fresh: true })).toBe(1);
+      });
+    } finally {
+      job.status = 'idle';
+    }
+    expect(job.prAttachedByBranch).toBe(false);
+    expect(job.reviewLoop.lastSha).toBeNull();
   });
 });
 
@@ -12307,6 +13746,29 @@ describe('Codex turn usage', () => {
   };
   const walks = (spy) => spy.mock.calls.filter(([dir]) => String(dir).includes('.codex-provider-2')).length;
 
+  it('persists the GitHub accounts actually used by successive review turns', async () => {
+    const job = getJob('codex-usage');
+    job.ownerId = 2;
+    job.reviewBranch = 'feature';
+    let login = 'alice';
+    setOwnerGithub(() => ({ token: `${login}-token`, login, id: 42 }));
+    try {
+      const usage = { input_tokens: 500100, cached_input_tokens: 450050, output_tokens: 20010 };
+      await turn(job, 'Review the change', usage);
+      login = 'bob';
+      await turn(job, 'Publish the review', usage);
+      await turn(job, 'Finish publishing', usage);
+      expect(job.reviewAuthorLogins).toEqual(['alice', 'bob']);
+      await flushJobs();
+      const saved = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
+      expect(JSON.parse(JSON.stringify(saved)).reviewAuthorLogins).toEqual(['alice', 'bob']);
+      const calls = spawn.mock.calls.filter(([cmd]) => cmd === '/mock/agent');
+      expect(calls.map(([, , opts]) => opts.env.GH_TOKEN)).toEqual(['alice-token', 'bob-token', 'bob-token']);
+    } finally {
+      setOwnerGithub(() => null);
+    }
+  });
+
   it('prices a running turn and updates the same checkpoint at close', async () => {
     vi.useFakeTimers();
     try {
@@ -14239,6 +15701,34 @@ describe('/btw side questions', () => {
     expect(btwQuestion(undefined)).toBeNull();
   });
 
+  it.each(['idle', 'running'])(
+    'refuses direct and message side questions after project revocation on a %s worker',
+    async (status) => {
+      const job = getJob('btw-session');
+      job.status = status;
+      job.ownerId = 2;
+      job.parentId = 'orchestrator';
+      const allowed = vi.fn(() => false);
+      setSessionProjectFilter(allowed);
+      const before = job.events.length;
+
+      expect(() => askDevSessionBtw(job.id, 'Which file?')).toThrow(/Project unavailable/);
+      expect(() => sendDevMessage(job.id, '/btw Which file?')).toThrow(/Project unavailable/);
+      expect(allowed).toHaveBeenCalledWith(job, expect.objectContaining({ repo: job.repo }));
+      expect(askClaudeSideQuestion).not.toHaveBeenCalled();
+      expect(recordTurnUsage).not.toHaveBeenCalled();
+      expect(job.events).toHaveLength(before);
+      expect(job.status).toBe(status);
+
+      allowed.mockReturnValue(true);
+      askClaudeSideQuestion.mockResolvedValueOnce({ text: 'lib/jobs.js', costUsd: 0.02 });
+      await expect(askDevSessionBtw(job.id, 'Which file?').answer).resolves.toMatchObject({
+        text: 'lib/jobs.js',
+      });
+      expect(askClaudeSideQuestion).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('answers beside a running turn: no queue, no user line, the answer paired by id', async () => {
     const job = getJob('btw-session');
     job.status = 'running';
@@ -14919,6 +16409,71 @@ describe('automatic recovery after a server restart', () => {
     child.emit('close', 0);
   };
 
+  it('uses server GitHub identity for automatic triage after reopening a failed queued session', async () => {
+    const gh = await vi.importActual('../lib/github.js');
+    Object.assign(state.projects[0], { autonomousReviewLoop: true, envTemplate: '', setupCommands: [] });
+    const originalSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, args, opts) => {
+      if (cmd !== 'git') return originalSpawn(cmd, args, opts);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      if (args[0] === 'clone') fs.mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      setImmediate(() => child.emit('close', 0));
+      return child;
+    });
+    const gitProbe = vi
+      .spyOn(await import('child_process'), 'spawnSync')
+      .mockReturnValue({ status: 0, stdout: '', stderr: '' });
+    const saved = row({
+      status: 'failed',
+      orchestrator: false,
+      branch: 'feature',
+      startedOnPr: 77,
+      prStatus: { number: 77, state: 'open' },
+      recoveryTurn: null,
+      recoveryQueue: [{ prompt: 'Queued instruction', shown: 'Queued instruction', files: [] }],
+      reviewLoop: { rounds: 1, reviewing: false, lastSha: 'a', pendingResult: { prNumber: 77, round: 1 } },
+    });
+    state.stored = [saved];
+    await initJobs({ deferPolling: true });
+    latestReviewFindings.mockResolvedValueOnce([
+      {
+        key: 'optional',
+        title: 'Small issue',
+        severity: 'low',
+        assessment: { verified: true, evidence: 'Reproduced', worthFixing: false, reason: 'Optional' },
+      },
+    ]);
+    githubRest.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ number: 77, state: 'open', labels: [{ name: 'code-approved' }] })),
+    );
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+    recordTriage.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await gh.githubRest({ githubToken: 'server-token' }, 'POST', '/automatic-triage');
+      return { error: null };
+    });
+    try {
+      gh.asGithubUser('request-token', () => reopenDevSession(saved.id));
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(children[0].prompt).toContain('Queued instruction');
+      finish(children[0]);
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+      expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer server-token');
+      await vi.waitFor(() => expect(saved.reviewLoop.done).toBe(true));
+    } finally {
+      gitProbe.mockRestore();
+      spawn.mockImplementation(originalSpawn);
+      fetch.mockRestore();
+      githubRest.mockReset();
+      recordTriage.mockReset();
+      recordTriage.mockResolvedValue({ error: null });
+    }
+  });
+
   it('resumes the saved conversation, preserves dirty files and delivers queued instructions', async () => {
     const checkout = path.join(root, 'checkout');
     fs.mkdirSync(checkout);
@@ -14961,6 +16516,86 @@ describe('automatic recovery after a server restart', () => {
         restartPending: false,
       }),
     );
+  });
+
+  it('reopens work only after the owner’s project grant is restored', async () => {
+    const checkout = path.join(root, 'checkout');
+    fs.mkdirSync(checkout);
+    spawnSync('git', ['-C', checkout, 'init', '-b', 'feature'], { stdio: 'ignore' });
+    state.projects[0].localDir = checkout;
+    const saved = row({
+      status: 'closed',
+      ownerId: 2,
+      orchestrator: false,
+      local: true,
+      workDir: checkout,
+      branch: 'feature',
+    });
+    state.stored = [saved];
+    await initJobs();
+    let shared = false;
+    const allowed = vi.fn((job, project) => job.ownerId !== 2 || project.id !== 1 || shared);
+    setSessionProjectFilter(allowed);
+    expect(() => sendDevMessage(saved.id, 'Continue')).toThrow(/Project unavailable/);
+    expect(children).toHaveLength(0);
+    expect(saved.status).toBe('closed');
+    shared = true;
+    sendDevMessage(saved.id, 'Continue');
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].cwd).toBe(checkout);
+    expect(children[0].rpc.find((m) => m.method === 'turn/start').params.input).toEqual([
+      { type: 'text', text: expect.stringContaining('Continue') },
+    ]);
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+  });
+
+  it('fails denied idle recovery without blocking other sessions or repeating it on restart', async () => {
+    const checkout = path.join(root, 'denied-checkout');
+    fs.mkdirSync(checkout);
+    fs.writeFileSync(path.join(checkout, 'unfinished.txt'), 'keep this work');
+    const denied = row({
+      status: 'idle',
+      ownerId: 2,
+      orchestrator: false,
+      dbServerId: 7,
+      workDir: checkout,
+      recoveryTurn: null,
+    });
+    const allowed = row({ status: 'idle', recoveryTurn: null });
+    state.stored = [denied, allowed];
+    setSessionProjectFilter((job) => job.ownerId !== 2);
+    releaseInstance.mockClear();
+    acquireInstance.mockClear();
+    await initJobs({ deferPolling: true });
+    expect(denied).toMatchObject({ status: 'interrupted', restartPending: true, restartDbServerId: 7 });
+    expect(() => resumeRestartedSessions()).not.toThrow();
+    await vi.waitFor(() => {
+      expect(denied).toMatchObject({
+        status: 'failed',
+        error: 'Project unavailable for the user who owns this session',
+        restartPending: false,
+        restartDbServerId: null,
+      });
+      expect(allowed.status).toBe('idle');
+    });
+    expect(reclaimInstance).toHaveBeenCalledWith(denied, 7);
+    expect(releaseInstance).toHaveBeenCalledWith(denied);
+    expect(acquireInstance).not.toHaveBeenCalled();
+    expect(children).toHaveLength(0);
+    expect(fs.readFileSync(path.join(checkout, 'unfinished.txt'), 'utf8')).toBe('keep this work');
+    await vi.waitFor(() =>
+      expect(saveJob.mock.calls.findLast(([j]) => j.id === denied.id)?.[0]).toMatchObject({
+        status: 'failed',
+        restartPending: false,
+        restartDbServerId: null,
+      }),
+    );
+    await initJobs({ deferPolling: true });
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(allowed.status).toBe('idle'));
+    expect(denied.status).toBe('failed');
+    expect(children).toHaveLength(0);
   });
 
   it('reopens waiting questions without inventing answers and leaves previously failed or closed sessions alone', async () => {
@@ -15537,6 +17172,52 @@ describe('automatic recovery after a server restart', () => {
     },
   );
 
+  it('names the exception of a failed setup step, without colour codes', async () => {
+    const checkout = path.join(root, 'acme__restart');
+    fs.mkdirSync(checkout);
+    const git = (args) => {
+      const result = spawnSync('git', args, { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git(['-C', checkout, 'init', '-b', 'feature']);
+    git([
+      '-C',
+      checkout,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'fixture',
+    ]);
+    const remote = path.join(root, 'remote.git');
+    git(['clone', '--bare', checkout, remote]);
+    git(['-C', checkout, 'remote', 'add', 'origin', remote]);
+    // Collision's shape: the exception, its message, then frames until the end.
+    state.projects[0].setupCommands = [
+      "printf 'TypeError\\nstrtolower(): null given\\n' && for i in 1 2 3 4 5 6; do printf '\\033[2m+%s vendor frames \\033[22m\\n' $i; done; exit 1",
+    ];
+    state.projects[0].envTemplate = '';
+    const child = row({
+      status: 'preparing',
+      orchestrator: false,
+      workDir: checkout,
+      branch: 'feature',
+      workspacePrepared: false,
+    });
+    state.stored = [child];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(child.error).toMatch(/exited with code 1/));
+    expect(child.error).toContain(
+      'TypeError | strtolower(): null given | … | +2 vendor frames | +3 vendor frames | +4 vendor frames | +5 vendor frames | +6 vendor frames',
+    );
+    expect(child.error).not.toContain('\x1b');
+    expect(child.events.filter((e) => e.kind === 'setup').map((e) => e.text)).toContain('+1 vendor frames');
+  });
+
   it.each(['idle', 'running', 'preparing'])(
     'keeps the prepared revision and dependencies together during %s recovery',
     async (status) => {
@@ -15859,6 +17540,117 @@ describe('automatic recovery after a server restart', () => {
     finish(children[0]);
     await vi.waitFor(() => expect(review.status).toBe('closed'));
     expect(children).toHaveLength(1);
+  });
+
+  it.each([
+    ['project', false],
+    ['database', false],
+    ['project', true],
+    ['database', true],
+    ['database during browser startup', false],
+    ['database during browser startup', true],
+  ])('keeps the reviewer after %s access denies publishing (answer: %s)', async (access, answering) => {
+    state.projects[0].reviewProviderId = 2;
+    const runtime = { providerId: 2, model: 'gpt-6.1-sol', effort: 'high' };
+    const parent = row({
+      status: 'closed',
+      recoveryTurn: null,
+      providerId: 1,
+      provider: 'Claude entry',
+      ownerId: 2,
+      branch: 'feature',
+      startedOnPr: 77,
+      prStatus: { number: 77, state: 'open', headSha: 'review-sha', syncedAt: new Date().toISOString() },
+    });
+    const review = row({
+      status: answering ? 'idle' : 'running',
+      awaitingAnswer: answering,
+      ownerId: 2,
+      reviewBranch: 'feature',
+      autoClose: true,
+      loopParentId: parent.id,
+      recoveryTurn: {
+        prompt: 'Review the change',
+        opts: { review: true },
+        phase: 'initial',
+        completed: false,
+      },
+    });
+    parent.reviewLoop = {
+      rounds: 1,
+      reviewing: true,
+      reviewerRound: true,
+      reviewSessionId: review.id,
+      lastSha: 'review-sha',
+      runtime: { ...runtime },
+      reviewRuntime: { ...runtime },
+    };
+    state.stored = [parent, review];
+    await initJobs({ deferPolling: true });
+    resumeRestartedSessions();
+    if (answering) {
+      await vi.waitFor(() => expect(review.status).toBe('idle'));
+      sendDevMessage(review.id, 'Continue the review');
+    }
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    const denial = access === 'project' ? 'Project unavailable' : 'Database server no longer shared';
+    let pool;
+    let serverSpy;
+    let launched;
+    let shared = true;
+    const browserStart = startBrowser.getMockImplementation();
+    if (access === 'project') setSessionProjectFilter(() => false);
+    else if (access === 'database')
+      assertInstanceAccess.mockImplementation(() => {
+        throw new Error(denial);
+      });
+    else {
+      pool = await vi.importActual('../lib/dbpool.js');
+      const servers = await import('../lib/dbservers.js');
+      serverSpy = vi.spyOn(servers, 'getDbServer').mockReturnValue({ id: 7 });
+      pool.setDbServerFilter(() => shared);
+      assertInstanceAccess.mockImplementation(pool.assertInstanceAccess);
+      instanceEnv.mockImplementation(pool.instanceEnv);
+      review.dbServerId = 7;
+      review.browser = true;
+      browserState.endpoint = null;
+      launched = Promise.withResolvers();
+      startBrowser.mockReturnValueOnce(launched.promise);
+    }
+    try {
+      finish(children[0]);
+      if (launched) {
+        await vi.waitFor(() => expect(startBrowser).toHaveBeenCalledWith(review.id));
+        shared = false;
+        launched.resolve();
+      }
+      await vi.waitFor(() => expect(parent.reviewLoop.reviewing).toBe(false));
+      expect(review.error).toContain(launched ? 'Database server is no longer shared' : denial);
+      expect(review.recoveryTurn.phase).toBe('publish');
+      expect(children).toHaveLength(1);
+      expect(parent.reviewLoop.reviewerFailed).not.toBe(true);
+      expect(parent.reviewLoop.runtime).toEqual(runtime);
+      expect(parent.reviewLoop.reviewRuntime).toEqual(runtime);
+      setSessionProjectFilter(() => true);
+      assertInstanceAccess.mockReset();
+      shared = true;
+      // Observe retry's selected runtime, stopping before real checkout/provider work.
+      parent.status = 'idle';
+      acquireInstance.mockRejectedValueOnce(new Error('fixture: retry admitted'));
+      await retryLoopRound(parent.id);
+      const retried = getJob(parent.reviewLoop.reviewSessionId);
+      expect(retried.providerId).toBe(2);
+      await vi.waitFor(() => expect(retried.status).toBe('failed'));
+      expect(retried.error).toBe('fixture: retry admitted');
+    } finally {
+      launched?.resolve();
+      pool?.setDbServerFilter(() => true);
+      serverSpy?.mockRestore();
+      instanceEnv.mockReset().mockReturnValue({});
+      startBrowser.mockReset().mockImplementation(browserStart);
+      setSessionProjectFilter(() => true);
+      assertInstanceAccess.mockReset();
+    }
   });
 
   it('continues after a completed discovery turn without running discovery again', async () => {

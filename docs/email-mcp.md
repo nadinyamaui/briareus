@@ -61,11 +61,11 @@ The API also accepts `access` on `POST /api/v1/settings/mail/accounts/connect`.
 Each mailbox belongs to the user who connected it. Through the API, every user
 (admin or member) reads and manages only their own mailboxes; another user's answers 404,
 and a mailbox already connected by someone else cannot be connected again. Mailboxes
-connected before users existed belong to the first admin.
+connected before users existed belong to the earliest user, the original operator, regardless of role.
 
 Eligible interactive chats in opted-in projects can access the mailboxes of the session's
 owner: the user who started it, or for a session nobody owns (one from before users) the
-first admin. A disabled owner's sessions reach none. Wake rules can name only those
+original operator. A disabled owner's sessions reach none. Wake rules can name only those
 mailboxes, and an email never wakes a session that is now another user's. Other projects
 have no access. Worker, review, QA, read-only analyst,
 preview, closed and failed sessions are refused, as are unattended delivery turns.

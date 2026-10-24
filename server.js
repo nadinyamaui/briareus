@@ -71,6 +71,7 @@ import {
 } from './lib/db.js';
 import {
   initJobs,
+  setSessionProjectFilter,
   resumeRestartedSessions,
   setAgentApiBase,
   jobForAgentToken,
@@ -107,7 +108,6 @@ import {
   openSessionBrowser,
   closeSessionBrowser,
   spawnWorkerSession,
-  setWorkerProjectAccess,
   workerSessionsFor,
   workerSummary,
   assertWorkerSlot,
@@ -273,38 +273,29 @@ const shares = createShares();
 const credentials = createUserCredentials();
 // A user's own GitHub identity (lib/me-routes.js), or null: none connected, the user is
 // gone or disabled, or CREDENTIALS_KEY cannot open it, in which case the server's stands.
+// An unloaded store must fail the action instead of silently changing its GitHub account.
 const githubOf = (userId) => {
   try {
     const user = userId == null ? null : users.get(userId);
     return user && user.disabledAt == null ? credentials.get(userId, 'github') : null;
-  } catch {
+  } catch (e) {
+    if (e.status === 503) throw e;
     return null;
   }
 };
 setOwnerGithub((job) => githubOf(job.ownerId));
-// Legacy Slack workspaces are assigned to this user once at startup.
-const firstAdmin = () => {
-  try {
-    return users.list().find((u) => u.role === 'admin')?.id ?? null;
-  } catch {
-    return null;
-  }
-};
-// Whose personal inboxes (mail, Slack) a session reaches: its owner, or for a session nobody
-// owns the first admin, and none while that user is disabled.
+// Whose personal inboxes (mail, Slack) a session reaches: its owner while they
+// are enabled, or for a session nobody owns, one from before users, the earliest user,
+// its original operator regardless of their current role.
 const inboxOwner = (job) => {
-  const id = job.ownerId ?? firstAdmin();
-  try {
-    const owner = id == null ? null : users.get(id);
-    return owner && owner.disabledAt == null ? owner.id : null;
-  } catch {
-    return null;
-  }
+  // An unavailable user store must defer mail processing, not revoke ownership.
+  const owner = job.ownerId != null ? users.get(job.ownerId) : users.list()[0];
+  return owner && owner.disabledAt == null ? owner.id : null;
 };
 setInboxOwner(inboxOwner);
 // The user a /api/v1 request acts as, who owns any session it starts.
 const requestOwner = (res) => res.locals.apiUser?.id ?? null;
-// Whether a session may use a shared server (lib/shares.js): one nobody started works as the
+// Whether a session may use a shared resource (lib/shares.js): one nobody started works as the
 // admins' and may use what its project is given; one a user owns, only what that user may
 // use, and nothing once they are gone or disabled.
 const sessionMayUse = (job, kind, id) => {
@@ -317,7 +308,7 @@ const sessionMayUse = (job, kind, id) => {
   }
 };
 setDbServerFilter((job, server) => sessionMayUse(job, 'dbServer', server.id));
-setWorkerProjectAccess((job, project) => sessionMayUse(job, 'project', project.id));
+setSessionProjectFilter((job, project) => sessionMayUse(job, 'project', project.id));
 
 // On every response, including the webhooks': nothing here is a page, and the
 // headers say so (lib/security.js).
@@ -333,14 +324,18 @@ const slackService = createSlackService({
   unfit: webhookUnfit,
   eventsUrl: (id) => `${getConfig().publicBaseUrl}/webhooks/slack/${id}`,
   inboxOwner,
-  legacyOwner: firstAdmin,
+  // Persist legacy workspaces to the original operator, regardless of their current role.
+  legacyOwner: () => users.list()[0]?.id ?? null,
 });
 setSlackAccess((job) => slackService.briefing(job));
 
 // Webhooks go ahead of the JSON body parser: GitHub and Slack sign the raw bytes with an HMAC,
 // and a re-serialized body verifies against nothing (lib/webhooks.js).
 const mailService = createMailService({ onReceived: mailReceivedDurably, onDisabled: cancelMailWakes });
-setMailWakeAccess((id) => mailService.wakeAccountEnabled(id));
+setMailWakeAccess((id, job) => {
+  const owner = inboxOwner(job);
+  return owner != null && mailService.forUser(owner).wakeAccountEnabled(id);
+});
 app.use(mailPushRoutes({ service: mailService }));
 app.use('/webhooks/slack', slackEventsRouter({ service: slackService }));
 
@@ -2262,7 +2257,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
 (async () => {
   try {
     await initDb();
-    await users.init();
+    await users.init().catch((e) => console.error('Could not load users:', e.message));
     await initTemplates();
     await initProjects();
     await initDbServers();
@@ -2272,8 +2267,8 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await envoyerService.init();
     await forgeAccounts.init();
     await mailService.init();
-    await shares.init();
-    await credentials.init();
+    await shares.init().catch((e) => console.error('Could not load shares:', e.message));
+    await credentials.init().catch((e) => console.error('Could not load user credentials:', e.message));
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
@@ -2314,9 +2309,12 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     .catch((e) => console.error('Could not load WhatsApp watches (tried again every poll):', e.message));
   // `npm run create-token` and `npm run users` write the database directly; a revoked token
   // or disabled user stops new requests within 15s and open streams within 30s.
+  // Shares and credentials follow the same cadence for changes from other server instances.
   setInterval(() => {
     mobileAuth.refresh().catch((e) => console.error('Could not reload device tokens:', e.message));
     users.refresh().catch((e) => console.error('Could not reload users:', e.message));
+    shares.refresh().catch((e) => console.error('Could not reload shares:', e.message));
+    credentials.refresh().catch((e) => console.error('Could not load user credentials:', e.message));
   }, 15000).unref();
   // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
   // a client reads its mail from the database rather than from the provider.
