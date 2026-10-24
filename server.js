@@ -686,12 +686,8 @@ api.use(slackRoutes({ service: slackService, agentSession, getProject }));
 // Each user's own Home Assistant (lib/me-routes.js). The one in .env was the operator's, so
 // it stands for the original operator until they connect one of their own.
 const homeAssistantOf = (user) => {
-  try {
-    const own = credentials.get(user.id, 'homeAssistant');
-    if (own) return own;
-  } catch {
-    return null;
-  }
+  const own = credentials.get(user.id, 'homeAssistant');
+  if (own) return own;
   return user.id === originalOperator() ? getConfig().homeAssistant : null;
 };
 api.use(
