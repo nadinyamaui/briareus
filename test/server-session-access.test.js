@@ -105,16 +105,18 @@ it.each(['shares', 'credentials'])(
     };
     const mobileAuth = { init: vi.fn(async () => {}), refresh: vi.fn(async () => {}) };
     const slackService = { migrateLegacyOwnership: vi.fn(async () => {}) };
+    const whatsappOwners = { init: vi.fn(async () => {}) };
     const boot = source.slice(
       source.indexOf('    await shares.init().catch('),
       source.indexOf('    await initSavedPrompts();'),
     );
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-    await new AsyncFunction('users', 'shares', 'credentials', 'mobileAuth', boot)(
+    await new AsyncFunction('users', 'shares', 'credentials', 'mobileAuth', 'whatsappOwners', boot)(
       users,
       shares,
       credentials,
       mobileAuth,
+      whatsappOwners,
     );
     const identityWiring = source.slice(
       source.indexOf('const githubOf ='),
@@ -137,7 +139,16 @@ it.each(['shares', 'credentials'])(
       source.indexOf('  setInterval(() => {\n    mobileAuth.refresh()'),
       source.indexOf('  // Every connected mailbox'),
     );
-    new Function('setInterval', 'users', 'shares', 'credentials', 'mobileAuth', 'slackService', timer)(
+    new Function(
+      'setInterval',
+      'users',
+      'shares',
+      'credentials',
+      'mobileAuth',
+      'slackService',
+      'whatsappOwners',
+      timer,
+    )(
       (fn) => {
         refresh = fn;
         return { unref() {} };
@@ -147,6 +158,7 @@ it.each(['shares', 'credentials'])(
       credentials,
       mobileAuth,
       slackService,
+      whatsappOwners,
     );
     refresh();
     await vi.waitFor(() => {

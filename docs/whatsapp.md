@@ -1,8 +1,12 @@
 # WhatsApp inbox through WAHA
 
-Briareus core exposes the operator’s WhatsApp inbox at `/api/v1/whatsapp`.
-It uses the same admin token as the other business inboxes, independently of
-projects and agent sessions. WAHA keeps the phone link and chat history;
+Briareus core exposes each user’s WhatsApp inbox at `/api/v1/whatsapp`,
+independently of projects and agent sessions. An account (a WAHA session with a
+phone linked to it) belongs to one user: `default`, linked before Briareus had
+users, and other existing WAHA sessions belong to the original operator, even after
+a role change. A new account belongs to whoever starts it first. Every
+user, admin or member, reaches only their own accounts, and their sessions only
+theirs. WAHA keeps the phone link and chat history;
 Briareus does not copy messages into its database or agent transcripts.
 
 The core has no UI. Windows, iOS or a server-side client can use the endpoints
@@ -92,14 +96,17 @@ docker compose --project-directory ~/.config/briareus/waha logs --tail 100
 
 ## Link a phone and use the inbox
 
-Every call needs `Authorization: Bearer <admin-token>`; read/manage tokens
-cannot access the inbox. Paths below are relative to `/api/v1`.
+Every call needs a user’s token: `read` reads, `manage` links, sends and marks
+read. Another user’s account answers 404, and the account list shows only your
+own. WAHA Core allows only the `default` session, so a second user can link a
+phone only with WAHA Plus (or a WAHA of their own on another server, which this
+core does not support yet). Paths below are relative to `/api/v1`.
 
 1. `GET /whatsapp/accounts` returns `{ configured, accounts }`; each account
    has `{ id, status, me: { id, name } | null }`.
 2. `POST /whatsapp/accounts/default/start` creates and starts the free WAHA
-   Core account, or reconnects it when stopped/failed. Existing Plus accounts
-   are available by their own IDs.
+   Core account, or reconnects it when stopped/failed. With Plus, use a new
+   account ID in place of `default` to create and link your own phone.
 3. Poll `GET /whatsapp/accounts/default` until `status` is `SCAN_QR_CODE`.
 4. `GET /whatsapp/accounts/default/qr` returns `{ mimetype: "image/png", data }`
    with base64 PNG data. Display the QR and refresh it periodically while the
@@ -171,8 +178,9 @@ The tools are `whatsapp_accounts`, `whatsapp_conversations`,
 `whatsapp_watch`,
 `whatsapp_unwatch` and `whatsapp_mark_read`, served under
 `/api/agent/whatsapp` with the session’s
-own token. They use the same WAHA service as the admin inbox; linking, the
-pairing QR and logout stay admin-only. `whatsapp_media` downloads one message’s
+own token. They use the same WAHA service as the inbox, held to the accounts the
+session’s owner owns (for a session from before users, the original operator’s); linking,
+the pairing QR and logout stay with the inbox API. `whatsapp_media` downloads one message’s
 media (up to 25 MiB, like mail attachments) to a private temporary file and
 returns its path, so the agent can open images and documents with its file
 tools. `whatsapp_transcribe` turns one voice note (or other audio message)
@@ -196,7 +204,7 @@ An operator can link one group in the session's existing webhook settings:
 
 ```http
 PUT /api/v1/sessions/{session}/webhook
-Authorization: Bearer <admin-token>
+Authorization: Bearer <your-token>
 Content-Type: application/json
 
 {

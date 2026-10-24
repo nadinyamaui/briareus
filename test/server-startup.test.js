@@ -45,6 +45,7 @@ describe('startup store loading', () => {
         'mailService',
         'mobileAuth',
         'credentials',
+        'whatsappOwners',
       ])
         deps[name] = { init: vi.fn().mockResolvedValue(undefined) };
       if (failed === 'credentials')
