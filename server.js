@@ -2312,7 +2312,10 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   // Shares and credentials follow the same cadence for changes from other server instances.
   setInterval(() => {
     mobileAuth.refresh().catch((e) => console.error('Could not reload device tokens:', e.message));
-    users.refresh().catch((e) => console.error('Could not reload users:', e.message));
+    users
+      .refresh()
+      .then(() => slackService.migrateLegacyOwnership())
+      .catch((e) => console.error('Could not reload users or Slack ownership:', e.message));
     shares.refresh().catch((e) => console.error('Could not reload shares:', e.message));
     credentials.refresh().catch((e) => console.error('Could not load user credentials:', e.message));
   }, 15000).unref();

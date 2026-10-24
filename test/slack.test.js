@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { createSlackService, createSlackApi, verifySlackSignature } from '../lib/slack.js';
 import { slackRoutes, slackEventsRouter } from '../lib/slack-routes.js';
+import { createUsers } from '../lib/users.js';
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ credentialsKey: 'k'.repeat(32) }) }));
 
@@ -125,6 +126,7 @@ describe('the Slack workspaces', () => {
     await s.init();
     expect(stored.slack_workspaces.map((w) => w.ownerId)).toEqual([1, 3]);
     admin = 2;
+    await s.migrateLegacyOwnership();
     expect(s.list(undefined, 1)).toHaveLength(1);
     expect(s.list(undefined, 2)).toEqual([]);
     expect(() => s.owns(stored.slack_workspaces[0].id, 2)).toThrow('not found');
@@ -141,20 +143,30 @@ describe('the Slack workspaces', () => {
     async (failure) => {
       const { stored } = await service();
       delete stored.slack_workspaces[0].ownerId;
+      const log = vi.fn();
+      let recovered = false;
       const s = createSlackService({
         load: async (key, fallback) => structuredClone(stored[key] ?? fallback),
-        legacyOwner: () => (failure === 'owner unavailable' ? null : 1),
-        save: async () => {
-          throw new Error('save failed');
+        legacyOwner: () => (!recovered && failure === 'owner unavailable' ? null : 1),
+        save: async (key, rows) => {
+          if (!recovered) throw new Error('save failed');
+          stored[key] = rows;
         },
         inboxOwner: () => null,
+        log,
       });
-      await expect(s.init()).rejects.toThrow(
+      await s.init();
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('legacy ownership migration deferred:'));
+      await expect(s.migrateLegacyOwnership()).rejects.toThrow(
         failure === 'owner unavailable' ? 'Cannot determine' : 'save failed',
       );
       expect(s.list(undefined, 1)).toEqual([]);
       expect(s.list(undefined, 2)).toEqual([]);
       expect(s.briefing(job())).toBeNull();
+      recovered = true;
+      await s.migrateLegacyOwnership();
+      expect(s.list(undefined, 1)).toHaveLength(1);
+      expect(stored.slack_workspaces[0].ownerId).toBe(1);
     },
   );
 
@@ -1482,6 +1494,47 @@ describe('replies through the Events API', () => {
     });
     // Slack's retry of the same event.
     expect(s.receive(String(w.id), reply.raw, reply.headers).then).toBeUndefined();
+  });
+
+  it('retries the same signed reply after the users store recovers, then deduplicates it', async () => {
+    const load = vi.fn(async () => [{ id: 1, disabledAt: null }]);
+    let users = createUsers({ load });
+    await users.init();
+    const { s, w, deliver } = await sentTo('U1', { inboxOwner: () => users.get(1)?.id ?? null });
+    users = createUsers({ load });
+    load.mockRejectedValueOnce(new Error('DB down'));
+    await expect(users.init()).rejects.toThrow('DB down');
+    await s.init(); // Already-owned workspaces and saved replies load despite the users outage.
+    const reply = signed(
+      event({ channel: 'D-U1', channel_type: 'im', user: 'U1', text: 'private reply', ts: '1.2' }),
+    );
+    const app = express();
+    app.use('/webhooks/slack', slackEventsRouter({ service: s, log: () => {} }));
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    const send = () =>
+      fetch(`http://127.0.0.1:${server.address().port}/webhooks/slack/${w.id}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Slack-Request-Timestamp': reply.headers.timestamp,
+          'X-Slack-Signature': reply.headers.signature,
+        },
+        body: reply.raw,
+      });
+    try {
+      expect((await send()).status).toBe(503);
+      expect(deliver).not.toHaveBeenCalled();
+      await users.refresh();
+      expect((await send()).status).toBe(200);
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect(deliver.mock.calls[0][1].text).toContain('private reply');
+      expect((await send()).status).toBe(200);
+      expect(deliver).toHaveBeenCalledOnce();
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it('persists human DM supersession, preserves agent threads, and lets a later agent send reclaim replies', async () => {

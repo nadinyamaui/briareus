@@ -104,6 +104,7 @@ it.each(['shares', 'credentials'])(
       get: () => ({ id: 2, disabledAt: null }),
     };
     const mobileAuth = { init: vi.fn(async () => {}), refresh: vi.fn(async () => {}) };
+    const slackService = { migrateLegacyOwnership: vi.fn(async () => {}) };
     const boot = source.slice(
       source.indexOf('    await shares.init().catch('),
       source.indexOf('    await initSavedPrompts();'),
@@ -136,7 +137,7 @@ it.each(['shares', 'credentials'])(
       source.indexOf('  setInterval(() => {\n    mobileAuth.refresh()'),
       source.indexOf('  // Every connected mailbox'),
     );
-    new Function('setInterval', 'users', 'shares', 'credentials', 'mobileAuth', timer)(
+    new Function('setInterval', 'users', 'shares', 'credentials', 'mobileAuth', 'slackService', timer)(
       (fn) => {
         refresh = fn;
         return { unref() {} };
@@ -145,6 +146,7 @@ it.each(['shares', 'credentials'])(
       shares,
       credentials,
       mobileAuth,
+      slackService,
     );
     refresh();
     await vi.waitFor(() => {
