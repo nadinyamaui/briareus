@@ -738,6 +738,31 @@ describe('acting as a user', () => {
     expect((await gh.githubRest(cfg, 'GET', '/y')).status).toBe(200);
   });
 
+  it.each([
+    [429, { 'retry-after': '60' }, {}],
+    [403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1800000600' }, {}],
+    [200, { 'x-ratelimit-reset': '1800000600' }, { errors: [{ type: 'RATE_LIMITED' }] }],
+    [200, {}, { errors: [{ type: 'RATE_LIMITED' }] }],
+  ])(
+    'preserves a personal GraphQL limit (%s, %j) without cooling down the server',
+    async (status, headers, body) => {
+      const gh = await freshGithub();
+      vi.useFakeTimers();
+      vi.setSystemTime(1800000000000);
+      const fetch = stubFetch(reply({ status, headers, body }), reply({ body: { data: { ok: true } } }));
+      await expect(
+        gh.asGithubUser('user-tok', () => gh.githubGraphql(cfg, 'mutation {}', {})),
+      ).rejects.toMatchObject({
+        status: 429,
+        rateLimited: true,
+        resource: 'graphql',
+        retryAt: 1800000000000 + ('x-ratelimit-reset' in headers ? 600000 : 60000) + 5000,
+      });
+      await expect(gh.githubGraphql(cfg, 'query {}', {})).resolves.toEqual({ ok: true });
+      expect(fetch.calls.map((c) => c.init.headers.Authorization)).toEqual(['Bearer user-tok', 'Bearer tok']);
+    },
+  );
+
   it('clears a request identity for detached work and restores it for the request', async () => {
     const gh = await freshGithub();
     const fetch = stubFetch(reply(), reply());
