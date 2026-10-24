@@ -66,6 +66,22 @@ for example `http://waha:3000`. Both values are required. Never expose WAHA’s
 port or put its key in a client. The core strips all `WAHA_*` variables from
 child-process environments.
 
+### Sharing a WAHA with other systems
+
+A WAHA that also serves other systems usually carries numbers the core must not
+read or send from. List the accounts (WAHA session names) the core may use, in
+the core’s `.env`, its environment or the private file `WAHA_CONFIG_FILE` names:
+
+```dotenv
+WAHA_ACCOUNTS=mine
+```
+
+Every other account is then left out of the account list and answers 404 to the
+inbox API and to session tools, before WAHA is asked. A listed account that WAHA
+does not have yet is created by `POST /whatsapp/accounts/<id>/start`; an account
+other than `default` needs WAHA Plus. Leave `WAHA_ACCOUNTS` empty to use every
+account. Restart the core after changing it.
+
 WAHA Dashboard and Swagger are disabled in this installation; pairing and
 inbox access go through Briareus’s authenticated API. Inspect the service with:
 
