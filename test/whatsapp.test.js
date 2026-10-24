@@ -46,7 +46,7 @@ async function mediaService(fileHandler, timeoutMs = 150) {
   return createWhatsAppService({ config: () => ({ url, apiKey: KEY }), timeoutMs });
 }
 
-async function setup({ initialAccount = null, accounts = undefined } = {}) {
+async function setup({ initialAccount = null, accounts = undefined, ownershipError = null } = {}) {
   const calls = [];
   let current = initialAccount;
   let failure = 0;
@@ -138,6 +138,7 @@ async function setup({ initialAccount = null, accounts = undefined } = {}) {
   const owners = createWhatsAppOwners({
     load: async () => structuredClone(stored),
     update: async (_key, _fallback, fn) => {
+      if (ownershipError) throw ownershipError;
       const value = structuredClone(stored);
       const result = await fn(value);
       stored = value;
@@ -387,6 +388,29 @@ describe('the WhatsApp core inbox', () => {
     );
     expect(ctx.owners.ownerOf('business')).toBe(1);
   });
+
+  it.each([
+    [
+      new Error("UPDATE denied for user 'internal'@'db-host' on table 'app_settings'"),
+      502,
+      'WhatsApp returned an unexpected response',
+    ],
+    [
+      Object.assign(new Error('WhatsApp ownership could not be loaded; try again shortly'), { status: 503 }),
+      503,
+      'WhatsApp ownership could not be loaded; try again shortly',
+    ],
+  ])(
+    'handles ownership persistence errors without starting the account (%s)',
+    async (error, status, message) => {
+      const ctx = await setup({ ownershipError: error });
+      const response = await ctx.request('/ana/start', { method: 'POST', token: ctx.tokens.member });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({ error: message });
+      expect(ctx.owners.ownerOf('ana')).toBeNull();
+      expect(ctx.calls).toEqual([]);
+    },
+  );
 
   it('rejects starting an excluded account without granting ownership or contacting WAHA', async () => {
     const ctx = await setup({

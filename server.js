@@ -716,6 +716,7 @@ const whatsappWatcher = createWhatsAppWatcher({
   allowed: (job) => whatsappWatchAllowed(job, getProject(job.repo)),
   mayUse: whatsappMayUse,
   ownershipReady: whatsappOwners.ready,
+  refreshOwnership: whatsappOwners.init,
   deliver: (id, delivery, group) => deliverToSession(id, delivery, { via: 'whatsapp', ...group }),
   instruct: (id, instruction, group) =>
     instructSessionDurably(id, instruction, { via: 'whatsapp', ...group }),

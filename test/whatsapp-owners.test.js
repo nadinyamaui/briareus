@@ -451,6 +451,71 @@ it.each(['watch load', 'lapsed read'])(
   },
 );
 
+it.each(['live', 'lapsed', 'refresh failure'])(
+  'refreshes stale ownership before pruning a saved %s watch',
+  async (stage) => {
+    const { createWhatsAppWatcher } = await import('../lib/whatsapp-watch.js');
+    const { store: first, createStore, stored } = owners();
+    const loadOwners = vi.fn(async () => structuredClone(stored()));
+    const second = createStore({ load: loadOwners });
+    await Promise.all([first.init(), second.init()]);
+    await first.claim(2, 'ana');
+    expect(second.ready()).toBe(true);
+    expect(second.ownerOf('ana')).toBeNull();
+    const now = 1700000000000;
+    const job = { id: 'j1', ownerId: 2 };
+    let saved = ['ana', 'default'].map((account) => ({
+      jobId: job.id,
+      account,
+      chat: '49123456789@c.us',
+      since: now / 1000 - 60,
+      expiresAt: now + (stage === 'lapsed' ? -1000 : 3600_000),
+      seen: [],
+    }));
+    const original = structuredClone(saved);
+    const messages = vi.fn(async () => ({
+      messages: [{ id: 'reply', timestamp: now / 1000 - 30, text: 'Hello', fromMe: false }],
+    }));
+    const deliver = vi.fn();
+    const save = vi.fn(async (_key, rows) => {
+      saved = structuredClone(rows);
+    });
+    const watcher = createWhatsAppWatcher({
+      service: { messages },
+      getJob: () => job,
+      allowed: () => true,
+      mayUse: (job, account) => second.owns(job.ownerId, account),
+      ownershipReady: second.ready,
+      refreshOwnership: second.init,
+      deliver,
+      load: async () => saved,
+      save,
+      now: () => now,
+      log: () => {},
+    });
+    try {
+      await watcher.init();
+      if (stage === 'refresh failure') {
+        loadOwners.mockRejectedValueOnce(new Error('Ownership unavailable'));
+        await watcher.poll();
+        expect(saved).toEqual(original);
+        expect(save).not.toHaveBeenCalled();
+        expect(messages).not.toHaveBeenCalled();
+        expect(deliver).not.toHaveBeenCalled();
+        await second.init();
+      }
+      await watcher.poll();
+      expect(messages).toHaveBeenCalledExactlyOnceWith('ana', original[0].chat, { limit: '20' });
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(saved).toEqual(stage === 'lapsed' ? [] : [{ ...original[0], seen: ['reply'] }]);
+      await watcher.poll();
+      expect(deliver).toHaveBeenCalledOnce();
+    } finally {
+      watcher.stop();
+    }
+  },
+);
+
 it.each(['constructor', 'toString', '__proto__'])('claims and reloads the valid name %s', async (account) => {
   const { store, stored } = owners();
   await store.init();
