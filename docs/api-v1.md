@@ -142,6 +142,30 @@ breaks spend down by `users` and filters by `user`, and `GET /usage` adds a
 first admin; sessions that already existed have no owner. Forge accounts are
 still used only by admins.
 
+### Your own GitHub account
+
+Without one, everything goes to GitHub as the server's account
+(`GITHUB_TOKEN`). A user can connect their own with a personal access token
+(`PUT /me/github`, stored encrypted under `CREDENTIALS_KEY`; `GET /me/github`
+shows only the login, `DELETE /me/github` removes it). After that:
+
+- Changes they make through the API, such as comments, merges, labels, finding
+  verdicts and board moves, are made as them. Reads keep the server's token,
+  so lists and caches stay the same for everyone.
+- Their sessions run `gh`, commit and push as them (`GH_TOKEN`, the git
+  credential, and the author and committer set to their login and GitHub
+  no-reply address). The server's own clones, fetches and setup steps, and the
+  automatic review loop's labels and comments, stay on the server's account.
+- A disabled user's token is no longer used.
+
+### Your own mail
+
+Mailboxes belong to the user who connected them. `GET /mail/messages` and
+the mail settings routes answer any user, held to their own mailboxes (a
+`read` token reads, `manage` connects, changes and sends); an admin has no
+access to a member's mail. Sessions reach their owner's mailboxes; see the
+[email guide](email-mcp.md).
+
 A disabled user's tokens answer 401 within 15 seconds, without a restart. The
 last enabled admin cannot be demoted or disabled. When the server was first
 upgraded to users, it created an admin named `Owner` and gave every existing
@@ -177,22 +201,22 @@ What is there, by area:
 
 See the [feature overview](features.md) for server capabilities and recent additions.
 
-| Area                     | Paths                                                                                                                                                                                                | Needs         |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| The token                | `/`, `/openapi.json`, `/token`, `/events`                                                                                                                                                            | read          |
-| Projects                 | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                                                                                                                                          | read / manage |
-| Pull requests and issues | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits`; `/repo/tree`, `/repo/file`, `/repo/archive`; `/issues/{number}` and its timeline, close; `/project-board` | read / manage |
-| Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops; `/preview/access`                                                                                                  | read / manage |
-| Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                                                                                                  | read to admin |
-| Memory                   | `/memories`, `/memories/health`                                                                                                                                                                      | read / admin  |
-| Slack inbox              | `/slack/workspaces`, `/slack/workspaces/{id}/conversations`, `people`, `direct-messages`, `events`; conversation history, threads, replies and read positions                                        | admin         |
-| WhatsApp inbox           | `/whatsapp/accounts`, account linking, QR codes, conversations, messages, read receipts and media downloads                                                                                          | admin         |
-| Operations               | `/attention`, `/maintenance`, `/deployments`, `/ssh/requests`, `/slack/requests`, `/tasks`, `/videos`                                                                                                | admin         |
-| Home Assistant           | `/home-assistant`, `/home-assistant/entities`, `/home-assistant/services`, `/home-assistant/events/{type}`                                                                                           | admin         |
-| Mail                     | `/mail/messages`, `/mail/accounts/{account}/messages/{id}`                                                                                                                                           | admin         |
-| Laravel Forge            | `/forge/accounts/{account}/servers`, sites, deployment scripts and environment files                                                                                                                 | admin         |
-| Laravel Envoyer          | `/envoyer/accounts`, account projects, servers and deployments                                                                                                                                       | read / manage |
-| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `slack/workspaces`, `mail/accounts`, `mcp/servers`, `forge/accounts`, `envoyer/accounts`, `templates`                  | admin         |
+| Area                     | Paths                                                                                                                                                                                                | Needs               |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| The token                | `/`, `/openapi.json`, `/token`, `/events`                                                                                                                                                            | read                |
+| Projects                 | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                                                                                                                                          | read / manage       |
+| Pull requests and issues | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits`; `/repo/tree`, `/repo/file`, `/repo/archive`; `/issues/{number}` and its timeline, close; `/project-board` | read / manage       |
+| Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops; `/preview/access`                                                                                                  | read / manage       |
+| Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                                                                                                  | read to admin       |
+| Memory                   | `/memories`, `/memories/health`                                                                                                                                                                      | read / admin        |
+| Slack inbox              | `/slack/workspaces`, `/slack/workspaces/{id}/conversations`, `people`, `direct-messages`, `events`; conversation history, threads, replies and read positions                                        | your own            |
+| WhatsApp inbox           | `/whatsapp/accounts`, account linking, QR codes, conversations, messages, read receipts and media downloads                                                                                          | admin               |
+| Operations               | `/attention`, `/maintenance`, `/deployments`, `/ssh/requests`, `/slack/requests`, `/tasks`, `/videos`                                                                                                | admin; manage Slack |
+| Home Assistant           | `/home-assistant`, `/home-assistant/entities`, `/home-assistant/services`, `/home-assistant/events/{type}`                                                                                           | admin               |
+| Mail                     | `/mail/messages`, `/mail/accounts/{account}/messages/{id}`                                                                                                                                           | admin               |
+| Laravel Forge            | `/forge/accounts/{account}/servers`, sites, deployment scripts and environment files                                                                                                                 | admin               |
+| Laravel Envoyer          | `/envoyer/accounts`, account projects, servers and deployments                                                                                                                                       | read / manage       |
+| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `slack/workspaces`, `mail/accounts`, `mcp/servers`, `forge/accounts`, `envoyer/accounts`, `templates`                  | admin; own Slack    |
 
 Everything the removed dashboard could do has a route, except its browser push
 notifications, which went with it. The reference ends with a table from each of
@@ -202,9 +226,14 @@ here, since a handler with no route is one nothing can reach.
 ## Slack inbox
 
 Slack is a core business inbox, independent of agent sessions: no Claude run,
-project association or session token is needed to read or reply. All inbox
-routes require an **admin** API token, since a workspace includes private DMs
-unrelated to project access. The existing session tools and their approvals
+project association or session token is needed to read or reply. Each
+workspace belongs to the user who connected it, since its token reads their
+private DMs and sends as them: every user, admin or member, reaches only their
+own workspaces (`read` to read, `manage` to send or change), and another's
+answers 404. Workspaces connected before users existed belong to the original
+operator, regardless of their current role. Only a workspace's owner sees and rules on what sessions want to send
+through it (`/slack/requests`), and a session uses its owner's workspace for its
+project; each user may connect their own workspace for the same project. The existing session tools and their approvals
 are separate; inbox sends are human-authored and send immediately as the
 connected Slack user.
 

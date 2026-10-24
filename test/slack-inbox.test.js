@@ -53,7 +53,8 @@ async function setup({ signingSecret = SECRET } = {}) {
     log: () => {},
   });
   await s.init();
-  const w = await s.create({ token: TOKEN, signingSecret, projects: [] });
+  // The workspace belongs to the user who connected it, here the first admin.
+  const w = await s.create({ token: TOKEN, signingSecret, projects: [] }, 1);
   let devices = [];
   const auth = createMobileAuth({
     load: async () => structuredClone(devices),
@@ -67,13 +68,24 @@ async function setup({ signingSecret = SECRET } = {}) {
     tokens[permission] = (
       await auth.create({ userId: 1, label: permission, permission, repos: ['o/a'], days: 30 }, OWNER)
     ).token;
+  // Another user, whose tokens reach none of the first admin's inbox.
+  tokens.member = (
+    await auth.create({ userId: 2, label: 'member', permission: 'manage', repos: ['o/a'], days: 30 }, OWNER)
+  ).token;
 
   const handlers = slackRoutes({ service: s, agentSession: () => null, getProject: () => null });
   const app = express();
   app.use('/webhooks/slack', slackEventsRouter({ service: s, log: () => {} }));
   app.use(
     apiV1Routes({
-      users: { get: () => ({ id: 1, name: 'Owner', role: 'admin', disabledAt: null }), list: () => [] },
+      users: {
+        get: (id) =>
+          ({
+            1: { id: 1, name: 'Owner', role: 'admin', disabledAt: null },
+            2: { id: 2, name: 'Ana', role: 'member', disabledAt: null },
+          })[id] || null,
+        list: () => [],
+      },
       auth,
       apiEnabled: () => true,
       ownerSecret: () => OWNER,
@@ -295,7 +307,7 @@ describe('the operator Slack inbox', () => {
     expect((await ctx.request('/9999/conversations')).status).toBe(404);
   });
 
-  it('keeps the entire inbox behind admin auth and out of agent endpoints', async () => {
+  it('keeps each inbox its owner’s, sends only with manage, and stays out of agent endpoints', async () => {
     const ctx = await setup();
     const before = ctx.api.mock.calls.length;
     const paths = [
@@ -310,9 +322,11 @@ describe('the operator Slack inbox', () => {
       [`${ctx.at}/conversations/C1/messages`, { method: 'POST', body: { text: 'hi' } }],
       [`${ctx.at}/conversations/C1/read`, { method: 'POST', body: { ts: MESSAGE.ts } }],
     ];
-    for (const permission of ['read', 'manage'])
-      for (const [path, opts] of paths)
-        expect((await ctx.request(path, { ...opts, token: ctx.tokens[permission] })).status).toBe(403);
+    for (const [path, opts] of paths.slice(1))
+      expect((await ctx.request(path, { ...opts, token: ctx.tokens.member })).status).toBe(404);
+    expect(await (await ctx.request('', { token: ctx.tokens.member })).json()).toEqual({ workspaces: [] });
+    for (const [path, opts] of paths.filter(([, opts]) => opts.method === 'POST'))
+      expect((await ctx.request(path, { ...opts, token: ctx.tokens.read })).status).toBe(403);
     expect((await ctx.request(`${ctx.at}/conversations`, { token: 'agent-session-token' })).status).toBe(401);
     expect((await fetch(`${ctx.url}/api/slack/inbox/${ctx.w.id}/conversations`)).status).toBe(404);
     expect((await fetch(`${ctx.url}/api/agent/slack/inbox`)).status).toBe(404);

@@ -14,6 +14,30 @@ The token’s own record, the user it belongs to, the API version and what this 
 
 **Returns** `{ version: integer, client: Client, user: User, transcribe: boolean }`
 
+### `GET /me/github`
+
+Whether you connected your own GitHub account. Needs `read`.
+
+**Returns** `GithubIdentity`
+
+### `PUT /me/github`
+
+Connect your own GitHub account with a token. Needs `manage`.
+
+**Body**
+
+| Field                | Type     |                                                                        |
+| -------------------- | -------- | ---------------------------------------------------------------------- |
+| `token` **required** | `string` | A GitHub personal access token; stored encrypted and never shown again |
+
+**Returns** `GithubIdentity`. Changes you then make through the API (comments, merges, labels, finding verdicts) are made as you, and your sessions commit, push and run `gh` as you. Reads keep the server’s token. Needs CREDENTIALS_KEY on the server.
+
+### `DELETE /me/github`
+
+Disconnect your GitHub account. Needs `manage`.
+
+**Returns** `GithubIdentity`. Your changes and sessions go back to the server’s GitHub account.
+
 ### `GET /users`
 
 List the people who share this server. Needs `admin`.
@@ -576,13 +600,13 @@ Close a session and delete its record and transcript. Needs `manage`, held to th
 
 ### `GET /sessions/{id}/mail-wake`
 
-Read a session’s email wake rules. Needs `admin`.
+Read a session’s email wake rules. Needs `read`, held to the session’s project.
 
 **Returns** `{ rules: object[], perHour: integer, maxTurns: integer }`
 
 ### `PUT /sessions/{id}/mail-wake`
 
-Replace a session’s email wake rules. Needs `admin`.
+Replace a session’s email wake rules. Needs `manage`, held to the session’s project.
 
 **Body**
 
@@ -1209,13 +1233,13 @@ Download a message attachment through the core. Needs `admin`.
 
 ### `GET /slack/workspaces`
 
-List the workspaces available to the operator’s Slack inbox. Needs `admin`.
+List the workspaces available to the operator’s Slack inbox. Needs `read`.
 
-**Returns** `{ workspaces: SlackWorkspace[] }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ workspaces: SlackWorkspace[] }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `GET /slack/workspaces/{id}/conversations`
 
-List channels, DMs and group DMs. Needs `admin`.
+List channels, DMs and group DMs. Needs `read`.
 
 **Query**
 
@@ -1225,17 +1249,17 @@ List channels, DMs and group DMs. Needs `admin`.
 | `limit`  | `integer` | Items to request, 1–200; 100 for directories and 15 for message history by default |
 | `types`  | `string`  | Comma-separated public_channel, private_channel, im and mpim; all four by default  |
 
-**Returns** `{ conversations: object[], nextCursor: string }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ conversations: object[], nextCursor: string }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `GET /slack/workspaces/{id}/conversations/{channel}`
 
-Read a conversation’s details. Needs `admin`.
+Read a conversation’s details. Needs `read`.
 
-**Returns** `{ conversation: object }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ conversation: object }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `GET /slack/workspaces/{id}/people`
 
-Read the workspace’s directory to resolve message authors. Needs `admin`.
+Read the workspace’s directory to resolve message authors. Needs `read`.
 
 **Query**
 
@@ -1244,11 +1268,11 @@ Read the workspace’s directory to resolve message authors. Needs `admin`.
 | `cursor` | `string`  | The `nextCursor` of the previous page; omit for the first page                     |
 | `limit`  | `integer` | Items to request, 1–200; 100 for directories and 15 for message history by default |
 
-**Returns** `{ people: object[], nextCursor: string }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ people: object[], nextCursor: string }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `POST /slack/workspaces/{id}/direct-messages`
 
-Open a direct message with a Slack user. Needs `admin`.
+Open a direct message with a Slack user. Needs `manage`.
 
 **Body**
 
@@ -1256,11 +1280,11 @@ Open a direct message with a Slack user. Needs `admin`.
 | --------------------- | -------- | -------------------------------------------- |
 | `userId` **required** | `string` | A Slack user ID from the workspace directory |
 
-**Returns** 201 `{ conversation: object }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** 201 `{ conversation: object }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `GET /slack/workspaces/{id}/conversations/{channel}/messages`
 
-Read a page of conversation history. Needs `admin`.
+Read a page of conversation history. Needs `read`.
 
 **Query**
 
@@ -1271,11 +1295,11 @@ Read a page of conversation history. Needs `admin`.
 | `oldest` | `string`  | Only messages after this Slack timestamp, exclusive                                |
 | `latest` | `string`  | Only messages before this Slack timestamp, exclusive                               |
 
-**Returns** `{ messages: object[], nextCursor: string, hasMore: boolean }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ messages: object[], nextCursor: string, hasMore: boolean }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `GET /slack/workspaces/{id}/conversations/{channel}/threads/{ts}`
 
-Read a thread’s parent and replies. Needs `admin`.
+Read a thread’s parent and replies. Needs `read`.
 
 **Query**
 
@@ -1286,11 +1310,11 @@ Read a thread’s parent and replies. Needs `admin`.
 | `oldest` | `string`  | Only messages after this Slack timestamp, exclusive                                |
 | `latest` | `string`  | Only messages before this Slack timestamp, exclusive                               |
 
-**Returns** `{ messages: object[], nextCursor: string, hasMore: boolean }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ messages: object[], nextCursor: string, hasMore: boolean }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `POST /slack/workspaces/{id}/conversations/{channel}/messages`
 
-Send a message or thread reply as the operator. Needs `admin`.
+Send a message or thread reply as the operator. Needs `manage`.
 
 **Body**
 
@@ -1299,11 +1323,11 @@ Send a message or thread reply as the operator. Needs `admin`.
 | `text` **required** | `string` | The message in Slack mrkdwn, 1–8000 characters                                        |
 | `threadTs`          | `string` | The parent message’s Slack timestamp for a thread reply; omit for a top-level message |
 
-**Returns** 201 `{ channel: string, ts: string, message: object }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits. Human-authored messages send immediately, without an agent approval. If credentials change or the workspace is removed during a confirmed send, returns 201 with only { channel, ts, workspaceChanged: true }; refresh the workspace and do not resend. Do not automatically retry an ambiguous failed send.
+**Returns** 201 `{ channel: string, ts: string, message: object }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits. Human-authored messages send immediately, without an agent approval. If credentials change or the workspace is removed during a confirmed send, returns 201 with only { channel, ts, workspaceChanged: true }; refresh the workspace and do not resend. Do not automatically retry an ambiguous failed send.
 
 ### `POST /slack/workspaces/{id}/conversations/{channel}/read`
 
-Mark a conversation read through a message. Needs `admin`.
+Mark a conversation read through a message. Needs `manage`.
 
 **Body**
 
@@ -1311,23 +1335,23 @@ Mark a conversation read through a message. Needs `admin`.
 | ----------------- | -------- | ------------------------------------------------------------------------------ |
 | `ts` **required** | `string` | The latest viewed message’s Slack timestamp; debounce updates per conversation |
 
-**Returns** `{ ok: boolean }`. Operator inbox, independent of agent sessions and project permissions; requires an admin token. Objects are returned as Slack shapes them. 404 for an unknown workspace, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
+**Returns** `{ ok: boolean }`. Your own inbox, independent of agent sessions and project permissions: only the workspaces you connected, whatever your role (`read` to read, `manage` to send). Objects are returned as Slack shapes them. 404 for an unknown workspace or another user’s, 502 for Slack errors (including missing scopes), 429 with Retry-After for rate limits.
 
 ### `GET /slack/workspaces/{id}/events`
 
-Follow new Slack messages, edits and deletions live. Needs `admin`.
+Follow new Slack messages, edits and deletions live. Needs `read`.
 
 **Returns** a server-sent event stream; see the guide’s Events section.
 
 ### `GET /slack/requests`
 
-List the Slack messages agents are waiting for approval to send. Needs `admin`.
+List the Slack messages agents are waiting for approval to send. Needs `manage`.
 
-**Returns** `{ requests: object[] }`. A request is `{ id, workspaceLabel, sendsAs, repo, jobId, sessionTitle, to: { kind, id, label }, text, threadTs, status, createdAt, expiresAt, unattended }`. One waits a day at most.
+**Returns** `{ requests: object[] }`. Only messages that would go out through your own workspaces: whoever connected a workspace rules on what is sent in their name. A request is `{ id, workspaceLabel, sendsAs, repo, jobId, sessionTitle, to: { kind, id, label }, text, threadTs, status, createdAt, expiresAt, unattended }`. One waits a day at most.
 
 ### `POST /slack/requests/{id}/decision`
 
-Approve or deny a Slack message; approving sends it. Needs `admin`.
+Approve or deny a Slack message; approving sends it. Needs `manage`.
 
 **Body**
 
@@ -1648,7 +1672,7 @@ Fire an event for Home Assistant automations. Needs `admin`.
 
 ### `GET /mail/messages`
 
-List the synced mail, newest first, of every connected mailbox or one. Needs `admin`.
+List the synced mail, newest first, of every connected mailbox or one. Needs `read`.
 
 **Query**
 
@@ -1668,19 +1692,19 @@ List the synced mail, newest first, of every connected mailbox or one. Needs `ad
 
 ### `GET /mail/accounts/{account}/messages/{id}`
 
-Read one synced message with its body. Needs `admin`.
+Read one synced message with its body. Needs `read`.
 
 **Returns** `{ message: MailMessage }`. URL-encode the message’s `id`: an Outlook id may hold `/`, `+` and `=`. 404 when the account or the message is not there, which a message deleted or moved to the trash is from the next sync on.
 
 ### `DELETE /mail/accounts/{account}/messages/{id}`
 
-Move one synced message to the provider trash and remove the synced copy. Needs `admin`.
+Move one synced message to the provider trash and remove the synced copy. Needs `manage`.
 
 **Returns** `{ ok: boolean }`. Moves only this message, not its thread, to Gmail Trash or Outlook Deleted Items; it does not permanently erase it. URL-encode `id`. Existing read-only connections need reconnecting with access: manage for gmail.modify or Mail.ReadWrite; otherwise 409. 404 for a missing account or cached message. Provider failures keep the synced copy; an uncertain write is not automatically retried.
 
 ### `POST /mail/accounts/{account}/messages/{id}/reply`
 
-Send a plain-text reply to one synced message as the mailbox owner. Needs `admin`.
+Send a plain-text reply to one synced message as the mailbox owner. Needs `manage`.
 
 **Body**
 
@@ -2055,7 +2079,7 @@ Finish a loopback sign-in with the address the browser was sent to. Needs `admin
 
 ### `GET /settings/slack/workspaces`
 
-List every workspace, with the values a new one starts from. Needs `admin`.
+List your Slack workspaces, with the values a new one starts from. Needs `read`.
 
 **Query**
 
@@ -2067,7 +2091,7 @@ List every workspace, with the values a new one starts from. Needs `admin`.
 
 ### `POST /settings/slack/workspaces`
 
-Add a workspace. Needs `admin`.
+Add a workspace. Needs `manage`.
 
 **Body**: a [SlackWorkspace](#slackworkspace), whole or in part.
 
@@ -2075,7 +2099,7 @@ Add a workspace. Needs `admin`.
 
 ### `PUT /settings/slack/workspaces/{id}`
 
-Change a workspace. Needs `admin`.
+Change a workspace. Needs `manage`.
 
 **Body**: a [SlackWorkspace](#slackworkspace), whole or in part.
 
@@ -2083,19 +2107,19 @@ Change a workspace. Needs `admin`.
 
 ### `DELETE /settings/slack/workspaces/{id}`
 
-Remove a workspace. Needs `admin`.
+Remove a workspace. Needs `manage`.
 
 **Returns** `{ ok: boolean }`
 
 ### `GET /settings/mail/accounts`
 
-List the connected mailboxes, which providers this server can connect, and the values a new one starts from. Needs `admin`.
+List the connected mailboxes, which providers this server can connect, and the values a new one starts from. Needs `read`.
 
 **Returns** `{ accounts: MailAccount[], providers: string[], callbackUrl: string, defaults: object }`. `providers` holds `gmail` when the server has a Google OAuth client (`GOOGLE_OAUTH_*`) and `outlook` when it has a Microsoft one (`MICROSOFT_OAUTH_*`). `callbackUrl` is this server’s own sign-in callback (`PUBLIC_BASE_URL/oauth/mail/callback`): register it as the OAuth client’s redirect URI and set it as `*_OAUTH_REDIRECT_URI` for sign-ins the server finishes itself. `defaults` is `{ label, enabled, syncDays }`.
 
 ### `POST /settings/mail/accounts/connect`
 
-Start connecting a mailbox: where to sign in. Needs `admin`.
+Start connecting a mailbox: where to sign in. Needs `manage`.
 
 **Body**
 
@@ -2112,7 +2136,7 @@ Start connecting a mailbox: where to sign in. Needs `admin`.
 
 ### `POST /settings/mail/accounts/connect/finish`
 
-Finish connecting a mailbox with the address its sign-in ended on. Needs `admin`.
+Finish connecting a mailbox with the address its sign-in ended on. Needs `manage`.
 
 **Body**
 
@@ -2126,7 +2150,7 @@ Finish connecting a mailbox with the address its sign-in ended on. Needs `admin`
 
 ### `PUT /settings/mail/accounts/{id}`
 
-Change a mailbox’s label, switch or window. Needs `admin`.
+Change a mailbox’s label, switch or window. Needs `manage`.
 
 **Body**
 
@@ -2140,13 +2164,13 @@ Change a mailbox’s label, switch or window. Needs `admin`.
 
 ### `DELETE /settings/mail/accounts/{id}`
 
-Remove a mailbox, its tokens and every message synced from it. Needs `admin`.
+Remove a mailbox, its tokens and every message synced from it. Needs `manage`.
 
 **Returns** `{ ok: boolean }`. The provider lists the app as having access until it is removed there too: myaccount.google.com/permissions, or myapps.microsoft.com.
 
 ### `POST /settings/mail/accounts/{id}/sync`
 
-Sync a mailbox now. Needs `admin`.
+Sync a mailbox now. Needs `manage`.
 
 **Returns** 202 `{ account: MailAccount }`. Answers as the pass starts, with `syncing` true; read the account again for `lastSyncAt` or `lastSyncError`. A pass already running is not started twice. 409 for an account in `reauth`.
 
@@ -2225,6 +2249,15 @@ A person who shares this server. Every token belongs to one, and acts as them; a
 | `name`     | `string`        | The name it was given, unique on this server                                          |
 | `role`     | `admin\|member` | An admin runs the server and reaches every project; a member only what they are given |
 | `disabled` | `boolean`       | Disabled on the server: their tokens answer 401 until they are enabled again          |
+
+### GithubIdentity
+
+Your own GitHub account on this server, if you connected one. The token is never sent back.
+
+| Field       | Type      |                                |
+| ----------- | --------- | ------------------------------ |
+| `connected` | `boolean` | Whether a token is stored      |
+| `login`     | `string?` | The GitHub login it belongs to |
 
 ### Share
 
@@ -2761,7 +2794,7 @@ A project’s full settings. A body may carry any of these; what it leaves out k
 | `repo`                      | `string`   | `owner/name`                                                                                                                                                                                                                                                                                                                                                       |
 | `label`                     | `string`   | Its display name                                                                                                                                                                                                                                                                                                                                                   |
 | `enabled`                   | `boolean`  | Whether sessions can start on it                                                                                                                                                                                                                                                                                                                                   |
-| `mailToolsEnabled`          | `boolean`  | Allow interactive sessions in this project to access the operator’s connected mailboxes; false by default                                                                                                                                                                                                                                                          |
+| `mailToolsEnabled`          | `boolean`  | Allow interactive sessions in this project to access their owner’s connected mailboxes; false by default                                                                                                                                                                                                                                                           |
 | `whatsappToolsEnabled`      | `boolean`  | Allow interactive sessions in this project to read, answer and mark read the operator’s WhatsApp chats; false by default                                                                                                                                                                                                                                           |
 | `sortOrder`                 | `integer`  | Its place in the list                                                                                                                                                                                                                                                                                                                                              |
 | `setupCommands`             | `string[]` | Run to prepare a checkout                                                                                                                                                                                                                                                                                                                                          |
@@ -3191,6 +3224,9 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 
 | Dashboard                                                                        | API                                                                             |
 | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `GET /api/me/github`                                                             | `GET /me/github`                                                                |
+| `PUT /api/me/github`                                                             | `PUT /me/github`                                                                |
+| `DELETE /api/me/github`                                                          | `DELETE /me/github`                                                             |
 | `GET /api/dev/projects`                                                          | `GET /projects`                                                                 |
 | `GET /api/dev/branches`                                                          | `GET /branches`                                                                 |
 | `POST /api/dev/branches/serve`                                                   | `POST /branches/serve`                                                          |

@@ -12,6 +12,8 @@ import { compactCodexThread } from '../lib/codex-session.js';
 import { askClaudeSideQuestion, transferClaudeSession } from '../lib/claude-session.js';
 import { forgetProviderUsage, providerUsage } from '../lib/balancer.js';
 import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
+import { createUsers } from '../lib/users.js';
+import { createSlackService } from '../lib/slack.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
@@ -127,7 +129,8 @@ vi.mock('../lib/db.js', () => ({
   jobEventMaxSeqs: vi.fn(async () => new Map()),
 }));
 
-vi.mock('../lib/github.js', () => ({
+vi.mock('../lib/github.js', async (importOriginal) => ({
+  asGithubUser: (await importOriginal()).asGithubUser,
   githubRest: vi.fn(),
   githubGraphql: vi.fn(),
   upsertPrComment: vi.fn(),
@@ -308,6 +311,8 @@ import {
   closeSessionBrowser,
   getJob,
   createDevSession,
+  agentGithubEnv,
+  setOwnerGithub,
   startDevServe,
   setSessionProjectFilter,
   stepProvider,
@@ -335,6 +340,7 @@ import {
   deliverWorkerNotices,
   deliverToSession,
   mailReceived,
+  setInboxOwner,
   mailReceivedDurably,
   cancelMailWakes,
   setSessionMailWake,
@@ -1467,6 +1473,31 @@ describe('pullRequestHasOpenSession', () => {
   });
 });
 
+describe('the agent’s GitHub identity', () => {
+  afterEach(() => setOwnerGithub(() => null));
+
+  it('is the owner’s account when they connected one, and the server’s otherwise', () => {
+    setOwnerGithub((job) => (job.ownerId === 2 ? { token: 'ana-tok', login: 'ana', id: 7 } : null));
+    expect(agentGithubEnv({ ownerId: 2 }, { githubToken: 'srv' })).toEqual({
+      GITHUB_TOKEN: 'ana-tok',
+      GH_TOKEN: 'ana-tok',
+      REVIEWER_GIT_TOKEN: 'ana-tok',
+      GIT_AUTHOR_NAME: 'ana',
+      GIT_AUTHOR_EMAIL: '7+ana@users.noreply.github.com',
+      GIT_COMMITTER_NAME: 'ana',
+      GIT_COMMITTER_EMAIL: '7+ana@users.noreply.github.com',
+    });
+    expect(agentGithubEnv({ ownerId: 3 }, { githubToken: 'srv' })).toEqual({
+      GITHUB_TOKEN: 'srv',
+      GH_TOKEN: 'srv',
+    });
+    expect(agentGithubEnv({ ownerId: null }, { githubToken: 'srv' })).toEqual({
+      GITHUB_TOKEN: 'srv',
+      GH_TOKEN: 'srv',
+    });
+  });
+});
+
 describe('createDevSession: the validation gauntlet', () => {
   beforeAll(() => {
     getProviderForJob.mockReset();
@@ -1502,6 +1533,30 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(worker.ownerId).toBe(2);
     expect(createDevSession({ ...base, parentId: orchestrator.id, ownerId: null }).ownerId).toBeNull();
     expect(createDevSession(base).ownerId).toBeNull();
+  });
+
+  it('announces a background review with the server identity outside the request', async () => {
+    const gh = await vi.importActual('../lib/github.js');
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+    upsertPrComment.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await gh.githubRest({ githubToken: 'server-token' }, 'POST', '/background-review');
+    });
+    try {
+      gh.asGithubUser('request-token', () =>
+        createDevSession({
+          ...base,
+          review: true,
+          branch: 'feature/request-context',
+          prNumber: 123,
+          ownerId: 2,
+        }),
+      );
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+      expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer server-token');
+    } finally {
+      fetch.mockRestore();
+    }
   });
 
   it('refuses a provider whose whole group is inactive', () => {
@@ -3839,6 +3894,26 @@ describe('spawnWorkerSession: tooling fixes', () => {
     resolveRuntime.mockClear();
     getJob('tool-orch').workerRuntime = null;
   });
+  afterEach(() => {
+    setSessionProjectFilter(() => true);
+    getJob('tool-orch').ownerId = null;
+  });
+
+  it('authorizes the inherited owner against the final tooling project before creating a worker', () => {
+    const parent = getJob('tool-orch');
+    parent.ownerId = 2;
+    const allowed = vi.fn((_job, project) => project.repo === parent.repo);
+    setSessionProjectFilter(allowed);
+    const before = workerSessionsFor(parent).length;
+    expect(() => spawnWorkerSession(parent, { prompt: 'Read private code', tooling: true })).toThrow(
+      /Project unavailable/,
+    );
+    expect(allowed).toHaveBeenCalledWith({ ownerId: 2 }, dashboard);
+    expect(workerSessionsFor(parent)).toHaveLength(before);
+    allowed.mockReturnValue(true);
+    const worker = spawnWorkerSession(parent, { prompt: 'Fix tooling', tooling: true });
+    expect(worker).toMatchObject({ ownerId: 2, repo: dashboard.repo, parentId: parent.id });
+  });
 
   it('refuses when no project is flagged as the dashboard itself', () => {
     state.projects = [state.projects[0]];
@@ -4166,8 +4241,10 @@ describe('webhook deliveries', () => {
     'hk-whatsapp',
     'hk-mail',
     'hk-mail-cap',
+    'hk-mail-recovery',
   ];
 
+  let heldDeliveryTick;
   beforeAll(async () => {
     state.stored = [
       ...IDLE.filter((id) => !['hk-off', 'hk-orch', 'hk-brief', 'hk-slack', 'hk-whatsapp'].includes(id)).map(
@@ -4186,7 +4263,10 @@ describe('webhook deliveries', () => {
       row('hk-loopfix', { loopFixParentId: 'hk-free' }),
       row('hk-analyst', { readOnly: true }),
     ];
+    const intervals = vi.spyOn(globalThis, 'setInterval');
     await initJobs();
+    heldDeliveryTick = intervals.mock.calls.find(([fn]) => fn.name === 'flushHeldDeliveries')[0];
+    intervals.mockRestore();
     for (const id of IDLE) getJob(id).status = 'idle';
     getJob('hk-ask').awaitingAnswer = true;
     getJob('hk-stop').turnCanceled = true;
@@ -4811,6 +4891,153 @@ describe('webhook deliveries', () => {
       expect(publicJob(job).mailWake).not.toHaveProperty('seen');
       await cli.finish(job);
     });
+    it('never wakes a session with another user’s mailbox', () => {
+      const job = getJob('hk-mail');
+      const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }] }).rules[0];
+      job.awaitingAnswer = true;
+      setInboxOwner(() => 2);
+      try {
+        expect(mailReceived({ ...account, userId: 3 }, email('elsewhere', rule.since))).toEqual([]);
+        expect(job.pendingDeliveries || []).toHaveLength(0);
+        expect(mailReceived({ ...account, userId: 2 }, email('mine', rule.since))).toEqual([job.id]);
+      } finally {
+        setInboxOwner((session) => session.ownerId ?? null);
+      }
+    });
+
+    it.each([
+      ['pendingMailWakes', 'reassigned'],
+      ['pendingDeliveries', 'reassigned'],
+      ['pendingMailWakes', 'disabled legacy owner'],
+      ['pendingDeliveries', 'disabled legacy owner'],
+    ])('rechecks ownership of %s after %s and persists cancellation', async (queue, change) => {
+      const { prompts } = fakeCli();
+      const job = getJob('hk-mail');
+      const originalOwnerId = job.ownerId;
+      const owner = { id: 1, disabledAt: null };
+      const users = { get: (id) => (id === 1 ? owner : { id, disabledAt: null }), list: () => [owner] };
+      const source = fs.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+      const inboxOwner = new Function(
+        'users',
+        source.slice(source.indexOf('const inboxOwner ='), source.indexOf('setInboxOwner(')) +
+          'return inboxOwner;',
+      )(users);
+      setInboxOwner(inboxOwner);
+      const mailService = {
+        wakeAccountEnabled: () => true,
+        forUser: (id) => ({ wakeAccountEnabled: (accountId) => accountId === 7 && id === 1 }),
+      };
+      new Function(
+        'inboxOwner',
+        'mailService',
+        'setMailWakeAccess',
+        source.slice(source.indexOf('setMailWakeAccess('), source.indexOf('app.use(mailPushRoutes(')),
+      )(inboxOwner, mailService, setMailWakeAccess);
+      try {
+        job.ownerId = change === 'reassigned' ? 1 : null;
+        const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }], maxTurns: 1 }).rules[0];
+        job.awaitingAnswer = true;
+        if (queue === 'pendingMailWakes') job.unattendedTurns = 1;
+        await mailReceivedDurably({ ...account, userId: 1 }, email('private-queued', rule.since));
+        expect(job[queue]).toHaveLength(1);
+        expect(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0][queue]).toHaveLength(1);
+        if (change === 'reassigned') job.ownerId = 2;
+        else owner.disabledAt = 1;
+        job.awaitingAnswer = false;
+        job.unattendedTurns = 0;
+        flushDeliveries(job);
+        await flushJobs();
+        expect(job.pendingMailWakes).toEqual([]);
+        expect(job.pendingDeliveries).toEqual([]);
+        expect(prompts).toHaveLength(0);
+        const saved = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
+        expect(saved).not.toHaveProperty('pendingMailWakes');
+        expect(saved).not.toHaveProperty('pendingDeliveries');
+        expect(() =>
+          deliverToSession(
+            job.id,
+            { text: 'private-direct' },
+            { via: 'mail', ruleId: rule.id, ruleSince: rule.since },
+          ),
+        ).toThrow(/no longer enabled/);
+      } finally {
+        if (prompts.length) await cli.finish(job);
+        job.ownerId = originalOwnerId;
+        setInboxOwner((session) => session.ownerId ?? null);
+      }
+    });
+
+    it.each([
+      ['receipt', 1],
+      ['receipt', null],
+      ['pendingMailWakes', 1],
+      ['pendingMailWakes', null],
+      ['pendingDeliveries', 1],
+      ['pendingDeliveries', null],
+    ])('retries %s after the first user load recovers (owner %s)', async (queue, ownerId) => {
+      const { prompts } = fakeCli();
+      const job = getJob('hk-mail-recovery');
+      const originalOwnerId = job.ownerId;
+      const source = fs.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+      const users = createUsers({ load: async () => [{ id: 1, disabledAt: null }] });
+      const inboxOwner = new Function(
+        'users',
+        source.slice(source.indexOf('const inboxOwner ='), source.indexOf('setInboxOwner(')) +
+          'return inboxOwner;',
+      )(users);
+      const mailService = {
+        forUser: (id) => ({ wakeAccountEnabled: (accountId) => id === 1 && accountId === 7 }),
+      };
+      try {
+        job.unattendedTurns = 0;
+        job.ownerId = ownerId;
+        job.awaitingAnswer = true;
+        const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }], maxTurns: 1 }).rules[0];
+        const message = email('retry-after-users', rule.since);
+        if (queue !== 'receipt') {
+          if (queue === 'pendingMailWakes') job.unattendedTurns = 1;
+          await mailReceivedDurably(account, message);
+          expect(job[queue]).toHaveLength(1);
+        }
+        // Restore durable queues before the users store has completed its first load.
+        setInboxOwner(inboxOwner);
+        new Function(
+          'inboxOwner',
+          'mailService',
+          'setMailWakeAccess',
+          source.slice(source.indexOf('setMailWakeAccess('), source.indexOf('app.use(mailPushRoutes(')),
+        )(inboxOwner, mailService, setMailWakeAccess);
+        job.awaitingAnswer = false;
+        job.unattendedTurns = 0;
+        if (queue === 'receipt') {
+          await expect(mailReceivedDurably({ ...account, userId: 1 }, message)).rejects.toMatchObject({
+            status: 503,
+          });
+        } else {
+          const held = structuredClone(job[queue]);
+          expect(() => heldDeliveryTick()).not.toThrow();
+          expect(job[queue]).toEqual(held);
+        }
+        expect(prompts).toHaveLength(0);
+        await users.init();
+        if (queue === 'receipt') await mailReceivedDurably({ ...account, userId: 1 }, message);
+        else heldDeliveryTick();
+        await vi.waitFor(() => expect(prompts).toHaveLength(1));
+        expect(prompts[0]).toContain('retry-after-users');
+        expect(job.pendingMailWakes).toEqual([]);
+        expect(job.pendingDeliveries).toEqual([]);
+        await mailReceivedDurably({ ...account, userId: 1 }, message);
+        expect(prompts).toHaveLength(1);
+      } finally {
+        if (prompts.length) await cli.finish(job);
+        job.ownerId = originalOwnerId;
+        job.mailWake = undefined;
+        job.pendingMailWakes = [];
+        job.pendingDeliveries = [];
+        setInboxOwner((session) => session.ownerId ?? null);
+      }
+    });
+
     it('holds matching email behind an unanswered question, keeps it with the webhook off and flushes when free', async () => {
       const { prompts } = fakeCli();
       const job = getJob('hk-mail');
@@ -5146,9 +5373,11 @@ describe('webhook deliveries', () => {
       channels: ['dev'],
       replies: true,
     };
-    setSlackAccess(() => slack);
+    const access = vi.fn(() => slack);
+    setSlackAccess(access);
     try {
       const told = slackProtocol(getJob('hk-free'));
+      expect(access).toHaveBeenCalledWith(getJob('hk-free'));
       expect(told).toContain('in the Okanet workspace as nadin');
       expect(told).toContain('direct messages to people and the channels #dev');
       expect(told).toContain('Each message waits for the user');
@@ -5928,8 +6157,16 @@ describe('standalone code-review findings', () => {
       queuedReview('mine-fix', [finding('m2', 'Validate the input')], true),
       queuedReview('mine-save', [finding('m3', 'Keep the type')], true),
       queuedReview('stand-dispatch', [finding('k7', 'Rename the flag')]),
+      ...['reply', 'delete'].map((action) => ({
+        ...queuedReview(`stand-legacy-${action}`, [finding('legacy', 'Persisted finding')]),
+        ownerId: 2,
+      })),
+      ...['reply', 'delete'].flatMap((action) =>
+        ['disconnected', 'changed'].map((connection) => queuedReview(`stand-${action}-${connection}`, [])),
+      ),
       // A review whose card is already gone (completed elsewhere, or its PR closed).
       { ...queuedReview('stand-none', []), reviewTriage: null },
+      { ...queuedReview('stand-deferred', []), reviewTriage: null },
     ];
     await initJobs();
     getJob('stand-close').status = 'idle';
@@ -5963,6 +6200,30 @@ describe('standalone code-review findings', () => {
     });
   });
 
+  it('keeps deferred publication lookups and earlier turn identities on the held card', async () => {
+    const found = [
+      {
+        ...finding('pending', 'Published finding'),
+        reviewPublication: { after: 1, before: 2, authors: ['alice', 'bob'] },
+      },
+    ];
+    latestReviewFindings.mockResolvedValueOnce(found);
+    sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
+    const job = getJob('stand-deferred');
+    job.status = 'idle';
+    job.reviewAuthorLogins = ['alice', 'bob'];
+
+    expect(await holdStandaloneReviewFindings(job)).toBe(true);
+    expect(latestReviewFindings.mock.lastCall.at(-1)).toEqual({
+      since: job.createdAt,
+      authorLogins: ['alice', 'bob'],
+    });
+    expect(JSON.parse(JSON.stringify(job.reviewTriage)).findings[0]).toMatchObject(found[0]);
+    await closeDevSession(job.id);
+    expect(getJob(job.id).reviewTriage.findings[0]).toMatchObject(found[0]);
+    expect(deleteJob).not.toHaveBeenCalledWith(job.id, null);
+  });
+
   // Whose pull request it is (GitHub's author vs the account the app acts as) decides the
   // card, so the hold works it out.
   it('holds a review of somebody else’s pull request as not the user’s own', async () => {
@@ -5988,6 +6249,35 @@ describe('standalone code-review findings', () => {
 
     expect(await holdStandaloneReviewFindings(job)).toBe(true);
     expect(job.reviewTriage).toMatchObject({ author: 'NadinYamaui', mine: true });
+  });
+
+  it('recognizes the session owner’s PR, with the project override and server fallback', async () => {
+    const found = [finding('owner', 'Owner finding')];
+    const identity = { token: 'ana-token', login: 'ana', id: 42 };
+    setOwnerGithub((job) => (job.ownerId === 2 ? identity : null));
+    try {
+      for (const [ownerId, reviewAuthor, author] of [
+        [2, '', 'Ana'],
+        [2, 'release-bot', 'release-bot'],
+        [3, '', 'server-bot'],
+        [null, '', 'server-bot'],
+      ]) {
+        state.projects = [{ repo: 'acme/standalone', reviewAuthor }];
+        latestReviewFindings.mockResolvedValueOnce(found);
+        sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
+        viewerLogin.mockResolvedValueOnce('server-bot');
+        const job = { ...newReview('stand-owner', 37), ownerId, prStatus: { number: 37, author } };
+        expect(await holdStandaloneReviewFindings(job)).toBe(true);
+        expect(latestReviewFindings.mock.lastCall.at(-1)).toEqual({
+          since: job.createdAt,
+          ...(ownerId != null ? { authorLogin: ownerId === 2 ? 'ana' : null } : {}),
+        });
+        expect(job.reviewTriage).toMatchObject({ author, mine: true });
+        viewerLogin.mockReset().mockResolvedValue(null);
+      }
+    } finally {
+      setOwnerGithub(() => null);
+    }
   });
 
   // The token's user is only the fallback: a project that posts as another account names it in
@@ -6060,21 +6350,31 @@ describe('standalone code-review findings', () => {
     await expect(saveReviewFindingsDrafts('stand-nope', {})).rejects.toThrow(/Session not found/);
   });
 
-  it("replies on one finding's thread and keeps it on the card", async () => {
-    replyOnFindingThread.mockClear();
-
-    const out = await replyToReviewFinding('stand-delete', 'k5', '  Fine for me  ');
-
-    expect(out).toEqual({ replied: 'k5', url: 'https://gh/r/101#reply' });
-    expect(replyOnFindingThread).toHaveBeenCalledWith(
-      'acme/standalone',
-      31,
-      expect.objectContaining({ key: 'k5' }),
-      '  Fine for me  ', // trimmed where it is written, so nothing is lost here
-      { since: '2026-09-07T10:00:00.000Z' },
-    );
-    expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k5', 'k6']);
-  });
+  it.each([null, 2])(
+    "replies on one finding's thread as owner %s and keeps it on the card",
+    async (ownerId) => {
+      replyOnFindingThread.mockClear();
+      const job = getJob('stand-delete');
+      job.ownerId = ownerId;
+      job.reviewTriage.findings[0].reviewAuthorLogin = ownerId == null ? null : 'ana';
+      setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
+      try {
+        const out = await replyToReviewFinding('stand-delete', 'k5', '  Fine for me  ');
+        expect(out).toEqual({ replied: 'k5', url: 'https://gh/r/101#reply' });
+        expect(replyOnFindingThread).toHaveBeenCalledWith(
+          'acme/standalone',
+          31,
+          expect.objectContaining({ key: 'k5' }),
+          '  Fine for me  ', // trimmed where it is written, so nothing is lost here
+          { since: '2026-09-07T10:00:00.000Z', authorLogin: ownerId == null ? null : 'ana' },
+        );
+        expect(job.reviewTriage.findings.map((f) => f.key)).toEqual(['k5', 'k6']);
+      } finally {
+        job.ownerId = null;
+        setOwnerGithub(() => null);
+      }
+    },
+  );
 
   it('refuses a reply on a finding, or a session, that is not there', async () => {
     await expect(replyToReviewFinding('stand-delete', 'nope', 'hi')).rejects.toThrow(
@@ -6084,27 +6384,88 @@ describe('standalone code-review findings', () => {
     await expect(replyToReviewFinding('stand-nope', 'k5', 'hi')).rejects.toThrow(/Session not found/);
   });
 
-  it('deletes one finding from the review itself and leaves the rest on the card', async () => {
-    deleteFindingFromReview.mockClear();
+  it.each(['reply', 'delete'])(
+    'keeps the server fallback for %s on restored findings without publication metadata',
+    async (action) => {
+      const job = getJob(`stand-legacy-${action}`);
+      expect(job.reviewTriage.findings[0]).not.toHaveProperty('reviewAuthorLogin');
+      setOwnerGithub(() => ({ token: 'new-token', login: 'new-account', id: 43 }));
+      try {
+        await holdStandaloneReviewFindings(job);
+        const operation = action === 'reply' ? replyOnFindingThread : deleteFindingFromReview;
+        operation.mockClear();
+        if (action === 'reply') await replyToReviewFinding(job.id, 'legacy', 'Noted');
+        else await deleteReviewFinding(job.id, 'legacy');
+        expect(operation.mock.lastCall.at(-1)).toEqual({ since: job.createdAt, authorLogin: null });
+        expect(job.reviewTriage.findings).toHaveLength(action === 'reply' ? 1 : 0);
+      } finally {
+        setOwnerGithub(() => null);
+      }
+    },
+  );
 
-    const out = await deleteReviewFinding('stand-delete', 'k5');
-
-    expect(out).toMatchObject({ deleted: 'k5', remaining: 1, commentDeleted: true, undeclared: true });
-    expect(deleteFindingFromReview).toHaveBeenCalledWith(
-      'acme/standalone',
-      31,
-      expect.objectContaining({ key: 'k5', title: 'Guard the id list' }),
-      { since: '2026-09-07T10:00:00.000Z' },
-    );
-    expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
+  it.each([
+    ['reply', 'disconnected'],
+    ['reply', 'changed'],
+    ['delete', 'disconnected'],
+    ['delete', 'changed'],
+  ])('uses the published author for %s after the owner connection is %s', async (action, connection) => {
+    const job = getJob(`stand-${action}-${connection}`);
+    job.reviewTriage = null;
+    job.ownerId = 2;
+    job.prStatus.author = 'a-colleague';
+    const published = { ...finding('published', 'Published finding'), reviewAuthorLogin: 'ana' };
+    latestReviewFindings.mockResolvedValueOnce([published]);
+    sortFindingsForFix.mockResolvedValueOnce({ kept: [published], parked: [] });
+    setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
+    try {
+      expect(await holdStandaloneReviewFindings(job)).toBe(true);
+      // The held result survives serialization without retaining a credential.
+      job.reviewTriage = JSON.parse(JSON.stringify(job.reviewTriage));
+      setOwnerGithub(() => (connection === 'changed' ? { token: 'bob-token', login: 'bob', id: 43 } : null));
+      const operation = action === 'reply' ? replyOnFindingThread : deleteFindingFromReview;
+      operation.mockClear();
+      if (action === 'reply') await replyToReviewFinding(job.id, 'published', 'Noted');
+      else await deleteReviewFinding(job.id, 'published');
+      const options = operation.mock.lastCall.at(-1);
+      expect(options).toEqual({ since: job.createdAt, authorLogin: 'ana' });
+      expect(job.reviewTriage.findings).toHaveLength(action === 'reply' ? 1 : 0);
+    } finally {
+      setOwnerGithub(() => null);
+    }
   });
 
-  it('keeps the finding on the card when GitHub refuses to delete its comment', async () => {
-    deleteFindingFromReview.mockRejectedValueOnce(
-      new Error("GitHub answered 403 deleting the finding's review comment"),
-    );
+  it('deletes one finding posted by the owner and leaves the rest on the card', async () => {
+    deleteFindingFromReview.mockClear();
+    const job = getJob('stand-delete');
+    job.ownerId = 2;
+    job.reviewTriage.findings[0].reviewAuthorLogin = 'ana';
+    setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
+    try {
+      const out = await deleteReviewFinding('stand-delete', 'k5');
+      expect(out).toMatchObject({ deleted: 'k5', remaining: 1, commentDeleted: true, undeclared: true });
+      expect(deleteFindingFromReview).toHaveBeenCalledWith(
+        'acme/standalone',
+        31,
+        expect.objectContaining({ key: 'k5', title: 'Guard the id list' }),
+        { since: '2026-09-07T10:00:00.000Z', authorLogin: 'ana' },
+      );
+      expect(job.reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
+    } finally {
+      job.ownerId = null;
+      setOwnerGithub(() => null);
+    }
+  });
 
-    await expect(deleteReviewFinding('stand-delete', 'k6')).rejects.toThrow(/answered 403/);
+  it.each([
+    [403, "deleting the finding's review comment"],
+    [404, "deleting the finding's review comment"],
+    [403, "rewriting the review's findings block"],
+    [404, "rewriting the review's findings block"],
+  ])('keeps the finding on the card when GitHub answers %i %s', async (status, action) => {
+    deleteFindingFromReview.mockRejectedValueOnce(new Error(`GitHub answered ${status} ${action}`));
+
+    await expect(deleteReviewFinding('stand-delete', 'k6')).rejects.toThrow(`answered ${status}`);
     expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
   });
 
@@ -6268,6 +6629,7 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
     state.stored = [
       row('cost-par-1', { costUsd: 1.25, inputTokens: 1000, outputTokens: 100, durationMs: 20_000 }),
       row('cost-rev-1', {
+        ownerId: 2,
         autoClose: true,
         loopParentId: 'cost-par-1',
         costUsd: 0.5,
@@ -6302,7 +6664,14 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
       outputTokens: 130,
       durationMs: 25_000,
     });
-    await closeDevSession('cost-rev-1');
+    const onDeleted = vi.fn();
+    bus.on('deleted', onDeleted);
+    try {
+      await closeDevSession('cost-rev-1');
+      expect(onDeleted).toHaveBeenCalledWith('cost-rev-1', 'acme/cost', 2);
+    } finally {
+      bus.off('deleted', onDeleted);
+    }
     expect(getJob('cost-rev-1')).toBeNull();
     const parent = getJob('cost-par-1');
     expect(sessionUsage(parent)).toEqual(before);
@@ -7036,16 +7405,25 @@ describe('the review loop: what a closing loop review reports back', () => {
   });
 
   it('a finished review that declared no findings ends the round cleanly', async () => {
-    await closeDevSession('rev-2');
-    await new Promise((r) => setTimeout(r, 0));
     const parent = getJob('par-2');
-    expect(parent.reviewLoop.reviewing).toBe(false);
-    expect(infoTexts(parent).join('\n')).toMatch(/declared no findings/);
-    // Scoped to what this review itself could have posted, so a round that
-    // published nothing does not hand back the previous round's findings.
-    expect(latestReviewFindings).toHaveBeenCalledWith('acme/loop', 77, {
-      since: '2026-08-25T13:00:00.000Z',
-    });
+    parent.ownerId = 2;
+    getJob('rev-2').reviewAuthorLogins = ['earlier-owner', 'ana'];
+    setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
+    try {
+      await closeDevSession('rev-2');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(parent.reviewLoop.reviewing).toBe(false);
+      expect(infoTexts(parent).join('\n')).toMatch(/declared no findings/);
+      // The review window and owner identity constrain its inline publications.
+      expect(latestReviewFindings).toHaveBeenCalledWith('acme/loop', 77, {
+        since: '2026-08-25T13:00:00.000Z',
+        authorLogin: 'ana',
+        authorLogins: ['earlier-owner', 'ana'],
+      });
+    } finally {
+      parent.ownerId = null;
+      setOwnerGithub(() => null);
+    }
   });
 
   it('a round is held for triage even while the session stands on a question', async () => {
@@ -13625,6 +14003,29 @@ describe('Codex turn usage', () => {
   };
   const walks = (spy) => spy.mock.calls.filter(([dir]) => String(dir).includes('.codex-provider-2')).length;
 
+  it('persists the GitHub accounts actually used by successive review turns', async () => {
+    const job = getJob('codex-usage');
+    job.ownerId = 2;
+    job.reviewBranch = 'feature';
+    let login = 'alice';
+    setOwnerGithub(() => ({ token: `${login}-token`, login, id: 42 }));
+    try {
+      const usage = { input_tokens: 500100, cached_input_tokens: 450050, output_tokens: 20010 };
+      await turn(job, 'Review the change', usage);
+      login = 'bob';
+      await turn(job, 'Publish the review', usage);
+      await turn(job, 'Finish publishing', usage);
+      expect(job.reviewAuthorLogins).toEqual(['alice', 'bob']);
+      await flushJobs();
+      const saved = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
+      expect(JSON.parse(JSON.stringify(saved)).reviewAuthorLogins).toEqual(['alice', 'bob']);
+      const calls = spawn.mock.calls.filter(([cmd]) => cmd === '/mock/agent');
+      expect(calls.map(([, , opts]) => opts.env.GH_TOKEN)).toEqual(['alice-token', 'bob-token', 'bob-token']);
+    } finally {
+      setOwnerGithub(() => null);
+    }
+  });
+
   it('prices a running turn and updates the same checkpoint at close', async () => {
     vi.useFakeTimers();
     try {
@@ -16297,6 +16698,108 @@ describe('automatic recovery after a server restart', () => {
     finish(children[0]);
     await vi.waitFor(() => expect(child.status).toBe('idle'));
   });
+
+  it('uses server GitHub identity for automatic triage after reopening a failed queued session', async () => {
+    const gh = await vi.importActual('../lib/github.js');
+    Object.assign(state.projects[0], { autonomousReviewLoop: true, envTemplate: '', setupCommands: [] });
+    const originalSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, args, opts) => {
+      if (cmd !== 'git') return originalSpawn(cmd, args, opts);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      if (args[0] === 'clone') fs.mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+      setImmediate(() => child.emit('close', 0));
+      return child;
+    });
+    const gitProbe = vi
+      .spyOn(await import('child_process'), 'spawnSync')
+      .mockReturnValue({ status: 0, stdout: '', stderr: '' });
+    const saved = row({
+      status: 'failed',
+      orchestrator: false,
+      branch: 'feature',
+      startedOnPr: 77,
+      prStatus: { number: 77, state: 'open' },
+      recoveryTurn: null,
+      recoveryQueue: [{ prompt: 'Queued instruction', shown: 'Queued instruction', files: [] }],
+      reviewLoop: { rounds: 1, reviewing: false, lastSha: 'a', pendingResult: { prNumber: 77, round: 1 } },
+    });
+    state.stored = [saved];
+    await initJobs({ deferPolling: true });
+    latestReviewFindings.mockResolvedValueOnce([
+      {
+        key: 'optional',
+        title: 'Small issue',
+        severity: 'low',
+        assessment: { verified: true, evidence: 'Reproduced', worthFixing: false, reason: 'Optional' },
+      },
+    ]);
+    githubRest.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ number: 77, state: 'open', labels: [{ name: 'code-approved' }] })),
+    );
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+    recordTriage.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await gh.githubRest({ githubToken: 'server-token' }, 'POST', '/automatic-triage');
+      return { error: null };
+    });
+    try {
+      gh.asGithubUser('request-token', () => reopenDevSession(saved.id));
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(children[0].prompt).toContain('Queued instruction');
+      finish(children[0]);
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+      expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer server-token');
+      await vi.waitFor(() => expect(saved.reviewLoop.done).toBe(true));
+    } finally {
+      gitProbe.mockRestore();
+      spawn.mockImplementation(originalSpawn);
+      fetch.mockRestore();
+      githubRest.mockReset();
+      recordTriage.mockReset();
+      recordTriage.mockResolvedValue({ error: null });
+    }
+  });
+
+  it.each([
+    { workspaces: [] },
+    { workspaces: [{ id: 1, ownerId: 1, projects: [{ repo: 'other/project' }] }] },
+  ])(
+    'recovers a session without Slack for its project while users are unavailable (%j)',
+    async ({ workspaces }) => {
+      const load = vi.fn().mockRejectedValueOnce(new Error('temporary users failure')).mockResolvedValue([]);
+      const users = createUsers({ load });
+      await expect(users.init()).rejects.toThrow('temporary users failure');
+      const inboxOwner = vi.fn(() => users.list()[0]?.id ?? null);
+      const slack = createSlackService({
+        load: async (key, fallback) => (key === 'slack_workspaces' ? workspaces : fallback),
+        save: async () => {},
+        inboxOwner,
+      });
+      await slack.init();
+      const saved = row();
+      state.stored = [saved];
+      setSlackAccess((job) => slack.briefing(job));
+      try {
+        await initJobs({ deferPolling: true });
+        expect(resumeRestartedSessions()).toBe(1);
+        await vi.waitFor(() => expect(children).toHaveLength(1));
+        expect(inboxOwner).not.toHaveBeenCalled();
+        expect(children[0].prompt).toContain('Finish the requested change');
+        finish(children[0]);
+        await vi.waitFor(() => expect(saved.status).toBe('idle'));
+        if (workspaces.length)
+          expect(() => slack.briefing({ repo: 'other/project' })).toThrow('User accounts are unavailable');
+        await users.refresh();
+        expect(saved.status).toBe('idle');
+      } finally {
+        setSlackAccess(() => null);
+      }
+    },
+  );
 
   it('resumes the saved conversation, preserves dirty files and delivers queued instructions', async () => {
     const checkout = path.join(root, 'checkout');

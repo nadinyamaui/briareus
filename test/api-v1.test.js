@@ -34,7 +34,8 @@ let auth,
   previewAccess,
   presentEvent,
   people,
-  sharedRepos;
+  sharedRepos,
+  actAs;
 beforeEach(async () => {
   let saved = [];
   previewAccess = null;
@@ -50,6 +51,7 @@ beforeEach(async () => {
   });
   await auth.init();
   sharedRepos = {};
+  actAs = vi.fn((_user, fn) => fn());
   people = [
     { id: 1, name: 'Owner', role: 'admin', createdAt: clock, disabledAt: null },
     { id: 2, name: 'Ana', role: 'member', createdAt: clock, disabledAt: null },
@@ -101,6 +103,7 @@ beforeEach(async () => {
       auth,
       users: { get: (id) => people.find((u) => u.id === id) || null, list: () => people },
       memberRepos: (user) => sharedRepos[user.id] || [],
+      actAs: (user, fn) => actAs(user, fn),
       apiEnabled: () => apiOn,
       ownerSecret: () => secret,
       handlers,
@@ -638,6 +641,16 @@ describe('handing a request to the dashboard’s handler', () => {
     ).toBe('/api/templates/1');
   });
 
+  it('runs the handler as the token’s user', async () => {
+    const seen = [];
+    actAs.mockImplementation((user, fn) => {
+      seen.push(user.name);
+      return fn();
+    });
+    await json('/sessions/mine/messages', { method: 'POST', body: { text: 'go' } });
+    expect(seen).toEqual(['Owner']);
+  });
+
   it('spends the token at the gateway and names the client as the author', async () => {
     const seen = await json('/sessions/mine/messages', { method: 'POST', body: { text: 'go' } });
     expect(seen).toMatchObject({
@@ -895,6 +908,54 @@ describe('the event streams', () => {
     await vi.waitFor(() => expect(bus.listenerCount('job') + bus.listenerCount('event')).toBe(0));
   });
 
+  it('filters deletion events by ownership even after the session record is gone', async () => {
+    sharedRepos[2] = [repo];
+    const ana = (
+      await auth.create({ userId: 2, label: 'ana', repos: [repo], permission: 'read', days: 1 }, secret)
+    ).token;
+    for (const [token, expected] of [
+      [ana, ['anas', 'ownerless']],
+      [tokens.read, ['owners', 'anas', 'ownerless']],
+    ]) {
+      const events = await readEvents('/events', 1 + expected.length, {
+        token,
+        onChunk: (seen) => {
+          if (seen.length !== 1) return;
+          bus.emit('deleted', 'owners', repo, 1);
+          bus.emit('deleted', 'anas', repo, 2);
+          bus.emit('deleted', 'ownerless', repo, null);
+          bus.emit('deleted', 'foreign', 'other/project', 2);
+        },
+      });
+      expect(events.filter((e) => e.event === 'session.deleted').map((e) => e.data.id)).toEqual(expected);
+    }
+  });
+
+  it.each(['read', 'manage'])(
+    'ends an admin’s %s streams on demotion with the same project reach',
+    async (permission) => {
+      sharedRepos[1] = [repo];
+      for (const route of ['/events?transcripts=1', '/sessions/anas/events']) {
+        people[0] = { ...people[0], role: 'admin' };
+        const response = await request(route, { token: tokens[permission] });
+        expect(response.status).toBe(200);
+        const reader = response.body.getReader();
+        await reader.read();
+        people[0] = { ...people[0], role: 'member' };
+        // Bound the assertion so a leaked stream fails instead of waiting for a ping.
+        const pending = reader.read().catch(() => 'disconnected');
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        bus.emit('job', { ...jobs.anas, status: 'running' });
+        const result = await Promise.race([
+          pending,
+          new Promise((resolve) => setTimeout(() => resolve('open'), 80)),
+        ]);
+        await reader.cancel().catch(() => {});
+        expect(result).toBe('disconnected');
+      }
+    },
+  );
+
   it('ends an open stream once its token is revoked', async () => {
     for (const route of ['/events', '/sessions/mine/events']) {
       const token = (
@@ -1146,10 +1207,39 @@ describe('the contract', () => {
       'actions.list',
       'client.get',
       'events.stream',
+      'mail.message',
+      'mail.message.delete',
+      'mail.message.reply',
+      'mail.messages',
+      'me.github.delete',
+      'me.github.get',
+      'me.github.set',
       'openapi.get',
       'preview.access',
       'projects.list',
       'sessions.list',
+      'settings.mailAccounts.connect',
+      'settings.mailAccounts.delete',
+      'settings.mailAccounts.finish',
+      'settings.mailAccounts.list',
+      'settings.mailAccounts.sync',
+      'settings.mailAccounts.update',
+      'settings.slackWorkspaces.create',
+      'settings.slackWorkspaces.delete',
+      'settings.slackWorkspaces.list',
+      'settings.slackWorkspaces.update',
+      'slack.conversation',
+      'slack.conversations',
+      'slack.decide',
+      'slack.events',
+      'slack.messages',
+      'slack.openDm',
+      'slack.people',
+      'slack.read',
+      'slack.requests',
+      'slack.send',
+      'slack.thread',
+      'slack.workspaces',
       'ssh.decide',
       'ssh.requests',
       'stats.server',
