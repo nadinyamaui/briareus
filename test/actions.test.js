@@ -323,6 +323,17 @@ describe('actionSessionSpec', () => {
     });
   });
 
+  it('keeps allocated video runs with the session specification', async () => {
+    prtasks.testRunPrompt.mockImplementationOnce(({ onVideoRun }) => {
+      onVideoRun('a__b/pr-<pr-number>-0123456789abcdef0123456789abcdef');
+      return 'RUN';
+    });
+    expect(await actionSessionSpec(getAction('test-run'), context)).toMatchObject({
+      prompt: 'RUN',
+      videoRuns: ['a__b/pr-<pr-number>-0123456789abcdef0123456789abcdef'],
+    });
+  });
+
   it('leaves the local checkout alone for a gh-only errand, still filed under the PR branch', async () => {
     const spec = await actionSessionSpec(getAction('delete-self-comments'), {
       ...context,

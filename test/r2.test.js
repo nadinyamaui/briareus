@@ -21,6 +21,7 @@ const R2 = {
   publicBaseUrl: 'https://videos.example.com',
 };
 
+const RUN = 'acme__shop/pr-<pr-number>-0123456789abcdef0123456789abcdef';
 let fetchMock;
 
 beforeEach(() => {
@@ -42,16 +43,58 @@ function drop(rel, content = 'webm-bytes') {
 }
 
 describe('syncVideos', () => {
+  it('isolates two projects and two sessions on the same project, including retries and bytes', async () => {
+    const otherRun = 'other__app/pr-<pr-number>-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const siblingRun = 'acme__shop/pr-<pr-number>-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const ownFile = 'acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm';
+    const otherFile = 'other__app/pr-34-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/2-checkout.webm';
+    drop(ownFile, 'owner bytes');
+    drop(otherFile, 'other project bytes');
+    drop('acme__shop/pr-56-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/3-sibling.webm', 'sibling bytes');
+    drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/private.pdf', 'not a video');
+    const sent = [];
+    fetchMock.mockImplementation(async (url, opts) => {
+      const bytes = Buffer.from(await new Response(opts.body).arrayBuffer());
+      sent.push({ url: String(url), bytes: bytes.toString() });
+      if (String(url).includes('/pr-12-') && sent.length === 1) throw new TypeError('fetch failed');
+      return { ok: true };
+    });
+    // Queue both before either starts: sharing a global queued result used to
+    // attach the first project's transport error to the second session too.
+    const owner = syncVideos([RUN]);
+    const other = syncVideos([otherRun]);
+    expect(other).not.toBe(owner);
+    expect(await owner).toEqual({
+      uploaded: [],
+      failed: [{ file: ownFile, error: 'fetch failed' }],
+      deferred: 0,
+    });
+    expect(await other).toEqual({ uploaded: [otherFile], failed: [], deferred: 0 });
+    expect(await syncVideos([otherRun])).toEqual({ uploaded: [], failed: [], deferred: 0 });
+    expect(sent).toHaveLength(2);
+    expect(fs.readFileSync(path.join(cfgState.testVideosDir, ownFile), 'utf8')).toBe('owner bytes');
+    expect(await syncVideos([RUN])).toEqual({ uploaded: [ownFile], failed: [], deferred: 0 });
+    expect(sent.map((s) => s.bytes)).toEqual(['owner bytes', 'other project bytes', 'owner bytes']);
+    expect(sent.every((s) => s.url.startsWith(`${R2.endpoint}/${R2.bucket}/`))).toBe(true);
+    expect(await syncVideos([siblingRun])).toMatchObject({
+      failed: [],
+      uploaded: [expect.stringContaining('/pr-56-')],
+    });
+    expect(await syncVideos()).toEqual({ uploaded: [], failed: [], deferred: 0 });
+    expect(await syncVideos([RUN])).toEqual({ uploaded: [], failed: [], deferred: 0 });
+    expect(sent).toHaveLength(4);
+  });
+
   it('does nothing without a bucket configured', async () => {
     cfgState.r2 = null;
     drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm');
-    expect(await syncVideos()).toEqual({ uploaded: [], failed: [], deferred: 0 });
+    expect(await syncVideos([RUN])).toEqual({ uploaded: [], failed: [], deferred: 0 });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('PUTs a new video to the bucket at its relative path, signed', async () => {
     drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm');
-    const { uploaded, failed } = await syncVideos();
+    const { uploaded, failed } = await syncVideos([RUN]);
     expect(uploaded).toEqual(['acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm']);
     expect(failed).toEqual([]);
     const [url, opts] = fetchMock.mock.calls[0];
@@ -73,8 +116,8 @@ describe('syncVideos', () => {
 
   it('uploads a file once: the manifest remembers across syncs', async () => {
     drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm');
-    await syncVideos();
-    const again = await syncVideos();
+    await syncVideos([RUN]);
+    const again = await syncVideos([RUN]);
     expect(again.uploaded).toEqual([]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -83,7 +126,7 @@ describe('syncVideos', () => {
     drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm');
     drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/2-checkout.webm');
     fetchMock.mockResolvedValueOnce({ ok: false, status: 403, text: async () => 'denied' });
-    const first = await syncVideos();
+    const first = await syncVideos([RUN]);
     expect(first.uploaded).toHaveLength(1);
     expect(first.failed).toEqual([
       {
@@ -91,16 +134,16 @@ describe('syncVideos', () => {
         error: 'PUT acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm: 403 denied',
       },
     ]);
-    const second = await syncVideos();
+    const second = await syncVideos([RUN]);
     expect(second.uploaded).toEqual(['acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm']);
     expect(second.failed).toEqual([]);
   });
 
   it('leaves dotfiles alone: the manifest itself is not evidence', async () => {
     drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm');
-    await syncVideos();
+    await syncVideos([RUN]);
     fetchMock.mockClear();
-    const again = await syncVideos();
+    const again = await syncVideos([RUN]);
     expect(again.uploaded).toEqual([]);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -109,9 +152,9 @@ describe('syncVideos', () => {
   // would mean "missing from the new bucket, forever".
   it('starts over when the destination bucket changes', async () => {
     drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm');
-    await syncVideos();
+    await syncVideos([RUN]);
     cfgState.r2 = { ...R2, bucket: 'qa-videos-2' };
-    const again = await syncVideos();
+    const again = await syncVideos([RUN]);
     expect(again.uploaded).toEqual(['acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm']);
     expect(String(fetchMock.mock.calls[1][0])).toContain('/qa-videos-2/');
   });
@@ -122,7 +165,7 @@ describe('syncVideos', () => {
     drop('acme__shop/pr-12/1-login.webm');
     drop('acme__shop/stray.webm');
     drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm');
-    const { uploaded, failed } = await syncVideos();
+    const { uploaded, failed } = await syncVideos([RUN]);
     expect(uploaded).toEqual(['acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm']);
     expect(failed).toEqual([]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -140,7 +183,7 @@ describe('syncVideos', () => {
         now += 11 * 60 * 1000;
         return { ok: true };
       });
-      const { uploaded, failed, deferred } = await syncVideos();
+      const { uploaded, failed, deferred } = await syncVideos([RUN]);
       expect(uploaded).toHaveLength(1);
       expect(failed).toEqual([]);
       expect(deferred).toBe(1);
@@ -154,9 +197,9 @@ describe('syncVideos', () => {
   it('sends files that failed last sync to the back of the line', async () => {
     drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/1-login.webm');
     fetchMock.mockResolvedValueOnce({ ok: false, status: 500, text: async () => 'stall' });
-    await syncVideos();
+    await syncVideos([RUN]);
     drop('acme__shop/pr-12-0123456789abcdef0123456789abcdef/2-checkout.webm');
-    const { uploaded } = await syncVideos();
+    const { uploaded } = await syncVideos([RUN]);
     expect(uploaded).toHaveLength(2);
     expect(String(fetchMock.mock.calls[1][0])).toContain('2-checkout');
     expect(String(fetchMock.mock.calls[2][0])).toContain('1-login');
@@ -173,12 +216,12 @@ describe('syncVideos', () => {
           release = () => resolve({ ok: true });
         }),
     );
-    const first = syncVideos();
+    const first = syncVideos([RUN]);
     // The stall is only real once the PUT is in flight: the sync hashes the
     // file before it ever touches the network.
     while (!release) await new Promise((r) => setTimeout(r, 2));
-    const second = syncVideos();
-    const third = syncVideos();
+    const second = syncVideos([RUN]);
+    const third = syncVideos([RUN]);
     expect(third).toBe(second);
     release();
     await first;
@@ -187,7 +230,7 @@ describe('syncVideos', () => {
 
   it('percent-encodes key segments the way the signature is computed', async () => {
     drop("acme__shop/pr-12-0123456789abcdef0123456789abcdef/3-it's here!.webm");
-    const { uploaded } = await syncVideos();
+    const { uploaded } = await syncVideos([RUN]);
     expect(uploaded).toHaveLength(1);
     const [url] = fetchMock.mock.calls[0];
     expect(String(url)).toBe(

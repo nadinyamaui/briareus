@@ -7,6 +7,7 @@ import os from 'os';
 import path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import { BINARIES } from '../lib/providers.js';
+import * as r2 from '../lib/r2.js';
 import * as providerTools from '../lib/providers.js';
 import { compactCodexThread } from '../lib/codex-session.js';
 import { askClaudeSideQuestion, transferClaudeSession } from '../lib/claude-session.js';
@@ -4197,6 +4198,8 @@ describe('webhook deliveries', () => {
   const armed = (extra) => ({ armed: true, epoch: 0, perHour: 30, maxTurns: 10, ...extra });
   const IDLE = [
     'hk-off',
+    'hk-video-owner',
+    'hk-video-other',
     'hk-free',
     'hk-busy',
     'hk-ask',
@@ -4328,6 +4331,51 @@ describe('webhook deliveries', () => {
     }
     return null;
   };
+
+  it('reports publication to its owner before settling and retries only that owner', async () => {
+    fakeCli();
+    const owner = getJob('hk-video-owner');
+    const other = getJob('hk-video-other');
+    owner.videoRuns = ['acme__hook/pr-<pr-number>-0123456789abcdef0123456789abcdef'];
+    other.videoRuns = ['other__project/pr-<pr-number>-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'];
+    const failed = { file: 'acme__hook/pr-12-token/login.webm', error: 'fetch failed' };
+    let release;
+    const sync = vi
+      .spyOn(r2, 'syncVideos')
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({ uploaded: ['other.webm'], failed: [], deferred: 0 })
+      .mockResolvedValueOnce({ uploaded: [failed.file], failed: [], deferred: 0 });
+    try {
+      sendDevMessage(owner.id, 'Finish owner');
+      const finishing = cli.finish(owner);
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      expect(owner.status).toBe('running');
+      release({ uploaded: [], failed: [failed], deferred: 0 });
+      await finishing;
+      expect(infos(owner).join('\n')).toContain('fetch failed');
+      expect(infos(owner).join('\n')).toContain('retry with another turn in this session');
+      sendDevMessage(other.id, 'Finish other');
+      await cli.finish(other);
+      expect(infos(other).join('\n')).not.toContain(failed.file);
+      expect(infos(other).join('\n')).not.toContain('fetch failed');
+      sendDevMessage(owner.id, 'Retry publication');
+      await cli.finish(owner);
+      expect(sync.mock.calls.map(([runs]) => runs)).toEqual([
+        owner.videoRuns,
+        other.videoRuns,
+        owner.videoRuns,
+      ]);
+      expect(infos(owner)).toContain('Uploaded 1 video to the R2 bucket.');
+    } finally {
+      sync.mockRestore();
+      owner.status = other.status = 'closed';
+    }
+  });
 
   it('is refused by a session nobody armed, and by one that does not exist', () => {
     expect(refused(() => deliverToSession('hk-off', { text: 'hi' }))).toMatchObject({
