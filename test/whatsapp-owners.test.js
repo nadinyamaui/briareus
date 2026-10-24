@@ -366,6 +366,91 @@ it.each(['load', 'discovery'])(
   },
 );
 
+it.each(['watch load', 'lapsed read'])(
+  'preserves watches when ownership refresh fails during an awaited %s',
+  async (stage) => {
+    const { createWhatsAppWatcher } = await import('../lib/whatsapp-watch.js');
+    const loadOwners = vi.fn(async () => ({ default: 1, ana: 2 }));
+    const { store } = owners({}, { load: loadOwners });
+    await store.init();
+    const now = 1700000000000;
+    const job = { id: 'j1', ownerId: 1 };
+    let saved = [
+      ['default', '49111111111@c.us', now - 1000],
+      ['default', '49222222222@c.us', now + 3600_000],
+      ['ana', '49333333333@c.us', now + 3600_000],
+    ].map(([account, chat, expiresAt]) => ({
+      jobId: job.id,
+      account,
+      chat,
+      since: now / 1000 - 60,
+      expiresAt,
+      seen: [],
+    }));
+    const original = structuredClone(saved);
+    const entered = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    const pause = async () => {
+      entered.resolve();
+      await resume.promise;
+    };
+    const messages = vi.fn(async (_account, chat) => ({
+      messages: [{ id: chat, timestamp: now / 1000 - 30, text: `Reply in ${chat}`, fromMe: false }],
+    }));
+    if (stage === 'lapsed read')
+      messages.mockImplementationOnce(async () => {
+        await pause();
+        return { messages: [] };
+      });
+    const deliver = vi.fn();
+    const save = vi.fn(async (_key, rows) => {
+      saved = structuredClone(rows);
+    });
+    const watcher = createWhatsAppWatcher({
+      service: { messages },
+      getJob: () => job,
+      allowed: () => true,
+      mayUse: (job, account) => store.owns(job.ownerId, account),
+      ownershipReady: store.ready,
+      deliver,
+      load: async () => {
+        if (stage === 'watch load') await pause();
+        return saved;
+      },
+      save,
+      now: () => now,
+      log: () => {},
+    });
+    try {
+      if (stage === 'lapsed read') await watcher.init();
+      const polling = watcher.poll();
+      await entered.promise;
+      loadOwners.mockRejectedValueOnce(new Error('Ownership refresh unavailable'));
+      await expect(store.init()).rejects.toThrow('Ownership refresh unavailable');
+      expect(store.ready()).toBe(false);
+      resume.resolve();
+      await polling;
+      expect(saved).toEqual(original);
+      expect(save).not.toHaveBeenCalled();
+      expect(deliver).not.toHaveBeenCalled();
+      expect(messages).toHaveBeenCalledTimes(stage === 'lapsed read' ? 1 : 0);
+      await store.init();
+      messages.mockClear();
+      await watcher.poll();
+      expect(messages.mock.calls.map(([account, chat]) => [account, chat])).toEqual(
+        original.slice(0, 2).map(({ account, chat }) => [account, chat]),
+      );
+      expect(deliver).toHaveBeenCalledTimes(2);
+      expect(saved).toEqual([{ ...original[1], seen: [original[1].chat] }]);
+      await watcher.poll();
+      expect(deliver).toHaveBeenCalledTimes(2);
+    } finally {
+      resume.resolve();
+      watcher.stop();
+    }
+  },
+);
+
 it.each(['constructor', 'toString', '__proto__'])('claims and reloads the valid name %s', async (account) => {
   const { store, stored } = owners();
   await store.init();
