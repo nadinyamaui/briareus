@@ -288,12 +288,9 @@ setOwnerGithub((job) => githubOf(job.ownerId));
 // are enabled, or for a session nobody owns, one from before users, the earliest user,
 // its original operator regardless of their current role.
 const inboxOwner = (job) => {
-  try {
-    const owner = job.ownerId != null ? users.get(job.ownerId) : users.list()[0];
-    return owner && owner.disabledAt == null ? owner.id : null;
-  } catch {
-    return null;
-  }
+  // An unavailable user store must defer mail processing, not revoke ownership.
+  const owner = job.ownerId != null ? users.get(job.ownerId) : users.list()[0];
+  return owner && owner.disabledAt == null ? owner.id : null;
 };
 setInboxOwner(inboxOwner);
 // The user a /api/v1 request acts as, who owns any session it starts.

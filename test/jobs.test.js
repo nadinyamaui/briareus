@@ -12,6 +12,7 @@ import { compactCodexThread } from '../lib/codex-session.js';
 import { askClaudeSideQuestion, transferClaudeSession } from '../lib/claude-session.js';
 import { forgetProviderUsage, providerUsage } from '../lib/balancer.js';
 import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
+import { createUsers } from '../lib/users.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
@@ -4232,8 +4233,10 @@ describe('webhook deliveries', () => {
     'hk-whatsapp',
     'hk-mail',
     'hk-mail-cap',
+    'hk-mail-recovery',
   ];
 
+  let heldDeliveryTick;
   beforeAll(async () => {
     state.stored = [
       ...IDLE.filter((id) => !['hk-off', 'hk-orch', 'hk-brief', 'hk-slack', 'hk-whatsapp'].includes(id)).map(
@@ -4252,7 +4255,10 @@ describe('webhook deliveries', () => {
       row('hk-loopfix', { loopFixParentId: 'hk-free' }),
       row('hk-analyst', { readOnly: true }),
     ];
+    const intervals = vi.spyOn(globalThis, 'setInterval');
     await initJobs();
+    heldDeliveryTick = intervals.mock.calls.find(([fn]) => fn.name === 'flushHeldDeliveries')[0];
+    intervals.mockRestore();
     for (const id of IDLE) getJob(id).status = 'idle';
     getJob('hk-ask').awaitingAnswer = true;
     getJob('hk-stop').turnCanceled = true;
@@ -4949,6 +4955,77 @@ describe('webhook deliveries', () => {
       } finally {
         if (prompts.length) await cli.finish(job);
         job.ownerId = originalOwnerId;
+        setInboxOwner((session) => session.ownerId ?? null);
+      }
+    });
+
+    it.each([
+      ['receipt', 1],
+      ['receipt', null],
+      ['pendingMailWakes', 1],
+      ['pendingMailWakes', null],
+      ['pendingDeliveries', 1],
+      ['pendingDeliveries', null],
+    ])('retries %s after the first user load recovers (owner %s)', async (queue, ownerId) => {
+      const { prompts } = fakeCli();
+      const job = getJob('hk-mail-recovery');
+      const originalOwnerId = job.ownerId;
+      const source = fs.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+      const users = createUsers({ load: async () => [{ id: 1, disabledAt: null }] });
+      const inboxOwner = new Function(
+        'users',
+        source.slice(source.indexOf('const inboxOwner ='), source.indexOf('setInboxOwner(')) +
+          'return inboxOwner;',
+      )(users);
+      const mailService = {
+        forUser: (id) => ({ wakeAccountEnabled: (accountId) => id === 1 && accountId === 7 }),
+      };
+      try {
+        job.unattendedTurns = 0;
+        job.ownerId = ownerId;
+        job.awaitingAnswer = true;
+        const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }], maxTurns: 1 }).rules[0];
+        const message = email('retry-after-users', rule.since);
+        if (queue !== 'receipt') {
+          if (queue === 'pendingMailWakes') job.unattendedTurns = 1;
+          await mailReceivedDurably(account, message);
+          expect(job[queue]).toHaveLength(1);
+        }
+        // Restore durable queues before the users store has completed its first load.
+        setInboxOwner(inboxOwner);
+        new Function(
+          'inboxOwner',
+          'mailService',
+          'setMailWakeAccess',
+          source.slice(source.indexOf('setMailWakeAccess('), source.indexOf('app.use(mailPushRoutes(')),
+        )(inboxOwner, mailService, setMailWakeAccess);
+        job.awaitingAnswer = false;
+        job.unattendedTurns = 0;
+        if (queue === 'receipt') {
+          await expect(mailReceivedDurably({ ...account, userId: 1 }, message)).rejects.toMatchObject({
+            status: 503,
+          });
+        } else {
+          const held = structuredClone(job[queue]);
+          expect(() => heldDeliveryTick()).not.toThrow();
+          expect(job[queue]).toEqual(held);
+        }
+        expect(prompts).toHaveLength(0);
+        await users.init();
+        if (queue === 'receipt') await mailReceivedDurably({ ...account, userId: 1 }, message);
+        else heldDeliveryTick();
+        await vi.waitFor(() => expect(prompts).toHaveLength(1));
+        expect(prompts[0]).toContain('retry-after-users');
+        expect(job.pendingMailWakes).toEqual([]);
+        expect(job.pendingDeliveries).toEqual([]);
+        await mailReceivedDurably({ ...account, userId: 1 }, message);
+        expect(prompts).toHaveLength(1);
+      } finally {
+        if (prompts.length) await cli.finish(job);
+        job.ownerId = originalOwnerId;
+        job.mailWake = undefined;
+        job.pendingMailWakes = [];
+        job.pendingDeliveries = [];
         setInboxOwner((session) => session.ownerId ?? null);
       }
     });

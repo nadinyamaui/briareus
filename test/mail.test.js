@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { createUsers } from '../lib/users.js';
 import crypto from 'node:crypto';
 import express from 'express';
 import { mailAgentRoutes } from '../lib/mail-agent.js';
@@ -2406,6 +2408,35 @@ describe('mail push', () => {
     await vi.advanceTimersByTimeAsync(15_000);
     expect(received).not.toHaveBeenCalled();
     expect(await store.pendingReceived(account.id)).toEqual([]);
+  });
+  it('keeps receipts pending until inbox ownership is available, then replays them once', async () => {
+    const users = createUsers({ load: async () => [{ id: 1, disabledAt: null }] });
+    const source = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+    const inboxOwner = new Function(
+      'users',
+      source.slice(source.indexOf('const inboxOwner ='), source.indexOf('setInboxOwner(')) +
+        'return inboxOwner;',
+    )(users);
+    const accepted = vi.fn();
+    await setupPush((account, message) => {
+      if (inboxOwner({ ownerId: 1 }) === account.userId) accepted(message.id);
+    });
+    mailbox.messages = {};
+    const account = await connect();
+    await finishSync();
+    await store.upsert(account.id, [{ id: 'pending', inInbox: true, receivedAt: clock }], clock, true);
+    cfg.mail.syncMinutes = 0;
+    vi.useFakeTimers();
+    service.start();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(accepted).not.toHaveBeenCalled();
+    expect((await store.pendingReceived(account.id)).map((row) => row.id)).toEqual(['pending']);
+    await users.init();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(accepted).toHaveBeenCalledExactlyOnceWith('pending');
+    expect(await store.pendingReceived(account.id)).toEqual([]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(accepted).toHaveBeenCalledTimes(1);
   });
   it('keeps the receipt until the asynchronous wake checkpoint succeeds', async () => {
     const received = vi.fn();
