@@ -400,6 +400,45 @@ describe('latestTestVerdict', () => {
     });
   });
 
+  it.each(['', 'A', '**API**'])('retains results after scenario identifier %j', async (identifier) => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        `| ${identifier} | UI | Open | Shown | ⬜ | |`,
+        '| 3 | Bad | curl | 200 | ❌ | 500 |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '3', scenario: 'Bad', expected: '200', evidence: '500' }],
+      total: 3,
+      passed: 1,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it.each([
+    '✅ API; UI never tested',
+    '✅ API; UI not covered',
+    '✅ API; UI skipped on this host',
+    '✅ API; UI blocked waiting for credentials',
+    '✅ API; Firefox was never executed after setup',
+    '✅ API; browser skipped until credentials arrive',
+    '✅ API; **UI blocked** awaiting a test account',
+    '✅ Verified API blocked by authorization policy; expected 403 received; UI never tested',
+  ])('does not certify missing execution regardless of its explanation: %s', async (status) => {
+    gh.comments = [
+      sheet([`| 1 | Mixed API/UI | curl then browser | Both work | ${status} | response.json |`]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
   it.each([
     ['✅ Verified API blocked by authorization policy; expected 403 received', true],
     ['✅ Verified API blocked by authorization policy; expected 403 received; UI not run', false],
