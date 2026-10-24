@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { createSlackService, createSlackApi, verifySlackSignature } from '../lib/slack.js';
 import { slackRoutes, slackEventsRouter } from '../lib/slack-routes.js';
 import { createUsers } from '../lib/users.js';
+import { createMobileAuth } from '../lib/mobile-auth.js';
+import { apiV1Routes } from '../lib/api-v1.js';
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ credentialsKey: 'k'.repeat(32) }) }));
 
@@ -1812,6 +1814,80 @@ describe('the wire', () => {
     expect(init.headers.Authorization).toBe(`Bearer ${TOKEN}`);
     expect(String(init.body)).toBe('channel=C1&text=hi');
   });
+
+  it.each([
+    { role: 'member', repos: ['o/private'], shared: [], visible: false },
+    { role: 'member', repos: ['o/a', 'o/private'], shared: [], visible: false },
+    { role: 'member', repos: ['o/private'], shared: ['o/a'], visible: false },
+    { role: 'member', repos: ['o/a', 'o/private'], shared: ['o/a'], visible: true },
+    { role: 'admin', repos: [], shared: [], visible: true },
+  ])(
+    'validates Slack projects within the caller’s API scope (%j)',
+    async ({ role, repos, shared, visible }) => {
+      const { s, w } = await service();
+      let devices = [];
+      const auth = createMobileAuth({
+        load: async () => structuredClone(devices),
+        save: async (_key, value) => {
+          devices = structuredClone(value);
+        },
+      });
+      await auth.init();
+      const { token } = await auth.create(
+        { userId: 1, label: 'Slack test', repos, permission: role === 'admin' ? 'admin' : 'manage', days: 1 },
+        'secret',
+      );
+      const getProject = (repo) => (['o/a', 'o/private'].includes(repo) ? { repo } : null);
+      const handlers = slackRoutes({ service: s, agentSession: () => null, getProject });
+      const app = express();
+      app.use(
+        apiV1Routes({
+          auth,
+          users: { get: () => ({ id: 1, role, disabledAt: null }) },
+          memberRepos: () => shared,
+          apiEnabled: () => true,
+          ownerSecret: () => 'secret',
+          handlers,
+          getProject,
+        }),
+      );
+      const server = app.listen(0, '127.0.0.1');
+      await new Promise((resolve) => server.once('listening', resolve));
+      const base = `http://127.0.0.1:${server.address().port}/api/v1/settings/slack/workspaces`;
+      try {
+        for (const [method, suffix] of [
+          ['POST', ''],
+          ['PUT', '/9999'],
+          ['PUT', `/${w.id}`],
+        ]) {
+          for (const repo of ['o/absent', 'o/private', 'o/a']) {
+            const response = await fetch(`${base}${suffix}`, {
+              method,
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ projects: [{ repo }] }),
+            });
+            const allowed = repo !== 'o/absent' && (role === 'admin' || (repo === 'o/a' && visible));
+            if (!allowed) {
+              expect(response.status).toBe(400);
+              expect(await response.json()).toEqual({ error: `${repo} is not a project` });
+            } else if (method === 'POST') {
+              // Passed project validation and reached normal workspace validation.
+              expect(await response.json()).toEqual({ error: 'Enter a Slack user token' });
+            } else if (suffix === '/9999') {
+              expect(response.status).toBe(404);
+              expect(await response.json()).toEqual({ error: 'Slack workspace not found' });
+            } else {
+              expect(response.status).toBe(200);
+              expect((await response.json()).workspace.projects[0].repo).toBe(repo);
+            }
+          }
+        }
+      } finally {
+        server.closeAllConnections();
+        await new Promise((resolve) => server.close(resolve));
+      }
+    },
+  );
 
   it('serves the agent’s calls on its session token, and the events route on the raw body', async () => {
     const { s, w, deliver } = await service();

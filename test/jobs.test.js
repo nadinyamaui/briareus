@@ -13,6 +13,7 @@ import { askClaudeSideQuestion, transferClaudeSession } from '../lib/claude-sess
 import { forgetProviderUsage, providerUsage } from '../lib/balancer.js';
 import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
 import { createUsers } from '../lib/users.js';
+import { createSlackService } from '../lib/slack.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
@@ -16473,6 +16474,43 @@ describe('automatic recovery after a server restart', () => {
       recordTriage.mockResolvedValue({ error: null });
     }
   });
+
+  it.each([
+    { workspaces: [] },
+    { workspaces: [{ id: 1, ownerId: 1, projects: [{ repo: 'other/project' }] }] },
+  ])(
+    'recovers a session without Slack for its project while users are unavailable (%j)',
+    async ({ workspaces }) => {
+      const load = vi.fn().mockRejectedValueOnce(new Error('temporary users failure')).mockResolvedValue([]);
+      const users = createUsers({ load });
+      await expect(users.init()).rejects.toThrow('temporary users failure');
+      const inboxOwner = vi.fn(() => users.list()[0]?.id ?? null);
+      const slack = createSlackService({
+        load: async (key, fallback) => (key === 'slack_workspaces' ? workspaces : fallback),
+        save: async () => {},
+        inboxOwner,
+      });
+      await slack.init();
+      const saved = row();
+      state.stored = [saved];
+      setSlackAccess((job) => slack.briefing(job));
+      try {
+        await initJobs({ deferPolling: true });
+        expect(resumeRestartedSessions()).toBe(1);
+        await vi.waitFor(() => expect(children).toHaveLength(1));
+        expect(inboxOwner).not.toHaveBeenCalled();
+        expect(children[0].prompt).toContain('Finish the requested change');
+        finish(children[0]);
+        await vi.waitFor(() => expect(saved.status).toBe('idle'));
+        if (workspaces.length)
+          expect(() => slack.briefing({ repo: 'other/project' })).toThrow('User accounts are unavailable');
+        await users.refresh();
+        expect(saved.status).toBe('idle');
+      } finally {
+        setSlackAccess(() => null);
+      }
+    },
+  );
 
   it('resumes the saved conversation, preserves dirty files and delivers queued instructions', async () => {
     const checkout = path.join(root, 'checkout');
