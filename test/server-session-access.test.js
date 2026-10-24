@@ -3,6 +3,7 @@ import { expect, it, vi } from 'vitest';
 
 vi.mock('../lib/db.js', () => ({
   loadShareRows: vi.fn(),
+  loadUserRows: vi.fn(),
   replaceShares: vi.fn(),
   loadUserCredentialRows: vi.fn(),
   saveUserCredential: vi.fn(),
@@ -12,10 +13,43 @@ vi.mock('../lib/config.js', () => ({ getConfig: () => ({ credentialsKey: 'k'.rep
 const { createUserCredentials } = await import('../lib/user-credentials.js');
 const { seal } = await import('../lib/secretbox.js');
 const { createShares } = await import('../lib/shares.js');
+const { createUsers } = await import('../lib/users.js');
 
 // Exercise the server's actual wiring without booting its workers.
 const source = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
 const wiring = source.slice(source.indexOf('const sessionMayUse ='), source.indexOf('// On every response,'));
+
+it('keeps legacy inbox access with the original operator through demotion and disable', () => {
+  const owners = [
+    { id: 1, role: 'admin', disabledAt: null },
+    { id: 2, role: 'admin', disabledAt: null },
+  ];
+  const users = { list: () => owners, get: (id) => owners.find((u) => u.id === id) };
+  const inboxWiring = source.slice(source.indexOf('const inboxOwner ='), source.indexOf('setInboxOwner('));
+  const inboxOwner = new Function('users', inboxWiring + 'return inboxOwner;')(users);
+  expect(inboxOwner({ ownerId: null })).toBe(1);
+  owners[0].role = 'member';
+  expect(inboxOwner({ ownerId: null })).toBe(1);
+  owners[0].disabledAt = 1;
+  expect(inboxOwner({ ownerId: null })).toBeNull();
+  expect(inboxOwner({ ownerId: 1 })).toBeNull();
+  expect(inboxOwner({ ownerId: 2 })).toBe(2);
+  expect(inboxOwner({ ownerId: 99 })).toBeNull();
+  owners.length = 0;
+  expect(inboxOwner({ ownerId: null })).toBeNull();
+});
+
+it.each([null, 1])('reports unavailable inbox ownership until users recover (owner %s)', async (ownerId) => {
+  const load = vi.fn(async () => [{ id: 1, disabledAt: null }]);
+  load.mockRejectedValueOnce(new Error('DB down'));
+  const users = createUsers({ load });
+  await expect(users.init()).rejects.toThrow('DB down');
+  const inboxWiring = source.slice(source.indexOf('const inboxOwner ='), source.indexOf('setInboxOwner('));
+  const inboxOwner = new Function('users', inboxWiring + 'return inboxOwner;')(users);
+  expect(() => inboxOwner({ ownerId })).toThrow(expect.objectContaining({ status: 503 }));
+  await users.refresh();
+  expect(inboxOwner({ ownerId })).toBe(1);
+});
 
 it('checks session project access against the shared project ID', async () => {
   const shares = createShares({

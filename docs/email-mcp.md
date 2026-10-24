@@ -54,12 +54,20 @@ read-only grant until reconnected with `access: manage`. Management requests
 [Gmail's gmail.modify permission](https://developers.google.com/workspace/gmail/api/auth/scopes)
 or Outlook's Mail.ReadWrite and
 [Mail.Send permission](https://learn.microsoft.com/en-us/graph/api/user-sendmail?view=graph-rest-1.0).
-The admin API also accepts `access` on `POST /api/v1/settings/mail/accounts/connect`.
+The API also accepts `access` on `POST /api/v1/settings/mail/accounts/connect`.
 
 ## Behavior and access
 
-Email is the operator's own data: eligible interactive chats in opted-in projects can access all
-connected mailboxes. Other projects have no access. Worker, review, QA, read-only analyst,
+Each mailbox belongs to the user who connected it. Through the API, every user
+(admin or member) reads and manages only their own mailboxes; another user's answers 404,
+and a mailbox already connected by someone else cannot be connected again. Mailboxes
+connected before users existed belong to the earliest user, the original operator, regardless of role.
+
+Eligible interactive chats in opted-in projects can access the mailboxes of the session's
+owner: the user who started it, or for a session nobody owns (one from before users) the
+original operator. A disabled owner's sessions reach none. Wake rules can name only those
+mailboxes, and an email never wakes a session that is now another user's. Other projects
+have no access. Worker, review, QA, read-only analyst,
 preview, closed and failed sessions are refused, as are unattended delivery turns.
 These checks run at every HTTP request, even if a turn already loaded the tools.
 No tools disconnect mailboxes or permanently delete messages.
@@ -150,7 +158,7 @@ individual rule; `{ "rules": [] }` disables all email wakes. Preserve the return
 rule `id` when keeping a rule unchanged; changing a filter or reenabling a rule
 starts its activation time again.
 
-An admin client can read or replace the same configuration through
+A client that can see the session can read (`read`) or replace (`manage`) the same configuration through
 `GET/PUT /api/v1/sessions/{id}/mail-wake`. Project email access must be enabled.
 Existing cached messages, messages older than rule activation, outgoing mail,
 and read/label updates do not wake sessions. Only newly cached incoming inbox

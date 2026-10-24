@@ -134,6 +134,7 @@ import {
   setSlackAccess,
   setExternalMcp,
   setOwnerGithub,
+  setInboxOwner,
   DEV_OPEN,
 } from './lib/jobs.js';
 import {
@@ -283,6 +284,15 @@ const githubOf = (userId) => {
   }
 };
 setOwnerGithub((job) => githubOf(job.ownerId));
+// Whose personal inboxes (mail, lib/mail-agent.js) a session reaches: its owner while they
+// are enabled, or for a session nobody owns, one from before users, the earliest user,
+// its original operator regardless of their current role.
+const inboxOwner = (job) => {
+  // An unavailable user store must defer mail processing, not revoke ownership.
+  const owner = job.ownerId != null ? users.get(job.ownerId) : users.list()[0];
+  return owner && owner.disabledAt == null ? owner.id : null;
+};
+setInboxOwner(inboxOwner);
 // The user a /api/v1 request acts as, who owns any session it starts.
 const requestOwner = (res) => res.locals.apiUser?.id ?? null;
 // Whether a session may use a shared resource (lib/shares.js): one nobody started works as the
@@ -319,7 +329,10 @@ setSlackAccess((repo) => slackService.briefing(repo));
 // Webhooks go ahead of the JSON body parser: GitHub and Slack sign the raw bytes with an HMAC,
 // and a re-serialized body verifies against nothing (lib/webhooks.js).
 const mailService = createMailService({ onReceived: mailReceivedDurably, onDisabled: cancelMailWakes });
-setMailWakeAccess((id) => mailService.wakeAccountEnabled(id));
+setMailWakeAccess((id, job) => {
+  const owner = inboxOwner(job);
+  return owner != null && mailService.forUser(owner).wakeAccountEnabled(id);
+});
 app.use(mailPushRoutes({ service: mailService }));
 app.use('/webhooks/slack', slackEventsRouter({ service: slackService }));
 
@@ -754,10 +767,21 @@ api.use(
     getProject,
     wakeState: sessionMailWakeState,
     wakeUpdate: setSessionMailWake,
+    inboxOwner,
   }),
 );
 api.use(
-  sessionMailWakeRoutes({ service: mailService, state: sessionMailWakeState, update: setSessionMailWake }),
+  sessionMailWakeRoutes({
+    service: mailService,
+    state: sessionMailWakeState,
+    update: setSessionMailWake,
+    mailFor: (id) => {
+      const job = getJob(id);
+      const owner = job ? inboxOwner(job) : null;
+      if (owner == null) throw Object.assign(new Error('Session not found'), { status: 404 });
+      return mailService.forUser(owner);
+    },
+  }),
 );
 
 api.get('/api/agent/memories', (req, res) => {

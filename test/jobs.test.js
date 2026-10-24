@@ -12,6 +12,7 @@ import { compactCodexThread } from '../lib/codex-session.js';
 import { askClaudeSideQuestion, transferClaudeSession } from '../lib/claude-session.js';
 import { forgetProviderUsage, providerUsage } from '../lib/balancer.js';
 import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
+import { createUsers } from '../lib/users.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
@@ -331,6 +332,7 @@ import {
   deliverWorkerNotices,
   deliverToSession,
   mailReceived,
+  setInboxOwner,
   mailReceivedDurably,
   cancelMailWakes,
   setSessionMailWake,
@@ -4231,8 +4233,10 @@ describe('webhook deliveries', () => {
     'hk-whatsapp',
     'hk-mail',
     'hk-mail-cap',
+    'hk-mail-recovery',
   ];
 
+  let heldDeliveryTick;
   beforeAll(async () => {
     state.stored = [
       ...IDLE.filter((id) => !['hk-off', 'hk-orch', 'hk-brief', 'hk-slack', 'hk-whatsapp'].includes(id)).map(
@@ -4251,7 +4255,10 @@ describe('webhook deliveries', () => {
       row('hk-loopfix', { loopFixParentId: 'hk-free' }),
       row('hk-analyst', { readOnly: true }),
     ];
+    const intervals = vi.spyOn(globalThis, 'setInterval');
     await initJobs();
+    heldDeliveryTick = intervals.mock.calls.find(([fn]) => fn.name === 'flushHeldDeliveries')[0];
+    intervals.mockRestore();
     for (const id of IDLE) getJob(id).status = 'idle';
     getJob('hk-ask').awaitingAnswer = true;
     getJob('hk-stop').turnCanceled = true;
@@ -4876,6 +4883,153 @@ describe('webhook deliveries', () => {
       expect(publicJob(job).mailWake).not.toHaveProperty('seen');
       await cli.finish(job);
     });
+    it('never wakes a session with another user’s mailbox', () => {
+      const job = getJob('hk-mail');
+      const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }] }).rules[0];
+      job.awaitingAnswer = true;
+      setInboxOwner(() => 2);
+      try {
+        expect(mailReceived({ ...account, userId: 3 }, email('elsewhere', rule.since))).toEqual([]);
+        expect(job.pendingDeliveries || []).toHaveLength(0);
+        expect(mailReceived({ ...account, userId: 2 }, email('mine', rule.since))).toEqual([job.id]);
+      } finally {
+        setInboxOwner((session) => session.ownerId ?? null);
+      }
+    });
+
+    it.each([
+      ['pendingMailWakes', 'reassigned'],
+      ['pendingDeliveries', 'reassigned'],
+      ['pendingMailWakes', 'disabled legacy owner'],
+      ['pendingDeliveries', 'disabled legacy owner'],
+    ])('rechecks ownership of %s after %s and persists cancellation', async (queue, change) => {
+      const { prompts } = fakeCli();
+      const job = getJob('hk-mail');
+      const originalOwnerId = job.ownerId;
+      const owner = { id: 1, disabledAt: null };
+      const users = { get: (id) => (id === 1 ? owner : { id, disabledAt: null }), list: () => [owner] };
+      const source = fs.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+      const inboxOwner = new Function(
+        'users',
+        source.slice(source.indexOf('const inboxOwner ='), source.indexOf('setInboxOwner(')) +
+          'return inboxOwner;',
+      )(users);
+      setInboxOwner(inboxOwner);
+      const mailService = {
+        wakeAccountEnabled: () => true,
+        forUser: (id) => ({ wakeAccountEnabled: (accountId) => accountId === 7 && id === 1 }),
+      };
+      new Function(
+        'inboxOwner',
+        'mailService',
+        'setMailWakeAccess',
+        source.slice(source.indexOf('setMailWakeAccess('), source.indexOf('app.use(mailPushRoutes(')),
+      )(inboxOwner, mailService, setMailWakeAccess);
+      try {
+        job.ownerId = change === 'reassigned' ? 1 : null;
+        const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }], maxTurns: 1 }).rules[0];
+        job.awaitingAnswer = true;
+        if (queue === 'pendingMailWakes') job.unattendedTurns = 1;
+        await mailReceivedDurably({ ...account, userId: 1 }, email('private-queued', rule.since));
+        expect(job[queue]).toHaveLength(1);
+        expect(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0][queue]).toHaveLength(1);
+        if (change === 'reassigned') job.ownerId = 2;
+        else owner.disabledAt = 1;
+        job.awaitingAnswer = false;
+        job.unattendedTurns = 0;
+        flushDeliveries(job);
+        await flushJobs();
+        expect(job.pendingMailWakes).toEqual([]);
+        expect(job.pendingDeliveries).toEqual([]);
+        expect(prompts).toHaveLength(0);
+        const saved = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
+        expect(saved).not.toHaveProperty('pendingMailWakes');
+        expect(saved).not.toHaveProperty('pendingDeliveries');
+        expect(() =>
+          deliverToSession(
+            job.id,
+            { text: 'private-direct' },
+            { via: 'mail', ruleId: rule.id, ruleSince: rule.since },
+          ),
+        ).toThrow(/no longer enabled/);
+      } finally {
+        if (prompts.length) await cli.finish(job);
+        job.ownerId = originalOwnerId;
+        setInboxOwner((session) => session.ownerId ?? null);
+      }
+    });
+
+    it.each([
+      ['receipt', 1],
+      ['receipt', null],
+      ['pendingMailWakes', 1],
+      ['pendingMailWakes', null],
+      ['pendingDeliveries', 1],
+      ['pendingDeliveries', null],
+    ])('retries %s after the first user load recovers (owner %s)', async (queue, ownerId) => {
+      const { prompts } = fakeCli();
+      const job = getJob('hk-mail-recovery');
+      const originalOwnerId = job.ownerId;
+      const source = fs.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+      const users = createUsers({ load: async () => [{ id: 1, disabledAt: null }] });
+      const inboxOwner = new Function(
+        'users',
+        source.slice(source.indexOf('const inboxOwner ='), source.indexOf('setInboxOwner(')) +
+          'return inboxOwner;',
+      )(users);
+      const mailService = {
+        forUser: (id) => ({ wakeAccountEnabled: (accountId) => id === 1 && accountId === 7 }),
+      };
+      try {
+        job.unattendedTurns = 0;
+        job.ownerId = ownerId;
+        job.awaitingAnswer = true;
+        const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }], maxTurns: 1 }).rules[0];
+        const message = email('retry-after-users', rule.since);
+        if (queue !== 'receipt') {
+          if (queue === 'pendingMailWakes') job.unattendedTurns = 1;
+          await mailReceivedDurably(account, message);
+          expect(job[queue]).toHaveLength(1);
+        }
+        // Restore durable queues before the users store has completed its first load.
+        setInboxOwner(inboxOwner);
+        new Function(
+          'inboxOwner',
+          'mailService',
+          'setMailWakeAccess',
+          source.slice(source.indexOf('setMailWakeAccess('), source.indexOf('app.use(mailPushRoutes(')),
+        )(inboxOwner, mailService, setMailWakeAccess);
+        job.awaitingAnswer = false;
+        job.unattendedTurns = 0;
+        if (queue === 'receipt') {
+          await expect(mailReceivedDurably({ ...account, userId: 1 }, message)).rejects.toMatchObject({
+            status: 503,
+          });
+        } else {
+          const held = structuredClone(job[queue]);
+          expect(() => heldDeliveryTick()).not.toThrow();
+          expect(job[queue]).toEqual(held);
+        }
+        expect(prompts).toHaveLength(0);
+        await users.init();
+        if (queue === 'receipt') await mailReceivedDurably({ ...account, userId: 1 }, message);
+        else heldDeliveryTick();
+        await vi.waitFor(() => expect(prompts).toHaveLength(1));
+        expect(prompts[0]).toContain('retry-after-users');
+        expect(job.pendingMailWakes).toEqual([]);
+        expect(job.pendingDeliveries).toEqual([]);
+        await mailReceivedDurably({ ...account, userId: 1 }, message);
+        expect(prompts).toHaveLength(1);
+      } finally {
+        if (prompts.length) await cli.finish(job);
+        job.ownerId = originalOwnerId;
+        job.mailWake = undefined;
+        job.pendingMailWakes = [];
+        job.pendingDeliveries = [];
+        setInboxOwner((session) => session.ownerId ?? null);
+      }
+    });
+
     it('holds matching email behind an unanswered question, keeps it with the webhook off and flushes when free', async () => {
       const { prompts } = fakeCli();
       const job = getJob('hk-mail');

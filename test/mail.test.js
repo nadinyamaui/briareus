@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { createUsers } from '../lib/users.js';
 import crypto from 'node:crypto';
 import express from 'express';
 import { mailAgentRoutes } from '../lib/mail-agent.js';
@@ -56,8 +58,10 @@ function memoryStore() {
     insertAccount: async (a) => {
       if ([...accounts.values()].some((b) => b.provider === a.provider && b.email === a.email))
         throw Object.assign(new Error('Duplicate entry'), { code: 'ER_DUP_ENTRY' });
+      // Mailboxes belong to a user (lib/users.js); these tests' are the first admin's.
       const row = {
         ...a,
+        userId: a.userId ?? 1,
         id: nextId++,
         syncState: null,
         lastSyncAt: null,
@@ -394,6 +398,68 @@ describe('Outlook expired continuations', () => {
       ).toEqual(empty ? ['archive'] : ['archive', 'live']);
     },
   );
+});
+
+describe('mailboxes belong to users', () => {
+  it('limits pending sign-ins per user without evicting another user’s sign-in', async () => {
+    const ana = service.forUser(2);
+    const bob = service.forUser(3);
+    const mine = ana.connectStart({ provider: 'gmail' });
+    const oldest = bob.connectStart({ provider: 'gmail' });
+    let newest;
+    for (let i = 0; i < 20; i++) newest = bob.connectStart({ provider: 'gmail' });
+    await expect(bob.connectFinish({ state: oldest.state, code: 'old' })).rejects.toThrow(/expired/);
+    expect(await ana.connectFinish({ state: mine.state, code: 'ana' })).toMatchObject({ userId: 2 });
+    mailbox.email = 'bob@gmail.com';
+    expect(await bob.connectFinish({ state: newest.state, code: 'bob' })).toMatchObject({ userId: 3 });
+  });
+
+  // As lib/mail-routes.js and lib/mail-agent.js reach it: held to one user.
+  async function connectAs(userId, email) {
+    mailbox.email = email;
+    const mail = service.forUser(userId);
+    const start = mail.connectStart({ provider: 'gmail' });
+    return mail.connectFinish({ url: `http://127.0.0.1/?state=${start.state}&code=c-${email}&scope=x` });
+  }
+
+  it('files a mailbox under whoever connected it, and shows each user only theirs', async () => {
+    const mine = await connectAs(2, 'ana@gmail.com');
+    const theirs = await connectAs(3, 'bob@gmail.com');
+    await settled();
+    expect(mine.userId).toBe(2);
+    const ana = service.forUser(2);
+    expect((await ana.list()).map((a) => a.email)).toEqual(['ana@gmail.com']);
+    expect(ana.wakeAccountEnabled(mine.id)).toBe(true);
+    expect(ana.wakeAccountEnabled(theirs.id)).toBe(false);
+    expect(ana.wakeAccountEnabled(999)).toBe(false);
+    await expect(ana.message(theirs.id, 'm1')).rejects.toMatchObject({ status: 404 });
+    await expect(ana.sync(theirs.id)).rejects.toMatchObject({ status: 404 });
+    await expect(ana.remove(theirs.id)).rejects.toMatchObject({ status: 404 });
+    await expect(ana.messages({ account: String(theirs.id) })).rejects.toMatchObject({ status: 404 });
+    const listed = await ana.messages({});
+    expect(listed.messages.every((m) => m.accountId === mine.id)).toBe(true);
+    expect(() => ana.connectStart({ provider: 'gmail', accountId: theirs.id })).toThrow(
+      'Mail account not found',
+    );
+    await ana.update(mine.id, { enabled: false });
+    expect(ana.wakeAccountEnabled(mine.id)).toBe(false);
+  });
+
+  it('keeps a mailbox with its user when another signs in to it, and their sign-in theirs', async () => {
+    await connectAs(2, 'ana@gmail.com');
+    await expect(connectAs(3, 'ana@gmail.com')).rejects.toMatchObject({ status: 409 });
+    const start = service.forUser(2).connectStart({ provider: 'gmail' });
+    await expect(
+      service.forUser(3).connectFinish({ url: `http://127.0.0.1/?state=${start.state}&code=x&scope=x` }),
+    ).rejects.toMatchObject({ status: 400 });
+    // The provider's redirect to this server carries no user: the sign-in's own owner stands.
+    mailbox.email = 'ana2@gmail.com';
+    const owned = service.forUser(2).connectStart({ provider: 'gmail' });
+    const finished = await service.connectFinish({
+      url: `http://127.0.0.1/?state=${owned.state}&code=y&scope=x`,
+    });
+    expect(finished.userId).toBe(2);
+  });
 });
 
 describe('connecting a mailbox', () => {
@@ -1156,7 +1222,9 @@ describe('message deletion', () => {
     let project = { mailToolsEnabled: true, enabled: true };
     const job = { kind: 'devchat', repo: 'test/mail', status: 'running' };
     const app = express();
-    app.use(mailAgentRoutes({ service, agentSession: () => job, getProject: () => project }));
+    app.use(
+      mailAgentRoutes({ service, agentSession: () => job, getProject: () => project, inboxOwner: () => 1 }),
+    );
     const server = app.listen(0, '127.0.0.1');
     await new Promise((resolve) => server.once('listening', resolve));
     try {
@@ -1491,7 +1559,9 @@ describe('mail management access', () => {
     }
     const app = express();
     app.use(express.json());
-    app.use(mailAgentRoutes({ service, agentSession: () => job, getProject: () => project }));
+    app.use(
+      mailAgentRoutes({ service, agentSession: () => job, getProject: () => project, inboxOwner: () => 1 }),
+    );
     const server = app.listen(0, '127.0.0.1');
     await new Promise((resolve) => server.once('listening', resolve));
     try {
@@ -2338,6 +2408,35 @@ describe('mail push', () => {
     await vi.advanceTimersByTimeAsync(15_000);
     expect(received).not.toHaveBeenCalled();
     expect(await store.pendingReceived(account.id)).toEqual([]);
+  });
+  it('keeps receipts pending until inbox ownership is available, then replays them once', async () => {
+    const users = createUsers({ load: async () => [{ id: 1, disabledAt: null }] });
+    const source = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+    const inboxOwner = new Function(
+      'users',
+      source.slice(source.indexOf('const inboxOwner ='), source.indexOf('setInboxOwner(')) +
+        'return inboxOwner;',
+    )(users);
+    const accepted = vi.fn();
+    await setupPush((account, message) => {
+      if (inboxOwner({ ownerId: 1 }) === account.userId) accepted(message.id);
+    });
+    mailbox.messages = {};
+    const account = await connect();
+    await finishSync();
+    await store.upsert(account.id, [{ id: 'pending', inInbox: true, receivedAt: clock }], clock, true);
+    cfg.mail.syncMinutes = 0;
+    vi.useFakeTimers();
+    service.start();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(accepted).not.toHaveBeenCalled();
+    expect((await store.pendingReceived(account.id)).map((row) => row.id)).toEqual(['pending']);
+    await users.init();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(accepted).toHaveBeenCalledExactlyOnceWith('pending');
+    expect(await store.pendingReceived(account.id)).toEqual([]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(accepted).toHaveBeenCalledTimes(1);
   });
   it('keeps the receipt until the asynchronous wake checkpoint succeeds', async () => {
     const received = vi.fn();
