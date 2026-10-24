@@ -23,9 +23,8 @@ it('loads core services even when WhatsApp account discovery fails', async () =>
   });
   const deps = {
     whatsappOwners,
-    users: { init: vi.fn(), list: () => [{ id: 1 }] },
+    users: { init: vi.fn().mockResolvedValue(undefined), list: () => [{ id: 1 }] },
     loadAppSetting: vi.fn(async () => 1),
-    saveAppSetting: vi.fn(),
     listProviders: () => [],
     console: { error: vi.fn() },
   };
@@ -52,8 +51,8 @@ it('loads core services even when WhatsApp account discovery fails', async () =>
     'credentials',
     'mobileAuth',
   ])
-    deps[name] = { init: vi.fn() };
-  await new AsyncFunction(...Object.keys(deps), `let legacyOwnerId; ${startup}`)(...Object.values(deps));
+    deps[name] = { init: vi.fn().mockResolvedValue(undefined) };
+  await new AsyncFunction(...Object.keys(deps), startup)(...Object.values(deps));
   for (const name of [
     'initSavedPrompts',
     'initMemorySelection',

@@ -776,3 +776,63 @@ it('sends generated Ogg/Opus through WAHA as a voice note without conversion', a
   await expect(ctx.service.sendVoice('default', CHAT, audio, '')).rejects.toMatchObject({ status: 400 });
   expect(ctx.calls.filter((c) => c.path === '/api/sendVoice')).toHaveLength(1);
 });
+
+describe('WAHA_ACCOUNTS on a shared WAHA', () => {
+  async function shared() {
+    const calls = [];
+    const sessions = [
+      { name: 'default', status: 'WORKING', me: { id: '49111111111@c.us', pushName: 'Business' } },
+      { name: 'support', status: 'WORKING', me: { id: '49222222222@c.us', pushName: 'Support' } },
+    ];
+    const upstream = express();
+    upstream.use(express.json());
+    upstream.use((req, res) => {
+      const path = decodeURIComponent(req.path);
+      calls.push({ path, method: req.method, body: req.body });
+      if (path === '/api/sessions' && req.method === 'GET') return res.json(sessions);
+      if (path === '/api/sessions' && req.method === 'POST') {
+        const created = { name: req.body.name, status: 'SCAN_QR_CODE', me: null };
+        sessions.push(created);
+        return res.status(201).json(created);
+      }
+      const found = sessions.find((s) => path === `/api/sessions/${s.name}`);
+      if (found) return res.json(found);
+      if (path.endsWith('/chats/overview')) return res.json([]);
+      res.sendStatus(404);
+    });
+    const url = await serve(upstream);
+    const service = createWhatsAppService({ config: () => ({ url, apiKey: KEY, accounts: ['mine'] }) });
+    return { calls, service };
+  }
+
+  it('lists only the named accounts and creates a named one that WAHA lacks', async () => {
+    const { calls, service } = await shared();
+    expect(await service.accounts()).toEqual({ configured: true, accounts: [] });
+    expect(await service.start('mine')).toEqual({
+      account: { id: 'mine', status: 'SCAN_QR_CODE', me: null },
+    });
+    expect(calls.find((c) => c.method === 'POST').body).toMatchObject({ name: 'mine', start: true });
+    expect((await service.accounts()).accounts.map((a) => a.id)).toEqual(['mine']);
+    expect(await service.conversations('mine')).toEqual({ conversations: [], nextOffset: null });
+  });
+
+  it('answers 404 for every other account without asking WAHA', async () => {
+    const { calls, service } = await shared();
+    for (const run of [
+      () => service.account('default'),
+      () => service.start('support'),
+      () => service.qr('default'),
+      () => service.logout('default'),
+      () => service.conversations('default'),
+      () => service.messages('default', CHAT),
+      () => service.send('default', CHAT, { text: 'hi' }),
+      () => service.sendVoice('default', CHAT, Buffer.from('OggS')),
+      () => service.createGroup('default', { name: 'g', participants: [CHAT] }),
+      () => service.addParticipants('default', '120363000000000000@g.us', { participants: [CHAT] }),
+      () => service.markRead('default', CHAT),
+      () => service.media('default', CHAT, MID),
+    ])
+      await expect(run()).rejects.toMatchObject({ status: 404 });
+    expect(calls).toEqual([]);
+  });
+});

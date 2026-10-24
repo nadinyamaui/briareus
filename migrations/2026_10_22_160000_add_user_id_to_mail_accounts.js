@@ -1,7 +1,7 @@
 // @ts-check
 // Whose mailbox each is (lib/users.js): a user reaches only their own, and their sessions'
 // mail tools only theirs. Every mailbox connected before this was the one operator's, so
-// they go to the first admin, the user the users migration made of them.
+// they go to the earliest user, the original operator, regardless of their current role.
 
 /** @param {import('mysql2/promise').Pool} p */
 async function hasColumn(p) {
@@ -14,12 +14,13 @@ async function hasColumn(p) {
 
 /** @param {{ context: import('mysql2/promise').Pool }} ctx */
 export async function up({ context: p }) {
-  if (await hasColumn(p)) return;
-  await p.query(
-    'ALTER TABLE `mail_accounts` ADD COLUMN `user_id` INT UNSIGNED NULL AFTER `id`, ADD KEY `mail_accounts_user` (`user_id`)',
-  );
-  const [admins] = await p.query("SELECT MIN(`id`) AS id FROM `users` WHERE `role` = 'admin'");
-  const owner = /** @type {any[]} */ (admins)[0]?.id;
+  if (!(await hasColumn(p))) {
+    await p.query(
+      'ALTER TABLE `mail_accounts` ADD COLUMN `user_id` INT UNSIGNED NULL AFTER `id`, ADD KEY `mail_accounts_user` (`user_id`)',
+    );
+  }
+  const [users] = await p.query('SELECT MIN(`id`) AS id FROM `users`');
+  const owner = /** @type {any[]} */ (users)[0]?.id;
   if (owner != null)
     await p.query('UPDATE `mail_accounts` SET `user_id` = ? WHERE `user_id` IS NULL', [owner]);
 }

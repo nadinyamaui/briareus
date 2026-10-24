@@ -1645,7 +1645,7 @@ Deploy an Envoyer project. Needs `manage`, held to `repo`.
 
 Check the Home Assistant connection. Needs `read`.
 
-**Returns** `{ configured: boolean, connected: boolean }`. Your own Home Assistant, connected with PUT /me/home-assistant (the first admin also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ configured: boolean, connected: boolean }`. Your own Home Assistant, connected with PUT /me/home-assistant (the original operator, the first user whatever their role, also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/entities`
 
@@ -1657,13 +1657,13 @@ Read current Home Assistant entities. Needs `read`.
 | -------- | -------- | ----------------------------------------------- |
 | `domain` | `string` | Optional domain filter, such as light or vacuum |
 
-**Returns** `{ entities: HomeAssistantEntity[] }`. Your own Home Assistant, connected with PUT /me/home-assistant (the first admin also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ entities: HomeAssistantEntity[] }`. Your own Home Assistant, connected with PUT /me/home-assistant (the original operator, the first user whatever their role, also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/entities/{id}`
 
 Read one Home Assistant entity. Needs `read`.
 
-**Returns** `{ entity: HomeAssistantEntity }`. Your own Home Assistant, connected with PUT /me/home-assistant (the first admin also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ entity: HomeAssistantEntity }`. Your own Home Assistant, connected with PUT /me/home-assistant (the original operator, the first user whatever their role, also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/services`
 

@@ -67,12 +67,12 @@ import {
   loadTaskSessions,
   loadJobTurnUsage,
   loadAppSetting,
-  saveAppSetting,
   updateAppSetting,
   getProviderRow,
 } from './lib/db.js';
 import {
   initJobs,
+  setSessionProjectFilter,
   resumeRestartedSessions,
   setAgentApiBase,
   jobForAgentToken,
@@ -274,33 +274,38 @@ const shares = createShares();
 const credentials = createUserCredentials();
 // A user's own GitHub identity (lib/me-routes.js), or null: none connected, the user is
 // gone or disabled, or CREDENTIALS_KEY cannot open it, in which case the server's stands.
+// An unloaded store must fail the action instead of silently changing its GitHub account.
 const githubOf = (userId) => {
   try {
     const user = userId == null ? null : users.get(userId);
     return user && user.disabledAt == null ? credentials.get(userId, 'github') : null;
-  } catch {
+  } catch (e) {
+    if (e.status === 503) throw e;
     return null;
   }
 };
 setOwnerGithub((job) => githubOf(job.ownerId));
-// The original operator keeps legacy integrations across role changes and restarts.
-let legacyOwnerId = null;
-const legacyOwner = () => legacyOwnerId;
-// Whose personal inboxes (mail, Slack) a session reaches: its owner, or for a session nobody
-// owns the original operator, and none while that user is disabled.
-const inboxOwner = (job) => {
-  const id = job.ownerId ?? legacyOwner();
+// Who owns what was the one operator's before users existed (sessions, Slack workspaces):
+// the first user, whom the users migration created, regardless of their current role.
+const originalOperator = () => {
   try {
-    const owner = id == null ? null : users.get(id);
-    return owner && owner.disabledAt == null ? owner.id : null;
+    return users.list()[0]?.id ?? null;
   } catch {
     return null;
   }
 };
+// Whose personal inboxes (mail, Slack) a session reaches: its owner while they
+// are enabled, or for a session nobody owns, one from before users, the earliest user,
+// its original operator regardless of their current role.
+const inboxOwner = (job) => {
+  // An unavailable user store must defer mail processing, not revoke ownership.
+  const owner = job.ownerId != null ? users.get(job.ownerId) : users.list()[0];
+  return owner && owner.disabledAt == null ? owner.id : null;
+};
 setInboxOwner(inboxOwner);
 // The user a /api/v1 request acts as, who owns any session it starts.
 const requestOwner = (res) => res.locals.apiUser?.id ?? null;
-// Whether a session may use a shared server (lib/shares.js): one nobody started works as the
+// Whether a session may use a shared resource (lib/shares.js): one nobody started works as the
 // admins' and may use what its project is given; one a user owns, only what that user may
 // use, and nothing once they are gone or disabled.
 const sessionMayUse = (job, kind, id) => {
@@ -313,6 +318,7 @@ const sessionMayUse = (job, kind, id) => {
   }
 };
 setDbServerFilter((job, server) => sessionMayUse(job, 'dbServer', server.id));
+setSessionProjectFilter((job, project) => sessionMayUse(job, 'project', project.id));
 
 // On every response, including the webhooks': nothing here is a page, and the
 // headers say so (lib/security.js).
@@ -328,14 +334,18 @@ const slackService = createSlackService({
   unfit: webhookUnfit,
   eventsUrl: (id) => `${getConfig().publicBaseUrl}/webhooks/slack/${id}`,
   inboxOwner,
-  legacyOwner,
+  // Persist legacy workspaces to the original operator, regardless of their current role.
+  legacyOwner: () => users.list()[0]?.id ?? null,
 });
 setSlackAccess((job) => slackService.briefing(job));
 
 // Webhooks go ahead of the JSON body parser: GitHub and Slack sign the raw bytes with an HMAC,
 // and a re-serialized body verifies against nothing (lib/webhooks.js).
 const mailService = createMailService({ onReceived: mailReceivedDurably, onDisabled: cancelMailWakes });
-setMailWakeAccess((id) => mailService.wakeAccountEnabled(id));
+setMailWakeAccess((id, job) => {
+  const owner = inboxOwner(job);
+  return owner != null && mailService.forUser(owner).wakeAccountEnabled(id);
+});
 app.use(mailPushRoutes({ service: mailService }));
 app.use('/webhooks/slack', slackEventsRouter({ service: slackService }));
 
@@ -677,13 +687,9 @@ api.use(slackRoutes({ service: slackService, agentSession, getProject }));
 // Each user's own Home Assistant (lib/me-routes.js). The one in .env was the operator's, so
 // it stands for the original operator until they connect one of their own.
 const homeAssistantOf = (user) => {
-  try {
-    const own = credentials.get(user.id, 'homeAssistant');
-    if (own) return own;
-  } catch {
-    return null;
-  }
-  return user.id === legacyOwner() ? getConfig().homeAssistant : null;
+  const own = credentials.get(user.id, 'homeAssistant');
+  if (own) return own;
+  return user.id === originalOperator() ? getConfig().homeAssistant : null;
 };
 api.use(
   homeAssistantRoutes({
@@ -698,7 +704,7 @@ const whatsappService = createWhatsAppService();
 // Replies in the chats a session wrote to come back to it (lib/whatsapp-watch.js).
 // Whose each WhatsApp account is (lib/whatsapp-owners.js); a session reaches its inbox owner's.
 const whatsappOwners = createWhatsAppOwners({
-  legacyOwner,
+  legacyOwner: originalOperator,
   lookupAccount: whatsappService.account,
   listAccounts: whatsappService.accounts,
 });
@@ -2291,6 +2297,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
 (async () => {
   try {
     await initDb();
+    await users.init().catch((e) => console.error('Could not load users:', e.message));
     await initTemplates();
     await initProjects();
     await initDbServers();
@@ -2300,14 +2307,8 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await envoyerService.init();
     await forgeAccounts.init();
     await mailService.init();
-    await users.init();
-    // The users migration assigned the original operator the first user id.
-    const storedOwner = await loadAppSetting('legacy_owner_id', null);
-    const originalOwner = storedOwner ?? users.list()[0]?.id ?? null;
-    if (storedOwner == null && originalOwner != null) await saveAppSetting('legacy_owner_id', originalOwner);
-    legacyOwnerId = originalOwner;
-    await shares.init();
-    await credentials.init();
+    await shares.init().catch((e) => console.error('Could not load shares:', e.message));
+    await credentials.init().catch((e) => console.error('Could not load user credentials:', e.message));
     await whatsappOwners
       .init()
       .catch((e) => console.error('Could not initialize WhatsApp ownership:', e.message));
@@ -2351,9 +2352,15 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     .catch((e) => console.error('Could not load WhatsApp watches (tried again every poll):', e.message));
   // `npm run create-token` and `npm run users` write the database directly; a revoked token
   // or disabled user stops new requests within 15s and open streams within 30s.
+  // Shares and credentials follow the same cadence for changes from other server instances.
   setInterval(() => {
     mobileAuth.refresh().catch((e) => console.error('Could not reload device tokens:', e.message));
-    users.refresh().catch((e) => console.error('Could not reload users:', e.message));
+    users
+      .refresh()
+      .then(() => slackService.migrateLegacyOwnership())
+      .catch((e) => console.error('Could not reload users or Slack ownership:', e.message));
+    shares.refresh().catch((e) => console.error('Could not reload shares:', e.message));
+    credentials.refresh().catch((e) => console.error('Could not load user credentials:', e.message));
     whatsappOwners.init().catch((e) => console.error('Could not initialize WhatsApp ownership:', e.message));
   }, 15000).unref();
   // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
