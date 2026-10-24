@@ -284,6 +284,15 @@ const githubOf = (userId) => {
   }
 };
 setOwnerGithub((job) => githubOf(job.ownerId));
+// Who owns what was the one operator's before users existed (sessions, Slack workspaces):
+// the first user, whom the users migration created, regardless of their current role.
+const originalOperator = () => {
+  try {
+    return users.list()[0]?.id ?? null;
+  } catch {
+    return null;
+  }
+};
 // Whose personal inboxes (mail, Slack) a session reaches: its owner while they
 // are enabled, or for a session nobody owns, one from before users, the earliest user,
 // its original operator regardless of their current role.
@@ -674,7 +683,22 @@ api.use(
   }),
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
-api.use(homeAssistantRoutes({ service: createHomeAssistantService() }));
+// Each user's own Home Assistant (lib/me-routes.js). The one in .env was the operator's, so
+// it stands for the original operator until they connect one of their own.
+const homeAssistantOf = (user) => {
+  const own = credentials.get(user.id, 'homeAssistant');
+  if (own) return own;
+  return user.id === originalOperator() ? getConfig().homeAssistant : null;
+};
+api.use(
+  homeAssistantRoutes({
+    serviceFor: (user) =>
+      createHomeAssistantService({
+        config: () => homeAssistantOf(user),
+        unconfigured: 'Connect your Home Assistant first: PUT /api/v1/me/home-assistant',
+      }),
+  }),
+);
 const whatsappService = createWhatsAppService();
 // Replies in the chats a session wrote to come back to it (lib/whatsapp-watch.js).
 const whatsappWatcher = createWhatsAppWatcher({

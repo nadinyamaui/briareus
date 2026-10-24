@@ -38,6 +38,31 @@ Disconnect your GitHub account. Needs `manage`.
 
 **Returns** `GithubIdentity`. Your changes and sessions go back to the server’s GitHub account.
 
+### `GET /me/home-assistant`
+
+Whether you connected your own Home Assistant. Needs `read`.
+
+**Returns** `HomeAssistantConnection`
+
+### `PUT /me/home-assistant`
+
+Connect your own Home Assistant. Needs `manage`.
+
+**Body**
+
+| Field                | Type     |                                                                   |
+| -------------------- | -------- | ----------------------------------------------------------------- |
+| `url` **required**   | `string` | Its address, such as http://homeassistant.local:8123              |
+| `token` **required** | `string` | A long-lived access token; stored encrypted and never shown again |
+
+**Returns** `HomeAssistantConnection`. Saved only once Home Assistant answers with that token; 502 when it cannot be reached or refuses it. Needs CREDENTIALS_KEY on the server.
+
+### `DELETE /me/home-assistant`
+
+Disconnect your Home Assistant. Needs `manage`.
+
+**Returns** `HomeAssistantConnection`
+
 ### `GET /users`
 
 List the people who share this server. Needs `admin`.
@@ -1618,13 +1643,13 @@ Deploy an Envoyer project. Needs `manage`, held to `repo`.
 
 ### `GET /home-assistant`
 
-Check the Home Assistant connection. Needs `admin`.
+Check the Home Assistant connection. Needs `read`.
 
-**Returns** `{ configured: boolean, connected: boolean }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ configured: boolean, connected: boolean }`. Your own Home Assistant, connected with PUT /me/home-assistant (the original operator, the first user whatever their role, also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/entities`
 
-Read current Home Assistant entities. Needs `admin`.
+Read current Home Assistant entities. Needs `read`.
 
 **Query**
 
@@ -1632,23 +1657,23 @@ Read current Home Assistant entities. Needs `admin`.
 | -------- | -------- | ----------------------------------------------- |
 | `domain` | `string` | Optional domain filter, such as light or vacuum |
 
-**Returns** `{ entities: HomeAssistantEntity[] }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ entities: HomeAssistantEntity[] }`. Your own Home Assistant, connected with PUT /me/home-assistant (the original operator, the first user whatever their role, also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/entities/{id}`
 
-Read one Home Assistant entity. Needs `admin`.
+Read one Home Assistant entity. Needs `read`.
 
-**Returns** `{ entity: HomeAssistantEntity }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ entity: HomeAssistantEntity }`. Your own Home Assistant, connected with PUT /me/home-assistant (the original operator, the first user whatever their role, also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/services`
 
-Discover available Home Assistant actions. Needs `admin`.
+Discover available Home Assistant actions. Needs `read`.
 
 **Returns** `{ services: object[] }`. Returns Home Assistant domain/service definitions, including service descriptions and fields, for clients to build action inputs.
 
 ### `POST /home-assistant/services/{domain}/{service}`
 
-Execute a Home Assistant action. Needs `admin`.
+Execute a Home Assistant action. Needs `manage`.
 
 **Query**
 
@@ -1662,7 +1687,7 @@ Execute a Home Assistant action. Needs `admin`.
 
 ### `POST /home-assistant/events/{type}`
 
-Fire an event for Home Assistant automations. Needs `admin`.
+Fire an event for Home Assistant automations. Needs `manage`.
 
 **Body**: a [HomeAssistantData](#homeassistantdata), whole or in part.
 
@@ -2249,6 +2274,15 @@ A person who shares this server. Every token belongs to one, and acts as them; a
 | `name`     | `string`        | The name it was given, unique on this server                                          |
 | `role`     | `admin\|member` | An admin runs the server and reaches every project; a member only what they are given |
 | `disabled` | `boolean`       | Disabled on the server: their tokens answer 401 until they are enabled again          |
+
+### HomeAssistantConnection
+
+Your own Home Assistant on this server, if you connected one. The token is never sent back.
+
+| Field       | Type      |                       |
+| ----------- | --------- | --------------------- |
+| `connected` | `boolean` | Whether one is stored |
+| `url`       | `string?` | Its address           |
 
 ### GithubIdentity
 
@@ -3227,6 +3261,9 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/me/github`                                                             | `GET /me/github`                                                                |
 | `PUT /api/me/github`                                                             | `PUT /me/github`                                                                |
 | `DELETE /api/me/github`                                                          | `DELETE /me/github`                                                             |
+| `GET /api/me/home-assistant`                                                     | `GET /me/home-assistant`                                                        |
+| `PUT /api/me/home-assistant`                                                     | `PUT /me/home-assistant`                                                        |
+| `DELETE /api/me/home-assistant`                                                  | `DELETE /me/home-assistant`                                                     |
 | `GET /api/dev/projects`                                                          | `GET /projects`                                                                 |
 | `GET /api/dev/branches`                                                          | `GET /branches`                                                                 |
 | `POST /api/dev/branches/serve`                                                   | `POST /branches/serve`                                                          |

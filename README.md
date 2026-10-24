@@ -66,7 +66,7 @@ it for 24 hours, so it can carry the conversation on by itself; see
 [WhatsApp from a session](docs/whatsapp.md#whatsapp-from-a-session).
 
 The Home Assistant bridge exposes live entities, available actions, and automation
-events through admin-only `/api/v1/home-assistant` endpoints.
+events from each user's own Home Assistant through `/api/v1/home-assistant` endpoints.
 See [Connect Home Assistant to Briareus](docs/home-assistant.md).
 
 ## Email in agent sessions
