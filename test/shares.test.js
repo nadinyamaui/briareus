@@ -36,6 +36,94 @@ describe('the share store', () => {
     expect(shares.list({ id: '3' })).toHaveLength(2);
   });
 
+  it('refreshes revocations made by another store', async () => {
+    const { shares, replace } = store([{ kind: 'project', id: '3', userId: 2 }]);
+    await shares.init();
+    await replace('project', '3', []);
+    await shares.refresh();
+    expect(shares.allows(ana, 'project', 3)).toBe(false);
+  });
+
+  it('recovers from a failed initial load on refresh', async () => {
+    const load = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('DB down'))
+      .mockResolvedValue([{ kind: 'project', id: '3', userId: 2 }]);
+    const shares = createShares({ load });
+    await expect(shares.init()).rejects.toThrow('DB down');
+    expect(() => shares.list()).toThrow('Sharing is unavailable');
+    await shares.refresh();
+    expect(shares.allows(ana, 'project', 3)).toBe(true);
+  });
+
+  it('refreshes a committed revocation after its reload failed', async () => {
+    let table = [{ kind: 'project', id: '3', userId: 2 }];
+    const load = vi.fn(async () => structuredClone(table));
+    const shares = createShares({
+      load,
+      replace: async () => {
+        table = [];
+      },
+    });
+    await shares.init();
+    load.mockRejectedValueOnce(new Error('DB down'));
+    await expect(shares.set('project', '3', [])).rejects.toThrow('DB down');
+    load.mockRejectedValueOnce(new Error('DB down'));
+    await expect(shares.refresh()).rejects.toThrow('DB down');
+    await shares.refresh();
+    expect(shares.allows(ana, 'project', 3)).toBe(false);
+  });
+
+  it('queues writes and later refreshes behind an in-flight refresh', async () => {
+    let table = [{ kind: 'project', id: '3', userId: 2 }];
+    const load = vi.fn(async () => structuredClone(table));
+    const replace = vi.fn(async () => {
+      table = [];
+    });
+    const shares = createShares({ load, replace });
+    await shares.init();
+    const delayed = Promise.withResolvers();
+    const started = Promise.withResolvers();
+    load.mockImplementationOnce(() => {
+      started.resolve();
+      return delayed.promise;
+    });
+    const refresh = shares.refresh();
+    await started.promise;
+    const write = shares.set('project', '3', []);
+    const nextRefresh = shares.refresh();
+    await Promise.resolve();
+    expect(replace).not.toHaveBeenCalled();
+    expect(load).toHaveBeenCalledTimes(2);
+    delayed.resolve(structuredClone(table));
+    await Promise.all([refresh, write, nextRefresh]);
+    expect(shares.allows(ana, 'project', 3)).toBe(false);
+  });
+
+  it('queues a refresh behind an in-flight write', async () => {
+    let table = [{ kind: 'project', id: '3', userId: 2 }];
+    const delayed = Promise.withResolvers();
+    const started = Promise.withResolvers();
+    const load = vi.fn(async () => structuredClone(table));
+    const shares = createShares({
+      load,
+      replace: async () => {
+        started.resolve();
+        await delayed.promise;
+        table = [];
+      },
+    });
+    await shares.init();
+    const write = shares.set('project', '3', []);
+    await started.promise;
+    const refresh = shares.refresh();
+    await Promise.resolve();
+    expect(load).toHaveBeenCalledTimes(1);
+    delayed.resolve();
+    await Promise.all([write, refresh]);
+    expect(shares.allows(ana, 'project', 3)).toBe(false);
+  });
+
   it('replaces who a resource is shared with, without duplicates, and shows what stuck', async () => {
     const { shares, replace } = store([{ kind: 'project', id: '3', userId: 2 }]);
     await shares.init();
@@ -106,4 +194,27 @@ describe('the share routes', () => {
     ).toBe(403);
     expect((await fetch(`${base}?kind=printer`)).status).toBe(400);
   });
+});
+
+it('retries failed initialization without reloading successful stores or overwriting changes', async () => {
+  let table = [{ kind: 'project', id: '3', userId: 2 }];
+  const load = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('DB down'))
+    .mockImplementation(async () => structuredClone(table));
+  const shares = createShares({
+    load,
+    replace: async () => {
+      table = [];
+    },
+  });
+  await expect(shares.init()).rejects.toThrow('DB down');
+  expect(() => shares.allows(ana, 'project', 3)).toThrow(expect.objectContaining({ status: 503 }));
+  await Promise.all([shares.init(), shares.init()]);
+  expect(load).toHaveBeenCalledTimes(2);
+  expect(shares.allows(ana, 'project', 3)).toBe(true);
+  await shares.set('project', '3', []);
+  await shares.init();
+  expect(load).toHaveBeenCalledTimes(3); // the only reload is the mutation's
+  expect(shares.allows(ana, 'project', 3)).toBe(false);
 });

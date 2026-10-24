@@ -1195,7 +1195,7 @@ Start or reconnect an account; create default when absent. Needs `manage`.
 
 ### `GET /whatsapp/accounts/{id}/qr`
 
-Get the pairing QR code as a base64 PNG. Needs `read`.
+Get the pairing QR code as a base64 PNG. Needs `manage`.
 
 **Returns** `{ mimetype: string, data: string }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Available in SCAN_QR_CODE; refresh periodically until WORKING. Scan from WhatsApp → Linked devices → Link a device. Do not store QR codes.
 
@@ -1645,7 +1645,7 @@ Deploy an Envoyer project. Needs `manage`, held to `repo`.
 
 Check the Home Assistant connection. Needs `read`.
 
-**Returns** `{ configured: boolean, connected: boolean }`. Your own Home Assistant, connected with PUT /me/home-assistant (the first admin also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ configured: boolean, connected: boolean }`. Your own Home Assistant, connected with PUT /me/home-assistant (the original operator, the first user whatever their role, also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/entities`
 
@@ -1657,13 +1657,13 @@ Read current Home Assistant entities. Needs `read`.
 | -------- | -------- | ----------------------------------------------- |
 | `domain` | `string` | Optional domain filter, such as light or vacuum |
 
-**Returns** `{ entities: HomeAssistantEntity[] }`. Your own Home Assistant, connected with PUT /me/home-assistant (the first admin also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ entities: HomeAssistantEntity[] }`. Your own Home Assistant, connected with PUT /me/home-assistant (the original operator, the first user whatever their role, also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/entities/{id}`
 
 Read one Home Assistant entity. Needs `read`.
 
-**Returns** `{ entity: HomeAssistantEntity }`. Your own Home Assistant, connected with PUT /me/home-assistant (the first admin also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ entity: HomeAssistantEntity }`. Your own Home Assistant, connected with PUT /me/home-assistant (the original operator, the first user whatever their role, also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/services`
 

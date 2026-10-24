@@ -1,7 +1,7 @@
 import express from 'express';
 import { expect, it } from 'vitest';
 import { taskHistoryRoutes } from '../lib/task-history-routes.js';
-async function serve(user, repos = null) {
+async function serve(user, repos = null, overrides = {}) {
   const app = express();
   app.use((_req, res, next) => {
     res.locals.apiUser = user;
@@ -14,6 +14,7 @@ async function serve(user, repos = null) {
       listSessions: () => [],
       loadUsage: async () => [{ jobId: 's', costUsd: 5 }],
       estimateCosts: async (r) => r,
+      ...overrides,
     }),
   );
   const server = app.listen(0, '127.0.0.1');
@@ -28,6 +29,30 @@ it('serves archived task history with exact ledger rows', async () => {
     const data = await res.json();
     expect(data.usage.costUsd).toBe(5);
     expect(data.sessions[0].conversationAvailable).toBe(false);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+it('keeps other users out of a task family even when they share a PR or parent', async () => {
+  const snapshots = [
+    { id: 'parent', repo: 'a/b', ownerId: 3, prNumber: 7 },
+    { id: 's', repo: 'a/b', ownerId: 2, prNumber: 7, parentId: 'parent' },
+    { id: 'other', repo: 'a/b', ownerId: 3, prNumber: 7 },
+    { id: 'child', repo: 'a/b', ownerId: 3, parentId: 's' },
+  ];
+  const { url, server } = await serve({ id: 2, role: 'member' }, ['a/b'], {
+    loadSnapshots: async () => snapshots,
+    listSessions: () => [{ id: 'live', repo: 'a/b', ownerId: 3, prNumber: 7 }],
+    loadUsage: async () => snapshots.map((s) => ({ jobId: s.id, costUsd: 5 })),
+  });
+  try {
+    const res = await fetch(url);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.root.id).toBe('s');
+    expect(data.sessions.map((s) => s.id)).toEqual(['s']);
+    expect(data.usage.costUsd).toBe(5);
   } finally {
     await new Promise((r) => server.close(r));
   }

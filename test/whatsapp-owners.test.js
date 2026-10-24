@@ -1,20 +1,162 @@
 import { it, expect, vi } from 'vitest';
 
-vi.mock('../lib/db.js', () => ({ loadAppSetting: vi.fn(), saveAppSetting: vi.fn() }));
+vi.mock('../lib/db.js', () => ({
+  loadAppSetting: vi.fn(),
+  saveAppSetting: vi.fn(),
+  updateAppSetting: vi.fn(),
+}));
 const { createWhatsAppOwners } = await import('../lib/whatsapp-owners.js');
 
-function owners(initial = {}) {
+function owners(initial = {}, deps = {}) {
   let stored = structuredClone(initial);
   const save = vi.fn(async (_key, value) => {
     stored = structuredClone(value);
   });
-  const store = createWhatsAppOwners({
-    load: async () => structuredClone(stored),
-    save,
-    legacyOwner: () => 1,
-  });
-  return { store, save, stored: () => stored };
+  let writes = Promise.resolve();
+  const update = (key, _fallback, fn) => {
+    const task = writes.then(async () => {
+      const value = structuredClone(stored);
+      const result = await fn(value);
+      await save(key, value);
+      return { value, result };
+    });
+    writes = task.catch(() => {});
+    return task;
+  };
+  const createStore = (overrides = {}) =>
+    createWhatsAppOwners({
+      load: async () => structuredClone(stored),
+      update,
+      legacyOwner: () => 1,
+      ...deps,
+      ...overrides,
+    });
+  return { store: createStore(), createStore, update, save, stored: () => stored };
 }
+
+it.each(['discovery', 'claim'])('retries a rolled-back deadlock during %s', async (stage) => {
+  const { createStore, update, stored } = owners({ ana: 2 });
+  const lockedUpdate = vi
+    .fn()
+    .mockRejectedValueOnce(
+      Object.assign(new Error('deadlock'), {
+        code: 'ER_LOCK_DEADLOCK',
+      }),
+    )
+    .mockImplementation(update);
+  const store = createStore({
+    update: lockedUpdate,
+    listAccounts: async () => ({ accounts: stage === 'discovery' ? [{ id: 'business' }] : [] }),
+  });
+  await store.init();
+  if (stage === 'claim') await store.claim(3, 'business');
+  expect(stored()).toEqual({ ana: 2, business: stage === 'discovery' ? 1 : 3 });
+  expect(lockedUpdate).toHaveBeenCalledTimes(2);
+});
+
+it.each([false, true])(
+  'preserves another instance’s linked owner (refresh before claim: %s)',
+  async (refresh) => {
+    let linked = false;
+    const listAccounts = vi.fn(async () => ({ accounts: [] }));
+    const lookupAccount = vi.fn(async () => (linked ? { account: { id: 'ana' } } : null));
+    const { store: first, createStore, stored } = owners({}, { listAccounts, lookupAccount });
+    const second = createStore();
+    await Promise.all([first.init(), second.init()]);
+    await first.claim(2, 'ana');
+    linked = true;
+    if (refresh) {
+      await second.init();
+      expect(second.owns(2, 'ana')).toBe(true);
+    }
+    await expect(second.claim(3, 'ana')).rejects.toMatchObject({ status: 404 });
+    expect(stored()).toEqual({ ana: 2 });
+    expect(second.owns(2, 'ana')).toBe(true);
+    expect(second.owns(1, 'ana')).toBe(false);
+    expect(first.owns(2, 'ana')).toBe(true);
+    expect(lookupAccount).toHaveBeenCalledTimes(1);
+    expect(listAccounts).toHaveBeenCalledTimes(2);
+  },
+);
+
+it.each([
+  ['ana', 'ana'],
+  ['ana', 'bob'],
+])('serializes claims for %s and %s across instances', async (a, b) => {
+  const { store: first, createStore, stored } = owners();
+  const second = createStore();
+  await Promise.all([first.init(), second.init()]);
+  const results = await Promise.allSettled([first.claim(2, a), second.claim(3, b)]);
+  expect(results.map((r) => r.status)).toEqual(['fulfilled', a === b ? 'rejected' : 'fulfilled']);
+  expect(stored()).toEqual(a === b ? { ana: 2 } : { ana: 2, bob: 3 });
+  await Promise.all([first.init(), second.init()]);
+  expect(first.ownerOf(a)).toBe(2);
+  expect(second.ownerOf(a)).toBe(2);
+});
+
+it('preserves a concurrent claim when startup discovery saves legacy owners', async () => {
+  const { store: first, createStore, stored } = owners();
+  await first.init();
+  // Claim after the second instance reads storage, but before discovery finishes.
+  const second = createStore({
+    listAccounts: async () => {
+      await first.claim(2, 'ana');
+      return { accounts: [{ id: 'ana' }, { id: 'business' }] };
+    },
+  });
+  await second.init();
+  expect(stored()).toEqual({ ana: 2, business: 1 });
+  expect(second.owns(2, 'ana')).toBe(true);
+});
+
+it('denies cached authorization after a refresh failure and recovers from storage', async () => {
+  const load = vi.fn().mockResolvedValue({ ana: 2 });
+  const { store } = owners({ ana: 2 }, { load });
+  await store.init();
+  expect(store.owns(2, 'ana')).toBe(true);
+  load.mockRejectedValueOnce(new Error('DB down'));
+  await expect(store.init()).rejects.toThrow('DB down');
+  expect(store.ready()).toBe(false);
+  expect(store.owns(2, 'ana')).toBe(false);
+  await expect(store.claim(2, 'ana')).rejects.toMatchObject({ status: 503 });
+  await store.init();
+  expect(store.owns(2, 'ana')).toBe(true);
+});
+
+it('does not save an allowlist-excluded account and safely discovers it when later allowed', async () => {
+  const { createWhatsAppService } = await import('../lib/whatsapp.js');
+  const config = { url: 'http://waha.test', apiKey: 'key', accounts: ['default'] };
+  const fetcher = vi.fn(
+    async (url) =>
+      new Response(
+        JSON.stringify(
+          url.endsWith('?all=true')
+            ? [{ name: 'business', status: 'WORKING' }]
+            : { name: 'business', status: 'WORKING' },
+        ),
+      ),
+  );
+  const service = createWhatsAppService({ config: () => config, fetcher });
+  const { store, save, stored, createStore } = owners(
+    {},
+    {
+      lookupAccount: service.account,
+      listAccounts: service.accounts,
+    },
+  );
+  await store.init();
+  fetcher.mockClear();
+  await expect(store.claim(2, 'business')).rejects.toMatchObject({ status: 404 });
+  expect(save).not.toHaveBeenCalled();
+  expect(stored()).toEqual({});
+  expect(fetcher).not.toHaveBeenCalled();
+  config.accounts.push('business');
+  const restarted = createStore();
+  await restarted.init();
+  expect(restarted.owns(1, 'business')).toBe(true);
+  expect(restarted.owns(2, 'business')).toBe(false);
+  expect((await service.account('business')).account.status).toBe('WORKING');
+});
 
 it('gives `default` to the first admin and any other account to whoever starts it first', async () => {
   const { store, save, stored } = owners();
@@ -27,7 +169,7 @@ it('gives `default` to the first admin and any other account to whoever starts i
   await store.claim(2, 'ana');
   expect(store.owns(2, 'ana')).toBe(true);
   await store.claim(2, 'ana');
-  expect(save).toHaveBeenCalledTimes(1);
+  expect(save).toHaveBeenCalledTimes(3);
   await expect(store.claim(3, 'ana')).rejects.toMatchObject({ status: 404 });
   expect(stored()).toEqual({ ana: 2 });
   expect(store.owns(null, 'default')).toBe(false);
@@ -39,6 +181,91 @@ it('keeps a claim it could not save from counting', async () => {
   save.mockRejectedValueOnce(new Error('DB down'));
   await expect(store.claim(2, 'ana')).rejects.toThrow('DB down');
   expect(store.ownerOf('ana')).toBeNull();
+});
+
+it('blocks claims after a failed load and preserves every persisted owner on retry', async () => {
+  const initial = { business: 2, other: 3 };
+  const load = vi.fn().mockRejectedValueOnce(new Error('DB down')).mockResolvedValue(initial);
+  const lookupAccount = vi.fn(async () => ({ account: { id: 'business' } }));
+  const { store, save, stored } = owners(initial, { load, lookupAccount });
+  await expect(store.claim(2, 'business')).rejects.toMatchObject({ status: 503 });
+  await expect(store.init()).rejects.toThrow('DB down');
+  await expect(store.claim(2, 'business')).rejects.toMatchObject({ status: 503 });
+  expect(store.owns(1, 'default')).toBe(false);
+  expect(save).not.toHaveBeenCalled();
+  expect(lookupAccount).not.toHaveBeenCalled();
+  expect(stored()).toEqual(initial);
+  await store.init();
+  await store.claim(2, 'business');
+  lookupAccount.mockRejectedValueOnce(Object.assign(new Error('Missing'), { status: 404 }));
+  await store.claim(4, 'new');
+  expect(stored()).toEqual({ ...initial, new: 4 });
+  expect(store.owns(2, 'business')).toBe(true);
+  expect(store.owns(3, 'other')).toBe(true);
+});
+
+it('assigns discovered accounts before reads and watches without replacing member ownership', async () => {
+  const { createWhatsAppWatcher } = await import('../lib/whatsapp-watch.js');
+  const listAccounts = vi.fn(async () => ({
+    accounts: [{ id: 'business' }, { id: 'stopped' }, { id: 'ana' }, { id: '__proto__' }],
+  }));
+  const { store, stored } = owners({ ana: 2 }, { listAccounts });
+  const job = {
+    id: 'j1',
+    ownerId: 1,
+    webhook: { armed: true, whatsappGroup: '1203@g.us', whatsappAccount: 'business' },
+  };
+  const watcher = createWhatsAppWatcher({
+    service: { messages: async () => ({ messages: [] }) },
+    getJob: () => job,
+    listJobs: () => [job],
+    allowed: () => true,
+    mayUse: (job, account) => store.owns(job.ownerId, account),
+    deliver: () => {},
+  });
+  expect(watcher.watching('j1', 'business', '1203@g.us')).toBe(false);
+  await store.init();
+  expect(stored()).toEqual({ ana: 2, business: 1, stopped: 1, ['__proto__']: 1 });
+  expect(store.owns(1, 'business')).toBe(true);
+  expect(store.owns(2, 'business')).toBe(false);
+  expect(store.owns(2, 'ana')).toBe(true);
+  expect(watcher.watching('j1', 'business', '1203@g.us')).toBe(true);
+  await expect(store.claim(2, 'business')).rejects.toMatchObject({ status: 404 });
+  await store.init();
+  expect(listAccounts).toHaveBeenCalledTimes(1);
+});
+
+it.each(['discovery', 'save'])('retries failed %s without publishing incomplete ownership', async (stage) => {
+  const listAccounts = vi.fn(async () => ({ accounts: [{ id: 'business' }] }));
+  const { store, save, stored } = owners({ ana: 2 }, { listAccounts });
+  (stage === 'discovery' ? listAccounts : save).mockRejectedValueOnce(new Error('Unavailable'));
+  await expect(store.init()).rejects.toThrow('Unavailable');
+  await expect(store.claim(2, 'business')).rejects.toMatchObject({ status: 503 });
+  expect(store.owns(1, 'business')).toBe(false);
+  expect(stored()).toEqual({ ana: 2 });
+  await store.init();
+  expect(stored()).toEqual({ ana: 2, business: 1 });
+  expect(store.owns(1, 'business')).toBe(true);
+});
+
+it('waits for legacy ownership and serializes initialization with new claims', async () => {
+  let legacyOwner = null;
+  const load = vi.fn();
+  const { store, save, stored } = owners(
+    { ana: 2 },
+    {
+      load,
+      legacyOwner: () => legacyOwner,
+      listAccounts: async () => ({ accounts: [{ id: 'business' }] }),
+    },
+  );
+  load.mockImplementation(async () => structuredClone(stored()));
+  await expect(store.init()).rejects.toMatchObject({ status: 503 });
+  expect(save).not.toHaveBeenCalled();
+  legacyOwner = 1;
+  await Promise.all([store.init(), store.init(), store.claim(3, 'new')]);
+  expect(stored()).toEqual({ ana: 2, business: 1, new: 3 });
+  expect(load).toHaveBeenCalledTimes(3);
 });
 
 it('never watches a group bound to an account its session’s owner does not own', async () => {
@@ -59,4 +286,288 @@ it('never watches a group bound to an account its session’s owner does not own
   expect(watcher.watching('j1', 'bob', '1203@g.us')).toBe(false);
   mine = true;
   expect(watcher.watching('j1', 'bob', '1203@g.us')).toBe(true);
+});
+
+it.each(['load', 'discovery'])(
+  'preserves saved watches during an ownership %s failure and resumes safely',
+  async (stage) => {
+    const { createWhatsAppWatcher } = await import('../lib/whatsapp-watch.js');
+    const initial = { default: 1, ana: 2 };
+    const load = vi.fn(async () => initial);
+    const listAccounts = vi.fn(async () => ({ accounts: [] }));
+    (stage === 'load' ? load : listAccounts).mockRejectedValueOnce(new Error('Unavailable'));
+    const { store } = owners(initial, { load, listAccounts });
+    const job = { id: 'j1', ownerId: 1 };
+    let now = 1700000000000;
+    let saved = ['default', 'ana'].map((account) => ({
+      jobId: job.id,
+      account,
+      chat: '49123456789@c.us',
+      since: now / 1000,
+      expiresAt: now + 3600_000,
+      seen: [],
+    }));
+    const original = structuredClone(saved);
+    const messages = vi.fn(async () => ({
+      messages: [
+        {
+          id: 'reply',
+          timestamp: now / 1000,
+          text: 'Hello',
+          fromMe: false,
+        },
+      ],
+    }));
+    const deliver = vi.fn();
+    const save = vi.fn(async (_key, rows) => {
+      saved = structuredClone(rows);
+    });
+    const watcher = createWhatsAppWatcher({
+      service: { messages },
+      getJob: () => job,
+      allowed: () => true,
+      mayUse: (job, account) => store.owns(job.ownerId, account),
+      ownershipReady: () => store.ready(),
+      deliver,
+      load: async () => saved,
+      save,
+      now: () => now,
+      log: () => {},
+    });
+    await expect(store.init()).rejects.toThrow('Unavailable');
+    await watcher.init();
+    try {
+      await watcher.poll();
+      expect(saved).toEqual(original);
+      expect(save).not.toHaveBeenCalled();
+      expect(messages).not.toHaveBeenCalled();
+      expect(deliver).not.toHaveBeenCalled();
+      // Recovery after expiry must still give the saved watch its final read.
+      now += 3601_000;
+      await store.init();
+      messages.mockResolvedValueOnce({
+        messages: [
+          {
+            id: 'reply',
+            timestamp: original[0].since + 1,
+            text: 'Hello',
+            fromMe: false,
+          },
+        ],
+      });
+      await watcher.poll();
+      expect(messages).toHaveBeenCalledExactlyOnceWith('default', original[0].chat, { limit: '20' });
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(deliver.mock.calls[0][1].text).toContain('Hello');
+      expect(saved).toEqual([]);
+    } finally {
+      watcher.stop();
+    }
+  },
+);
+
+it.each(['watch load', 'lapsed read'])(
+  'preserves watches when ownership refresh fails during an awaited %s',
+  async (stage) => {
+    const { createWhatsAppWatcher } = await import('../lib/whatsapp-watch.js');
+    const loadOwners = vi.fn(async () => ({ default: 1, ana: 2 }));
+    const { store } = owners({}, { load: loadOwners });
+    await store.init();
+    const now = 1700000000000;
+    const job = { id: 'j1', ownerId: 1 };
+    let saved = [
+      ['default', '49111111111@c.us', now - 1000],
+      ['default', '49222222222@c.us', now + 3600_000],
+      ['ana', '49333333333@c.us', now + 3600_000],
+    ].map(([account, chat, expiresAt]) => ({
+      jobId: job.id,
+      account,
+      chat,
+      since: now / 1000 - 60,
+      expiresAt,
+      seen: [],
+    }));
+    const original = structuredClone(saved);
+    const entered = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    const pause = async () => {
+      entered.resolve();
+      await resume.promise;
+    };
+    const messages = vi.fn(async (_account, chat) => ({
+      messages: [{ id: chat, timestamp: now / 1000 - 30, text: `Reply in ${chat}`, fromMe: false }],
+    }));
+    if (stage === 'lapsed read')
+      messages.mockImplementationOnce(async () => {
+        await pause();
+        return { messages: [] };
+      });
+    const deliver = vi.fn();
+    const save = vi.fn(async (_key, rows) => {
+      saved = structuredClone(rows);
+    });
+    const watcher = createWhatsAppWatcher({
+      service: { messages },
+      getJob: () => job,
+      allowed: () => true,
+      mayUse: (job, account) => store.owns(job.ownerId, account),
+      ownershipReady: store.ready,
+      deliver,
+      load: async () => {
+        if (stage === 'watch load') await pause();
+        return saved;
+      },
+      save,
+      now: () => now,
+      log: () => {},
+    });
+    try {
+      if (stage === 'lapsed read') await watcher.init();
+      const polling = watcher.poll();
+      await entered.promise;
+      loadOwners.mockRejectedValueOnce(new Error('Ownership refresh unavailable'));
+      await expect(store.init()).rejects.toThrow('Ownership refresh unavailable');
+      expect(store.ready()).toBe(false);
+      resume.resolve();
+      await polling;
+      expect(saved).toEqual(original);
+      expect(save).not.toHaveBeenCalled();
+      expect(deliver).not.toHaveBeenCalled();
+      expect(messages).toHaveBeenCalledTimes(stage === 'lapsed read' ? 1 : 0);
+      await store.init();
+      messages.mockClear();
+      await watcher.poll();
+      expect(messages.mock.calls.map(([account, chat]) => [account, chat])).toEqual(
+        original.slice(0, 2).map(({ account, chat }) => [account, chat]),
+      );
+      expect(deliver).toHaveBeenCalledTimes(2);
+      expect(saved).toEqual([{ ...original[1], seen: [original[1].chat] }]);
+      await watcher.poll();
+      expect(deliver).toHaveBeenCalledTimes(2);
+    } finally {
+      resume.resolve();
+      watcher.stop();
+    }
+  },
+);
+
+it.each(['live', 'lapsed', 'refresh failure'])(
+  'refreshes stale ownership before pruning a saved %s watch',
+  async (stage) => {
+    const { createWhatsAppWatcher } = await import('../lib/whatsapp-watch.js');
+    const { store: first, createStore, stored } = owners();
+    const loadOwners = vi.fn(async () => structuredClone(stored()));
+    const second = createStore({ load: loadOwners });
+    await Promise.all([first.init(), second.init()]);
+    await first.claim(2, 'ana');
+    expect(second.ready()).toBe(true);
+    expect(second.ownerOf('ana')).toBeNull();
+    const now = 1700000000000;
+    const job = { id: 'j1', ownerId: 2 };
+    let saved = ['ana', 'default'].map((account) => ({
+      jobId: job.id,
+      account,
+      chat: '49123456789@c.us',
+      since: now / 1000 - 60,
+      expiresAt: now + (stage === 'lapsed' ? -1000 : 3600_000),
+      seen: [],
+    }));
+    const original = structuredClone(saved);
+    const messages = vi.fn(async () => ({
+      messages: [{ id: 'reply', timestamp: now / 1000 - 30, text: 'Hello', fromMe: false }],
+    }));
+    const deliver = vi.fn();
+    const save = vi.fn(async (_key, rows) => {
+      saved = structuredClone(rows);
+    });
+    const watcher = createWhatsAppWatcher({
+      service: { messages },
+      getJob: () => job,
+      allowed: () => true,
+      mayUse: (job, account) => second.owns(job.ownerId, account),
+      ownershipReady: second.ready,
+      refreshOwnership: second.init,
+      deliver,
+      load: async () => saved,
+      save,
+      now: () => now,
+      log: () => {},
+    });
+    try {
+      await watcher.init();
+      if (stage === 'refresh failure') {
+        loadOwners.mockRejectedValueOnce(new Error('Ownership unavailable'));
+        await watcher.poll();
+        expect(saved).toEqual(original);
+        expect(save).not.toHaveBeenCalled();
+        expect(messages).not.toHaveBeenCalled();
+        expect(deliver).not.toHaveBeenCalled();
+        await second.init();
+      }
+      await watcher.poll();
+      expect(messages).toHaveBeenCalledExactlyOnceWith('ana', original[0].chat, { limit: '20' });
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(saved).toEqual(stage === 'lapsed' ? [] : [{ ...original[0], seen: ['reply'] }]);
+      await watcher.poll();
+      expect(deliver).toHaveBeenCalledOnce();
+    } finally {
+      watcher.stop();
+    }
+  },
+);
+
+it.each(['constructor', 'toString', '__proto__'])('claims and reloads the valid name %s', async (account) => {
+  const { store, stored } = owners();
+  await store.init();
+  expect(store.ownerOf(account)).toBeNull();
+  await store.claim(2, account);
+  expect(store.owns(2, account)).toBe(true);
+  expect(Object.hasOwn(stored(), account)).toBe(true);
+  const reloaded = owners(stored()).store;
+  await reloaded.init();
+  expect(reloaded.owns(2, account)).toBe(true);
+  await expect(reloaded.claim(3, account)).rejects.toMatchObject({ status: 404 });
+});
+
+it('does not expose or reassign an existing account if its legacy assignment cannot be saved', async () => {
+  const lookupAccount = vi.fn(async () => ({ account: { id: 'business', status: 'WORKING' } }));
+  const { store, save, stored } = owners({}, { lookupAccount });
+  await store.init();
+  save.mockRejectedValueOnce(new Error('DB down'));
+  await expect(store.claim(2, 'business')).rejects.toThrow('DB down');
+  expect(store.ownerOf('business')).toBeNull();
+  expect(stored()).toEqual({});
+  await expect(store.claim(2, 'business')).rejects.toMatchObject({ status: 404 });
+  expect(store.ownerOf('business')).toBe(1);
+  await store.claim(1, 'business');
+  expect(lookupAccount).toHaveBeenCalledTimes(2);
+});
+
+it('refuses to claim an existing account without a legacy owner', async () => {
+  const { store, save } = owners(
+    {},
+    {
+      legacyOwner: () => null,
+      lookupAccount: async () => ({ account: { id: 'business' } }),
+    },
+  );
+  await store.init();
+  await expect(store.claim(2, 'business')).rejects.toMatchObject({ status: 503 });
+  expect(save).not.toHaveBeenCalled();
+  expect(store.ownerOf('business')).toBeNull();
+});
+
+it('serializes new claims and preserves a persisted owner without consulting WAHA', async () => {
+  const lookupAccount = vi.fn(async () => {
+    throw Object.assign(new Error('Missing'), { status: 404 });
+  });
+  const { store, stored } = owners({}, { lookupAccount });
+  await store.init();
+  const claims = await Promise.allSettled([store.claim(2, 'ana'), store.claim(3, 'ana')]);
+  expect(claims.map((result) => result.status)).toEqual(['fulfilled', 'rejected']);
+  const reloaded = owners(stored(), { lookupAccount }).store;
+  await reloaded.init();
+  await reloaded.claim(2, 'ana');
+  expect(reloaded.ownerOf('ana')).toBe(2);
+  expect(lookupAccount).toHaveBeenCalledTimes(1);
 });

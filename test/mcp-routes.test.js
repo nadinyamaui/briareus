@@ -30,7 +30,7 @@ beforeEach(async () => {
   const app = express();
   app.use(mcpOAuthCallbackRouter({ service }));
   mayUse = vi.fn(() => true);
-  app.use(mcpProxyRouter({ service, agentSession, fetchImpl: upstream, mayUse }));
+  app.use(mcpProxyRouter({ service, agentSession, fetchImpl: upstream, mayUse, recheckMs: 20 }));
   app.use(express.json());
   const routes = mcpRoutes({ service, getProject: (repo) => (repo === 'o/r' ? { repo } : null) });
   // The operator reaches these through /api/v1 (a header stands in for the
@@ -151,6 +151,34 @@ describe('the session proxy', () => {
     }
   });
 
+  it.each(['initial credentials', 'OAuth refresh'])(
+    'rechecks access after awaiting %s before dispatching upstream',
+    async (phase) => {
+      const target = {
+        url: 'https://remote.example/mcp',
+        headers: { Authorization: 'Bearer fresh' },
+        oauth: true,
+      };
+      if (phase === 'OAuth refresh') upstream.mockResolvedValueOnce(new Response('no', { status: 401 }));
+      service.upstream.mockImplementation(async (_id, _repo, opts) => {
+        if (phase === 'initial credentials' || opts?.force) mayUse.mockReturnValue(false);
+        return target;
+      });
+      upstream.mockResolvedValue(new Response('{}', { headers: { 'content-type': 'application/json' } }));
+
+      const res = await fetch(`${base}/api/agent/mcp/5`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer session-token', 'Content-Type': 'application/json' },
+        body: JSON.stringify(rpc),
+      });
+
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'MCP server unavailable for this project' });
+      expect(upstream).toHaveBeenCalledTimes(phase === 'OAuth refresh' ? 1 : 0);
+      expect(service.upstream).toHaveBeenCalledTimes(phase === 'OAuth refresh' ? 2 : 1);
+    },
+  );
+
   it('refreshes once and retries when the remote refuses the token', async () => {
     upstream
       .mockResolvedValueOnce(new Response('no', { status: 401 }))
@@ -202,6 +230,43 @@ describe('the session proxy', () => {
       controller.close();
     }
   });
+
+  it.each(['unshared', 'disabled owner', 'sharing unavailable'])(
+    'ends an admitted MCP stream when %s',
+    async (reason) => {
+      const cancelled = vi.fn();
+      upstream.mockResolvedValue(
+        new Response(
+          new ReadableStream({
+            start(c) {
+              c.enqueue(new TextEncoder().encode(': connected\n\n'));
+            },
+            cancel: cancelled,
+          }),
+          { headers: { 'content-type': 'text/event-stream' } },
+        ),
+      );
+      const res = await fetch(`${base}/api/agent/mcp/5`, {
+        headers: { Authorization: 'Bearer session-token' },
+        signal: AbortSignal.timeout(2000),
+      });
+      const reader = res.body.getReader();
+      await reader.read();
+      if (reason === 'sharing unavailable')
+        mayUse.mockImplementation(() => {
+          throw new Error('unavailable');
+        });
+      else mayUse.mockReturnValue(false);
+      await expect(reader.read()).rejects.toThrow();
+      await vi.waitFor(() => {
+        expect(upstream.mock.calls[0][1].signal.aborted).toBe(true);
+        expect(cancelled).toHaveBeenCalledOnce();
+      });
+      const checks = mayUse.mock.calls.length;
+      await new Promise((r) => setTimeout(r, 60));
+      expect(mayUse).toHaveBeenCalledTimes(checks);
+    },
+  );
 
   it('streams an event stream through as it comes', async () => {
     const enc = new TextEncoder();

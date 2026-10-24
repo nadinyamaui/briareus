@@ -58,6 +58,34 @@ function fakePool() {
 }
 
 describe('migrator', () => {
+  it.each([
+    ['turn_usage', '2026_10_22_140000_add_user_id_to_turn_usage'],
+    ['mail_accounts', '2026_10_22_160000_add_user_id_to_mail_accounts'],
+  ])('keeps legacy %s with the original operator after demotion', async (table, file) => {
+    const users = [
+      { id: 1, role: 'member' },
+      { id: 2, role: 'admin' },
+    ];
+    let owner = null;
+    const pool = {
+      async query(sql, params = []) {
+        if (/information_schema\.COLUMNS|ALTER TABLE/.test(sql)) return [[]];
+        if (/SELECT MIN/.test(sql)) {
+          const eligible = /WHERE/.test(sql) ? users.filter((u) => u.role === 'admin') : users;
+          return [[{ id: Math.min(...eligible.map((u) => u.id)) }]];
+        }
+        if (sql.startsWith(`UPDATE \`${table}\``)) {
+          owner = params[0];
+          return [{}];
+        }
+        throw new Error(`Unexpected query: ${sql}`);
+      },
+    };
+    const migration = await import(`../migrations/${file}.js`);
+    await migration.up({ context: pool });
+    expect(owner).toBe(1);
+  });
+
   it('lists every file in migrations/ as pending on an empty database, in name order', async () => {
     const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith('.js')).sort();
     const { umzug } = createMigrator(fakePool());
@@ -122,5 +150,54 @@ describe('migrator', () => {
     const absent = fakePool();
     await migration.down({ context: absent });
     expect(absent.queries.some((q) => /ALTER TABLE `providers`/.test(q))).toBe(false);
+  });
+});
+
+describe.each([
+  '2026_10_22_140000_add_user_id_to_turn_usage',
+  '2026_10_22_160000_add_user_id_to_mail_accounts',
+])('%s owner migration retries', (name) => {
+  it('backfills for the demoted operator after ALTER committed but lookup failed', async () => {
+    const { up } = await import(`../migrations/${name}.js`);
+    let column = false;
+    let failed = false;
+    let alters = 0;
+    const usage = [{ userId: null }, { userId: 7 }];
+    const users = [
+      { id: 1, role: 'member' },
+      { id: 7, role: 'admin' },
+    ];
+    const pool = {
+      async query(sql, params) {
+        if (sql.includes('information_schema')) return [column ? [{}] : []];
+        if (sql.startsWith('ALTER')) {
+          column = true;
+          alters++;
+          return [{}];
+        }
+        if (sql.startsWith('SELECT MIN')) {
+          if (!failed) {
+            failed = true;
+            throw new Error('connection lost');
+          }
+          const eligible = sql.includes("WHERE `role` = 'admin'")
+            ? users.filter((user) => user.role === 'admin')
+            : users;
+          return [[{ id: Math.min(...eligible.map((user) => user.id)) }]];
+        }
+        if (sql.startsWith('UPDATE')) {
+          for (const row of usage) if (row.userId === null) row.userId = params[0];
+          return [{}];
+        }
+        throw new Error('Unexpected SQL: ' + sql);
+      },
+    };
+    await expect(up({ context: pool })).rejects.toThrow('connection lost');
+    expect(column).toBe(true);
+    expect(usage[0].userId).toBeNull();
+    await up({ context: pool });
+    await up({ context: pool });
+    expect(alters).toBe(1);
+    expect(usage).toEqual([{ userId: 1 }, { userId: 7 }]);
   });
 });

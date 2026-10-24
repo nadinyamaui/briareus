@@ -66,7 +66,7 @@ it for 24 hours, so it can carry the conversation on by itself; see
 [WhatsApp from a session](docs/whatsapp.md#whatsapp-from-a-session).
 
 The Home Assistant bridge exposes live entities, available actions, and automation
-events through admin-only `/api/v1/home-assistant` endpoints.
+events from each user's own Home Assistant through `/api/v1/home-assistant` endpoints.
 See [Connect Home Assistant to Briareus](docs/home-assistant.md).
 
 ## Email in agent sessions
@@ -90,11 +90,18 @@ for setup and access details.
    starts and once every 24 hours; slots claimed by open or recoverable sessions
    are skipped. Whole checkouts move into `WORKSPACE_DIR/.briareus-recovery/`
    without deleting files, so Docker-owned artifacts cannot cause partial
-   cleanup or destroy Git history. Logs name each preserved checkout; recover
-   any unpushed work before manually removing it. Quarantine stops at 100
-   preserved checkouts and reports an actionable error rather than deleting
-   old backups. New sessions skip slots missing `.git`; reopening such a slot
-   still requires inspection.
+   cleanup or destroy Git history during the move. Before quarantining slots,
+   each startup/daily cleanup automatically deletes recovery checkouts whose
+   Git state shows no local work: no modified or untracked files, stash, or
+   unpublished commits reachable from refs or HEAD. Ignored files and reflog-only
+   history do not prevent expiry; remote-tracking refs determine what is published.
+   Checkouts with unfinished merges/rebases/cherry-picks/reverts/bisects, pending index writes, inspection-suppressing index flags,
+   noncommit refs, submodule/linked-worktree registrations, or embedded repositories
+   along tracked paths are retained, as are checkouts that cannot be safely
+   inspected. Logs name preserved checkouts and inspection/deletion failures;
+   inspect and recover local work before manual removal. Quarantine stops at
+   100 remaining checkouts and reports an actionable error. New sessions skip
+   slots missing `.git`; reopening such a slot still requires inspection.
    The pool itself is listed at `GET /api/v1/settings/workspaces`: every slot's
    branch, HEAD, dirty state, size, dependency trees and which open session
    holds it, with two actions for idle slots: _Reset setup_ forgets the

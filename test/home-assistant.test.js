@@ -299,6 +299,22 @@ it('reports unconfigured status and refuses operations', async () => {
   expect(await service.status()).toEqual({ configured: false, connected: false });
   await expect(service.entities()).rejects.toMatchObject({ status: 503 });
 });
+it('blames the token and the address, not the server, when a connection check fails', async () => {
+  const check = (status) =>
+    createHomeAssistantService({
+      config: () => ({ url: 'http://ha.test/wrong', token: 'secret' }),
+      fetcher: vi.fn().mockResolvedValue(Response.json({ message: 'nope' }, { status })),
+    }).status();
+  for (const status of [401, 403])
+    await expect(check(status)).rejects.toMatchObject({
+      status: 502,
+      message: 'Home Assistant refused the access token it is connected with',
+    });
+  await expect(check(404)).rejects.toMatchObject({
+    status: 502,
+    message: 'No Home Assistant API at that address; use its base URL without /api',
+  });
+});
 it('does not follow redirects with its private token', async () => {
   const destination = vi.fn((_req, res) => res.json([]));
   const target = express();

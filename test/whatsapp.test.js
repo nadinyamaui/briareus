@@ -46,9 +46,9 @@ async function mediaService(fileHandler, timeoutMs = 150) {
   return createWhatsAppService({ config: () => ({ url, apiKey: KEY }), timeoutMs });
 }
 
-async function setup() {
+async function setup({ initialAccount = null, accounts = undefined, ownershipError = null } = {}) {
   const calls = [];
-  let current = null;
+  let current = initialAccount;
   let failure = 0;
   let mediaUrl = '';
   let groupAnswer = null;
@@ -69,7 +69,8 @@ async function setup() {
       };
       return res.status(201).json(current);
     }
-    if (path === '/api/sessions/default') return current ? res.json(current) : res.sendStatus(404);
+    if (/^\/api\/sessions\/[^/]+$/.test(path))
+      return current && path === `/api/sessions/${current.name}` ? res.json(current) : res.sendStatus(404);
     if (/\/api\/sessions\/default\/(start|restart)$/.test(path)) {
       current.status = 'STARTING';
       return res.json(current);
@@ -115,7 +116,7 @@ async function setup() {
   });
   const wahaUrl = await serve(upstream);
   mediaUrl = `${wahaUrl}/api/files/default/attachment.ogg`;
-  const service = createWhatsAppService({ config: () => ({ url: wahaUrl, apiKey: KEY }) });
+  const service = createWhatsAppService({ config: () => ({ url: wahaUrl, apiKey: KEY, accounts }) });
   let devices = [];
   const auth = createMobileAuth({
     load: async () => structuredClone(devices),
@@ -135,13 +136,20 @@ async function setup() {
   ).token;
   let stored = {};
   const owners = createWhatsAppOwners({
-    load: async () => stored,
-    save: async (_key, value) => {
+    load: async () => structuredClone(stored),
+    update: async (_key, _fallback, fn) => {
+      if (ownershipError) throw ownershipError;
+      const value = structuredClone(stored);
+      const result = await fn(value);
       stored = value;
+      return { value, result };
     },
     legacyOwner: () => 1,
+    lookupAccount: service.account,
+    listAccounts: service.accounts,
   });
   await owners.init();
+  calls.length = 0;
   const app = express();
   app.use(
     apiV1Routes({
@@ -172,6 +180,7 @@ async function setup() {
     });
   return {
     service,
+    owners,
     request,
     calls,
     tokens,
@@ -246,6 +255,20 @@ describe('the WhatsApp core inbox', () => {
     expect(await (await ctx.request('/default/logout', { method: 'POST' })).json()).toEqual({ ok: true });
   });
 
+  it('requires manage access for a pairing QR while allowing read-only inbox access', async () => {
+    const ctx = await setup({ initialAccount: { name: 'default', status: 'SCAN_QR_CODE' } });
+    expect((await ctx.request('/default/qr', { token: ctx.tokens.read })).status).toBe(403);
+    expect(ctx.calls).toEqual([]);
+
+    for (const path of ['', '/default', '/default/conversations', `/default/conversations/${CHAT}/messages`])
+      expect((await ctx.request(path, { token: ctx.tokens.read })).status).toBe(200);
+    for (const token of [ctx.tokens.manage, ctx.tokens.admin]) {
+      const qr = await ctx.request('/default/qr', { token });
+      expect(qr.status).toBe(200);
+      expect(await qr.json()).toEqual({ mimetype: 'image/png', data: 'cXJjb2Rl' });
+    }
+  });
+
   it('keeps another user’s account and a read token’s writes from WAHA', async () => {
     const ctx = await setup();
     const routes = [
@@ -279,6 +302,126 @@ describe('the WhatsApp core inbox', () => {
     ctx.setCurrent({ name: 'default', status: 'WORKING' });
     expect((await (await ctx.request('', { token: ctx.tokens.member })).json()).accounts).toEqual([]);
     expect((await (await ctx.request('')).json()).accounts.map((a) => a.id)).toEqual(['default']);
+  });
+
+  it('lists and reads an existing Plus account for its original operator without starting it', async () => {
+    const ctx = await setup({ initialAccount: { name: 'business', status: 'WORKING' } });
+    expect((await (await ctx.request()).json()).accounts.map((a) => a.id)).toEqual(['business']);
+    expect((await ctx.request('/business')).status).toBe(200);
+    expect((await (await ctx.request('', { token: ctx.tokens.member })).json()).accounts).toEqual([]);
+    ctx.calls.length = 0;
+    expect((await ctx.request('/business', { token: ctx.tokens.member })).status).toBe(404);
+    expect((await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member })).status).toBe(
+      404,
+    );
+    expect(ctx.calls).toEqual([]);
+  });
+
+  it('creates a member’s new Plus account and keeps it private to that member', async () => {
+    const ctx = await setup();
+    const response = await ctx.request('/ana/start', { method: 'POST', token: ctx.tokens.member });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ account: { id: 'ana', status: 'STARTING' } });
+    expect(ctx.calls.find((c) => c.path === '/api/sessions' && c.method === 'POST').body).toEqual({
+      name: 'ana',
+      start: true,
+      config: { noweb: { store: { enabled: true, fullSync: true } } },
+    });
+    expect(ctx.owners.ownerOf('ana')).toBe(2);
+    expect(
+      (await (await ctx.request('', { token: ctx.tokens.member })).json()).accounts.map((a) => a.id),
+    ).toEqual(['ana']);
+    ctx.calls.length = 0;
+    expect((await ctx.request('/ana')).status).toBe(404);
+    expect((await ctx.request('/ana/start', { method: 'POST' })).status).toBe(404);
+    expect(ctx.calls).toEqual([]);
+  });
+
+  it('lets WAHA reject non-default creation when its edition does not support it', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('', { status: 404 }))
+      .mockResolvedValueOnce(new Response('private edition error', { status: 422 }));
+    const service = createWhatsAppService({
+      config: () => ({ url: 'http://waha.test', apiKey: KEY }),
+      fetcher,
+    });
+    await expect(service.start('ana')).rejects.toMatchObject({
+      status: 409,
+      message: 'WAHA refused the operation; check the account connection and chat',
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[1][1]).toMatchObject({
+      method: 'POST',
+      body: expect.stringContaining('"name":"ana"'),
+    });
+  });
+
+  it('reserves an existing Plus account for the original operator before a member can start it', async () => {
+    const ctx = await setup();
+    const phone = { id: '49111111111@c.us', pushName: 'Original operator' };
+    ctx.setCurrent({ name: 'business', status: 'WORKING', me: phone });
+    const response = await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'WhatsApp account not found' });
+    expect(ctx.owners.ownerOf('business')).toBe(1);
+    expect(ctx.calls.map(({ method, path }) => [method, path])).toEqual([['GET', '/api/sessions/business']]);
+    expect((await ctx.request('/business/conversations', { token: ctx.tokens.member })).status).toBe(404);
+    expect(ctx.calls).toHaveLength(1);
+    expect((await ctx.request('/business/start', { method: 'POST' })).status).toBe(200);
+    expect((await (await ctx.request()).json()).accounts.map((a) => a.id)).toEqual(['business']);
+    await ctx.owners.init();
+    expect(ctx.owners.ownerOf('business')).toBe(1);
+  });
+
+  it('does not claim an unknown account when WAHA cannot confirm whether it exists', async () => {
+    const ctx = await setup();
+    ctx.setFailure(500);
+    expect((await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member })).status).toBe(
+      502,
+    );
+    expect(ctx.owners.ownerOf('business')).toBeNull();
+    ctx.setFailure(0);
+    ctx.setCurrent({ name: 'business', status: 'STOPPED' });
+    expect((await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member })).status).toBe(
+      404,
+    );
+    expect(ctx.owners.ownerOf('business')).toBe(1);
+  });
+
+  it.each([
+    [
+      new Error("UPDATE denied for user 'internal'@'db-host' on table 'app_settings'"),
+      502,
+      'WhatsApp returned an unexpected response',
+    ],
+    [
+      Object.assign(new Error('WhatsApp ownership could not be loaded; try again shortly'), { status: 503 }),
+      503,
+      'WhatsApp ownership could not be loaded; try again shortly',
+    ],
+  ])(
+    'handles ownership persistence errors without starting the account (%s)',
+    async (error, status, message) => {
+      const ctx = await setup({ ownershipError: error });
+      const response = await ctx.request('/ana/start', { method: 'POST', token: ctx.tokens.member });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({ error: message });
+      expect(ctx.owners.ownerOf('ana')).toBeNull();
+      expect(ctx.calls).toEqual([]);
+    },
+  );
+
+  it('rejects starting an excluded account without granting ownership or contacting WAHA', async () => {
+    const ctx = await setup({
+      initialAccount: { name: 'business', status: 'WORKING' },
+      accounts: ['default'],
+    });
+    const response = await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'WhatsApp account, chat or message not found' });
+    expect(ctx.owners.ownerOf('business')).toBeNull();
+    expect(ctx.calls).toEqual([]);
   });
 
   it('rejects malformed IDs, pagination and messages before touching WAHA', async () => {
@@ -671,4 +814,64 @@ it('sends generated Ogg/Opus through WAHA as a voice note without conversion', a
   });
   await expect(ctx.service.sendVoice('default', CHAT, audio, '')).rejects.toMatchObject({ status: 400 });
   expect(ctx.calls.filter((c) => c.path === '/api/sendVoice')).toHaveLength(1);
+});
+
+describe('WAHA_ACCOUNTS on a shared WAHA', () => {
+  async function shared() {
+    const calls = [];
+    const sessions = [
+      { name: 'default', status: 'WORKING', me: { id: '49111111111@c.us', pushName: 'Business' } },
+      { name: 'support', status: 'WORKING', me: { id: '49222222222@c.us', pushName: 'Support' } },
+    ];
+    const upstream = express();
+    upstream.use(express.json());
+    upstream.use((req, res) => {
+      const path = decodeURIComponent(req.path);
+      calls.push({ path, method: req.method, body: req.body });
+      if (path === '/api/sessions' && req.method === 'GET') return res.json(sessions);
+      if (path === '/api/sessions' && req.method === 'POST') {
+        const created = { name: req.body.name, status: 'SCAN_QR_CODE', me: null };
+        sessions.push(created);
+        return res.status(201).json(created);
+      }
+      const found = sessions.find((s) => path === `/api/sessions/${s.name}`);
+      if (found) return res.json(found);
+      if (path.endsWith('/chats/overview')) return res.json([]);
+      res.sendStatus(404);
+    });
+    const url = await serve(upstream);
+    const service = createWhatsAppService({ config: () => ({ url, apiKey: KEY, accounts: ['mine'] }) });
+    return { calls, service };
+  }
+
+  it('lists only the named accounts and creates a named one that WAHA lacks', async () => {
+    const { calls, service } = await shared();
+    expect(await service.accounts()).toEqual({ configured: true, accounts: [] });
+    expect(await service.start('mine')).toEqual({
+      account: { id: 'mine', status: 'SCAN_QR_CODE', me: null },
+    });
+    expect(calls.find((c) => c.method === 'POST').body).toMatchObject({ name: 'mine', start: true });
+    expect((await service.accounts()).accounts.map((a) => a.id)).toEqual(['mine']);
+    expect(await service.conversations('mine')).toEqual({ conversations: [], nextOffset: null });
+  });
+
+  it('answers 404 for every other account without asking WAHA', async () => {
+    const { calls, service } = await shared();
+    for (const run of [
+      () => service.account('default'),
+      () => service.start('support'),
+      () => service.qr('default'),
+      () => service.logout('default'),
+      () => service.conversations('default'),
+      () => service.messages('default', CHAT),
+      () => service.send('default', CHAT, { text: 'hi' }),
+      () => service.sendVoice('default', CHAT, Buffer.from('OggS')),
+      () => service.createGroup('default', { name: 'g', participants: [CHAT] }),
+      () => service.addParticipants('default', '120363000000000000@g.us', { participants: [CHAT] }),
+      () => service.markRead('default', CHAT),
+      () => service.media('default', CHAT, MID),
+    ])
+      await expect(run()).rejects.toMatchObject({ status: 404 });
+    expect(calls).toEqual([]);
+  });
 });

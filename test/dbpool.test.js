@@ -113,11 +113,13 @@ const {
   stopDatabaseProcesses,
   releaseInstance,
   claimHolder,
+  waitingForInstance,
   sessionCapacity,
   projectClaimsServer,
   probeDbServer,
   instanceAppPort,
   instanceEnv,
+  assertInstanceAccess,
   dropSessionDatabase,
   ensureProfileDatabase,
   profileDbElsewhere,
@@ -560,6 +562,30 @@ describe('restart database claims', () => {
     await releaseInstance(session);
     expect(claimHolder(2)).toBeNull();
   });
+
+  it.each([false, true])(
+    'rejects a reclaimed unshared server before probing (preparing=%s)',
+    async (dbPreparing) => {
+      state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
+      state.servers = [server()];
+      const session = { ...job(), repo: 'acme/app', ownerId: 2, dbPreparing };
+      reclaimInstance(session, 1);
+      const allowed = vi.fn(() => false);
+      setDbServerFilter(allowed);
+      try {
+        await expect(acquireInstance(session, session.repo, vi.fn())).rejects.toThrow(/no longer shared/);
+        expect(allowed).toHaveBeenCalledWith(session, state.servers[0]);
+        expect(claimHolder(1)).toBe(session.id);
+        expect(session.dbServerId).toBe(1);
+        expect(state.mysqlQueries).toEqual([]);
+        expect(state.psqlCalls).toEqual([]);
+      } finally {
+        setDbServerFilter(() => true);
+        await releaseInstance(session);
+      }
+      expect(claimHolder(1)).toBeNull();
+    },
+  );
 
   it('fails reclaimed acquisition when MySQL cannot be reached, retaining the claim until cleanup', async () => {
     state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
@@ -1299,6 +1325,41 @@ describe('claiming a server', () => {
     }
   });
 
+  it('refuses fresh credentials and profile DDL after a grant is revoked, retaining cleanup', async () => {
+    const session = { ...job(), repo: 'r/r', ownerId: 2 };
+    await acquire(session);
+    const queries = [...state.mysqlQueries];
+    setDbServerFilter(() => false);
+    try {
+      expect(() => instanceEnv(session)).toThrow(/no longer shared/);
+      await expect(ensureProfileDatabase(session, 'casos_new_profile')).rejects.toThrow(/no longer shared/);
+      expect(state.mysqlQueries).toEqual(queries);
+      expect(claimHolder(1)).toBe(session.id);
+      expect(session.dbServerId).toBe(1);
+      await releaseInstance(session);
+      expect(claimHolder(1)).toBeNull();
+    } finally {
+      setDbServerFilter(() => true);
+    }
+  });
+
+  it.each([false, true])('classifies database admission errors as non-provider (missing: %s)', (missing) => {
+    const session = { ...job(), ownerId: 2, dbServerId: missing ? 99 : 1 };
+    setDbServerFilter(() => false);
+    try {
+      expect(() => assertInstanceAccess(session)).toThrow(
+        expect.objectContaining({
+          message: missing
+            ? "The session's database server (99) is unavailable"
+            : 'Database server is no longer shared with the session owner',
+          fromProvider: false,
+        }),
+      );
+    } finally {
+      setDbServerFilter(() => true);
+    }
+  });
+
   it('claims the first free entry and stamps the session with it', async () => {
     const j = job();
     const events = [];
@@ -1364,6 +1425,71 @@ describe('claiming a server', () => {
     await expect(pending).resolves.toBe(1);
     expect(events.filter((e) => e.includes('waiting for one to free up'))).toHaveLength(1);
   });
+
+  it('checks waiting progress on every poll and stops checking once a server is claimed', async () => {
+    state.servers = [server()];
+    state.project.dbPoolEnabled = true;
+    const holder = job('holder');
+    await acquire(holder);
+    const waiter = job('waiter');
+    claimed.push(waiter);
+    const onWait = vi.fn();
+    const onClaim = () => {
+      onWait.mockImplementation(() => {
+        throw new Error('already claimed');
+      });
+    };
+    const pending = acquireInstance(waiter, 'r/r', vi.fn(), onClaim, onWait);
+    try {
+      await vi.waitFor(() => expect(onWait.mock.calls.length).toBeGreaterThan(1));
+      await releaseInstance(holder);
+      await expect(pending).resolves.toBe(1);
+      expect(waitingForInstance(waiter.id)).toBe(false);
+      expect(claimHolder(1)).toBe(waiter.id);
+    } finally {
+      waiter.status = 'closed';
+      await pending.catch(() => {});
+    }
+  });
+
+  it.each(['claim', 'cancel', 'revoke', 'timeout'])(
+    'tracks an acquisition wait until it ends with %s',
+    async (outcome) => {
+      state.servers = [server({ id: 1 })];
+      state.project.dbPoolEnabled = true;
+      const holder = job('holder');
+      await acquire(holder);
+      const waiter = job('waiter');
+      const pending = acquire(waiter).catch((e) => e);
+      expect(waitingForInstance(waiter.id)).toBe(true);
+      expect(waitingForInstance(holder.id)).toBe(false);
+      try {
+        if (outcome === 'claim') await releaseInstance(holder);
+        else if (outcome === 'cancel') waiter.status = 'closed';
+        else if (outcome === 'revoke') setDbServerFilter(() => false);
+        // The deadline was captured at entry, so advance time only for timeout.
+        const clock =
+          outcome === 'timeout' ? vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 11 * 60_000) : null;
+        try {
+          const result = await pending;
+          if (outcome === 'claim') expect(result).toBe(1);
+          else
+            expect(result.message).toMatch(
+              outcome === 'cancel'
+                ? /canceled/
+                : outcome === 'revoke'
+                  ? /none is shared/
+                  : /no database server became free/,
+            );
+          expect(waitingForInstance(waiter.id)).toBe(false);
+        } finally {
+          clock?.mockRestore();
+        }
+      } finally {
+        setDbServerFilter(() => true);
+      }
+    },
+  );
 
   it('gives up once the wait timeout has passed', async () => {
     state.servers = [server({ id: 1 })];

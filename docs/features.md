@@ -158,6 +158,7 @@ These additions are present in the server revision documented here:
   tools. Installer reruns preserve engine selection, and NOWEB history
   storage is enabled for accounts created by the core. Replies in a chat a
   session watches wake it, with voice notes transcribed by the core first.
+  `WAHA_ACCOUNTS` limits a shared WAHA to the accounts the core may use.
 - Open sessions recover automatically after server restarts, retaining
   queued instructions and workflow stages. Workspace cleanup preserves
   checkouts for inspection and recovery instead of deleting them.
