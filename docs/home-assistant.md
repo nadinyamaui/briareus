@@ -16,7 +16,8 @@ one operator, until that user connects one of their own.
 
 For a Briareus process running directly on Spark, use `HOME_ASSISTANT_URL=http://127.0.0.1:8123`.
 For a Briareus container, use the host's LAN address, such as `http://192.168.1.47:8123`; loopback inside that container refers to the container itself.
-Use the base URL without `/api`. Configure both values or leave both unset to disable the bridge.
+Use the base URL without `/api`. Configure both values or leave both unset. Unset, they do not turn the bridge off:
+users still connect their own Home Assistant, and only the original operator's fallback is gone.
 The Compose app forwards these variables to the server without writing the token into its checkout.
 
 Clients authenticate with their own Briareus token. The server adds the user's Home Assistant token to upstream requests; it never returns it to clients.
