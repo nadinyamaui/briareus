@@ -425,6 +425,58 @@ describe('latestTestVerdict', () => {
     });
   });
 
+  it.each(['```markdown', '~~~~markdown', '````'])('ignores fenced result examples: %s', async (fence) => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        '',
+        'Saved response includes an example table:',
+        '',
+        fence,
+        '| # | Scenario | Steps | Expected | Status | Evidence |',
+        '|---|---|---|---|---|---|',
+        '| 2 | Example | steps | value | ⬜ | |',
+        fence.replace('markdown', ''),
+        '',
+        '| # | Scenario | Steps | Expected | Status | Evidence |',
+        '|---|---|---|---|---|---|',
+        '| 3 | Real | curl | 200 | ✅ | response.json |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 2,
+      passed: 2,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
+  it.each(['```', '~~~', '````markdown'])(
+    'keeps example rows inside a longer fence after %s',
+    async (line) => {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl | 200 | ✅ | response.json |',
+          '',
+          '````',
+          line,
+          '| # | Scenario | Steps | Expected | Status | Evidence |',
+          '|---|---|---|---|---|---|',
+          '| 2 | Example | steps | value | ❌ | example only |',
+          '````',
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 1,
+        manual: 0,
+        incomplete: false,
+      });
+    },
+  );
+
   it('counts an unnumbered result row and retains a later failure', async () => {
     gh.comments = [
       sheet([
