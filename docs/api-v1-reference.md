@@ -942,9 +942,9 @@ Resume an interrupted session from the recovery report just read. Needs `admin`.
 
 ### `GET /tasks/{id}`
 
-Read a task’s history: every session filed under it and what they cost together. Needs `admin`.
+Read a task’s history: every session filed under it and what they cost together. Needs `read`.
 
-**Returns** `{ root: object, sessions: object[], usage: object, prUrl: string? }`
+**Returns** `{ root: object, sessions: object[], usage: object, prUrl: string? }`. Kept after the sessions are deleted. A task you may not see (another user’s, or outside the token’s projects) answers 404.
 
 ## Composer
 
@@ -1135,9 +1135,9 @@ Read usage and costs across every project. Needs `admin`.
 
 ### `GET /attention`
 
-List what is waiting on the operator: questions, findings to rule on, failures, SSH and Slack approvals. Needs `admin`.
+List what is waiting on you: questions, findings to rule on, failures, SSH and Slack approvals. Needs `read`.
 
-**Returns** `{ items: object[] }`. An item is `{ id, sessionId, taskId, revision, repo, title, kind, summary, href, at }`.
+**Returns** `{ items: object[] }`. An admin sees every session’s items, a member their own and ownerless ones of their projects, held to the token’s projects. SSH commands are those you rule on (`GET /ssh/requests`), Slack messages those that would go out through your own workspaces. An item is `{ id, sessionId, taskId, revision, repo, title, kind, summary, href, at }`.
 
 ### `GET /maintenance`
 

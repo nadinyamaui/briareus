@@ -146,6 +146,7 @@ These additions are present in the server revision documented here:
 - Per-user Slack workspaces, inbox and approvals.
 - Per-user Home Assistant connections.
 - Per-user WhatsApp accounts for the inbox, session tools and watches.
+- Per-user attention feed and task history.
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.
