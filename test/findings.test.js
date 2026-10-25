@@ -483,6 +483,8 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    '| # | Scenario | Steps | Expected | Status | Evidence / video |',
+    '| Case | Scenario | Request | Response | **Status** | _Evidence (video)_ |',
     '| Case | Scenario | Steps | Expected | Status | Evidence |',
     '| **Case** | API scenario | Request | Response | **Status** | _Evidence_ |',
     '| Test case | Scenario | Steps | Expected | Status | Evidence |',
@@ -682,6 +684,16 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '<span/>',
+    '<span class="evidence" />',
+    '<hr>',
+    '<hr />',
+    '[]()',
+    '<div>[]()<span/></div>',
+    '&#8203;',
+    '&#x200B;',
+    '\u200b',
+    '**<hr>&#8203;[]()**',
     '<span></span>',
     '<div><br></div>',
     '&ensp;',
@@ -760,6 +772,12 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API blocked user denied with 403',
+    '✅ API blocked user cannot access /admin',
+    '✅ UI pending payment shown correctly',
+    '✅ UI pending payment remains visible',
+    '✅ API: blocked recently revoked user denied with 403',
+    '✅ UI: pending payment remains visible',
     '✅ UI manual payment is recorded',
     '✅ API blocked user is not allowed',
     '✅ UI pending payment is shown as required',
@@ -811,6 +829,22 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI not checked',
+    '✅ API; UI needs manual verification',
+    "✅ API; UI wasn't run",
+    '✅ API; UI could not be checked',
+    '✅ API; UI excluded',
+    '✅ API; UI tests did not pass',
+    '✅ API; UI tests still pending',
+    '✅ API; UI remains untested',
+    '✅ API; UI testing is not complete',
+    '✅ API<br>**UI tests** are still pending',
+    '✅ API/UI checks were not checked',
+    '✅ API (UI remains untested)',
+    '✅ API blocked user denied with 403; UI not checked',
+    '✅ API blocked user cannot access /admin; UI needs manual verification',
+    "✅ UI pending payment shown correctly; UI wasn't run",
+    '✅ UI pending payment remains visible; UI testing is not complete',
     '✅ API; UI manual verification is required',
     '✅ API; UI pending while credentials are missing',
     '✅ API; UI testing has not been run',
@@ -931,6 +965,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '<img src="https://example.com/screenshot.png" />',
+    '![screenshot](https://example.com/screenshot.png)',
+    '[evidence](#)',
+    '<span/>response.json<hr>',
+    'response&#8203;.json',
     'no-evidence-available.json',
     'not run.json',
     'No evidence available was returned as expected',
