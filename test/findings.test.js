@@ -746,6 +746,31 @@ describe('latestTestVerdict', () => {
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
+  it.each([
+    '| Nº | Scénario | Étapes | Attendu | Statut | Preuve |',
+    '| **ID** | Cas | Requête | Attendu | **Statut** | _Preuve_ |',
+    '| 番号 | シナリオ | 手順 | 期待値 | 結果 | 証拠 |',
+  ])('counts localized unexecuted results without known QA markers: %s', async (header) => {
+    for (const status of ['', '🟢']) {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl | 200 | ✅ | response.json |',
+          '',
+          header,
+          '|---|---|---|---|---|---|',
+          `| 2 | New endpoint | curl /new | 200 | ${status} | ${status ? 'response.json' : ''} |`,
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 2,
+        passed: 1,
+        manual: 0,
+        incomplete: true,
+      });
+    }
+  });
+
   it('does not infer QA results from an unrelated numbered six-column table', async () => {
     gh.comments = [
       sheet([
@@ -1052,6 +1077,14 @@ describe('latestTestVerdict', () => {
     '**`none`**',
     '~~TBD~~',
     '~~**N/A**~~',
+    'No evidence exists',
+    'Evidence missing',
+    'Evidence not available',
+    'No artifacts',
+    '**No evidence exists.**',
+    '<span>Evidence is missing</span>',
+    'Evidence was not available',
+    'No artifacts uploaded',
     'No evidence available',
     'No evidence collected',
     'not collected',
@@ -1225,6 +1258,37 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    ['Manual refund', 'Refund successful', 'API manual refund successful'],
+    ['Manual refund', 'Refund successful', 'API manual refund refunded successfully'],
+    ['Blocked user', 'Redirect to login', 'UI blocked user redirected to login'],
+  ])(
+    'accepts executed business outcomes for %s while retaining missing coverage',
+    async (scenario, expected, outcome) => {
+      for (const [status, evidence] of [
+        [`✅ ${outcome}`, 'response.json'],
+        ['✅', outcome],
+      ]) {
+        for (const missing of ['', '; UI not able to run']) {
+          gh.comments = [
+            sheet([`| 1 | ${scenario} | Run procedure | ${expected} | ${status}${missing} | ${evidence} |`]),
+          ];
+          expect(await latestTestVerdict(repo, 5)).toMatchObject({
+            total: 1,
+            passed: missing ? 0 : 1,
+            incomplete: !!missing,
+          });
+        }
+      }
+    },
+  );
+
+  it.each([
+    '✅ API; UI could not open browser',
+    '✅ API; UI not able to run',
+    '✅ API; UI not supported on this host',
+    '✅ API; UI could not be opened',
+    '✅ API; UI not reviewed',
+    '✅ API; UI blocked during setup returns 500',
     '✅ API; UI could not complete',
     '✅ API; UI not reached because browser crashed',
     '✅ API; UI blocked after login returns 500',
@@ -1466,6 +1530,12 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '<img src="https://example.com/screenshot.png" />',
+    'no-artifacts.json',
+    'Evidence missing was returned as expected',
+    'No evidence exists was returned as expected',
+    'Evidence not available was returned as expected',
+    'No artifacts was returned as expected',
+    '[Evidence missing](https://example.com/result)',
     'no-evidence-uploaded.json',
     'evidence-unavailable.json',
     'No evidence uploaded was returned as expected',
