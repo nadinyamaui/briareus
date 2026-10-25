@@ -696,6 +696,9 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    '| # | Scenario | Steps | Expected | Status (✅/❌) | Evidence |',
+    '| # | Scenario | Steps | Expected | **Status (✅ / ❌)** | _Evidence_ |',
+    '| # | Scenario | Steps | Expected | Status [✅/❌] | Evidence |',
     '| # | Scenario | Steps | Expected | Status ✅/❌ | Evidence |',
     '| # | Scenario | Steps | Expected | **Status ✅/❌** | _Evidence_ |',
     '| # | Scenario | Steps | Expected | Status | Video |',
@@ -1022,6 +1025,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'Not run due to missing node.js',
+    'No video was recorded because capture failed in capture.js',
+    '**Not run due to missing node.js**',
+    '<span>No video was recorded because capture failed in capture.js</span>',
     'Evidence was not uploaded',
     'No video was recorded',
     'Not run due to missing credentials',
@@ -1255,6 +1262,13 @@ describe('latestTestVerdict', () => {
 
   it.each([
     [
+      'Queue a pending job',
+      'POST /jobs',
+      'HTTP 202 queued',
+      '✅ API pending jobs queued correctly',
+      'response.json',
+    ],
+    [
       'Manual refund',
       'POST /refunds with manual=true',
       'HTTP 200 approved',
@@ -1354,6 +1368,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; browser: could not connect',
+    '✅ API; UI could not access the app because browser connection was refused',
+    '✅ API; browser could not connect to http://localhost:4300',
+    '✅ API; UI could not access the app; browser connection was refused',
     '✅ API; UI could not open browser',
     '✅ API; UI not able to run',
     '✅ API; UI not supported on this host',
@@ -1604,6 +1622,9 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'not-run-due-to-missing-node.js',
+    'capture.js',
+    '[capture.js](https://example.com/capture.js)',
     'evidence-was-not-uploaded.json',
     'no-video-was-recorded.webm',
     'not run due to missing credentials.json',
