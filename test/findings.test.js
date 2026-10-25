@@ -347,8 +347,8 @@ describe('latestTestVerdict', () => {
     expect(verdict.incomplete).toBe(!row.includes('response.json'));
   });
 
-  it.each(['| 2 |', '2 |', '| **2** |', '2', '**2**', '#2', '2.1'])(
-    'keeps scanning after number-only row %s',
+  it.each(['| 2 |', '2 |', '| **2** |', '2', '**2**', '#2', '2.1', 'A', '**A**'])(
+    'keeps scanning after identifier-only row %s',
     async (row) => {
       gh.comments = [
         sheet([
@@ -386,8 +386,8 @@ describe('latestTestVerdict', () => {
     });
   });
 
-  it.each(['---', '----', '***', '___'])(
-    'retains the final failed result before horizontal rule %s',
+  it.each(['---', '----', '***', '___', '|---|---|---|---|---|---|'])(
+    'retains the final failed result before divider %s',
     async (rule) => {
       gh.comments = [
         sheet([
@@ -405,6 +405,25 @@ describe('latestTestVerdict', () => {
       });
     },
   );
+
+  it.each(['❌', '⬜', '✅'])('counts annotated result cells as data: %s', async (status) => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl /api | 200 | ✅ | response.json |',
+        `| 2 | Annotated | curl /api | 200 | Status: ${status} | Evidence: got 500 |`,
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures:
+        status === '❌'
+          ? [{ number: '2', scenario: 'Annotated', expected: '200', evidence: 'Evidence: got 500' }]
+          : [],
+      total: 2,
+      passed: status === '✅' ? 2 : 1,
+      manual: 0,
+      incomplete: status === '⬜',
+    });
+  });
 
   it('counts an unnumbered result row and retains a later failure', async () => {
     gh.comments = [
@@ -506,6 +525,9 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    '| # | Scenario | Steps | Expected | Result | Evidence |',
+    '| # | Escenario | Pasos | Esperado | Estado | Evidencia |',
+    '| Case | Scenario | Request | Response | **Result (status)** | _Evidence / video_ |',
     '| # | Scenario | Steps | Expected | Status | Evidence / video |',
     '| # | Scenario | Steps | Expected | Status (result) | Evidence |',
     '| # | Scenario | Steps | Expected | **Status (result)** | _Evidence / video_ |',
@@ -709,6 +731,13 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '![]()',
+    '![ ]()',
+    '**![]()**',
+    'Not executed: browser unavailable',
+    'Not executed because browser unavailable',
+    'API passed; UI skipped (browser unavailable)',
+    'No evidence attached',
     '<span/>',
     '<img src="">',
     '<img src="" />',
@@ -812,6 +841,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ UI pending payment renders correctly',
+    '✅ UI manual payment saved successfully',
+    '✅ API manual refund completed successfully',
+    '✅ API blocked user sees 403',
     '✅ API blocked user denied with 403',
     '✅ API blocked user rejected with 403',
     '✅ API: blocked recently revoked user rejected with 403',
@@ -878,6 +911,26 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI verification pending',
+    '✅ API; UI did not finish',
+    '✅ API; UI tests were deferred',
+    '✅ API; failed UI',
+    '✅ API; UI was not exercised',
+    '✅ API; UI has not passed',
+    '✅ API; UI attempted but blocked',
+    '✅ API; UI tests have not passed',
+    '✅ API; UI waiting for browser',
+    '✅ API; UI test suite not run',
+    '✅ API; UI must be tested manually',
+    '✅ API; UI tests did not finish',
+    '✅ API; UI has yet to be tested',
+    '✅ API; UI testing is awaiting credentials',
+    '✅ API; UI not finished',
+    '✅ API; UI must be manually verified',
+    '✅ UI pending payment renders correctly; UI verification pending',
+    '✅ UI manual payment saved successfully; UI was not exercised',
+    '✅ API manual refund completed successfully; UI has not passed',
+    '✅ API blocked user sees 403; UI attempted but blocked',
     '✅ API; UI not checked',
     '✅ API; UI to be tested',
     '✅ API; UI unable to run',
@@ -1039,6 +1092,8 @@ describe('latestTestVerdict', () => {
     '<img src="https://example.com/screenshot.png" />',
     '<img src="" alt="response screenshot">',
     '<img srcset="screenshot.png 1x">',
+    'not executed.json',
+    'UI pending payment renders correctly',
     'not captured.json',
     'not available was returned as expected',
     '![screenshot](https://example.com/screenshot.png)',
