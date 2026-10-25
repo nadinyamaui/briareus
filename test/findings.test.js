@@ -347,22 +347,25 @@ describe('latestTestVerdict', () => {
     expect(verdict.incomplete).toBe(!row.includes('response.json'));
   });
 
-  it.each(['| 2 |', '2 |', '| **2** |'])('keeps scanning after number-only row %s', async (row) => {
-    gh.comments = [
-      sheet([
-        '| 1 | API | curl /api | 200 | ✅ | response.json |',
-        row,
-        '| 3 | Failure | curl /api | 200 | ❌ | saw 500 |',
-      ]),
-    ];
-    expect(await latestTestVerdict(repo, 5)).toEqual({
-      failures: [{ number: '3', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
-      total: 3,
-      passed: 1,
-      manual: 0,
-      incomplete: true,
-    });
-  });
+  it.each(['| 2 |', '2 |', '| **2** |', '2', '**2**', '#2', '2.1'])(
+    'keeps scanning after number-only row %s',
+    async (row) => {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl /api | 200 | ✅ | response.json |',
+          row,
+          '| 3 | Failure | curl /api | 200 | ❌ | saw 500 |',
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [{ number: '3', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+        total: 3,
+        passed: 1,
+        manual: 0,
+        incomplete: true,
+      });
+    },
+  );
 
   it('keeps failed scenarios after empty table spacer rows', async () => {
     gh.comments = [
@@ -484,6 +487,8 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '| # | Scenario | Steps | Expected | Status | Evidence / video |',
+    '| # | Scenario | Steps | Expected | Status (result) | Evidence |',
+    '| # | Scenario | Steps | Expected | **Status (result)** | _Evidence / video_ |',
     '| Case | Scenario | Request | Response | **Status** | _Evidence (video)_ |',
     '| Case | Scenario | Steps | Expected | Status | Evidence |',
     '| **Case** | API scenario | Request | Response | **Status** | _Evidence_ |',
@@ -685,6 +690,16 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '<span/>',
+    '<img src="">',
+    '<img src="" />',
+    "<img src='   '>",
+    '<img>',
+    '<img src="" alt=" ">',
+    'not captured',
+    'not available',
+    'N/A - not recorded',
+    '**not captured**',
+    '<span>not available</span>',
     '<span class="evidence" />',
     '<hr>',
     '<hr />',
@@ -773,6 +788,11 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '✅ API blocked user denied with 403',
+    '✅ API blocked user rejected with 403',
+    '✅ API: blocked recently revoked user rejected with 403',
+    '✅ GET /health; POST /orders returns 201',
+    '✅ POST /api/orders returns 201',
+    '✅ GET / returns 200',
     '✅ API blocked user cannot access /admin',
     '✅ UI pending payment shown correctly',
     '✅ UI pending payment remains visible',
@@ -830,6 +850,18 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '✅ API; UI not checked',
+    '✅ API; UI has been skipped',
+    '✅ API; UI has been blocked by unavailable credentials',
+    '✅ API; UI could not start',
+    '✅ API; Playwright not run',
+    '✅ API; E2E not run',
+    '✅ API<br>**UI tests** have been skipped',
+    '✅ API/E2E not run',
+    '✅ GET /health; POST /orders not tested',
+    '✅ GET /health; POST /api/orders not tested',
+    '✅ GET /health / UI tests not run',
+    '✅ GET / not tested',
+    '✅ API blocked user rejected with 403; UI has been skipped',
     '✅ API; UI needs manual verification',
     "✅ API; UI wasn't run",
     '✅ API; UI could not be checked',
@@ -966,6 +998,10 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '<img src="https://example.com/screenshot.png" />',
+    '<img src="" alt="response screenshot">',
+    '<img srcset="screenshot.png 1x">',
+    'not captured.json',
+    'not available was returned as expected',
     '![screenshot](https://example.com/screenshot.png)',
     '[evidence](#)',
     '<span/>response.json<hr>',
