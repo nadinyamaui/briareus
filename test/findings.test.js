@@ -1053,6 +1053,7 @@ describe('latestTestVerdict', () => {
     '**No evidence collected.**',
     '<span>No evidence collected</span>',
     'No evidence available.',
+    'No evidence saved because browser<br>is unavailable',
     'no evidence',
     'NO EVIDENCE PROVIDED',
     '**No evidence available**',
@@ -1095,6 +1096,9 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API manual refund processed successfully',
+    '✅ UI regression tests pending payment shown correctly',
+    '✅ UI smoke tests manual payment saved successfully',
     '✅ API blocked user forbidden with 403',
     '✅ API: blocked recently revoked user forbidden with 403',
     '✅ UI pending payment renders correctly',
@@ -1208,6 +1212,10 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    '✅ API; UI regression tests not run',
+    '✅ API; UI smoke tests were skipped',
+    '✅ API<br>**UI regression tests** were not fully tested',
+    '✅ API manual refund processed successfully; UI smoke tests were skipped',
     '✅ API; UI not fully tested',
     '✅ API; UI partially tested',
     '✅ API; browser could not launch',
@@ -1440,6 +1448,8 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '<img src="https://example.com/screenshot.png" />',
+    'API manual refund processed successfully',
+    'API_not_running.json',
     'API blocked user forbidden with 403',
     'no-evidence-saved.json',
     'No evidence saved was returned as expected',
