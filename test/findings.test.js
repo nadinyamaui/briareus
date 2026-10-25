@@ -386,6 +386,26 @@ describe('latestTestVerdict', () => {
     });
   });
 
+  it.each(['---', '----', '***', '___'])(
+    'retains the final failed result before horizontal rule %s',
+    async (rule) => {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl /api | 200 | ✅ | response.json |',
+          '| 2 | Failure | curl /api | 200 | ❌ | saw 500 |',
+          rule,
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [{ number: '2', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+        total: 2,
+        passed: 1,
+        manual: 0,
+        incomplete: false,
+      });
+    },
+  );
+
   it('counts an unnumbered result row and retains a later failure', async () => {
     gh.comments = [
       sheet([
@@ -744,6 +764,11 @@ describe('latestTestVerdict', () => {
     '~~TBD~~',
     '~~**N/A**~~',
     'No evidence available',
+    'No evidence collected',
+    'not collected',
+    'N/A - not collected',
+    '**No evidence collected.**',
+    '<span>No evidence collected</span>',
     'No evidence available.',
     'no evidence',
     'NO EVIDENCE PROVIDED',
@@ -794,6 +819,10 @@ describe('latestTestVerdict', () => {
     '✅ POST /api/orders returns 201',
     '✅ GET / returns 200',
     '✅ API blocked user cannot access /admin',
+    '✅ API blocked user cannot enter /admin',
+    '✅ API: blocked recently revoked user cannot enter /admin',
+    "✅ API blocked user can't enter /admin",
+    '✅ UI failed account returns 403',
     '✅ UI pending payment shown correctly',
     '✅ UI pending payment remains visible',
     '✅ API: blocked recently revoked user denied with 403',
@@ -850,6 +879,16 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '✅ API; UI not checked',
+    '✅ API; UI to be tested',
+    '✅ API; UI unable to run',
+    '✅ API; UI never ran',
+    '✅ API; UI not done',
+    '✅ API; UI not passing',
+    '✅ API; UI failed to return expected result',
+    '✅ API<br>**UI tests** are to be tested',
+    '✅ API (UI unable to run)',
+    '✅ API/UI failed to return expected result',
+    '✅ API blocked user cannot enter /admin; UI not done',
     '✅ API; UI has been skipped',
     '✅ API; UI has been blocked by unavailable credentials',
     '✅ API; UI could not start',
@@ -1009,6 +1048,8 @@ describe('latestTestVerdict', () => {
     'no-evidence-available.json',
     'not run.json',
     'No evidence available was returned as expected',
+    'No evidence collected was returned as expected',
+    'no-evidence-collected.json',
     'Asserted the job was not run',
     '[response.json]()',
     '<span>response.json</span>',
