@@ -137,6 +137,8 @@ describe('SSH permission boundary', () => {
     'invalidates queued approvals on %s',
     async (action) => {
       const { server, request } = await submit();
+      job.status = 'idle';
+      job.awaitingAnswer = true;
       if (action === 'remove') await service.remove(server.id);
       else
         await service.update(
@@ -164,6 +166,61 @@ describe('SSH permission boundary', () => {
       expect(execute).not.toHaveBeenCalled();
     },
   );
+  it('keeps the original approval and TTL only while the same turn awaits its owner', async () => {
+    vi.useFakeTimers();
+    const { request } = await submit();
+    job.status = 'idle';
+    job.awaitingAnswer = true;
+    vi.advanceTimersByTime(599999);
+    expect(service.pending()).toEqual([request]);
+    expect(execute).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(service.pending()).toEqual([]);
+    expect(service.result(job, request.id)).toMatchObject({ status: 'cancelled', error: 'Approval expired' });
+    expect(() => service.decide(request.id, 'approve')).toThrow();
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it.each(['answer', 'cancel', 'close', 'closing', 'new-turn', 'repo', 'owner', 'finish', 'failed'])(
+    'invalidates an approval awaiting its owner on %s',
+    async (change) => {
+      const { request } = await submit();
+      job.status = 'idle';
+      job.awaitingAnswer = true;
+      if (change === 'answer' || change === 'finish') job.awaitingAnswer = false;
+      if (change === 'cancel') job.turnCanceled = true;
+      if (change === 'close') job.status = 'closed';
+      if (change === 'closing') job.closing = true;
+      if (change === 'failed') job.status = 'failed';
+      if (change === 'new-turn') job.turns++;
+      if (change === 'repo') job.repo = 'other/repo';
+      if (change === 'owner') job.ownerId = 2;
+      expect(service.pending()).toEqual([]);
+      expect(service.result(job, request.id).error).toBe('Session turn ended or changed');
+      expect(() => service.decide(request.id, 'approve')).toThrow();
+      expect(execute).not.toHaveBeenCalled();
+    },
+  );
+  it('does not reuse an unanswered approval in a later turn even before the completed count advances', async () => {
+    job.sshApprovalTurn = 'first-turn';
+    const { request } = await submit();
+    job.turns++;
+    job.status = 'idle';
+    job.awaitingAnswer = true;
+    expect(service.pending()).toEqual([request]);
+    job.status = 'running';
+    job.sshApprovalTurn = 'next-turn';
+    job.awaitingAnswer = true;
+    expect(() => service.decide(request.id, 'approve')).toThrow();
+    expect(service.pending()).toEqual([]);
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it('can deny an approval after the turn stops to ask', async () => {
+    const { request } = await submit();
+    job.status = 'idle';
+    job.awaitingAnswer = true;
+    expect(service.decide(request.id, 'deny').status).toBe('denied');
+    expect(execute).not.toHaveBeenCalled();
+  });
   it('expires approvals and never replays them after restart', async () => {
     vi.useFakeTimers();
     const { request } = await submit();
@@ -188,10 +245,12 @@ describe('SSH permission boundary', () => {
     service = createSshService({ load: async () => [], save, execute, getJob: () => job, mayUse });
     await service.init();
     const { request } = await submit();
+    job.status = 'idle';
+    job.awaitingAnswer = true;
     // The user registry may replace the owner/session object before approval.
     job = { ...job, disabled: reason === 'disabled owner' };
     if (reason === 'unshared') shared = false;
-    expect(() => service.decide(request.id, 'approve')).toThrow(/no longer available/);
+    expect(() => service.decide(request.id, 'approve')).toThrow(/no longer/);
     expect(service.result(job, request.id).status).toBe('cancelled');
     expect(service.pending()).toEqual([]);
     expect(execute).not.toHaveBeenCalled();

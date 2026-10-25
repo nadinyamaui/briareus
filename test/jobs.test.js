@@ -16,6 +16,7 @@ import { forgetProviderUsage, providerUsage } from '../lib/balancer.js';
 import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
 import { createUsers } from '../lib/users.js';
 import { createSlackService } from '../lib/slack.js';
+import { createSshService } from '../lib/ssh.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
@@ -229,6 +230,7 @@ vi.mock('../lib/findings.js', () => {
 });
 
 vi.mock('../lib/uploads.js', () => ({
+  MAX_UPLOAD_BYTES: 25 * 1024 * 1024,
   initUploads: vi.fn(),
   getUpload: vi.fn(() => null),
 }));
@@ -2692,6 +2694,46 @@ describe('spawnWorkerSession', () => {
       children[0].emit('close', 0);
       await done;
       expect(job.awaitingAnswer).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps an unattended SSH approval after ask-user ends the real session turn', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.awaitingAnswer = false;
+    const { children, settled, restore } = fakeClaude();
+    const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+    await ssh.init();
+    const server = await ssh.create({
+      repo: job.repo,
+      host: 'fixture.example',
+      username: 'deploy',
+      permissionMode: 'allow',
+    });
+    try {
+      const done = settled(job);
+      sendDevMessage(job.id, 'Check the server', undefined, { unattended: true });
+      children[0].emitLines(init, replay('Check the server'));
+      const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+      expect(request).toMatchObject({ status: 'pending', unattended: true });
+      children[0].emitLines(
+        said('<ask-user>Approve the SSH request in Attention, then tell me to continue.</ask-user>'),
+        result('Asked.'),
+      );
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(job.status).toBe('idle');
+      expect(job.awaitingAnswer).toBe(true);
+      expect(ssh.pending()).toEqual([request]);
+      expect(execute).not.toHaveBeenCalled();
+      ssh.decide(request.id, 'approve');
+      await Promise.resolve();
+      expect(ssh.result(job, request.id).status).toBe('completed');
+      expect(execute).toHaveBeenCalledTimes(1);
     } finally {
       restore();
     }

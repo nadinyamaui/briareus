@@ -1,6 +1,7 @@
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createSshService } from '../lib/ssh.js';
+import { operationsRoutes } from '../lib/operations-routes.js';
 import { sshRoutes } from '../lib/ssh-routes.js';
 import { agentOnly } from '../lib/auth.js';
 
@@ -36,10 +37,19 @@ beforeEach(async () => {
       return null;
     },
   });
+  const operations = operationsRoutes({
+    listSessions: () => [job],
+    ssh: service,
+    getJob: () => job,
+    sendMessage: vi.fn(),
+    sshVisible: (user) => user.role === 'admin' || user.id === job.ownerId,
+  });
   app.use((req, res, next) => {
     res.locals.apiUser = apiUser;
     res.locals.apiRepos = apiRepos;
-    return req.headers['x-test-operator'] ? routes(req, res, next) : agentOnly(routes)(req, res, next);
+    return req.headers['x-test-operator']
+      ? operations(req, res, () => routes(req, res, next))
+      : agentOnly(routes)(req, res, next);
   });
   app.use('/api', (req, res) => res.status(410).json({ error: 'This route is retired' }));
   server = app.listen(0, '127.0.0.1');
@@ -140,6 +150,47 @@ describe('SSH HTTP authorization and registration', () => {
     expect(servers[0]).toMatchObject({ hasPassword: true });
     expect(servers[0]).not.toHaveProperty('password');
     expect(servers[0]).not.toHaveProperty('passwordSealed');
+  });
+  it('exposes an unattended approval in native Attention after ask-user, with the same owner and repo controls', async () => {
+    const row = await service.create({ ...input, permissionMode: 'allow' });
+    job.unattendedTurn = true;
+    const res = await request('/api/agent/ssh/execute', {
+      token: 'session-token',
+      method: 'POST',
+      body: { serverId: row.id, command: 'pwd' },
+    });
+    const { request: queued } = await res.json();
+    job.status = 'idle';
+    job.awaitingAnswer = true;
+    const attention = async () =>
+      (await (await request('/api/operations/attention', { operator: true })).json()).items;
+    const pending = async () =>
+      (await (await request('/api/ssh/requests', { operator: true })).json()).requests;
+    const decide = () =>
+      request(`/api/ssh/requests/${queued.id}/decision`, {
+        operator: true,
+        method: 'POST',
+        body: { decision: 'approve' },
+      });
+    apiUser = { id: 2, role: 'member' };
+    expect(await attention()).toEqual([]);
+    expect(await pending()).toEqual([]);
+    expect((await decide()).status).toBe(400);
+    apiUser = { id: 1, role: 'member' };
+    apiRepos = ['other/repo'];
+    expect(await attention()).toEqual([]);
+    expect((await decide()).status).toBe(400);
+    apiRepos = [input.repo];
+    expect(await attention()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: 'ssh', request: queued })]),
+    );
+    expect(await pending()).toEqual([queued]);
+    expect(execute).not.toHaveBeenCalled();
+    expect((await decide()).status).toBe(200);
+    expect(await pending()).toEqual([]);
+    expect(execute).toHaveBeenCalledTimes(1);
+    const result = await request(`/api/agent/ssh/requests/${queued.id}`, { token: 'session-token' });
+    expect((await result.json()).request.status).toBe('completed');
   });
   it('executes only after an operator decision, then serves the result to the owning session', async () => {
     const row = await service.create(input);
@@ -254,7 +305,7 @@ describe('SSH approvals for members', () => {
     apiUser = { id: 2, role: 'member' };
     expect((await (await request('/api/ssh/requests', { operator: true })).json()).requests).toEqual([]);
     expect((await decide()).status).toBe(400);
-    job.ownerId = 2;
+    apiUser = { id: 1, role: 'member' };
     apiRepos = ['other/repo'];
     expect((await (await request('/api/ssh/requests', { operator: true })).json()).requests).toEqual([]);
     apiRepos = [input.repo];
