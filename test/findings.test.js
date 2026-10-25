@@ -747,6 +747,8 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '| Nr. | Szenario | Schritte | Erwartet | Status | Nachweis |',
+    '| **Nr.** | Szenario | Schritte | Erwartet | **Status** | _Nachweis_ |',
     '| Nº | Scénario | Étapes | Attendu | Statut | Preuve |',
     '| **ID** | Cas | Requête | Attendu | **Statut** | _Preuve_ |',
     '| 番号 | シナリオ | 手順 | 期待値 | 結果 | 証拠 |',
@@ -997,6 +999,12 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '![]()',
+    'No evidence (upload failed)',
+    'Not run; credentials missing',
+    '**No evidence (upload failed)**',
+    '<span>Not run; credentials missing</span>',
+    'No evidence; upload failed',
+    'Not tested (credentials missing)',
     'No evidence uploaded',
     'Evidence unavailable',
     '**No evidence uploaded.**',
@@ -1216,6 +1224,13 @@ describe('latestTestVerdict', () => {
 
   it.each([
     [
+      'Manual refund',
+      'POST /refunds with manual=true',
+      'HTTP 202 accepted',
+      '✅ API manual refund accepted with 202',
+      'response.json',
+    ],
+    [
       'Sold out',
       'Open product with stock=0, try Buy',
       'Purchase is refused for unavailable product',
@@ -1281,6 +1296,24 @@ describe('latestTestVerdict', () => {
       }
     },
   );
+
+  it.each([
+    '✅ not yet tested',
+    '✅ partially tested',
+    '✅ API; not yet tested',
+    '✅ API<br>**partially tested**',
+    '✅ has not yet been tested',
+    '✅ only partly executed',
+  ])('keeps subjectless unfinished execution incomplete: %s', async (status) => {
+    gh.comments = [sheet([`| 1 | Scenario | Run | Works | ${status} | response.json |`])];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+  });
 
   it.each([
     '✅ API; UI could not open browser',
@@ -1530,6 +1563,9 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '<img src="https://example.com/screenshot.png" />',
+    'no evidence (upload failed).json',
+    'Not run was returned as expected',
+    '[No evidence (upload failed)](https://example.com/result)',
     'no-artifacts.json',
     'Evidence missing was returned as expected',
     'No evidence exists was returned as expected',
