@@ -516,6 +516,52 @@ describe('latestTestVerdict', () => {
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
+  it.each([['Method'], ['Environment'], ['**Method**', '`Environment`']])(
+    'reads results with extra columns %j',
+    async (...extraHeaders) => {
+      const header = `| Case | Scenario | ${extraHeaders.join(' | ')} | Steps | Expected | **Status** | _Evidence_ |`;
+      const extraCells = extraHeaders.map(() => 'curl').join(' | ');
+      const rows = [
+        header,
+        `|${Array(6 + extraHeaders.length)
+          .fill('---')
+          .join('|')}|`,
+      ];
+      gh.comments = [
+        sheet([
+          '| 1 | Browser | Open | Shown | ✅ | video |',
+          '',
+          ...rows,
+          `| 2 | API | ${extraCells} | GET /api | 200 | ❌ | got 500 |`,
+          '| 3 | UI |',
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [{ number: '2', scenario: 'API', expected: '200', evidence: 'got 500' }],
+        total: 3,
+        passed: 1,
+        manual: 0,
+        incomplete: true,
+      });
+      gh.comments = [
+        {
+          body: [
+            TEST_SHEET_ANCHOR,
+            ...rows,
+            `| 1 | API | ${extraCells} | GET /api | 200 | ✅ | response.json |`,
+          ].join('\n'),
+        },
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+      gh.comments = [
+        {
+          body: [TEST_SHEET_ANCHOR, ...rows, `| 1 | API | ${extraCells} | GET /api | 200 | ✅ |`].join('\n'),
+        },
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    },
+  );
+
   it.each(['', '\n', '\nSaved response summary\n'])(
     'ignores a separate evidence table after scenarios: %j',
     async (gap) => {
@@ -704,6 +750,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API blocked user gets 403',
+    '✅ UI pending payment displays correctly',
+    '✅ UI pending payment appears',
+    '✅ API: blocked revoked user gets 403',
+    '✅ UI unknown route returns 404',
     '✅ UI failed payment is displayed',
     '✅ API incomplete profile returns 422',
     '✅ API blocked user is denied with 403',
@@ -747,6 +798,17 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI untested',
+    '✅ API; UI not started',
+    '✅ API; UI has not yet been tested',
+    '✅ API; UI unknown on this host',
+    '✅ API (UI tests have not yet been executed)',
+    '✅ API/UI automation not yet started',
+    '✅ API<br>Firefox untested on this host',
+    '✅ API; **UI checks** are unknown on this host',
+    '✅ API blocked user gets 403; UI not started',
+    '✅ UI pending payment displays correctly; browser untested',
+    '✅ UI pending payment appears; UI has not yet been tested',
     '✅ API; UI pending browser setup',
     '✅ API; UI tests are in progress',
     '✅ API; UI manual testing required',
