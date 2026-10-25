@@ -2699,45 +2699,69 @@ describe('spawnWorkerSession', () => {
     }
   });
 
-  it('keeps an unattended SSH approval after ask-user ends the real session turn', async () => {
-    const job = getJob('bg-claude');
-    job.status = 'idle';
-    job.awaitingAnswer = false;
-    const { children, settled, restore } = fakeClaude();
-    const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
-    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
-    await ssh.init();
-    const server = await ssh.create({
-      repo: job.repo,
-      host: 'fixture.example',
-      username: 'deploy',
-      permissionMode: 'allow',
-    });
-    try {
-      const done = settled(job);
-      sendDevMessage(job.id, 'Check the server', undefined, { unattended: true });
-      children[0].emitLines(init, replay('Check the server'));
-      const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
-      expect(request).toMatchObject({ status: 'pending', unattended: true });
-      children[0].emitLines(
-        said('<ask-user>Approve the SSH request in Attention, then tell me to continue.</ask-user>'),
-        result('Asked.'),
-      );
-      await vi.waitFor(() => expect(children[0].ended).toBe(true));
-      children[0].emit('close', 0);
-      await done;
-      expect(job.status).toBe('idle');
-      expect(job.awaitingAnswer).toBe(true);
-      expect(ssh.pending()).toEqual([request]);
-      expect(execute).not.toHaveBeenCalled();
-      ssh.decide(request.id, 'approve');
-      await Promise.resolve();
-      expect(ssh.result(job, request.id).status).toBe('completed');
-      expect(execute).toHaveBeenCalledTimes(1);
-    } finally {
-      restore();
-    }
-  });
+  it.each([false, true])(
+    'keeps an unattended SSH approval after ask-user ends the real session turn (quota fallback: %s)',
+    async (fallback) => {
+      const job = getJob('bg-claude');
+      job.status = 'idle';
+      job.awaitingAnswer = false;
+      if (fallback) {
+        job.providerId = 1;
+        job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+        state.otherProviders = [{ ...state.provider, id: 2, label: 'Claude spare' }];
+        state.group = [state.provider, ...state.otherProviders];
+      }
+      const { children, settled, restore } = fakeClaude();
+      if (fallback)
+        getProviderForJob.mockImplementation((j) => state.group.find((p) => p.id === j.providerId));
+      const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+      const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+      await ssh.init();
+      const server = await ssh.create({
+        repo: job.repo,
+        host: 'fixture.example',
+        username: 'deploy',
+        permissionMode: 'allow',
+      });
+      try {
+        const done = settled(job);
+        sendDevMessage(job.id, 'Check the server', undefined, { unattended: true });
+        let child = children[0];
+        child.emitLines(init, replay('Check the server'));
+        if (fallback) {
+          const previous = ssh.request(job, { serverId: server.id, command: 'pwd' });
+          child.emitLines({ type: 'result', is_error: true, result: "You've hit your limit" });
+          child.emit('close', 1);
+          await vi.waitFor(() => expect(children).toHaveLength(2));
+          expect(job.providerId).toBe(2);
+          expect(ssh.pending()).toEqual([]);
+          expect(() => ssh.decide(previous.id, 'approve')).toThrow('no longer');
+          child = children[1];
+          child.emitLines(init, replay(child.writes[0]));
+        }
+        const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+        expect(request).toMatchObject({ status: 'pending', unattended: true });
+        child.emitLines(
+          said('<ask-user>Approve the SSH request in Attention, then tell me to continue.</ask-user>'),
+          result('Asked.'),
+        );
+        await vi.waitFor(() => expect(child.ended).toBe(true));
+        child.emit('close', 0);
+        await done;
+        expect(job.status).toBe('idle');
+        expect(job.awaitingAnswer).toBe(true);
+        expect(ssh.pending()).toEqual([request]);
+        expect(execute).not.toHaveBeenCalled();
+        ssh.decide(request.id, 'approve');
+        await Promise.resolve();
+        expect(ssh.result(job, request.id).status).toBe('completed');
+        expect(execute).toHaveBeenCalledTimes(1);
+      } finally {
+        job.providerId = 1;
+        restore();
+      }
+    },
+  );
 
   it.each(['publication', 'compaction'])(
     'expires unanswered SSH requests before %s can expose a finished turn as running',
