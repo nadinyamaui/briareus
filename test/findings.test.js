@@ -407,21 +407,41 @@ describe('latestTestVerdict', () => {
   );
 
   it.each(['❌', '⬜', '✅'])('counts annotated result cells as data: %s', async (status) => {
+    for (const divider of [[], ['|---|---|---|---|---|---|']]) {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl /api | 200 | ✅ | response.json |',
+          `| 2 | Annotated | curl /api | 200 | Status: ${status} | Evidence: got 500 |`,
+          ...divider,
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures:
+          status === '❌'
+            ? [{ number: '2', scenario: 'Annotated', expected: '200', evidence: 'Evidence: got 500' }]
+            : [],
+        total: 2,
+        passed: status === '✅' ? 2 : 1,
+        manual: 0,
+        incomplete: status === '⬜',
+      });
+    }
+  });
+
+  it('keeps a numbered result with a status legend before a divider', async () => {
     gh.comments = [
       sheet([
         '| 1 | API | curl /api | 200 | ✅ | response.json |',
-        `| 2 | Annotated | curl /api | 200 | Status: ${status} | Evidence: got 500 |`,
+        '| **#2** | Annotated | curl /api | 200 | Status ✅/❌ | Evidence: got 500 |',
+        '|---|---|---|---|---|---|',
       ]),
     ];
     expect(await latestTestVerdict(repo, 5)).toEqual({
-      failures:
-        status === '❌'
-          ? [{ number: '2', scenario: 'Annotated', expected: '200', evidence: 'Evidence: got 500' }]
-          : [],
+      failures: [{ number: '2', scenario: 'Annotated', expected: '200', evidence: 'Evidence: got 500' }],
       total: 2,
-      passed: status === '✅' ? 2 : 1,
+      passed: 1,
       manual: 0,
-      incomplete: status === '⬜',
+      incomplete: false,
     });
   });
 
@@ -676,6 +696,8 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    '| # | Scenario | Steps | Expected | Status ✅/❌ | Evidence |',
+    '| # | Scenario | Steps | Expected | **Status ✅/❌** | _Evidence_ |',
     '| # | Scenario | Steps | Expected | Status | Video |',
     '| Case | Scenario | Request | Response | **Result** | _Video / response_ |',
     '| # | Scenario | Steps | Expected | Result | Evidence |',
@@ -747,6 +769,8 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '| N. | Scenario | Passi | Atteso | Stato | Prova |',
+    '| **N.** | Scenario | Passi | Atteso | **Stato** | _Prova_ |',
     '| Nr. | Szenario | Schritte | Erwartet | Status | Nachweis |',
     '| **Nr.** | Szenario | Schritte | Erwartet | **Status** | _Nachweis_ |',
     '| Nº | Scénario | Étapes | Attendu | Statut | Preuve |',
@@ -998,6 +1022,13 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'Evidence was not uploaded',
+    'No video was recorded',
+    'Not run due to missing credentials',
+    'Not tested on this host',
+    'Skipped because browser failed',
+    '**Evidence was not uploaded.**',
+    '<span>No video was recorded</span>',
     '![]()',
     'No evidence (upload failed)',
     'Not run; credentials missing',
@@ -1226,6 +1257,13 @@ describe('latestTestVerdict', () => {
     [
       'Manual refund',
       'POST /refunds with manual=true',
+      'HTTP 200 approved',
+      '✅ API manual refund approved with 200',
+      'response.json',
+    ],
+    [
+      'Manual refund',
+      'POST /refunds with manual=true',
       'HTTP 202 accepted',
       '✅ API manual refund accepted with 202',
       'response.json',
@@ -1321,6 +1359,10 @@ describe('latestTestVerdict', () => {
     '✅ API; UI not supported on this host',
     '✅ API; UI could not be opened',
     '✅ API; UI not reviewed',
+    '✅ API; UI blocked when browser returns 500',
+    '✅ API; UI skipped when browser returns 500',
+    '✅ API; UI blocked whenever browser returns 500',
+    '✅ API; UI blocked while browser returns 500',
     '✅ API; UI blocked during setup returns 500',
     '✅ API; UI could not complete',
     '✅ API; UI not reached because browser crashed',
@@ -1562,6 +1604,14 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'evidence-was-not-uploaded.json',
+    'no-video-was-recorded.webm',
+    'not run due to missing credentials.json',
+    'Evidence was not uploaded was returned as expected',
+    'No video was recorded was returned as expected',
+    'Not tested on this host was returned as expected',
+    'Skipped because browser failed was returned as expected',
+    '[Evidence was not uploaded](https://example.com/result)',
     '<img src="https://example.com/screenshot.png" />',
     'no evidence (upload failed).json',
     'Not run was returned as expected',
