@@ -524,3 +524,20 @@ it.each([true, false])(
     }
   },
 );
+
+it('sends binary uploads on stdin using the same strict SSH and private authentication path', async () => {
+  const bytes = Buffer.alloc(1024 * 1024 + 1, 251);
+  const stdin = { end: vi.fn(), on: vi.fn() };
+  execFile.mockImplementation((_bin, _args, _options, cb) => {
+    cb(null, 'receipt', '');
+    return { stdin };
+  });
+  await executeSsh({ ...input, port: 22 }, 'receiver command', 60, false, bytes);
+  const [binary, args] = execFile.mock.calls.at(-1);
+  expect(binary).toBe('ssh');
+  expect(args).toContain('StrictHostKeyChecking=yes');
+  expect(args.at(-1)).toBe('receiver command');
+  expect(JSON.stringify(args).length).toBeLessThan(1024);
+  expect(stdin.end).toHaveBeenCalledTimes(1);
+  expect(stdin.end.mock.calls[0][0]).toBe(bytes);
+});

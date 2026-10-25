@@ -871,13 +871,33 @@ Each server has one permission mode:
   (`POST /api/v1/ssh/requests/:id/decision`) executes it once, and denying returns the denial to the agent.
 - **Don't ask anything**: every command submitted through the SSH tool starts immediately.
 
-Claude and Codex sessions receive `ssh_list_servers`, `ssh_execute` and `ssh_result` MCP
+Claude and Codex sessions receive `ssh_list_servers`, `ssh_execute`, `ssh_upload` and `ssh_result` MCP
 tools. Providers without headless MCP configuration use the equivalent session-authenticated
 HTTP routes described in their briefing. Only enabled servers assigned to the session's
 project are available. Each command runs in a fresh noninteractive shell, so include `cd`
 in the command when a working directory is needed. Execution defaults to a 60-second timeout
 (maximum 300 seconds) and 256 KiB per output stream; timeout or excess output terminates the
 local SSH client, but cannot guarantee that a remote process has stopped.
+
+`ssh_upload` sends a private local file to one registered server using the same approval,
+polling, authentication and strict host-key checks as commands. Submit
+`{serverId, sourcePath, destination, timeoutSeconds?}` to the tool or
+`POST /api/agent/ssh/upload` with the session's bearer token; poll `ssh_result` with the
+returned ID. The source must be an absolute path to a non-hidden regular file in the
+session's owned workspace (excluding `node_modules` and `vendor`), or an attachment
+delivered to that session after this feature was installed. Other sessions' files and
+symlinks are rejected. Files are limited to 25 MiB. The approval displays the exact
+server, source path, destination, size and SHA-256; a changed source fails before SSH
+starts. The destination must be an absolute file path in an existing directory writable
+by the SSH user; uploads do not support sudo. The server needs `python3`.
+
+File bytes travel on SSH stdin, never in command text or public download URLs. The remote
+receiver writes a private `0600` staging file beside the destination, verifies byte count
+and SHA-256, then atomically replaces the destination (including any existing file).
+Failures clean up staging when the receiver can finish; a killed remote process can leave
+a private staging file. A connection loss after replacement can leave an uncertain result:
+inspect the destination through the SSH tools before deciding whether to submit again.
+Denied, cancelled and failed requests are never automatically retried.
 
 Approvals expire after ten minutes and are cancelled when the session turn ends or the
 server registration changes. Switching to “Don't ask anything” does not execute already
