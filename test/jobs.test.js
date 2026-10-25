@@ -2816,8 +2816,11 @@ describe('spawnWorkerSession', () => {
     }
   });
 
-  it.each([false, true])('preserves upload cancellation across a new turn (Stop: %s)', async (stop) => {
+  it.each(['reply', 'stop', 'close'])('keeps upload cancellation across turns (%s)', async (action) => {
     const job = getJob('bg-claude');
+    const workspaceDir = state.workspaceDir;
+    const workDir = job.workDir;
+    state.workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-close-'));
     job.status = 'idle';
     job.awaitingAnswer = false;
     const { children, settled, restore } = fakeClaude();
@@ -2847,11 +2850,19 @@ describe('spawnWorkerSession', () => {
       });
       ssh.decide(request.id, 'approve');
       await vi.waitFor(() => expect(release).toBeTypeOf('function'));
-      if (stop) cancelDevTurn(job.id);
+      if (action === 'stop') cancelDevTurn(job.id);
       children[0].emitLines(result('Done.'));
-      if (!stop) await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      if (action !== 'stop') await vi.waitFor(() => expect(children[0].ended).toBe(true));
       children[0].emit('close', 0);
       await done;
+      if (action === 'close') {
+        await closeDevSession(job.id);
+        job.orchestrator = true;
+        reopenDevSession(job.id);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        delete job.orchestrator;
+        job.workDir = workDir;
+      }
       done = settled(job);
       sendDevMessage(job.id, 'Do something else');
       await vi.waitFor(() => expect(children).toHaveLength(2));
@@ -2862,13 +2873,60 @@ describe('spawnWorkerSession', () => {
       await vi.waitFor(() => expect(children[1].ended).toBe(true));
       children[1].emit('close', 0);
       await done;
-      expect(ssh.result(job, request.id).status).toBe(stop ? 'failed' : 'completed');
-      expect(execute).toHaveBeenCalledTimes(stop ? 0 : 1);
+      expect(ssh.result(job, request.id).status).toBe(action === 'reply' ? 'completed' : 'failed');
+      expect(execute).toHaveBeenCalledTimes(action === 'reply' ? 1 : 0);
     } finally {
       release?.();
       read?.mockRestore();
       job.sshUploadAttachments = attachments;
       fs.rmSync(dir, { recursive: true, force: true });
+      delete job.orchestrator;
+      job.workDir = workDir;
+      fs.rmSync(state.workspaceDir, { recursive: true, force: true });
+      state.workspaceDir = workspaceDir;
+      restore();
+    }
+  });
+
+  it('does not revive an unswept SSH approval after Close and reopen without a new turn', async () => {
+    const job = getJob('bg-claude');
+    const workspaceDir = state.workspaceDir;
+    const workDir = job.workDir;
+    state.workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-close-'));
+    job.status = 'idle';
+    job.awaitingAnswer = false;
+    const { children, settled, restore } = fakeClaude();
+    const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+    await ssh.init();
+    const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+    try {
+      const done = settled(job);
+      sendDevMessage(job.id, 'Check the server');
+      children[0].emitLines(init, replay('Check the server'));
+      const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+      children[0].emitLines(said('<ask-user>Approve SSH first?</ask-user>'), result('Asked.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(ssh.pending()).toEqual([request]);
+      await closeDevSession(job.id);
+      // Do not sweep SSH requests while closed: reopening must not revive the old identity.
+      job.orchestrator = true;
+      reopenDevSession(job.id);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      delete job.orchestrator;
+      job.workDir = workDir;
+      expect(job.awaitingAnswer).toBe(true);
+      expect(children).toHaveLength(1);
+      expect(ssh.pending()).toEqual([]);
+      expect(() => ssh.decide(request.id, 'approve')).toThrow('no longer');
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      delete job.orchestrator;
+      job.workDir = workDir;
+      fs.rmSync(state.workspaceDir, { recursive: true, force: true });
+      state.workspaceDir = workspaceDir;
       restore();
     }
   });
