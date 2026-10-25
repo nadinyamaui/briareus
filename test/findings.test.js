@@ -477,6 +477,70 @@ describe('latestTestVerdict', () => {
     },
   );
 
+  it.each(['    ```', '\t```', '    ~~~', '```invalid`info'])(
+    'retains real failed results after a non-fence line: %s',
+    async (line) => {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl | 200 | ✅ | response.json |',
+          '',
+          line,
+          '',
+          '| # | Scenario | Steps | Expected | Status | Evidence |',
+          '|---|---|---|---|---|---|',
+          '| 2 | Failure | curl | 200 | ❌ | saw 500 |',
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [{ number: '2', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+        total: 2,
+        passed: 1,
+        manual: 0,
+        incomplete: false,
+      });
+    },
+  );
+
+  it('counts an inline-code shortened row without opening a fence', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        '```2```',
+        '| 3 | Failure | curl | 200 | ❌ | saw 500 |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({
+      failures: [{ number: '3', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+      total: 3,
+      passed: 1,
+      incomplete: true,
+    });
+  });
+
+  it.each([' ```markdown', '   ~~~markdown'])(
+    'ignores examples inside a valid indented fence: %s',
+    async (fence) => {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl | 200 | ✅ | response.json |',
+          '',
+          fence,
+          '    ' + fence.trim().replace('markdown', ''),
+          '| # | Scenario | Steps | Expected | Status | Evidence |',
+          '|---|---|---|---|---|---|',
+          '| 2 | Example | steps | value | ❌ | example only |',
+          fence.replace('markdown', ''),
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        failures: [],
+        total: 1,
+        passed: 1,
+        incomplete: false,
+      });
+    },
+  );
+
   it('counts an unnumbered result row and retains a later failure', async () => {
     gh.comments = [
       sheet([
@@ -784,6 +848,13 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '![]()',
+    'No evidence was collected',
+    'No evidence has been collected',
+    '**No evidence was collected.**',
+    'Evidence pending',
+    '<span>Evidence pending</span>',
+    'Not tested — browser unavailable',
+    'Not tested - browser unavailable',
     '![ ]()',
     '**![]()**',
     'Not executed: browser unavailable',
@@ -894,6 +965,11 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '✅ UI pending payment renders correctly',
+    '✅ API manual refund succeeds',
+    '✅ UI pending payment persists successfully',
+    '✅ API blocked user returned 403',
+    '✅ UI pending payment displayed correctly',
+    '✅ UI tests pending payment shown correctly',
     '✅ UI manual payment saved successfully',
     '✅ API manual refund completed successfully',
     '✅ API blocked user sees 403',
@@ -964,6 +1040,19 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '✅ API; UI verification pending',
+    '✅ API; UI test execution not run',
+    '✅ API; UI would require manual testing',
+    '✅ API; UI blocked — login page displays a 500',
+    '✅ API; UI tests were blocked — browser returns an error during setup',
+    '✅ (partial)',
+    '✅ API; UI tests NOT_RUN',
+    '✅ API; UI test execution has not been run',
+    '✅ API<br>**UI test execution** was not run',
+    '✅ API (UI would require manual testing)',
+    '✅ API; UI blocked: login page displays a 500',
+    '✅ API; UI blocked - login page displays a 500',
+    '✅ API manual refund succeeds; UI test execution not run',
+    '✅ UI pending payment persists successfully; UI would require manual testing',
     '✅ API; UI did not finish',
     '✅ API; UI tests were deferred',
     '✅ API; failed UI',
@@ -1142,6 +1231,14 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '<img src="https://example.com/screenshot.png" />',
+    'API blocked user returned 403',
+    'UI pending payment displayed correctly',
+    'API manual refund succeeds',
+    'UI pending payment persists successfully',
+    'No evidence was collected was returned as expected',
+    'Evidence pending was returned as expected',
+    'evidence-pending.json',
+    'not tested.json',
     '<img src="" alt="response screenshot">',
     '<img srcset="screenshot.png 1x">',
     'not executed.json',
