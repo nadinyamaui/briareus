@@ -2888,6 +2888,58 @@ describe('spawnWorkerSession', () => {
     }
   });
 
+  it('does not revive an unswept SSH approval after stopping and restarting compaction', async () => {
+    const job = getJob('bg-claude');
+    const workDir = job.workDir;
+    const contextUsage = job.contextUsage;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-compact-'));
+    job.status = 'idle';
+    job.awaitingAnswer = false;
+    const { children, settled, restore } = fakeClaude();
+    const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+    await ssh.init();
+    const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+    try {
+      const done = settled(job);
+      sendDevMessage(job.id, 'Check the server');
+      children[0].emitLines(init, replay('Check the server'));
+      const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+      children[0].emitLines(said('<ask-user>Approve SSH first?</ask-user>'), result('Asked.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(ssh.pending()).toEqual([request]);
+      job.workDir = dir;
+      job.contextUsage = { providerId: 1, sessionId: 'bg-sid', model: job.model };
+      const first = expect(compactDevSession(job.id)).rejects.toThrow('claude exited with code null');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      cancelDevTurn(job.id);
+      children[1].emit('close', null);
+      await first;
+      // No SSH poll between Stop and the next compaction: cancellation must persist.
+      const second = expect(compactDevSession(job.id)).rejects.toThrow('claude exited with code 1');
+      await vi.waitFor(() => expect(children).toHaveLength(3));
+      expect(job.turnCanceled).toBe(false);
+      let approvalError;
+      try {
+        ssh.decide(request.id, 'approve');
+      } catch (error) {
+        approvalError = error;
+      }
+      children[2].emit('close', 1);
+      await second;
+      expect(approvalError?.message).toContain('no longer');
+      expect(ssh.pending()).toEqual([]);
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      job.workDir = workDir;
+      job.contextUsage = contextUsage;
+      restore();
+    }
+  });
+
   it('does not revive an unswept SSH approval after Close and reopen without a new turn', async () => {
     const job = getJob('bg-claude');
     const workspaceDir = state.workspaceDir;
