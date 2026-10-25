@@ -3,6 +3,7 @@ import { EventEmitter } from 'events';
 import { AsyncResource } from 'async_hooks';
 import { PassThrough } from 'stream';
 import fs from 'fs';
+import fsp from 'node:fs/promises';
 import os from 'os';
 import path from 'path';
 import { spawn, spawnSync } from 'child_process';
@@ -16,6 +17,7 @@ import { forgetProviderUsage, providerUsage } from '../lib/balancer.js';
 import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
 import { createUsers } from '../lib/users.js';
 import { createSlackService } from '../lib/slack.js';
+import { createSshService } from '../lib/ssh.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
@@ -229,6 +231,7 @@ vi.mock('../lib/findings.js', () => {
 });
 
 vi.mock('../lib/uploads.js', () => ({
+  MAX_UPLOAD_BYTES: 25 * 1024 * 1024,
   initUploads: vi.fn(),
   getUpload: vi.fn(() => null),
 }));
@@ -2696,6 +2699,338 @@ describe('spawnWorkerSession', () => {
       restore();
     }
   });
+
+  it.each([false, true])(
+    'keeps an unattended SSH approval after ask-user ends the real session turn (quota fallback: %s)',
+    async (fallback) => {
+      const job = getJob('bg-claude');
+      job.status = 'idle';
+      job.awaitingAnswer = false;
+      if (fallback) {
+        job.providerId = 1;
+        job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+        state.otherProviders = [{ ...state.provider, id: 2, label: 'Claude spare' }];
+        state.group = [state.provider, ...state.otherProviders];
+      }
+      const { children, settled, restore } = fakeClaude();
+      if (fallback)
+        getProviderForJob.mockImplementation((j) => state.group.find((p) => p.id === j.providerId));
+      const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+      const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+      await ssh.init();
+      const server = await ssh.create({
+        repo: job.repo,
+        host: 'fixture.example',
+        username: 'deploy',
+        permissionMode: 'allow',
+      });
+      try {
+        const done = settled(job);
+        sendDevMessage(job.id, 'Check the server', undefined, { unattended: true });
+        let child = children[0];
+        child.emitLines(init, replay('Check the server'));
+        if (fallback) {
+          const previous = ssh.request(job, { serverId: server.id, command: 'pwd' });
+          child.emitLines({ type: 'result', is_error: true, result: "You've hit your limit" });
+          child.emit('close', 1);
+          await vi.waitFor(() => expect(children).toHaveLength(2));
+          expect(job.providerId).toBe(2);
+          expect(ssh.pending()).toEqual([]);
+          expect(() => ssh.decide(previous.id, 'approve')).toThrow('no longer');
+          child = children[1];
+          child.emitLines(init, replay(child.writes[0]));
+        }
+        const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+        expect(request).toMatchObject({ status: 'pending', unattended: true });
+        child.emitLines(
+          said('<ask-user>Approve the SSH request in Attention, then tell me to continue.</ask-user>'),
+          result('Asked.'),
+        );
+        await vi.waitFor(() => expect(child.ended).toBe(true));
+        child.emit('close', 0);
+        await done;
+        expect(job.status).toBe('idle');
+        expect(job.awaitingAnswer).toBe(true);
+        expect(ssh.pending()).toEqual([request]);
+        expect(execute).not.toHaveBeenCalled();
+        ssh.decide(request.id, 'approve');
+        await Promise.resolve();
+        expect(ssh.result(job, request.id).status).toBe('completed');
+        expect(execute).toHaveBeenCalledTimes(1);
+      } finally {
+        job.providerId = 1;
+        restore();
+      }
+    },
+  );
+
+  it('invalidates pending SSH approvals while a reply waits for browser startup', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.awaitingAnswer = false;
+    const { children, settled, restore } = fakeClaude();
+    const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+    await ssh.init();
+    const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+    let release;
+    try {
+      let done = settled(job);
+      sendDevMessage(job.id, 'Check the server');
+      children[0].emitLines(init, replay('Check the server'));
+      const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+      children[0].emitLines(said('<ask-user>Approve SSH first?</ask-user>'), result('Asked.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(ssh.pending()).toEqual([request]);
+      job.browser = true;
+      startBrowser.mockImplementationOnce(() => new Promise((resolve) => (release = resolve)));
+      done = settled(job);
+      sendDevMessage(job.id, 'Skip that command; do something else');
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      expect(job.status).toBe('running');
+      expect(job.awaitingAnswer).toBe(false);
+      expect(children).toHaveLength(1);
+      const pending = ssh.pending();
+      let approvalError;
+      try {
+        ssh.decide(request.id, 'approve');
+      } catch (error) {
+        approvalError = error;
+      }
+      // Finish the held turn before assertions so a red run leaves no background turn.
+      release();
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      children[1].emitLines(init, replay('Skip that command; do something else'), result('Done.'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+      expect(pending).toEqual([]);
+      expect(approvalError?.message).toContain('no longer');
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      release?.();
+      delete job.browser;
+      restore();
+    }
+  });
+
+  it.each(['reply', 'stop', 'close'])('keeps upload cancellation across turns (%s)', async (action) => {
+    const job = getJob('bg-claude');
+    const workspaceDir = state.workspaceDir;
+    const workDir = job.workDir;
+    state.workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-close-'));
+    job.status = 'idle';
+    job.awaitingAnswer = false;
+    const { children, settled, restore } = fakeClaude();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-stop-restart-'));
+    const sourcePath = path.join(dir, 'payload.txt');
+    fs.writeFileSync(sourcePath, 'private payload');
+    const attachments = job.sshUploadAttachments;
+    job.sshUploadAttachments = [sourcePath];
+    let request, release;
+    const execute = vi.fn(async () => ({
+      stdout: `${request.upload.size} ${request.upload.sha256}\n`,
+      error: null,
+    }));
+    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+    await ssh.init();
+    const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+    const open = fsp.open.bind(fsp);
+    let read;
+    try {
+      let done = settled(job);
+      sendDevMessage(job.id, 'Upload the file');
+      children[0].emitLines(init, replay('Upload the file'));
+      request = await ssh.upload(job, { serverId: server.id, sourcePath, destination: '/tmp/payload.txt' });
+      read = vi.spyOn(fsp, 'open').mockImplementationOnce(async (...args) => {
+        await new Promise((resolve) => (release = resolve));
+        return open(...args);
+      });
+      ssh.decide(request.id, 'approve');
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      if (action === 'stop') cancelDevTurn(job.id);
+      children[0].emitLines(result('Done.'));
+      if (action !== 'stop') await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      if (action === 'close') {
+        await closeDevSession(job.id);
+        job.orchestrator = true;
+        reopenDevSession(job.id);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        delete job.orchestrator;
+        job.workDir = workDir;
+      }
+      done = settled(job);
+      sendDevMessage(job.id, 'Do something else');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(job.turnCanceled).toBe(false);
+      release();
+      await vi.waitFor(() => expect(ssh.result(job, request.id).status).not.toBe('running'));
+      children[1].emitLines(init, replay('Do something else'), result('Done.'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+      expect(ssh.result(job, request.id).status).toBe(action === 'reply' ? 'completed' : 'failed');
+      expect(execute).toHaveBeenCalledTimes(action === 'reply' ? 1 : 0);
+    } finally {
+      release?.();
+      read?.mockRestore();
+      job.sshUploadAttachments = attachments;
+      fs.rmSync(dir, { recursive: true, force: true });
+      delete job.orchestrator;
+      job.workDir = workDir;
+      fs.rmSync(state.workspaceDir, { recursive: true, force: true });
+      state.workspaceDir = workspaceDir;
+      restore();
+    }
+  });
+
+  it('does not revive an unswept SSH approval after stopping and restarting compaction', async () => {
+    const job = getJob('bg-claude');
+    const workDir = job.workDir;
+    const contextUsage = job.contextUsage;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-compact-'));
+    job.status = 'idle';
+    job.awaitingAnswer = false;
+    const { children, settled, restore } = fakeClaude();
+    const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+    await ssh.init();
+    const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+    try {
+      const done = settled(job);
+      sendDevMessage(job.id, 'Check the server');
+      children[0].emitLines(init, replay('Check the server'));
+      const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+      children[0].emitLines(said('<ask-user>Approve SSH first?</ask-user>'), result('Asked.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(ssh.pending()).toEqual([request]);
+      job.workDir = dir;
+      job.contextUsage = { providerId: 1, sessionId: 'bg-sid', model: job.model };
+      const first = expect(compactDevSession(job.id)).rejects.toThrow('claude exited with code null');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      cancelDevTurn(job.id);
+      children[1].emit('close', null);
+      await first;
+      // No SSH poll between Stop and the next compaction: cancellation must persist.
+      const second = expect(compactDevSession(job.id)).rejects.toThrow('claude exited with code 1');
+      await vi.waitFor(() => expect(children).toHaveLength(3));
+      expect(job.turnCanceled).toBe(false);
+      let approvalError;
+      try {
+        ssh.decide(request.id, 'approve');
+      } catch (error) {
+        approvalError = error;
+      }
+      children[2].emit('close', 1);
+      await second;
+      expect(approvalError?.message).toContain('no longer');
+      expect(ssh.pending()).toEqual([]);
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      job.workDir = workDir;
+      job.contextUsage = contextUsage;
+      restore();
+    }
+  });
+
+  it('does not revive an unswept SSH approval after Close and reopen without a new turn', async () => {
+    const job = getJob('bg-claude');
+    const workspaceDir = state.workspaceDir;
+    const workDir = job.workDir;
+    state.workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-close-'));
+    job.status = 'idle';
+    job.awaitingAnswer = false;
+    const { children, settled, restore } = fakeClaude();
+    const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+    await ssh.init();
+    const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+    try {
+      const done = settled(job);
+      sendDevMessage(job.id, 'Check the server');
+      children[0].emitLines(init, replay('Check the server'));
+      const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+      children[0].emitLines(said('<ask-user>Approve SSH first?</ask-user>'), result('Asked.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(ssh.pending()).toEqual([request]);
+      await closeDevSession(job.id);
+      // Do not sweep SSH requests while closed: reopening must not revive the old identity.
+      job.orchestrator = true;
+      reopenDevSession(job.id);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      delete job.orchestrator;
+      job.workDir = workDir;
+      expect(job.awaitingAnswer).toBe(true);
+      expect(children).toHaveLength(1);
+      expect(ssh.pending()).toEqual([]);
+      expect(() => ssh.decide(request.id, 'approve')).toThrow('no longer');
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      delete job.orchestrator;
+      job.workDir = workDir;
+      fs.rmSync(state.workspaceDir, { recursive: true, force: true });
+      state.workspaceDir = workspaceDir;
+      restore();
+    }
+  });
+
+  it.each(['publication', 'compaction'])(
+    'expires unanswered SSH requests before %s can expose a finished turn as running',
+    async (window) => {
+      const job = getJob('bg-claude');
+      job.status = 'idle';
+      job.awaitingAnswer = false;
+      const { children, settled, restore } = fakeClaude();
+      const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+      const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+      await ssh.init();
+      const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+      let release;
+      const sync = vi.spyOn(r2, 'syncVideos').mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve({ uploaded: [], failed: [], deferred: 0 });
+          }),
+      );
+      try {
+        const done = settled(job);
+        sendDevMessage(job.id, 'Check the server');
+        children[0].emitLines(init, replay('Check the server'));
+        const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+        children[0].emitLines(said('Done.'), result('Done.'));
+        await vi.waitFor(() => expect(children[0].ended).toBe(true));
+        children[0].emit('close', 0);
+        await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+        if (window === 'compaction') {
+          release();
+          await done;
+          expect(job.status).toBe('idle');
+          // No SSH sweep during idle: manual compaction exposes this same identity as running.
+          job.status = 'running';
+        }
+        expect(job.status).toBe('running');
+        expect(ssh.pending()).toEqual([]);
+        expect(() => ssh.decide(request.id, 'approve')).toThrow('no longer');
+        expect(execute).not.toHaveBeenCalled();
+        release();
+        await done;
+      } finally {
+        release?.();
+        sync.mockRestore();
+        job.status = 'idle';
+        restore();
+      }
+    },
+  );
 
   it('keeps every question a turn asks for the inbox, and starts over once they are answered', async () => {
     const job = getJob('bg-claude');

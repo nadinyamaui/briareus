@@ -65,6 +65,50 @@ describe('private SSH upload approval and transfer', { timeout: 30000 }, () => {
     expect((await fs.readdir(dir)).some((p) => p.startsWith('.briareus-upload-'))).toBe(false);
     expect(await fs.stat(path.join(dir, 'injected')).catch(() => null)).toBeNull();
   });
+  it('keeps an unattended upload approvable while awaiting the owner, then verifies the original bytes', async () => {
+    await service.update(server.id, { permissionMode: 'allow' });
+    job.unattendedTurn = true;
+    const r = await upload();
+    job.status = 'idle';
+    job.awaitingAnswer = true;
+    expect(service.pending()).toEqual([r]);
+    expect(execute).not.toHaveBeenCalled();
+    service.decide(r.id, 'approve');
+    expect((await finished(r.id)).status).toBe('completed');
+    expect(await fs.readFile(destination)).toEqual(bytes);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+  it.each(['running', 'idle'])(
+    'finishes an approved upload when the reply turn is %s after a delayed read',
+    async (status) => {
+      job.sshApprovalTurn = 'original-turn';
+      const r = await upload();
+      job.status = 'idle';
+      job.awaitingAnswer = true;
+      let release, started;
+      const paused = new Promise((resolve) => {
+        started = resolve;
+      });
+      const resume = new Promise((resolve) => {
+        release = resolve;
+      });
+      const realpath = fs.realpath.bind(fs);
+      vi.spyOn(fs, 'realpath').mockImplementationOnce(async (...args) => {
+        started();
+        await resume;
+        return realpath(...args);
+      });
+      expect(service.decide(r.id, 'approve').status).toBe('running');
+      await paused;
+      job.awaitingAnswer = false;
+      job.sshApprovalTurn = 'reply-turn';
+      job.status = status;
+      release();
+      expect((await finished(r.id)).status).toBe('completed');
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(await fs.readFile(destination)).toEqual(bytes);
+    },
+  );
   it('allow mode starts once and replaces an existing destination atomically', async () => {
     await service.update(server.id, { permissionMode: 'allow' });
     await fs.writeFile(destination, 'old');
@@ -178,7 +222,7 @@ describe('private SSH upload approval and transfer', { timeout: 30000 }, () => {
     const r = await upload();
     expect(() => service.result({ ...job, id: 'other-session' }, r.id)).toThrow('not found');
     shared = false;
-    expect(() => service.decide(r.id, 'approve')).toThrow('no longer available');
+    expect(() => service.decide(r.id, 'approve')).toThrow('no longer');
     expect(service.result(job, r.id).status).toBe('cancelled');
     await expect(upload()).rejects.toThrow('unavailable');
     expect(execute).not.toHaveBeenCalled();
