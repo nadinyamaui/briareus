@@ -91,6 +91,7 @@ describe('SSH HTTP authorization and registration', () => {
     for (const [path, method] of [
       ['/api/agent/ssh/servers', 'GET'],
       ['/api/agent/ssh/execute', 'POST'],
+      ['/api/agent/ssh/upload', 'POST'],
       ['/api/agent/ssh/requests/fake', 'GET'],
     ]) {
       expect((await request(path, { operator: true, token: 'invalid', method })).status).toBe(401);
@@ -260,4 +261,13 @@ describe('SSH approvals for members', () => {
     expect((await (await request('/api/ssh/requests', { operator: true })).json()).requests).toHaveLength(1);
     expect((await (await decide()).json()).request.status).toBe('denied');
   });
+});
+
+it('authenticates and dispatches upload metadata through the existing agent route', async () => {
+  const upload = vi.spyOn(service, 'upload').mockResolvedValue({ id: 'upload-id', status: 'pending' });
+  const body = { serverId: 1, sourcePath: '/workspace/owner.xlsx', destination: '/tmp/import.xlsx' };
+  const res = await request('/api/agent/ssh/upload', { token: 'session-token', method: 'POST', body });
+  expect(res.status).toBe(200);
+  expect(upload).toHaveBeenCalledExactlyOnceWith(job, body);
+  expect((await res.json()).request.id).toBe('upload-id');
 });

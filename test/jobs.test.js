@@ -8,6 +8,7 @@ import path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import { BINARIES } from '../lib/providers.js';
 import * as r2 from '../lib/r2.js';
+import { getUpload } from '../lib/uploads.js';
 import * as providerTools from '../lib/providers.js';
 import { compactCodexThread } from '../lib/codex-session.js';
 import { askClaudeSideQuestion, transferClaudeSession } from '../lib/claude-session.js';
@@ -1532,6 +1533,20 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(worker.ownerId).toBe(2);
     expect(createDevSession({ ...base, parentId: orchestrator.id, ownerId: null }).ownerId).toBeNull();
     expect(createDevSession(base).ownerId).toBeNull();
+  });
+
+  it('keeps delivered attachment identities private and scoped to the session for SSH uploads', async () => {
+    const file = { id: '1234abcd', name: 'fixture.xlsx', path: '/tmp/fixture/fixture.xlsx', size: 7 };
+    getUpload.mockReturnValueOnce(file);
+    const started = createDevSession({ ...base, attachments: [file.id] });
+    expect(getJob(started.id).sshUploadAttachments).toEqual([file.path]);
+    expect(started).not.toHaveProperty('sshUploadAttachments');
+    const other = createDevSession(base);
+    expect(getJob(other.id).sshUploadAttachments).toEqual([]);
+    await flushJobs();
+    expect(saveJob.mock.calls.findLast(([row]) => row.id === started.id)[0].sshUploadAttachments).toEqual([
+      file.path,
+    ]);
   });
 
   it('announces a background review with the server identity outside the request', async () => {

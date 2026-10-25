@@ -588,3 +588,17 @@ command as root using the stored sudo password. The approval shows the elevated
 command; the password is sent over SSH stdin and never included in command text.
 Elevated commands have stdin closed, so they cannot consume the password when
 sudo uses cached credentials or a NOPASSWD rule.
+
+### Private SSH file upload (agent API)
+
+`POST /api/agent/ssh/upload` takes JSON `{serverId, sourcePath, destination, timeoutSeconds?}`
+under the session bearer token and returns `{request}`; it shares SSH approvals and
+`GET /api/agent/ssh/requests/:id` polling with command execution.
+`request.upload` contains `{sourcePath, destination, size, sha256}` for approval and history;
+`request.command` describes the upload without file bytes or credentials.
+Only enabled servers assigned to the session project and shared with its owner are usable.
+Sources are limited to 25 MiB and to non-hidden regular workspace files or attachments
+delivered to the session; arbitrary local paths and symlinks are rejected.
+The remote destination is an absolute file path, atomically replaced as the SSH user
+with mode `0600` after size and SHA-256 verification; `python3` is required and sudo is
+unsupported. Changed sources fail before connecting. No public file URL is involved.

@@ -11,7 +11,8 @@ beforeEach(async () => {
   app.use((req, res) => {
     calls.push({ path: req.path, method: req.method, body: req.body, token: req.headers.authorization });
     if (req.path.endsWith('/servers')) return res.json({ servers: [{ id: 1, permissionMode: 'ask' }] });
-    if (req.path.endsWith('/execute')) return res.json({ request: { id: 'command-id', status: 'pending' } });
+    if (req.path.endsWith('/execute') || req.path.endsWith('/upload'))
+      return res.json({ request: { id: 'command-id', status: 'pending' } });
     if (req.path.endsWith('/command-id'))
       return res.json({ request: { id: 'command-id', status: 'completed', result: { stdout: 'done' } } });
     return res.status(404).json({ error: 'SSH request not found' });
@@ -53,6 +54,7 @@ it('advertises SSH tools and initializes as a tools-only MCP server', async () =
   expect((await rpc('tools/list')).result.tools.map((t) => t.name)).toEqual([
     'ssh_list_servers',
     'ssh_execute',
+    'ssh_upload',
     'ssh_result',
   ]);
 });
@@ -82,4 +84,13 @@ it('surfaces missing requests and unsupported tools as tool errors', async () =>
   expect(result.result.isError).toBe(true);
   expect(result.result.content[0].text).toContain('SSH request not found');
   expect((await rpc('tools/call', { name: 'ssh_approve' })).result.isError).toBe(true);
+});
+
+it('submits private upload metadata without reading or embedding file bytes in MCP', async () => {
+  const args = { serverId: 1, sourcePath: '/workspace/owner.xlsx', destination: '/tmp/import.xlsx' };
+  const response = await rpc('tools/call', { name: 'ssh_upload', arguments: args });
+  expect(JSON.parse(response.result.content[0].text).request.status).toBe('pending');
+  expect(calls).toEqual([
+    { path: '/api/agent/ssh/upload', method: 'POST', body: args, token: 'Bearer test-token' },
+  ]);
 });
