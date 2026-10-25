@@ -418,6 +418,30 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '| A | UI | Open | visible | ⬜ |',
+    '| | UI | Open | visible | ⬜ |',
+    '| A | UI | Open | visible |',
+    '| A | UI | Open |',
+    '| A | UI |',
+    '| A |',
+  ])('retains later failures after shortened nonnumeric row %s', async (row) => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        row,
+        '| 3 | Failure | curl | 200 | ❌ | saw 500 |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '3', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+      total: 3,
+      passed: 1,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it.each([
     '✅ API; UI never tested',
     '✅ API; UI not covered',
     '✅ API; UI skipped on this host',
@@ -657,6 +681,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API blocked revoked user returns 403',
+    '✅ API: blocked recently revoked user receives 403',
+    '✅ API skipped expired payment notification returns 204',
+    '✅ API manual payment is displayed',
+    '✅ UI tests verify unknown route returns 404',
     '✅ request from blocked user was blocked',
     '✅ user not verified is denied',
     '✅ API blocked user returns 403',
@@ -690,6 +719,16 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI tests not run',
+    '✅ API; UI tests were not executed',
+    '✅ API; UI not performed',
+    '✅ API; UI requires manual testing',
+    '✅ API; UI N/A',
+    '✅ API; UI 🔴',
+    '✅ API; **UI tests** were not executed on this host',
+    '✅ API; browser checks are not performed',
+    '✅ API blocked revoked user returns 403; UI tests not run',
+    '✅ API blocked revoked user returns 403; UI blocked waiting for credentials',
     '✅ API; UI unavailable on this host',
     '✅ API; UI not available',
     '✅ API; UI could not run',
