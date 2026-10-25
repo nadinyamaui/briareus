@@ -483,6 +483,9 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    '| Case | Scenario | Steps | Expected | Status | Evidence |',
+    '| **Case** | API scenario | Request | Response | **Status** | _Evidence_ |',
+    '| Test case | Scenario | Steps | Expected | Status | Evidence |',
     '| ID | API scenario | Request | Expected | Status | Evidence |',
     '| **ID** | Case | Request | Response | **Status** | _Evidence_ |',
     '| No. | Scenario | Steps | Expected | Status | Evidence |',
@@ -633,6 +636,15 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '<span></span>',
+    '<div><br></div>',
+    '&ensp;',
+    '&emsp;',
+    '&#8194;',
+    '&#x2003;',
+    '<div><span>&thinsp;</span></div>',
+    '<span class="evidence">**TODO**</span>',
+    '<div></div><span>_N/A_</span>',
     '<br>',
     '<br/>',
     '<br />',
@@ -692,6 +704,8 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ UI failed payment is displayed',
+    '✅ API incomplete profile returns 422',
     '✅ API blocked user is denied with 403',
     '✅ API: blocked revoked user was denied with 403',
     '✅ API skipped expired notification is ignored',
@@ -733,6 +747,18 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI pending browser setup',
+    '✅ API; UI tests are in progress',
+    '✅ API; UI manual testing required',
+    '✅ API; UI not completed',
+    '✅ API; UI incomplete',
+    '✅ API; UI could not execute',
+    '✅ API; UI failed',
+    '✅ API; UI checks could not be completed',
+    '✅ API<br>UI pending browser setup',
+    '✅ API (UI tests are in progress)',
+    '✅ API/UI manual testing required',
+    '✅ API blocked user is denied with 403; UI failed',
     '✅ API; UI blocked by credentials that are missing',
     '✅ API; UI skipped waiting until browser is available',
     '✅ API; UI cannot be tested',
@@ -818,6 +844,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '<span>response.json</span>',
+    '<div><a href="https://example.com/result">response.json</a></div>',
+    '<img src="https://example.com/screenshot.png">',
+    '<https://example.com/result>',
     '_response.json_',
     '**asserted HTTP 200**',
     '`response.json`',
