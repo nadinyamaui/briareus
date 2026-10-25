@@ -718,6 +718,93 @@ describe('latestTestVerdict', () => {
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
+  it.each([
+    '| # | Scenario | Steps | Expected | Statut | Preuve |',
+    '| **ID** | Cas | Requête | Attendu | **Statut** | _Preuve_ |',
+    '| 番号 | シナリオ | 手順 | 期待値 | 結果 | 証拠 |',
+  ])('recognizes numbered QA results independently of header language: %s', async (header) => {
+    const table = [header, '|---|---|---|---|---|---|'];
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        '',
+        ...table,
+        '| 2 | Pending | curl | 200 | | |',
+        '| 3 | Failure | curl /api | 200 | ❌ | saw 500 |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '3', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+      total: 3,
+      passed: 1,
+      manual: 0,
+      incomplete: true,
+    });
+    gh.comments = [
+      { body: [TEST_SHEET_ANCHOR, ...table, '| 1 | API | curl | 200 | ✅ | response.json |'].join('\n') },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it('does not infer QA results from an unrelated numbered six-column table', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        '',
+        '| # | Resource | Method | Path | HTTP code | Response |',
+        '|---|---|---|---|---|---|',
+        '| 200 | Users | GET | /users | 200 | response.json |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it('recognizes a custom table with a shortened inline-code row before its failure', async () => {
+    gh.comments = [
+      {
+        body: [
+          TEST_SHEET_ANCHOR,
+          '| # | Scenario | Steps | Expected | Statut | Preuve |',
+          '|---|---|---|---|---|---|',
+          '```1```',
+          '| 2 | Failure | curl | 200 | ❌ | saw 500 |',
+        ].join('\n'),
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '2', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+      total: 2,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it.each(['---', '## More results', '<!-- separate table -->', '```'])(
+    'bounds custom-schema detection before %s',
+    async (boundary) => {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl | 200 | ✅ | response.json |',
+          '',
+          '| # | Resource | Method | Path | HTTP code | Response |',
+          '|---|---|---|---|---|---|',
+          '| 200 | Users | GET | /users | 200 | response.json |',
+          boundary,
+          '| # | Scenario | Steps | Expected | Statut | Preuve |',
+          '|---|---|---|---|---|---|',
+          '| 2 | Failure | curl | 200 | ❌ | saw 500 |',
+          ...(boundary === '```' ? ['```'] : []),
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        total: boundary === '```' ? 1 : 2,
+        passed: 1,
+        incomplete: false,
+      });
+    },
+  );
+
   it.each([['Method'], ['Environment'], ['**Method**', '`Environment`']])(
     'reads results with extra columns %j',
     async (...extraHeaders) => {
@@ -1082,6 +1169,72 @@ describe('latestTestVerdict', () => {
       manual: 0,
       incomplete: false,
     });
+  });
+
+  it.each([
+    [
+      'Optional nickname is omitted',
+      'POST /users with nickname key absent',
+      '200 and persisted user',
+      '✅ API omitted optional field returns 200',
+      'response.json',
+    ],
+    [
+      'Accept terms validation',
+      'Open checkout, leave terms unchecked, click Pay',
+      'Cannot complete checkout without accepting terms',
+      '✅ UI cannot finish checkout without accepting terms',
+      'checkout.webm',
+    ],
+  ])(
+    'accepts observed negative-test outcomes for %s',
+    async (scenario, steps, expected, status, evidence) => {
+      for (const suffix of ['', '; UI not fully tested']) {
+        gh.comments = [
+          sheet([`| 1 | ${scenario} | ${steps} | ${expected} | ${status}${suffix} | ${evidence} |`]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          failures: [],
+          total: 1,
+          passed: suffix ? 0 : 1,
+          incomplete: !!suffix,
+        });
+      }
+      gh.comments = [
+        sheet([`| 1 | ${scenario} | ${steps} | ${expected} | ✅ | ${status.replace('✅ ', '')} |`]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    },
+  );
+
+  it.each([
+    '✅ API; UI not fully tested',
+    '✅ API; UI partially tested',
+    '✅ API; browser could not launch',
+    '✅ API; UI not running',
+    '✅ API; UI has not been fully tested',
+    '✅ API; UI only partially tested',
+    '✅ API; browser couldn’t launch',
+    '✅ API; UI partly executed',
+    '✅ API; UI not completely verified',
+    '✅ API; UI omitted optional checks',
+    '✅ API; UI cannot finish checkout after setup failed',
+  ])('retains incomplete execution coverage in status and evidence: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [annotation, 'response.json'],
+      ['✅ API', annotation.replace('✅ API; ', '')],
+    ]) {
+      gh.comments = [
+        sheet([`| 1 | Mixed API/UI | curl then browser | Both work | ${status} | ${evidence} |`]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
   });
 
   it.each([
