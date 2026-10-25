@@ -517,6 +517,41 @@ describe('latestTestVerdict', () => {
     });
   });
 
+  it.each(['comment', 'comment with fence', '    ', '\t'])(
+    'ignores literal sample tables in %j context and resumes real results',
+    async (context) => {
+      const header = '| # | Scenario | Steps | Expected | Status | Evidence |';
+      const divider = '|---|---|---|---|---|---|';
+      const sample = [header, divider, '| 2 | Example | steps | value | ⬜ | |'];
+      const hidden = context.startsWith('comment')
+        ? ['<!--', ...(context.endsWith('fence') ? ['```markdown', ...sample, '```'] : sample), '-->']
+        : sample.map((line) => context + line);
+      for (const status of ['✅', '❌']) {
+        gh.comments = [
+          sheet([
+            '| 1 | API | curl | 200 | ✅ | response.json |',
+            '',
+            ...hidden,
+            '',
+            header,
+            divider,
+            `| 3 | Real | curl | 200 | ${status} | response.json |`,
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toEqual({
+          failures:
+            status === '❌'
+              ? [{ number: '3', scenario: 'Real', expected: '200', evidence: 'response.json' }]
+              : [],
+          total: 2,
+          passed: status === '✅' ? 2 : 1,
+          manual: 0,
+          incomplete: false,
+        });
+      }
+    },
+  );
+
   it.each([' ```markdown', '   ~~~markdown'])(
     'ignores examples inside a valid indented fence: %s',
     async (fence) => {
@@ -641,6 +676,8 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    '| # | Scenario | Steps | Expected | Status | Video |',
+    '| Case | Scenario | Request | Response | **Result** | _Video / response_ |',
     '| # | Scenario | Steps | Expected | Result | Evidence |',
     '| # | Escenario | Pasos | Esperado | Estado | Evidencia |',
     '| Case | Scenario | Request | Response | **Result (status)** | _Evidence / video_ |',
@@ -848,6 +885,13 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '![]()',
+    'No evidence saved',
+    'No evidence: browser unavailable',
+    'No evidence captured because the upload failed',
+    'Not run — missing browser',
+    'Not verified because browser is unavailable',
+    '**No evidence saved.**',
+    '<span>No evidence captured because the upload failed</span>',
     'No evidence was collected',
     'No evidence has been collected',
     '**No evidence was collected.**',
@@ -964,6 +1008,8 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API blocked user forbidden with 403',
+    '✅ API: blocked recently revoked user forbidden with 403',
     '✅ UI pending payment renders correctly',
     '✅ API manual refund succeeds',
     '✅ UI pending payment persists successfully',
@@ -1039,6 +1085,16 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI tests not successful',
+    '✅ API; UI validation not run',
+    '✅ API; UI still needs to be tested',
+    '✅ API; UI cannot finish',
+    '✅ API; UI omitted',
+    '✅ API; UI 🚫',
+    '✅ API<br>**UI validation** was not run',
+    '✅ API (UI still needs to be tested)',
+    '✅ API/UI cannot finish after setup',
+    '✅ API blocked user forbidden with 403; UI validation not run',
     '✅ API; UI verification pending',
     '✅ API; UI test execution not run',
     '✅ API; UI would require manual testing',
@@ -1231,6 +1287,10 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '<img src="https://example.com/screenshot.png" />',
+    'API blocked user forbidden with 403',
+    'no-evidence-saved.json',
+    'No evidence saved was returned as expected',
+    'UI validation passed',
     'API blocked user returned 403',
     'UI pending payment displayed correctly',
     'API manual refund succeeds',
