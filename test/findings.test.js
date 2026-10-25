@@ -972,6 +972,12 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '![]()',
+    'No evidence uploaded',
+    'Evidence unavailable',
+    '**No evidence uploaded.**',
+    '<span>Evidence unavailable</span>',
+    'No evidence has been uploaded',
+    'Evidence is unavailable',
     'No evidence saved',
     'No evidence: browser unavailable',
     'No evidence captured because the upload failed',
@@ -1177,6 +1183,13 @@ describe('latestTestVerdict', () => {
 
   it.each([
     [
+      'Sold out',
+      'Open product with stock=0, try Buy',
+      'Purchase is refused for unavailable product',
+      '✅ UI unavailable product cannot be purchased',
+      'checkout.webm',
+    ],
+    [
       'Optional nickname is omitted',
       'POST /users with nickname key absent',
       '200 and persisted user',
@@ -1212,6 +1225,11 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    '✅ API; UI could not complete',
+    '✅ API; UI not reached because browser crashed',
+    '✅ API; UI blocked after login returns 500',
+    '✅ API; Browser coverage: skipped',
+    '✅ API; UI not evaluated',
     '✅ API; UI regression tests not run',
     '✅ API; UI smoke tests were skipped',
     '✅ API<br>**UI regression tests** were not fully tested',
@@ -1448,6 +1466,11 @@ describe('latestTestVerdict', () => {
 
   it.each([
     '<img src="https://example.com/screenshot.png" />',
+    'no-evidence-uploaded.json',
+    'evidence-unavailable.json',
+    'No evidence uploaded was returned as expected',
+    'Evidence unavailable was returned as expected',
+    '[Evidence unavailable](https://example.com/result)',
     'API manual refund processed successfully',
     'API_not_running.json',
     'API blocked user forbidden with 403',
