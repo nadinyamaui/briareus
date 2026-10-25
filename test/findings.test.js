@@ -483,6 +483,8 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    '| ID | API scenario | Request | Expected | Status | Evidence |',
+    '| **ID** | Case | Request | Response | **Status** | _Evidence_ |',
     '| No. | Scenario | Steps | Expected | Status | Evidence |',
     '| **No.** | Case | Request | Response | **Status** | _Evidence_ |',
     '| # | Scenario | Request | Expected | Status | Evidence |',
@@ -631,6 +633,15 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '<br>',
+    '<br/>',
+    '<br />',
+    '&nbsp;',
+    '&#160;',
+    '&#xA0;',
+    '<!-- TODO -->',
+    '**<br>&nbsp;<!-- TODO -->**',
+    '<!-- note --> _N/A_ <br>',
     '—',
     '–',
     '-',
@@ -681,6 +692,9 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API blocked user is denied with 403',
+    '✅ API: blocked revoked user was denied with 403',
+    '✅ API skipped expired notification is ignored',
     '✅ API blocked revoked user returns 403',
     '✅ API: blocked recently revoked user receives 403',
     '✅ API skipped expired payment notification returns 204',
@@ -719,6 +733,18 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI blocked by credentials that are missing',
+    '✅ API; UI skipped waiting until browser is available',
+    '✅ API; UI cannot be tested',
+    '✅ API; UI automation not run',
+    '✅ API; UI: tests were not executed',
+    '✅ API; UI execution pending',
+    '✅ API; UI has not been tested',
+    '✅ API; UI tests cannot be executed on this host',
+    '✅ API; UI: automation was not run',
+    '✅ API blocked user is denied with 403; UI cannot be tested',
+    '✅ API blocked user is denied with 403; UI automation not run',
+    '✅ API blocked user is denied with 403; UI blocked waiting for credentials',
     '✅ API; UI tests not run',
     '✅ API; UI tests were not executed',
     '✅ API; UI not performed',
@@ -791,13 +817,17 @@ describe('latestTestVerdict', () => {
     });
   });
 
-  it.each(['_response.json_', '**asserted HTTP 200**', '`response.json`', '~~response.json~~'])(
-    'accepts formatted execution evidence: %s',
-    async (evidence) => {
-      gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
-      expect(await latestTestVerdict(repo, 5)).toMatchObject({ passed: 1, incomplete: false });
-    },
-  );
+  it.each([
+    '_response.json_',
+    '**asserted HTTP 200**',
+    '`response.json`',
+    '~~response.json~~',
+    '<!-- saved --> response.json<br>',
+    '[response](https://example.com/result)',
+  ])('accepts formatted execution evidence: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ passed: 1, incomplete: false });
+  });
 
   it('accepts multiple evidenced passing subprocedures', async () => {
     gh.comments = [
