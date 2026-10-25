@@ -38,6 +38,31 @@ Disconnect your GitHub account. Needs `manage`.
 
 **Returns** `GithubIdentity`. Your changes and sessions go back to the server’s GitHub account.
 
+### `GET /me/home-assistant`
+
+Whether you connected your own Home Assistant. Needs `read`.
+
+**Returns** `HomeAssistantConnection`
+
+### `PUT /me/home-assistant`
+
+Connect your own Home Assistant. Needs `manage`.
+
+**Body**
+
+| Field                | Type     |                                                                   |
+| -------------------- | -------- | ----------------------------------------------------------------- |
+| `url` **required**   | `string` | Its address, such as http://homeassistant.local:8123              |
+| `token` **required** | `string` | A long-lived access token; stored encrypted and never shown again |
+
+**Returns** `HomeAssistantConnection`. Saved only once Home Assistant answers with that token; 502 when it cannot be reached or refuses it. Needs CREDENTIALS_KEY on the server.
+
+### `DELETE /me/home-assistant`
+
+Disconnect your Home Assistant. Needs `manage`.
+
+**Returns** `HomeAssistantConnection`
+
 ### `GET /users`
 
 List the people who share this server. Needs `admin`.
@@ -1152,37 +1177,37 @@ Approve or deny an SSH command. Needs `manage`.
 
 ### `GET /whatsapp/accounts`
 
-List linked WhatsApp accounts. Needs `admin`.
+List linked WhatsApp accounts. Needs `read`.
 
-**Returns** `{ configured: boolean, accounts: WhatsAppAccount[] }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. When disabled, returns { configured: false, accounts: [] }.
+**Returns** `{ configured: boolean, accounts: WhatsAppAccount[] }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. When disabled, returns { configured: false, accounts: [] }.
 
 ### `GET /whatsapp/accounts/{id}`
 
-Read a WhatsApp account’s connection status. Needs `admin`.
+Read a WhatsApp account’s connection status. Needs `read`.
 
-**Returns** `{ account: WhatsAppAccount }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+**Returns** `{ account: WhatsAppAccount }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
 
 ### `POST /whatsapp/accounts/{id}/start`
 
-Start or reconnect an account; create default when absent. Needs `admin`.
+Start or reconnect an account; create default when absent. Needs `manage`.
 
-**Returns** `{ account: WhatsAppAccount }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+**Returns** `{ account: WhatsAppAccount }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
 
 ### `GET /whatsapp/accounts/{id}/qr`
 
-Get the pairing QR code as a base64 PNG. Needs `admin`.
+Get the pairing QR code as a base64 PNG. Needs `manage`.
 
-**Returns** `{ mimetype: string, data: string }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Available in SCAN_QR_CODE; refresh periodically until WORKING. Scan from WhatsApp → Linked devices → Link a device. Do not store QR codes.
+**Returns** `{ mimetype: string, data: string }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Available in SCAN_QR_CODE; refresh periodically until WORKING. Scan from WhatsApp → Linked devices → Link a device. Do not store QR codes.
 
 ### `POST /whatsapp/accounts/{id}/logout`
 
-Unlink the phone from WAHA. Needs `admin`.
+Unlink the phone from WAHA. Needs `manage`.
 
-**Returns** `{ ok: boolean }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+**Returns** `{ ok: boolean }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
 
 ### `GET /whatsapp/accounts/{id}/conversations`
 
-List WhatsApp chats, newest activity first. Needs `admin`.
+List WhatsApp chats, newest activity first. Needs `read`.
 
 **Query**
 
@@ -1191,11 +1216,11 @@ List WhatsApp chats, newest activity first. Needs `admin`.
 | `limit`  | `integer` | Page size, 1–100; 50 by default                                   |
 | `offset` | `integer` | The previous page’s nextOffset, 0–100000; omit for the first page |
 
-**Returns** `{ conversations: object[], nextOffset: integer? }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Each chat is { id, name, unreadCount, lastMessage: WhatsAppMessage|null }; unreadCount may be null when the engine omits it.
+**Returns** `{ conversations: object[], nextOffset: integer? }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Each chat is { id, name, unreadCount, lastMessage: WhatsAppMessage|null }; unreadCount may be null when the engine omits it.
 
 ### `GET /whatsapp/accounts/{id}/conversations/{chat}/messages`
 
-Read WhatsApp history, newest first. Needs `admin`.
+Read WhatsApp history, newest first. Needs `read`.
 
 **Query**
 
@@ -1204,11 +1229,11 @@ Read WhatsApp history, newest first. Needs `admin`.
 | `limit`  | `integer` | Page size, 1–100; 50 by default                                   |
 | `offset` | `integer` | The previous page’s nextOffset, 0–100000; omit for the first page |
 
-**Returns** `{ messages: WhatsAppMessage[], nextOffset: integer? }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Offset pagination can overlap when new messages arrive; deduplicate by ID. nextOffset advances by the requested limit even for short or empty pages, because WAHA filters protocol records after paging. There is no reliable end-of-history indicator; null nextOffset marks the supported offset bound.
+**Returns** `{ messages: WhatsAppMessage[], nextOffset: integer? }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Offset pagination can overlap when new messages arrive; deduplicate by ID. nextOffset advances by the requested limit even for short or empty pages, because WAHA filters protocol records after paging. There is no reliable end-of-history indicator; null nextOffset marks the supported offset bound.
 
 ### `POST /whatsapp/accounts/{id}/conversations/{chat}/messages`
 
-Send a text message or quoted reply as the operator. Needs `admin`.
+Send a text message or quoted reply as the operator. Needs `manage`.
 
 **Body**
 
@@ -1217,19 +1242,19 @@ Send a text message or quoted reply as the operator. Needs `admin`.
 | `text` **required** | `string` | Message text, 1–8000 characters           |
 | `replyTo`           | `string` | Optional quoted message ID from this chat |
 
-**Returns** 201 `{ message: WhatsAppMessage }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+**Returns** 201 `{ message: WhatsAppMessage }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
 
 ### `POST /whatsapp/accounts/{id}/conversations/{chat}/read`
 
-Mark unread WhatsApp messages as read. Needs `admin`.
+Mark unread WhatsApp messages as read. Needs `manage`.
 
-**Returns** `{ ok: boolean }`. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
+**Returns** `{ ok: boolean }`. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure.
 
 ### `GET /whatsapp/accounts/{id}/conversations/{chat}/messages/{message}/media`
 
-Download a message attachment through the core. Needs `admin`.
+Download a message attachment through the core. Needs `read`.
 
-**Returns** the file. Operator inbox, admin token required; no project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Downloads only WAHA local file storage; the API key never reaches clients. Returns the attachment’s media type and Content-Disposition: attachment. Availability depends on the WAHA edition/engine; 501 for unsupported operations.
+**Returns** the file. Your own inbox: only the accounts you own, whatever your role (`read` to read, `manage` to link, send or mark read); another user’s answers 404. Starting an account nobody owns makes it yours; `default` belongs to the first admin. WAHA Core allows only `default`, so other users need WAHA Plus to link a phone. No project or agent session is needed. WAHA owns history and linked devices. 503 if not configured, 502 if WAHA is unavailable or rejects its key, 409 for an invalid account state, 429 for rate limits. Refresh account status and the first conversation/history page every 5 seconds while visible; merge messages by ID and reload on reconnect. Do not automatically retry sends after an ambiguous failure. Downloads only WAHA local file storage; the API key never reaches clients. Returns the attachment’s media type and Content-Disposition: attachment. Availability depends on the WAHA edition/engine; 501 for unsupported operations.
 
 ### `GET /slack/workspaces`
 
@@ -1618,13 +1643,13 @@ Deploy an Envoyer project. Needs `manage`, held to `repo`.
 
 ### `GET /home-assistant`
 
-Check the Home Assistant connection. Needs `admin`.
+Check the Home Assistant connection. Needs `read`.
 
-**Returns** `{ configured: boolean, connected: boolean }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ configured: boolean, connected: boolean }`. Your own Home Assistant, connected with PUT /me/home-assistant (the original operator, the first user whatever their role, also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/entities`
 
-Read current Home Assistant entities. Needs `admin`.
+Read current Home Assistant entities. Needs `read`.
 
 **Query**
 
@@ -1632,23 +1657,23 @@ Read current Home Assistant entities. Needs `admin`.
 | -------- | -------- | ----------------------------------------------- |
 | `domain` | `string` | Optional domain filter, such as light or vacuum |
 
-**Returns** `{ entities: HomeAssistantEntity[] }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ entities: HomeAssistantEntity[] }`. Your own Home Assistant, connected with PUT /me/home-assistant (the original operator, the first user whatever their role, also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/entities/{id}`
 
-Read one Home Assistant entity. Needs `admin`.
+Read one Home Assistant entity. Needs `read`.
 
-**Returns** `{ entity: HomeAssistantEntity }`. Admin token required; independent of projects and agent sessions. Configure HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN on the server. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
+**Returns** `{ entity: HomeAssistantEntity }`. Your own Home Assistant, connected with PUT /me/home-assistant (the original operator, the first user whatever their role, also has the one HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN set on the server); independent of projects and agent sessions. `read` reads, `manage` calls services and fires events. When unconfigured, GET /home-assistant returns 200 with configured:false and connected:false; other endpoints return 503. 502 for connection failures or rejected upstream credentials, 404 when missing. No automatic retries for actions: after an ambiguous failure, read the entity state before retrying. Poll entities while visible for current state; no event subscription is provided.
 
 ### `GET /home-assistant/services`
 
-Discover available Home Assistant actions. Needs `admin`.
+Discover available Home Assistant actions. Needs `read`.
 
 **Returns** `{ services: object[] }`. Returns Home Assistant domain/service definitions, including service descriptions and fields, for clients to build action inputs.
 
 ### `POST /home-assistant/services/{domain}/{service}`
 
-Execute a Home Assistant action. Needs `admin`.
+Execute a Home Assistant action. Needs `manage`.
 
 **Query**
 
@@ -1662,7 +1687,7 @@ Execute a Home Assistant action. Needs `admin`.
 
 ### `POST /home-assistant/events/{type}`
 
-Fire an event for Home Assistant automations. Needs `admin`.
+Fire an event for Home Assistant automations. Needs `manage`.
 
 **Body**: a [HomeAssistantData](#homeassistantdata), whole or in part.
 
@@ -2249,6 +2274,15 @@ A person who shares this server. Every token belongs to one, and acts as them; a
 | `name`     | `string`        | The name it was given, unique on this server                                          |
 | `role`     | `admin\|member` | An admin runs the server and reaches every project; a member only what they are given |
 | `disabled` | `boolean`       | Disabled on the server: their tokens answer 401 until they are enabled again          |
+
+### HomeAssistantConnection
+
+Your own Home Assistant on this server, if you connected one. The token is never sent back.
+
+| Field       | Type      |                       |
+| ----------- | --------- | --------------------- |
+| `connected` | `boolean` | Whether one is stored |
+| `url`       | `string?` | Its address           |
 
 ### GithubIdentity
 
@@ -3227,6 +3261,9 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/me/github`                                                             | `GET /me/github`                                                                |
 | `PUT /api/me/github`                                                             | `PUT /me/github`                                                                |
 | `DELETE /api/me/github`                                                          | `DELETE /me/github`                                                             |
+| `GET /api/me/home-assistant`                                                     | `GET /me/home-assistant`                                                        |
+| `PUT /api/me/home-assistant`                                                     | `PUT /me/home-assistant`                                                        |
+| `DELETE /api/me/home-assistant`                                                  | `DELETE /me/home-assistant`                                                     |
 | `GET /api/dev/projects`                                                          | `GET /projects`                                                                 |
 | `GET /api/dev/branches`                                                          | `GET /branches`                                                                 |
 | `POST /api/dev/branches/serve`                                                   | `POST /branches/serve`                                                          |

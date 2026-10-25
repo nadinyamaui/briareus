@@ -23,6 +23,7 @@ import { createUsers } from './lib/users.js';
 import { createShares } from './lib/shares.js';
 import { seesSession } from './lib/ownership.js';
 import { createUserCredentials } from './lib/user-credentials.js';
+import { createWhatsAppOwners } from './lib/whatsapp-owners.js';
 import { meRoutes } from './lib/me-routes.js';
 import { asGithubUser } from './lib/github.js';
 import { shareRoutes } from './lib/share-routes.js';
@@ -284,6 +285,15 @@ const githubOf = (userId) => {
   }
 };
 setOwnerGithub((job) => githubOf(job.ownerId));
+// Who owns what was the one operator's before users existed (sessions, Slack workspaces):
+// the first user, whom the users migration created, regardless of their current role.
+const originalOperator = () => {
+  try {
+    return users.list()[0]?.id ?? null;
+  } catch {
+    return null;
+  }
+};
 // Whose personal inboxes (mail, Slack) a session reaches: its owner while they
 // are enabled, or for a session nobody owns, one from before users, the earliest user,
 // its original operator regardless of their current role.
@@ -674,14 +684,39 @@ api.use(
   }),
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
-api.use(homeAssistantRoutes({ service: createHomeAssistantService() }));
+// Each user's own Home Assistant (lib/me-routes.js). The one in .env was the operator's, so
+// it stands for the original operator until they connect one of their own.
+const homeAssistantOf = (user) => {
+  const own = credentials.get(user.id, 'homeAssistant');
+  if (own) return own;
+  return user.id === originalOperator() ? getConfig().homeAssistant : null;
+};
+api.use(
+  homeAssistantRoutes({
+    serviceFor: (user) =>
+      createHomeAssistantService({
+        config: () => homeAssistantOf(user),
+        unconfigured: 'Connect your Home Assistant first: PUT /api/v1/me/home-assistant',
+      }),
+  }),
+);
 const whatsappService = createWhatsAppService();
 // Replies in the chats a session wrote to come back to it (lib/whatsapp-watch.js).
+// Whose each WhatsApp account is (lib/whatsapp-owners.js); a session reaches its inbox owner's.
+const whatsappOwners = createWhatsAppOwners({
+  legacyOwner: originalOperator,
+  lookupAccount: whatsappService.account,
+  listAccounts: whatsappService.accounts,
+});
+const whatsappMayUse = (job, account) => whatsappOwners.owns(inboxOwner(job), account);
 const whatsappWatcher = createWhatsAppWatcher({
   service: whatsappService,
   getJob,
   listJobs: devSessionRecords,
   allowed: (job) => whatsappWatchAllowed(job, getProject(job.repo)),
+  mayUse: whatsappMayUse,
+  ownershipReady: whatsappOwners.ready,
+  refreshOwnership: whatsappOwners.init,
   deliver: (id, delivery, group) => deliverToSession(id, delivery, { via: 'whatsapp', ...group }),
   instruct: (id, instruction, group) =>
     instructSessionDurably(id, instruction, { via: 'whatsapp', ...group }),
@@ -696,9 +731,15 @@ const whatsappWatcher = createWhatsAppWatcher({
   registryComplete: sessionRegistryComplete,
 });
 setWhatsAppWatchAccess((id) => whatsappWatcher.watching(id));
-api.use(whatsappRoutes({ service: whatsappService }));
+api.use(whatsappRoutes({ service: whatsappService, owners: whatsappOwners }));
 api.use(
-  whatsappAgentRoutes({ service: whatsappService, agentSession, getProject, watcher: whatsappWatcher }),
+  whatsappAgentRoutes({
+    service: whatsappService,
+    agentSession,
+    getProject,
+    watcher: whatsappWatcher,
+    mayUse: whatsappMayUse,
+  }),
 );
 api.use(mcpRoutes({ service: mcpService, getProject }));
 api.use(
@@ -2269,6 +2310,9 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await mailService.init();
     await shares.init().catch((e) => console.error('Could not load shares:', e.message));
     await credentials.init().catch((e) => console.error('Could not load user credentials:', e.message));
+    await whatsappOwners
+      .init()
+      .catch((e) => console.error('Could not initialize WhatsApp ownership:', e.message));
     await mobileAuth.init();
     await initSavedPrompts();
     await initMemorySelection();
@@ -2318,6 +2362,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
       .catch((e) => console.error('Could not reload users or Slack ownership:', e.message));
     shares.refresh().catch((e) => console.error('Could not reload shares:', e.message));
     credentials.refresh().catch((e) => console.error('Could not load user credentials:', e.message));
+    whatsappOwners.init().catch((e) => console.error('Could not initialize WhatsApp ownership:', e.message));
   }, 15000).unref();
   // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
   // a client reads its mail from the database rather than from the provider.

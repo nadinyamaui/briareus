@@ -22,7 +22,7 @@ const ROUTES = [
 ];
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-let server, base, job, service, project, watcher, generateSpeech, transcribeVoice;
+let server, base, job, service, project, watcher, generateSpeech, transcribeVoice, mayUse;
 const AUDIO = Buffer.from('OggSfake-opus');
 beforeEach(async () => {
   job = { id: 'chat', kind: 'devchat', repo: 'owner/repo', status: 'running' };
@@ -46,10 +46,13 @@ beforeEach(async () => {
       participants: input.participants.map((id) => ({ id, code: 200, added: true, inviteSent: false })),
     })),
   };
+  // The session's owner owns `default` and nothing else.
+  mayUse = vi.fn((_job, account) => account === 'default');
   watcher = createWhatsAppWatcher({
     service,
     getJob: () => job,
     allowed: () => true,
+    mayUse,
     deliver: () => {},
     load: async (_key, fallback) => fallback,
     save: async () => {},
@@ -61,6 +64,7 @@ beforeEach(async () => {
     whatsappAgentRoutes({
       service,
       watcher,
+      mayUse,
       generateSpeech,
       transcribeVoice,
       getProject: (repo) => (project?.repo === repo ? project : null),
@@ -512,5 +516,30 @@ describe('voice note sends', () => {
     expect((await request(endpoint, 'POST', { text: 'Hola' })).status).toBe(502);
     expect(service.sendVoice).toHaveBeenCalledTimes(1);
     expect(watcher.watching(job.id, 'default', CHAT)).toBe(false);
+  });
+});
+
+describe('another user’s WhatsApp', () => {
+  it('is left out of the account list and answers as missing on every account route', async () => {
+    service.accounts.mockResolvedValue({
+      configured: true,
+      accounts: [
+        { id: 'default', status: 'WORKING' },
+        { id: 'bob', status: 'WORKING' },
+      ],
+    });
+    const headers = { Authorization: 'Bearer session-token', 'Content-Type': 'application/json' };
+    const listed = await (await fetch(`${base}/api/agent/whatsapp/accounts`, { headers })).json();
+    expect(listed.accounts.map((a) => a.id)).toEqual(['default']);
+    const read = await fetch(`${base}/api/agent/whatsapp/accounts/bob/conversations`, { headers });
+    expect(read.status).toBe(404);
+    const sent = await fetch(`${base}/api/agent/whatsapp/accounts/bob/conversations/${CHAT}/messages`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ text: 'hi' }),
+    });
+    expect(sent.status).toBe(404);
+    expect(service.conversations).not.toHaveBeenCalled();
+    expect(service.send).not.toHaveBeenCalled();
   });
 });

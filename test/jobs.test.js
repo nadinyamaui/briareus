@@ -7,6 +7,7 @@ import os from 'os';
 import path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import { BINARIES } from '../lib/providers.js';
+import * as r2 from '../lib/r2.js';
 import * as providerTools from '../lib/providers.js';
 import { compactCodexThread } from '../lib/codex-session.js';
 import { askClaudeSideQuestion, transferClaudeSession } from '../lib/claude-session.js';
@@ -1428,6 +1429,7 @@ describe('loop children waiting for a database slot', () => {
 });
 
 describe('pullRequestHasOpenSession', () => {
+  const openIds = ['bs-number', 'bs-synced', 'bs-borrowed', 'bs-own-branch', 'bs-preparing'];
   // Own repo and PR numbers, so the rows restored here match nothing the other blocks sync.
   const row = (id, over) => ({
     id,
@@ -1448,8 +1450,12 @@ describe('pullRequestHasOpenSession', () => {
       row('bs-closed', { branch: 'feature/215', startedOnPr: 215 }),
     ];
     await initJobs();
-    for (const id of ['bs-number', 'bs-synced', 'bs-borrowed', 'bs-own-branch', 'bs-preparing'])
-      getJob(id).status = 'idle';
+    for (const id of openIds) getJob(id).status = 'idle';
+  });
+
+  // Retire fixtures so later poll ticks cannot discover their branches under another test's mocks.
+  afterAll(() => {
+    for (const id of openIds) getJob(id).status = 'closed';
   });
 
   it('finds an open session by the pull request it was started on or synced to', () => {
@@ -4204,6 +4210,8 @@ describe('webhook deliveries', () => {
   const armed = (extra) => ({ armed: true, epoch: 0, perHour: 30, maxTurns: 10, ...extra });
   const IDLE = [
     'hk-off',
+    'hk-video-owner',
+    'hk-video-other',
     'hk-free',
     'hk-busy',
     'hk-ask',
@@ -4272,6 +4280,10 @@ describe('webhook deliveries', () => {
     getJob('hk-stop').turnCanceled = true;
   });
 
+  afterAll(() => {
+    for (const id of IDLE) getJob(id).status = 'closed';
+  });
+
   // Queue-only provider by default; live delivery is exercised separately for Claude and Codex.
   let cli;
   function fakeCli(binary = 'opencode') {
@@ -4335,6 +4347,110 @@ describe('webhook deliveries', () => {
     }
     return null;
   };
+
+  it('reports publication to its owner before settling and retries only that owner', async () => {
+    fakeCli();
+    const owner = getJob('hk-video-owner');
+    const other = getJob('hk-video-other');
+    owner.videoRuns = ['acme__hook/pr-<pr-number>-0123456789abcdef0123456789abcdef'];
+    other.videoRuns = ['other__project/pr-<pr-number>-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'];
+    const failed = { file: 'acme__hook/pr-12-token/login.webm', error: 'fetch failed' };
+    let release;
+    const sync = vi
+      .spyOn(r2, 'syncVideos')
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({ uploaded: ['other.webm'], failed: [], deferred: 0 })
+      .mockResolvedValueOnce({ uploaded: [failed.file], failed: [], deferred: 0 });
+    try {
+      sendDevMessage(owner.id, 'Finish owner');
+      const finishing = cli.finish(owner);
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      expect(owner.status).toBe('running');
+      release({ uploaded: [], failed: [failed], deferred: 0 });
+      await finishing;
+      expect(infos(owner).join('\n')).toContain('fetch failed');
+      expect(infos(owner).join('\n')).toContain('retry with another turn in this session');
+      sendDevMessage(other.id, 'Finish other');
+      await cli.finish(other);
+      expect(infos(other).join('\n')).not.toContain(failed.file);
+      expect(infos(other).join('\n')).not.toContain('fetch failed');
+      sendDevMessage(owner.id, 'Retry publication');
+      await cli.finish(owner);
+      expect(sync.mock.calls.map(([runs]) => runs)).toEqual([
+        owner.videoRuns,
+        other.videoRuns,
+        owner.videoRuns,
+      ]);
+      expect(infos(owner)).toContain('Uploaded 1 video to the R2 bucket.');
+    } finally {
+      sync.mockRestore();
+      owner.status = other.status = 'closed';
+    }
+  });
+
+  it.each(['failed', 'deferred', 'rejected'])(
+    'retains automatic QA retry ownership when publication is %s',
+    async (kind) => {
+      fakeCli();
+      const owner = getJob('hk-video-owner');
+      owner.status = 'idle';
+      owner.autoClose = true;
+      owner.qaParentId = 'hk-video-other';
+      owner.videoRuns = ['acme__hook/pr-<pr-number>-0123456789abcdef0123456789abcdef'];
+      const sync = vi.spyOn(r2, 'syncVideos');
+      if (kind === 'rejected') sync.mockRejectedValueOnce(new Error('offline'));
+      else
+        sync.mockResolvedValueOnce({
+          uploaded: [],
+          failed: kind === 'failed' ? [{ file: 'login.webm', error: 'offline' }] : [],
+          deferred: kind === 'deferred' ? 1 : 0,
+        });
+      try {
+        sendDevMessage(owner.id, 'Finish automatic QA');
+        await cli.finish(owner);
+        await vi.waitFor(() => expect(owner.status).toBe('closed'));
+        expect(getJob(owner.id)).toBe(owner);
+        await flushJobs();
+        const saved = saveJob.mock.calls.findLast(([row]) => row.id === owner.id)[0];
+        expect(saved.videoRuns).toEqual(owner.videoRuns);
+        expect(saved.videoPublicationPending).toBe(true);
+      } finally {
+        sync.mockRestore();
+        owner.autoClose = false;
+        delete owner.qaParentId;
+      }
+    },
+  );
+
+  it('Stop cancels an upload wait without losing retry ownership', async () => {
+    fakeCli();
+    const owner = getJob('hk-video-owner');
+    owner.status = 'idle';
+    const sync = vi.spyOn(r2, 'syncVideos').mockImplementationOnce(
+      (_runs, signal) =>
+        new Promise((resolve) => {
+          signal.addEventListener('abort', () => resolve({ uploaded: [], failed: [], deferred: 1 }), {
+            once: true,
+          });
+        }),
+    );
+    try {
+      sendDevMessage(owner.id, 'Publish then stop');
+      const finishing = cli.finish(owner);
+      await vi.waitFor(() => expect(sync).toHaveBeenCalled());
+      cancelDevTurn(owner.id);
+      await finishing;
+      expect(owner.videoPublicationPending).toBe(true);
+    } finally {
+      sync.mockRestore();
+      owner.status = 'closed';
+    }
+  });
 
   it('is refused by a session nobody armed, and by one that does not exist', () => {
     expect(refused(() => deliverToSession('hk-off', { text: 'hi' }))).toMatchObject({
@@ -5871,6 +5987,55 @@ describe('webhook deliveries', () => {
       await cli.finish(job);
       job.webhook = { ...job.webhook, instructions: false };
     });
+  });
+  it('checkpoints a completed provider turn during publication before shutdown', async () => {
+    fakeCli();
+    const owner = getJob('hk-video-owner');
+    owner.status = 'idle';
+    let release;
+    const sync = vi.spyOn(r2, 'syncVideos').mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    try {
+      const cost = owner.costUsd || 0;
+      const duration = owner.durationMs || 0;
+      recordTurnUsage.mockClear();
+      sendDevMessage(owner.id, 'Complete before upload');
+      cli.children[0].stdout.write(
+        JSON.stringify({ type: 'text', timestamp: 1000, part: { text: 'Done' } }) +
+          '\n' +
+          JSON.stringify({
+            type: 'step_finish',
+            timestamp: 2000,
+            part: { cost: 0.25, tokens: { input: 100, output: 20 } },
+          }) +
+          '\n',
+      );
+      cli.children[0].emit('close', 0);
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      await stopAllJobProcesses();
+      await flushJobs();
+      const saved = saveJob.mock.calls.findLast(([row]) => row.id === owner.id)[0];
+      expect(saved.recoveryTurn).toMatchObject({ completed: true });
+      expect(saved.costUsd).toBeCloseTo(cost + 0.25);
+      expect(saved.durationMs).toBe(duration + 1000);
+      expect(recordTurnUsage).toHaveBeenCalledOnce();
+      expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({
+        costUsd: 0.25,
+        durationMs: 1000,
+        inputTokens: 100,
+        outputTokens: 20,
+      });
+      release({ uploaded: [], failed: [], deferred: 0 });
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      sync.mockRestore();
+      setDraining(false);
+      owner.status = 'closed';
+    }
   });
 });
 
@@ -9658,6 +9823,15 @@ describe('attachPrForBranch', () => {
   it('keeps its short backoff when the GraphQL fallback also fails', async () => {
     vi.useFakeTimers();
     try {
+      state.stored = [];
+      const intervals = vi.spyOn(globalThis, 'setInterval');
+      let pollPrs;
+      try {
+        await initJobs();
+        pollPrs = intervals.mock.calls.find(([fn]) => fn.name === 'syncDevPrs')[0];
+      } finally {
+        intervals.mockRestore();
+      }
       githubRest.mockRejectedValue(
         Object.assign(new Error('GitHub core rate limit exhausted'), { rateLimited: true }),
       );
@@ -9672,6 +9846,8 @@ describe('attachPrForBranch', () => {
       expect(job.reviewLoop.discoveryRetries).toBe(1);
       expect(githubGraphql).toHaveBeenCalledTimes(1);
 
+      // A real poll tick used to discover PRs for idle fixtures left by prior blocks.
+      pollPrs();
       await vi.advanceTimersByTimeAsync(5_000);
       expect(githubGraphql).toHaveBeenCalledTimes(2);
     } finally {
@@ -14088,6 +14264,36 @@ describe('Codex turn usage', () => {
       expect(job.pendingCodexUsage).toBeUndefined();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('records Codex usage before publication and excludes upload time from duration', async () => {
+    const job = getJob('codex-usage');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1800000000000);
+    let release;
+    const sync = vi.spyOn(r2, 'syncVideos').mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    try {
+      sendDevMessage(job.id, 'One second of work');
+      clock.mockReturnValue(1800000001000);
+      children.at(-1).complete({ input_tokens: 500100, cached_input_tokens: 450050, output_tokens: 20010 });
+      children.at(-1).emit('close', 0);
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      expect(recordTurnUsage).toHaveBeenCalledOnce();
+      expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({ durationMs: 1000, inputTokens: 100 });
+      clock.mockReturnValue(1800000121000);
+      release({ uploaded: [], failed: [], deferred: 0 });
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      expect(recordTurnUsage).toHaveBeenCalledOnce();
+      expect(recordTurnUsage.mock.lastCall[1].durationMs).toBe(1000);
+    } finally {
+      release?.({ uploaded: [], failed: [], deferred: 0 });
+      clock.mockRestore();
+      sync.mockRestore();
     }
   });
 

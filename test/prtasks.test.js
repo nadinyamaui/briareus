@@ -265,9 +265,14 @@ describe('testRunPrompt', () => {
     // carry the same unguessable token; the sync mirrors relative paths.
     it('points the links at the bucket, one 128-bit token on both paths', () => {
       cfgState.r2 = { publicBaseUrl: 'https://videos.example.com' };
-      const prompt = testRunPrompt(base);
+      const onVideoRun = vi.fn();
+      const qaInstructions = 'Use curl and assert JSON response values.';
+      const prompt = testRunPrompt({ ...base, onVideoRun, qaInstructions });
       const dir = prompt.match(/\/srv\/videos\/acme__shop\/pr-<pr-number>-([0-9a-f]{32})/);
       expect(dir).not.toBeNull();
+      expect(onVideoRun).toHaveBeenCalledWith(`acme__shop/pr-<pr-number>-${dir[1]}`);
+      expect(prompt).toContain(qaInstructions);
+      expect(prompt).toContain('every row is ✅ with execution evidence');
       expect(prompt).toContain(`https://videos.example.com/acme__shop/pr-<pr-number>-${dir[1]}`);
       expect(prompt).not.toContain('reviewer.example.com/videos');
     });

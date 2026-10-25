@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createWhatsAppService } from '../lib/whatsapp.js';
 import { whatsappRoutes } from '../lib/whatsapp-routes.js';
+import { createWhatsAppOwners } from '../lib/whatsapp-owners.js';
 import { apiV1Routes } from '../lib/api-v1.js';
 import { createMobileAuth } from '../lib/mobile-auth.js';
 
@@ -45,9 +46,9 @@ async function mediaService(fileHandler, timeoutMs = 150) {
   return createWhatsAppService({ config: () => ({ url, apiKey: KEY }), timeoutMs });
 }
 
-async function setup() {
+async function setup({ initialAccount = null, accounts = undefined, ownershipError = null } = {}) {
   const calls = [];
-  let current = null;
+  let current = initialAccount;
   let failure = 0;
   let mediaUrl = '';
   let groupAnswer = null;
@@ -68,7 +69,8 @@ async function setup() {
       };
       return res.status(201).json(current);
     }
-    if (path === '/api/sessions/default') return current ? res.json(current) : res.sendStatus(404);
+    if (/^\/api\/sessions\/[^/]+$/.test(path))
+      return current && path === `/api/sessions/${current.name}` ? res.json(current) : res.sendStatus(404);
     if (/\/api\/sessions\/default\/(start|restart)$/.test(path)) {
       current.status = 'STARTING';
       return res.json(current);
@@ -114,7 +116,7 @@ async function setup() {
   });
   const wahaUrl = await serve(upstream);
   mediaUrl = `${wahaUrl}/api/files/default/attachment.ogg`;
-  const service = createWhatsAppService({ config: () => ({ url: wahaUrl, apiKey: KEY }) });
+  const service = createWhatsAppService({ config: () => ({ url: wahaUrl, apiKey: KEY, accounts }) });
   let devices = [];
   const auth = createMobileAuth({
     load: async () => structuredClone(devices),
@@ -128,14 +130,41 @@ async function setup() {
     tokens[permission] = (
       await auth.create({ userId: 1, label: permission, permission, repos: ['o/r'], days: 30 }, 'owner')
     ).token;
+  // Ana, a member: `default` is the first admin's, so none of it is hers.
+  tokens.member = (
+    await auth.create({ userId: 2, label: 'ana', permission: 'manage', repos: ['o/r'], days: 30 }, 'owner')
+  ).token;
+  let stored = {};
+  const owners = createWhatsAppOwners({
+    load: async () => structuredClone(stored),
+    update: async (_key, _fallback, fn) => {
+      if (ownershipError) throw ownershipError;
+      const value = structuredClone(stored);
+      const result = await fn(value);
+      stored = value;
+      return { value, result };
+    },
+    legacyOwner: () => 1,
+    lookupAccount: service.account,
+    listAccounts: service.accounts,
+  });
+  await owners.init();
+  calls.length = 0;
   const app = express();
   app.use(
     apiV1Routes({
-      users: { get: () => ({ id: 1, name: 'Owner', role: 'admin', disabledAt: null }), list: () => [] },
+      users: {
+        get: (id) =>
+          ({
+            1: { id: 1, name: 'Owner', role: 'admin', disabledAt: null },
+            2: { id: 2, name: 'Ana', role: 'member', disabledAt: null },
+          })[id] || null,
+        list: () => [],
+      },
       auth,
       apiEnabled: () => true,
       ownerSecret: () => 'owner',
-      handlers: whatsappRoutes({ service }),
+      handlers: whatsappRoutes({ service, owners }),
       getJob: () => null,
       getProject: () => null,
       listSessions: () => [],
@@ -151,6 +180,7 @@ async function setup() {
     });
   return {
     service,
+    owners,
     request,
     calls,
     tokens,
@@ -225,10 +255,23 @@ describe('the WhatsApp core inbox', () => {
     expect(await (await ctx.request('/default/logout', { method: 'POST' })).json()).toEqual({ ok: true });
   });
 
-  it('refuses every inbox route to read/manage tokens before touching WAHA', async () => {
+  it('requires manage access for a pairing QR while allowing read-only inbox access', async () => {
+    const ctx = await setup({ initialAccount: { name: 'default', status: 'SCAN_QR_CODE' } });
+    expect((await ctx.request('/default/qr', { token: ctx.tokens.read })).status).toBe(403);
+    expect(ctx.calls).toEqual([]);
+
+    for (const path of ['', '/default', '/default/conversations', `/default/conversations/${CHAT}/messages`])
+      expect((await ctx.request(path, { token: ctx.tokens.read })).status).toBe(200);
+    for (const token of [ctx.tokens.manage, ctx.tokens.admin]) {
+      const qr = await ctx.request('/default/qr', { token });
+      expect(qr.status).toBe(200);
+      expect(await qr.json()).toEqual({ mimetype: 'image/png', data: 'cXJjb2Rl' });
+    }
+  });
+
+  it('keeps another user’s account and a read token’s writes from WAHA', async () => {
     const ctx = await setup();
     const routes = [
-      ['', 'GET'],
       ['/default', 'GET'],
       ['/default/start', 'POST'],
       ['/default/qr', 'GET'],
@@ -239,17 +282,145 @@ describe('the WhatsApp core inbox', () => {
       [`/default/conversations/${CHAT}/read`, 'POST'],
       [`/default/conversations/${CHAT}/messages/${MID}/media`, 'GET'],
     ];
-    for (const token of [ctx.tokens.read, ctx.tokens.manage])
-      for (const [path, method] of routes)
-        expect(
-          (
-            await ctx.request(path, {
-              method,
-              token,
-              body: method === 'POST' ? { text: 'hello' } : undefined,
-            })
-          ).status,
-        ).toBe(403);
+    for (const [path, method] of routes)
+      expect(
+        (
+          await ctx.request(path, {
+            method,
+            token: ctx.tokens.member,
+            body: method === 'POST' ? { text: 'hello' } : undefined,
+          })
+        ).status,
+      ).toBe(404);
+    for (const [path, method] of routes.filter(([, method]) => method === 'POST'))
+      expect(
+        (await ctx.request(path, { method, token: ctx.tokens.read, body: { text: 'hello' } })).status,
+      ).toBe(403);
+    expect(ctx.calls).toEqual([]);
+    // Her list leaves out the first admin's `default`; starting an account nobody owns makes it hers.
+    expect((await (await ctx.request('', { token: ctx.tokens.member })).json()).accounts).toEqual([]);
+    ctx.setCurrent({ name: 'default', status: 'WORKING' });
+    expect((await (await ctx.request('', { token: ctx.tokens.member })).json()).accounts).toEqual([]);
+    expect((await (await ctx.request('')).json()).accounts.map((a) => a.id)).toEqual(['default']);
+  });
+
+  it('lists and reads an existing Plus account for its original operator without starting it', async () => {
+    const ctx = await setup({ initialAccount: { name: 'business', status: 'WORKING' } });
+    expect((await (await ctx.request()).json()).accounts.map((a) => a.id)).toEqual(['business']);
+    expect((await ctx.request('/business')).status).toBe(200);
+    expect((await (await ctx.request('', { token: ctx.tokens.member })).json()).accounts).toEqual([]);
+    ctx.calls.length = 0;
+    expect((await ctx.request('/business', { token: ctx.tokens.member })).status).toBe(404);
+    expect((await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member })).status).toBe(
+      404,
+    );
+    expect(ctx.calls).toEqual([]);
+  });
+
+  it('creates a member’s new Plus account and keeps it private to that member', async () => {
+    const ctx = await setup();
+    const response = await ctx.request('/ana/start', { method: 'POST', token: ctx.tokens.member });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ account: { id: 'ana', status: 'STARTING' } });
+    expect(ctx.calls.find((c) => c.path === '/api/sessions' && c.method === 'POST').body).toEqual({
+      name: 'ana',
+      start: true,
+      config: { noweb: { store: { enabled: true, fullSync: true } } },
+    });
+    expect(ctx.owners.ownerOf('ana')).toBe(2);
+    expect(
+      (await (await ctx.request('', { token: ctx.tokens.member })).json()).accounts.map((a) => a.id),
+    ).toEqual(['ana']);
+    ctx.calls.length = 0;
+    expect((await ctx.request('/ana')).status).toBe(404);
+    expect((await ctx.request('/ana/start', { method: 'POST' })).status).toBe(404);
+    expect(ctx.calls).toEqual([]);
+  });
+
+  it('lets WAHA reject non-default creation when its edition does not support it', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('', { status: 404 }))
+      .mockResolvedValueOnce(new Response('private edition error', { status: 422 }));
+    const service = createWhatsAppService({
+      config: () => ({ url: 'http://waha.test', apiKey: KEY }),
+      fetcher,
+    });
+    await expect(service.start('ana')).rejects.toMatchObject({
+      status: 409,
+      message: 'WAHA refused the operation; check the account connection and chat',
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[1][1]).toMatchObject({
+      method: 'POST',
+      body: expect.stringContaining('"name":"ana"'),
+    });
+  });
+
+  it('reserves an existing Plus account for the original operator before a member can start it', async () => {
+    const ctx = await setup();
+    const phone = { id: '49111111111@c.us', pushName: 'Original operator' };
+    ctx.setCurrent({ name: 'business', status: 'WORKING', me: phone });
+    const response = await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'WhatsApp account not found' });
+    expect(ctx.owners.ownerOf('business')).toBe(1);
+    expect(ctx.calls.map(({ method, path }) => [method, path])).toEqual([['GET', '/api/sessions/business']]);
+    expect((await ctx.request('/business/conversations', { token: ctx.tokens.member })).status).toBe(404);
+    expect(ctx.calls).toHaveLength(1);
+    expect((await ctx.request('/business/start', { method: 'POST' })).status).toBe(200);
+    expect((await (await ctx.request()).json()).accounts.map((a) => a.id)).toEqual(['business']);
+    await ctx.owners.init();
+    expect(ctx.owners.ownerOf('business')).toBe(1);
+  });
+
+  it('does not claim an unknown account when WAHA cannot confirm whether it exists', async () => {
+    const ctx = await setup();
+    ctx.setFailure(500);
+    expect((await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member })).status).toBe(
+      502,
+    );
+    expect(ctx.owners.ownerOf('business')).toBeNull();
+    ctx.setFailure(0);
+    ctx.setCurrent({ name: 'business', status: 'STOPPED' });
+    expect((await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member })).status).toBe(
+      404,
+    );
+    expect(ctx.owners.ownerOf('business')).toBe(1);
+  });
+
+  it.each([
+    [
+      new Error("UPDATE denied for user 'internal'@'db-host' on table 'app_settings'"),
+      502,
+      'WhatsApp returned an unexpected response',
+    ],
+    [
+      Object.assign(new Error('WhatsApp ownership could not be loaded; try again shortly'), { status: 503 }),
+      503,
+      'WhatsApp ownership could not be loaded; try again shortly',
+    ],
+  ])(
+    'handles ownership persistence errors without starting the account (%s)',
+    async (error, status, message) => {
+      const ctx = await setup({ ownershipError: error });
+      const response = await ctx.request('/ana/start', { method: 'POST', token: ctx.tokens.member });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({ error: message });
+      expect(ctx.owners.ownerOf('ana')).toBeNull();
+      expect(ctx.calls).toEqual([]);
+    },
+  );
+
+  it('rejects starting an excluded account without granting ownership or contacting WAHA', async () => {
+    const ctx = await setup({
+      initialAccount: { name: 'business', status: 'WORKING' },
+      accounts: ['default'],
+    });
+    const response = await ctx.request('/business/start', { method: 'POST', token: ctx.tokens.member });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'WhatsApp account, chat or message not found' });
+    expect(ctx.owners.ownerOf('business')).toBeNull();
     expect(ctx.calls).toEqual([]);
   });
 
