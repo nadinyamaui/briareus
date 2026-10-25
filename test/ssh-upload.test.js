@@ -7,6 +7,7 @@ import { hash } from 'node:crypto';
 import { createSshService } from '../lib/ssh.js';
 import { MAX_SSH_UPLOAD_BYTES, sshUploadCommand, withSshUpload } from '../lib/ssh-upload.js';
 
+vi.mock('../lib/config.js', () => ({ getConfig: () => ({ credentialsKey: 'k'.repeat(32) }) }));
 vi.mock('../lib/db.js', () => ({ loadAppSetting: vi.fn(), saveAppSetting: vi.fn() }));
 let dir, job, service, server, execute, sourcePath, destination, bytes;
 const remote = { repo: 'owner/repo', host: 'fixture.example', username: 'deploy' };
@@ -31,6 +32,7 @@ beforeEach(async () => {
   server = await service.create(remote);
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   await fs.rm(dir, { recursive: true, force: true });
 });
 const upload = (extra = {}) =>
@@ -88,6 +90,42 @@ describe('private SSH upload approval and transfer', { timeout: 30000 }, () => {
       expect(execute).not.toHaveBeenCalled();
       expect(await fs.stat(destination).catch(() => null)).toBeNull();
       vi.restoreAllMocks();
+    },
+  );
+  it.each(['ask', 'allow'].flatMap((mode) => ['turn', 'host', 'password'].map((change) => [mode, change])))(
+    'rejects a %s-mode upload when %s changes during the initial read',
+    async (permissionMode, change) => {
+      await service.update(server.id, { permissionMode });
+      let release, started;
+      const paused = new Promise((resolve) => {
+        started = resolve;
+      });
+      const resume = new Promise((resolve) => {
+        release = resolve;
+      });
+      const realpath = fs.realpath.bind(fs);
+      const read = vi.spyOn(fs, 'realpath').mockImplementationOnce(async (...args) => {
+        started();
+        await resume;
+        return realpath(...args);
+      });
+      const pending = upload();
+      const rejected = expect(pending).rejects.toThrow('changed');
+      await paused;
+      try {
+        if (change === 'turn') job.turns++;
+        else
+          await service.update(server.id, {
+            [change]: change === 'host' ? 'replacement.example' : 'new-password',
+          });
+      } finally {
+        release();
+        read.mockRestore();
+      }
+      await rejected;
+      expect(service.pending()).toEqual([]);
+      expect(execute).not.toHaveBeenCalled();
+      expect(await fs.stat(destination).catch(() => null)).toBeNull();
     },
   );
   it('rechecks disabling and session cancellation after approval while reading the source', async () => {
@@ -165,6 +203,21 @@ describe('SSH upload source and project boundaries', () => {
     await expect(upload({ sourcePath: link })).rejects.toThrow();
     await fs.truncate(sourcePath, MAX_SSH_UPLOAD_BYTES + 1);
     await expect(upload()).rejects.toThrow('25 MiB');
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it('rejects parent traversal before a symlink path can be normalized to a different file', async () => {
+    const workspace = path.join(dir, 'workspace');
+    const outside = path.join(dir, 'outside');
+    await fs.mkdir(workspace);
+    await fs.mkdir(path.join(outside, 'sub'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'file.txt'), 'workspace bytes');
+    await fs.writeFile(path.join(outside, 'file.txt'), 'requested bytes');
+    await fs.symlink(path.join(outside, 'sub'), path.join(workspace, 'link'));
+    job.workDir = workspace;
+    const ambiguous = workspace + '/link/../file.txt';
+    expect(await fs.readFile(ambiguous, 'utf8')).toBe('requested bytes');
+    await expect(upload({ sourcePath: ambiguous })).rejects.toThrow('parent traversal');
+    expect(service.pending()).toEqual([]);
     expect(execute).not.toHaveBeenCalled();
   });
   it('permits only attachments delivered to this session, including orchestrators without a workspace', async () => {
