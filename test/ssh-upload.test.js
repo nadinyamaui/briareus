@@ -128,6 +128,35 @@ describe('private SSH upload approval and transfer', { timeout: 30000 }, () => {
       expect(await fs.stat(destination).catch(() => null)).toBeNull();
     },
   );
+  it.each(
+    ['initial', 'approved'].flatMap((stage) => ['turnCanceled', 'closing'].map((flag) => [stage, flag])),
+  )('rejects uploads when %s read is interrupted by %s', async (stage, flag) => {
+    const request = stage === 'approved' ? await upload() : null;
+    let release, started;
+    const paused = new Promise((resolve) => {
+      started = resolve;
+    });
+    const resume = new Promise((resolve) => {
+      release = resolve;
+    });
+    const realpath = fs.realpath.bind(fs);
+    vi.spyOn(fs, 'realpath').mockImplementationOnce(async (...args) => {
+      started();
+      await resume;
+      return realpath(...args);
+    });
+    let rejected;
+    if (request) service.decide(request.id, 'approve');
+    else rejected = expect(upload()).rejects.toThrow('changed');
+    await paused;
+    job[flag] = true;
+    release();
+    if (request) expect((await finished(request.id)).status).toBe('failed');
+    else await rejected;
+    expect(service.pending()).toEqual([]);
+    expect(execute).not.toHaveBeenCalled();
+    expect(await fs.stat(destination).catch(() => null)).toBeNull();
+  });
   it('rechecks disabling and session cancellation after approval while reading the source', async () => {
     const r = await upload();
     service.decide(r.id, 'approve');
@@ -170,6 +199,33 @@ describe('private SSH upload approval and transfer', { timeout: 30000 }, () => {
     });
     expect(execute).not.toHaveBeenCalled();
   });
+  it('accepts startup output before the final receipt from the real receiver', async () => {
+    execute.mockImplementation((_server, command, _timeout, _sudo, payload) =>
+      shell('echo "Welcome to the server"; ' + command, payload),
+    );
+    const r = await upload();
+    service.decide(r.id, 'approve');
+    expect((await finished(r.id)).status).toBe('completed');
+    expect(await fs.readFile(destination)).toEqual(bytes);
+  });
+  it.each(['', 'wrong receipt', 'suffix', 'extra line', 'leading space', 'trailing space'])(
+    'rejects a missing or malformed final receipt: %s',
+    async (kind) => {
+      const receipt = `${bytes.length} ${hash('sha256', bytes)}`;
+      const stdout = {
+        '': 'Welcome\n',
+        'wrong receipt': 'Welcome\n0 wrong\n',
+        suffix: `Welcome\nx${receipt}\n`,
+        'extra line': `Welcome\n${receipt}\nextra\n`,
+        'leading space': `Welcome\n ${receipt}\n`,
+        'trailing space': `Welcome\n${receipt} \n`,
+      }[kind];
+      execute.mockResolvedValueOnce({ error: null, stdout, exitCode: 0 });
+      const r = await upload();
+      service.decide(r.id, 'approve');
+      expect((await finished(r.id)).error).toContain('receipt');
+    },
+  );
   it('reports remote failures and invalid receipts without retrying', async () => {
     await service.update(server.id, { permissionMode: 'allow' });
     execute.mockResolvedValueOnce({ error: 'Host key verification failed', stdout: '', exitCode: 255 });
@@ -203,6 +259,24 @@ describe('SSH upload source and project boundaries', () => {
     await expect(upload({ sourcePath: link })).rejects.toThrow();
     await fs.truncate(sourcePath, MAX_SSH_UPLOAD_BYTES + 1);
     await expect(upload()).rejects.toThrow('25 MiB');
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it('accepts configured and canonical workspace paths while rejecting symlinks below the root', async () => {
+    const alias = path.join(dir, 'alias');
+    const workspace = path.join(dir, 'workspace');
+    await fs.mkdir(workspace);
+    await fs.symlink(workspace, alias);
+    await fs.writeFile(path.join(workspace, 'file.txt'), 'workspace bytes');
+    await fs.symlink(sourcePath, path.join(workspace, 'link'));
+    job.workDir = alias;
+    for (const root of [alias, workspace]) {
+      await expect(withSshUpload(job, path.join(root, 'file.txt'), (data) => data.toString())).resolves.toBe(
+        'workspace bytes',
+      );
+      await expect(upload({ sourcePath: path.join(root, 'link') })).rejects.toThrow();
+      await expect(upload({ sourcePath: root + '/../owner.xlsx' })).rejects.toThrow('parent traversal');
+    }
+    await expect(upload()).rejects.toThrow();
     expect(execute).not.toHaveBeenCalled();
   });
   it('rejects parent traversal before a symlink path can be normalized to a different file', async () => {
