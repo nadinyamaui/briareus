@@ -3,6 +3,7 @@ import { EventEmitter } from 'events';
 import { AsyncResource } from 'async_hooks';
 import { PassThrough } from 'stream';
 import fs from 'fs';
+import fsp from 'node:fs/promises';
 import os from 'os';
 import path from 'path';
 import { spawn, spawnSync } from 'child_process';
@@ -2762,6 +2763,115 @@ describe('spawnWorkerSession', () => {
       }
     },
   );
+
+  it('invalidates pending SSH approvals while a reply waits for browser startup', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.awaitingAnswer = false;
+    const { children, settled, restore } = fakeClaude();
+    const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+    await ssh.init();
+    const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+    let release;
+    try {
+      let done = settled(job);
+      sendDevMessage(job.id, 'Check the server');
+      children[0].emitLines(init, replay('Check the server'));
+      const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+      children[0].emitLines(said('<ask-user>Approve SSH first?</ask-user>'), result('Asked.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(ssh.pending()).toEqual([request]);
+      job.browser = true;
+      startBrowser.mockImplementationOnce(() => new Promise((resolve) => (release = resolve)));
+      done = settled(job);
+      sendDevMessage(job.id, 'Skip that command; do something else');
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      expect(job.status).toBe('running');
+      expect(job.awaitingAnswer).toBe(false);
+      expect(children).toHaveLength(1);
+      const pending = ssh.pending();
+      let approvalError;
+      try {
+        ssh.decide(request.id, 'approve');
+      } catch (error) {
+        approvalError = error;
+      }
+      // Finish the held turn before assertions so a red run leaves no background turn.
+      release();
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      children[1].emitLines(init, replay('Skip that command; do something else'), result('Done.'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+      expect(pending).toEqual([]);
+      expect(approvalError?.message).toContain('no longer');
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      release?.();
+      delete job.browser;
+      restore();
+    }
+  });
+
+  it.each([false, true])('preserves upload cancellation across a new turn (Stop: %s)', async (stop) => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.awaitingAnswer = false;
+    const { children, settled, restore } = fakeClaude();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-stop-restart-'));
+    const sourcePath = path.join(dir, 'payload.txt');
+    fs.writeFileSync(sourcePath, 'private payload');
+    const attachments = job.sshUploadAttachments;
+    job.sshUploadAttachments = [sourcePath];
+    let request, release;
+    const execute = vi.fn(async () => ({
+      stdout: `${request.upload.size} ${request.upload.sha256}\n`,
+      error: null,
+    }));
+    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+    await ssh.init();
+    const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+    const open = fsp.open.bind(fsp);
+    let read;
+    try {
+      let done = settled(job);
+      sendDevMessage(job.id, 'Upload the file');
+      children[0].emitLines(init, replay('Upload the file'));
+      request = await ssh.upload(job, { serverId: server.id, sourcePath, destination: '/tmp/payload.txt' });
+      read = vi.spyOn(fsp, 'open').mockImplementationOnce(async (...args) => {
+        await new Promise((resolve) => (release = resolve));
+        return open(...args);
+      });
+      ssh.decide(request.id, 'approve');
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      if (stop) cancelDevTurn(job.id);
+      children[0].emitLines(result('Done.'));
+      if (!stop) await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      done = settled(job);
+      sendDevMessage(job.id, 'Do something else');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(job.turnCanceled).toBe(false);
+      release();
+      await vi.waitFor(() => expect(ssh.result(job, request.id).status).not.toBe('running'));
+      children[1].emitLines(init, replay('Do something else'), result('Done.'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+      expect(ssh.result(job, request.id).status).toBe(stop ? 'failed' : 'completed');
+      expect(execute).toHaveBeenCalledTimes(stop ? 0 : 1);
+    } finally {
+      release?.();
+      read?.mockRestore();
+      job.sshUploadAttachments = attachments;
+      fs.rmSync(dir, { recursive: true, force: true });
+      restore();
+    }
+  });
 
   it.each(['publication', 'compaction'])(
     'expires unanswered SSH requests before %s can expose a finished turn as running',
