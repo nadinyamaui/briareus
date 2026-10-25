@@ -78,6 +78,37 @@ describe('private SSH upload approval and transfer', { timeout: 30000 }, () => {
     expect(await fs.readFile(destination)).toEqual(bytes);
     expect(execute).toHaveBeenCalledTimes(1);
   });
+  it.each(['running', 'idle'])(
+    'finishes an approved upload when the reply turn is %s after a delayed read',
+    async (status) => {
+      job.sshApprovalTurn = 'original-turn';
+      const r = await upload();
+      job.status = 'idle';
+      job.awaitingAnswer = true;
+      let release, started;
+      const paused = new Promise((resolve) => {
+        started = resolve;
+      });
+      const resume = new Promise((resolve) => {
+        release = resolve;
+      });
+      const realpath = fs.realpath.bind(fs);
+      vi.spyOn(fs, 'realpath').mockImplementationOnce(async (...args) => {
+        started();
+        await resume;
+        return realpath(...args);
+      });
+      expect(service.decide(r.id, 'approve').status).toBe('running');
+      await paused;
+      job.awaitingAnswer = false;
+      job.sshApprovalTurn = 'reply-turn';
+      job.status = status;
+      release();
+      expect((await finished(r.id)).status).toBe('completed');
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(await fs.readFile(destination)).toEqual(bytes);
+    },
+  );
   it('allow mode starts once and replaces an existing destination atomically', async () => {
     await service.update(server.id, { permissionMode: 'allow' });
     await fs.writeFile(destination, 'old');

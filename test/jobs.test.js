@@ -2739,6 +2739,55 @@ describe('spawnWorkerSession', () => {
     }
   });
 
+  it.each(['publication', 'compaction'])(
+    'expires unanswered SSH requests before %s can expose a finished turn as running',
+    async (window) => {
+      const job = getJob('bg-claude');
+      job.status = 'idle';
+      job.awaitingAnswer = false;
+      const { children, settled, restore } = fakeClaude();
+      const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+      const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+      await ssh.init();
+      const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+      let release;
+      const sync = vi.spyOn(r2, 'syncVideos').mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve({ uploaded: [], failed: [], deferred: 0 });
+          }),
+      );
+      try {
+        const done = settled(job);
+        sendDevMessage(job.id, 'Check the server');
+        children[0].emitLines(init, replay('Check the server'));
+        const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+        children[0].emitLines(said('Done.'), result('Done.'));
+        await vi.waitFor(() => expect(children[0].ended).toBe(true));
+        children[0].emit('close', 0);
+        await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+        if (window === 'compaction') {
+          release();
+          await done;
+          expect(job.status).toBe('idle');
+          // No SSH sweep during idle: manual compaction exposes this same identity as running.
+          job.status = 'running';
+        }
+        expect(job.status).toBe('running');
+        expect(ssh.pending()).toEqual([]);
+        expect(() => ssh.decide(request.id, 'approve')).toThrow('no longer');
+        expect(execute).not.toHaveBeenCalled();
+        release();
+        await done;
+      } finally {
+        release?.();
+        sync.mockRestore();
+        job.status = 'idle';
+        restore();
+      }
+    },
+  );
+
   it('keeps every question a turn asks for the inbox, and starts over once they are answered', async () => {
     const job = getJob('bg-claude');
     job.status = 'idle';
