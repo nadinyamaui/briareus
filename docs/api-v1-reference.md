@@ -1809,6 +1809,18 @@ Choose the users one project or server is shared with. Needs `admin`.
 
 **Returns** `{ kind: string, id: string, userIds: integer[] }`. Replaces the whole list. A member loses a project from every token they hold as soon as it is no longer shared with them.
 
+### `GET /settings/projects/{id}/backup`
+
+Read the last main database backup status. Needs `admin`.
+
+**Returns** `{ status: object? }`
+
+### `POST /settings/projects/{id}/backup`
+
+Back up the main database to R2 now. Needs `admin`.
+
+**Returns** 202 `{ status: object? }`
+
 ### `GET /settings/projects/{id}/update`
 
 Read how the project’s local checkout last updated itself. Needs `admin`.
@@ -2839,6 +2851,7 @@ A project’s full settings. A body may carry any of these; what it leaves out k
 | `dbPoolEnabled`             | `boolean`  | Whether its sessions claim a database server                                                                                                                                                                                                                                                                                                                       |
 | `dbPoolDatabase`            | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
 | `dbRestoreSql`              | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `databaseBackupEnabled`     | `boolean`  | Back up the main local checkout database daily to R2, compressed and encrypted with CREDENTIALS_KEY; defaults to false for new projects                                                                                                                                                                                                                            |
 | `dbExtensions`              | `string[]` |                                                                                                                                                                                                                                                                                                                                                                    |
 | `envTemplate`               | `string`   | The `.env` written into a checkout                                                                                                                                                                                                                                                                                                                                 |
 | `runCommands`               | `string[]` | What ▶ Run runs                                                                                                                                                                                                                                                                                                                                                    |
@@ -3419,6 +3432,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `DELETE /api/projects/:id`                                                       | `DELETE /settings/projects/{id}`                                                |
 | `GET /api/shares`                                                                | `GET /settings/shares`                                                          |
 | `PUT /api/shares`                                                                | `PUT /settings/shares`                                                          |
+| `GET /api/projects/:id/backup`                                                   | `GET /settings/projects/{id}/backup`                                            |
+| `POST /api/projects/:id/backup`                                                  | `POST /settings/projects/{id}/backup`                                           |
 | `GET /api/projects/:id/update`                                                   | `GET /settings/projects/{id}/update`                                            |
 | `POST /api/projects/:id/update`                                                  | `POST /settings/projects/{id}/update`                                           |
 | `GET /api/templates`                                                             | `GET /settings/templates`                                                       |
