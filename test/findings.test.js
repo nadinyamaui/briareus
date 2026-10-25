@@ -716,6 +716,16 @@ describe('latestTestVerdict', () => {
     '**`none`**',
     '~~TBD~~',
     '~~**N/A**~~',
+    'No evidence available',
+    'No evidence available.',
+    'no evidence',
+    'NO EVIDENCE PROVIDED',
+    '**No evidence available**',
+    '<span>No evidence available</span>',
+    'not run',
+    'not yet run',
+    '_not executed_',
+    'not tested',
   ])('keeps placeholder evidence incomplete: %s', async (evidence) => {
     gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
@@ -750,6 +760,9 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ UI manual payment is recorded',
+    '✅ API blocked user is not allowed',
+    '✅ UI pending payment is shown as required',
     '✅ API blocked user gets 403',
     '✅ UI pending payment displays correctly',
     '✅ UI pending payment appears',
@@ -798,6 +811,18 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI manual verification is required',
+    '✅ API; UI pending while credentials are missing',
+    '✅ API; UI testing has not been run',
+    '✅ API; UI did not run',
+    '✅ API; UI requires a manual check',
+    '✅ API; UI manual verification is still required',
+    '✅ API; UI pending while credentials are currently unavailable',
+    '✅ API (UI testing has not yet been executed)',
+    '✅ API/UI did not execute',
+    '✅ API<br>**UI testing** was not performed',
+    '✅ API and UI requires a manual check',
+    '✅ API blocked user is denied with 403; UI manual verification is required',
     '✅ API; UI untested',
     '✅ API; UI not started',
     '✅ API; UI has not yet been tested',
@@ -906,6 +931,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'no-evidence-available.json',
+    'not run.json',
+    'No evidence available was returned as expected',
+    'Asserted the job was not run',
+    '[response.json]()',
     '<span>response.json</span>',
     '<div><a href="https://example.com/result">response.json</a></div>',
     '<img src="https://example.com/screenshot.png">',
