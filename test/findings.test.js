@@ -921,6 +921,22 @@ describe('latestTestVerdict', () => {
     },
   );
 
+  it.each(['</details>', '</DETAILS>', '  </details>'])(
+    'ends collapsible results at %s without counting a phantom scenario',
+    async (closingTag) => {
+      const wrapped = sheet(['| 1 | API | curl /api | 200 | ✅ | response.json |', closingTag]);
+      wrapped.body = '<details>\n<summary>QA</summary>\n\n' + wrapped.body;
+      gh.comments = [wrapped];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 1,
+        manual: 0,
+        incomplete: false,
+      });
+    },
+  );
+
   it('ignores numeric prose rows outside the scenario table', async () => {
     gh.comments = [
       sheet([
@@ -1025,6 +1041,9 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'No evidence was produced',
+    '**No evidence was produced.**',
+    '<span>No evidence has been produced</span>',
     'Not run due to missing node.js',
     'No video was recorded because capture failed in capture.js',
     '**Not run due to missing node.js**',
@@ -1325,6 +1344,39 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    ['403 forbidden', 'API cannot access admin endpoint; HTTP 403 returned as expected', 'response.json'],
+    ['Access denied', 'UI cannot open admin dashboard; access denied as expected', 'video.webm'],
+  ])('accepts an observed expected access restriction: %s', async (expected, outcome, artifact) => {
+    for (const [status, evidence] of [
+      [`✅ ${outcome}`, artifact],
+      ['✅', outcome],
+    ]) {
+      for (const missing of ['', '; UI could not load the app']) {
+        gh.comments = [
+          sheet([
+            `| 1 | Unauthorized user | Log in as viewer and GET /admin | ${expected} | ${status}${missing} | ${evidence} |`,
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          total: 1,
+          passed: missing ? 0 : 1,
+          incomplete: !!missing,
+        });
+      }
+    }
+  });
+
+  it.each([
+    ['200 OK', '✅ API cannot access admin endpoint; HTTP 403 returned as expected'],
+    ['401 unauthorized', '✅ API cannot access admin endpoint; HTTP 403 returned as expected'],
+    ['403 forbidden', '✅ API cannot access admin endpoint'],
+    ['Access denied', '✅ API; UI could not access the app because browser connection was refused'],
+  ])('keeps an unobserved or unexpected restriction incomplete: %s / %s', async (expected, status) => {
+    gh.comments = [sheet([`| 1 | Mixed | curl then browser | ${expected} | ${status} | response.json |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
+  it.each([
     ['Manual refund', 'Refund successful', 'API manual refund successful'],
     ['Manual refund', 'Refund successful', 'API manual refund refunded successfully'],
     ['Blocked user', 'Redirect to login', 'UI blocked user redirected to login'],
@@ -1368,6 +1420,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI cannot perform tests',
+    '✅ API; UI could not load the app',
+    '✅ API; UI could not be performed',
+    '✅ API; UI execution was unsuccessful',
     '✅ API; browser: could not connect',
     '✅ API; UI could not access the app because browser connection was refused',
     '✅ API; browser could not connect to http://localhost:4300',
@@ -1622,6 +1678,9 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'no-evidence-was-produced.json',
+    'No evidence was produced was returned as expected',
+    '[No evidence was produced](https://example.com/result)',
     'not-run-due-to-missing-node.js',
     'capture.js',
     '[capture.js](https://example.com/capture.js)',
