@@ -1987,6 +1987,32 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    ['HTTP 403 Forbidden', 'API login failed with HTTP 403 as expected'],
+    ['HTTP 404 Not Found', 'API login failed with HTTP 404 as expected'],
+    ['HTTP 504', 'API timed out with HTTP 504 as expected'],
+    ['HTTP 408', 'API timed out with HTTP 408 as expected'],
+  ])('accepts matching observed HTTP errors: %s / %s', async (expected, outcome) => {
+    for (const [status, evidence] of [
+      [`✅ ${outcome}`, 'response.json'],
+      ['✅', `${outcome}; response.json`],
+    ]) {
+      for (const unfinished of ['', '; UI tests unverified', '; UI setup failed']) {
+        gh.comments = [
+          sheet([
+            `| 1 | Negative API check | POST /login or slow upstream | ${expected} | ${status}${unfinished} | ${evidence} |`,
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          failures: [],
+          total: 1,
+          passed: unfinished ? 0 : 1,
+          incomplete: !!unfinished,
+        });
+      }
+    }
+  });
+
+  it.each([
     ['UI connects normally', 'UI cannot connect as expected'],
     ['Cannot complete registration', 'UI cannot complete checkout as expected'],
     ['Cannot finish checkout', 'UI cannot finish checkout before tests started'],
@@ -2005,6 +2031,14 @@ describe('latestTestVerdict', () => {
     ['HTTP 401', 'UI browser login failed: invalid credentials error was displayed'],
     ['200 OK', 'API login failed as expected'],
     ['HTTP 200', 'API timed out as expected'],
+    ['HTTP 200', 'API timed out with HTTP 504 as expected'],
+    ['HTTP 408', 'API timed out with HTTP 504 as expected'],
+    ['HTTP 504', 'API timed out with HTTP 408 as expected'],
+    ['HTTP 401', 'API login failed with HTTP 403 as expected'],
+    ['HTTP 403', 'API login failed with HTTP 401 as expected'],
+    ['HTTP 403', 'API login failed with HTTP 403 before tests started'],
+    ['HTTP 504', 'API timed out with HTTP 504 before tests started'],
+    ['HTTP 504', 'UI browser startup failed with HTTP 504 as expected'],
     ['HTTP 200', 'UI timed out error was displayed as expected'],
     ['Timeout error is displayed', 'UI timed out before tests started'],
     ['Login fails', 'UI browser login failed as expected'],
@@ -2734,6 +2768,78 @@ describe('latestTestVerdict', () => {
   ])('keeps explicit failed capture and deleted evidence incomplete: %s', async (evidence) => {
     gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
+  it.each([
+    'No evidence was retained',
+    'No evidence exists for this scenario',
+    'No evidence exists for this test',
+    'No evidence exists for this check',
+    'Pending upload',
+    'Not recorded for this run',
+    'Not captured for this scenario',
+    'Evidence was lost',
+    'UI screenshot unavailable',
+    'N/A because no execution environment',
+    'No evidence was retained: could not save response.json',
+    'Evidence was lost: response.json',
+  ])('rejects whole-cell evidence absence: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`]) {
+      gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        failures: [],
+        total: 1,
+        passed: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'UI tests unverified',
+    'UI execution prevented by missing credentials',
+    'UI tests were not carried out',
+    'UI tests could not proceed',
+    'UI tests did not proceed',
+    'UI testing has not occurred',
+    'UI could not test because browser unavailable',
+    'Could not test UI because browser credentials are missing',
+    'unable to verify UI because browser unavailable',
+  ])('retains explicit missing execution: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅', `API response.json; ${annotation}`],
+      ['✅', annotation],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl and browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        failures: [],
+        total: 1,
+        passed: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'No evidence was retained was displayed as expected',
+    'No evidence exists for this scenario was returned as expected',
+    'Pending upload was shown as expected',
+    'Not recorded for this run was observed as expected',
+    'Evidence was lost was displayed as expected',
+    'UI screenshot unavailable was shown as expected',
+    'N/A because no execution environment was returned as expected',
+    'Could not test UI was displayed as expected',
+    'UI unverified user was denied as expected',
+    'UI prevented duplicate payment as expected',
+    'Unable to verify UI was returned as expected',
+    'no-evidence-was-retained.json',
+    'pending-upload.json',
+    '[Evidence was lost](https://example.test/result)',
+    '[UI screenshot unavailable](https://example.test/result)',
+  ])('preserves observed messages and artifacts for absence wording: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl /api | Expected message | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
   it.each([
