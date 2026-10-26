@@ -2567,6 +2567,39 @@ describe('latestTestVerdict', () => {
     },
   );
 
+  it.each([
+    'Could not run UI tests because Chromium is unavailable',
+    'Could not execute browser checks because no browser is installed',
+    "Couldn't run UI tests because Chromium is unavailable",
+    'Unable to execute browser checks because no browser is installed',
+    'UI yet untested',
+    'UI awaits manual testing',
+  ])('retains inverted inability and pending execution clauses: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅', `[API response](https://example.test/response.json); ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl and browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'UI yet untested label is displayed',
+    'UI awaits manual testing label is shown',
+    'Could not run UI tests was displayed as expected',
+    'Could not execute browser checks was returned as expected',
+  ])('preserves observed pending and inability messages: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | Negative test | Run | Expected message | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
   it.each([' but ', ', but ', '; but '])(
     'retains unfinished contrastive procedure clauses with %s',
     async (separator) => {
@@ -2725,6 +2758,25 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'Evidence not retained',
+    'Evidence was not retained',
+    '**Evidence not retained**',
+    '<span>Evidence not retained</span>',
+    'No evidence exists for this run',
+    '**No evidence exists for this run**',
+    '<span>No evidence exists for this run</span>',
+    'No evidence exists for this run. Upload of response.json failed.',
+  ])('keeps unretained and run-qualified evidence absent: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
+  it.each([
+    'Evidence not retained was displayed as expected',
+    'No evidence exists for this run was returned as expected',
+    'evidence-not-retained.json',
+    '[Evidence not retained](https://example.com/result)',
+    '[No evidence exists for this run](https://example.com/result)',
     'No evidence was supplied was shown as expected',
     'No evidence saved, upload failed was returned as expected',
     'no-evidence-was-supplied.json',
