@@ -1041,6 +1041,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'Not recorded yet',
+    '**Not recorded yet.**',
+    '<span>No evidence has been uploaded yet</span>',
+    'No evidence has been uploaded yet',
     'Evidence was not generated',
     '**Evidence was not generated.**',
     '<span>Evidence was not produced</span>',
@@ -1295,6 +1299,13 @@ describe('latestTestVerdict', () => {
 
   it.each([
     [
+      'Reject invalid request',
+      'POST /users with invalid email; check HTTP 422 validation response',
+      'HTTP 422 and validation error',
+      '✅ API validation failed as expected',
+      'response.json',
+    ],
+    [
       'Queue a pending job',
       'POST /jobs',
       'HTTP 202 queued',
@@ -1462,6 +1473,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI - not run',
+    '✅ API; Safari not installed',
+    '✅ API; UI could not render',
+    '✅ API; UI blocked browser startup returns 500',
+    '✅ API; UI blocked login returns 500',
     '✅ API; UI navigation failed before execution',
     '✅ API; UI was not possible on this host',
     '✅ API; UI: TODO',
@@ -1730,6 +1746,9 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'not recorded yet.json',
+    'No evidence has been uploaded yet was returned as expected',
+    '[Not recorded yet](https://example.com/result)',
     'evidence-was-not-generated.json',
     'could-not-run.webm',
     'Evidence was not generated was returned as expected',
