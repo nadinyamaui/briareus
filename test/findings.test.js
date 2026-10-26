@@ -1301,6 +1301,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'No evidence: could not save response.json',
+    'No evidence. Could not save response.json',
+    '**No evidence: could not save response.json**',
+    '<span>No video. Could not save capture.webm</span>',
     'No evidence was captured because upload failed for response.json',
     'No video was recorded because capture failed in capture.webm',
     '**No evidence was captured because upload failed for response.json**',
@@ -1774,6 +1778,45 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    ['HTTP 401 and invalid credentials shown', 'UI login failed with HTTP 401 as expected'],
+    ['HTTP 401 and invalid credentials shown', 'UI login failed: invalid credentials error was displayed'],
+    ['401 Unauthorized', 'API login failed with HTTP 401 Unauthorized as expected'],
+    ['Incorrect password error is shown', 'UI login failed: incorrect password error was shown'],
+  ])('accepts an observed login rejection: %s / %s', async (expected, outcome) => {
+    for (const [status, evidence] of [
+      [`✅ ${outcome}`, '[video](https://example.com/login.webm)'],
+      ['✅', `${outcome}; [video](https://example.com/login.webm)`],
+    ]) {
+      for (const [statusSuffix, evidenceSuffix] of [
+        ['', ''],
+        ['; UI browser tests were not run', ''],
+        ['', '; UI assertions were never executed'],
+        ['; UI setup failed', ''],
+      ]) {
+        gh.comments = [
+          sheet([
+            `| 1 | Invalid password | Submit bad credentials | ${expected} | ${status}${statusSuffix} | ${evidence}${evidenceSuffix} |`,
+          ]),
+        ];
+        const incomplete = !!(statusSuffix || evidenceSuffix);
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          failures: [],
+          total: 1,
+          passed: incomplete ? 0 : 1,
+          incomplete,
+        });
+      }
+    }
+  });
+
+  it.each([
+    ['HTTP 200', 'UI login failed with HTTP 401 as expected'],
+    ['HTTP 401', 'UI login failed with HTTP 500 as expected'],
+    ['HTTP 403 and invalid credentials shown', 'UI login failed with HTTP 401 as expected'],
+    ['HTTP 200', 'UI login failed: invalid credentials error was displayed'],
+    ['HTTP 401', 'UI login failed with HTTP 401 before tests started'],
+    ['HTTP 401', 'UI browser login failed with HTTP 401 as expected'],
+    ['HTTP 401', 'UI browser login failed: invalid credentials error was displayed'],
     ['200 OK', 'API login failed as expected'],
     ['HTTP 200', 'API timed out as expected'],
     ['HTTP 504', 'UI setup failed as expected'],
@@ -2244,6 +2287,14 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI browser tests were not run',
+    'UI Playwright tests were not executed',
+    'UI browser automation was skipped',
+    'UI assertions not executed',
+    'UI assertions skipped',
+    'UI assertions were never executed',
+    'UI browser regression tests have not been run',
+    'UI Playwright assertions were not checked',
     'UI has yet to run',
     'UI could not be exercised',
     'UI missing credentials prevents execution',
