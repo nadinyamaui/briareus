@@ -61,6 +61,22 @@ it('supports PostgreSQL URLs and reports missing databases without leaking URLs'
   expect(await databaseSource(project)).toBeNull();
 });
 
+it.each([
+  'DB_CONNECTION=pgsql\nDB_DATABASE=main data',
+  'DATABASE_URL=postgresql://backup@localhost/main%20data',
+])('accepts explicitly configured database names containing spaces: %s', async (text) => {
+  await env(text);
+  expect(await databaseSource(project)).toMatchObject({ type: 'pgsql', database: 'main data' });
+});
+
+it.each(['main host=other', 'postgresql://other/main', 'main\tdata', 'main\0data'])(
+  'rejects connection strings and control characters in database names: %s',
+  async (database) => {
+    await env(`DB_CONNECTION=pgsql\nDB_DATABASE="${database}"`);
+    await expect(databaseSource(project)).rejects.toThrow('Invalid database name');
+  },
+);
+
 it('preserves omitted URL fields and distinguishes explicitly empty credentials', async () => {
   const fields = 'DB_DATABASE=fallback\nDB_USERNAME=actual_user\nDB_PASSWORD=actual_password\nDB_PORT=3307\n';
   await env(fields + 'DB_URL=mysql://localhost');
@@ -242,14 +258,14 @@ it.each(['mysql', 'pgsql'])(
       host: 'localhost',
       port: 3306,
       user: 'u',
-      database: 'main',
+      database: 'main data',
       password: 'never-in-arguments',
     };
     await dumpDatabase(source, file, secret);
     const capture = JSON.parse(await fs.readFile(captured, 'utf8'));
     expect(capture.password).toBe(source.password);
     expect(capture.args).not.toContain(source.password);
-    expect(capture.args).toContain('main');
+    expect(capture.args).toContain('main data');
     if (type === 'pgsql') expect(capture.hostaddr).toBeUndefined();
     else {
       expect(capture.args[0]).toBe('--no-defaults');
@@ -288,6 +304,7 @@ function service(options = {}) {
   let time = 1800000000000;
   const backups = createDatabaseBackups({
     projects: () => [project],
+    getProject: async (id) => (options.projects?.() || [project]).find((p) => p.id === id),
     lock: async (_key, fn) => fn(new AbortController().signal),
     config: () => ({ r2: {}, credentialsKey: secret }),
     load: async (key) => rows.get(key) || null,
@@ -503,6 +520,46 @@ describe('backup scheduler', () => {
     });
     await backups.tick();
     expect(backups.dump).not.toHaveBeenCalled();
+  });
+
+  it.each([false, null])('rechecks persisted opt-in under the lock (enabled=%s)', async (enabled) => {
+    const save = vi.fn();
+    let current = { ...project };
+    const getProject = vi.fn(async () => current);
+    const backups = service({
+      getProject,
+      save,
+      lock: async (_key, fn) => {
+        current = enabled === null ? null : { ...current, databaseBackupEnabled: enabled };
+        return fn(new AbortController().signal);
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await backups.tick();
+    backups.advance(25 * 3600000);
+    await backups.tick();
+    await expect(backups.run(project)).rejects.toThrow('Database backup is disabled');
+    expect(project.databaseBackupEnabled).toBe(true);
+    expect(getProject).toHaveBeenCalledTimes(3);
+    expect(getProject).toHaveBeenCalledWith(project.id);
+    expect(backups.dump).not.toHaveBeenCalled();
+    expect(backups.upload).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    expect(await backups.status(project)).toBeNull();
+  });
+
+  it('does not export or write status when the authoritative project read fails', async () => {
+    const save = vi.fn();
+    const backups = service({
+      getProject: async () => {
+        throw new Error('Project read failed');
+      },
+      save,
+    });
+    await expect(backups.run(project)).rejects.toThrow('Project read failed');
+    expect(backups.dump).not.toHaveBeenCalled();
+    expect(backups.upload).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
   });
 
   it('does not upload or overwrite shared status after losing its lock', async () => {
