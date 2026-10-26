@@ -800,6 +800,33 @@ describe('latestTestVerdict', () => {
     }
   });
 
+  it.each([
+    '| № | Сценарий | Шаги | Ожидаемо | Результат | Доказательство |',
+    '| **№** | Сценарий | Шаги | Ожидаемо | **Результат** | _Доказательство_ |',
+  ])('retains numbered Russian results independently of execution status: %s', async (header) => {
+    for (const status of ['', 'unknown', '❌', '✅']) {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl | 200 | ✅ | response.json |',
+          '',
+          header,
+          '|---|---|---|---|---|---|',
+          `| 2 | API | curl | 200 | ${status} | ${status ? 'response.json' : ''} |`,
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures:
+          status === '❌'
+            ? [{ number: '2', scenario: 'API', expected: '200', evidence: 'response.json' }]
+            : [],
+        total: 2,
+        passed: status === '✅' ? 2 : 1,
+        manual: 0,
+        incomplete: !['❌', '✅'].includes(status),
+      });
+    }
+  });
+
   it('does not infer QA results from an unrelated numbered six-column table', async () => {
     gh.comments = [
       sheet([
@@ -1068,6 +1095,12 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'Evidence unavailable because upload failed',
+    'Evidence unavailable (upload failed)',
+    'No HTTP responses recorded',
+    '**Evidence unavailable because upload failed.**',
+    '<span>Evidence unavailable (upload failed)</span>',
+    '<span>No HTTP responses recorded</span>',
     'Evidence not yet available',
     '**Evidence not yet available.**',
     '<span>Evidence not yet available</span>',
@@ -1335,6 +1368,20 @@ describe('latestTestVerdict', () => {
 
   it.each([
     [
+      'Manual payment creation',
+      'POST /payments with manual=true',
+      'HTTP 201 and persisted payment',
+      '✅ API manual payment created successfully',
+      'response.json',
+    ],
+    [
+      'Pending payment update',
+      'PATCH /payments/1',
+      'HTTP 200 and persisted payment',
+      '✅ API pending payment updated successfully',
+      'response.json',
+    ],
+    [
       'Manual payment',
       'POST /payments with manual=true',
       'HTTP 201 and persisted payment',
@@ -1412,6 +1459,12 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    ['HTTP 404', 'API cannot access another tenant record (404 returned as expected)', 'response.json'],
+    [
+      'HTTP 404 Not Found',
+      'API cannot access another tenant record; HTTP 404 Not Found returned as expected',
+      'response.json',
+    ],
     [
       'HTTP 403 forbidden',
       'API cannot access admin endpoint; HTTP 403 Forbidden returned as expected',
@@ -1455,6 +1508,9 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    ['HTTP 403 forbidden', '✅ API cannot access another tenant record (404 returned as expected)'],
+    ['HTTP 404', '✅ API cannot access another tenant record (403 returned as expected)'],
+    ['HTTP 404', '✅ API cannot access another tenant record'],
     ['HTTP 401 unauthorized', '✅ API cannot access admin endpoint; HTTP 403 Forbidden returned as expected'],
     ['HTTP 403 forbidden', '✅ API cannot access admin endpoint; HTTP 401 Unauthorized returned as expected'],
     ['200 OK', '✅ API cannot access admin endpoint; HTTP 403 returned as expected'],
@@ -1516,6 +1572,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI could not navigate to /settings',
+    '✅ API; UI browser dependency missing',
+    '✅ API; UI ⚪ pending',
+    '✅ API; Skipped UI because browser failed',
+    '✅ API; Blocked UI because browser failed',
     '✅ API; UI will be tested manually',
     '✅ API; UI could not be launched',
     '✅ API; UI not applicable on this host',
@@ -1806,6 +1867,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'evidence-unavailable-because-upload-failed.json',
+    'no-http-responses-recorded.json',
+    '[Evidence unavailable (upload failed)](https://example.com/result)',
+    'Evidence unavailable because upload failed was returned as expected',
+    'No HTTP responses recorded was shown as expected',
     'evidence-not-yet-available.json',
     'no-execution-evidence.webm',
     'not uploaded.json',
