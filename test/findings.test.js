@@ -1095,6 +1095,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'No evidence was captured because upload failed for response.json',
+    'No video was recorded because capture failed in capture.webm',
+    '**No evidence was captured because upload failed for response.json**',
+    '<span>No video was recorded because capture failed in capture.webm</span>',
+    'Evidence was not captured because upload failed for response.json',
     'Evidence has not been captured',
     'No response body captured',
     'No screenshots recorded',
@@ -1375,6 +1380,20 @@ describe('latestTestVerdict', () => {
 
   it.each([
     [
+      'Fetch manual payment',
+      'GET /payments/1 for existing manual payment',
+      'HTTP 200 with manual payment',
+      '✅ API manual payment fetched successfully',
+      'response.json',
+    ],
+    [
+      'Read pending invoice',
+      'GET /invoices/1 for pending invoice',
+      'HTTP 200 with pending invoice',
+      '✅ API pending invoice retrieved successfully',
+      'response.json',
+    ],
+    [
       'Manual payment deletion',
       'DELETE /payments/1 for existing manual payment',
       'HTTP 204 and payment deleted',
@@ -1600,6 +1619,13 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI needs to run',
+    '✅ API; UI needs a browser',
+    '✅ API; UI not assessed',
+    '✅ API; UI ⏸️',
+    '✅ API / UI ❎',
+    '✅ API manual payment fetched successfully; UI needs to run',
+    '✅ API pending invoice retrieved successfully; UI not assessed',
     '✅ API; UI requires browser installation',
     '✅ API; UI browser not installed',
     '✅ API; UI will need browser testing',
@@ -1902,7 +1928,28 @@ describe('latestTestVerdict', () => {
     });
   });
 
+  it.each(['UI needs to run', 'UI needs a browser', 'UI not assessed', 'UI ⏸️', 'UI ❎'])(
+    'retains unfinished execution declared in evidence: %s',
+    async (annotation) => {
+      gh.comments = [
+        sheet([`| 1 | API and UI | curl then browser | Both pass | ✅ | response.json; ${annotation} |`]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    },
+  );
+
   it.each([
+    'response.json',
+    'capture.webm',
+    'no-evidence-was-captured.json',
+    'No evidence was captured because upload failed for response.json was returned as expected',
+    '[No evidence was captured](https://example.com/response.json)',
     'evidence-has-not-been-captured.json',
     'no-response-body-captured.json',
     'no-screenshots-recorded.png',
