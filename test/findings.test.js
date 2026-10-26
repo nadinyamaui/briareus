@@ -2537,6 +2537,36 @@ describe('latestTestVerdict', () => {
     }
   });
 
+  it.each([
+    'UI TBD',
+    'UI ❗ not executed',
+    'UI ⚫ blocked',
+    'UI to be done',
+    'UI outstanding',
+    'UI testing has not taken place',
+    'UI is not being tested',
+  ])('retains pending and decorated unfinished procedures: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API / ${annotation}`, 'response.json'],
+      ['✅ API', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each(['UI outstanding balance is displayed', 'UI TBD label is shown', 'UI ❗ icon is displayed'])(
+    'preserves completed business observations: %s',
+    async (annotation) => {
+      gh.comments = [
+        sheet([
+          `| 1 | Business state | Run procedure | State is displayed | ✅ ${annotation} | response.json |`,
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    },
+  );
+
   it.each([' but ', ', but ', '; but '])(
     'retains unfinished contrastive procedure clauses with %s',
     async (separator) => {
@@ -2674,6 +2704,35 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'No evidence saved, upload failed',
+    'No evidence was supplied',
+    'Evidence: none',
+    'Video: not recorded',
+    '**No evidence saved, upload failed**',
+    '<span>No evidence was supplied</span>',
+    'No evidence was supplied, upload failed for response.json',
+    '&mdash;',
+    '&ndash;',
+    '&hellip;',
+    '&#8212;',
+    '&#x2014;',
+    '&#8230;',
+    '**&mdash;**',
+    '<span>&#x2014;</span>',
+  ])('keeps labeled absence and encoded placeholders incomplete: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
+  it.each([
+    'No evidence was supplied was shown as expected',
+    'No evidence saved, upload failed was returned as expected',
+    'no-evidence-was-supplied.json',
+    'Evidence: response.json',
+    'Video: capture.webm',
+    'Evidence: none was displayed as expected',
+    '[No evidence was supplied](https://example.com/result)',
+    'response&mdash;body.json',
     'No evidence is present was shown as expected',
     'No screenshot was taken was displayed as expected',
     'No record of execution was returned as expected',
