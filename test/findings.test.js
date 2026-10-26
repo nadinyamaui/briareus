@@ -1095,6 +1095,13 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'Evidence has not been captured',
+    'No response body captured',
+    'No screenshots recorded',
+    'Video could not be recorded',
+    'No evidence was obtained',
+    '**Evidence has not been captured.**',
+    '<span>Video could not be recorded</span>',
     'Evidence unavailable because upload failed',
     'Evidence unavailable (upload failed)',
     'No HTTP responses recorded',
@@ -1368,6 +1375,27 @@ describe('latestTestVerdict', () => {
 
   it.each([
     [
+      'Manual payment deletion',
+      'DELETE /payments/1 for existing manual payment',
+      'HTTP 204 and payment deleted',
+      '✅ API manual payment deleted successfully',
+      'response.json',
+    ],
+    [
+      'Pending invoice payment',
+      'POST /invoices/1/pay for pending invoice',
+      'HTTP 200 and paid invoice',
+      '✅ API pending invoice paid successfully',
+      'response.json',
+    ],
+    [
+      'Cancelled order refund',
+      'POST /orders/1/refund for cancelled order',
+      'HTTP 200 and refunded order',
+      '✅ API cancelled order refunded successfully',
+      'response.json',
+    ],
+    [
       'Manual payment creation',
       'POST /payments with manual=true',
       'HTTP 201 and persisted payment',
@@ -1572,6 +1600,14 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI requires browser installation',
+    '✅ API; UI browser not installed',
+    '✅ API; UI will need browser testing',
+    '✅ API; UI cancelled',
+    '✅ API; UI canceled due to server outage',
+    '✅ API; API cancelled due to server outage',
+    '✅ API manual payment deleted successfully; UI requires browser installation',
+    '✅ API pending invoice paid successfully; UI cancelled',
     '✅ API; UI could not navigate to /settings',
     '✅ API; UI browser dependency missing',
     '✅ API; UI ⚪ pending',
@@ -1867,6 +1903,17 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'evidence-has-not-been-captured.json',
+    'no-response-body-captured.json',
+    'no-screenshots-recorded.png',
+    'video-could-not-be-recorded.webm',
+    'no-evidence-was-obtained.txt',
+    '[Video could not be recorded](https://example.com/result)',
+    'Evidence has not been captured was returned as expected',
+    'No response body captured was shown as expected',
+    'No screenshots recorded was displayed as expected',
+    'Video could not be recorded was observed as expected',
+    'No evidence was obtained was returned as expected',
     'evidence-unavailable-because-upload-failed.json',
     'no-http-responses-recorded.json',
     '[Evidence unavailable (upload failed)](https://example.com/result)',
