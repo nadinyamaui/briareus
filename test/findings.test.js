@@ -1823,6 +1823,27 @@ describe('latestTestVerdict', () => {
 
   it.each([
     [
+      'Offline error',
+      'Disconnect network then open app',
+      'UI cannot connect; offline error is shown',
+      'UI cannot connect as expected',
+      'offline.webm',
+    ],
+    [
+      'Terms required',
+      'Leave terms unchecked then click Pay',
+      'Cannot complete checkout',
+      'UI cannot complete checkout as expected',
+      'checkout.webm',
+    ],
+    [
+      'Terms required',
+      'Leave terms unchecked then click Pay',
+      'Cannot finish checkout',
+      'API cannot finish checkout as expected',
+      'response.json',
+    ],
+    [
       'Deleted page',
       'Delete page then open it',
       'Page cannot load after deletion',
@@ -1848,6 +1869,8 @@ describe('latestTestVerdict', () => {
           ['; UI never opened', ''],
           ['', '; UI never launched'],
           ['; UI setup failed', ''],
+          ['; frontend not run', ''],
+          ['', '; UI browser crashed before testing'],
         ]) {
           gh.comments = [
             sheet([
@@ -1898,6 +1921,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    ['UI connects normally', 'UI cannot connect as expected'],
+    ['Cannot complete registration', 'UI cannot complete checkout as expected'],
+    ['Cannot finish checkout', 'UI cannot finish checkout before tests started'],
+    ['UI cannot connect', 'UI cannot connect because browser setup failed'],
     ['Page loads normally', 'UI cannot load page as expected'],
     ['Page cannot open after deletion', 'UI cannot load page as expected'],
     ['Browser is supported', 'Browser not supported as expected'],
@@ -2388,6 +2415,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI could not reach app',
+    'UI browser crashed before testing',
+    'UI browser tests did not happen',
+    'frontend not run',
     'UI browser tests were not run',
     'UI Playwright tests were not executed',
     'UI browser automation was skipped',
@@ -2489,6 +2520,29 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    'Failed to capture response.json',
+    'Capture of response.json failed',
+    'Evidence deleted before upload',
+    'Unrecorded',
+    '**Failed to capture response.json**',
+    '<span>Capture of response.json failed</span>',
+    'Evidence was deleted before upload',
+    'Unrecorded.',
+  ])('keeps explicit failed capture and deleted evidence incomplete: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
+  it.each([
+    'unrecorded.json',
+    'failed-to-capture-response.json',
+    'capture-of-response-failed.json',
+    'evidence-deleted-before-upload.json',
+    '[Failed to capture response.json](https://example.com/result)',
+    'Failed to capture response.json was displayed as expected',
+    'Capture of response.json failed was shown as expected',
+    'Evidence deleted before upload was returned as expected',
+    'Unrecorded was observed as expected',
     'response.json',
     'capture.webm',
     'no-evidence-was-captured.json',
