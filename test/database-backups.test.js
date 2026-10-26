@@ -78,6 +78,15 @@ it.each(['main host=other', 'postgresql://other/main', 'main\tdata', 'main\0data
   },
 );
 
+it.each(['mysql', 'pgsql'])('accepts Unicode and plus signs in %s database names', async (type) => {
+  for (const database of ['café', 'cafe\u0301', '数据库', 'main+archive', '+archive']) {
+    await env(`DB_CONNECTION=${type}\nDB_DATABASE=${database}`);
+    expect(await databaseSource(project)).toMatchObject({ type, database });
+    await env(`DATABASE_URL=${type}://backup@localhost/${encodeURIComponent(database)}`);
+    expect(await databaseSource(project)).toMatchObject({ type, database });
+  }
+});
+
 it('preserves omitted URL fields and distinguishes explicitly empty credentials', async () => {
   const fields = 'DB_DATABASE=fallback\nDB_USERNAME=actual_user\nDB_PASSWORD=actual_password\nDB_PORT=3307\n';
   await env(fields + 'DB_URL=mysql://localhost');
