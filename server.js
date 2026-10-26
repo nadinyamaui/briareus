@@ -1,4 +1,5 @@
 // @ts-check
+import { createDatabaseBackups } from './lib/database-backups.js';
 import express from 'express';
 import { createDeploymentService } from './lib/deployments.js';
 import { deploymentRoutes } from './lib/deployment-routes.js';
@@ -69,6 +70,7 @@ import {
   loadAppSetting,
   updateAppSetting,
   getProviderRow,
+  getProjectRow,
 } from './lib/db.js';
 import {
   initJobs,
@@ -540,6 +542,22 @@ api.delete('/api/projects/:id', async (req, res) => {
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
   }
+});
+
+const databaseBackups = createDatabaseBackups();
+
+api.get('/api/projects/:id/backup', async (req, res) => {
+  const project = await getProjectRow(Number(req.params.id));
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  res.json({ status: await databaseBackups.status(project) });
+});
+
+api.post('/api/projects/:id/backup', async (req, res) => {
+  const project = await getProjectRow(Number(req.params.id));
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (!project.databaseBackupEnabled) return res.status(400).json({ error: 'Database backup is disabled' });
+  databaseBackups.run(project).catch((e) => console.error('Database backup failed:', e.message));
+  res.status(202).json({ status: await databaseBackups.status(project) });
 });
 
 // The local checkout's auto-update (lib/local-update.js): how its last run
@@ -2383,6 +2401,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     sessionStats.start();
     // Projects with `babysitPrs` get their pull requests' errands started every 15 minutes.
     createBabysitter().startTimer();
+    databaseBackups.start();
     // Recovered sessions must claim their slots before pruning unused clones.
     startWorkspacePruner();
     const projects = activeProjects();

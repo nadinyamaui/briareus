@@ -602,3 +602,51 @@ delivered to the session; arbitrary local paths and symlinks are rejected.
 The remote destination is an absolute file path, atomically replaced as the SSH user
 with mode `0600` after size and SHA-256 verification; `python3` is required and sudo is
 unsupported. Changed sources fail before connecting. No public file URL is involved.
+
+## Main database backups to R2
+
+Set `databaseBackupEnabled: true` with `PUT /api/v1/settings/projects/{id}`.
+The server backs up the database in the main `localDir/.env` every 24 hours,
+including projects disabled for new sessions; it never uses a session database or
+`envTemplate`. Projects without a main database are recorded as skipped.
+Existing projects are enabled by the migration except HQ (`hqrentalsoftware/*`)
+and Heedly (including its current name `okanetsolutions/oka-core`); new projects
+start with backups disabled.
+
+`POST /api/v1/settings/projects/{id}/backup` starts a backup immediately (202),
+and `GET` at the same path returns its status, last successful upload time,
+R2 object key and size, or the failure reason. Both routes require an admin token.
+Overlapping runs for one project are coalesced; failed scheduled backups retry
+hourly. MySQL needs `mysqldump`, PostgreSQL needs `pg_dump` compatible with the
+server version, and SQLite uses Node's online backup API. Database URL query
+options are rejected; databases requiring custom connection options need separate
+backup configuration.
+The self-project uses Briareus's environment parsing and separate `DB_*` fields,
+ignoring `DB_URL` and `DATABASE_URL`. MySQL projects declaring
+`mysql2` as a runtime dependency (and the self-project) use TCP, including for
+`localhost`. Other MySQL projects using `localhost` must set `DB_SOCKET` for socket
+transport or use an explicit TCP host such as `127.0.0.1`. Backups ignore MySQL
+option and login files so ambient filters cannot silently omit tables or data.
+MySQL's consistent snapshot covers transactional tables; schema changes during a
+backup and nontransactional tables require a separate maintenance window.
+
+Backups stream through gzip and AES-256-GCM before upload to the existing `R2_*`
+bucket under `database-backups/<owner>/<repo>/`. No unencrypted dump is uploaded,
+and temporary files are removed after the attempt. Keep a separate secure copy of
+`CREDENTIALS_KEY`: the original key is required to recover these backups, even if
+it has since been rotated on the server. Objects are retained until removed by
+an operator or an R2 lifecycle rule; this feature does not delete older backups.
+
+Download the encrypted object using your R2 console, then authenticate and decrypt
+it on a machine configured with the original `CREDENTIALS_KEY`:
+
+```sh
+node scripts/decrypt-database-backup.js backup.sql.gz.enc database.sql.gz
+gunzip database.sql.gz
+```
+
+The decrypt command refuses to overwrite an existing output. Import the resulting
+SQL with `mysql` or `psql` into a separate database first to verify recovery.
+For SQLite, the decrypted gzip contains the SQLite database file instead of SQL;
+unzip it to a new `.sqlite` file. Restoration is an operator action; the backup
+feature never writes to the source database.

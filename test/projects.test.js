@@ -842,3 +842,21 @@ describe('WhatsApp tool project opt-in', () => {
     expect(state.saved).toHaveLength(0);
   });
 });
+
+describe('main database backup settings', () => {
+  it('defaults off and preserves explicit choices through unrelated edits', async () => {
+    const saved = await createProject(base);
+    expect(saved.databaseBackupEnabled).toBe(false);
+    expect((await updateProject(saved.id, { databaseBackupEnabled: true })).databaseBackupEnabled).toBe(true);
+    expect((await updateProject(saved.id, { label: 'Backed up' })).databaseBackupEnabled).toBe(true);
+    expect((await updateProject(saved.id, { databaseBackupEnabled: false })).databaseBackupEnabled).toBe(
+      false,
+    );
+  });
+
+  it.each(['false', 1, null])('rejects a non-boolean backup choice: %s', async (value) => {
+    await expect(createProject({ ...base, databaseBackupEnabled: value })).rejects.toThrow(
+      'must be true or false',
+    );
+  });
+});
