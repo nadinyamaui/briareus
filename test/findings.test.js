@@ -741,7 +741,7 @@ describe('latestTestVerdict', () => {
     });
   });
 
-  it.each(['comment', 'comment with fence', '    ', '\t'])(
+  it.each(['comment', 'comment with fence', '    ', '\t', 'pre', 'PRE', 'textarea', 'script', 'style'])(
     'ignores literal sample tables in %j context and resumes real results',
     async (context) => {
       const header = '| # | Scenario | Steps | Expected | Status | Evidence |';
@@ -749,7 +749,9 @@ describe('latestTestVerdict', () => {
       const sample = [header, divider, '| 2 | Example | steps | value | ⬜ | |'];
       const hidden = context.startsWith('comment')
         ? ['<!--', ...(context.endsWith('fence') ? ['```markdown', ...sample, '```'] : sample), '-->']
-        : sample.map((line) => context + line);
+        : /^\s+$/.test(context)
+          ? sample.map((line) => context + line)
+          : [`<${context}>`, ...sample, `</${context}>`];
       for (const status of ['✅', '❌']) {
         gh.comments = [
           sheet([
@@ -1209,6 +1211,39 @@ describe('latestTestVerdict', () => {
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
+  it.each([
+    '- API assertions were checked.',
+    '> Evidence is attached above.',
+    '1. Response header values verified.',
+    '2. Response header values verified.',
+    '2) Response header values verified.',
+  ])('ends results before the Markdown block %s', async (boundary) => {
+    gh.comments = [sheet(['| 1 | API | curl /api | 200 | ✅ | response.json |', boundary])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    gh.comments[0].body += '\n\n' + sheet(['| 2 | Failure | curl /api | 200 | ❌ | saw 500 |']).body;
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({
+      failures: [{ number: '2', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+      total: 2,
+      passed: 1,
+      incomplete: false,
+    });
+  });
+
+  it.each(['✅', '⬜', '❌'])('ignores a standalone pre sample with status %s', async (status) => {
+    gh.comments = [
+      {
+        body: `${TEST_SHEET_ANCHOR}\n<pre>\n${sheet([`| 1 | Example | curl | 200 | ${status} | response.json |`]).body}\n</pre>`,
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 0,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
   it.each(['**2**', '2.', '_2_', '`2`', '~~2~~', '**2.**', '#2', '2a', '2.1', '**2.1**'])(
     'preserves failed and subsequent scenarios after formatted number %s',
     async (number) => {
@@ -1301,6 +1336,15 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'Could not capture response.json',
+    '**Could not capture response.json**',
+    '<span>Could not capture response.json</span>',
+    'Unable to save response.json',
+    'Could not record video.webm',
+    'Nothing was recorded',
+    'Nothing was captured.',
+    '**Nothing was recorded**',
+    'Nothing was saved: response.json could not be created',
     'No evidence: could not save response.json',
     'No evidence. Could not save response.json',
     '**No evidence: could not save response.json**',
@@ -1778,6 +1822,50 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    [
+      'Deleted page',
+      'Delete page then open it',
+      'Page cannot load after deletion',
+      'UI cannot load page as expected',
+      'video.webm',
+    ],
+    [
+      'Browser compatibility',
+      'Open using unsupported browser',
+      'Browser is not supported',
+      'Browser not supported as expected',
+      'result.json',
+    ],
+  ])(
+    'accepts observed expected restrictions for %s',
+    async (scenario, steps, expected, outcome, artifact) => {
+      for (const [status, evidence] of [
+        [`✅ ${outcome}`, artifact],
+        ['✅', `${outcome}; ${artifact}`],
+      ]) {
+        for (const [statusSuffix, evidenceSuffix] of [
+          ['', ''],
+          ['; UI never opened', ''],
+          ['', '; UI never launched'],
+          ['; UI setup failed', ''],
+        ]) {
+          gh.comments = [
+            sheet([
+              `| 1 | ${scenario} | ${steps} | ${expected} | ${status}${statusSuffix} | ${evidence}${evidenceSuffix} |`,
+            ]),
+          ];
+          const incomplete = !!(statusSuffix || evidenceSuffix);
+          expect(await latestTestVerdict(repo, 5)).toMatchObject({
+            total: 1,
+            passed: incomplete ? 0 : 1,
+            incomplete,
+          });
+        }
+      }
+    },
+  );
+
+  it.each([
     ['HTTP 401 and invalid credentials shown', 'UI login failed with HTTP 401 as expected'],
     ['HTTP 401 and invalid credentials shown', 'UI login failed: invalid credentials error was displayed'],
     ['401 Unauthorized', 'API login failed with HTTP 401 Unauthorized as expected'],
@@ -1810,6 +1898,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    ['Page loads normally', 'UI cannot load page as expected'],
+    ['Page cannot open after deletion', 'UI cannot load page as expected'],
+    ['Browser is supported', 'Browser not supported as expected'],
+    ['Page cannot load after deletion', 'UI cannot load page before tests started'],
+    ['Page cannot load after deletion', 'UI could not load the app because browser setup failed'],
     ['HTTP 200', 'UI login failed with HTTP 401 as expected'],
     ['HTTP 401', 'UI login failed with HTTP 500 as expected'],
     ['HTTP 403 and invalid credentials shown', 'UI login failed with HTTP 401 as expected'],
@@ -1833,6 +1926,14 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    ['✅ API passed; UI never opened', 'response.json'],
+    ['✅ API passed; UI never launched', 'response.json'],
+    ['✅ API passed; UI not opened', 'response.json'],
+    ['✅ API passed; UI not launched', 'response.json'],
+    ['✅ API', 'response.json; UI never opened'],
+    ['✅ API', 'response.json; UI never launched'],
+    ['✅ API', 'response.json; UI not opened'],
+    ['✅ API', 'response.json; UI not launched'],
     ['✅ API / ❔ UI', 'response.json'],
     ['✅ / ⚪', 'response.json'],
     ['✅ / ❔', 'response.json'],
