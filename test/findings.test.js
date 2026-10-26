@@ -801,9 +801,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '| Nº | Cenário | Passos | Esperado | Situação | Evidências |',
+    '| **Nº** | Cenário | Passos | Esperado | **Situação** | _Evidências_ |',
     '| № | Сценарий | Шаги | Ожидаемо | Результат | Доказательство |',
     '| **№** | Сценарий | Шаги | Ожидаемо | **Результат** | _Доказательство_ |',
-  ])('retains numbered Russian results independently of execution status: %s', async (header) => {
+  ])('retains localized results independently of execution status: %s', async (header) => {
     for (const status of ['', 'unknown', '❌', '✅']) {
       gh.comments = [
         sheet([
@@ -1265,6 +1267,16 @@ describe('latestTestVerdict', () => {
     'not yet run',
     '_not executed_',
     'not tested',
+    'No evidence is available',
+    'No evidence is available. Upload failed for response.json.',
+    '**No evidence is available**',
+    '<span>No evidence is available</span>',
+    'No screenshots are available',
+    'Unable to capture evidence',
+    'Unable to capture evidence. Upload failed for response.json.',
+    '**Unable to capture evidence**',
+    '<span>Unable to capture evidence</span>',
+    'Unable to save recording because capture failed for capture.webm',
     'No evidence attached. Upload failed.',
     'No evidence attached. Upload failed for response.json.',
     'Evidence missing. Upload failed.',
@@ -1541,6 +1553,8 @@ describe('latestTestVerdict', () => {
       'response.json',
     ],
     ['403 forbidden', 'API cannot access admin endpoint; HTTP 403 returned as expected', 'response.json'],
+    ['HTTP 404', 'API cannot load deleted record (404 returned as expected)', 'response.json'],
+    ['HTTP 403', 'UI cannot navigate to admin page (403 returned as expected)', 'video.webm'],
     ['Access denied', 'UI cannot open admin dashboard; access denied as expected', 'video.webm'],
   ])('accepts an observed expected access restriction: %s', async (expected, outcome, artifact) => {
     for (const [status, evidence] of [
@@ -1566,6 +1580,10 @@ describe('latestTestVerdict', () => {
     ['HTTP 403 forbidden', '✅ API cannot access another tenant record (404 returned as expected)'],
     ['HTTP 404', '✅ API cannot access another tenant record (403 returned as expected)'],
     ['HTTP 404', '✅ API cannot access another tenant record'],
+    ['HTTP 404', '✅ API cannot load deleted record (403 returned as expected)'],
+    ['HTTP 403', '✅ UI cannot navigate to admin page (404 returned as expected)'],
+    ['HTTP 404', '✅ API cannot load deleted record'],
+    ['HTTP 403', '✅ UI cannot navigate to admin page'],
     ['HTTP 401 unauthorized', '✅ API cannot access admin endpoint; HTTP 403 Forbidden returned as expected'],
     ['HTTP 403 forbidden', '✅ API cannot access admin endpoint; HTTP 401 Unauthorized returned as expected'],
     ['200 OK', '✅ API cannot access admin endpoint; HTTP 403 returned as expected'],
@@ -1937,6 +1955,14 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI has yet to run',
+    'UI could not be exercised',
+    'UI missing credentials prevents execution',
+    'UI browser connection refused',
+    'UI not validated',
+    'UI is not runnable',
+    'UI not yet validated',
+    '⚪ UI',
     'UI could not log in',
     "UI couldn't log in",
     'UI setup failed',
@@ -1945,7 +1971,7 @@ describe('latestTestVerdict', () => {
     'UI skipped since browser setup failed',
     'UI blocked since login page loaded an error',
     'UI browser setup failed',
-  ])('keeps login and setup failures incomplete in status and evidence: %s', async (annotation) => {
+  ])('keeps unfinished procedures incomplete in status and evidence: %s', async (annotation) => {
     for (const [status, evidence] of [
       [`✅ API; ${annotation}`, 'response.json'],
       ['✅ API', `response.json; ${annotation}`],
@@ -1963,6 +1989,18 @@ describe('latestTestVerdict', () => {
 
   it.each([
     [
+      'Read manual payment',
+      'GET /payments/1 for existing manual payment',
+      'HTTP 200 with manual payment',
+      'API manual payment read successfully',
+    ],
+    [
+      'Handle pending payment',
+      'POST /payments/1/settle',
+      'HTTP 200 and settled payment',
+      'API pending payment handled successfully',
+    ],
+    [
       'Fetch manual payment',
       'GET /payments/1',
       'HTTP 200 with manual payment',
@@ -1974,7 +2012,7 @@ describe('latestTestVerdict', () => {
       'HTTP 200 and invoice PDF downloaded',
       'API pending invoice downloaded successfully',
     ],
-  ])('accepts completed load/download observations for %s', async (scenario, steps, expected, outcome) => {
+  ])('accepts completed business observations for %s', async (scenario, steps, expected, outcome) => {
     for (const [status, evidence] of [
       [`✅ ${outcome}`, 'response.json'],
       ['✅', outcome],
@@ -2130,6 +2168,10 @@ describe('latestTestVerdict', () => {
     '[Not saved](https://example.com/result)',
     'No evidence attached. Upload failed. was returned as expected',
     'The UI setup failed message was displayed as expected',
+    'No evidence is available was returned as expected',
+    'Unable to capture evidence was displayed as expected',
+    '[Unable to capture evidence](https://example.com/result)',
+    'unable-to-capture-evidence.json',
   ])('accepts formatted execution evidence: %s', async (evidence) => {
     gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ passed: 1, incomplete: false });
