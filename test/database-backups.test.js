@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter } from 'node:events';
 import mysql from 'mysql2/promise';
 import * as config from '../lib/config.js';
+import * as db from '../lib/db.js';
 import { putObject } from '../lib/r2.js';
 import { up as migrateBackups } from '../migrations/2026_10_25_120000_add_database_backup_to_projects.js';
 import {
@@ -109,6 +110,24 @@ it('preserves omitted URL fields and distinguishes explicitly empty credentials'
 it.each(['mysql', 'postgresql'])('normalizes IPv6 hosts in %s URLs', async (type) => {
   await env(`DATABASE_URL=${type}://u:p@[::1]:5433/main`);
   expect(await databaseSource(project)).toMatchObject({ host: '::1', port: '5433' });
+});
+
+it.each(['DB_URL', 'DATABASE_URL'])('normalizes Laravel driver aliases in %s', async (key) => {
+  await env(`${key}=mysql2://u:p@127.0.0.1:3307/main`);
+  expect(await databaseSource(project)).toMatchObject({
+    type: 'mysql',
+    database: 'main',
+    user: 'u',
+    password: 'p',
+    port: '3307',
+  });
+  await env(`${key}=sqlite3:///database/main.sqlite`);
+  expect(await databaseSource(project)).toEqual({
+    type: 'sqlite',
+    file: path.join(dir, 'database/main.sqlite'),
+  });
+  await env(`${key}=sqlite3:////tmp/main.sqlite`);
+  expect(await databaseSource(project)).toEqual({ type: 'sqlite', file: '/tmp/main.sqlite' });
 });
 
 it('uses the self-project env convention and TCP while preserving Laravel conventions', async () => {
@@ -269,11 +288,13 @@ it.each(['mysql', 'pgsql'])(
     const captured = path.join(dir, 'args.json');
     await fs.writeFile(
       binary,
-      `#!${process.execPath}\nrequire('fs').writeFileSync(${JSON.stringify(captured)}, JSON.stringify({args:process.argv.slice(2), loginFile:process.env.MYSQL_TEST_LOGIN_FILE,hostaddr:process.env.PGHOSTADDR,password:process.env.${type === 'mysql' ? 'MYSQL_PWD' : 'PGPASSWORD'}}));process.stdout.write('CREATE TABLE saved (id INT);');\n`,
+      `#!${process.execPath}\nrequire('fs').writeFileSync(${JSON.stringify(captured)}, JSON.stringify({args:process.argv.slice(2), loginFile:process.env.MYSQL_TEST_LOGIN_FILE,hostaddr:process.env.PGHOSTADDR,service:process.env.PGSERVICE,serviceFile:process.env.PGSERVICEFILE,password:process.env.${type === 'mysql' ? 'MYSQL_PWD' : 'PGPASSWORD'}}));process.stdout.write('CREATE TABLE saved (id INT);');\n`,
       { mode: 0o700 },
     );
     vi.stubEnv('PATH', `${dir}${path.delimiter}${process.env.PATH}`);
     vi.stubEnv('PGHOSTADDR', '192.0.2.1');
+    vi.stubEnv('PGSERVICE', 'ambient');
+    vi.stubEnv('PGSERVICEFILE', path.join(dir, 'ambient-pg-service.conf'));
     vi.stubEnv('MYSQL_TEST_LOGIN_FILE', path.join(dir, 'ambient-login.cnf'));
     const file = path.join(dir, 'dump.enc');
     const source = {
@@ -290,8 +311,11 @@ it.each(['mysql', 'pgsql'])(
     expect(capture.password).toBe(source.password);
     expect(capture.args).not.toContain(source.password);
     expect(capture.args).toContain('main data');
-    if (type === 'pgsql') expect(capture.hostaddr).toBeUndefined();
-    else {
+    if (type === 'pgsql') {
+      expect(capture.hostaddr).toBeUndefined();
+      expect(capture.service).toBeUndefined();
+      expect(capture.serviceFile).toBeUndefined();
+    } else {
       expect(capture.args[0]).toBe('--no-defaults');
       expect(capture.loginFile).toBe(os.devNull);
       expect(capture.args).toContain('--loose-set-gtid-purged=OFF');
@@ -343,6 +367,12 @@ function service(options = {}) {
 }
 
 describe('shared database backup lock', () => {
+  beforeEach(() => {
+    vi.spyOn(config, 'getConfig').mockReturnValue({
+      db: { host: '127.0.0.1', port: 3306, database: 'settings', user: 'test', password: '' },
+    });
+  });
+
   function connection(acquired = 1) {
     const conn = Object.assign(new EventEmitter(), {
       query: vi.fn(async () => [[{ acquired }]]),
@@ -405,6 +435,63 @@ describe('shared database backup lock', () => {
 
 describe('backup scheduler', () => {
   beforeEach(() => env('DB_DATABASE=main'));
+
+  it('discovers newly enabled projects from persistence on each scheduled pass', async () => {
+    const cached = { ...project, databaseBackupEnabled: false };
+    const loadProjects = vi.spyOn(db, 'loadProjectRows').mockResolvedValue([cached]);
+    const getProject = vi.fn(async () => ({ ...project }));
+    const backups = service({ projects: undefined, getProject });
+    await backups.tick();
+    expect(backups.dump).not.toHaveBeenCalled();
+    loadProjects.mockResolvedValue([{ ...project }]);
+    await backups.tick();
+    backups.advance(25 * 3600000);
+    await backups.tick();
+    expect(loadProjects).toHaveBeenCalledTimes(3);
+    expect(backups.upload).toHaveBeenCalledTimes(2);
+    expect(getProject).toHaveBeenCalledTimes(2);
+    expect(cached.databaseBackupEnabled).toBe(false);
+  });
+
+  it('allows a manual run when persisted opt-in is newer than the caller', async () => {
+    const cached = { ...project, databaseBackupEnabled: false };
+    const backups = service();
+    expect(await backups.run(cached)).toMatchObject({ state: 'uploaded' });
+    expect(backups.upload).toHaveBeenCalledOnce();
+    expect(cached.databaseBackupEnabled).toBe(false);
+  });
+
+  it.each([false, true])(
+    'uses the source and repository fetched under the lock (scheduled=%s)',
+    async (scheduled) => {
+      const currentDir = path.join(dir, 'current');
+      await fs.mkdir(currentDir);
+      await env('DB_DATABASE=retired_main');
+      await fs.writeFile(
+        path.join(currentDir, '.env'),
+        'DB_CONNECTION=sqlite\nDB_DATABASE=" current_main "\nDB_HOST=" 127.0.0.1 "',
+      );
+      let current = project;
+      const backups = service({
+        getProject: async () => current,
+        lock: async (_key, fn) => {
+          current = { ...project, localDir: currentDir, repo: 'o/current', isSelf: true };
+          return fn(new AbortController().signal);
+        },
+      });
+      if (scheduled) await backups.tick();
+      const result = scheduled ? await backups.status(project) : await backups.run(project);
+      expect(result).toMatchObject({ state: 'uploaded' });
+      expect(backups.dump.mock.calls[0][0]).toMatchObject({
+        type: 'mysql',
+        database: 'current_main',
+        host: '127.0.0.1',
+        tcp: true,
+      });
+      expect(backups.upload.mock.calls[0][0]).toMatch(/^database-backups\/o\/current\//);
+      expect(project.localDir).toBe(dir);
+    },
+  );
 
   it('uploads once per day, coalesces concurrent manual runs and cleans up temporary files', async () => {
     const backups = service();

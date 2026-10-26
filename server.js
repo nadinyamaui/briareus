@@ -70,6 +70,7 @@ import {
   loadAppSetting,
   updateAppSetting,
   getProviderRow,
+  getProjectRow,
 } from './lib/db.js';
 import {
   initJobs,
@@ -552,7 +553,7 @@ api.get('/api/projects/:id/backup', async (req, res) => {
 });
 
 api.post('/api/projects/:id/backup', async (req, res) => {
-  const project = listProjects().find((p) => p.id === Number(req.params.id));
+  const project = await getProjectRow(Number(req.params.id));
   if (!project) return res.status(404).json({ error: 'Project not found' });
   if (!project.databaseBackupEnabled) return res.status(400).json({ error: 'Database backup is disabled' });
   databaseBackups.run(project).catch((e) => console.error('Database backup failed:', e.message));
