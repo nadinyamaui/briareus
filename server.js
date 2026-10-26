@@ -547,7 +547,7 @@ api.delete('/api/projects/:id', async (req, res) => {
 const databaseBackups = createDatabaseBackups();
 
 api.get('/api/projects/:id/backup', async (req, res) => {
-  const project = listProjects().find((p) => p.id === Number(req.params.id));
+  const project = await getProjectRow(Number(req.params.id));
   if (!project) return res.status(404).json({ error: 'Project not found' });
   res.json({ status: await databaseBackups.status(project) });
 });
