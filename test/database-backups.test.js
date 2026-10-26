@@ -129,6 +129,22 @@ it.each(['DB_URL', 'DATABASE_URL'])(
   },
 );
 
+it.each(['pgsql', 'sqlite'])('ignores DB_CONNECTION=%s only for the self-project', async (type) => {
+  await env(
+    `DB_CONNECTION=${type}\nDB_DATABASE=actual_main\nDB_HOST=localhost\nDB_PORT=3307\nDB_USERNAME=actual_user\nDB_PASSWORD=actual_password`,
+  );
+  expect(await databaseSource({ ...project, isSelf: true })).toMatchObject({
+    type: 'mysql',
+    database: 'actual_main',
+    host: 'localhost',
+    port: '3307',
+    user: 'actual_user',
+    password: 'actual_password',
+    tcp: true,
+  });
+  expect((await databaseSource(project)).type).toBe(type);
+});
+
 it('honors a Laravel MySQL socket while preserving the self/mysql2 TCP convention', async () => {
   await env('DB_DATABASE=main\nDB_HOST=localhost\nDB_SOCKET=/run/mysql-project.sock');
   expect(await databaseSource(project)).toMatchObject({ tcp: false, socket: '/run/mysql-project.sock' });
