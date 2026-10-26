@@ -2572,6 +2572,48 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI: 0/5 tests run',
+    'UI 0/5 tests run',
+    'UI 0 / 5 checks executed',
+    'UI 0  /  5 checks executed',
+    'UI 0 of 5 tests run',
+    'UI 0 of 12 assertions were performed',
+    'UI tests: 0/5 tests have been completed',
+    '**UI: 0/5 tests run**',
+  ])('keeps zero-of-required execution counts incomplete: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅', `API response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl and browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'UI 5/5 tests run',
+    'UI 5 / 5 tests run',
+    'UI 5 of 5 checks executed',
+    'UI 0 assertions',
+    'UI 0 failures observed',
+    'UI showed 0/5 tests run as expected',
+  ])('preserves completed counts and observed zero counts: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅', `API response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl and browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    }
+  });
+
+  it.each([
     'UI TBD',
     'UI ❗ not executed',
     'UI ⚫ blocked',
@@ -2861,6 +2903,40 @@ describe('latestTestVerdict', () => {
   ])('keeps labeled absence and encoded placeholders incomplete: %s', async (evidence) => {
     gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
+  it.each([
+    'Evidence: missing',
+    'Evidence: absent',
+    'Video: unavailable',
+    'Video: lost',
+    'Responses: unavailable',
+  ])('preserves labeled evidence absence: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`]) {
+      gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'Evidence: response.json',
+    'Video: missing.webm',
+    'Evidence: absent.json',
+    'Video: unavailable.webm',
+    'Video: lost.webm',
+    'Responses: unavailable.json',
+    'Evidence: missing was returned as expected',
+    'Video: unavailable was shown as expected',
+    'Video: [unavailable](https://example.com/video.webm)',
+  ])('preserves labeled artifacts and absence observations: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl /api | Expected message | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
   it.each([
