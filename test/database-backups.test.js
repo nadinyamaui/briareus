@@ -123,6 +123,30 @@ it('uses the self-project env convention and TCP while preserving Laravel conven
   expect(await databaseSource(project)).toMatchObject({ tcp: true, port: '3307' });
 });
 
+it('trims self-project connection fields while preserving password whitespace', async () => {
+  await env(
+    'DB_DATABASE=" main data "\nDB_HOST=" 127.0.0.1 "\nDB_USERNAME=" backup "\nDB_PASSWORD=" secret "',
+  );
+  expect(await databaseSource({ ...project, isSelf: true })).toMatchObject({
+    database: 'main data',
+    host: '127.0.0.1',
+    user: 'backup',
+    password: ' secret ',
+  });
+});
+
+it('preserves quoted connection-field whitespace for other projects', async () => {
+  await env(
+    'DB_DATABASE="main data "\nDB_HOST=" 127.0.0.1 "\nDB_USERNAME=" backup "\nDB_PASSWORD=" secret "',
+  );
+  expect(await databaseSource(project)).toMatchObject({
+    database: 'main data ',
+    host: ' 127.0.0.1 ',
+    user: ' backup ',
+    password: ' secret ',
+  });
+});
+
 it.each(['DB_URL', 'DATABASE_URL'])(
   'ignores %s for the self-project while preserving URL support for other projects',
   async (key) => {
@@ -271,6 +295,7 @@ it.each(['mysql', 'pgsql'])(
       expect(capture.args[0]).toBe('--no-defaults');
       expect(capture.loginFile).toBe(os.devNull);
       expect(capture.args).toContain('--loose-set-gtid-purged=OFF');
+      expect(capture.args).toContain('--loose-column-statistics=0');
       expect(capture.args).toContain('--protocol=TCP');
       await env('DB_DATABASE=main\nDB_HOST=remote.invalid\nDB_PORT=1\nDB_SOCKET=/run/mysql-project.sock');
       await dumpDatabase(await databaseSource(project), path.join(dir, 'socket.enc'), secret);
