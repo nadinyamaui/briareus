@@ -312,6 +312,37 @@ describe('latestTestVerdict', () => {
     },
   );
 
+  it.each(['<div>', '<details>', '<section class="evidence">', '</div>'])(
+    'ignores literal result tables in raw HTML until a blank line: %s',
+    async (opening) => {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl | 200 | ✅ | response.json |',
+          '',
+          opening,
+          '| # | Scenario | Steps | Expected | Status | Evidence |',
+          '|---|---|---|---|---|---|',
+          '| 99 | Literal example | Open page | Visible | ⬜ | |',
+          '</div>',
+          '| # | Scenario | Steps | Expected | Status | Evidence |',
+          '|---|---|---|---|---|---|',
+          '| 100 | Still literal | curl | 200 | ❌ | example error |',
+          '',
+          '| # | Scenario | Steps | Expected | Status | Evidence |',
+          '|---|---|---|---|---|---|',
+          '| 2 | Real failure | curl | 200 | ❌ | saw 500 |',
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [{ number: '2', scenario: 'Real failure', expected: '200', evidence: 'saw 500' }],
+        total: 2,
+        passed: 1,
+        manual: 0,
+        incomplete: false,
+      });
+    },
+  );
+
   it('retains shortened rows beginning with inline HTML', async () => {
     gh.comments = [
       sheet([
@@ -1792,6 +1823,41 @@ describe('latestTestVerdict', () => {
       'API login failed as expected',
       'response.json',
     ],
+    [
+      'Wrong password rejected',
+      'Enter wrong password',
+      'Login fails',
+      'UI login failed as expected',
+      'login.webm',
+    ],
+    [
+      'Timeout shown',
+      'Request slow upstream',
+      'Timeout error is displayed',
+      'UI timed out error was displayed as expected',
+      'video.webm',
+    ],
+    [
+      'Admin denied',
+      'Open /admin',
+      'User cannot access /admin',
+      'UI cannot access /admin as expected',
+      'access.webm',
+    ],
+    [
+      'Admin denied',
+      'Open /admin/settings',
+      'User cannot access /admin/settings',
+      'UI cannot access /admin/settings as expected',
+      'access.webm',
+    ],
+    [
+      'Admin API denied',
+      'Open /api/UI',
+      'User cannot access /api/UI',
+      'UI cannot access /api/UI as expected',
+      'access.webm',
+    ],
     ['Gateway timeout', 'Request slow upstream', 'HTTP 504', 'API timed out as expected', 'response.json'],
     [
       'Request timeout',
@@ -1939,6 +2005,9 @@ describe('latestTestVerdict', () => {
     ['HTTP 401', 'UI browser login failed: invalid credentials error was displayed'],
     ['200 OK', 'API login failed as expected'],
     ['HTTP 200', 'API timed out as expected'],
+    ['HTTP 200', 'UI timed out error was displayed as expected'],
+    ['Timeout error is displayed', 'UI timed out before tests started'],
+    ['Login fails', 'UI browser login failed as expected'],
     ['HTTP 504', 'UI setup failed as expected'],
     ['401 Unauthorized', 'UI browser startup failed as expected'],
     ['401 Unauthorized', 'UI login failed before tests started'],
@@ -2415,6 +2484,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI no tests were run',
+    'UI 0 tests executed',
+    'UI still to do',
+    'UI ✋ manual',
     'no UI testing',
     'UI did not even start',
     'UI results unknown',
@@ -2463,6 +2536,21 @@ describe('latestTestVerdict', () => {
       });
     }
   });
+
+  it.each([' but ', ', but ', '; but '])(
+    'retains unfinished contrastive procedure clauses with %s',
+    async (separator) => {
+      for (const [status, evidence] of [
+        [`✅ API passed${separator}UI could not launch`, 'response.json'],
+        ['✅', `API passed${separator}UI could not launch`],
+      ]) {
+        gh.comments = [
+          sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+      }
+    },
+  );
 
   it.each([
     [
@@ -2556,6 +2644,13 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    'No evidence is present',
+    'No screenshot was taken',
+    'No record of execution',
+    'Responses were not saved',
+    'Artifacts are missing',
+    '**Responses were not saved**',
+    '<span>No evidence is present</span>',
     'No evidence was ever captured',
     'No video has yet been recorded',
     'No video has ever been recorded',
@@ -2579,6 +2674,14 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'No evidence is present was shown as expected',
+    'No screenshot was taken was displayed as expected',
+    'No record of execution was returned as expected',
+    'Responses were not saved was displayed as expected',
+    'Artifacts are missing were shown as expected',
+    'no-record-of-execution.txt',
+    'no-screenshot-was-taken.png',
+    '[Artifacts are missing](https://example.com/result)',
     'no-evidence-whatsoever.json',
     '[No evidence whatsoever](https://example.com/result)',
     'No evidence whatsoever was shown as expected',
