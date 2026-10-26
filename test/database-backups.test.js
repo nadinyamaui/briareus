@@ -107,6 +107,28 @@ it('uses the self-project env convention and TCP while preserving Laravel conven
   expect(await databaseSource(project)).toMatchObject({ tcp: true, port: '3307' });
 });
 
+it.each(['DB_URL', 'DATABASE_URL'])(
+  'ignores %s for the self-project while preserving URL support for other projects',
+  async (key) => {
+    await env(
+      `DB_DATABASE=actual_main\nDB_HOST=127.0.0.1\nDB_PORT=3307\nDB_USERNAME=actual_user\nDB_PASSWORD=actual_password\n${key}=postgresql://other:pass@127.0.0.2:5433/other_database`,
+    );
+    expect(await databaseSource({ ...project, isSelf: true })).toMatchObject({
+      type: 'mysql',
+      database: 'actual_main',
+      host: '127.0.0.1',
+      port: '3307',
+      user: 'actual_user',
+      password: 'actual_password',
+      tcp: true,
+    });
+    expect(await databaseSource(project)).toMatchObject({
+      type: 'pgsql',
+      database: 'other_database',
+    });
+  },
+);
+
 it('honors a Laravel MySQL socket while preserving the self/mysql2 TCP convention', async () => {
   await env('DB_DATABASE=main\nDB_HOST=localhost\nDB_SOCKET=/run/mysql-project.sock');
   expect(await databaseSource(project)).toMatchObject({ tcp: false, socket: '/run/mysql-project.sock' });
@@ -191,11 +213,12 @@ it.each(['mysql', 'pgsql'])(
     const captured = path.join(dir, 'args.json');
     await fs.writeFile(
       binary,
-      `#!${process.execPath}\nrequire('fs').writeFileSync(${JSON.stringify(captured)}, JSON.stringify({args:process.argv.slice(2), hostaddr:process.env.PGHOSTADDR,password:process.env.${type === 'mysql' ? 'MYSQL_PWD' : 'PGPASSWORD'}}));process.stdout.write('CREATE TABLE saved (id INT);');\n`,
+      `#!${process.execPath}\nrequire('fs').writeFileSync(${JSON.stringify(captured)}, JSON.stringify({args:process.argv.slice(2), loginFile:process.env.MYSQL_TEST_LOGIN_FILE,hostaddr:process.env.PGHOSTADDR,password:process.env.${type === 'mysql' ? 'MYSQL_PWD' : 'PGPASSWORD'}}));process.stdout.write('CREATE TABLE saved (id INT);');\n`,
       { mode: 0o700 },
     );
     vi.stubEnv('PATH', `${dir}${path.delimiter}${process.env.PATH}`);
     vi.stubEnv('PGHOSTADDR', '192.0.2.1');
+    vi.stubEnv('MYSQL_TEST_LOGIN_FILE', path.join(dir, 'ambient-login.cnf'));
     const file = path.join(dir, 'dump.enc');
     const source = {
       type,
@@ -213,6 +236,8 @@ it.each(['mysql', 'pgsql'])(
     expect(capture.args).toContain('main');
     if (type === 'pgsql') expect(capture.hostaddr).toBeUndefined();
     else {
+      expect(capture.args[0]).toBe('--no-defaults');
+      expect(capture.loginFile).toBe(os.devNull);
       expect(capture.args).toContain('--loose-set-gtid-purged=OFF');
       expect(capture.args).toContain('--protocol=TCP');
       await env('DB_DATABASE=main\nDB_HOST=remote.invalid\nDB_PORT=1\nDB_SOCKET=/run/mysql-project.sock');
@@ -223,6 +248,10 @@ it.each(['mysql', 'pgsql'])(
       expect(socketArgs[socketArgs.indexOf('--socket') + 1]).toBe('/run/mysql-project.sock');
       expect(socketArgs[socketArgs.indexOf('--host') + 1]).toBe('localhost');
       expect(socketArgs).not.toContain('--protocol=TCP');
+      expect(socketArgs[0]).toBe('--no-defaults');
+      await expect(
+        dumpDatabase({ ...source, tcp: false }, path.join(dir, 'ambiguous.enc'), secret),
+      ).rejects.toThrow(/DB_SOCKET/);
     }
     const output = path.join(dir, 'dump.gz');
     await decryptDatabaseBackup(file, output, secret);
@@ -270,6 +299,10 @@ describe('shared database backup lock', () => {
     const conn = connection();
     expect(await withDatabaseBackupLock('database-backup:1', async () => 'done')).toBe('done');
     expect(conn.query.mock.calls[0][1][0]).toHaveLength(64);
+    expect(conn.query.mock.calls[0][0]).toEqual({
+      sql: 'SELECT GET_LOCK(?, 0) AS acquired',
+      timeout: 10000,
+    });
     expect(conn.end).toHaveBeenCalledOnce();
     await expect(
       withDatabaseBackupLock('database-backup:1', async () => {
@@ -277,6 +310,18 @@ describe('shared database backup lock', () => {
       }),
     ).rejects.toThrow('dump failed');
     expect(conn.end).toHaveBeenCalledTimes(2);
+  });
+
+  it('destroys a failed acquisition connection without queuing a graceful close', async () => {
+    const conn = connection();
+    conn.query.mockRejectedValue(new Error('Query inactivity timeout'));
+    // Graceful close could queue forever behind the unanswered query.
+    conn.end.mockImplementation(() => new Promise(() => {}));
+    const fn = vi.fn();
+    await expect(withDatabaseBackupLock('database-backup:1', fn)).rejects.toThrow('Query inactivity timeout');
+    expect(conn.destroy).toHaveBeenCalledOnce();
+    expect(conn.end).not.toHaveBeenCalled();
+    expect(fn).not.toHaveBeenCalled();
   });
 
   it.each([0, null])('does not run without owning the lock (GET_LOCK=%s)', async (acquired) => {
