@@ -813,6 +813,33 @@ describe('latestTestVerdict', () => {
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
+  it.each([
+    '| # | Scenario | Steps | Expected | Outcome | Proof |',
+    '| **ID** | API scenario | Request | Response | **Outcome** | _Proof_ |',
+  ])('recognizes the scenario schema without relying on result markers: %s', async (header) => {
+    for (const status of ['', 'unknown', '🟢', '❌', '✅']) {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl | 200 | ✅ | response.json |',
+          '',
+          header,
+          '|---|---|---|---|---|---|',
+          `| 2 | UI | Open page | Visible | ${status} | screenshot.png |`,
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures:
+          status === '❌'
+            ? [{ number: '2', scenario: 'UI', expected: 'Visible', evidence: 'screenshot.png' }]
+            : [],
+        total: 2,
+        passed: status === '✅' ? 2 : 1,
+        manual: 0,
+        incomplete: !['❌', '✅'].includes(status),
+      });
+    }
+  });
+
   it('recognizes a custom table with a shortened inline-code row before its failure', async () => {
     gh.comments = [
       {
@@ -1041,6 +1068,15 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'Evidence not yet available',
+    '**Evidence not yet available.**',
+    '<span>Evidence not yet available</span>',
+    'No execution evidence',
+    '**No execution evidence.**',
+    '<span>No execution evidence</span>',
+    'Not uploaded',
+    '**Not uploaded.**',
+    '<span>Not uploaded</span>',
     'Not recorded yet',
     '**Not recorded yet.**',
     '<span>No evidence has been uploaded yet</span>',
@@ -1299,6 +1335,13 @@ describe('latestTestVerdict', () => {
 
   it.each([
     [
+      'Manual payment',
+      'POST /payments with manual=true',
+      'HTTP 201 and persisted payment',
+      '✅ API manual payment submitted successfully',
+      'response.json',
+    ],
+    [
       'Reject invalid request',
       'POST /users with invalid email; check HTTP 422 validation response',
       'HTTP 422 and validation error',
@@ -1473,6 +1516,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI will be tested manually',
+    '✅ API; UI could not be launched',
+    '✅ API; UI not applicable on this host',
+    '✅ API; UI no browser available',
     '✅ API; UI - not run',
     '✅ API; Safari not installed',
     '✅ API; UI could not render',
@@ -1542,6 +1589,19 @@ describe('latestTestVerdict', () => {
         incomplete: true,
       });
     }
+  });
+
+  it('does not let an API checkmark certify an unknown UI result', async () => {
+    gh.comments = [
+      sheet(['| 1 | Mixed API/UI | curl then browser | Both work | ✅ API; 🟢 UI | response.json |']),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
   });
 
   it.each([
@@ -1746,6 +1806,15 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'evidence-not-yet-available.json',
+    'no-execution-evidence.webm',
+    'not uploaded.json',
+    '[Evidence not yet available](https://example.com/result)',
+    '[No execution evidence](https://example.com/result)',
+    '[Not uploaded](https://example.com/result)',
+    'Evidence not yet available was returned as expected',
+    'No execution evidence was shown as expected',
+    'Not uploaded was displayed as expected',
     'not recorded yet.json',
     'No evidence has been uploaded yet was returned as expected',
     '[Not recorded yet](https://example.com/result)',
