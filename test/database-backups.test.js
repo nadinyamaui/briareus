@@ -6,6 +6,8 @@ import { gunzipSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter } from 'node:events';
 import mysql from 'mysql2/promise';
+import * as config from '../lib/config.js';
+import { putObject } from '../lib/r2.js';
 import { up as migrateBackups } from '../migrations/2026_10_25_120000_add_database_backup_to_projects.js';
 import {
   databaseSource,
@@ -25,6 +27,7 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   await fs.rm(dir, { recursive: true, force: true });
 });
 
@@ -67,6 +70,13 @@ it('preserves omitted URL fields and distinguishes explicitly empty credentials'
     password: 'actual_password',
     port: '3307',
   });
+  await env(fields + 'DB_URL=mysql://localhost/');
+  expect(await databaseSource(project)).toMatchObject({
+    database: 'fallback',
+    user: 'actual_user',
+    password: 'actual_password',
+    port: '3307',
+  });
   await env(fields + 'DB_URL=mysql://localhost/main');
   expect(await databaseSource(project)).toMatchObject({
     database: 'main',
@@ -95,6 +105,15 @@ it('uses the self-project env convention and TCP while preserving Laravel conven
   expect((await databaseSource(project)).tcp).toBeFalsy();
   await fs.writeFile(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { mysql2: '^3' } }));
   expect(await databaseSource(project)).toMatchObject({ tcp: true, port: '3307' });
+});
+
+it('honors a Laravel MySQL socket while preserving the self/mysql2 TCP convention', async () => {
+  await env('DB_DATABASE=main\nDB_HOST=localhost\nDB_SOCKET=/run/mysql-project.sock');
+  expect(await databaseSource(project)).toMatchObject({ tcp: false, socket: '/run/mysql-project.sock' });
+  expect((await databaseSource({ ...project, isSelf: true })).socket).toBeFalsy();
+  await fs.writeFile(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { mysql2: '^3' } }));
+  expect(await databaseSource(project)).toMatchObject({ tcp: true });
+  expect((await databaseSource(project)).socket).toBeFalsy();
 });
 
 it('cancels the online SQLite copy at a progress boundary and removes its temporary copy', async () => {
@@ -196,6 +215,14 @@ it.each(['mysql', 'pgsql'])(
     else {
       expect(capture.args).toContain('--loose-set-gtid-purged=OFF');
       expect(capture.args).toContain('--protocol=TCP');
+      await env('DB_DATABASE=main\nDB_HOST=remote.invalid\nDB_PORT=1\nDB_SOCKET=/run/mysql-project.sock');
+      await dumpDatabase(await databaseSource(project), path.join(dir, 'socket.enc'), secret);
+      const socketArgs = JSON.parse(await fs.readFile(captured, 'utf8')).args;
+      expect(socketArgs).toContain('--protocol=SOCKET');
+      expect(socketArgs).toContain('--socket');
+      expect(socketArgs[socketArgs.indexOf('--socket') + 1]).toBe('/run/mysql-project.sock');
+      expect(socketArgs[socketArgs.indexOf('--host') + 1]).toBe('localhost');
+      expect(socketArgs).not.toContain('--protocol=TCP');
     }
     const output = path.join(dir, 'dump.gz');
     await decryptDatabaseBackup(file, output, secret);
@@ -304,6 +331,27 @@ describe('backup scheduler', () => {
     expect(save.mock.calls.every(([key]) => key.length <= 64)).toBe(true);
   });
 
+  it('logs a project lock failure, continues to later projects and retries on the next tick', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const lock = vi.fn(async (key, fn) => {
+      if (key === 'database-backup:1') throw new Error('lock connection lost');
+      return fn(new AbortController().signal);
+    });
+    const second = { ...project, id: 2, repo: 'o/second' };
+    const backups = service({ projects: () => [project, second], lock });
+    await backups.tick();
+    expect(lock.mock.calls.map(([key]) => key)).toEqual(['database-backup:1', 'database-backup:2']);
+    expect(await backups.status(second)).toMatchObject({ state: 'uploaded' });
+    expect(error).toHaveBeenCalledWith('Database backup scheduler:', project.repo, 'lock connection lost');
+    await backups.tick();
+    expect(lock.mock.calls.map(([key]) => key)).toEqual([
+      'database-backup:1',
+      'database-backup:2',
+      'database-backup:1',
+    ]);
+    await expect(backups.run(project)).rejects.toThrow('lock connection lost');
+  });
+
   it('exposes the previous upload immediately and throughout a new run', async () => {
     const backups = service();
     const previous = await backups.run(project);
@@ -410,6 +458,32 @@ describe('backup scheduler', () => {
     await expect(backups.run(project)).rejects.toThrow('lock lost');
     expect(backups.upload).not.toHaveBeenCalled();
     expect(save).toHaveBeenCalledOnce();
+  });
+
+  it('cancels an in-flight R2 upload after losing its lock without overwriting shared status', async () => {
+    const controller = new AbortController();
+    const save = vi.fn();
+    vi.spyOn(config, 'getConfig').mockReturnValue({
+      r2: {
+        endpoint: 'https://r2.example.test',
+        bucket: 'backups',
+        accessKeyId: 'test',
+        secretAccessKey: 'test',
+      },
+    });
+    const fetch = vi.fn(async (_url, options) => {
+      controller.abort(new Error('lock lost during upload'));
+      options.signal.throwIfAborted();
+      return { ok: true };
+    });
+    vi.stubGlobal('fetch', fetch);
+    const backups = service({ lock: async (_key, fn) => fn(controller.signal), upload: putObject, save });
+    await expect(backups.run(project)).rejects.toThrow('lock lost during upload');
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(save).toHaveBeenCalledOnce();
+    expect(save.mock.calls[0][1].state).toBe('running');
+    await expect(fs.stat(backups.dump.mock.calls[0][1])).rejects.toThrow(/ENOENT/);
   });
 
   it('does not upload failed dumps and retries failures in an hour', async () => {
