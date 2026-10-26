@@ -1041,6 +1041,12 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'Evidence was not generated',
+    '**Evidence was not generated.**',
+    '<span>Evidence was not produced</span>',
+    'Could not run: credentials missing',
+    '**Could not run: credentials missing**',
+    '<span>Could not run: credentials missing</span>',
     'No evidence was generated',
     '**No evidence was generated.**',
     '<span>No evidence could be produced</span>',
@@ -1353,6 +1359,16 @@ describe('latestTestVerdict', () => {
 
   it.each([
     [
+      'HTTP 403 forbidden',
+      'API cannot access admin endpoint; HTTP 403 Forbidden returned as expected',
+      'response.json',
+    ],
+    [
+      'HTTP 401 unauthorized',
+      'API cannot access admin endpoint; HTTP 401 Unauthorized received as expected',
+      'response.json',
+    ],
+    [
       'forbidden (HTTP 403)',
       'API cannot access admin endpoint; HTTP 403 returned as expected',
       'response.json',
@@ -1385,6 +1401,8 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    ['HTTP 401 unauthorized', '✅ API cannot access admin endpoint; HTTP 403 Forbidden returned as expected'],
+    ['HTTP 403 forbidden', '✅ API cannot access admin endpoint; HTTP 401 Unauthorized returned as expected'],
     ['200 OK', '✅ API cannot access admin endpoint; HTTP 403 returned as expected'],
     ['401 unauthorized', '✅ API cannot access admin endpoint; HTTP 403 returned as expected'],
     ['forbidden (HTTP 401)', '✅ API cannot access admin endpoint; HTTP 403 returned as expected'],
@@ -1396,6 +1414,8 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    ['Blocked login', 'Blocked user cannot log in', 'UI blocked user cannot log in'],
+    ['Pending task', 'HTTP 202 queued', 'API pending task enqueued successfully'],
     ['Pending order', 'Pending order exists in the list', 'UI pending order exists in the list'],
     ['Manual payment', 'Payment can be submitted', 'UI manual payment can be submitted'],
     ['Optional field', 'Unavailable optional field omitted', 'UI unavailable optional field omitted'],
@@ -1442,6 +1462,12 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI navigation failed before execution',
+    '✅ API; UI was not possible on this host',
+    '✅ API; UI: TODO',
+    '✅ API<br>**UI navigation** failed before execution',
+    '✅ API pending task enqueued successfully; UI navigation failed before execution',
+    '✅ UI blocked user cannot log in; UI was not possible on this host',
     '✅ API; UI execution timed out before tests started',
     '✅ API; UI tests crashed before execution',
     '✅ API; UI execution aborted',
@@ -1704,6 +1730,12 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'evidence-was-not-generated.json',
+    'could-not-run.webm',
+    'Evidence was not generated was returned as expected',
+    'Could not run: credentials missing was returned as expected',
+    '[Evidence was not generated](https://example.com/result)',
+    '[Could not run: credentials missing](https://example.com/result)',
     'no-evidence-was-generated.json',
     'upload-pending.webm',
     'No evidence was generated was returned as expected',
