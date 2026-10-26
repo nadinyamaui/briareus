@@ -1041,6 +1041,14 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'No evidence was generated',
+    '**No evidence was generated.**',
+    '<span>No evidence could be produced</span>',
+    'No evidence could be produced',
+    'pending',
+    'Upload pending',
+    'N/A (no browser)',
+    'No recording due to browser crash',
     'No evidence was produced',
     '**No evidence was produced.**',
     '<span>No evidence has been produced</span>',
@@ -1344,6 +1352,16 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    [
+      'forbidden (HTTP 403)',
+      'API cannot access admin endpoint; HTTP 403 returned as expected',
+      'response.json',
+    ],
+    [
+      'Access denied (HTTP 403)',
+      'API cannot access admin endpoint; HTTP 403 returned as expected',
+      'response.json',
+    ],
     ['403 forbidden', 'API cannot access admin endpoint; HTTP 403 returned as expected', 'response.json'],
     ['Access denied', 'UI cannot open admin dashboard; access denied as expected', 'video.webm'],
   ])('accepts an observed expected access restriction: %s', async (expected, outcome, artifact) => {
@@ -1369,6 +1387,7 @@ describe('latestTestVerdict', () => {
   it.each([
     ['200 OK', '✅ API cannot access admin endpoint; HTTP 403 returned as expected'],
     ['401 unauthorized', '✅ API cannot access admin endpoint; HTTP 403 returned as expected'],
+    ['forbidden (HTTP 401)', '✅ API cannot access admin endpoint; HTTP 403 returned as expected'],
     ['403 forbidden', '✅ API cannot access admin endpoint'],
     ['Access denied', '✅ API; UI could not access the app because browser connection was refused'],
   ])('keeps an unobserved or unexpected restriction incomplete: %s / %s', async (expected, status) => {
@@ -1377,6 +1396,9 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    ['Pending order', 'Pending order exists in the list', 'UI pending order exists in the list'],
+    ['Manual payment', 'Payment can be submitted', 'UI manual payment can be submitted'],
+    ['Optional field', 'Unavailable optional field omitted', 'UI unavailable optional field omitted'],
     ['Manual refund', 'Refund successful', 'API manual refund successful'],
     ['Manual refund', 'Refund successful', 'API manual refund refunded successfully'],
     ['Blocked user', 'Redirect to login', 'UI blocked user redirected to login'],
@@ -1420,6 +1442,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '✅ API; UI execution timed out before tests started',
+    '✅ API; UI tests crashed before execution',
+    '✅ API; UI execution aborted',
+    '✅ API; UI did not succeed',
     '✅ API; UI cannot perform tests',
     '✅ API; UI could not load the app',
     '✅ API; UI could not be performed',
@@ -1678,6 +1704,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'no-evidence-was-generated.json',
+    'upload-pending.webm',
+    'No evidence was generated was returned as expected',
+    'No recording due to browser crash was returned as expected',
+    '[No evidence was generated](https://example.com/result)',
     'no-evidence-was-produced.json',
     'No evidence was produced was returned as expected',
     '[No evidence was produced](https://example.com/result)',
