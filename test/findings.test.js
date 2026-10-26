@@ -298,6 +298,168 @@ describe('latestTestVerdict', () => {
     ].join('\n'),
   });
 
+  it.each(['<details><summary>Evidence</summary>', '<DETAILS open>', '  <details>'])(
+    'ends results before a standalone HTML details block: %s',
+    async (opening) => {
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl /api | 200 | ✅ | response.json |',
+          opening,
+          'response.json',
+          '</details>',
+          '',
+          '| # | Scenario | Steps | Expected | Status | Evidence |',
+          '|---|---|---|---|---|---|',
+          '| 2 | UI | Open | Visible | ❌ | saw nothing |',
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [{ number: '2', scenario: 'UI', expected: 'Visible', evidence: 'saw nothing' }],
+        total: 2,
+        passed: 1,
+        manual: 0,
+        incomplete: false,
+      });
+    },
+  );
+
+  it.each(['Status (✅ = pass, ❌ = fail)', '**Status ✅ / ❌ / ⚪**', 'Status [✅ pass / ❌ fail]'])(
+    'retains results under a header with an explanatory legend: %s',
+    async (header) => {
+      for (const status of ['❌', '⬜', '', '✅']) {
+        gh.comments = [
+          sheet([
+            '| 1 | API | curl | 200 | ✅ | response.json |',
+            '',
+            `| # | Scenario | Steps | Expected | ${header} | Evidence |`,
+            '|---|---|---|---|---|---|',
+            `| 2 | UI | Open | Visible | ${status} | screenshot.png |`,
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toEqual({
+          failures:
+            status === '❌'
+              ? [{ number: '2', scenario: 'UI', expected: 'Visible', evidence: 'screenshot.png' }]
+              : [],
+          total: 2,
+          passed: status === '✅' ? 2 : 1,
+          manual: 0,
+          incomplete: !['❌', '✅'].includes(status),
+        });
+      }
+    },
+  );
+
+  it('bounds custom-schema detection before a details block', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        '',
+        '| # | Resource | Method | Path | HTTP code | Response |',
+        '|---|---|---|---|---|---|',
+        '| 200 | Users | GET | /users | 200 | response.json |',
+        '<details><summary>QA</summary>',
+        '',
+        '| # | Scenario | Steps | Expected | Status | Evidence |',
+        '|---|---|---|---|---|---|',
+        '| 2 | UI | Open | Visible | ✅ | video.webm |',
+        '</details>',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 2, passed: 2, incomplete: false });
+  });
+
+  it.each([
+    'There is no evidence',
+    '**There is no evidence.**',
+    '<span>Evidence is absent</span>',
+    'Evidence is absent',
+    'There is no evidence. Upload failed for response.json.',
+    'Evidence is absent because capture failed in capture.webm',
+  ])('keeps explicit existential and predicate evidence absence incomplete: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
+  it.each([
+    'UI could not authenticate',
+    'Tests were not executed',
+    'Testing was not completed',
+    'Checks were not performed',
+    'UI could not authenticate because browser setup failed',
+    'UI not executed because credentials unavailable',
+  ])('retains explicit execution statements across sentence boundaries: %s', async (annotation) => {
+    for (const separator of ['; ', '. ', ' — ', '<br>']) {
+      for (const [status, evidence] of [
+        [`✅ API${separator}${annotation}`, 'response.json'],
+        ['✅', `response.json${separator}${annotation}.`],
+      ]) {
+        gh.comments = [
+          sheet([`| 1 | API and UI | curl then browser | Both pass | ${status} | ${evidence} |`]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+      }
+    }
+  });
+
+  it.each([
+    ['Pending invoices', 'GET /invoices/pending', '200', 'API pending invoice endpoint responds with 200'],
+    ['Manual payment', 'Click manual payment button', 'works', 'UI manual payment button works'],
+    ['Pending invoice', 'GET /invoices/pending', '200', 'API pending invoice endpoint answers with 200'],
+    [
+      'Manual payment',
+      'Click manual payment button',
+      'works',
+      'UI manual payment button functions correctly',
+    ],
+  ])(
+    'distinguishes tested subjects from execution states: %s',
+    async (scenario, steps, expected, outcome) => {
+      for (const [status, evidence] of [
+        [`✅ ${outcome}`, 'response.json'],
+        ['✅', outcome],
+      ]) {
+        for (const suffix of ['', '; UI not executed']) {
+          gh.comments = [
+            sheet([`| 1 | ${scenario} | ${steps} | ${expected} | ${status}${suffix} | ${evidence} |`]),
+          ];
+          expect(await latestTestVerdict(repo, 5)).toMatchObject({
+            total: 1,
+            passed: suffix ? 0 : 1,
+            incomplete: !!suffix,
+          });
+        }
+      }
+    },
+  );
+
+  it.each([
+    'API pending invoice not executed',
+    'API pending invoice not executed yet',
+    'UI manual payment not tested',
+    'UI manual payment not tested yet',
+    'UI manual payment',
+  ])('does not infer completed execution from a tested subject alone: %s', async (outcome) => {
+    gh.comments = [
+      sheet([
+        `| 1 | Manual payment and pending invoice | Manual payment not tested; pending invoice not executed | Works | ✅ ${outcome} | response.json |`,
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
+  it.each([
+    'There is no evidence was returned as expected',
+    'Evidence is absent was displayed as expected',
+    'there-is-no-evidence.json',
+    'evidence-is-absent.json',
+    '[There is no evidence](https://example.com/result)',
+    'response.json. UI blocked user receives 403.',
+  ])('preserves artifacts and observed application results: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | Negative test | Run | Expected result | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
   it('reads only the ❌ rows off the newest sheet', async () => {
     gh.comments = [
       sheet([
@@ -1555,6 +1717,8 @@ describe('latestTestVerdict', () => {
     ['403 forbidden', 'API cannot access admin endpoint; HTTP 403 returned as expected', 'response.json'],
     ['HTTP 404', 'API cannot load deleted record (404 returned as expected)', 'response.json'],
     ['HTTP 403', 'UI cannot navigate to admin page (403 returned as expected)', 'video.webm'],
+    ['HTTP 401', 'UI cannot authenticate (401 returned as expected)', 'response.json'],
+    ['HTTP 401', 'UI could not authenticate (401 returned as expected)', 'response.json'],
     ['Access denied', 'UI cannot open admin dashboard; access denied as expected', 'video.webm'],
   ])('accepts an observed expected access restriction: %s', async (expected, outcome, artifact) => {
     for (const [status, evidence] of [
@@ -1582,6 +1746,8 @@ describe('latestTestVerdict', () => {
     ['HTTP 404', '✅ API cannot access another tenant record'],
     ['HTTP 404', '✅ API cannot load deleted record (403 returned as expected)'],
     ['HTTP 403', '✅ UI cannot navigate to admin page (404 returned as expected)'],
+    ['HTTP 401', '✅ UI cannot authenticate (403 returned as expected)'],
+    ['HTTP 401', '✅ UI cannot authenticate'],
     ['HTTP 404', '✅ API cannot load deleted record'],
     ['HTTP 403', '✅ UI cannot navigate to admin page'],
     ['HTTP 401 unauthorized', '✅ API cannot access admin endpoint; HTTP 403 Forbidden returned as expected'],
