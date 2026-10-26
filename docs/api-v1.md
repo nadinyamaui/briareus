@@ -621,6 +621,9 @@ hourly. MySQL needs `mysqldump`, PostgreSQL needs `pg_dump` compatible with the
 server version, and SQLite uses Node's online backup API. Database URL query
 options are rejected; databases requiring custom connection options need separate
 backup configuration.
+The self-project uses Briareus's environment parsing. MySQL projects declaring
+`mysql2` as a runtime dependency (and the self-project) use TCP, including for
+`localhost`; other projects retain the dump client's default transport behavior.
 MySQL's consistent snapshot covers transactional tables; schema changes during a
 backup and nontransactional tables require a separate maintenance window.
 
