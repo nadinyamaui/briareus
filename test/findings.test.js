@@ -2415,6 +2415,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'no UI testing',
+    'UI did not even start',
+    'UI results unknown',
+    'UI <em>not run</em>',
+    'UI <strong>did not even launch</strong>',
     'UI could not reach app',
     'UI browser crashed before testing',
     'UI browser tests did not happen',
@@ -2503,6 +2508,37 @@ describe('latestTestVerdict', () => {
     }
   });
 
+  it.each([
+    ['Connection refused error is displayed', 'connection refused error was displayed as expected', true],
+    ['Connection refused error is displayed', 'connection refused error was shown as expected', true],
+    ['Connection refused error is displayed', 'connection refused error was displayed', true],
+    ['Connection refused error is displayed', 'connection refused', false],
+    ['Connection refused error is displayed', 'browser connection refused', false],
+    ['Connection refused error is displayed', 'setup failed: connection refused', false],
+    ['Timeout error is displayed', 'connection refused error was displayed as expected', false],
+  ])(
+    'distinguishes observed connection errors from missing execution: %s / %s',
+    async (expected, observation, completed) => {
+      for (const [status, evidence] of [
+        [`✅ UI ${observation}`, 'video.webm'],
+        ['✅', `UI ${observation}; video.webm`],
+      ]) {
+        for (const unfinished of ['', '; UI not run', '; no UI testing']) {
+          gh.comments = [
+            sheet([
+              `| 1 | Connect to unavailable database | POST /connections/test | ${expected} | ${status}${unfinished} | ${evidence} |`,
+            ]),
+          ];
+          expect(await latestTestVerdict(repo, 5)).toMatchObject({
+            total: 1,
+            passed: completed && !unfinished ? 1 : 0,
+            incomplete: !completed || !!unfinished,
+          });
+        }
+      }
+    },
+  );
+
   it.each(['UI needs to run', 'UI needs a browser', 'UI not assessed', 'UI ⏸️', 'UI ❎'])(
     'retains unfinished execution declared in evidence: %s',
     async (annotation) => {
@@ -2520,6 +2556,15 @@ describe('latestTestVerdict', () => {
   );
 
   it.each([
+    'No evidence was ever captured',
+    'No video has yet been recorded',
+    'No video has ever been recorded',
+    'No evidence has actually been collected',
+    'No evidence was ever captured: upload failed for response.json',
+    'No evidence whatsoever',
+    'not applicable',
+    '**No evidence was ever captured**',
+    '<span>No video has yet been recorded</span>',
     'Failed to capture response.json',
     'Capture of response.json failed',
     'Evidence deleted before upload',
@@ -2534,6 +2579,12 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'no-evidence-whatsoever.json',
+    '[No evidence whatsoever](https://example.com/result)',
+    'No evidence whatsoever was shown as expected',
+    'No evidence was ever captured was displayed as expected',
+    'No video has yet been recorded was returned as expected',
+    'Not applicable was observed as expected',
     'unrecorded.json',
     'failed-to-capture-response.json',
     'capture-of-response-failed.json',
