@@ -1265,6 +1265,14 @@ describe('latestTestVerdict', () => {
     'not yet run',
     '_not executed_',
     'not tested',
+    'No evidence attached. Upload failed.',
+    'No evidence attached. Upload failed for response.json.',
+    'Evidence missing. Upload failed.',
+    'No video was recorded. Capture failed in capture.webm.',
+    'Not saved.',
+    '**Not saved.**',
+    'Not saved. Upload failed.',
+    'Not saved. Upload failed for response.json',
   ])('keeps placeholder evidence incomplete: %s', async (evidence) => {
     gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
@@ -1928,6 +1936,63 @@ describe('latestTestVerdict', () => {
     });
   });
 
+  it.each([
+    'UI could not log in',
+    "UI couldn't log in",
+    'UI setup failed',
+    'UI browser failed to launch',
+    'UI blocked since login page returns 500',
+    'UI skipped since browser setup failed',
+    'UI blocked since login page loaded an error',
+    'UI browser setup failed',
+  ])('keeps login and setup failures incomplete in status and evidence: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅ API', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    [
+      'Fetch manual payment',
+      'GET /payments/1',
+      'HTTP 200 with manual payment',
+      'API manual payment loaded successfully',
+    ],
+    [
+      'Download pending invoice',
+      'GET /invoices/1/pdf',
+      'HTTP 200 and invoice PDF downloaded',
+      'API pending invoice downloaded successfully',
+    ],
+  ])('accepts completed load/download observations for %s', async (scenario, steps, expected, outcome) => {
+    for (const [status, evidence] of [
+      [`✅ ${outcome}`, 'response.json'],
+      ['✅', outcome],
+    ]) {
+      for (const missing of ['', '; UI setup failed', '; UI blocked since login page returns 500']) {
+        gh.comments = [
+          sheet([`| 1 | ${scenario} | ${steps} | ${expected} | ${status}${missing} | ${evidence} |`]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          failures: [],
+          total: 1,
+          passed: missing ? 0 : 1,
+          incomplete: !!missing,
+        });
+      }
+    }
+  });
+
   it.each(['UI needs to run', 'UI needs a browser', 'UI not assessed', 'UI ⏸️', 'UI ❎'])(
     'retains unfinished execution declared in evidence: %s',
     async (annotation) => {
@@ -2059,6 +2124,12 @@ describe('latestTestVerdict', () => {
     '~~response.json~~',
     '<!-- saved --> response.json<br>',
     '[response](https://example.com/result)',
+    'No evidence attached was returned as expected. response.json records the assertion.',
+    'Not saved was displayed as expected',
+    'not saved.json',
+    '[Not saved](https://example.com/result)',
+    'No evidence attached. Upload failed. was returned as expected',
+    'The UI setup failed message was displayed as expected',
   ])('accepts formatted execution evidence: %s', async (evidence) => {
     gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ passed: 1, incomplete: false });
