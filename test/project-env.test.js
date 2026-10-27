@@ -4,6 +4,7 @@ import path from 'path';
 import util from 'util';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseEnvFile } from '../lib/config.js';
 import { editEnvText, projectEnvRoutes } from '../lib/project-env.js';
 
 describe('editEnvText', () => {
@@ -52,7 +53,7 @@ describe('editEnvText', () => {
     expect(util.parseEnv(replaced)).toEqual({ PATH_WIN: 'new', TOKEN: 'old', OTHER: 'ok', TAIL: '1' });
   });
 
-  it('reads a blank value and a bare `=` running on past their line, as Node does', () => {
+  it('reads Node continuations but refuses edits that conflict with the linewise consumer', () => {
     const text = 'A=  \nB=old\nC=end\n';
     expect(util.parseEnv(text)).toEqual({ A: 'B=old', C: 'end' });
     // B=old is A's value, not an assignment of B.
@@ -61,14 +62,15 @@ describe('editEnvText', () => {
       B: 'new',
       C: 'end',
     });
-    expect(editEnvText(text, { unset: ['B'] })).toBe(text);
-    const replaced = editEnvText(text, { set: { A: 'x' } });
-    expect(replaced).toBe('A=x\nC=end\n');
-    expect(util.parseEnv(replaced)).toEqual({ A: 'x', C: 'end' });
+    // The core sees B as an independent assignment, so neither leaving it active after an
+    // unset nor deleting it when setting A is safe for both consumers.
+    expect(parseEnvFile(text)).toEqual({ A: '', B: 'old', C: 'end' });
+    expect(() => editEnvText(text, { unset: ['B'] })).toThrow(/ambiguous/i);
+    expect(() => editEnvText(text, { set: { A: 'x' } })).toThrow(/ambiguous/i);
     // An empty key leaves the rest of its line to be read again.
     const bare = '=  D=1\nE=2\n';
     expect(util.parseEnv(bare)).toEqual({ D: '1', E: '2' });
-    expect(util.parseEnv(editEnvText(bare, { unset: ['D'] }))).toEqual({ E: '2' });
+    expect(() => editEnvText(bare, { unset: ['D'] })).toThrow(/ambiguous/i);
     // A blank value at the very end reads as empty, and stays empty with a key appended.
     expect(util.parseEnv(editEnvText('A=1\nZ=  ', { set: { B: '2' } }))).toEqual({ A: '1', Z: '', B: '2' });
   });
@@ -79,6 +81,15 @@ describe('editEnvText', () => {
     // Its quote would close one an earlier line left open.
     expect(() => editEnvText('A="open\nB=2\n', { set: { C: '"q"' } })).toThrow(/own line/);
     expect(editEnvText('A=1\nB=2\n', { set: { A: '' } })).toBe('A=\nB=2\n');
+  });
+
+  it.each([
+    ['DB_PASSWORD=  \nDB_DATABASE=app\nDB_HOST=server-a\n', { set: { DB_PASSWORD: 'secret' } }],
+    ['export EMPTY=\nTOKEN=old\n', { unset: ['EMPTY'] }],
+    ['export\tEMPTY=\nTOKEN=old\n', { unset: ['EMPTY'] }],
+    ['MESSAGE="first\nINNER=keep\nlast"\n', { set: { MESSAGE: 'new' } }],
+  ])('refuses an edit ambiguous to the existing linewise consumer: %j', (text, edits) => {
+    expect(() => editEnvText(text, edits)).toThrow(/ambiguous/i);
   });
 
   it('refuses bad keys, multi-line values and empty edits', () => {
@@ -205,6 +216,31 @@ describe('projectEnvRoutes', () => {
     const res = await request('POST', { set: { A: 'x\ny' } });
     expect(res.status).toBe(400);
     expect(saves).toEqual([]);
+  });
+
+  it.each([
+    ['DB_PASSWORD=  \nDB_DATABASE=app\nDB_HOST=server-a\n', { set: { DB_PASSWORD: 'secret' } }],
+    ['export EMPTY=\nTOKEN=old\n', { unset: ['EMPTY'] }],
+  ])('refuses ambiguous template edits before saving or mirroring: %j', async (text, edits) => {
+    project = { ...project, envTemplate: text };
+    fs.writeFileSync(path.join(dir, '.env'), text);
+    const res = await request('POST', edits);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/ambiguous/i);
+    expect(saves).toEqual([]);
+    expect(project.envTemplate).toBe(text);
+    expect(fs.readFileSync(path.join(dir, '.env'), 'utf8')).toBe(text);
+    expect(note).not.toHaveBeenCalled();
+  });
+
+  it('leaves an ambiguous checkout intact when the template edit is safe', async () => {
+    const text = 'DB_PASSWORD=  \nDB_DATABASE=app\nDB_HOST=server-a\n';
+    fs.writeFileSync(path.join(dir, '.env'), text);
+    const res = await request('POST', { set: { DB_PASSWORD: 'secret' } });
+    expect(res.status).toBe(200);
+    expect(res.body.checkout).toMatch(/^not updated: .*ambiguous/i);
+    expect(project.envTemplate).toBe('APP_KEY=secret\nDB_DATABASE=main\nDB_PASSWORD=secret\n');
+    expect(fs.readFileSync(path.join(dir, '.env'), 'utf8')).toBe(text);
   });
 
   it.each([
