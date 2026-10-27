@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { TEST_SHEET_ANCHOR, FIXES_ANCHOR } from '../lib/markers.js';
 
 // The GitHub mock, per test: the PR's issue comments and a log of every write back. `fail`
@@ -296,6 +298,141 @@ describe('latestTestVerdict', () => {
       '|---|----------|-------|----------|--------|----------|',
       ...rows,
     ].join('\n'),
+  });
+
+  it('bounds whitespace-heavy result cells and header candidates', () => {
+    const source = readFileSync(new URL('../lib/findings.js', import.meta.url), 'utf8');
+    const parser = source.slice(
+      source.indexOf('function parseSheetVerdict('),
+      source.indexOf('// Missing, empty, manual and unexecuted sheets'),
+    );
+    const body = sheet([
+      `| 1 | API | curl | 200 | ✅ | No evidence ${' '.repeat(3000)}x |`,
+      '',
+      `| # | Scenario | Steps | Expected | Status ${' '.repeat(3000)}x | Evidence |`,
+      '|---|---|---|---|---|---|',
+      '| 2 | UI | Open | Visible | ❌ | saw nothing |',
+    ]).body;
+    // A child deadline catches synchronous backtracking without wedging the test runner.
+    const result = execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `${parser}\nconsole.log(JSON.stringify(parseSheetVerdict(${JSON.stringify(body)})));`,
+      ],
+      { encoding: 'utf8', timeout: 2000 },
+    );
+    expect(JSON.parse(result)).toMatchObject({
+      total: 2,
+      failures: [{ number: '2', scenario: 'UI', expected: 'Visible', evidence: 'saw nothing' }],
+    });
+  });
+
+  it.each([
+    'UI testing did not take place',
+    'UI needs validation',
+    'UI still to execute',
+    'UI only one of two tests passed',
+    'Could not execute the UI tests',
+  ])('retains explicit remaining execution in either result cell: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅', annotation],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each([
+    'UI testing did take place',
+    'UI validation completed',
+    'UI executed all tests',
+    'UI only two of two tests passed',
+    'UI showed only one of two tests passed as expected',
+    'UI showed could not execute the UI tests as expected',
+  ])('preserves completed execution and observed execution wording: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ ${annotation}`, 'response.json'],
+      ['✅', annotation],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    }
+  });
+
+  it.each([
+    [
+      'UI form validation',
+      'Fill invalid form and submit',
+      'Invalid form cannot be submitted',
+      'UI blocked by validation as expected',
+    ],
+    [
+      'UI label',
+      'Open settings',
+      'Not checked label is displayed',
+      'UI not checked label was displayed as expected',
+    ],
+  ])(
+    'accepts the explicitly expected validation or label observation: %s',
+    async (scenario, steps, expected, observation) => {
+      for (const [status, evidence] of [
+        [`✅ ${observation}`, 'video.webm'],
+        ['✅', observation],
+      ]) {
+        for (const unfinished of ['', '; UI testing did not take place']) {
+          gh.comments = [
+            sheet([`| 1 | ${scenario} | ${steps} | ${expected} | ${status}${unfinished} | ${evidence} |`]),
+          ];
+          expect(await latestTestVerdict(repo, 5)).toMatchObject({
+            total: 1,
+            passed: unfinished ? 0 : 1,
+            incomplete: !!unfinished,
+          });
+        }
+      }
+    },
+  );
+
+  it.each([
+    ['Both work', 'UI blocked by validation as expected'],
+    ['Invalid form cannot be submitted', 'UI blocked by browser setup as expected'],
+    ['Invalid form cannot be submitted', 'UI blocked by validation'],
+    ['Checked label is displayed', 'UI not checked label was displayed as expected'],
+    ['Not checked label is displayed', 'UI not checked'],
+    ['Not checked label is displayed', 'UI setup failed'],
+  ])('retains mismatched observations and missing execution: %s / %s', async (expected, observation) => {
+    for (const [status, evidence] of [
+      [`✅ ${observation}`, 'video.webm'],
+      ['✅', observation],
+    ]) {
+      gh.comments = [sheet([`| 1 | UI | Open settings | ${expected} | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each(['No HTTP response headers were captured', 'Passed (no evidence captured)'])(
+    'rejects an absence-only capture summary: %s',
+    async (absence) => {
+      for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`]) {
+        gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+      }
+    },
+  );
+
+  it.each([
+    'HTTP response headers: headers.json',
+    'No HTTP response headers were captured was displayed as expected',
+    'Passed (response.json)',
+    'Passed (no evidence captured); screenshot.png',
+    'Status 200 as expected; response was not saved',
+    '[No HTTP response headers were captured](https://example.com/headers.json)',
+  ])('preserves actual evidence beside absence wording: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
   it.each(['<div>Evidence bundle</div>', '<p>response.json</p>', '<hr>'])(
