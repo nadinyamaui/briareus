@@ -2595,6 +2595,48 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI will run after deployment',
+    'UI tests will execute after deployment',
+    'UI checks will be run after deployment',
+    'UI testing will begin after deployment',
+    'UI will start after deployment',
+    'UI has not begun',
+    "UI hasn't begun",
+    'UI testing has not yet begun',
+    'UI tests have never begun',
+  ])('keeps future and not-begun execution incomplete: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅ API', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'UI ran after deployment',
+    'UI tests were executed after deployment',
+    'UI displayed will run after deployment as expected',
+    'UI showed has not begun as expected',
+    'UI has not begun message is displayed',
+  ])('preserves completed execution and observed future wording: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅ API', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    }
+  });
+
+  it.each([
     'UI: not actually tested',
     'UI tests were not actually executed',
     'UI: never actually verified',
