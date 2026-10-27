@@ -2,6 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const gh = vi.hoisted(() => ({ graphql: vi.fn(), rest: vi.fn() }));
 
+vi.mock('../lib/github-store.js', () => ({
+  githubStore: {
+    readBoard: vi.fn(async () => null),
+    saveBoard: vi.fn(async () => {}),
+  },
+}));
+
 vi.mock('../lib/config.js', () => ({
   getConfig: () => ({ githubToken: 'tok' }),
 }));
@@ -11,6 +18,7 @@ vi.mock('../lib/github.js', () => ({
   githubRest: (...args) => gh.rest(...args),
 }));
 
+import { githubStore } from '../lib/github-store.js';
 import {
   closeIssue,
   hasLabel,
@@ -141,9 +149,57 @@ function serve(nodes, defaultBranch = 'main', hasNextPage = false, refs = nodes,
   });
 }
 
-beforeEach(() => gh.graphql.mockReset());
+beforeEach(() => {
+  gh.graphql.mockReset();
+  vi.mocked(githubStore.readBoard).mockReset().mockResolvedValue(null);
+  vi.mocked(githubStore.saveBoard).mockClear();
+});
 
 describe('projectPulls', () => {
+  it('serves a durable board after restart without calling GitHub', async () => {
+    const p = project();
+    vi.mocked(githubStore.readBoard).mockResolvedValue({
+      defaultBranch: 'main',
+      pulls: [
+        {
+          number: 1,
+          title: 'Saved pull',
+          branch: 'fix',
+          baseBranch: 'main',
+          labels: [],
+          mergeable: 'mergeable',
+        },
+      ],
+      issues: [],
+      issuesError: null,
+      issuesTruncated: false,
+      syncedAt: '2026-10-01T00:00:00Z',
+    });
+    const result = await projectPulls(p);
+    expect(result).toMatchObject({
+      repo: p.repo,
+      pulls: [{ title: 'Saved pull', recommended: 'review' }],
+      syncedAt: '2026-10-01T00:00:00Z',
+    });
+    expect(gh.graphql).not.toHaveBeenCalled();
+  });
+
+  it('persists successful GitHub reads before returning their board', async () => {
+    const p = project();
+    gh.graphql.mockResolvedValue({ repository: { pullRequests: { nodes: [] }, issues: { nodes: [] } } });
+    await projectPulls(p, { fresh: true });
+    expect(githubStore.saveBoard).toHaveBeenCalledWith(
+      p.repo,
+      expect.objectContaining({ pulls: [], issues: [], observedAt: expect.any(Number) }),
+    );
+  });
+
+  it('reports a failed database write instead of claiming an unsaved board was persisted', async () => {
+    gh.graphql.mockResolvedValue({ repository: { pullRequests: { nodes: [] }, issues: { nodes: [] } } });
+    vi.mocked(githubStore.saveBoard).mockRejectedValueOnce(new Error('Database unavailable'));
+    await expect(projectPulls(project(), { fresh: true })).rejects.toThrow('Database unavailable');
+  });
+
   describe('what a load costs GitHub', () => {
     const board = () => ({
       repository: {

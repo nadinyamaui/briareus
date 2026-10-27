@@ -5,6 +5,8 @@ import express from 'express';
 
 const GITHUB_SECRET = 'gh-secret';
 
+vi.mock('../lib/github-sync.js', () => ({ githubSync: { onWebhook: vi.fn() } }));
+
 vi.mock('../lib/jobs.js', () => ({
   syncSessionsOn: vi.fn(),
   noteWebhookDelivery: vi.fn(),
@@ -448,7 +450,19 @@ describe('POST /webhooks/session/:id', () => {
 describe('ensureRepoWebhook', () => {
   const cfg = { githubToken: 'tok' };
   const url = 'https://reviewer.example.com/webhooks/github';
-  const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite', 'status'];
+  const events = [
+    'pull_request',
+    'pull_request_review',
+    'pull_request_review_comment',
+    'issues',
+    'issue_comment',
+    'check_suite',
+    'check_run',
+    'status',
+    'label',
+    'milestone',
+    'sub_issues',
+  ];
 
   function restServing(hooks, responses = {}) {
     return vi.fn(async (c, method, _path, _body) => {
@@ -667,7 +681,19 @@ describe('ensureRepoWebhook without a hostname to point at', () => {
 describe('ensureRepoWebhook when GitHub refuses the write', () => {
   const cfg = { githubToken: 'tok' };
   const url = 'https://reviewer.example.com/webhooks/github';
-  const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite', 'status'];
+  const events = [
+    'pull_request',
+    'pull_request_review',
+    'pull_request_review_comment',
+    'issues',
+    'issue_comment',
+    'check_suite',
+    'check_run',
+    'status',
+    'label',
+    'milestone',
+    'sub_issues',
+  ];
 
   const restServing = (hooks, responses = {}) =>
     vi.fn(async (c, method) => {
@@ -775,7 +801,19 @@ describe('installRepoWebhooks', () => {
   });
 
   it('stays quiet about a hook that was already right', async () => {
-    const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite', 'status'];
+    const events = [
+      'pull_request',
+      'pull_request_review',
+      'pull_request_review_comment',
+      'issues',
+      'issue_comment',
+      'check_suite',
+      'check_run',
+      'status',
+      'label',
+      'milestone',
+      'sub_issues',
+    ];
     const url = 'https://reviewer.example.com/webhooks/github';
     const rest = vi.fn(async () => ({
       ok: true,

@@ -611,10 +611,31 @@ every project it works on (the `repo` scope the token already needs
 covers it), recognising its own by URL so an existing deploy hook is never
 touched, and re-pointing it if the hostname changes.
 
-What each delivery does: nothing is started by one. The hook subscribes to
-`pull_request`, `pull_request_review`, `issue_comment`, `check_suite` and `status`
-(not `check_run`: a repository hook hears a suite finish, not a run start), and each
-refreshes the PR panel of any open session on that branch as the event lands rather
+The core keeps PRs and issues in normalized MySQL tables, including closed issues
+and merged PRs, bodies, labels, assignees, milestones, links, comments, reviews,
+commits, changed files and head checks. The lists read this durable mirror; its
+`syncedAt` identifies the last board refresh. A missing mirror is filled on first
+read, and `fresh=1` requests a GitHub refresh (with the existing 15-second minimum).
+Detailed viewers and merge validation still read GitHub on demand.
+
+An in-process scheduled task runs at startup and every hour for enabled projects.
+The first pass backfills all issue/PR pages; subsequent passes use an overlapping
+update cursor and recheck open PRs for CI changes. Completed historical items are
+remembered so a rate limit can interrupt a backfill without restarting it. The
+cursor advances only after a complete pass, and failed pages leave the previous
+collections intact. Tables are migrated at boot; no operating-system crontab is
+required. See [GitHub's issues API](https://docs.github.com/en/rest/issues/issues#list-repository-issues)
+for the shared issue/PR listing and update cursor. GitHub's own limits on commit
+and file lists still apply; this mirror does not archive repository blobs or
+attachments.
+
+What each delivery does: no agent session is started by one. The hook subscribes to
+`pull_request`, `pull_request_review`, `pull_request_review_comment`, `issues`,
+`issue_comment`, `check_suite`, `check_run`, `status`, `label`, `milestone` and
+`sub_issues`. Authenticated deliveries for enabled repositories refresh affected
+items and their board, coalescing bursts for two seconds; hourly sync catches
+missed events. Existing session events also refresh the PR panel of any open
+session on that branch as the event lands rather
 than on the next twenty-second tick (a commit status still `pending` refreshes
 nothing). A repository whose hook has delivered within the last hour, and which
 this boot found or left carrying every one of those events, is polled only every
