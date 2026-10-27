@@ -523,6 +523,103 @@ describe('latestTestVerdict', () => {
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
   });
 
+  it.each([
+    ['API', `<span ${' '.repeat(100000)}x>✅</span>`, 'response.json', 1],
+    ['API', `✅ <span ${' '.repeat(100000)}x`, 'response.json', 1],
+    ['w '.repeat(14000), `✅ API manual ${'a '.repeat(14000)}`, 'response.json', 0],
+    [`pending ${'a '.repeat(14000)}`, `✅ UI pending ${'b '.repeat(14000)}`, 'response.json', 0],
+    [`manual ${'a '.repeat(14000)}c`, `✅ API manual ${'a '.repeat(14000)}not run`, 'response.json', 0],
+    ['w '.repeat(14000), '✅', `UI manual ${'a '.repeat(14000)}`, 0],
+  ])('bounds HTML and subject matching with large contexts (%#)', (scenario, status, evidence, passed) => {
+    const source = readFileSync(new URL('../lib/findings.js', import.meta.url), 'utf8');
+    const parser = source.slice(
+      source.indexOf('function parseSheetVerdict('),
+      source.indexOf('// Missing, empty, manual and unexecuted sheets'),
+    );
+    const body = sheet([
+      `| 1 | ${scenario} | curl then browser | Both work | ${status} | ${evidence} |`,
+      '| 2 | UI | Open | Visible | ❌ | saw nothing |',
+    ]).body;
+    const result = execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `import { readFileSync } from 'node:fs';\n${parser}\nconsole.log(JSON.stringify(parseSheetVerdict(JSON.parse(readFileSync(0, 'utf8')))));`,
+      ],
+      { input: JSON.stringify(body), encoding: 'utf8', timeout: 2000 },
+    );
+    expect(JSON.parse(result)).toEqual({
+      total: 2,
+      passed,
+      manual: 0,
+      incomplete: passed === 0,
+      failures: [{ number: '2', scenario: 'UI', expected: 'Visible', evidence: 'saw nothing' }],
+    });
+  });
+
+  it.each([
+    'UI must still be tested manually',
+    'UI must still be manually verified',
+    'Browser coverage: 0%',
+    'Browser coverage 0%',
+    'UI coverage: 50%',
+    'UI coverage: 99.5%',
+  ])('retains required manual work and incomplete coverage: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅', `API: 200 OK asserted. ${annotation}.`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'UI manual verification passed',
+    'UI manual verification has passed',
+    'UI coverage: 100%',
+    'UI displayed Browser coverage: 0% as expected',
+    'UI showed must still be tested manually as expected',
+  ])('preserves completed verification and observed coverage messages: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅', `API: 200 OK asserted. ${annotation}.`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    }
+  });
+
+  it.each([
+    'No evidence of execution',
+    'No browser video or API responses were saved',
+    'No UI screenshots and API responses were captured',
+    'No evidence of execution was saved because response.json could not be uploaded',
+  ])('rejects qualified and coordinated evidence absence: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`]) {
+      gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each([
+    '[No evidence of execution](https://example.test/response.json)',
+    'No evidence of execution was displayed as expected',
+    'No browser video or API responses were saved was shown as expected',
+    'No browser video or API responses were saved; [response](https://example.test/response.json)',
+    'No browser video or API responses were saved; curl returned 200 as expected',
+  ])('preserves observed absence wording and separate retained evidence: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
   it.each(['No execution artifacts', 'N/A — not saved'])(
     'rejects explicit execution-artifact absence: %s',
     async (absence) => {
