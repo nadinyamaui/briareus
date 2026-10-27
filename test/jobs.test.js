@@ -18906,6 +18906,30 @@ describe('incoming feedback assessment gate', () => {
     expect(recordTriage).not.toHaveBeenCalled();
     expect(pendingFeedbackAssessment(job.repo, 31)).toBeNull();
   });
+  it.each(['known stale', 'moved head', 'edited source'])(
+    'discards an obsolete card without overwriting newer Fix decisions (%s)',
+    async (change) => {
+      await holdFeedbackAssessment(job);
+      const key = job.reviewTriage.findings[0].key;
+      if (change === 'known stale') job.reviewTriage.stale = true;
+      else if (change === 'moved head') {
+        job.feedbackAssessment = structuredClone(snapshot);
+        snapshot.sha = 'replacement-head';
+      } else job.feedbackAssessment.sources[0].body = 'Old evidence';
+      // The actual durable decision/checklist writer must never be called on
+      // this path: a replacement assessment may already have selected Fix.
+      recordTriage.mockClear();
+      implementFeedbackPrompt.mockClear();
+      const result = await triageStandaloneReviewFindings(job.id, {
+        verdicts: [{ key, decision: 'dismissed' }],
+      });
+      expect(result).toMatchObject({ dismissed: true, fixing: false, approved: false });
+      expect(recordTriage).not.toHaveBeenCalled();
+      expect(implementFeedbackPrompt).not.toHaveBeenCalled();
+      expect(addPullRequestLabel).not.toHaveBeenCalled();
+      expect(getJob(job.id)).toBeNull();
+    },
+  );
   it('passes only selected findings and the original source to the implementation prompt after a manual decision', async () => {
     await holdFeedbackAssessment(job);
     const key = job.reviewTriage.findings[0].key;

@@ -29,10 +29,15 @@ vi.mock('../lib/github.js', () => ({
   githubRest: vi.fn(async (cfg, method, url, body) => {
     if (method === 'GET' && /\/pulls\/\d+\/comments\?/.test(url)) {
       const page = Number(new URL(url, 'https://x').searchParams.get('page'));
-      return { ok: true, status: 200, json: async () => (page === 1 ? gh.reviewComments : []) };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => gh.reviewComments.slice((page - 1) * 100, page * 100),
+      };
     }
     if (method === 'GET' && /\/comments\?/.test(url)) {
-      return { ok: true, status: 200, json: async () => gh.comments };
+      const page = Number(new URL(url, 'https://x').searchParams.get('page'));
+      return { ok: true, status: 200, json: async () => gh.comments.slice((page - 1) * 100, page * 100) };
     }
     if (method === 'GET' && /\/pulls\/\d+\/files\?/.test(url)) {
       if (gh.files === null) return { ok: false, status: 500, json: async () => ({}) };
@@ -452,61 +457,80 @@ describe('sortFindingsForFix: the split as advice, nothing written', () => {
 });
 
 describe('recordTriage: the orchestrator’s verdicts on a round', () => {
-  it('persists summary-only external Fix findings and their checklist before releasing the assessment', async () => {
-    gh.comments = [{ id: 1, body: 'Human review with no machine declaration' }];
-    const original = githubRest.getMockImplementation();
-    githubRest.mockImplementation(async (cfg, method, url, body) => {
-      const res = await original(cfg, method, url, body);
-      if (res.ok && method === 'POST') gh.comments.push({ id: gh.comments.length + 1, body: body.body });
-      return res;
-    });
-    try {
-      const selected = {
-        title: 'Missing permission guard',
-        severity: 'medium',
-        file: 'lib/api.js',
-        line: 5,
-        sourceId: 'review:42',
-        url: 'https://github.com/owner/repo/pull/5#pullrequestreview-42',
-        decision: 'fix',
-        assessment: {
-          verified: true,
-          worthFixing: true,
-          evidence: 'Reproduced --> bypass',
-          reason: 'Protect private data',
-        },
-      };
-      const optional = { title: 'Optional claim', sourceId: 'review:42', decision: 'optional' };
-      await recordTriage(repo, 5, [selected, optional]);
-      const posts = gh.writes.filter((w) => w.method === 'POST');
-      expect(posts[0].body.body).toContain('## Selected feedback findings');
-      expect(posts[0].body.body).toContain('[source]');
-      expect(posts[1].body.body).toContain(`<!-- fix:${findingKey(selected.title)} -->`);
-      const fresh = await getFindings(repo, 5, { fresh: true });
-      expect(fresh.findings).toEqual([
-        expect.objectContaining({
-          title: selected.title,
-          decision: 'fix',
-          file: selected.file,
-          line: 5,
-          assessment: selected.assessment,
-        }),
-      ]);
-      // Retry an already-recorded decision after a checklist failure; do not redeclare it.
-      gh.fail = 'PATCH';
-      await expect(recordTriage(repo, 5, [selected])).rejects.toThrow('Required fixes');
-      gh.fail = '';
-      await recordTriage(repo, 5, [selected]);
-      expect(gh.writes.filter((w) => w.body?.body?.includes('## Selected feedback findings'))).toHaveLength(
-        1,
-      );
-      expect(gh.writes.at(-1)).toMatchObject({
-        method: 'PATCH',
-        body: { body: expect.stringContaining('Missing permission guard') },
+  it.each([1, 300])(
+    'persists external Fix findings after %i comments before releasing the assessment',
+    async (count) => {
+      gh.comments = Array.from({ length: count }, (_, i) => ({
+        id: i + 1,
+        body: 'Human review with no machine declaration',
+      }));
+      const original = githubRest.getMockImplementation();
+      githubRest.mockImplementation(async (cfg, method, url, body) => {
+        const res = await original(cfg, method, url, body);
+        if (res.ok && method === 'POST') gh.comments.push({ id: gh.comments.length + 1, body: body.body });
+        return res;
       });
-    } finally {
-      githubRest.mockImplementation(original);
-    }
+      try {
+        const selected = {
+          title: 'Missing permission guard',
+          severity: 'medium',
+          file: 'lib/api.js',
+          line: 5,
+          sourceId: 'review:42',
+          url: 'https://github.com/owner/repo/pull/5#pullrequestreview-42',
+          decision: 'fix',
+          assessment: {
+            verified: true,
+            worthFixing: true,
+            evidence: 'Reproduced --> bypass',
+            reason: 'Protect private data',
+          },
+        };
+        const optional = { title: 'Optional claim', sourceId: 'review:42', decision: 'optional' };
+        await recordTriage(repo, 5, [selected, optional]);
+        const posts = gh.writes.filter((w) => w.method === 'POST');
+        expect(posts[0].body.body).toContain('## Selected feedback findings');
+        expect(posts[0].body.body).toContain('[source]');
+        expect(posts[1].body.body).toContain(`<!-- fix:${findingKey(selected.title)} -->`);
+        const fresh = await getFindings(repo, 5, { fresh: true });
+        expect(fresh.findings).toEqual([
+          expect.objectContaining({
+            title: selected.title,
+            decision: 'fix',
+            file: selected.file,
+            line: 5,
+            assessment: selected.assessment,
+          }),
+        ]);
+        // Retry an already-recorded decision after a checklist failure; do not redeclare it.
+        gh.fail = 'PATCH';
+        await expect(recordTriage(repo, 5, [selected])).rejects.toThrow('Required fixes');
+        gh.fail = '';
+        await recordTriage(repo, 5, [selected]);
+        expect(gh.writes.filter((w) => w.body?.body?.includes('## Selected feedback findings'))).toHaveLength(
+          1,
+        );
+        expect(gh.writes.at(-1)).toMatchObject({
+          method: 'PATCH',
+          body: { body: expect.stringContaining('Missing permission guard') },
+        });
+      } finally {
+        githubRest.mockImplementation(original);
+      }
+    },
+  );
+  it('refuses an incomplete durable reader scope before saving selected findings', async () => {
+    gh.comments = Array.from({ length: 2000 }, (_, i) => ({ id: i + 1, body: 'Discussion' }));
+    await expect(
+      recordTriage(repo, 5, [{ title: 'External fix', sourceId: 'review:42', decision: 'fix' }]),
+    ).rejects.toThrow(/pagination limit/);
+    expect(gh.writes).toEqual([]);
+    expect(db.decisions.size).toBe(0);
+  });
+  it('refuses completion when GitHub acknowledges a declaration but does not return its tracking', async () => {
+    await expect(
+      recordTriage(repo, 5, [{ title: 'External fix', sourceId: 'review:42', decision: 'fix' }]),
+    ).rejects.toThrow(/missing from the durable Required fixes checklist/);
   });
   it('fails triage without losing the card when an external declaration cannot be saved', async () => {
     gh.fail = 'POST';
@@ -1119,6 +1143,25 @@ describe('deleteFindingFromReview', () => {
 });
 
 describe('replyOnFindingThread', () => {
+  it.each([null, 201])('replies to a pinned imported comment after position 300 (root: %s)', async (root) => {
+    gh.reviewComments = Array.from({ length: 300 }, (_, i) => ({ id: i + 1, body: 'Other finding' }));
+    gh.reviewComments.push({ id: 301, in_reply_to_id: root, body: 'Imported finding' });
+    await replyOnFindingThread(repo, 5, { reviewCommentId: 301 }, 'Imported feedback reply');
+    expect(gh.writes).toEqual([
+      {
+        method: 'POST',
+        url: `/repos/${repo}/pulls/5/comments/${root || 301}/replies`,
+        body: { body: 'Imported feedback reply' },
+      },
+    ]);
+  });
+  it('refuses an incomplete inline scope instead of guessing a reply target', async () => {
+    gh.reviewComments = Array.from({ length: 2000 }, (_, i) => ({ id: i + 1, body: 'Finding' }));
+    await expect(replyOnFindingThread(repo, 5, { reviewCommentId: 2001 }, 'Reply')).rejects.toThrow(
+      /pagination limit/,
+    );
+    expect(gh.writes).toEqual([]);
+  });
   const race = {
     key: findingKey('Race in the retry loop'),
     title: 'Race in the retry loop',

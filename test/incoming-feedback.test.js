@@ -192,6 +192,62 @@ describe('incoming feedback intake', () => {
     await expect(h.service.assess(project, pr)).rejects.toThrow('Settings unavailable');
     expect(h.start).not.toHaveBeenCalled();
   });
+  it('does not spend the retry budget on an unconfigured review runtime', async () => {
+    const h = harness();
+    const unconfigured = { ...project, reviewProviderId: null };
+    for (let i = 0; i < 4; i++)
+      await expect(h.service.assess(unconfigured, pr)).rejects.toThrow(/Choose a review provider/);
+    expect(h.save).not.toHaveBeenCalled();
+    expect(h.start).not.toHaveBeenCalled();
+    await h.service.assess(project, pr);
+    expect(h.state()['acme/shop#7'].attempts['review:42'].count).toBe(1);
+    expect(h.start).toHaveBeenCalledTimes(1);
+  });
+  it('releases refused starts but retains the budget for accepted assessments', async () => {
+    const h = harness();
+    // Preserve an earlier accepted failure while configuration is being repaired.
+    await h.service.assess(project, pr);
+    h.fail();
+    for (const reason of ['draining', 'Unknown provider', 'inactive provider', 'CLI not found']) {
+      h.start.mockImplementationOnce(() => {
+        throw new Error(reason);
+      });
+      await expect(h.service.assess(project, pr)).rejects.toThrow(reason);
+      expect(h.state()['acme/shop#7'].attempts['review:42'].count).toBe(1);
+    }
+    await h.service.assess(project, pr);
+    expect(h.state()['acme/shop#7'].attempts['review:42'].count).toBe(2);
+  });
+  it.each(['pending', 'busy', 'capacity'])(
+    'rechecks %s after reservation and releases the unused attempt',
+    async (claim) => {
+      let reserved = false;
+      let durable = {};
+      const h = harness({
+        pending: () => claim === 'pending' && reserved,
+        busy: () => claim === 'busy' && reserved,
+        slots: () => (claim === 'capacity' && reserved ? 0 : 1),
+        load: async () => structuredClone(durable),
+        save: async (next) => {
+          durable = structuredClone(next);
+          reserved = true;
+        },
+      });
+      expect(await h.service.assess(project, pr)).toBe(true);
+      expect(h.start).not.toHaveBeenCalled();
+      expect(durable['acme/shop#7'].attempts).toEqual({});
+    },
+  );
+  it('keeps the reserved attempt when persistence fails after an accepted start', async () => {
+    const h = harness({
+      persist: async () => {
+        throw new Error('Flush failed');
+      },
+    });
+    await expect(h.service.assess(project, pr)).rejects.toThrow('Flush failed');
+    expect(h.start).toHaveBeenCalledTimes(1);
+    expect(h.state()['acme/shop#7'].attempts['review:42'].count).toBe(1);
+  });
   it('defers while a card waits or capacity is full, without consuming the review', async () => {
     const pending = harness({ pending: () => ({ reviewTriage: {} }) });
     expect(await pending.service.assess(project, pr)).toBe(true);
