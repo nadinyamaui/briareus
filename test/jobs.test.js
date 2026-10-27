@@ -202,6 +202,7 @@ vi.mock('../lib/prtasks.js', () => ({
   testSheetPrompt: vi.fn(() => 'SHEET'),
   testRunPrompt: vi.fn(() => 'RUN'),
   implementFeedbackPrompt: vi.fn(() => 'FEEDBACK'),
+  solveConflictsPrompt: vi.fn(() => 'CONFLICTS'),
 }));
 
 vi.mock('../lib/findings.js', () => {
@@ -333,6 +334,7 @@ import {
   attachPrForBranch,
   refreshJobBranch,
   spawnWorkerSession,
+  startOrchestratorPrAction,
   workerSessionsFor,
   workerSummary,
   deliverWorkerNotices,
@@ -7346,6 +7348,8 @@ describe('the review loop: what a closing loop review reports back', () => {
       reviewRow('auto-optional-rev', 'auto-optional', true),
       parentRow('auto-fail', 'auto-fail-rev'),
       reviewRow('auto-fail-rev', 'auto-fail', true),
+      { ...parentRow('manual-action', 'manual-action-rev'), orchestratorPrAction: 'implement-feedback' },
+      reviewRow('manual-action-rev', 'manual-action', true),
       parentRow('incomplete-par', 'incomplete-rev'),
       reviewRow('incomplete-rev', 'incomplete-par', true),
       parentRow('par-1', 'rev-1'),
@@ -7514,6 +7518,34 @@ describe('the review loop: what a closing loop review reports back', () => {
     }
     throw new Error('the loop never reached the expected state');
   };
+
+  it('keeps official orchestrator action findings manual even in an autonomous project', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    const parent = getJob('manual-action');
+    parent.status = 'idle';
+    getJob('manual-action-rev').status = 'idle';
+    const findings = [
+      {
+        key: 'manual',
+        severity: 'high',
+        title: 'Needs a fix',
+        assessment: { verified: true, evidence: 'Reproduced', worthFixing: true, reason: 'Worth fixing' },
+      },
+    ];
+    latestReviewFindings.mockResolvedValueOnce(findings);
+    sortFindingsForFix.mockResolvedValueOnce({ kept: findings, parked: [] });
+    const triages = recordTriage.mock.calls.length;
+    try {
+      await closeDevSession('manual-action-rev');
+      await waitFor(() => !!parent.reviewLoop.triage);
+      expect(recordTriage.mock.calls.length).toBe(triages);
+      expect(parent.reviewLoop.fixing).toBeFalsy();
+      expect(parent.reviewLoop.done).toBeFalsy();
+      expect(parent.reviewLoop.triage.findings).toHaveLength(1);
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+    }
+  });
 
   it('automatically fixes confirmed worthwhile findings, including later-round lows', async () => {
     state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
@@ -18553,4 +18585,179 @@ describe('automatic recovery after a server restart', () => {
       }
     },
   );
+});
+
+describe('official orchestrator PR actions', () => {
+  let parent;
+  const pull = (extra = {}) => ({
+    state: 'open',
+    head: { ref: 'feature', repo: { full_name: 'acme/shop' } },
+    base: { ref: 'main' },
+    ...extra,
+  });
+  beforeAll(async () => {
+    state.stored = [
+      {
+        id: 'pr-orch',
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/shop',
+        orchestrator: true,
+        providerId: 1,
+        model: 'claude-fable-5-1',
+        effort: 'high',
+        turns: 1,
+        createdAt: '2026-09-02T00:00:00.000Z',
+        meta: {},
+      },
+    ];
+    await initJobs();
+    parent = getJob('pr-orch');
+    parent.status = 'idle';
+  });
+  beforeEach(() => {
+    state.otherProviders = [{ id: 2, label: 'Project reviewer', binary: 'claude', active: true }];
+    state.projects = [
+      {
+        repo: 'acme/shop',
+        label: 'Shop',
+        localDir: '',
+        reviewProviderId: 2,
+        reviewModel: 'claude-fable-5-1',
+        reviewEffort: 'low',
+      },
+    ];
+    githubRest.mockReset();
+    githubRest.mockResolvedValue({ ok: true, json: async () => pull() });
+    parent.status = 'idle';
+    parent.ownerId = null;
+    for (const worker of workerSessionsFor(parent)) {
+      worker.status = 'closed';
+      worker.reviewTriage = null;
+      worker.reviewLoop = null;
+    }
+  });
+  afterEach(async () => {
+    setSessionProjectFilter(() => true);
+    await settleWorkers([parent.id]);
+  });
+  it.each(['review', 'implement-feedback', 'solve-conflicts'])(
+    'starts official %s and exposes it to its parent',
+    async (action) => {
+      const session = await startOrchestratorPrAction(parent, { action, prNumber: 12 });
+      expect(session.parentId).toBe(parent.id);
+      expect(session.startedOnPr).toBe(12);
+      expect(session.startBranch).toBe('feature');
+      expect(session.effort).toBe('low');
+      expect(session.providerId).toBe(2);
+      expect(workerSessionsFor(parent)).toContain(session);
+      expect(workerSummary(session)).toMatchObject({ id: session.id, effort: 'low' });
+      if (action === 'review') {
+        expect(session.reviewBranch).toBe('feature');
+        expect(session.reviewPrompt).toBeTruthy();
+      } else {
+        expect(session.reviewBranch).toBeNull();
+        expect(session.activity).toBe(action);
+        expect(!!session.reviewLoop).toBe(action === 'implement-feedback');
+        expect(session.recoveryTurn.prompt).toContain(
+          action === 'implement-feedback' ? 'FEEDBACK' : 'CONFLICTS',
+        );
+        if (action === 'implement-feedback')
+          expect(session.recoveryTurn.prompt).toContain('does not delegate review triage');
+      }
+    },
+  );
+  it.each([0, -1, 1.2, '12', null, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid PR %s',
+    async (prNumber) => {
+      await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber })).rejects.toMatchObject({
+        status: 400,
+      });
+      expect(githubRest).not.toHaveBeenCalled();
+    },
+  );
+  it('rejects another project and arbitrary actions before GitHub', async () => {
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'review', prNumber: 12, repo: 'other/repo' }),
+    ).rejects.toMatchObject({ status: 403 });
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'custom-feedback', prNumber: 12 }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(githubRest).not.toHaveBeenCalled();
+  });
+  it('checks current owner access before reading the PR', async () => {
+    parent.ownerId = 2;
+    setSessionProjectFilter(() => false);
+    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toThrow(
+      /Project unavailable/,
+    );
+    expect(githubRest).not.toHaveBeenCalled();
+  });
+  it.each([
+    [pull({ state: 'closed' }), 409],
+    [pull({ head: { ref: 'feature', repo: { full_name: 'other/repo' } } }), 400],
+    [pull({ head: null }), 400],
+  ])('rejects closed or foreign PR heads', async (pr, status) => {
+    githubRest.mockResolvedValueOnce({ ok: true, json: async () => pr });
+    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toMatchObject(
+      { status },
+    );
+  });
+  it.each([404, 403, 500])('surfaces GitHub failure %s', async (status) => {
+    githubRest.mockResolvedValueOnce({ ok: false, status });
+    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toMatchObject(
+      { status: status === 404 ? 404 : 502 },
+    );
+  });
+  it('refuses a missing configured reviewer instead of changing provider', async () => {
+    state.projects[0].reviewProviderId = 999;
+    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toMatchObject(
+      { status: 409 },
+    );
+  });
+  it('keeps an auto-closing review result readable after releasing its resources', async () => {
+    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+    expect(session.autoClose).toBe(true);
+    expect(session.orchestratorPrAction).toBe('review');
+    await settleWorkers([parent.id]);
+    await closeDevSession(session.id);
+    expect(getJob(session.id)?.status).toBe('closed');
+    expect(workerSessionsFor(parent).map((j) => j.id)).toContain(session.id);
+  });
+
+  it('keeps the user-triaged fix under the orchestrator with manual triage and updates', async () => {
+    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+    await settleWorkers([parent.id]);
+    // The operator's Findings decision uses the official standalone review flow.
+    session.reviewTriage = {
+      mine: true,
+      prNumber: 12,
+      branch: 'feature',
+      findings: [{ key: 'fix-me', title: 'A confirmed defect', severity: 'high' }],
+    };
+    const result = await triageStandaloneReviewFindings(session.id, {
+      verdicts: [{ key: 'fix-me', decision: 'fix' }],
+    });
+    const fix = getJob(result.session.id);
+    expect(fix.parentId).toBe(parent.id);
+    expect(fix.orchestratorPrAction).toBe('implement-feedback');
+    expect(fix.reviewLoop).toBeTruthy();
+    expect(workerSessionsFor(parent)).toContain(fix);
+  });
+
+  it('inherits the owner and refuses duplicate actions, then preserves standalone triage after closure', async () => {
+    parent.ownerId = 2;
+    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+    expect(session.ownerId).toBe(2);
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'implement-feedback', prNumber: 12 }),
+    ).rejects.toMatchObject({ status: 409 });
+    await settleWorkers([parent.id]);
+    session.status = 'closed';
+    session.reviewTriage = { findings: [{ title: 'Pending' }], prNumber: 12 };
+    expect(workerSummary(session).reviewTriage.findings).toHaveLength(1);
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'implement-feedback', prNumber: 12 }),
+    ).rejects.toThrow(/awaiting user triage/);
+  });
 });
