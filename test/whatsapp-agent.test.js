@@ -493,6 +493,7 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
         ['wmv', 'video/x-ms-wmv'],
         ['flv', 'video/x-flv'],
         ['m2ts', 'video/mp2t'],
+        ['3g2', 'video/3gpp2'],
       ]) {
         const filename = `video.${extension}`;
         fs.writeFileSync(path.join(dir, filename), PNG);
@@ -512,9 +513,11 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
       for (const [mimetype, extension] of [
         ['video/mp4', 'mp4'],
         ['video/quicktime', 'mov'],
+        ['video/QuickTime', 'mov'],
         ['video/x-m4v', 'm4v'],
         ['video/webm', 'webm'],
         ['video/3gpp', '3gp'],
+        ['video/3gpp2', '3g2'],
         ['video/x-matroska', 'mkv'],
         ['video/x-msvideo', 'avi'],
         ['video/mpeg', 'mpeg'],
@@ -533,6 +536,7 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
         );
         try {
           expect(path.basename(downloaded.path)).toBe(`media.${extension}`);
+          expect(downloaded.mimetype).toBe(mimetype);
           const forwarded = await tool('whatsapp_send_media', {
             account: 'default',
             chat: CHAT,
@@ -541,14 +545,14 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
           expect(forwarded.result.isError).not.toBe(true);
           expect(service.sendMedia).toHaveBeenLastCalledWith('default', CHAT, {
             data: PNG,
-            mimetype,
+            mimetype: mimetype.toLowerCase(),
             filename: `media.${extension}`,
           });
           const video = mimetype.startsWith('video/');
           expect(waha.mock.lastCall[0]).toBe(`http://waha.test/api/send${video ? 'Video' : 'File'}`);
           const body = JSON.parse(waha.mock.lastCall[1].body);
           expect(body.file).toEqual({
-            mimetype,
+            mimetype: mimetype.toLowerCase(),
             filename: `media.${extension}`,
             data: PNG.toString('base64'),
           });
