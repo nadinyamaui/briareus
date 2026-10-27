@@ -428,6 +428,12 @@ describe('one commit', () => {
 });
 
 describe('updating a pull request branch', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
   const sha = 'a'.repeat(40);
   const options = { headSha: sha, baseRef: 'main' };
   const answer = (status, body) => ({ ok: status < 300, status, json: async () => body });

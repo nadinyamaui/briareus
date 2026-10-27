@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const gh = vi.hoisted(() => ({ graphql: vi.fn(), rest: vi.fn() }));
 
@@ -20,7 +20,7 @@ vi.mock('../lib/github.js', () => ({
 }));
 
 import { githubStore } from '../lib/github-store.js';
-import { mergePullRequest } from '../lib/prviewer.js';
+import { mergePullRequest, updatePullRequestBranch } from '../lib/prviewer.js';
 import {
   closeIssue,
   hasLabel,
@@ -156,6 +156,126 @@ beforeEach(() => {
   vi.mocked(githubStore.readBoard).mockReset().mockResolvedValue(null);
   vi.mocked(githubStore.saveBoard).mockClear();
   vi.mocked(githubStore.saveItem).mockClear();
+});
+
+describe('branch update reconciliation', () => {
+  const headSha = 'a'.repeat(40);
+  const options = { headSha, baseRef: 'main' };
+  let p, saved;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    p = project();
+    saved = {
+      pulls: [{ number: 1, title: 'Saved pull', labels: [], headSha, checks: 'success' }],
+      issues: [],
+      syncedAt: new Date().toISOString(),
+    };
+    vi.mocked(githubStore.readBoard).mockImplementation(async () => saved);
+    vi.mocked(githubStore.saveBoard).mockImplementation(async (_repo, board) => {
+      saved = board;
+    });
+    gh.rest.mockReset().mockImplementation(async (_cfg, method) => ({
+      ok: true,
+      status: method === 'PUT' ? 202 : 200,
+      json: async () => ({ state: 'open', head: { sha: headSha }, base: { ref: 'main' } }),
+    }));
+    remote(headSha);
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.mocked(githubStore.saveBoard).mockResolvedValue(undefined);
+    vi.restoreAllMocks();
+  });
+
+  function remote(sha, rollup = 'SUCCESS') {
+    const node = prNode({ rollup });
+    node.commits.nodes[0].commit.oid = sha;
+    serve([node]);
+  }
+
+  it('reconciles through delayed completion after an immediate refresh still saw the old head', async () => {
+    expect((await projectPulls(p)).pulls[0]).toMatchObject({ headSha, checks: 'success' });
+    await expect(updatePullRequestBranch(p, 1, options)).resolves.toMatchObject({ status: 'accepted' });
+    expect((await projectPulls(p)).pulls[0].headSha).toBe(headSha);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(saved.pulls[0].headSha).toBe(headSha);
+
+    const nextHead = 'b'.repeat(40);
+    remote(nextHead, 'PENDING');
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(saved.pulls[0]).toMatchObject({ headSha: nextHead, checks: 'pending' });
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(121_000);
+    expect((await projectPulls(p)).pulls[0]).toMatchObject({ headSha: nextHead, checks: 'pending' });
+    expect(gh.graphql).toHaveBeenCalledTimes(3);
+    expect(gh.rest).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries refresh failures and honors the GitHub retry time', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await updatePullRequestBranch(p, 1, options);
+    const retryAt = Date.now() + 90_000;
+    gh.graphql
+      .mockRejectedValueOnce(new Error('GitHub answered 503'))
+      .mockRejectedValueOnce(Object.assign(new Error('Rate limited'), { status: 429, retryAt }));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(gh.graphql).toHaveBeenCalledTimes(2);
+    remote('b'.repeat(40), 'PENDING');
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(gh.graphql).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(saved.pulls[0].checks).toBe('pending');
+    expect(gh.graphql).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('bounds polling and leaves an ordinary read able to refresh after exhaustion', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await updatePullRequestBranch(p, 1, options);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(gh.graphql).toHaveBeenCalledTimes(8);
+    expect(vi.getTimerCount()).toBe(0);
+    remote('b'.repeat(40), 'PENDING');
+    expect((await projectPulls(p)).pulls[0].checks).toBe('pending');
+    expect(gh.graphql).toHaveBeenCalledTimes(9);
+  });
+
+  it('stops when the updated pull request has left the board', async () => {
+    await updatePullRequestBranch(p, 1, options);
+    serve([]);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(saved.pulls).toEqual([]);
+    expect(gh.graphql).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('replaces an earlier pending poll for another accepted update of the same PR', async () => {
+    await updatePullRequestBranch(p, 1, options);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await updatePullRequestBranch(p, 1, options);
+    expect(vi.getTimerCount()).toBe(1);
+    remote('b'.repeat(40));
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(gh.graphql).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('preserves the durable board and schedules no reconciliation for a refused update', async () => {
+    await projectPulls(p);
+    gh.rest.mockImplementation(async (_cfg, method) => ({
+      ok: method === 'GET',
+      status: method === 'GET' ? 200 : 422,
+      json: async () => ({ state: 'open', head: { sha: headSha }, base: { ref: 'main' } }),
+    }));
+    await expect(updatePullRequestBranch(p, 1, options)).rejects.toMatchObject({ status: 422 });
+    await vi.advanceTimersByTimeAsync(121_000);
+    expect((await projectPulls(p)).pulls[0].headSha).toBe(headSha);
+    expect(gh.graphql).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
 
 describe('projectPulls', () => {
