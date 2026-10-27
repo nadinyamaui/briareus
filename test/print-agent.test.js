@@ -1,6 +1,9 @@
 import express from 'express';
 import { EventEmitter } from 'node:events';
-import { createPrintService } from '../lib/print.js';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { createPrintService, runCups } from '../lib/print.js';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { printAgentRoutes, printSessionAllowed } from '../lib/print-agent.js';
 
@@ -255,6 +258,67 @@ describe('print submission lifecycle', () => {
     expect(ids).toContain('Office-1');
     expect(ids).toContain('Office-101');
     expect(ids).not.toContain('Office-2');
+  });
+
+  it.each(['missing', 'not executable'])(
+    'releases history after real spawn failures (%s), allowing printing after repair',
+    async (failure) => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'briareus-print-test-'));
+      const executable = path.join(dir, 'lp');
+      try {
+        if (failure === 'not executable') await writeFile(executable, '', { mode: 0o600 });
+        let repaired = false;
+        const run = vi.fn(async (command, args) => {
+          if (command === 'lp') {
+            if (!repaired) return runCups(executable, []);
+            return { code: 0, stdout: 'request id is Office-1', stderr: '' };
+          }
+          if (args[0] === '-o') return { code: 0, stdout: 'Office-1 user 1024 date\n', stderr: '' };
+          return {
+            code: 0,
+            stdout: 'printer Office is idle.\nsystem default destination: Office\n',
+            stderr: '',
+          };
+        });
+        Object.assign(service, createPrintService({ run }));
+        const recover = vi.spyOn(service, 'recover');
+        for (let i = 0; i < 101; i++) {
+          const res = await request('/jobs', 'POST', { path: '/w/a.pdf' });
+          expect(res.status).toBe(failure === 'missing' ? 503 : 400);
+          const { error } = await res.json();
+          expect(error).toMatch(failure === 'missing' ? /not installed/ : /EACCES/);
+          expect(error).not.toMatch(/uncertain|resubmit/);
+        }
+        expect(await (await request('/jobs')).json()).toEqual({ jobs: [] });
+        expect(recover).not.toHaveBeenCalled();
+        repaired = true;
+        expect((await request('/jobs', 'POST', { path: '/w/a.pdf' })).status).toBe(200);
+        expect(await (await request('/jobs')).json()).toEqual({
+          jobs: [{ jobId: 'Office-1', state: 'pending' }],
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('retains uncertainty after a real process runs and exits unsuccessfully', async () => {
+    const run = vi.fn(async (command) => {
+      if (command === 'lp') return runCups(process.execPath, ['-e', 'process.exit(1)']);
+      return {
+        code: 0,
+        stdout: 'printer Office is idle.\nsystem default destination: Office\n',
+        stderr: '',
+      };
+    });
+    Object.assign(service, createPrintService({ run }));
+    vi.spyOn(service, 'recover').mockResolvedValue([]);
+    const res = await request('/jobs', 'POST', { path: '/w/a.pdf' });
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toMatch(/submission is uncertain.*Do not resubmit/);
+    expect((await (await request('/jobs')).json()).jobs).toEqual([
+      { jobId: expect.stringMatching(/^briareus-/), printer: 'Office', state: 'uncertain' },
+    ]);
   });
 
   it('retains uncertain submissions and recovers cancellation ownership without another print', async () => {

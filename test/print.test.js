@@ -129,6 +129,23 @@ describe('the print service', () => {
   });
 
   it.each([
+    ['界'.repeat(80), '界'.repeat(69)],
+    ['😀'.repeat(80), '😀'.repeat(52)],
+    ['a'.repeat(208) + '😀', 'a'.repeat(208)],
+    ['a'.repeat(208) + '\nmore', 'a'.repeat(208) + ' '],
+    ['a'.repeat(250), 'a'.repeat(209)],
+  ])('bounds the marked UTF-8 title without splitting characters: %s', async (title, expected) => {
+    const run = fakeCups();
+    const submitting = vi.fn();
+    await createPrintService({ run }).print(Buffer.from('x'), { title }, { submitting });
+    const args = run.mock.calls.find(([command]) => command === 'lp')[1];
+    const markedTitle = args[args.indexOf('-t') + 1];
+    expect(markedTitle).toBe(`${submitting.mock.calls[0][0].marker} ${expected}`);
+    expect(Buffer.byteLength(markedTitle)).toBeLessThanOrEqual(255);
+    expect(Buffer.from(markedTitle).toString()).toBe(markedTitle);
+  });
+
+  it.each([
     [{ printer: 'Nowhere' }, 404],
     [{ printer: '-o' }, 404],
     [{ copies: 0 }, 400],
