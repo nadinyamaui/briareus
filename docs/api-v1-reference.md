@@ -533,7 +533,7 @@ Download a project’s repository at a commit as a gzipped tarball. Needs `read`
 
 ### `GET /sessions`
 
-List the sessions of this token’s projects, newest first. Needs `read`.
+List the sessions of this token’s projects: pinned ones first, most recently pinned first, then the rest newest first. Needs `read`.
 
 **Returns** `{ sessions: Session[] }`
 
@@ -605,7 +605,7 @@ Follow one session: transcript lines as unnamed events whose `id:` is their `seq
 
 ### `PATCH /sessions/{id}`
 
-Edit a session’s title or compaction settings; one field per request. Needs `manage`, held to the session’s project.
+Edit a session’s title, pin or compaction settings; one field per request. Needs `manage`, held to the session’s project.
 
 **Body**
 
@@ -614,6 +614,7 @@ Edit a session’s title or compaction settings; one field per request. Needs `m
 | `title`               | `string`  | The new title                                                    |
 | `autoCompact`         | `boolean` | Whether the session compacts itself when its context fills       |
 | `compactInstructions` | `string`  | What every compaction of this session must keep; empty clears it |
+| `pinned`              | `boolean` | Pin the session so it leads the session list, or unpin it        |
 
 **Returns** `{ session: Session }`
 
@@ -2352,6 +2353,7 @@ A conversation with an agent. The record is pushed whole on every change, so rep
 | `startBranch`     | `string?`                                                       | The existing branch it was started on, if any                                                                                                                                                                                       |
 | `local`           | `boolean`                                                       | Whether it works in the project’s local checkout                                                                                                                                                                                    |
 | `createdAt`       | `string`                                                        | ISO time it was created                                                                                                                                                                                                             |
+| `pinnedAt`        | `string?`                                                       | ISO time it was pinned; absent when not pinned. Pinned sessions lead the list, the most recently pinned first                                                                                                                       |
 | `startedAt`       | `string?`                                                       | ISO time its current turn started                                                                                                                                                                                                   |
 | `endedAt`         | `string?`                                                       | ISO time it last settled                                                                                                                                                                                                            |
 | `turns`           | `integer`                                                       | Turns run so far                                                                                                                                                                                                                    |

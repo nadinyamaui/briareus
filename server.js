@@ -100,6 +100,7 @@ import {
   renameDevSession,
   setDevSessionAutoCompact,
   setDevSessionCompactInstructions,
+  setDevSessionPinned,
   linkPrToSession,
   dropQueuedMessage,
   startDevServe,
@@ -2154,6 +2155,7 @@ const editSession = sessionEditRoute({
   renameDevSession,
   setDevSessionAutoCompact,
   setDevSessionCompactInstructions,
+  setDevSessionPinned,
 });
 api.patch('/api/dev/sessions/:id', editSession);
 

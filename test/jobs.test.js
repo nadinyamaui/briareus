@@ -329,6 +329,8 @@ import {
   renameDevSession,
   setDevSessionAutoCompact,
   setDevSessionCompactInstructions,
+  setDevSessionPinned,
+  listDevSessions,
   linkPrToSession,
   attachPrForBranch,
   refreshJobBranch,
@@ -10926,10 +10928,10 @@ describe('manual session metadata', () => {
 
   beforeAll(async () => {
     state.stored = [
-      row('manual-ok'),
-      row('manual-url'),
-      row('manual-wrong'),
-      row('manual-linked', { startedOnPr: 9 }),
+      row('manual-ok', { createdAt: '2026-10-04T00:00:00.000Z' }),
+      row('manual-url', { createdAt: '2026-10-03T00:00:00.000Z' }),
+      row('manual-wrong', { createdAt: '2026-10-02T00:00:00.000Z' }),
+      row('manual-linked', { startedOnPr: 9, createdAt: '2026-10-01T00:00:00.000Z' }),
     ];
     await initJobs();
   });
@@ -10949,6 +10951,34 @@ describe('manual session metadata', () => {
   it('refuses an empty or excessively long title', () => {
     expect(() => renameDevSession('manual-ok', '   ')).toThrow(/cannot be empty/);
     expect(() => renameDevSession('manual-ok', 'x'.repeat(161))).toThrow(/160 characters/);
+  });
+
+  it('lists pinned sessions first, the most recently pinned leading, until unpinned', () => {
+    const order = () =>
+      listDevSessions()
+        .map((s) => s.id)
+        .filter((id) => id.startsWith('manual-'));
+    const unpinned = order();
+    vi.useFakeTimers({ now: Date.parse('2026-10-27T10:00:00Z'), toFake: ['Date'] });
+    try {
+      expect(setDevSessionPinned('manual-wrong', true).pinnedAt).toBe('2026-10-27T10:00:00.000Z');
+      vi.setSystemTime(Date.parse('2026-10-27T11:00:00Z'));
+      setDevSessionPinned('manual-url', true);
+      // Pinning again keeps the original time, and with it the place.
+      vi.setSystemTime(Date.parse('2026-10-27T12:00:00Z'));
+      expect(setDevSessionPinned('manual-wrong', true).pinnedAt).toBe('2026-10-27T10:00:00.000Z');
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(unpinned).toEqual(['manual-ok', 'manual-url', 'manual-wrong', 'manual-linked']);
+    expect(order()).toEqual(['manual-url', 'manual-wrong', 'manual-ok', 'manual-linked']);
+    expect(getJob('manual-ok').events).toEqual([]);
+
+    expect(setDevSessionPinned('manual-url', false).pinnedAt).toBeUndefined();
+    setDevSessionPinned('manual-wrong', false);
+    expect(order()).toEqual(unpinned);
+    expect(() => setDevSessionPinned('manual-ok', 'yes')).toThrow('true or false');
+    expect(() => setDevSessionPinned('missing', true)).toThrow('not found');
   });
 
   it('links a PR number after verifying its exact head branch', async () => {
