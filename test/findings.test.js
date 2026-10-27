@@ -1172,6 +1172,63 @@ describe('latestTestVerdict', () => {
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
+  it.each([
+    'No evidence was uploaded or saved',
+    'No evidence was uploaded and saved',
+    'No evidence was captured or recorded or saved',
+    'No response was uploaded or saved for this run',
+  ])('rejects coordinated evidence absence: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`]) {
+      gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+    for (const retained of ['response.json', 'curl returned 200 as expected']) {
+      for (const evidence of [`${absence}; ${retained}`, `${retained}; ${absence}`]) {
+        gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+      }
+    }
+    gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${absence} was displayed as expected |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it.each([
+    'worker not run',
+    'worker was not executed',
+    'worker has not been tested',
+    'worker skipped',
+    'background worker not run',
+  ])('keeps required background execution incomplete: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅ API', `response.json; ${annotation}`],
+      ['✅ API', `${annotation}; response.json`],
+    ]) {
+      gh.comments = [
+        sheet([
+          `| 1 | API and background worker | curl then trigger worker | Both work | ${status} | ${evidence} |`,
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each([
+    'worker completed successfully',
+    'worker not run was displayed as expected',
+    'worker not run.json',
+    '[worker not run](https://example.com/worker.json)',
+    'worker-not-run.json',
+    'worker skipped expired notification returns 204',
+  ])('preserves background observations and artifacts: %s', async (annotation) => {
+    gh.comments = [
+      sheet([
+        `| 1 | API and worker | curl then trigger worker | Both work | ✅ API | response.json; ${annotation} |`,
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
   it('caches custom schemas independently by table width and block', async () => {
     gh.comments = [
       {
@@ -2464,6 +2521,12 @@ describe('latestTestVerdict', () => {
     ['- [x] UI', '    '],
     ['- Results\n\n    - UI', '        '],
     ['- UI', '\t'],
+    ['-\tUI', '    '],
+    ['1.\tUI', '    '],
+    ['- - UI', '      '],
+    ['-\t-\tUI', '        '],
+    ['1. - UI', '       '],
+    ['- - - UI', '        '],
   ])('counts failed results inside list %j', async (list, indent) => {
     gh.comments = [
       sheet([
@@ -2521,6 +2584,41 @@ describe('latestTestVerdict', () => {
       });
     },
   );
+
+  it.each([
+    ['-\tUI', 4],
+    ['- - UI', 4],
+    ['-\t-\tUI', 8],
+    ['-     UI', 2],
+  ])('keeps code exclusions relative to list %j', async (list, containerIndent) => {
+    const sample = [
+      '| # | Scenario | Steps | Expected | Status | Evidence |',
+      '|---|---|---|---|---|---|',
+      '| 2 | Example | steps | value | ❌ | example only |',
+    ];
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        '',
+        list,
+        '',
+        ...sample.map((line) => ' '.repeat(containerIndent + 4) + line),
+        '',
+        ' '.repeat(containerIndent) + '```markdown',
+        ...sample.map((line) => ' '.repeat(containerIndent) + line),
+        ' '.repeat(containerIndent) + '```',
+        '',
+        ...sample.slice(0, 2).map((line) => ' '.repeat(containerIndent) + line),
+        ' '.repeat(containerIndent) + '| 3 | UI | Open | Page | ❌ | screenshot.png |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({
+      failures: [{ number: '3', scenario: 'UI' }],
+      total: 2,
+      passed: 1,
+      incomplete: false,
+    });
+  });
 
   it.each(['```markdown', '~~~~markdown', '````'])('ignores fenced result examples: %s', async (fence) => {
     gh.comments = [
