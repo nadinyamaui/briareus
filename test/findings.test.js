@@ -301,6 +301,66 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    '50% of UI tested',
+    'UI 50 percent tested',
+    'Browser process exited before testing',
+    'API was never called',
+    'Pending execution',
+    'Pending verification',
+    'Partial coverage',
+    'Incomplete coverage',
+    'Manual verification required',
+    'Result: UI tests not executed',
+  ])('rejects explicit unfinished execution declarations: %s', async (annotation) => {
+    const cases = [[`✅ API; ${annotation}`, 'response.json']];
+    // Bare Evidence placeholders can accompany a retained artifact; named unrun procedures cannot.
+    if (!/^(?:Pending|Partial|Incomplete|Manual)\b/.test(annotation))
+      cases.push(['✅', `${annotation}; response.json`]);
+    for (const [status, evidence] of cases) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    '100% of UI tested',
+    'UI 100 percent tested',
+    'Browser process exited after testing',
+    'API was called',
+    'Result: UI tests executed',
+    'UI manual verification passed',
+    'UI displayed Pending execution as expected',
+    'UI displayed Partial coverage as expected',
+    'UI displayed Manual verification required as expected',
+    'blocked user receives 403',
+    'pending payment is displayed',
+  ])('preserves completed coverage and observed business states: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ ${annotation}`, 'response.json'],
+      ['✅', `response.json; ${annotation}`],
+    ]) {
+      for (const unfinished of ['', '; UI not tested']) {
+        gh.comments = [
+          sheet([
+            `| 1 | API and UI | curl then browser | Both work | ${status}${unfinished} | ${evidence} |`,
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          total: 1,
+          passed: unfinished ? 0 : 1,
+          incomplete: !!unfinished,
+        });
+      }
+    }
+  });
+
+  it.each([
     'UI execution has yet to occur',
     'UI tests scheduled',
     'UI: Error: cannot start browser',
@@ -477,6 +537,7 @@ describe('latestTestVerdict', () => {
     'UI has been left untested',
     'unknown result',
     'status: unknown',
+    'result: unknown',
     '(result unknown)',
   ])('retains explicit progress and unknown verdicts as incomplete: %s', async (annotation) => {
     for (const [status, evidence] of [
@@ -511,6 +572,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'Evidence is not yet ready',
+    'No evidence exists for PR #196.',
+    'Evidence: none recorded',
+    'No evidence for this execution',
     'No evidence has been recorded for this PR.',
     'No evidence has been recorded for the PR',
     'No evidence has been recorded for this pull request',
