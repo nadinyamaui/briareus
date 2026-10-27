@@ -31,6 +31,9 @@ import { shareRoutes } from './lib/share-routes.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
+import { readSessionFile } from './lib/ssh-upload.js';
+import { createPrintService } from './lib/print.js';
+import { printAgentRoutes } from './lib/print-agent.js';
 import { createSlackService } from './lib/slack.js';
 import { slackRoutes, slackEventsRouter } from './lib/slack-routes.js';
 import { createHomeAssistantService } from './lib/home-assistant.js';
@@ -703,6 +706,9 @@ api.use(
   }),
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
+api.use(
+  printAgentRoutes({ service: createPrintService(), agentSession, getProject, readFile: readSessionFile }),
+);
 // Each user's own Home Assistant (lib/me-routes.js). The one in .env was the operator's, so
 // it stands for the original operator until they connect one of their own.
 const homeAssistantOf = (user) => {

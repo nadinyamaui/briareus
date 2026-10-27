@@ -354,6 +354,7 @@ import {
   slackProtocol,
   mailProtocol,
   whatsappProtocol,
+  printProtocol,
   pushProtocol,
   rotateSessionWebhook,
   sessionWebhookState,
@@ -16091,6 +16092,37 @@ describe('the shared browser in a session', () => {
       setWhatsAppWatchAccess(() => false);
       project.mailToolsEnabled = previous.mail;
       project.whatsappToolsEnabled = previous.whatsapp;
+      job.readOnly = false;
+    }
+  });
+
+  it('mounts print tools only in projects that opt in to printing, and only in attended turns', async () => {
+    const job = getJob('br-turn');
+    const project = state.projects.find((p) => p.repo === job.repo);
+    const previous = project.printToolsEnabled;
+    job.browser = false;
+    try {
+      project.printToolsEnabled = false;
+      const off = await turn(job, 'Keep coding');
+      await off.settled;
+      expect(off.seen.mcp).not.toHaveProperty('reviewer_print');
+      expect(printProtocol(job)).toBe('');
+      project.printToolsEnabled = true;
+      const on = await turn(job, 'Print the report');
+      await on.settled;
+      expect(on.seen.mcp.reviewer_print.args[0]).toMatch(/print-mcp\.js$/);
+      expect(on.seen.mcp.reviewer_print.env).toEqual(on.seen.mcp.reviewer_memory.env);
+      expect(printProtocol(job)).toContain('# Printing');
+      expect(printProtocol(job)).toContain('POST /api/agent/print/jobs');
+      const unwatched = await turn(job, 'A delivery', { unattended: true });
+      await unwatched.settled;
+      expect(unwatched.seen.mcp).not.toHaveProperty('reviewer_print');
+      job.readOnly = true;
+      const analyst = await turn(job, 'Analyze this code');
+      await analyst.settled;
+      expect(analyst.seen.mcp).not.toHaveProperty('reviewer_print');
+    } finally {
+      project.printToolsEnabled = previous;
       job.readOnly = false;
     }
   });
