@@ -8,7 +8,11 @@ import { createSshService } from '../lib/ssh.js';
 import { MAX_SSH_UPLOAD_BYTES, sshUploadCommand, withSshUpload } from '../lib/ssh-upload.js';
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ credentialsKey: 'k'.repeat(32) }) }));
-vi.mock('../lib/db.js', () => ({ loadAppSetting: vi.fn(), saveAppSetting: vi.fn() }));
+vi.mock('../lib/db.js', () => ({
+  loadAppSetting: vi.fn(),
+  saveAppSetting: vi.fn(),
+  updateAppSetting: vi.fn(),
+}));
 let dir, job, service, server, execute, sourcePath, destination, bytes;
 const remote = { repo: 'owner/repo', host: 'fixture.example', username: 'deploy' };
 const shell = (command, payload) =>
@@ -27,7 +31,15 @@ beforeEach(async () => {
   destination = path.join(dir, "remote 'quoted' $(touch injected) `id`.xlsx");
   await fs.writeFile(sourcePath, bytes);
   execute = vi.fn((_server, command, _timeout, _sudo, payload) => shell(command, payload));
-  service = createSshService({ load: async () => [], save: async () => {}, execute, getJob: () => job });
+  let saved = [];
+  service = createSshService({
+    load: async () => structuredClone(saved),
+    save: async (_name, rows) => {
+      saved = rows;
+    },
+    execute,
+    getJob: () => job,
+  });
   await service.init();
   server = await service.create(remote);
 });

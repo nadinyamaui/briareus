@@ -123,6 +123,9 @@ vi.mock('../lib/config.js', () => ({
 }));
 
 vi.mock('../lib/db.js', () => ({
+  loadAppSetting: vi.fn(),
+  saveAppSetting: vi.fn(),
+  updateAppSetting: vi.fn(),
   saveJob: vi.fn(async () => {}),
   saveTaskSession: vi.fn(async () => {}),
   saveJobEvents: vi.fn(async () => {}),

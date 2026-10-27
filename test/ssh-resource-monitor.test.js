@@ -227,10 +227,10 @@ describe('pushed resources and retention', () => {
 });
 
 it('isolates and rotates machine credentials without storing or exposing plaintext', async () => {
-  let saved;
+  let saved = [];
   const execute = vi.fn();
   const service = createSshService({
-    load: async () => [],
+    load: async () => structuredClone(saved),
     save: async (_name, rows) => {
       saved = rows;
     },
@@ -240,18 +240,18 @@ it('isolates and rotates machine credentials without storing or exposing plainte
   const first = await service.create(host());
   const second = await service.create(host(2));
   const credential = await service.issueMonitorToken(first.id);
-  expect(service.authorizeMonitor(first.id, credential)?.id).toBe(first.id);
-  expect(service.authorizeMonitor(second.id, credential)).toBeNull();
+  expect((await service.authorizeMonitor(first.id, credential))?.id).toBe(first.id);
+  expect(await service.authorizeMonitor(second.id, credential)).toBeNull();
   expect(JSON.stringify(saved)).not.toContain(credential);
   expect(service.list()[0]).not.toHaveProperty('monitorTokenHash');
   const replacement = await service.issueMonitorToken(first.id);
-  expect(service.authorizeMonitor(first.id, credential)).toBeNull();
-  expect(service.authorizeMonitor(first.id, replacement)).toBeTruthy();
+  expect(await service.authorizeMonitor(first.id, credential)).toBeNull();
+  expect(await service.authorizeMonitor(first.id, replacement)).toBeTruthy();
   await service.update(first.id, { repo: 'new/repo' });
-  expect(service.authorizeMonitor(first.id, replacement)).toBeNull();
+  expect(await service.authorizeMonitor(first.id, replacement)).toBeNull();
   const third = await service.issueMonitorToken(first.id);
   await service.revokeMonitorToken(first.id);
-  expect(service.authorizeMonitor(first.id, third)).toBeNull();
+  expect(await service.authorizeMonitor(first.id, third)).toBeNull();
   expect(execute).not.toHaveBeenCalled();
 });
 

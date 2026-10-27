@@ -25,7 +25,15 @@ beforeEach(async () => {
     history: vi.fn(async (server, since) => ({ serverId: server.id, since, samples: [] })),
   };
   execute = vi.fn(async () => ({ stdout: 'done', exitCode: 0 }));
-  service = createSshService({ load: async () => [], save: async () => {}, execute, getJob: () => job });
+  let saved = [];
+  service = createSshService({
+    load: async () => structuredClone(saved),
+    save: async (_name, rows) => {
+      saved = rows;
+    },
+    execute,
+    getJob: () => job,
+  });
   await service.init();
   const app = express();
   app.use(express.json());
@@ -96,10 +104,10 @@ describe('SSH HTTP authorization and registration', () => {
       endpoint: `https://core.example/api/v1/telemetry/ssh/${row.id}/samples`,
     });
     expect(config.token).toMatch(/^brm_/);
-    expect(service.authorizeMonitor(row.id, config.token)).toBeTruthy();
+    expect(await service.authorizeMonitor(row.id, config.token)).toBeTruthy();
     expect(JSON.stringify(service.list())).not.toContain(config.token);
     expect((await request(path, { operator: true, method: 'DELETE' })).status).toBe(200);
-    expect(service.authorizeMonitor(row.id, config.token)).toBeNull();
+    expect(await service.authorizeMonitor(row.id, config.token)).toBeNull();
   });
   it('shows telemetry only for shared servers inside the token’s project scope', async () => {
     const mine = await service.create(input);
