@@ -16,11 +16,15 @@ async function accounts(rows = []) {
 describe('the Forge accounts', () => {
   it('stores the token sealed and never hands it back', async () => {
     const { service, save } = await accounts();
-    const account = await service.create({ organization: 'okanet', token: 'forge-secret', repos: ['o/a'] });
+    const account = await service.create({
+      organization: 'exampleco',
+      token: 'forge-secret',
+      repos: ['o/a'],
+    });
     expect(account).toEqual({
       id: expect.any(Number),
-      label: 'okanet',
-      organization: 'okanet',
+      label: 'exampleco',
+      organization: 'exampleco',
       repos: ['o/a'],
       hasToken: true,
     });
@@ -28,17 +32,17 @@ describe('the Forge accounts', () => {
     expect(stored.token).toMatch(/^v1:/);
     expect(JSON.stringify(stored)).not.toContain('forge-secret');
     expect(service.credentials(account.id)).toEqual({
-      label: 'okanet',
-      organization: 'okanet',
+      label: 'exampleco',
+      organization: 'exampleco',
       token: 'forge-secret',
     });
   });
 
   it('keeps the stored token when an edit leaves it blank', async () => {
     const { service } = await accounts();
-    const { id } = await service.create({ organization: 'okanet', token: 'forge-secret' });
-    await service.update(id, { label: 'Okanet', token: '', repos: ['o/b', 'o/b'] });
-    expect(service.list()).toEqual([expect.objectContaining({ label: 'Okanet', repos: ['o/b'] })]);
+    const { id } = await service.create({ organization: 'exampleco', token: 'forge-secret' });
+    await service.update(id, { label: 'Exampleco', token: '', repos: ['o/b', 'o/b'] });
+    expect(service.list()).toEqual([expect.objectContaining({ label: 'Exampleco', repos: ['o/b'] })]);
     expect(service.credentials(id).token).toBe('forge-secret');
   });
 
@@ -52,7 +56,7 @@ describe('the Forge accounts', () => {
 
   it('refuses an account without a token or a usable organization', async () => {
     const { service } = await accounts();
-    await expect(service.create({ organization: 'okanet' })).rejects.toThrow('token');
+    await expect(service.create({ organization: 'exampleco' })).rejects.toThrow('token');
     await expect(service.create({ organization: '../x', token: 't' })).rejects.toThrow('organization');
     await expect(service.create({ organization: 'o', token: 't', repos: 'o/a' })).rejects.toThrow('list');
     expect(() => service.credentials(1)).toThrow(expect.objectContaining({ status: 404 }));

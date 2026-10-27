@@ -13,11 +13,11 @@ vi.mock('../lib/config.js', () => ({ getConfig: () => ({ credentialsKey: 'k'.rep
 const TOKEN = 'xoxp-1111-2222-3333-abcdef';
 const SECRET = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
 const PEOPLE = [
-  { id: 'U1', name: 'andres', real_name: 'Andrés Pérez', profile: { display_name: 'Andres' } },
-  { id: 'U2', name: 'andrea', real_name: 'Andrea Gómez', profile: { display_name: '' } },
-  { id: 'U3', name: 'nadin', real_name: 'Nadin Yamaui', profile: {} },
-  { id: 'U4', name: 'gone', real_name: 'Andres Old', deleted: true, profile: {} },
-  { id: 'B1', name: 'deploybot', real_name: 'Andres Bot', is_bot: true, profile: {} },
+  { id: 'U1', name: 'alexei', real_name: 'Alexei Sámple', profile: { display_name: 'Alexei' } },
+  { id: 'U2', name: 'alexa', real_name: 'Alexa Example', profile: { display_name: '' } },
+  { id: 'U3', name: 'morgan', real_name: 'Morgan Example', profile: {} },
+  { id: 'U4', name: 'gone', real_name: 'Alexei Old', deleted: true, profile: {} },
+  { id: 'B1', name: 'deploybot', real_name: 'Alexei Bot', is_bot: true, profile: {} },
 ];
 const CHANNELS = [
   { id: 'C1', name: 'dev' },
@@ -33,11 +33,11 @@ function fakeSlack() {
     if (method === 'auth.test')
       return {
         ok: true,
-        team: 'Okanet',
+        team: 'Exampleco',
         team_id: 'T1',
-        user: 'nadin',
+        user: 'morgan',
         user_id: 'U3',
-        url: 'https://okanet.slack.com/',
+        url: 'https://example-workspace.slack.com/',
       };
     if (method === 'users.list') return { ok: true, members: PEOPLE };
     if (method === 'conversations.list' && params.types === 'im')
@@ -214,13 +214,13 @@ describe('the Slack workspaces', () => {
     const { w, stored } = await service();
     expect(w).toEqual({
       id: expect.any(Number),
-      label: 'Okanet',
+      label: 'Exampleco',
       projects: [{ repo: 'o/a', channels: ['dev'], directMessages: true, permissionMode: 'ask' }],
-      team: 'Okanet',
+      team: 'Exampleco',
       teamId: 'T1',
-      user: 'nadin',
+      user: 'morgan',
       userId: 'U3',
-      url: 'https://okanet.slack.com/',
+      url: 'https://example-workspace.slack.com/',
       hasToken: true,
       hasSigningSecret: true,
       eventsUrl: `https://briareus.example/webhooks/slack/${w.id}`,
@@ -281,7 +281,7 @@ describe('the Slack workspaces', () => {
     const { s } = await service();
     await expect(s.create({ token: 'xoxb-1-2-abcdefghijkl', projects: [] })).rejects.toThrow('user token');
     await expect(s.create({ token: TOKEN, projects: [{ repo: 'o/a' }] })).rejects.toThrow(
-      'o/a already sends through the Okanet workspace',
+      'o/a already sends through the Exampleco workspace',
     );
     await expect(
       s.create({ token: TOKEN, projects: [{ repo: 'o/b', permissionMode: 'yolo' }] }),
@@ -298,8 +298,8 @@ describe('the Slack workspaces', () => {
     expect(s.list('o/a')).toHaveLength(1);
     expect(s.list('o/b')).toEqual([]);
     expect(s.briefing({ repo: 'o/a' })).toEqual({
-      team: 'Okanet',
-      user: 'nadin',
+      team: 'Exampleco',
+      user: 'morgan',
       permissionMode: 'ask',
       directMessages: true,
       channels: ['dev'],
@@ -312,17 +312,17 @@ describe('the Slack workspaces', () => {
 describe('a session sending', () => {
   it('finds people by any of their names, the closest first, and never the deleted or the bots', async () => {
     const { s } = await service();
-    const found = await s.findPeople(job(), 'andres');
+    const found = await s.findPeople(job(), 'alexei');
     expect(found.map((p) => p.id)).toEqual(['U1']);
     expect(found[0]).toEqual({
       id: 'U1',
-      handle: 'andres',
-      realName: 'Andrés Pérez',
-      displayName: 'Andres',
+      handle: 'alexei',
+      realName: 'Alexei Sámple',
+      displayName: 'Alexei',
       title: '',
     });
-    expect((await s.findPeople(job(), 'andr')).map((p) => p.id)).toEqual(['U2', 'U1']);
-    expect((await s.findPeople(job(), 'Pérez')).map((p) => p.id)).toEqual(['U1']);
+    expect((await s.findPeople(job(), 'alex')).map((p) => p.id)).toEqual(['U2', 'U1']);
+    expect((await s.findPeople(job(), 'Sámple')).map((p) => p.id)).toEqual(['U1']);
   });
 
   it('lets only the workspace’s owner rule on what it sends, and each user’s sessions use their own', async () => {
@@ -346,8 +346,8 @@ describe('a session sending', () => {
     const r = await s.request(job(), { to: 'U1', text: 'The importer is fixed' });
     expect(r).toMatchObject({
       status: 'pending',
-      to: { kind: 'user', id: 'U1', label: '@andres (Andrés Pérez)' },
-      sendsAs: 'nadin',
+      to: { kind: 'user', id: 'U1', label: '@alexei (Alexei Sámple)' },
+      sendsAs: 'morgan',
       unattended: false,
     });
     expect(slack.posted()).toHaveLength(0);
@@ -362,10 +362,10 @@ describe('a session sending', () => {
         channel: 'D-U1',
         ts: '1700000000.000100',
         jobId: 'j1',
-        to: '@andres (Andrés Pérez)',
+        to: '@alexei (Alexei Sámple)',
       }),
     ]);
-    expect(note).toHaveBeenCalledWith('j1', expect.stringContaining('approved message to @andres'));
+    expect(note).toHaveBeenCalledWith('j1', expect.stringContaining('approved message to @alexei'));
     await expect(s.decide(r.id, 'approve')).rejects.toThrow('no longer waiting');
     expect(s.result(job(), r.id).status).toBe('sent');
     expect(() => s.result(job({ id: 'other' }), r.id)).toThrow('not found');
@@ -378,7 +378,7 @@ describe('a session sending', () => {
       to: { kind: 'channel', id: 'C1', label: '#dev' },
     });
     expect(slack.posted()[0].params.channel).toBe('C1');
-    const unwatched = await s.request(job({ unattendedTurn: true }), { to: '@andres', text: 'Hi' });
+    const unwatched = await s.request(job({ unattendedTurn: true }), { to: '@alexei', text: 'Hi' });
     expect(unwatched).toMatchObject({ status: 'pending', unattended: true });
     expect(slack.posted()).toHaveLength(1);
   });
@@ -389,7 +389,7 @@ describe('a session sending', () => {
       '#general is not one of this project’s Slack channels (#dev)',
     );
     await expect(s.request(job(), { to: 'U1', text: 'x' })).rejects.toThrow('may not send direct messages');
-    await expect(s.findPeople(job(), 'andres')).rejects.toThrow('may not send direct messages');
+    await expect(s.findPeople(job(), 'alexei')).rejects.toThrow('may not send direct messages');
     await expect(s.request(job({ repo: 'o/b' }), { to: '#dev', text: 'x' })).rejects.toThrow(
       'no Slack workspace',
     );
@@ -404,7 +404,7 @@ describe('a session sending', () => {
     const a = await s.request(job(), { to: 'U1', text: 'one' });
     const b = await s.request(job(), { to: 'U1', text: 'two' });
     await s.decide(b.id, 'deny');
-    expect(note).toHaveBeenCalledWith('j1', 'Slack: you denied the message to @andres (Andrés Pérez).');
+    expect(note).toHaveBeenCalledWith('j1', 'Slack: you denied the message to @alexei (Alexei Sámple).');
     await s.update(w.id, { projects: [{ repo: 'o/a', channels: ['dev', 'general'] }] });
     expect(s.result(job(), a.id)).toMatchObject({
       status: 'cancelled',
@@ -503,8 +503,8 @@ describe('a session sending', () => {
   it('tells the agent where it may send', async () => {
     const { s } = await service({ project: { channels: ['dev', 'nowhere'] } });
     expect(await s.destinations(job())).toEqual({
-      workspace: 'Okanet',
-      sendsAs: 'nadin',
+      workspace: 'Exampleco',
+      sendsAs: 'morgan',
       permissionMode: 'ask',
       directMessages: true,
       channels: [{ id: 'C1', name: 'dev' }],
@@ -521,7 +521,7 @@ describe('a session reading', () => {
       directMessages: [
         {
           id: 'D1',
-          with: { id: 'U1', handle: 'andres', realName: 'Andrés Pérez', displayName: 'Andres', title: '' },
+          with: { id: 'U1', handle: 'alexei', realName: 'Alexei Sámple', displayName: 'Alexei', title: '' },
         },
       ],
     });
@@ -541,14 +541,14 @@ describe('a session reading', () => {
       messages: [
         {
           ts: '3.1',
-          from: 'Andrés Pérez',
+          from: 'Alexei Sámple',
           fromMe: false,
-          text: 'Can you check @nadin? <urgent>',
+          text: 'Can you check @morgan? <urgent>',
           threadTs: '3.1',
           replies: 2,
           files: 0,
         },
-        { ts: '2.1', from: 'Nadin Yamaui', fromMe: true, text: 'Done', threadTs: '', replies: 0, files: 1 },
+        { ts: '2.1', from: 'Morgan Example', fromMe: true, text: 'Done', threadTs: '', replies: 0, files: 1 },
       ],
       nextCursor: 'next',
     });
@@ -622,9 +622,9 @@ describe('a session reading', () => {
         ...(method === 'conversations.replies' ? { threadTs: '1.1' } : {}),
       });
       expect(page.messages.map((m) => m.text)).toEqual([
-        'Please approve @nadin',
+        'Please approve @morgan',
         'Deployment <failed>',
-        'Approval\nCheck deployment (https://example.com)\nProduction\nRequested by @andres',
+        'Approval\nCheck deployment (https://example.com)\nProduction\nRequested by @alexei',
         'Needs approval\nDeploy\nEnvironment\nProduction\nPlease approve',
         'Existing text\nDuplicate text',
         'Please approve',
@@ -652,7 +652,7 @@ describe('a session reading', () => {
         },
         {
           text: 'Ask <@U3>',
-          attachments: [{ text: 'Ask @nadin' }, { fallback: 'Check the deadline' }],
+          attachments: [{ text: 'Ask @morgan' }, { fallback: 'Check the deadline' }],
         },
         {
           blocks: [
@@ -686,8 +686,8 @@ describe('a session reading', () => {
       });
       expect(page.messages.map((m) => m.text)).toEqual([
         'Review requested\nProduction deployment\nApprove https://deploy.example/123 before 17:00',
-        'Ask @nadin\nCheck the deadline',
-        'Please ask @nadin and @U123 to approve https://deploy.example/123 or deployment (https://deploy.example/456)',
+        'Ask @morgan\nCheck the deadline',
+        'Please ask @morgan and @U123 to approve https://deploy.example/123 or deployment (https://deploy.example/456)',
       ]);
     },
   );
@@ -1155,11 +1155,11 @@ describe('a session reading', () => {
           },
           {
             text: 'Ask <@U3>',
-            blocks: [{ type: 'section', text: { type: 'mrkdwn', text: 'Ask @nadin' } }],
-            attachments: [{ fallback: 'Ask @nadin' }],
+            blocks: [{ type: 'section', text: { type: 'mrkdwn', text: 'Ask @morgan' } }],
+            attachments: [{ fallback: 'Ask @morgan' }],
           },
         ],
-        expected: ['Approval requested\nApprove deployment 123 before 17:00', 'Ask @nadin'],
+        expected: ['Approval requested\nApprove deployment 123 before 17:00', 'Ask @morgan'],
       },
       {
         title: 'rich-text channel targets and date fallbacks or timestamps',
@@ -1295,11 +1295,11 @@ describe('a session reading', () => {
         '',
       ]);
       expect(page.messages.map((m) => m.from)).toEqual([
-        'Andrés Pérez',
-        'Andrés Pérez',
-        'Andrés Pérez',
+        'Alexei Sámple',
+        'Alexei Sámple',
+        'Alexei Sámple',
         'Production deployment approvals',
-        'Andrés Pérez',
+        'Alexei Sámple',
         'UUNKNOWN',
         'Integration',
         'BDEPLOY',
@@ -1528,8 +1528,8 @@ describe('replies through the Events API', () => {
     expect(outcome).toMatchObject({ status: 200, body: { ok: true } });
     await outcome.then();
     expect(deliver).toHaveBeenCalledWith('j1', {
-      text: 'Slack reply from Andrés Pérez (@andres, U1) in a direct message, answering this session’s message to @andres (Andrés Pérez):\n\nSure, @nadin & I will look',
-      source: 'Slack @andres',
+      text: 'Slack reply from Alexei Sámple (@alexei, U1) in a direct message, answering this session’s message to @alexei (Alexei Sámple):\n\nSure, @morgan & I will look',
+      source: 'Slack @alexei',
       id: expect.stringMatching(/^[0-9a-f]{32}$/),
     });
     // Slack's retry of the same event.
@@ -1668,7 +1668,7 @@ describe('replies through the Events API', () => {
     );
     await s.receive(String(w.id), inThread.raw, inThread.headers).then();
     expect(deliver.mock.calls[0][1].text).toMatch(
-      /^Slack reply from Andrea Gómez \(@andrea, U2\) in #dev, thread 1700000000\.000100/,
+      /^Slack reply from Alexa Example \(@alexa, U2\) in #dev, thread 1700000000\.000100/,
     );
   });
 
@@ -1807,7 +1807,7 @@ describe('replies through the Events API', () => {
     await s.receive(String(w.id), r.raw, r.headers).then();
     expect(note).toHaveBeenCalledWith(
       'j1',
-      'Slack: a reply from @andres could not reach the agent: This session failed',
+      'Slack: a reply from @alexei could not reach the agent: This session failed',
     );
   });
 });
@@ -1958,7 +1958,7 @@ describe('the wire', () => {
     await new Promise((resolve) => server.once('listening', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
     try {
-      const people = await fetch(`${base}/api/agent/slack/people?q=andres`, {
+      const people = await fetch(`${base}/api/agent/slack/people?q=alexei`, {
         headers: { Authorization: 'Bearer agent' },
       });
       expect((await people.json()).people.map((p) => p.id)).toEqual(['U1']);

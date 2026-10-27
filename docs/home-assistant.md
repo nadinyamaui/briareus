@@ -14,8 +14,8 @@ outside session checkouts (restart after setting them), still work: they are the
 operator's Home Assistant (the first user, whatever their role now), from when the server had
 one operator, until that user connects one of their own.
 
-For a Briareus process running directly on Spark, use `HOME_ASSISTANT_URL=http://127.0.0.1:8123`.
-For a Briareus container, use the host's LAN address, such as `http://192.168.1.47:8123`; loopback inside that container refers to the container itself.
+For a Briareus process running directly on the host, use `HOME_ASSISTANT_URL=http://127.0.0.1:8123`.
+For a Briareus container, use the host's LAN address, such as `http://192.0.2.10:8123`; loopback inside that container refers to the container itself.
 Use the base URL without `/api`. Configure both values or leave both unset. Unset, they do not turn the bridge off:
 users still connect their own Home Assistant, and only the original operator's fallback is gone.
 The Compose app forwards these variables to the server without writing the token into its checkout.

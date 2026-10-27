@@ -32,7 +32,7 @@ const pr = (over = {}) => ({
   number: 7,
   title: 'Add cart',
   draft: false,
-  author: 'nadin',
+  author: 'morgan',
   branch: 'feature/cart',
   baseBranch: 'main',
   labels: [],
@@ -94,10 +94,10 @@ describe('errandsFor', () => {
   });
 
   it('pushes only to the configured author’s pull requests, but reviews anyone’s', () => {
-    const p = project({ reviewAuthor: 'Nadin' });
+    const p = project({ reviewAuthor: 'Morgan' });
     expect(errandsFor(pr({ author: 'someone', checks: 'failure' }), p)).toEqual(['review']);
     expect(errandsFor(pr({ author: 'someone', recommended: 'solve-conflicts' }), p)).toEqual(['review']);
-    expect(errandsFor(pr({ author: 'nadin', checks: 'failure' }), p)).toEqual(['fix-checks', 'review']);
+    expect(errandsFor(pr({ author: 'morgan', checks: 'failure' }), p)).toEqual(['fix-checks', 'review']);
     expect(errandsFor(pr({ author: 'someone' }), p)).toEqual(['review']);
   });
 });

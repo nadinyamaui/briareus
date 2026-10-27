@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createForgeClient } from '../lib/forge.js';
 import { forgeRoutes } from '../lib/forge-routes.js';
 
-const FORGE = { token: 'forge-secret', organization: 'okanet' };
+const FORGE = { token: 'forge-secret', organization: 'exampleco' };
 
 function forge(...answers) {
   const request = vi.fn(async () => {
@@ -49,7 +49,7 @@ describe('the Forge client', () => {
     });
     const [url, init] = request.mock.calls[0];
     expect(url).toBe(
-      'https://forge.laravel.com/api/orgs/okanet/servers?page%5Bsize%5D=100&page%5Bcursor%5D=prev',
+      'https://forge.laravel.com/api/orgs/exampleco/servers?page%5Bsize%5D=100&page%5Bcursor%5D=prev',
     );
     expect(init.headers.Authorization).toBe('Bearer forge-secret');
   });
@@ -58,19 +58,19 @@ describe('the Forge client', () => {
     const site = (server) => ({
       data: {
         id: '9',
-        attributes: { name: 'okanet.net' },
+        attributes: { name: 'example.com' },
         relationships: { server: { data: { id: server } } },
       },
     });
     const { client, request } = forge(
-      [200, { data: [{ id: '9', attributes: { name: 'okanet.net' } }], meta: { next_cursor: null } }],
+      [200, { data: [{ id: '9', attributes: { name: 'example.com' } }], meta: { next_cursor: null } }],
       [200, site('7')],
       [200, site('8')],
     );
-    expect(await client.sites('7')).toEqual({ sites: [{ id: 9, name: 'okanet.net' }], nextCursor: null });
-    expect(request.mock.calls[0][0]).toContain('/orgs/okanet/servers/7/sites?');
-    expect(await client.site('7', '9')).toEqual({ site: { id: 9, name: 'okanet.net' } });
-    expect(request.mock.calls[1][0]).toBe('https://forge.laravel.com/api/orgs/okanet/sites/9');
+    expect(await client.sites('7')).toEqual({ sites: [{ id: 9, name: 'example.com' }], nextCursor: null });
+    expect(request.mock.calls[0][0]).toContain('/orgs/exampleco/servers/7/sites?');
+    expect(await client.site('7', '9')).toEqual({ site: { id: 9, name: 'example.com' } });
+    expect(request.mock.calls[1][0]).toBe('https://forge.laravel.com/api/orgs/exampleco/sites/9');
     await expect(client.site('7', '9')).rejects.toMatchObject({ status: 404 });
   });
 
@@ -91,7 +91,7 @@ describe('the Forge client', () => {
       await client.setDeploymentScript('7', '9', { content: 'git pull\nnpm ci', autoSource: true }),
     ).toEqual({ content: 'git pull\nnpm ci', autoSource: true });
     const [url, init] = request.mock.calls[1];
-    expect(url).toBe('https://forge.laravel.com/api/orgs/okanet/servers/7/sites/9/deployments/script');
+    expect(url).toBe('https://forge.laravel.com/api/orgs/exampleco/servers/7/sites/9/deployments/script');
     expect(init.method).toBe('PUT');
     expect(JSON.parse(init.body)).toEqual({ content: 'git pull\nnpm ci', auto_source: true });
   });
@@ -104,7 +104,7 @@ describe('the Forge client', () => {
     expect(await client.environment('7', '9')).toEqual({ content: 'APP_ENV=prod' });
     expect(await client.setEnvironment('7', '9', { content: 'APP_ENV=staging' })).toEqual({ ok: true });
     const [url, init] = request.mock.calls[1];
-    expect(url).toBe('https://forge.laravel.com/api/orgs/okanet/servers/7/sites/9/environment');
+    expect(url).toBe('https://forge.laravel.com/api/orgs/exampleco/servers/7/sites/9/environment');
     expect(JSON.parse(init.body)).toEqual({ environment: 'APP_ENV=staging' });
     await expect(client.setEnvironment('7', '9', {})).rejects.toMatchObject({ status: 400 });
   });
