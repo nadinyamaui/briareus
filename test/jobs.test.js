@@ -17119,6 +17119,66 @@ describe('automatic recovery after a server restart', () => {
     child.emit('close', 0);
   };
 
+  it.each(['review', 'fix'])(
+    'restores an official action after its active %s child and continues unrelated recovery',
+    async (kind) => {
+      const parent = row({
+        status: 'idle',
+        orchestrator: false,
+        orchestratorPrAction: 'implement-feedback',
+        branch: 'feature',
+        startedOnPr: 77,
+        recoveryTurn: null,
+      });
+      const child = row({
+        orchestrator: false,
+        branch: 'feature',
+        startedOnPr: 77,
+        ...(kind === 'review' ? { loopParentId: parent.id } : { loopFixParentId: parent.id }),
+      });
+      parent.reviewLoop = {
+        rounds: 1,
+        ...(kind === 'review'
+          ? { reviewing: true, reviewSessionId: child.id }
+          : { fixing: true, fixSessionId: child.id }),
+      };
+      for (const [index, saved] of [child, parent].entries()) {
+        const checkout = path.join(root, index ? 'acme__restart__2' : 'acme__restart');
+        fs.mkdirSync(checkout);
+        const git = (...args) => {
+          const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
+          expect(result.status, result.stderr).toBe(0);
+        };
+        git('init', '-b', 'feature');
+        fs.writeFileSync(path.join(checkout, 'work'), 'original');
+        git('add', '.');
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture');
+        const remote = path.join(root, `remote-${index}.git`);
+        expect(spawnSync('git', ['clone', '--bare', checkout, remote]).status).toBe(0);
+        git('remote', 'add', 'origin', remote);
+        Object.assign(saved, { workDir: checkout, workspacePrepared: true });
+        claimSlot(checkout, saved.id, { prepared: true });
+      }
+      const unrelated = row({ status: 'idle', recoveryTurn: null });
+      // Database restoration orders the newer child before its idle action parent.
+      state.stored = [child, parent, unrelated];
+      await initJobs({ deferPolling: true });
+      expect(resumeRestartedSessions()).toBe(3);
+      await vi.waitFor(() => {
+        expect(child.status, child.error).toBe('running');
+        expect(parent.status, parent.error).toBe('idle');
+        expect(unrelated.status, unrelated.error).toBe('idle');
+      });
+      expect(children).toHaveLength(1);
+      expect(parent.reviewLoop[kind === 'review' ? 'reviewSessionId' : 'fixSessionId']).toBe(child.id);
+      expect(() => sendDevMessage(parent.id, 'Start another parent turn')).toThrow(
+        /already has an open session/,
+      );
+      finish(children[0]);
+      await vi.waitFor(() => expect(child.status).toBe('idle'));
+    },
+  );
+
   it('uses server GitHub identity for automatic triage after reopening a failed queued session', async () => {
     const gh = await vi.importActual('../lib/github.js');
     Object.assign(state.projects[0], { autonomousReviewLoop: true, envTemplate: '', setupCommands: [] });
@@ -19329,10 +19389,50 @@ describe('official orchestrator PR actions', () => {
       );
       if (status !== 'idle') {
         expect(() => reopenDevSession(original.id)).toThrow(/already has an open session/);
+        expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
+          /already has an open session/,
+        );
       }
       expect(original.status).toBe(status);
       expect(original.recoveryTurn).toBe(checkpoint);
       expect(DEV_OPEN).toContain(replacement.status);
+    },
+  );
+
+  it.each(['review', 'fix'])(
+    'requires both active loop links when recovering an official action with a %s child',
+    async (kind) => {
+      const original = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+      await settleWorkers([parent.id]);
+      original.status = 'failed';
+      const other = getJob('pr-cap-0');
+      const parentKey = kind === 'review' ? 'loopParentId' : 'loopFixParentId';
+      const sessionKey = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
+      const activeKey = kind === 'review' ? 'reviewing' : 'fixing';
+      other.status = 'idle';
+      other.startedOnPr = 12;
+      original.reviewLoop = { [activeKey]: true, [sessionKey]: other.id };
+      try {
+        other[parentKey] = 'another-action';
+        expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
+          /already has an open session/,
+        );
+        other[parentKey] = original.id;
+        original.reviewLoop[sessionKey] = 'another-child';
+        expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
+          /already has an open session/,
+        );
+        original.reviewLoop[sessionKey] = other.id;
+        original.reviewLoop[activeKey] = false;
+        expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
+          /already has an open session/,
+        );
+      } finally {
+        other.status = 'closed';
+        other.startedOnPr = null;
+        delete other[parentKey];
+        original.reviewLoop = null;
+      }
     },
   );
 
