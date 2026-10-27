@@ -18883,6 +18883,70 @@ describe('automatic recovery after a server restart', () => {
     expect(children).toHaveLength(1);
   });
 
+  it.each([
+    ['initial', 'queued'],
+    ['publish', 'queued'],
+    ['initial', 'direct'],
+    ['publish', 'direct'],
+  ])('does not restore a canceled review %s stage for a %s replacement', async (phase, delivery) => {
+    const checkout = path.join(root, 'canceled-review');
+    fs.mkdirSync(checkout);
+    const git = (...args) => {
+      const result = spawnSync('git', args, { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git('-C', checkout, 'init', '-b', 'feature');
+    git(
+      '-C',
+      checkout,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'fixture',
+    );
+    git('-C', checkout, 'remote', 'add', 'origin', checkout);
+    const review = row({
+      status: delivery === 'queued' ? 'running' : 'idle',
+      orchestrator: false,
+      local: false,
+      workDir: checkout,
+      workspacePrepared: true,
+      branch: 'feature',
+      reviewBranch: 'feature',
+      startedOnPr: 77,
+      autoClose: true,
+      orchestratorPrAction: 'review',
+      recoveryTurn: {
+        prompt: 'Canceled review contract',
+        opts: phase === 'initial' ? { review: true } : {},
+        phase,
+        canceled: true,
+        completed: false,
+      },
+      recoveryQueue:
+        delivery === 'queued' ? [{ prompt: 'Do this instead', shown: 'Do this instead', files: [] }] : [],
+    });
+    state.stored = [review];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(1);
+    if (delivery === 'direct') {
+      await vi.waitFor(() => expect(review.restartPending).toBe(false));
+      sendDevMessage(review.id, 'Do this instead');
+    }
+    await vi.waitFor(() => expect(children, review.error).toHaveLength(1));
+    expect(children[0].prompt).toBe('Do this instead');
+    expect(children[0].args[0]).toBe('app-server');
+    expect(review.recoveryTurn).toMatchObject({ phase: 'followup', opts: {}, completed: false });
+    expect(review.recoveryTurn.canceled).toBeUndefined();
+    finish(children[0]);
+    await vi.waitFor(() => expect(review.status).toBe('closed'));
+    expect(children, review.error).toHaveLength(1);
+  });
+
   it.each([false, true])(
     'kills a detached provider group and preserves its checkpoint (leader exited: %s)',
     async (leaderExits) => {
