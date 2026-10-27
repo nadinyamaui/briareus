@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TEST_SHEET_ANCHOR, FIXES_ANCHOR } from '../lib/markers.js';
 import { githubRest } from '../lib/github.js';
+import { parseFeedbackAssessment } from '../lib/feedback-assessment.js';
 
 // The GitHub mock, per test: the PR's issue comments and a log of every write back. `fail`
 // refuses writes of one method. `files` is the PR's changed paths, or null when GitHub will
@@ -457,6 +458,90 @@ describe('sortFindingsForFix: the split as advice, nothing written', () => {
 });
 
 describe('recordTriage: the orchestrator’s verdicts on a round', () => {
+  it.each(['none', 'write', 'delete'])(
+    'bounds a 200-finding checklist, preserves ticks and retries partial %s failures',
+    async (failure) => {
+      const raw = Array.from({ length: 200 }, (_, i) => ({
+        title: `Finding ${String(i).padStart(3, '0')} ${'x'.repeat(188)}`,
+        severity: 'low',
+        file: `lib/${'nested/'.repeat(12)}module.js`,
+        line: 100,
+        source: 'review:42',
+        recommendation: 'fix',
+        assessment: { verified: true, worthFixing: true, evidence: 'Reproduced', reason: 'Protect data' },
+      }));
+      const selected = parseFeedbackAssessment(
+        JSON.stringify({ sha: 'abc', complete: true, sourcesReviewed: ['review:42'], findings: raw }),
+        { sha: 'abc', sources: [{ id: 'review:42', url: 'https://github.com/acme/shop/pull/5' }] },
+      ).map((f) => ({ ...f, decision: 'fix' }));
+      const ticked = selected.at(-1).key;
+      gh.comments = [{ id: 1, body: `${FIXES_ANCHOR}\n- [x] Existing tick <!-- fix:${ticked} -->` }];
+      const original = githubRest.getMockImplementation();
+      let nextId = 2;
+      let checklistWrites = 0;
+      let failed = false;
+      githubRest.mockImplementation(async (cfg, method, url, body) => {
+        if (body?.body) expect(body.body.length).toBeLessThanOrEqual(65_536);
+        if (method === 'POST' && body.body.includes(FIXES_ANCHOR)) {
+          checklistWrites++;
+          if (failure === 'write' && checklistWrites === 2) {
+            failed = true;
+            return { ok: false, status: 422 };
+          }
+        }
+        if (method === 'DELETE' && failure === 'delete' && !failed) {
+          failed = true;
+          return { ok: false, status: 500 };
+        }
+        const res = await original(cfg, method, url, body);
+        if (res.ok && method === 'POST')
+          gh.comments.push({ id: nextId++, body: body.body, html_url: `https://example.com/${nextId}` });
+        if (res.ok && method === 'PATCH')
+          gh.comments.find((c) => c.id === Number(url.split('/').at(-1))).body = body.body;
+        if (res.ok && method === 'DELETE')
+          gh.comments = gh.comments.filter((c) => c.id !== Number(url.split('/').at(-1)));
+        return res;
+      });
+      try {
+        if (failure !== 'none') {
+          await expect(recordTriage(repo, 5, selected)).rejects.toThrow(/Required fixes/);
+          expect(failed).toBe(true);
+          expect(
+            (await getFindings(repo, 5, { fresh: true })).findings.find((f) => f.key === ticked).fixed,
+          ).toBe(true);
+        }
+        await recordTriage(repo, 5, selected);
+        const declarations = gh.comments.filter((c) => c.body.startsWith('## Selected feedback findings'));
+        const parts = gh.comments.filter((c) => c.body.includes(FIXES_ANCHOR));
+        expect(parts).toHaveLength(2);
+        const keys = parts.flatMap((c) =>
+          [...c.body.matchAll(/<!-- fix:([a-f0-9]{12}) -->/g)].map((m) => m[1]),
+        );
+        expect(keys.sort()).toEqual(selected.map((f) => f.key).sort());
+        let fresh = await getFindings(repo, 5, { fresh: true });
+        expect(fresh.findings).toHaveLength(200);
+        expect(fresh.findings.every((f) => f.decision === 'fix')).toBe(true);
+        expect(fresh.findings.find((f) => f.key === ticked).fixed).toBe(true);
+        await recordTriage(repo, 5, selected);
+        expect(gh.comments.filter((c) => c.body.startsWith('## Selected feedback findings'))).toEqual(
+          declarations,
+        );
+        // Shrink back to one part, retaining a tick that lived in the second part.
+        await recordTriage(
+          repo,
+          5,
+          selected.slice(0, -1).map((f) => ({ ...f, decision: 'optional' })),
+        );
+        expect(gh.comments.filter((c) => c.body.includes(FIXES_ANCHOR))).toHaveLength(1);
+        fresh = await getFindings(repo, 5, { fresh: true });
+        expect(fresh.findings.find((f) => f.key === ticked).fixed).toBe(true);
+        await recordTriage(repo, 5, [{ ...selected.at(-1), decision: 'optional' }]);
+        expect(gh.comments.filter((c) => c.body.includes(FIXES_ANCHOR))).toEqual([]);
+      } finally {
+        githubRest.mockImplementation(original);
+      }
+    },
+  );
   it.each([false, true])(
     'splits large declarations and retries partial writes without duplicates (%s)',
     async (failSecond) => {

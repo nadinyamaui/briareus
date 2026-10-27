@@ -19106,4 +19106,40 @@ describe('incoming feedback assessment gate', () => {
     expect(state.appSettings['incoming-feedback']).toBeUndefined();
     expect(addPullRequestLabel).not.toHaveBeenCalled();
   });
+  it('rejects a FIFO assessment result without blocking the event loop', () => {
+    const resultPath = path.join(workDir, snapshot.resultFile);
+    fs.unlinkSync(resultPath);
+    expect(spawnSync('mkfifo', [resultPath]).status).toBe(0);
+    // Isolate the actual handler so a regression times out instead of hanging Vitest.
+    const source = fs.readFileSync(new URL('../lib/jobs.js', import.meta.url), 'utf8');
+    const handler = source
+      .slice(
+        source.indexOf('export async function holdFeedbackAssessment('),
+        source.indexOf('\nconst feedbackConsumption ='),
+      )
+      .replace(/^export /, '');
+    const child = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `
+      import fs from 'node:fs';
+      import path from 'node:path';
+      ${handler}
+      try {
+        await holdFeedbackAssessment(${JSON.stringify({ workDir, feedbackAssessment: { resultFile: snapshot.resultFile } })});
+        process.exitCode = 1;
+      } catch (error) {
+        if (error.message !== 'Invalid feedback assessment result file') throw error;
+        setTimeout(() => process.stdout.write('event loop responsive'), 0);
+      }
+    `,
+      ],
+      { encoding: 'utf8', timeout: 2000 },
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(0);
+    expect(child.stdout).toBe('event loop responsive');
+  });
 });
