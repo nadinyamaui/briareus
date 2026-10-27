@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TEST_SHEET_ANCHOR, FIXES_ANCHOR } from '../lib/markers.js';
+import { githubRest } from '../lib/github.js';
 
 // The GitHub mock, per test: the PR's issue comments and a log of every write back. `fail`
 // refuses writes of one method. `files` is the PR's changed paths, or null when GitHub will
@@ -451,6 +452,69 @@ describe('sortFindingsForFix: the split as advice, nothing written', () => {
 });
 
 describe('recordTriage: the orchestrator’s verdicts on a round', () => {
+  it('persists summary-only external Fix findings and their checklist before releasing the assessment', async () => {
+    gh.comments = [{ id: 1, body: 'Human review with no machine declaration' }];
+    const original = githubRest.getMockImplementation();
+    githubRest.mockImplementation(async (cfg, method, url, body) => {
+      const res = await original(cfg, method, url, body);
+      if (res.ok && method === 'POST') gh.comments.push({ id: gh.comments.length + 1, body: body.body });
+      return res;
+    });
+    try {
+      const selected = {
+        title: 'Missing permission guard',
+        severity: 'medium',
+        file: 'lib/api.js',
+        line: 5,
+        sourceId: 'review:42',
+        url: 'https://github.com/owner/repo/pull/5#pullrequestreview-42',
+        decision: 'fix',
+        assessment: {
+          verified: true,
+          worthFixing: true,
+          evidence: 'Reproduced --> bypass',
+          reason: 'Protect private data',
+        },
+      };
+      const optional = { title: 'Optional claim', sourceId: 'review:42', decision: 'optional' };
+      await recordTriage(repo, 5, [selected, optional]);
+      const posts = gh.writes.filter((w) => w.method === 'POST');
+      expect(posts[0].body.body).toContain('## Selected feedback findings');
+      expect(posts[0].body.body).toContain('[source]');
+      expect(posts[1].body.body).toContain(`<!-- fix:${findingKey(selected.title)} -->`);
+      const fresh = await getFindings(repo, 5, { fresh: true });
+      expect(fresh.findings).toEqual([
+        expect.objectContaining({
+          title: selected.title,
+          decision: 'fix',
+          file: selected.file,
+          line: 5,
+          assessment: selected.assessment,
+        }),
+      ]);
+      // Retry an already-recorded decision after a checklist failure; do not redeclare it.
+      gh.fail = 'PATCH';
+      await expect(recordTriage(repo, 5, [selected])).rejects.toThrow('Required fixes');
+      gh.fail = '';
+      await recordTriage(repo, 5, [selected]);
+      expect(gh.writes.filter((w) => w.body?.body?.includes('## Selected feedback findings'))).toHaveLength(
+        1,
+      );
+      expect(gh.writes.at(-1)).toMatchObject({
+        method: 'PATCH',
+        body: { body: expect.stringContaining('Missing permission guard') },
+      });
+    } finally {
+      githubRest.mockImplementation(original);
+    }
+  });
+  it('fails triage without losing the card when an external declaration cannot be saved', async () => {
+    gh.fail = 'POST';
+    await expect(
+      recordTriage(repo, 5, [{ title: 'External fix', sourceId: 'review:42', decision: 'fix' }]),
+    ).rejects.toThrow('saving selected feedback findings');
+    expect(db.decisions.size).toBe(0);
+  });
   it('leaves a visible Not fixed note linking incoming feedback and separating optional from dismissed claims', async () => {
     await recordTriage(
       repo,

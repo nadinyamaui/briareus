@@ -116,9 +116,11 @@ describe('incoming feedback intake', () => {
   it('retries asynchronously failed assessments without a timestamp change, including after restart', async () => {
     const h = harness();
     await h.service.assess(project, pr);
-    expect(h.save).not.toHaveBeenCalled();
+    expect(h.state()['acme/shop#7'].reviews).toBeUndefined();
+    expect(h.state()['acme/shop#7'].attempts['review:42'].count).toBe(1);
+    const writes = h.save.mock.calls.length;
     await h.service.remember(h.start.mock.calls[0][0].feedbackAssessment);
-    expect(h.save).not.toHaveBeenCalled();
+    expect(h.save).toHaveBeenCalledTimes(writes);
     h.fail();
     const restored = harness({ load: async () => h.state() });
     expect(await restored.service.assess(project, pr)).toBe(true);
@@ -129,6 +131,66 @@ describe('incoming feedback intake', () => {
     await restored.complete();
     expect(await restored.service.assess(project, pr)).toBe(false);
     expect(restored.start).toHaveBeenCalledTimes(2);
+  });
+  it('bounds failures across polls, webhooks and restarts without consuming feedback', async () => {
+    const h = harness();
+    for (let i = 0; i < 12; i++) {
+      await h.service.assess(project, pr);
+      h.fail();
+    }
+    expect(h.start).toHaveBeenCalledTimes(3);
+    expect(h.state()['acme/shop#7'].reviews).toBeUndefined();
+    let durable = structuredClone(h.state());
+    const restored = harness({
+      load: async () => structuredClone(durable),
+      save: async (next) => {
+        durable = structuredClone(next);
+      },
+    });
+    await restored.service.reviewEvent(project.repo, {
+      action: 'submitted',
+      pull_request: {
+        number: 7,
+        user: { login: 'nadin' },
+        head: { ref: 'feature', repo: { full_name: 'acme/shop' } },
+        updated_at: 'later',
+      },
+    });
+    await restored.service.assess(project, { ...pr, updatedAt: 'latest' });
+    expect(restored.start).not.toHaveBeenCalled();
+    // Explicit assessments bypass intake and still durably consume on success.
+    await restored.service.remember({ ...restored.snapshot, completed: true });
+    await restored.service.assess(project, pr);
+    expect(restored.start).not.toHaveBeenCalled();
+    expect(durable['acme/shop#7'].reviews['review:42']).toBeTruthy();
+  });
+  it.each(['head', 'edit', 'new review'])(
+    'admits new evidence after exhausting retries (%s)',
+    async (change) => {
+      const h = harness();
+      for (let i = 0; i < 3; i++) {
+        await h.service.assess(project, pr);
+        h.fail();
+      }
+      if (change === 'head') h.snapshot.sha = 'new-sha';
+      if (change === 'edit') h.snapshot.sources[0].body += ' corrected';
+      if (change === 'new review')
+        h.snapshot.sources.push({ ...h.snapshot.sources[0], id: 'review:43', reviewId: 43 });
+      await h.service.assess(project, { ...pr, updatedAt: 'later' });
+      expect(h.start).toHaveBeenCalledTimes(4);
+      expect(h.start.mock.calls[3][0].feedbackAssessment.sources.map((s) => s.id)).toEqual([
+        change === 'new review' ? 'review:43' : 'review:42',
+      ]);
+    },
+  );
+  it('does not dispatch if the attempt reservation cannot be persisted', async () => {
+    const h = harness({
+      save: async () => {
+        throw new Error('Settings unavailable');
+      },
+    });
+    await expect(h.service.assess(project, pr)).rejects.toThrow('Settings unavailable');
+    expect(h.start).not.toHaveBeenCalled();
   });
   it('defers while a card waits or capacity is full, without consuming the review', async () => {
     const pending = harness({ pending: () => ({ reviewTriage: {} }) });
@@ -171,7 +233,7 @@ describe('incoming feedback intake', () => {
       throw new Error('draining');
     });
     await expect(h.service.assess(project, pr)).rejects.toThrow('draining');
-    expect(h.save).not.toHaveBeenCalled();
+    expect(h.state()['acme/shop#7'].reviews).toBeUndefined();
     await h.service.assess(project, pr);
     expect(h.start).toHaveBeenCalledTimes(2);
   });

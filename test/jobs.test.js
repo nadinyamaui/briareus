@@ -289,6 +289,7 @@ import {
   replyOnFindingThread,
 } from '../lib/findings.js';
 import { implementFeedbackPrompt } from '../lib/prtasks.js';
+import { feedbackSnapshotCurrent } from '../lib/feedback-assessment.js';
 import { jobUsageEstimates } from '../lib/usage.js';
 import {
   addPullRequestLabel,
@@ -18957,20 +18958,41 @@ describe('incoming feedback assessment gate', () => {
     expect(pendingFeedbackAssessment(job.repo, 31)).toBe(job);
     expect(job.reviewTriage.stale).toBeUndefined();
   });
-  it.each(['edited', 'deleted'])(
+  it('retains the external assessment card if selected findings cannot be persisted', async () => {
+    await holdFeedbackAssessment(job);
+    const held = job.reviewTriage;
+    recordTriage.mockRejectedValueOnce(new Error('Could not save selected feedback findings'));
+    implementFeedbackPrompt.mockClear();
+    await expect(
+      triageStandaloneReviewFindings(job.id, {
+        verdicts: [{ key: held.findings[0].key, decision: 'fix' }],
+      }),
+    ).rejects.toThrow('Could not save selected feedback findings');
+    expect(job.reviewTriage).toBe(held);
+    expect(getJob(job.id)).toBe(job);
+    expect(implementFeedbackPrompt).not.toHaveBeenCalled();
+  });
+  it.each(['edited', 'deleted', 'added'])(
     'makes a completed card refreshable when a source is %s without a push',
     async (change) => {
       await holdFeedbackAssessment(job);
       await closeDevSession(job.id);
       const current = structuredClone(snapshot);
       if (change === 'edited') current.sources[0].body = 'Corrected feedback';
-      else current.sources = [];
+      else if (change === 'deleted') current.sources = [];
+      else current.sources.push({ ...current.sources[0], id: 'review:43', reviewId: 43 });
       expect(feedbackAssessmentReusable(job, current)).toBe(false);
       expect(job.reviewTriage.stale).toBe(true);
       expect(pendingFeedbackAssessment(job.repo, 31)).toBeNull();
       expect(recordTriage).not.toHaveBeenCalled();
     },
   );
+  it('keeps selected-source validation valid when unrelated feedback is added', async () => {
+    await holdFeedbackAssessment(job);
+    const current = structuredClone(snapshot);
+    current.sources.push({ ...current.sources[0], id: 'review:43', reviewId: 43 });
+    expect(feedbackSnapshotCurrent(job.feedbackAssessment, current)).toBe(true);
+  });
   it('remembers successful empty assessments as well as held cards', async () => {
     fs.writeFileSync(
       path.join(workDir, snapshot.resultFile),

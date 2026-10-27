@@ -220,6 +220,9 @@ on a later tick. Automatic intake always waits for manual decisions, even when
 autonomous review-loop fixing is enabled. Closed PRs, drafts, forks and bot reviews
 are excluded from automatic intake. Use Implement feedback to assess existing
 feedback manually without enabling Babysit PRs.
+Automatic attempts are limited to three per review revision and head commit,
+including across restarts. After repeated failures, use Implement feedback to
+retry explicitly; edited feedback or a new head receives a fresh attempt budget.
 
 Assessment wording is editable as **Assess incoming feedback** in project or
 shared prompt settings; **Implement feedback** remains the template used to

@@ -53,6 +53,63 @@ beforeEach(async () => {
 });
 
 describe('feedback snapshot', () => {
+  it.each([
+    'The `<!-- reviewer:required-fixes -->` checklist loses entries',
+    '> <!-- reviewer:review-started -->\nThis notice is incorrect',
+    '```html\n<!-- reviewer:triage-notes session -->\n```\nThe notes are stale',
+    '<!-- reviewer:required-fixes -->\nThis is human feedback, not a managed checklist',
+  ])('preserves human feedback quoting a managed marker: %s', async (body) => {
+    vi.mocked(githubRest).mockImplementation(async (_cfg, _method, route) => ({
+      ok: true,
+      json: async () =>
+        route.includes('/reviews?') ? [{ ...review, body }] : route.includes('/comments?') ? [] : pr,
+    }));
+    const current = await readFeedbackSnapshot('acme/shop', 7);
+    expect(current.sources).toHaveLength(1);
+    expect(externalFeedbackRevisions(current)).toHaveLength(1);
+    expect(
+      parseFeedbackAssessment(
+        JSON.stringify({
+          complete: true,
+          sha: current.sha,
+          sourcesReviewed: ['review:42'],
+          findings: [
+            {
+              source: 'review:42',
+              title: 'Checklist bug',
+              recommendation: 'fix',
+              assessment: {
+                verified: true,
+                worthFixing: true,
+                evidence: 'Reproduced missing checklist entry',
+                reason: 'Loses required fixes',
+              },
+            },
+          ],
+        }),
+        current,
+      ),
+    ).toHaveLength(1);
+  });
+  it('keeps actual dashboard notices in history but excludes them from actionable sources', async () => {
+    const bodies = [
+      '<!-- reviewer:review-started -->\n### 🔍 Code review started\n\nProvider is reviewing a branch',
+      '<!-- reviewer:required-fixes -->\n## Required fixes\n\n- [ ] Fix this',
+      '<!-- reviewer:triage-notes session-1 -->\n## Review triage notes (round 1)\n\nSome notes',
+    ];
+    vi.mocked(githubRest).mockImplementation(async (_cfg, _method, route) => ({
+      ok: true,
+      json: async () =>
+        route.includes('/issues/')
+          ? bodies.map((body, id) => ({ id, body }))
+          : route.includes('/reviews?') || route.includes('/comments?')
+            ? []
+            : pr,
+    }));
+    const current = await readFeedbackSnapshot('acme/shop', 7);
+    expect(current.sources).toEqual([]);
+    expect(current.history.map((s) => s.body)).toEqual(bodies);
+  });
   it('includes summary-only COMMENTED feedback and inline roots, preserving replies and earlier decisions as history', () => {
     expect(snapshot.sha).toBe('head-sha');
     expect(snapshot.sources).toEqual(
