@@ -395,6 +395,8 @@ describe('latestTestVerdict', () => {
     'Status (✅ = pass, ❌ = fail)',
     '**Status ✅ / ❌ / ⚪**',
     'Status [✅ pass / ❌ fail]',
+    'Status [pass ✅ / fail ❌]',
+    '**Status (pass ✅ / fail ❌ / unknown ❔)**',
     'Status: ✅ pass / ❌ fail',
     'Status ✅ Pass / ❌ Fail',
     '**Result: ✅ pass / ❌ fail / ❔ unknown**',
@@ -2596,6 +2598,9 @@ describe('latestTestVerdict', () => {
 
   it.each([
     'UI will run after deployment',
+    'UI scheduled for tomorrow',
+    'UI never began',
+    'UI: no checks were attempted',
     'UI tests will execute after deployment',
     'UI checks will be run after deployment',
     'UI testing will begin after deployment',
@@ -2661,6 +2666,10 @@ describe('latestTestVerdict', () => {
 
   it.each([
     'UI 1/5 tests run',
+    'UI 1 of 2 tests passed',
+    'API 1 of 2 assertions succeeded',
+    'UI: 1 of 2 scenarios executed',
+    'UI 1 / 2 scenarios attempted',
     'UI 1 of 5 checks executed',
     'UI 5 / 10 checks executed',
     'UI tests remaining: 4',
@@ -2697,6 +2706,13 @@ describe('latestTestVerdict', () => {
     'UI displayed not actually tested as expected',
     'UI showed only 1 of 2 checks completed as expected',
     'UI 10/10 checks executed',
+    'UI 2 of 2 tests passed',
+    'API 2 of 2 assertions succeeded',
+    'UI 2 of 2 scenarios executed',
+    'UI 2 / 2 scenarios attempted',
+    'UI checks were attempted',
+    'UI showed 1 of 2 tests passed as expected',
+    'UI showed scheduled for tomorrow as expected',
     'UI 12 of 12 assertions were performed',
     'UI tests remaining: 0',
     'UI checks remaining: 0',
@@ -2871,6 +2887,37 @@ describe('latestTestVerdict', () => {
     },
   );
 
+  it.each([
+    ['Not available message displayed', 'not available message was displayed as expected', true],
+    ['Not available message displayed', 'not available message was shown', true],
+    ['Not available error displayed', 'not available error was observed as expected', true],
+    ['Timeout message displayed', 'not available message was displayed as expected', false],
+    ['Not available message displayed', 'not available', false],
+    ['Not available message displayed', 'not available because browser setup failed', false],
+    ['Not available message displayed', 'setup failed: not available message was displayed', false],
+  ])(
+    'matches observed availability messages to Expected: %s / %s',
+    async (expected, observation, completed) => {
+      for (const [status, evidence] of [
+        [`✅ UI ${observation}`, 'screenshot.png'],
+        ['✅', `UI ${observation}; screenshot.png`],
+      ]) {
+        for (const unfinished of ['', '; UI not run']) {
+          gh.comments = [
+            sheet([
+              `| 1 | Unavailable item | Open item | ${expected} | ${status}${unfinished} | ${evidence} |`,
+            ]),
+          ];
+          expect(await latestTestVerdict(repo, 5)).toMatchObject({
+            total: 1,
+            passed: completed && !unfinished ? 1 : 0,
+            incomplete: !completed || !!unfinished,
+          });
+        }
+      }
+    },
+  );
+
   it.each(['UI needs to run', 'UI needs a browser', 'UI not assessed', 'UI ⏸️', 'UI ❎'])(
     'retains unfinished execution declared in evidence: %s',
     async (annotation) => {
@@ -2954,6 +3001,14 @@ describe('latestTestVerdict', () => {
 
   it.each([
     'No evidence was retained',
+    'No evidence exists for API or UI',
+    'No evidence available for API',
+    'No evidence was kept',
+    'No HTTP headers captured',
+    'HTTP headers were not kept',
+    'HTTP headers: not kept',
+    'No evidence exists for API or UI: response.json',
+    'No HTTP headers captured: response.json',
     'No evidence exists for this scenario',
     'No evidence exists for this test',
     'No evidence exists for this check',
@@ -2975,6 +3030,20 @@ describe('latestTestVerdict', () => {
         incomplete: true,
       });
     }
+  });
+
+  it.each([
+    'No evidence exists for API or UI was displayed as expected',
+    'No evidence was kept was returned as expected',
+    'No HTTP headers captured was shown as expected',
+    '[No evidence exists for API or UI](https://example.com/response.json)',
+    '[No HTTP headers captured](https://example.com/headers.json)',
+    'no-http-headers-captured.json',
+    'HTTP headers: headers.json',
+    'HTTP headers were kept: headers.json',
+  ])('preserves artifacts and observed qualified absence wording: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl /api | Expected message | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
   it.each([
