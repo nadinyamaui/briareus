@@ -18801,6 +18801,68 @@ describe('official orchestrator PR actions', () => {
   };
   const fixVerdicts = { verdicts: [{ key: 'fix-me', decision: 'fix' }] };
 
+  it.each(['open worker', 'standalone findings', 'loop findings'])(
+    'blocks %s from a differently cased repository name',
+    async (kind) => {
+      const worker = getJob('pr-cap-0');
+      worker.repo = 'Acme/Shop';
+      worker.startedOnPr = 12;
+      if (kind === 'open worker') worker.status = 'idle';
+      else if (kind === 'standalone findings') hold(worker);
+      else worker.reviewLoop = { triage: { prNumber: 12, findings: [] } };
+      try {
+        await expect(
+          startOrchestratorPrAction(parent, { action: 'implement-feedback', prNumber: 12 }),
+        ).rejects.toThrow(kind === 'open worker' ? /already has an open session/ : /awaiting user triage/);
+      } finally {
+        worker.repo = 'acme/shop';
+        worker.status = 'closed';
+        worker.startedOnPr = null;
+        worker.reviewTriage = null;
+        worker.reviewLoop = null;
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'delivers another author review completion after source deletion (buffered: %s)',
+    async (buffered) => {
+      const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+      await settleWorkers([parent.id]);
+      hold(session);
+      session.reviewTriage.mine = false;
+      parent.status = 'idle';
+      parent.awaitingAnswer = buffered;
+      parent.unattendedTurns = 10;
+      try {
+        const result = await triageReviewFindings(session.id, { by: 'the operator' });
+        expect(result).toEqual({ completed: true, prNumber: 12, findings: 1 });
+        expect(getJob(session.id)).toBeNull();
+        if (buffered) {
+          expect(parent.pendingWorkerNotices).toContainEqual(
+            expect.objectContaining({
+              workerId: session.id,
+              kind: 'action-completed',
+              text: expect.stringContaining('completed by the operator'),
+            }),
+          );
+          parent.awaitingAnswer = false;
+          deliverWorkerNotices(parent);
+        }
+        expect(
+          parent.events.some(
+            (e) =>
+              e.text?.includes(`Review session ${session.id} on PR #12 was completed by the operator`) &&
+              e.text.includes('findings remain on the pull request for its author'),
+          ),
+        ).toBe(true);
+      } finally {
+        parent.awaitingAnswer = false;
+        parent.unattendedTurns = 0;
+      }
+    },
+  );
+
   it.each(['startBranch', 'branch', 'prBranch'])('blocks a branch-only worker using %s', async (field) => {
     const worker = getJob('pr-cap-0');
     worker.status = 'idle';
