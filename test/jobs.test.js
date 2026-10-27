@@ -4508,6 +4508,28 @@ describe('the unattended-turn breaker and the delivery holds', () => {
     expect(getJob('brk-w1').noticeUnheard).toBe(true);
   });
 
+  it('keeps completed action payloads after source closure or deletion while dropping stale questions', () => {
+    const orch = getJob('brk-orch');
+    orch.status = 'idle';
+    orch.unattendedTurns = 10;
+    orch.pendingWorkerNotices = [
+      { workerId: 'brk-closed', kind: 'action-completed', text: 'Closed action completed.' },
+      { workerId: 'deleted-action', kind: 'action-completed', text: 'Deleted action completed.' },
+      { workerId: 'brk-closed', kind: 'ask', text: 'Stale question.' },
+      { workerId: 'deleted-action', kind: 'triage', text: 'Stale hold.' },
+    ];
+    deliverWorkerNotices(orch);
+    expect(orch.pendingWorkerNotices).toHaveLength(0);
+    const text = orch.events
+      .filter((e) => e.kind === 'info')
+      .map((e) => e.text)
+      .join('\n');
+    expect(text).toContain('Closed action completed.');
+    expect(text).toContain('Deleted action completed.');
+    expect(text).not.toContain('Stale question.');
+    expect(text).not.toContain('Stale hold.');
+  });
+
   it('a genuine user message re-arms the breaker; an injected one would not', () => {
     sendDevMessage('brk-reset', 'sigue');
     const orch = getJob('brk-reset');
@@ -7335,6 +7357,11 @@ describe('the review loop: what a closing loop review reports back', () => {
       { ...parentRow('auto-declared-clean', 'auto-declared-clean-rev'), qaLoop: { done: false } },
       reviewRow('auto-declared-clean-rev', 'auto-declared-clean', true),
       parentRow('auto-filtered', 'auto-filtered-rev'),
+      {
+        ...parentRow('official-filtered', 'official-filtered-rev'),
+        orchestratorPrAction: 'implement-feedback',
+      },
+      reviewRow('official-filtered-rev', 'official-filtered', true),
       reviewRow('auto-filtered-rev', 'auto-filtered', true),
       parentRow('auto-filtered-approved', 'auto-filtered-approved-rev'),
       reviewRow('auto-filtered-approved-rev', 'auto-filtered-approved', true),
@@ -7638,39 +7665,44 @@ describe('the review loop: what a closing loop review reports back', () => {
     }
   });
 
-  it('requires approval when prior verdicts filter out every autonomous finding', async () => {
-    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-    const parent = getJob('auto-filtered');
-    const approvals = addPullRequestLabel.mock.calls.length;
-    const records = recordTriage.mock.calls.length;
-    const reads = githubRest.mock.calls.length;
-    latestReviewFindings.mockResolvedValue([{ key: 'prior', severity: 'high', title: 'Prior finding' }]);
-    sortFindingsForFix.mockResolvedValue({ kept: [], parked: [] });
-    githubRest.mockResolvedValue({
-      ok: true,
-      json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
-    });
-    try {
-      await closeDevSession('auto-filtered-rev');
-      await waitFor(() => !!parent.reviewLoop.pendingResult?.error || !!parent.reviewLoop.done);
-      expect(parent.reviewLoop.done).toBeFalsy();
-      expect(parent.reviewLoop.pendingResult.error).toMatch(/has not applied the code-approved label/);
-      // On the read-failure backoff, so the deadline can end it.
-      expect(parent.reviewLoop.pendingResult).toMatchObject({ attempts: 1, approvalSaid: true });
-      expect(parent.reviewLoop.pendingResult.failingSince).toBeTruthy();
-      expect(githubRest.mock.calls.length).toBeGreaterThan(reads);
-      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
-      expect(recordTriage.mock.calls.length).toBe(records);
-    } finally {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-      parent.reviewLoop.pendingResult = null;
-      latestReviewFindings.mockReset().mockResolvedValue([]);
-      sortFindingsForFix
-        .mockReset()
-        .mockImplementation(async (repo, prNumber, findings) => ({ kept: findings, parked: [] }));
-      githubRest.mockReset();
-    }
-  });
+  it.each(['auto-filtered', 'official-filtered'])(
+    'requires approval when prior verdicts filter out every finding for %s',
+    async (id) => {
+      state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+      const parent = getJob(id);
+      parent.status = 'idle';
+      getJob(`${id}-rev`).status = 'idle';
+      const approvals = addPullRequestLabel.mock.calls.length;
+      const records = recordTriage.mock.calls.length;
+      const reads = githubRest.mock.calls.length;
+      latestReviewFindings.mockResolvedValue([{ key: 'prior', severity: 'high', title: 'Prior finding' }]);
+      sortFindingsForFix.mockResolvedValue({ kept: [], parked: [] });
+      githubRest.mockResolvedValue({
+        ok: true,
+        json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
+      });
+      try {
+        await closeDevSession(`${id}-rev`);
+        await waitFor(() => !!parent.reviewLoop.pendingResult?.error || !!parent.reviewLoop.done);
+        expect(parent.reviewLoop.done).toBeFalsy();
+        expect(parent.reviewLoop.pendingResult.error).toMatch(/has not applied the code-approved label/);
+        // On the read-failure backoff, so the deadline can end it.
+        expect(parent.reviewLoop.pendingResult).toMatchObject({ attempts: 1, approvalSaid: true });
+        expect(parent.reviewLoop.pendingResult.failingSince).toBeTruthy();
+        expect(githubRest.mock.calls.length).toBeGreaterThan(reads);
+        expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
+        expect(recordTriage.mock.calls.length).toBe(records);
+      } finally {
+        state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+        parent.reviewLoop.pendingResult = null;
+        latestReviewFindings.mockReset().mockResolvedValue([]);
+        sortFindingsForFix
+          .mockReset()
+          .mockImplementation(async (repo, prNumber, findings) => ({ kept: findings, parked: [] }));
+        githubRest.mockReset();
+      }
+    },
+  );
 
   it.each([
     ['approved', { ok: true, json: async () => ({ labels: [{ name: 'code-approved' }] }) }],
@@ -18611,6 +18643,19 @@ describe('official orchestrator PR actions', () => {
         meta: {},
       },
     ];
+    state.stored.push(
+      { ...state.stored[0], id: 'orphan-pr-orch' },
+      ...Array.from({ length: 8 }, (_, i) => ({
+        id: `pr-cap-${i}`,
+        createdAt: '2026-09-02T00:00:00.000Z',
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/shop',
+        parentId: 'pr-orch',
+        providerId: 1,
+        turns: 1,
+      })),
+    );
     await initJobs();
     parent = getJob('pr-orch');
     parent.status = 'idle';
@@ -18743,6 +18788,107 @@ describe('official orchestrator PR actions', () => {
     expect(fix.orchestratorPrAction).toBe('implement-feedback');
     expect(fix.reviewLoop).toBeTruthy();
     expect(workerSessionsFor(parent)).toContain(fix);
+  });
+
+  const hold = (session) => {
+    session.status = 'closed';
+    session.reviewTriage = {
+      mine: true,
+      prNumber: 12,
+      branch: 'feature',
+      findings: [{ key: 'fix-me', title: 'A confirmed defect', severity: 'high' }],
+    };
+  };
+  const fixVerdicts = { verdicts: [{ key: 'fix-me', decision: 'fix' }] };
+
+  it.each(['startBranch', 'branch', 'prBranch'])('blocks a branch-only worker using %s', async (field) => {
+    const worker = getJob('pr-cap-0');
+    worker.status = 'idle';
+    worker[field] = 'feature';
+    try {
+      await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toThrow(
+        /already has an open session/,
+      );
+    } finally {
+      worker.status = 'closed';
+      delete worker[field];
+    }
+  });
+
+  it.each([false, true])(
+    'enforces capacity before dispatch (filled during GitHub: %s)',
+    async (duringRead) => {
+      const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+      await settleWorkers([parent.id]);
+      hold(session);
+      const fill = () => {
+        for (let i = 0; i < 8; i++) getJob(`pr-cap-${i}`).status = 'idle';
+      };
+      recordTriage.mockClear();
+      if (duringRead)
+        recordTriage.mockImplementationOnce(async () => {
+          fill();
+          return {};
+        });
+      else fill();
+      try {
+        await expect(triageStandaloneReviewFindings(session.id, fixVerdicts)).rejects.toThrow(
+          /Already 8 open workers/,
+        );
+        expect(recordTriage).toHaveBeenCalledTimes(duringRead ? 1 : 0);
+        expect(session.reviewTriage).toBeTruthy();
+        expect(
+          workerSessionsFor(parent).filter(
+            (w) => w.activity === 'implement-feedback' && w.status !== 'closed',
+          ),
+        ).toHaveLength(0);
+      } finally {
+        for (let i = 0; i < 8; i++) getJob(`pr-cap-${i}`).status = 'closed';
+      }
+    },
+  );
+
+  it('dispatches an orphaned review fix with its owner and manual triage policy', async () => {
+    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+    await settleWorkers([parent.id]);
+    hold(session);
+    session.parentId = 'orphan-pr-orch';
+    session.ownerId = 2;
+    await deleteJobById('orphan-pr-orch');
+    const result = await triageStandaloneReviewFindings(session.id, fixVerdicts);
+    const fix = getJob(result.session.id);
+    expect(fix.parentId).toBeFalsy();
+    expect(fix.ownerId).toBe(2);
+    expect(fix.orchestratorPrAction).toBe('implement-feedback');
+    expect(fix.reviewLoop).toBeTruthy();
+    await closeDevSession(fix.id);
+  });
+
+  it('delivers triage completion with the fix ID after deleting the source review', async () => {
+    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+    await settleWorkers([parent.id]);
+    hold(session);
+    parent.awaitingAnswer = true;
+    try {
+      const result = await triageStandaloneReviewFindings(session.id, fixVerdicts);
+      expect(getJob(session.id)).toBeNull();
+      expect(parent.pendingWorkerNotices).toContainEqual(
+        expect.objectContaining({
+          kind: 'action-completed',
+          text: expect.stringContaining(result.session.id),
+        }),
+      );
+      parent.unattendedTurns = 10;
+      parent.awaitingAnswer = false;
+      parent.status = 'idle';
+      deliverWorkerNotices(parent);
+      expect(
+        parent.events.some((e) => e.text?.includes(`follow Implement feedback session ${result.session.id}`)),
+      ).toBe(true);
+    } finally {
+      parent.awaitingAnswer = false;
+      parent.unattendedTurns = 0;
+    }
   });
 
   it('inherits the owner and refuses duplicate actions, then preserves standalone triage after closure', async () => {
