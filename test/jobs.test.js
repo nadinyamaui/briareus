@@ -11361,6 +11361,17 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       worker('ci-qa', 217, { qaLoop: { done: false } }),
       worker('ci-pending', 218),
       worker('ci-terminal', 219),
+      ...[
+        ['ci-qa-failed', 220, { done: true, failedScenarios: 1 }],
+        ['ci-qa-error', 221, { done: true, failedScenarios: 0, verdictError: 'could not read sheet' }],
+        [
+          'ci-qa-failure',
+          222,
+          { done: true, failedScenarios: 0, failure: { kind: 'interrupted', reason: 'session stopped' } },
+        ],
+        ['ci-qa-passed', 223, { done: true, failedScenarios: 0 }],
+        ['ci-qa-verdict', 224, { done: true, failedScenarios: 0, pendingVerdict: { prNumber: 224 } }],
+      ].map(([id, number, qaLoop]) => worker(id, number, { reviewLoop: { done: true, rounds: 1 }, qaLoop })),
       worker('ci-red', 202),
       worker('ci-loop', 203, { reviewLoop: { rounds: 2, done: false } }),
       // Converged on an empty block whose publishing policy withheld code-approved.
@@ -11608,6 +11619,36 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     await vi.waitFor(() => expect(notices('ci-qa')).toContain('Its QA run has not reported yet'));
     expect(notices('ci-qa')).not.toContain('ready to merge');
     expect(getJob('ci-qa').qaLoop.done).toBe(false);
+  });
+
+  it.each([
+    ['ci-qa-failed', 220, 'QA failed 1 scenario(s)'],
+    ['ci-qa-error', 221, 'the QA verdict could not be read: could not read sheet'],
+    ['ci-qa-failure', 222, 'QA interrupted: session stopped'],
+  ])('does not announce readiness after green CI with unresolved QA: %s', async (id, number, problem) => {
+    const job = getJob(id);
+    const qaBefore = structuredClone(job.qaLoop);
+    syncSessionsOn('acme/ci', null, number);
+    await vi.waitFor(() => expect(notices(id)).toContain(problem));
+    expect(job.prStatus.checks).toMatchObject({ total: 2, passed: 2, failed: 0, pending: 0 });
+    expect(notices(id)).toContain('Do not merge');
+    expect(notices(id)).not.toContain('ready to merge');
+    expect(notices(id)).not.toContain('Nothing is pending');
+    expect(job.qaLoop).toEqual(qaBefore);
+  });
+
+  it('keeps waiting for an explicitly pending QA verdict', async () => {
+    syncSessionsOn('acme/ci', null, 224);
+    await vi.waitFor(() => expect(notices('ci-qa-verdict')).toContain('Its QA run has not reported yet'));
+    expect(notices('ci-qa-verdict')).not.toContain('ready to merge');
+  });
+
+  it('announces readiness after green CI with review and QA passed', async () => {
+    syncSessionsOn('acme/ci', null, 223);
+    await vi.waitFor(() => expect(notices('ci-qa-passed')).toContain('every check on PR #223 passed (2/2)'));
+    expect(notices('ci-qa-passed')).toContain('ready to merge');
+    expect(notices('ci-qa-passed')).not.toContain('Do not merge');
+    expect(getJob('ci-qa-passed').qaLoop).toMatchObject({ done: true, failedScenarios: 0 });
   });
 
   it('does not announce a partially pending rollup', async () => {
