@@ -315,6 +315,116 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI only the first step was executed',
+    'UI only the first check has been performed',
+    'UI assertions have not all been verified',
+    'UI checks were not all completed',
+    'UI setup did not succeed',
+  ])('keeps article and auxiliary forms of partial QA incomplete: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API passed; ${annotation}`, 'response.json'],
+      ['✅ API passed', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each([
+    'UI all steps have been executed',
+    'UI assertions have all been verified',
+    'UI setup did succeed',
+    'UI showed only the first step was executed as expected',
+    'UI showed assertions have not all been verified as expected',
+    'UI showed setup did not succeed as expected',
+  ])('preserves completed QA and observations of partial-execution messages: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API passed; ${annotation}`, 'response.json'],
+      ['✅ API passed', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    }
+  });
+
+  it.each([
+    'No evidence was recorded locally',
+    'No evidence saved to disk',
+    'No evidence collected for this test run',
+    'There were no recordings made',
+  ])('rejects absence with storage and run modifiers: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`]) {
+      gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+    for (const retained of [
+      'response.json',
+      '[response](https://example.com/response.json)',
+      'curl returned 200 as expected',
+    ]) {
+      for (const evidence of [`${absence}; ${retained}`, `${retained}; ${absence}`]) {
+        gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+      }
+    }
+    gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${absence} was displayed as expected |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it('caches custom schemas independently by table width and block', async () => {
+    gh.comments = [
+      {
+        body: [
+          TEST_SHEET_ANCHOR,
+          '| a | b | c | d | e | f |',
+          '|---|---|---|---|---|---|',
+          '| 1 | API | curl | 200 | | |',
+          '| 2 | API | curl | 200 | ✅ | response.json |',
+          '',
+          '| a | b | c | d | e | f |',
+          '|---|---|---|---|---|---|',
+          '| 3 | Other width | extra | curl | 200 | ❌ | not a matching schema |',
+          '',
+          '| a | b | c | d | e | f | g |',
+          '|---|---|---|---|---|---|---|',
+          '| 4 | UI | extra | browser | Visible | ❌ | saw nothing |',
+        ].join('\n'),
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      total: 3,
+      passed: 1,
+      manual: 0,
+      incomplete: true,
+      failures: [{ number: '4', scenario: 'UI', expected: 'Visible', evidence: 'saw nothing' }],
+    });
+  });
+
+  it('bounds repeated custom-header lookahead on comment-sized tables', () => {
+    const source = readFileSync(new URL('../lib/findings.js', import.meta.url), 'utf8');
+    const parser = source.slice(
+      source.indexOf('function parseSheetVerdict('),
+      source.indexOf('// Missing, empty, manual and unexecuted sheets'),
+    );
+    const result = execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `${parser}
+        const body = ${JSON.stringify(TEST_SHEET_ANCHOR + '\n')} + ${JSON.stringify('a|b|c|d|e|f\n-|-|-|-|-|-\n')}.repeat(2000);
+        const start = performance.now();
+        const verdict = parseSheetVerdict(body);
+        console.log(JSON.stringify({ verdict, elapsed: performance.now() - start }));`,
+      ],
+      { encoding: 'utf8', timeout: 2000 },
+    );
+    const { verdict, elapsed } = JSON.parse(result);
+    expect(verdict).toMatchObject({ total: 0, incomplete: true });
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  it.each([
     'UI: 2 checks remaining',
     'UI: completed 1 of 2 checks',
     'UI: only first check run',
