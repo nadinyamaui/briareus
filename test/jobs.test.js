@@ -11381,6 +11381,25 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       worker('ci-loop', 203, { reviewLoop: { rounds: 2, done: false } }),
       // Converged on an empty block whose publishing policy withheld code-approved.
       worker('ci-withheld', 214, { reviewLoop: { rounds: 1, done: true, approvalWithheld: true } }),
+      ...['question', 'findings', 'completed', 'closed'].map((kind, index) => {
+        const number = 215 + index;
+        return worker(`ci-review-${kind}`, number, {
+          reviewBranch: `dev-ci-${number}`,
+          orchestratorPrAction: 'review',
+          awaitingAnswer: kind === 'question',
+          reviewTriage:
+            kind === 'findings' || kind === 'closed'
+              ? { prNumber: number, findings: [{ title: 'A pending finding', severity: 'low' }] }
+              : null,
+          prStatus: {
+            number,
+            state: 'open',
+            headSha: `sha${number}`,
+            checks: { total: 2, passed: 1, failed: 1, pending: 0, runs: [] },
+            syncedAt: '2026-08-25T13:00:00.000Z',
+          },
+        });
+      }),
       // Nothing mirrored yet: the PR's first sync, which must stay quiet.
       worker('ci-first', 204, { prStatus: null }),
       // Head seen moments ago, before its CI registered: an unseen pending run is still awaited.
@@ -11598,6 +11617,41 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       'The publishing policy withheld code-approved, so wait for that before merging.',
     );
     expect(notices('ci-withheld')).not.toContain('ready to merge');
+  });
+
+  it.each([
+    ['question', 215, 'Its review is waiting for an answer'],
+    ['findings', 216, 'Its review findings await user triage in the dashboard'],
+    ['completed', 217, 'Nothing is pending on it'],
+    ['closed', 218, null],
+  ])('keeps standalone review state in a green CI rerun notice (%s)', async (kind, number, expected) => {
+    const id = `ci-review-${kind}`;
+    const job = getJob(id);
+    const parent = getJob('ci-orch');
+    if (kind === 'closed') job.status = 'closed';
+    syncSessionsOn('acme/ci', null, number);
+    await vi.waitFor(() => expect(notices(id)).toContain(`every check on PR #${number} passed`));
+    if (expected) expect(notices(id)).toContain(expected);
+    if (kind === 'question' || kind === 'findings') {
+      expect(notices(id)).not.toContain('Nothing is pending');
+      expect(notices(id)).not.toContain('ready to merge');
+    }
+    const eventsBefore = parent.events.length;
+    parent.awaitingAnswer = false;
+    parent.unattendedTurns = 10;
+    try {
+      deliverWorkerNotices(parent);
+      const delivered = parent.events
+        .slice(eventsBefore)
+        .map((event) => event.text || '')
+        .join('\n');
+      if (expected) expect(delivered).toContain(expected);
+      else expect(delivered).not.toContain(`PR #${number}`);
+      expect(notices(id)).toBe('');
+    } finally {
+      parent.awaitingAnswer = true;
+      parent.unattendedTurns = 0;
+    }
   });
 
   it('hands over the verdict of a run that registered after the push was first read', async () => {
