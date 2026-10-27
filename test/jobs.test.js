@@ -17191,6 +17191,79 @@ describe('automatic recovery after a server restart', () => {
     },
   );
 
+  it.each(['idle', 'running'])(
+    'isolates PR admission refusal after restoring a newer %s ordinary worker',
+    async (status) => {
+      const ordinary = row({
+        status,
+        orchestrator: false,
+        branch: 'feature',
+        startedOnPr: 77,
+        ...(status === 'idle' ? { recoveryTurn: null } : {}),
+      });
+      const action = row({
+        status: 'idle',
+        orchestrator: false,
+        orchestratorPrAction: 'implement-feedback',
+        branch: 'feature',
+        startedOnPr: 77,
+        dbServerId: 7,
+        recoveryTurn: null,
+      });
+      for (const [index, saved] of [ordinary, action].entries()) {
+        const checkout = path.join(root, index ? 'acme__restart__2' : 'acme__restart');
+        fs.mkdirSync(checkout);
+        const git = (...args) => {
+          const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
+          expect(result.status, result.stderr).toBe(0);
+        };
+        git('init', '-b', 'feature');
+        fs.writeFileSync(path.join(checkout, 'work'), 'original');
+        git('add', '.');
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture');
+        const remote = path.join(root, `remote-${index}.git`);
+        expect(spawnSync('git', ['clone', '--bare', checkout, remote]).status).toBe(0);
+        git('remote', 'add', 'origin', remote);
+        Object.assign(saved, { workDir: checkout, workspacePrepared: true });
+        claimSlot(checkout, saved.id, { prepared: true });
+      }
+      const unrelated = row({ status: 'idle', recoveryTurn: null });
+      state.stored = [ordinary, action, unrelated];
+      releaseInstance.mockClear();
+      await initJobs({ deferPolling: true });
+      expect(resumeRestartedSessions()).toBe(3);
+      await vi.waitFor(() => {
+        expect(ordinary.status, ordinary.error).toBe(status);
+        expect(action).toMatchObject({
+          status: 'failed',
+          error: 'This pull request already has an open session',
+          restartPending: false,
+          restartDbServerId: null,
+          endedAt: expect.any(String),
+        });
+        expect(unrelated.status, unrelated.error).toBe('idle');
+      });
+      expect(reclaimInstance).toHaveBeenCalledWith(action, 7);
+      expect(releaseInstance).toHaveBeenCalledWith(action);
+      expect(children).toHaveLength(status === 'running' ? 1 : 0);
+      expect(resumeRestartedSessions()).toBe(0);
+      expect(() => reopenDevSession(action.id)).toThrow(/already has an open session/);
+      expect(() => sendDevMessage(action.id, 'Retry')).toThrow(/already has an open session/);
+      expect(fs.readFileSync(path.join(action.workDir, 'work'), 'utf8')).toBe('original');
+      await vi.waitFor(() =>
+        expect(saveJob.mock.calls.findLast(([j]) => j.id === action.id)?.[0]).toMatchObject({
+          status: 'failed',
+          restartPending: false,
+          restartDbServerId: null,
+        }),
+      );
+      if (children.length) {
+        finish(children[0]);
+        await vi.waitFor(() => expect(ordinary.status).toBe('idle'));
+      }
+    },
+  );
+
   it('uses server GitHub identity for automatic triage after reopening a failed queued session', async () => {
     const gh = await vi.importActual('../lib/github.js');
     Object.assign(state.projects[0], { autonomousReviewLoop: true, envTemplate: '', setupCommands: [] });
