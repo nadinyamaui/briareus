@@ -301,6 +301,12 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI 50% tested',
+    'UI 0% tested',
+    'UI 99.5% tested',
+    'UI remaining 2 checks',
+    'UI remaining checks: 2',
+    'UI remaining 1 test',
     'UI tests 1/2 verified',
     'UI 1 of 2 assertions verified',
     'UI: verified 1 of 2 checks',
@@ -326,6 +332,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI 100% tested',
+    'UI remaining 0 checks',
+    'UI remaining checks: 0',
+    'UI displayed 50% tested as expected',
+    'UI showed remaining 2 checks as expected',
     'UI tests 2/2 verified',
     'UI 2 of 2 assertions verified',
     'UI: verified 2 of 2 checks',
@@ -345,6 +356,34 @@ describe('latestTestVerdict', () => {
       expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
     }
   });
+
+  it.each(['⚠️ ', '- ', '+ ', '• ', 'NOTE: ', '⚠️ NOTE: '])(
+    'recognizes decorated execution subjects in evidence: %s',
+    async (prefix) => {
+      for (const annotation of ['UI not tested', 'UI not run', 'UI 50% tested', 'UI remaining 2 checks']) {
+        gh.comments = [
+          sheet([
+            `| 1 | API and UI | curl then browser | Both work | ✅ | response.json; ${prefix}${annotation} |`,
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+      }
+      for (const annotation of [
+        'UI 100% tested',
+        'UI remaining 0 checks',
+        'UI displayed not tested as expected',
+        'UI showed remaining 2 checks as expected',
+        'response.json',
+      ]) {
+        gh.comments = [
+          sheet([
+            `| 1 | API and UI | curl then browser | Both work | ✅ | response.json; ${prefix}${annotation} |`,
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+      }
+    },
+  );
 
   it.each(['UI 1/2 steps done', 'UI: done 1 of 2 checks', 'UI unchecked'])(
     'keeps unfinished progress and unchecked procedures incomplete: %s',
@@ -406,6 +445,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'Evidence will be uploaded later',
+    'No evidence was attached to this comment',
+    'Evidence collection is still pending',
+    'TODO: run browser checks',
     'No evidence available at this time',
     'No test execution occurred',
     'Pending execution',
