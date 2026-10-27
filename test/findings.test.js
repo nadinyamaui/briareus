@@ -952,6 +952,14 @@ describe('latestTestVerdict', () => {
     'UI checks not all finished',
     'UI checks have not all been finished',
     'API requests were not sent',
+    'Requests never sent',
+    'Requests were never sent',
+    'Requests not sent',
+    'Requests have not been sent',
+    'Request was not sent',
+    'Requests never executed',
+    'No requests were sent',
+    'curl requests never sent',
   ])('retains partial verification and unsent requests as incomplete: %s', async (annotation) => {
     for (const [status, evidence] of [
       [`✅ API passed; ${annotation}`, 'response.json'],
@@ -990,6 +998,11 @@ describe('latestTestVerdict', () => {
     'UI displayed 50% verified as expected',
     'UI showed checks not all finished as expected',
     'API requests were not sent was displayed as expected',
+    'Requests were sent',
+    'Requests executed',
+    'Requests never sent was displayed as expected',
+    'Requests never executed was shown as expected',
+    'Video upload failed; response.json; Requests were sent',
   ])('preserves complete verification and observed execution messages: %s', async (annotation) => {
     for (const [status, evidence] of [
       [`✅ ${annotation}`, 'response.json'],
@@ -1163,6 +1176,8 @@ describe('latestTestVerdict', () => {
     ['HTTP 200 with pending-count: 0', 'API pending-count: 0'],
     ['No results, result count=0', 'Nothing matched (asserted result count=0)'],
     ['No request is sent, network request count=0', 'No request was sent (asserted network request count=0)'],
+    ['No requests, network request count=0', 'Requests never sent (asserted network request count=0)'],
+    ['Zero requests', 'Requests were never sent (asserted network request count=0)'],
   ])('preserves matching business observations: %s / %s', async (expected, observation) => {
     for (const [status, evidence] of [
       [`✅ ${observation}`, 'response.json'],
@@ -1207,6 +1222,7 @@ describe('latestTestVerdict', () => {
   it.each([
     ['result count=1', 'Nothing matched (asserted result count=0)'],
     ['network request count=1', 'No request was sent (asserted network request count=0)'],
+    ['network request count=1', 'Requests never sent (asserted network request count=0)'],
   ])('does not exempt mismatched zero-count evidence: %s', async (expected, evidence) => {
     gh.comments = [sheet([`| 1 | Negative check | Run check | ${expected} | ✅ | ${evidence} |`])];
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
