@@ -444,6 +444,85 @@ describe('latestTestVerdict', () => {
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
+  it.each([
+    'UI: 1 of 2 steps executed',
+    'UI: 1 / 2 steps completed',
+    'UI: one of two steps executed',
+    'UI not all steps executed',
+    'UI: remaining steps: 2',
+    'UI steps remaining: 2',
+    'UI tests stopped before execution',
+    'UI steps were stopped before execution',
+    'UI tests passing but remaining checks were not run',
+    'UI tests passing but remaining steps were not executed',
+  ])('retains partial and stopped subprocedure execution: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅', `API passed; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        failures: [],
+        total: 1,
+        passed: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'UI: 2 of 2 steps executed',
+    'UI: 2 / 2 steps completed',
+    'UI: two of two steps executed',
+    'UI all steps executed',
+    'UI: remaining steps: 0',
+    'UI steps remaining: 0',
+    'UI showed 1 of 2 steps executed as expected',
+    'UI showed stopped before execution as expected',
+    'UI tests passing but remaining checks were completed',
+    'UI stopped payment is displayed',
+  ])('preserves completed steps and observed stop wording: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅', `API passed; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    }
+  });
+
+  it.each([
+    [`✅ API: ${' '.repeat(60000)}passed`, 'response.json', 1],
+    [`✅ API manual ${'xyz '.repeat(15000)}`, 'response.json', 0],
+    ['✅', `UI manual ${'a '.repeat(15000)}!`, 0],
+  ])('bounds long status and annotation scans (%#)', (status, evidence, passed) => {
+    const source = readFileSync(new URL('../lib/findings.js', import.meta.url), 'utf8');
+    const parser = source.slice(
+      source.indexOf('function parseSheetVerdict('),
+      source.indexOf('// Missing, empty, manual and unexecuted sheets'),
+    );
+    const body = sheet([`| 1 | API | curl | 200 | ${status} | ${evidence} |`]).body;
+    const result = execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `${parser}\nconsole.log(JSON.stringify(parseSheetVerdict(${JSON.stringify(body)})));`,
+      ],
+      { encoding: 'utf8', timeout: 2000 },
+    );
+    expect(JSON.parse(result)).toMatchObject({ total: 1, passed, incomplete: passed === 0 });
+  });
+
+  it.each(['—', '–', '/'])('preserves spaced annotation delimiters: %s', async (delimiter) => {
+    gh.comments = [
+      sheet([
+        `| 1 | API and UI | curl then browser | Both work | ✅ API ${' '.repeat(100)}${delimiter} ${' '.repeat(100)}UI not run | response.json |`,
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
   it.each(['No execution artifacts', 'N/A — not saved'])(
     'rejects explicit execution-artifact absence: %s',
     async (absence) => {
