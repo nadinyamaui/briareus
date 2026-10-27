@@ -113,6 +113,52 @@ describe('feedback snapshot', () => {
       externalFeedbackRevisions({ ...snapshot, sources: snapshot.sources.map((s) => ({ ...s, bot: true })) }),
     ).toEqual([]);
   });
+  it.each(['added', 'edited', 'deleted'])(
+    'invalidates selected feedback when a reviewer reply is %s',
+    (change) => {
+      const current = structuredClone(snapshot);
+      if (change === 'added')
+        current.history.push({
+          ...current.history.find((s) => s.id === 'comment:45'),
+          id: 'comment:47',
+          body: 'Withdrawn',
+        });
+      if (change === 'edited') current.history.find((s) => s.id === 'comment:45').body = 'Withdrawn';
+      if (change === 'deleted') current.history = current.history.filter((s) => s.id !== 'comment:45');
+      expect(feedbackSnapshotCurrent(snapshot, current)).toBe(false);
+      expect(externalFeedbackRevisions(current)[0].revision).not.toBe(
+        externalFeedbackRevisions(snapshot)[0].revision,
+      );
+    },
+  );
+  it('ignores unrelated threads and implementation notes when checking selected feedback', () => {
+    const current = structuredClone(snapshot);
+    current.history.push(
+      {
+        ...current.history.find((s) => s.id === 'comment:45'),
+        id: 'comment:47',
+        replyTo: 99,
+        body: 'Unrelated withdrawal',
+      },
+      {
+        ...current.history.find((s) => s.id === 'comment:45'),
+        id: 'comment:48',
+        author: 'nadin',
+        body: 'Implemented',
+      },
+      {
+        ...current.history.find((s) => s.id === 'comment:45'),
+        id: 'comment:49',
+        bot: true,
+        body: 'Bot note',
+      },
+    );
+    expect(feedbackSnapshotCurrent(snapshot, current)).toBe(true);
+    expect(externalFeedbackRevisions(current)).toEqual(externalFeedbackRevisions(snapshot));
+    const selected = { ...snapshot, sources: snapshot.sources.filter((s) => s.id === 'issue:46') };
+    current.history.find((s) => s.id === 'comment:45').body = 'Withdrawn';
+    expect(feedbackSnapshotCurrent(selected, current)).toBe(true);
+  });
 });
 
 describe('assessment protocol and findings', () => {

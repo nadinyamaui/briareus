@@ -260,7 +260,15 @@ vi.mock('../lib/usage.js', () => ({
   recordTurnUsage: vi.fn(),
 }));
 
-import { deleteJob, jobEventMaxSeqs, loadJobs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
+import {
+  deleteJob,
+  jobEventMaxSeqs,
+  loadJobs,
+  loadJobEvents,
+  saveJob,
+  saveJobEvents,
+  saveAppSetting,
+} from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
 import {
   acquireInstance,
@@ -17380,6 +17388,91 @@ describe('automatic recovery after a server restart', () => {
     expect(children).toHaveLength(1);
   });
 
+  it.each(['missing', 'invalid', 'changed', 'asking'])(
+    'releases an assessment after its answered turn fails completion (%s)',
+    async (outcome) => {
+      const checkout = path.join(root, 'assessment');
+      fs.mkdirSync(checkout);
+      spawnSync('git', ['init', '-q', checkout]);
+      spawnSync('git', [
+        '-C',
+        checkout,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'fixture',
+      ]);
+      const sha = spawnSync('git', ['-C', checkout, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+      const assessment = {
+        repo: 'acme/restart',
+        prNumber: 77,
+        branch: 'feature',
+        sha,
+        resultFile: '.briareus-feedback-test.json',
+        completed: false,
+        sources: [],
+        history: [],
+      };
+      if (outcome !== 'missing')
+        fs.writeFileSync(
+          path.join(checkout, assessment.resultFile),
+          outcome === 'invalid'
+            ? '{}'
+            : JSON.stringify({ sha, complete: true, sourcesReviewed: [], findings: [] }),
+        );
+      const child = row({
+        status: 'closed',
+        orchestrator: false,
+        workDir: checkout,
+        startedOnPr: 77,
+        awaitingAnswer: true,
+        autoClose: true,
+        feedbackAssessment: assessment,
+      });
+      state.stored = [child];
+      await initJobs();
+      child.status = 'idle';
+      githubRest.mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({
+              state: 'open',
+              user: { login: 'nadin' },
+              head: { sha: 'changed-sha', ref: 'feature', repo: { full_name: child.repo } },
+            }),
+          ),
+      );
+      const releases = releaseInstance.mock.calls.length;
+      try {
+        sendDevMessage(child.id, 'The operator answer');
+        await vi.waitFor(() => expect(children).toHaveLength(1));
+        if (outcome === 'asking')
+          children[0].notify('item/completed', {
+            item: { type: 'agentMessage', text: '<ask-user>More detail?</ask-user>' },
+          });
+        finish(children[0]);
+        await vi.waitFor(() => expect(child.status).toBe(outcome === 'asking' ? 'idle' : 'failed'));
+        if (outcome === 'asking') {
+          expect(child.awaitingAnswer).toBe(true);
+          expect(pendingFeedbackAssessment(child.repo, 77)).toBe(child);
+          expect(releaseInstance.mock.calls).toHaveLength(releases);
+        } else {
+          await vi.waitFor(() => expect(releaseInstance.mock.calls.slice(releases)).toEqual([[child]]));
+          expect(child.feedbackAssessment.completed).toBe(false);
+          expect(child.reviewTriage).toBeFalsy();
+          expect(pendingFeedbackAssessment(child.repo, 77)).toBeNull();
+        }
+      } finally {
+        githubRest.mockReset();
+      }
+    },
+  );
+
   it.each(['current', 'stale', 'replaced', 'asking'])(
     'handles failed deferred QA execution after an answer (%s child)',
     async (tracking) => {
@@ -18721,6 +18814,84 @@ describe('incoming feedback assessment gate', () => {
       { by: 'the user', note: undefined },
     );
     expect(addPullRequestLabel).not.toHaveBeenCalled();
+  });
+  it('does not consume feedback when its completed assessment cannot be saved', async () => {
+    const original = saveJob.getMockImplementation();
+    saveJob.mockImplementation(async (row) => {
+      if (row.id === job.id && row.feedbackAssessment?.completed) throw new Error('Database unavailable');
+      return original(row);
+    });
+    try {
+      await expect(holdFeedbackAssessment(job)).rejects.toThrow(/persist/);
+      expect(state.appSettings['incoming-feedback']).toBeUndefined();
+      expect(job.feedbackAssessment.consumed).toBeFalsy();
+    } finally {
+      saveJob.mockImplementation(original);
+    }
+    // Retrying persistence uses the validated in-memory result, even if the file is gone.
+    fs.unlinkSync(path.join(workDir, snapshot.resultFile));
+    await holdFeedbackAssessment(job);
+    expect(job.feedbackAssessment.consumed).toBe(true);
+    expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
+  });
+  it.each([false, true])(
+    'retries consumption after a settings failure across restart (empty: %s)',
+    async (empty) => {
+      if (empty) {
+        const file = path.join(workDir, snapshot.resultFile);
+        const result = JSON.parse(fs.readFileSync(file, 'utf8'));
+        result.findings = [];
+        fs.writeFileSync(file, JSON.stringify(result));
+      }
+      const originalSave = saveAppSetting.getMockImplementation();
+      saveAppSetting.mockRejectedValue(new Error('Settings unavailable'));
+      try {
+        await expect(holdFeedbackAssessment(job)).rejects.toThrow('Settings unavailable');
+        expect(job.feedbackAssessment.completed).toBe(true);
+        expect(job.feedbackAssessment.consumed).toBeFalsy();
+        expect(state.appSettings['incoming-feedback']).toBeUndefined();
+        await closeDevSession(job.id);
+        expect(getJob(job.id)).toBe(job);
+        expect(pendingFeedbackAssessment(job.repo, 31)).toBe(job);
+        // The shutdown flush also waits for unrelated lifecycle fixtures' probes.
+        // Only this closed assessment's persisted row is needed for restart.
+        let stored;
+        await vi.waitFor(() => {
+          stored = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
+          expect(stored.status).toBe('closed');
+          expect(stored.feedbackAssessment.consumed).toBeFalsy();
+        });
+        state.stored = [structuredClone(stored)];
+        fs.unlinkSync(path.join(workDir, snapshot.resultFile));
+        const intervals = vi.spyOn(globalThis, 'setInterval');
+        let poll;
+        try {
+          await initJobs();
+          poll = intervals.mock.calls.find(([fn]) => fn.name === 'syncDevPrs')[0];
+        } finally {
+          intervals.mockRestore();
+        }
+        job = getJob('feedback-gate');
+        await expect(holdFeedbackAssessment(job)).rejects.toThrow('Settings unavailable');
+        saveAppSetting.mockImplementation(originalSave);
+        poll();
+        await vi.waitFor(() => expect(job.feedbackAssessment.consumed).toBe(true));
+        await holdFeedbackAssessment(job);
+        expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
+        if (empty) await vi.waitFor(() => expect(getJob(job.id)).toBeNull());
+        else expect(job.reviewTriage.findings).toHaveLength(1);
+      } finally {
+        saveAppSetting.mockImplementation(originalSave);
+      }
+    },
+  );
+  it('retries consumption before completing and deleting a held card', async () => {
+    saveAppSetting.mockRejectedValueOnce(new Error('Settings unavailable'));
+    await expect(holdFeedbackAssessment(job)).rejects.toThrow('Settings unavailable');
+    const key = job.reviewTriage.findings[0].key;
+    await triageStandaloneReviewFindings(job.id, { verdicts: [{ key, decision: 'optional' }] });
+    expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
+    expect(getJob(job.id)).toBeNull();
   });
   it('starts no fixes if the PR moved after assessment, keeping the card available for a refresh', async () => {
     await holdFeedbackAssessment(job);
