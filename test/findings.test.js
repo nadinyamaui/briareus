@@ -511,6 +511,10 @@ describe('latestTestVerdict', () => {
     'API pending invoice not executed yet',
     'UI manual payment not tested',
     'UI manual payment not tested yet',
+    'UI manual payment was not tested',
+    'UI manual payment was never tested',
+    'API pending invoice was not executed',
+    'API pending invoice was never executed',
     'UI manual payment',
   ])('does not infer completed execution from a tested subject alone: %s', async (outcome) => {
     gh.comments = [
@@ -519,6 +523,25 @@ describe('latestTestVerdict', () => {
       ]),
     ];
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
+  it.each([
+    ['Manual payment', 'Submit manual payment', 'UI manual payment was not tested'],
+    ['Pending invoice', 'Fetch pending invoice', 'API pending invoice was never executed'],
+  ])('retains negated execution of business subjects: %s', async (scenario, steps, outcome) => {
+    for (const [status, evidence] of [
+      [`✅ ${outcome}`, 'response.json'],
+      ['✅', outcome],
+    ]) {
+      gh.comments = [sheet([`| 1 | ${scenario} | ${steps} | Works | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
   });
 
   it.each([
@@ -2572,6 +2595,12 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI 1/5 tests run',
+    'UI 1 of 5 checks executed',
+    'UI 5 / 10 checks executed',
+    'UI tests remaining: 4',
+    'UI checks remaining: 1',
+    'UI assertions remaining: 2',
     'UI: 0/5 tests run',
     'UI 0/5 tests run',
     'UI 0 / 5 checks executed',
@@ -2580,7 +2609,7 @@ describe('latestTestVerdict', () => {
     'UI 0 of 12 assertions were performed',
     'UI tests: 0/5 tests have been completed',
     '**UI: 0/5 tests run**',
-  ])('keeps zero-of-required execution counts incomplete: %s', async (annotation) => {
+  ])('keeps incomplete required execution counts incomplete: %s', async (annotation) => {
     for (const [status, evidence] of [
       [`✅ API; ${annotation}`, 'response.json'],
       ['✅', `API response.json; ${annotation}`],
@@ -2597,6 +2626,12 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI 10/10 checks executed',
+    'UI 12 of 12 assertions were performed',
+    'UI tests remaining: 0',
+    'UI checks remaining: 0',
+    'UI showed 1/5 tests run as expected',
+    'UI showed tests remaining: 4 as expected',
     'UI 5/5 tests run',
     'UI 5 / 5 tests run',
     'UI 5 of 5 checks executed',
@@ -2906,6 +2941,12 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'Evidence: not retained',
+    'Video: not attached',
+    'Evidence: was not saved',
+    'Evidence: has not been retained',
+    'Video: could not be recorded',
+    'Evidence: not retained: response.json',
     'Evidence: missing',
     'Evidence: absent',
     'Video: unavailable',
@@ -2925,6 +2966,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'Evidence: not retained was displayed as expected',
+    'Video: not attached was shown as expected',
+    'Evidence: was not saved was returned as expected',
+    'Evidence: not-retained.json',
+    'Video: [not attached](https://example.com/video.webm)',
     'Evidence: response.json',
     'Video: missing.webm',
     'Evidence: absent.json',
