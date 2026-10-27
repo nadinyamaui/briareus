@@ -489,3 +489,21 @@ describe('print submission lifecycle', () => {
     },
   );
 });
+
+describe('runCups', () => {
+  it('keeps multibyte characters split across output chunks intact', async () => {
+    // Write the two bytes of é separately, with a pause so they arrive as separate chunks.
+    const script = `
+      const é = Buffer.from('é');
+      for (const out of [process.stdout, process.stderr]) out.write(Buffer.concat([Buffer.from('Caf'), é.subarray(0, 1)]));
+      setTimeout(() => {
+        for (const out of [process.stdout, process.stderr]) out.write(Buffer.concat([é.subarray(1), Buffer.from('\\n')]));
+      }, 50);
+    `;
+    expect(await runCups(process.execPath, ['-e', script])).toEqual({
+      code: 0,
+      stdout: 'Café\n',
+      stderr: 'Café\n',
+    });
+  });
+});
