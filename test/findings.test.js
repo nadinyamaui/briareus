@@ -315,6 +315,139 @@ describe('latestTestVerdict', () => {
     },
   );
 
+  it.each([
+    'API: 50% executed',
+    'UI 50% done',
+    'UI is partially complete',
+    'API: 2 of 4 tests finished',
+    'API execution did not occur',
+    'Execution has yet to start',
+    'UI could not get started',
+    'UI has been left untested',
+    'unknown result',
+    'status: unknown',
+    '(result unknown)',
+  ])('retains explicit progress and unknown verdicts as incomplete: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API passed; ${annotation}`, 'response.json'],
+      ['✅', annotation],
+      ['✅', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each([
+    'API: 100% executed',
+    'UI 100% done',
+    'UI is complete',
+    'API: 4 of 4 tests finished',
+    'API execution did occur',
+    'Execution has started',
+    'UI got started and completed',
+    'UI displayed unknown result as expected',
+    'UI showed status: unknown as expected',
+    'UI displayed 50% done as expected',
+  ])('preserves full execution and displayed progress: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ ${annotation}`, 'response.json'],
+      ['✅', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    }
+  });
+
+  it.each([
+    'No requests were executed.',
+    'I did not execute this scenario.',
+    'Run not attempted due to missing credentials.',
+    'The video is unavailable.',
+    'TBD (upload pending)',
+    'Evidence awaiting upload',
+    'Evidence is still pending upload',
+    'Waiting for evidence',
+    'Evidence was never captured',
+    'None available',
+    'Execution evidence has been lost',
+    'No actual evidence',
+    'No execution took place because the test environment was unavailable',
+  ])('rejects qualified absence while retaining separate observations: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`, `Evidence: ${absence}`]) {
+      gh.comments = [sheet([`| 1 | API | curl | HTTP 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+    for (const retained of ['response.json', 'curl returned 200 as expected']) {
+      for (const evidence of [`${absence}; ${retained}`, `${retained}; ${absence}`]) {
+        gh.comments = [sheet([`| 1 | API | curl | HTTP 200 | ✅ | ${evidence} |`])];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+      }
+    }
+    gh.comments = [sheet([`| 1 | API | curl | Expected message | ✅ | ${absence} was shown as expected |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it.each([
+    ['Returns HTTP 429 when rate limited', 'API failed with HTTP 429 rate limited as expected'],
+    ['HTTP 400 or HTTP 422 for invalid payload', 'API failed with HTTP 422 as expected'],
+    ['HTTP 422 for invalid payload', 'API failed with HTTP 422: name is required'],
+    ['The purchase requires manual approval', 'UI requires manual approval as expected'],
+    ['Order scheduled for tomorrow', 'UI scheduled for tomorrow as expected'],
+    ['Setup did not succeed message is displayed', 'UI setup did not succeed was displayed as expected'],
+    ['HTTP 200 with pending=0', 'API pending=0'],
+    ['HTTP 200 with pending-count: 0', 'API pending-count: 0'],
+    ['No results, result count=0', 'Nothing matched (asserted result count=0)'],
+    ['No request is sent, network request count=0', 'No request was sent (asserted network request count=0)'],
+  ])('preserves matching business observations: %s / %s', async (expected, observation) => {
+    for (const [status, evidence] of [
+      [`✅ ${observation}`, 'response.json'],
+      ['✅', `${observation}; video.webm`],
+    ]) {
+      for (const unfinished of ['', '; UI not tested']) {
+        gh.comments = [
+          sheet([`| 1 | Negative check | Run check | ${expected} | ${status}${unfinished} | ${evidence} |`]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          total: 1,
+          passed: unfinished ? 0 : 1,
+          incomplete: !!unfinished,
+        });
+      }
+    }
+    gh.comments = [sheet([`| 1 | Negative check | Run check | ${expected} | ✅ | ${observation} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it.each([
+    ['HTTP 200', 'API failed with HTTP 429 rate limited as expected'],
+    ['HTTP 400 or HTTP 422', 'API failed with HTTP 500 as expected'],
+    ['HTTP 422', 'API failed with HTTP 500: name is required'],
+    ['HTTP 422', 'API failed with HTTP 422 before tests started as expected'],
+    ['HTTP 422', 'API failed with HTTP 422: setup failed'],
+    ['The purchase requires automatic approval', 'UI requires manual approval as expected'],
+    ['Order scheduled for today', 'UI scheduled for tomorrow as expected'],
+    ['Setup succeeded', 'UI setup did not succeed was displayed as expected'],
+    ['HTTP 200 with pending=1', 'API pending=0'],
+    ['HTTP 200 with pending-count: 1', 'API pending-count: 0'],
+  ])('retains mismatched business and execution outcomes: %s / %s', async (expected, observation) => {
+    for (const [status, evidence] of [
+      [`✅ ${observation}`, 'response.json'],
+      ['✅', observation],
+    ]) {
+      gh.comments = [sheet([`| 1 | Negative check | Run check | ${expected} | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each([
+    ['result count=1', 'Nothing matched (asserted result count=0)'],
+    ['network request count=1', 'No request was sent (asserted network request count=0)'],
+  ])('does not exempt mismatched zero-count evidence: %s', async (expected, evidence) => {
+    gh.comments = [sheet([`| 1 | Negative check | Run check | ${expected} | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
   it.each(['<br class="break">', "<BR class='break' />", '<br data-break="true">'])(
     'separates required procedures across attributed HTML breaks: %s',
     async (breakTag) => {
