@@ -264,7 +264,11 @@ describe('print submission lifecycle', () => {
       throw Object.assign(new Error('lp timed out'), { status: 502 });
     });
     service.recover = vi.fn(async () => []);
-    expect((await request('/jobs', 'POST', { path: '/w/a.pdf' })).status).toBe(502);
+    const res = await request('/jobs', 'POST', { path: '/w/a.pdf' });
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toBe(
+      'lp timed out. The submission is uncertain: CUPS may already have accepted it. Do not resubmit; check print_jobs for briareus-token',
+    );
     expect(await (await request('/jobs')).json()).toEqual({
       jobs: [{ jobId: 'briareus-token', printer: 'Office', state: 'uncertain' }],
     });

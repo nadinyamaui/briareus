@@ -192,6 +192,38 @@ describe('the print service', () => {
     ]);
   });
 
+  it.each([{}, { printer: 'Office/photo' }])(
+    'accepts a default instance lpstat lists only by its base queue: %j',
+    async (options) => {
+      const run = fakeCups({
+        'lpstat -p -d': {
+          code: 0,
+          stdout: 'printer Office is idle.\nsystem default destination: Office/photo\n',
+          stderr: '',
+        },
+      });
+      expect(await createPrintService({ run }).print(Buffer.from('x'), options)).toMatchObject({
+        printer: 'Office/photo',
+      });
+      expect(run.mock.calls.find(([command]) => command === 'lp')[1].slice(0, 2)).toEqual([
+        '-d',
+        'Office/photo',
+      ]);
+    },
+  );
+
+  it.each([
+    ['Office/draft', 'printer Office is idle.\nsystem default destination: Office/photo\n'],
+    ['Office/photo', 'printer Label is idle.\nsystem default destination: Office/photo\n'],
+    ['Office/-bad', 'printer Office is idle.\nsystem default destination: Office/-bad\n'],
+  ])('refuses %s when it is not the default of a listed queue', async (printer, stdout) => {
+    const run = fakeCups({ 'lpstat -p -d': { code: 0, stdout, stderr: '' } });
+    await expect(createPrintService({ run }).print(Buffer.from('x'), { printer })).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(run.mock.calls.some(([command]) => command === 'lp')).toBe(false);
+  });
+
   it.each(['Office/', '/photo', 'Office/photo/extra', 'Office/-bad', 'Office/missing'])(
     'refuses malformed or unlisted instances: %s',
     async (printer) => {
