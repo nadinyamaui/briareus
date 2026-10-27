@@ -534,6 +534,54 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     },
   );
 
+  it('hides deleted closing issues after a 410 webhook and failed board refresh without losing history', async () => {
+    const r = repo();
+    const linked = { number: 2, title: issue().title, url: issue().url, state: 'open', repo: r };
+    await store.saveBoard(r, board({ pulls: [pull({ issues: [linked] })], observedAt: 100 }));
+    expect((await store.readBoard(r)).pulls[0].issues).toHaveLength(1);
+    const errors = [];
+    const service = createGithubSync({
+      projects: () => [{ repo: r }],
+      config: () => ({ githubToken: 'token' }),
+      store,
+      now: () => 200,
+      invalidate: () => {},
+      log: (message) => errors.push(message),
+      rest: async (_cfg, _method, path) => {
+        expect(path).toBe(`/repos/${r}/issues/2`);
+        return { ok: false, status: 410 };
+      },
+      board: async () => {
+        throw new Error('Board503');
+      },
+    });
+    service.onWebhook('issues', { action: 'deleted', repository: { full_name: r }, issue: { number: 2 } });
+    await service.flush(r);
+    const result = await store.readBoard(r);
+    expect(result.issues).toEqual([]);
+    expect(result.pulls).toHaveLength(1);
+    expect(result.pulls[0].issues).toEqual([]);
+    expect(errors).toEqual([`${r}: Board503`]);
+    const [links] = await pool.query(
+      `SELECT l.relation FROM github_item_links l
+      JOIN github_items i ON i.id=l.item_id JOIN github_repositories r ON r.id=i.repository_id
+      WHERE r.repo=? AND i.number=1 AND l.relation='closes'`,
+      [r],
+    );
+    expect(links).toEqual([{ relation: 'closes' }]);
+    // Ordinary closed issues remain visible in PR relationships.
+    await store.saveItem(r, {
+      ...issue({ pulls: undefined }),
+      kind: 'issue',
+      state: 'closed',
+      observedAt: 300,
+    });
+    expect((await store.readBoard(r)).issues).toEqual([]);
+    expect((await store.readBoard(r)).pulls[0].issues).toEqual([
+      expect.objectContaining({ number: 2, state: 'closed' }),
+    ]);
+  });
+
   it('reconciles fully paginated PR links while retaining bounded and historical issue links', async () => {
     const r = repo();
     const external = repo();
