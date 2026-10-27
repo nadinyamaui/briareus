@@ -21,6 +21,10 @@ import {
   up as membershipUp,
   down as membershipDown,
 } from '../migrations/2026_10_27_160000_order_github_issue_membership.js';
+import {
+  up as metadataNamesUp,
+  down as metadataNamesDown,
+} from '../migrations/2026_10_27_170000_allow_github_metadata_name_overlap.js';
 
 // Opt in against a real MySQL server: the normal suite needs no infrastructure.
 // Only the randomly named database created by this file is ever dropped.
@@ -110,10 +114,14 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     );
     expect(Number(retried.issues_board_observed_at)).toBe(100);
     await pool.query("DELETE FROM github_repositories WHERE repo LIKE 'migration/%'");
+    await metadataNamesUp({ context: pool });
+    await metadataNamesUp({ context: pool });
     store = createGithubStore({ connection: () => pool.getConnection() });
   });
   afterAll(async () => {
     if (pool) {
+      await metadataNamesDown({ context: pool });
+      await metadataNamesDown({ context: pool });
       await membershipDown({ context: pool });
       await membershipDown({ context: pool });
       await relationObservationDown({ context: pool });
@@ -1072,6 +1080,144 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
       { number: 2, label_id: 22, name: 'A', milestone_id: 22, title: 'A' },
     ]);
   });
+
+  it('keeps real metadata names visible through partial item renames and later reconciliation', async () => {
+    const r = repo();
+    const metadata = (swapped = false) => ({
+      labels: [
+        { id: 11, name: swapped ? 'B' : 'A' },
+        { id: 22, name: swapped ? 'A' : 'B' },
+      ],
+      milestones: [
+        { id: 11, title: swapped ? 'B' : 'A' },
+        { id: 22, title: swapped ? 'A' : 'B' },
+      ],
+    });
+    await store.saveMetadata(r, metadata());
+    await store.saveItem(r, {
+      ...issue({ labels: [{ id: 22, name: 'B' }], milestone: 'B', milestoneId: 22 }),
+      kind: 'issue',
+      state: 'closed',
+      observedAt: 100,
+    });
+    const linked = { number: 2, title: issue().title, url: issue().url, repo: r };
+    await store.saveBoard(r, board({ issues: [], pulls: [pull({ issues: [linked] })], observedAt: 200 }));
+    await store.saveItem(r, {
+      ...issue({ number: 3, labels: [{ id: 11, name: 'B' }], milestone: 'B', milestoneId: 11 }),
+      kind: 'issue',
+      state: 'open',
+      observedAt: 300,
+    });
+    // A healthy board cannot replace metadata on a complete linked issue.
+    await store.saveBoard(
+      r,
+      board({
+        issues: [issue({ number: 3, labels: [{ name: 'B' }], milestone: 'B' })],
+        pulls: [pull({ issues: [{ ...linked, labels: [{ id: 22, name: 'A' }] }] })],
+        observedAt: 400,
+      }),
+    );
+    const visible = await store.readBoard(r);
+    expect(visible.pulls[0].issues[0].labels).toEqual([{ name: 'B', color: '' }]);
+    expect(visible.issues[0]).toMatchObject({ labels: [{ name: 'B', color: '' }], milestone: 'B' });
+    const [[historical]] = await pool.query(
+      `SELECT l.github_id AS label_id, l.name, m.github_id AS milestone_id, m.title
+      FROM github_items i JOIN github_repositories r ON r.id=i.repository_id
+      JOIN github_item_labels il ON il.item_id=i.id JOIN github_labels l ON l.id=il.label_id
+      JOIN github_milestones m ON m.id=i.milestone_id WHERE r.repo=? AND i.number=2`,
+      [r],
+    );
+    expect(historical).toMatchObject({ label_id: 22, name: 'B', milestone_id: 22, title: 'B' });
+    await expect(metadataNamesDown({ context: pool })).rejects.toThrow('Reconcile GitHub metadata');
+    await store.saveMetadata(r, metadata(true));
+    const reconciled = await store.readBoard(r);
+    expect(reconciled.pulls[0].issues[0].labels).toEqual([{ name: 'A', color: '' }]);
+    expect(reconciled.issues[0]).toMatchObject({ labels: [{ name: 'B', color: '' }], milestone: 'B' });
+    const [assignments] = await pool.query(
+      `SELECT i.number, l.github_id AS label_id, m.github_id AS milestone_id
+      FROM github_items i JOIN github_repositories r ON r.id=i.repository_id
+      JOIN github_item_labels il ON il.item_id=i.id JOIN github_labels l ON l.id=il.label_id
+      JOIN github_milestones m ON m.id=i.milestone_id WHERE r.repo=? AND i.number IN (2,3) ORDER BY i.number`,
+      [r],
+    );
+    expect(assignments).toEqual([
+      { number: 2, label_id: 22, milestone_id: 22 },
+      { number: 3, label_id: 11, milestone_id: 11 },
+    ]);
+  });
+
+  it.each(['success', 'failure'])(
+    'invalidates an unreadable new head verdict after %s through a webhook',
+    async (verdict) => {
+      const r = repo();
+      const head = 'c'.repeat(40);
+      await store.saveBoard(r, board());
+      await store.saveItem(
+        r,
+        {
+          ...pull({ checks: verdict }),
+          kind: 'pull',
+          state: 'open',
+          observedAt: 2000,
+        },
+        { checks: [{ id: 8, name: 'CI', status: 'completed', conclusion: verdict }] },
+      );
+      let currentHead = pull().headSha;
+      const errors = [];
+      const service = createGithubSync({
+        projects: () => [{ repo: r }],
+        config: () => ({ githubToken: 'token' }),
+        store,
+        now: () => 3000,
+        invalidate: () => {},
+        log: (message) => errors.push(message),
+        rest: async (_cfg, _method, path) => {
+          const resource = new URL(path, 'https://api.github.com').pathname.replace(`/repos/${r}`, '');
+          if (resource.endsWith('/check-runs')) return { ok: false, status: 403 };
+          let result = [];
+          if (resource === '/issues/1')
+            result = { number: 1, pull_request: {}, updated_at: pull().updatedAt };
+          if (resource === '/pulls/1')
+            result = {
+              number: 1,
+              title: 'A pull',
+              html_url: pull().url,
+              state: 'open',
+              updated_at: pull().updatedAt,
+              head: { sha: currentHead, ref: 'fix' },
+              base: { sha: 'b'.repeat(40), ref: 'main' },
+            };
+          return { ok: true, json: async () => result };
+        },
+        graphql: async () => ({
+          repository: {
+            issueOrPullRequest: {
+              __typename: 'PullRequest',
+              closingIssuesReferences: { nodes: [] },
+            },
+          },
+        }),
+        board: async () => {
+          throw new Error('Board503');
+        },
+      });
+      const refresh = async () => {
+        service.onWebhook('pull_request', { repository: { full_name: r }, pull_request: { number: 1 } });
+        await service.flush(r);
+        return (await store.readBoard(r)).pulls[0];
+      };
+      expect(await refresh()).toMatchObject({ headSha: currentHead, checks: verdict });
+      currentHead = head;
+      expect(await refresh()).toMatchObject({ headSha: head, checks: null });
+      const [checks] = await pool.query(
+        `SELECT ch.head_sha, ch.conclusion FROM github_checks ch
+      JOIN github_items i ON i.id=ch.item_id JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=?`,
+        [r],
+      );
+      expect(checks).toEqual([{ head_sha: pull().headSha, conclusion: verdict }]);
+      expect(errors).toEqual([`${r}: Board503`, `${r}: Board503`]);
+    },
+  );
 
   it('retains replacement metadata assignments downloaded before metadata refresh', async () => {
     const r = repo();

@@ -26,6 +26,7 @@ function harness({
   cursor = null,
   synced = new Map(),
   now = () => Date.parse('2026-10-27T12:00:00Z'),
+  projects = [project],
 } = {}) {
   const routes = new Map([
     ['/repos/acme/shop/issues', initial],
@@ -68,7 +69,7 @@ function harness({
     },
   }));
   const service = createGithubSync({
-    projects: () => [project],
+    projects: () => projects,
     config: () => ({ githubToken: 'token' }),
     store,
     rest,
@@ -209,6 +210,119 @@ describe('durable GitHub synchronization', () => {
     expect(h.store.saveItem).not.toHaveBeenCalled();
     expect(h.board).not.toHaveBeenCalled();
     expect(h.errors).toEqual([expect.stringContaining('rate limited')]);
+  });
+
+  it('reconciles boards across repeated core windows while unchanged open PR detail work exhausts REST', async () => {
+    const h = harness();
+    h.routes.set('/repos/acme/shop/pulls', [pull(1), pull(2), pull(3)]);
+    for (const number of [1, 2, 3]) {
+      h.routes.set(`/repos/acme/shop/issues/${number}`, issue(number, { pull_request: {} }));
+      h.routes.set(`/repos/acme/shop/pulls/${number}`, pull(number));
+    }
+    h.routes.set(`/repos/acme/shop/commits/${'a'.repeat(40)}/check-runs`, { check_runs: [] });
+    h.routes.set(
+      '/repos/acme/shop/pulls/3/files',
+      Object.assign(new Error('core exhausted'), {
+        status: 429,
+        resource: 'core',
+        rateLimited: true,
+      }),
+    );
+    await h.service.tick();
+    await h.service.tick();
+    expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1, 2, 1, 2]);
+    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(h.invalidate).toHaveBeenCalledTimes(2);
+    expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
+    expect(h.errors).toEqual([`${project.repo}: core exhausted`, `${project.repo}: core exhausted`]);
+    h.routes.set('/repos/acme/shop/pulls/3/files', []);
+    await h.service.tick();
+    expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, Date.parse('2026-10-27T12:00:00Z'));
+  });
+
+  it.each(['inventory', 'item', 'metadata'])(
+    'reconciles current boards after a core rate limit in %s without more REST work',
+    async (stage) => {
+      const h = harness({ initial: [issue(1), issue(2)] });
+      const path = {
+        inventory: '/repos/acme/shop/issues',
+        item: '/repos/acme/shop/issues/1/comments',
+        metadata: '/repos/acme/shop/labels',
+      }[stage];
+      h.routes.set(path, Object.assign(new Error('core exhausted'), { status: 429, resource: 'core' }));
+      await h.service.tick();
+      expect(new URL(h.rest.mock.calls.at(-1)[2], 'https://api.github.com').pathname).toBe(path);
+      expect(h.board).toHaveBeenCalledWith(project, { complete: true });
+      expect(h.invalidate).toHaveBeenCalledWith(project.repo);
+      expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
+      expect(h.errors).toEqual([`${project.repo}: core exhausted`]);
+    },
+  );
+
+  it('reconciles later repositories while the shared core allowance remains exhausted', async () => {
+    const other = { repo: 'acme/other', enabled: true };
+    const h = harness({ initial: [issue(1)], projects: [project, other] });
+    const limited = Object.assign(new Error('core exhausted'), { status: 429, resource: 'core' });
+    h.routes.set('/repos/acme/shop/issues/1/comments', limited);
+    h.routes.set('/repos/acme/other/issues', limited);
+    await h.service.tick();
+    expect(h.board.mock.calls.map(([project]) => project.repo)).toEqual([project.repo, other.repo]);
+    expect(h.invalidate.mock.calls.map(([repo]) => repo)).toEqual([project.repo, other.repo]);
+    expect(h.store.saveItem).not.toHaveBeenCalled();
+    expect(h.store.finishSync).not.toHaveBeenCalledWith(expect.any(String), expect.any(Number));
+    expect(h.errors).toEqual([`${project.repo}: core exhausted`, `${other.repo}: core exhausted`]);
+  });
+
+  it.each(['item', 'metadata'])('reconciles a webhook board after %s exhausts core', async (stage) => {
+    const h = harness();
+    const path = stage === 'item' ? '/repos/acme/shop/issues/1/comments' : '/repos/acme/shop/labels';
+    h.routes.set(path, Object.assign(new Error('core exhausted'), { status: 429, resource: 'core' }));
+    if (stage === 'metadata') h.service.onWebhook('label', { repository: { full_name: project.repo } });
+    for (const number of [1, 2])
+      h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number } });
+    await h.service.flush(project.repo);
+    expect(h.store.saveItem).not.toHaveBeenCalled();
+    expect(new URL(h.rest.mock.calls.at(-1)[2], 'https://api.github.com').pathname).toBe(path);
+    expect(h.board).toHaveBeenCalledTimes(1);
+    expect(h.invalidate).toHaveBeenCalledWith(project.repo);
+    expect(h.errors).toEqual([`${project.repo}: core exhausted`]);
+  });
+
+  it('does not retry board work after GraphQL rate limits', async () => {
+    const h = harness({ initial: [issue(1), issue(2)] });
+    h.graphql.mockRejectedValue(
+      Object.assign(new Error('graphql exhausted'), {
+        status: 429,
+        resource: 'graphql',
+      }),
+    );
+    await h.service.tick();
+    expect(h.graphql).toHaveBeenCalledTimes(1);
+    expect(h.board).not.toHaveBeenCalled();
+    expect(h.store.saveItem).not.toHaveBeenCalled();
+    expect(h.errors).toEqual([`${project.repo}: graphql exhausted`]);
+  });
+
+  it('records a GraphQL board rate limit without retrying after core exhaustion', async () => {
+    const h = harness({ initial: [issue(1)] });
+    h.routes.set(
+      '/repos/acme/shop/issues/1/comments',
+      Object.assign(new Error('core exhausted'), {
+        status: 429,
+        resource: 'core',
+      }),
+    );
+    h.board.mockRejectedValue(
+      Object.assign(new Error('graphql exhausted'), {
+        status: 429,
+        resource: 'graphql',
+      }),
+    );
+    await h.service.tick();
+    expect(h.board).toHaveBeenCalledTimes(1);
+    expect(h.invalidate).not.toHaveBeenCalled();
+    expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
+    expect(h.errors).toEqual([`${project.repo}: graphql exhausted`]);
   });
 
   it.each(['failure', 'error'])(
