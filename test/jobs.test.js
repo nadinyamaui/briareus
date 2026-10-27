@@ -17119,7 +17119,7 @@ describe('automatic recovery after a server restart', () => {
     child.emit('close', 0);
   };
 
-  it.each(['review', 'fix'])(
+  it.each(['review', 'fix', 'qa', 'stale qa'])(
     'restores an official action after its active %s child and continues unrelated recovery',
     async (kind) => {
       const parent = row({
@@ -17134,14 +17134,25 @@ describe('automatic recovery after a server restart', () => {
         orchestrator: false,
         branch: 'feature',
         startedOnPr: 77,
-        ...(kind === 'review' ? { loopParentId: parent.id } : { loopFixParentId: parent.id }),
+        ...(kind === 'review'
+          ? { loopParentId: parent.id }
+          : kind === 'fix'
+            ? { loopFixParentId: parent.id }
+            : { qaParentId: parent.id }),
       });
       parent.reviewLoop = {
         rounds: 1,
         ...(kind === 'review'
           ? { reviewing: true, reviewSessionId: child.id }
-          : { fixing: true, fixSessionId: child.id }),
+          : kind === 'fix'
+            ? { fixing: true, fixSessionId: child.id }
+            : { done: kind === 'qa' }),
       };
+      if (kind === 'qa' || kind === 'stale qa')
+        parent.qaLoop = {
+          running: true,
+          [kind === 'qa' ? 'sessionId' : 'staleSessionId']: child.id,
+        };
       for (const [index, saved] of [child, parent].entries()) {
         const checkout = path.join(root, index ? 'acme__restart__2' : 'acme__restart');
         fs.mkdirSync(checkout);
@@ -17170,7 +17181,8 @@ describe('automatic recovery after a server restart', () => {
         expect(unrelated.status, unrelated.error).toBe('idle');
       });
       expect(children).toHaveLength(1);
-      expect(parent.reviewLoop[kind === 'review' ? 'reviewSessionId' : 'fixSessionId']).toBe(child.id);
+      if (parent.qaLoop) expect(parent.qaLoop.sessionId || parent.qaLoop.staleSessionId).toBe(child.id);
+      else expect(parent.reviewLoop[kind === 'review' ? 'reviewSessionId' : 'fixSessionId']).toBe(child.id);
       expect(() => sendDevMessage(parent.id, 'Start another parent turn')).toThrow(
         /already has an open session/,
       );
@@ -19399,31 +19411,39 @@ describe('official orchestrator PR actions', () => {
     },
   );
 
-  it.each(['review', 'fix'])(
+  it.each(['review', 'fix', 'qa', 'stale qa'])(
     'requires both active loop links when recovering an official action with a %s child',
     async (kind) => {
       const original = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
       await settleWorkers([parent.id]);
       original.status = 'failed';
       const other = getJob('pr-cap-0');
-      const parentKey = kind === 'review' ? 'loopParentId' : 'loopFixParentId';
-      const sessionKey = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
-      const activeKey = kind === 'review' ? 'reviewing' : 'fixing';
+      const qa = kind === 'qa' || kind === 'stale qa';
+      const parentKey = qa ? 'qaParentId' : kind === 'review' ? 'loopParentId' : 'loopFixParentId';
+      const sessionKey = qa
+        ? kind === 'qa'
+          ? 'sessionId'
+          : 'staleSessionId'
+        : kind === 'review'
+          ? 'reviewSessionId'
+          : 'fixSessionId';
+      const activeKey = qa ? 'running' : kind === 'review' ? 'reviewing' : 'fixing';
       other.status = 'idle';
       other.startedOnPr = 12;
-      original.reviewLoop = { [activeKey]: true, [sessionKey]: other.id };
+      const loop = { [activeKey]: true, [sessionKey]: other.id };
+      original[qa ? 'qaLoop' : 'reviewLoop'] = loop;
       try {
         other[parentKey] = 'another-action';
         expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
           /already has an open session/,
         );
         other[parentKey] = original.id;
-        original.reviewLoop[sessionKey] = 'another-child';
+        loop[sessionKey] = 'another-child';
         expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
           /already has an open session/,
         );
-        original.reviewLoop[sessionKey] = other.id;
-        original.reviewLoop[activeKey] = false;
+        loop[sessionKey] = other.id;
+        loop[activeKey] = false;
         expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
           /already has an open session/,
         );
@@ -19432,6 +19452,7 @@ describe('official orchestrator PR actions', () => {
         other.startedOnPr = null;
         delete other[parentKey];
         original.reviewLoop = null;
+        original.qaLoop = null;
       }
     },
   );
