@@ -38,9 +38,18 @@ describe('editEnvText', () => {
     const key = "A=1\nPRIVATE_KEY='-----BEGIN KEY-----\nabc\n-----END KEY-----'\nB=2\n";
     expect(editEnvText(key, { unset: ['PRIVATE_KEY'] })).toBe('A=1\nB=2\n');
     expect(editEnvText(key, { set: { PRIVATE_KEY: 'none' } })).toBe('A=1\nPRIVATE_KEY=none\nB=2\n');
-    // An escaped quote does not close the value; one never closed is read as its own line.
-    expect(editEnvText('A="x\\"\nB=1"\nB=2\n', { set: { B: '3' } })).toBe('A="x\\"\nB=1"\nB=3\n');
+    // A value never closed is read as its own line.
     expect(editEnvText('A="open\nB=1\n', { set: { B: '2' } })).toBe('A="open\nB=2\n');
+  });
+
+  it('closes a quoted value at its next quote, a backslash before it included, as Node does', () => {
+    const text = 'PATH_WIN="C:\\temp\\"\nTOKEN=old\nOTHER="ok"\nTAIL=1\n';
+    expect(Object.keys(util.parseEnv(text)).sort()).toEqual(['OTHER', 'PATH_WIN', 'TAIL', 'TOKEN']);
+    const removed = editEnvText(text, { unset: ['TOKEN'] });
+    expect(removed).toBe('PATH_WIN="C:\\temp\\"\nOTHER="ok"\nTAIL=1\n');
+    expect(util.parseEnv(removed)).not.toHaveProperty('TOKEN');
+    const replaced = editEnvText(text, { set: { PATH_WIN: 'new' } });
+    expect(util.parseEnv(replaced)).toEqual({ PATH_WIN: 'new', TOKEN: 'old', OTHER: 'ok', TAIL: '1' });
   });
 
   it('refuses bad keys, multi-line values and empty edits', () => {
@@ -206,6 +215,35 @@ describe('projectEnvRoutes', () => {
     const res = await request('POST', { set: { NEW: '1' } });
     expect(res.body.checkout).toBe('updated');
     expect(fs.readFileSync(path.join(dir, '.env'), 'utf8')).toBe('NEW=1\nDB_DATABASE=session_one\n');
+  });
+
+  it('creates the checkout .env, holding the session database, when DB_DATABASE is the first key', async () => {
+    project = { ...project, envTemplate: '' };
+    job.sessionDb = 'session_one';
+    const res = await request('POST', { set: { DB_DATABASE: 'default' } });
+    expect(res.body.checkout).toBe('updated');
+    expect(project.envTemplate).toBe('DB_DATABASE=default\n');
+    expect(fs.readFileSync(path.join(dir, '.env'), 'utf8')).toBe('DB_DATABASE=session_one\n');
+  });
+
+  it('refuses a queued edit whose project was renamed to another repository while it waited', async () => {
+    const run = editProject.getMockImplementation();
+    editProject.mockImplementationOnce(async (id, change) => {
+      project = { ...project, repo: 'owner/renamed' };
+      return run(id, change);
+    });
+    const res = await request('POST', { set: { A: '1' } });
+    expect(res.status).toBe(404);
+    expect(saves).toEqual([]);
+  });
+
+  it('accepts the stored repository in another letter case', async () => {
+    const run = editProject.getMockImplementation();
+    editProject.mockImplementationOnce(async (id, change) => {
+      project = { ...project, repo: 'Owner/Repo' };
+      return run(id, change);
+    });
+    expect((await request('POST', { set: { A: '1' } })).status).toBe(200);
   });
 
   it('creates no .env for a removal alone', async () => {
