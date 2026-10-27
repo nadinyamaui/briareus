@@ -17,6 +17,10 @@ import {
   up as relationObservationUp,
   down as relationObservationDown,
 } from '../migrations/2026_10_27_150000_order_github_removals_and_relations.js';
+import {
+  up as membershipUp,
+  down as membershipDown,
+} from '../migrations/2026_10_27_160000_order_github_issue_membership.js';
 
 // Opt in against a real MySQL server: the normal suite needs no infrastructure.
 // Only the randomly named database created by this file is ever dropped.
@@ -85,10 +89,33 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     await itemObservationUp({ context: pool });
     await relationObservationUp({ context: pool });
     await relationObservationUp({ context: pool });
+    await pool.query(`INSERT INTO github_repositories (repo, board_observed_at, issues_error, issues_truncated)
+      VALUES ('migration/complete', 200, NULL, FALSE), ('migration/partial', 300, NULL, TRUE),
+      ('migration/failed', 400, 'Unavailable', FALSE)`);
+    await membershipUp({ context: pool });
+    const [migrated] = await pool.query(
+      "SELECT repo, issues_board_observed_at FROM github_repositories WHERE repo LIKE 'migration/%' ORDER BY repo",
+    );
+    expect(migrated.map((row) => [row.repo, Number(row.issues_board_observed_at)])).toEqual([
+      ['migration/complete', 200],
+      ['migration/failed', 0],
+      ['migration/partial', 0],
+    ]);
+    await pool.query(
+      "UPDATE github_repositories SET issues_board_observed_at = 100 WHERE repo = 'migration/complete'",
+    );
+    await membershipUp({ context: pool });
+    const [[retried]] = await pool.query(
+      "SELECT issues_board_observed_at FROM github_repositories WHERE repo = 'migration/complete'",
+    );
+    expect(Number(retried.issues_board_observed_at)).toBe(100);
+    await pool.query("DELETE FROM github_repositories WHERE repo LIKE 'migration/%'");
     store = createGithubStore({ connection: () => pool.getConnection() });
   });
   afterAll(async () => {
     if (pool) {
+      await membershipDown({ context: pool });
+      await membershipDown({ context: pool });
       await relationObservationDown({ context: pool });
       await relationObservationDown({ context: pool });
       await itemObservationDown({ context: pool });
@@ -194,6 +221,49 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     await store.saveItem(r, { ...pull({ title: 'Newer' }), kind: 'pull', state: 'open', observedAt: 4000 });
     expect((await store.readBoard(r)).pulls[0].title).toBe('Newer');
   });
+
+  it.each(['pull', 'issue'])('preserves newer complete-board absences during %s backfills', async (kind) => {
+    for (const existing of [false, true]) {
+      const r = repo();
+      if (existing) await store.saveBoard(r, board({ observedAt: 50 }));
+      await store.saveBoard(r, board({ pulls: [], issues: [], observedAt: 200 }));
+      // Later partial issue lists must retain the last complete absence.
+      await store.saveBoard(r, board({ pulls: [], issues: [], issuesTruncated: true, observedAt: 300 }));
+      const row = {
+        ...(kind === 'pull' ? pull() : issue()),
+        kind,
+        state: 'open',
+        body: 'Historical body',
+        observedAt: 100,
+        sourceUpdatedAt: pull().updatedAt,
+      };
+      expect(await store.saveItem(r, row, { comments: [{ id: 1, body: 'Historical comment' }] })).toBe(true);
+      const result = await store.readBoard(r);
+      expect(result.pulls).toEqual([]);
+      expect(result.issues).toEqual([]);
+      expect((await store.syncedItems(r)).get(row.number)).toBe(row.sourceUpdatedAt);
+      const [[saved]] = await pool.query(
+        `SELECT i.body, c.body AS comment FROM github_items i
+        JOIN github_repositories r ON r.id=i.repository_id JOIN github_comments c ON c.item_id=i.id
+        WHERE r.repo=? AND i.number=?`,
+        [r, row.number],
+      );
+      expect(saved).toEqual({ body: 'Historical body', comment: 'Historical comment' });
+      await store.saveItem(r, { ...row, observedAt: 400 });
+      expect((await store.readBoard(r))[kind === 'pull' ? 'pulls' : 'issues']).toHaveLength(1);
+    }
+  });
+
+  it.each([{ issuesTruncated: true }, { issuesError: 'No access' }])(
+    'allows issue downloads to restore membership after an incomplete board: %j',
+    async (partial) => {
+      const r = repo();
+      await store.saveBoard(r, board({ pulls: [], issues: [], observedAt: 50 }));
+      await store.saveBoard(r, board({ pulls: [], issues: [], observedAt: 200, ...partial }));
+      await store.saveItem(r, { ...issue(), kind: 'issue', state: 'open', observedAt: 100 });
+      expect((await store.readBoard(r)).issues).toHaveLength(1);
+    },
+  );
 
   it('keeps cross-repository links and labels without exposing stubs as board rows', async () => {
     const r = repo();
@@ -557,6 +627,40 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     },
   );
 
+  it.each(['pull', 'issue'])('creates missing reciprocal links from a fresh %s observation', async (kind) => {
+    const r = repo(),
+      external = repo();
+    await store.saveBoard(r, board({ issues: [], observedAt: 50 }));
+    await store.saveBoard(external, board({ pulls: [], observedAt: 50 }));
+    await store.saveItem(r, { ...pull(), kind: 'pull', state: 'open', observedAt: 100 });
+    await store.saveItem(external, { ...issue(), kind: 'issue', state: 'open', observedAt: 100 });
+    const row =
+      kind === 'pull'
+        ? pull({ issues: [{ ...issue(), repo: external, state: 'open' }] })
+        : issue({ pulls: [{ ...pull(), repo: r, state: 'open' }] });
+    await store.saveItem(kind === 'pull' ? r : external, { ...row, kind, state: 'open', observedAt: 200 });
+    expect((await store.readBoard(r)).pulls[0].issues.map((i) => i.number)).toEqual([2]);
+    expect((await store.readBoard(external)).issues[0].pulls.map((p) => p.number)).toEqual([1]);
+    // Older negative collections cannot erase either direction of the new fact.
+    await store.saveItem(kind === 'pull' ? external : r, {
+      ...(kind === 'pull' ? issue() : pull()),
+      kind: kind === 'pull' ? 'issue' : 'pull',
+      state: 'open',
+      observedAt: 150,
+    });
+    expect((await store.readBoard(r)).pulls[0].issues).toHaveLength(1);
+    expect((await store.readBoard(external)).issues[0].pulls).toHaveLength(1);
+    await store.saveItem(external, { ...issue(), kind: 'issue', state: 'open', observedAt: 300 });
+    await store.saveItem(r, {
+      ...pull({ issues: [{ ...issue(), repo: external, state: 'open' }] }),
+      kind: 'pull',
+      state: 'open',
+      observedAt: 250,
+    });
+    expect((await store.readBoard(r)).pulls[0].issues).toEqual([]);
+    expect((await store.readBoard(external)).issues[0].pulls).toEqual([]);
+  });
+
   it.each([false, true])(
     'backfills collections without erasing newer board relationships (complete: %s)',
     async (complete) => {
@@ -686,15 +790,23 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
       JOIN github_items i ON i.id=l.item_id JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=?`,
       [r],
     );
-    expect(count.n).toBe(71);
+    expect(count.n).toBe(142); // 71 relationships, each stored in both directions
     expect((await store.readBoard(r)).issues[0].pulls).toEqual([]);
     await store.saveItem(r, { ...issue(), kind: 'issue', state: 'open', observedAt: 2000 });
     const [[remaining]] = await pool.query(
       `SELECT COUNT(*) AS n FROM github_item_links l
-      JOIN github_items i ON i.id=l.item_id JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=? AND l.relation='closed_by'`,
+      JOIN github_items i ON i.id=l.item_id JOIN github_repositories r ON r.id=i.repository_id
+      WHERE r.repo=? AND i.number=2 AND l.relation='closed_by'`,
       [r],
     );
     expect(remaining.n).toBe(0);
+    const [[retained]] = await pool.query(
+      `SELECT COUNT(*) AS n FROM github_item_links l
+      JOIN github_items i ON i.id=l.item_id JOIN github_repositories r ON r.id=i.repository_id
+      WHERE r.repo=? AND i.number=1 AND l.relation='closes'`,
+      [r],
+    );
+    expect(retained.n).toBe(70);
   });
 
   it('retains confirmed closures across truncated refreshes without hiding unpaged issues', async () => {
@@ -959,5 +1071,71 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
       { number: 1, label_id: 11, name: 'B', milestone_id: 11, title: 'B' },
       { number: 2, label_id: 22, name: 'A', milestone_id: 22, title: 'A' },
     ]);
+  });
+
+  it('retains replacement metadata assignments downloaded before metadata refresh', async () => {
+    const r = repo();
+    const metadata = (id) => ({
+      labels: [{ id, name: 'bug', color: 'abcdef' }],
+      milestones: [{ id, number: id, title: 'Release', state: 'open' }],
+    });
+    await store.saveMetadata(r, metadata(55));
+    let downloads = 0,
+      clock = 100;
+    const rawIssue = {
+      number: 2,
+      title: 'Closed issue',
+      html_url: issue().url,
+      state: 'closed',
+      updated_at: issue().updatedAt,
+      labels: metadata(66).labels,
+      milestone: metadata(66).milestones[0],
+    };
+    const errors = [];
+    const service = createGithubSync({
+      projects: () => [{ repo: r }],
+      config: () => ({ githubToken: 'token' }),
+      store,
+      now: () => ++clock,
+      log: (message) => errors.push(message),
+      invalidate: () => {},
+      rest: async (_cfg, _method, path) => {
+        const resource = new URL(path, 'https://api.github.com').pathname.replace(`/repos/${r}`, '');
+        let result = [];
+        if (resource === '/issues') result = [rawIssue];
+        else if (resource === '/issues/2/comments') downloads++;
+        else if (resource === '/labels') result = metadata(66).labels;
+        else if (resource === '/milestones') result = metadata(66).milestones;
+        return { ok: true, json: async () => result };
+      },
+      graphql: async () => ({
+        repository: {
+          issueOrPullRequest: {
+            __typename: 'Issue',
+            subIssues: { nodes: [] },
+            closedByPullRequestsReferences: { nodes: [] },
+          },
+        },
+      }),
+      board: async () => ({ issuesError: null, issuesTruncated: false }),
+    });
+    await service.tick();
+    await service.tick();
+    expect(errors).toEqual([]);
+    expect(downloads).toBe(1);
+    const [[saved]] = await pool.query(
+      `SELECT l.github_id AS label_id, l.name, m.github_id AS milestone_id, m.title
+      FROM github_items i JOIN github_repositories r ON r.id=i.repository_id
+      JOIN github_item_labels il ON il.item_id=i.id JOIN github_labels l ON l.id=il.label_id
+      JOIN github_milestones m ON m.id=i.milestone_id WHERE r.repo=? AND i.number=2`,
+      [r],
+    );
+    expect(saved).toBeDefined();
+    expect({ ...saved, label_id: Number(saved.label_id), milestone_id: Number(saved.milestone_id) }).toEqual({
+      label_id: 66,
+      name: 'bug',
+      milestone_id: 66,
+      title: 'Release',
+    });
   });
 });
