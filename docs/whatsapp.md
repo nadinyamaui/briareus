@@ -174,7 +174,7 @@ and of the project’s Slack workspace, so each channel is enabled per project.
 
 The tools are `whatsapp_accounts`, `whatsapp_conversations`,
 `whatsapp_messages`, `whatsapp_media`, `whatsapp_transcribe`, `whatsapp_send`, `whatsapp_send_voice`,
-`whatsapp_create_group`, `whatsapp_add_participants`, `whatsapp_watches`,
+`whatsapp_send_media`, `whatsapp_create_group`, `whatsapp_add_participants`, `whatsapp_watches`,
 `whatsapp_watch`,
 `whatsapp_unwatch` and `whatsapp_mark_read`, served under
 `/api/agent/whatsapp` with the session’s
@@ -302,3 +302,23 @@ Recipients must be told the voice is AI-generated; built-in voices do not
 clone a person or a session character. Voice sends have the same permissions,
 reply watches and no automatic retry rule as text sends. The internal route is
 `POST /api/agent/whatsapp/accounts/:id/conversations/:chat/voice`.
+
+### Sending photos, videos and documents
+
+`whatsapp_send_media` takes `account`, `chat`, the absolute `path` of a local
+file (up to 25 MiB) and optional `caption` (up to 4000 characters),
+`asDocument`, `replyTo` and `watch`. The tool reads the file in the session
+and sends its bytes base64-encoded to
+`POST /api/agent/whatsapp/accounts/:id/conversations/:chat/media`
+(`{data, mimetype, filename, caption?, asDocument?, replyTo?, watch?}`),
+which skips the app-wide 1 MB JSON limit and is parsed only once the session is
+authorized. JPEG and PNG go through
+[WAHA sendImage](https://waha.devlike.pro/docs/how-to/send-messages/#send-image),
+videos through `sendVideo` with `convert: true` so WAHA re-encodes them for
+WhatsApp, and every other type, or any file with `asDocument: true`, through
+`sendFile` under its file name. The installed WAHA edition/engine must support
+media sending (501 otherwise). In a group the caption starts with the bot
+prefix like a text reply (an uncaptioned send gets a 📷, 🎬 or 📄 after it), so
+a linked group never hands the core’s own send back as an operator
+instruction. Media sends have the same permissions, reply watches and no
+automatic retry rule as text sends.

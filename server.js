@@ -37,7 +37,7 @@ import { createHomeAssistantService } from './lib/home-assistant.js';
 import { homeAssistantRoutes } from './lib/home-assistant-routes.js';
 import { createWhatsAppService, readMedia } from './lib/whatsapp.js';
 import { whatsappRoutes } from './lib/whatsapp-routes.js';
-import { whatsappAgentRoutes, whatsappWatchAllowed } from './lib/whatsapp-agent.js';
+import { whatsappAgentRoutes, whatsappMediaPath, whatsappWatchAllowed } from './lib/whatsapp-agent.js';
 import { createWhatsAppWatcher } from './lib/whatsapp-watch.js';
 import { createMcpService, MCP_OAUTH_CALLBACK_PATH } from './lib/mcp-servers.js';
 import { mcpRoutes, mcpProxyRouter, mcpOAuthCallbackRouter } from './lib/mcp-routes.js';
@@ -396,8 +396,11 @@ app.use(
   }),
 );
 const jsonBody = express.json({ limit: '1mb' });
-// Mail sends carry their attachments in the body; lib/mail-agent.js parses those after auth.
-app.use((req, res, next) => (mailActionPath(req.path) ? next() : jsonBody(req, res, next)));
+// Mail sends and WhatsApp media sends carry their files in the body; lib/mail-agent.js and
+// lib/whatsapp-agent.js parse those after auth.
+app.use((req, res, next) =>
+  mailActionPath(req.path) || whatsappMediaPath(req.path) ? next() : jsonBody(req, res, next),
+);
 
 // Of all the handlers added for the rest of this file, only an agent's own are
 // answered at their own path.
