@@ -46,7 +46,20 @@ opens a path the session named. PDF, plain text and common image formats print
 directly; the agent is told to convert other formats to PDF first.
 
 A session sees and cancels only the jobs it sent. That list is kept in memory,
-so it starts empty after the core restarts.
+so it starts empty after the core restarts or the session closes or is deleted.
+At most four file reads/submissions run at once across sessions. Each session
+retains up to 100 jobs; only confirmed terminal jobs are pruned to make room.
+If all retained jobs are active or uncertain, new submissions are refused.
+
+Every submission has a unique marker in its CUPS title. If `lp` loses its
+acknowledgement, `print_jobs` retains an `uncertain` entry and uses CUPS's
+`ipptool` to recover the job ID by marker and printer, including completed jobs.
+After recovery the session can cancel a pending job normally. No match still
+means uncertain, never permission to print again. Recovery requires `ipptool`
+(usually the `cups-ipp-utils` package) and retained CUPS job names/history;
+a missing tool or failed query is reported as an error without discarding the
+submission. Standard local socket configurations are queried through localhost
+port 631; that HTTP listener must reach the same scheduler as the socket.
 
 ## Set up a printer
 

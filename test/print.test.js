@@ -93,7 +93,7 @@ describe('the print service', () => {
       '-n',
       '2',
       '-t',
-      'report .pdf',
+      expect.stringMatching(/^briareus-[0-9a-f-]{36} report \.pdf$/),
       '-P',
       '1-3,5',
       '-o',
@@ -155,6 +155,147 @@ describe('the print service', () => {
       { jobId: 'Office-9', state: 'unknown' },
     ]);
     expect(await service.jobs([])).toEqual([]);
+  });
+
+  it.each([{}, { printer: 'Office/photo' }])('accepts a listed printer instance: %j', async (options) => {
+    const run = fakeCups({
+      'lpstat -p -d': {
+        code: 0,
+        stdout: 'printer Office/photo is idle.\nsystem default destination: Office/photo\n',
+        stderr: '',
+      },
+    });
+    expect(await createPrintService({ run }).print(Buffer.from('x'), options)).toMatchObject({
+      printer: 'Office/photo',
+    });
+    expect(run.mock.calls.find(([command]) => command === 'lp')[1].slice(0, 2)).toEqual([
+      '-d',
+      'Office/photo',
+    ]);
+  });
+
+  it.each(['Office/', '/photo', 'Office/photo/extra', 'Office/-bad', 'Office/missing'])(
+    'refuses malformed or unlisted instances: %s',
+    async (printer) => {
+      const run = fakeCups({
+        'lpstat -p -d': {
+          code: 0,
+          stdout: `printer ${printer === 'Office/missing' ? 'Office' : printer} is idle.\n`,
+          stderr: '',
+        },
+      });
+      await expect(createPrintService({ run }).print(Buffer.from('x'), { printer })).rejects.toMatchObject({
+        status: 404,
+      });
+      expect(run.mock.calls.some(([command]) => command === 'lp')).toBe(false);
+    },
+  );
+
+  it('calls authorization after discovery and never submits if revoked', async () => {
+    const run = fakeCups();
+    const authorize = vi.fn(() => {
+      throw Object.assign(new Error('Revoked'), { status: 403 });
+    });
+    await expect(
+      createPrintService({ run }).print(Buffer.from('x'), {}, { authorize }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(run.mock.calls.map(([command]) => command)).toEqual(['lpstat']);
+  });
+
+  it.each(
+    ['lpstat -o', 'lpstat -l -W completed -o'].flatMap((command) =>
+      [0, 1].map((n) => [command, n ? null : 1]),
+    ),
+  )('propagates status failure from %s (exit %s)', async (command, code) => {
+    const run = fakeCups({
+      [command]: { code, stdout: 'Office-12 user 1024 date\n', stderr: 'Scheduler is not running' },
+    });
+    await expect(createPrintService({ run }).jobs(['Office-12'])).rejects.toMatchObject({
+      status: 502,
+      message: 'Scheduler is not running',
+    });
+  });
+
+  it('takes the completed snapshot only after pending, retaining a job that finishes between them', async () => {
+    const run = fakeCups();
+    let release;
+    run.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const result = createPrintService({ run }).jobs(['Office-10']);
+    expect(run.mock.calls).toHaveLength(1);
+    release({ code: 0, stdout: '', stderr: '' });
+    expect(await result).toEqual([{ jobId: 'Office-10', state: 'completed' }]);
+    expect(run.mock.calls[1][1]).toEqual(['-l', '-W', 'completed', '-o']);
+  });
+
+  it('records a unique marker before lp, retaining it when acknowledgement times out', async () => {
+    const run = fakeCups({ 'lp -unused': {} });
+    const fallback = run.getMockImplementation();
+    run.mockImplementation((command, args) =>
+      command === 'lp' ? { code: null, stdout: '', stderr: '' } : fallback(command, args),
+    );
+    const submitting = vi.fn();
+    await expect(
+      createPrintService({ run }).print(Buffer.from('x'), {}, { submitting }),
+    ).rejects.toMatchObject({ status: 502 });
+    const submission = submitting.mock.calls[0][0];
+    expect(submission).toMatchObject({ jobId: submission.marker, printer: 'Office', copies: 1 });
+    expect(run.mock.calls.find(([command]) => command === 'lp')[1]).toContain(
+      `${submission.marker} Briareus`,
+    );
+  });
+
+  it('recovers pending or completed jobs only by the unique marker and destination', async () => {
+    const dict = (id, title, queue = 'Office') =>
+      `<dict><key>job-id</key><integer>${id}</integer><key>job-name</key><string>${title}</string><key>job-printer-uri</key><string>ipp://localhost/printers/${queue}</string></dict>`;
+    const submission = {
+      jobId: 'briareus-token',
+      marker: 'briareus-token',
+      printer: 'Office/photo',
+      copies: 2,
+    };
+    const run = fakeCups({
+      'lpstat -H': { code: 0, stdout: '/run/cups/cups.sock\n', stderr: '' },
+    });
+    const fallback = run.getMockImplementation();
+    run.mockImplementation((command, args) =>
+      command === 'ipptool'
+        ? {
+            code: 0,
+            stderr: '',
+            stdout: `<key>ResponseAttributes</key><array>${dict(9, 'unrelated')}${dict(10, 'briareus-token report', 'Other')}${dict(42, 'briareus-token report')}</array>`,
+          }
+        : fallback(command, args),
+    );
+    const service = createPrintService({ run });
+    expect(await service.recover([submission])).toEqual([{ ...submission, jobId: 'Office-42' }]);
+    expect(run.mock.calls.find(([command]) => command === 'ipptool')[1]).toEqual([
+      '-X',
+      '-T',
+      '30',
+      'ipp://localhost/',
+      expect.stringMatching(/print-recovery\.ipp$/),
+    ]);
+    expect(await service.recover([{ ...submission, marker: 'another-session' }])).toEqual([]);
+    expect(await service.recover([])).toEqual([]);
+  });
+
+  it('rejects failed or malformed recovery queries', async () => {
+    const run = vi.fn(async (command) =>
+      command === 'lpstat'
+        ? { code: 0, stdout: 'localhost:631', stderr: '' }
+        : { code: null, stdout: '', stderr: 'Timed out' },
+    );
+    await expect(createPrintService({ run }).recover([{}])).rejects.toMatchObject({
+      status: 502,
+      message: 'Timed out',
+    });
+    run.mockResolvedValue({ code: 0, stdout: 'invalid', stderr: '' });
+    await expect(createPrintService({ run }).recover([{}])).rejects.toMatchObject({ status: 502 });
   });
 
   it('cancels a job by its id and refuses anything else', async () => {

@@ -707,7 +707,13 @@ api.use(
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
 api.use(
-  printAgentRoutes({ service: createPrintService(), agentSession, getProject, readFile: readSessionFile }),
+  printAgentRoutes({
+    service: createPrintService(),
+    agentSession,
+    getProject,
+    readFile: readSessionFile,
+    sessions: bus,
+  }),
 );
 // Each user's own Home Assistant (lib/me-routes.js). The one in .env was the operator's, so
 // it stands for the original operator until they connect one of their own.
