@@ -301,6 +301,127 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'No evidence captured; upload returned 500',
+    'No evidence was recorded; nothing was shown',
+    'No evidence at all',
+    'All evidence was lost',
+  ])('rejects absence explanations and failed capture responses: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`]) {
+      gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+    for (const retained of [
+      'response.json',
+      '[response](https://example.com/response.json)',
+      'curl returned 200 as expected',
+    ]) {
+      for (const evidence of [`${absence}; ${retained}`, `${retained}; ${absence}`]) {
+        gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+      }
+    }
+  });
+
+  it.each([
+    'upload returned 500',
+    'nothing was shown',
+    'No evidence captured; upload returned 500 was displayed as expected',
+    'No evidence was recorded; nothing was shown was displayed as expected',
+    'No evidence at all was displayed as expected',
+    'All evidence was lost was shown as expected',
+    'Nothing was shown was displayed as expected',
+  ])('preserves observed application absence messages: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it.each([
+    [
+      'Unable to start browser message is displayed',
+      'UI unable to start browser was displayed as expected',
+      true,
+    ],
+    ['Unable to start browser message is displayed', 'UI unable to start browser', false],
+    [
+      'Unable to start browser message is displayed',
+      'UI unable to install browser was displayed as expected',
+      false,
+    ],
+    ['Both work', 'UI unable to start browser was displayed as expected', false],
+  ])(
+    'matches named displayed setup messages to Expected: %s / %s',
+    async (expected, observation, complete) => {
+      for (const [status, evidence] of [
+        [`✅ API; ${observation}`, 'video.webm'],
+        ['✅ API', `${observation}; video.webm`],
+      ]) {
+        for (const unfinished of ['', '; UI not executed']) {
+          gh.comments = [
+            sheet([
+              `| 1 | API and UI | curl then browser | ${expected} | ${status}${unfinished} | ${evidence} |`,
+            ]),
+          ];
+          expect(await latestTestVerdict(repo, 5)).toMatchObject({
+            total: 1,
+            passed: complete && !unfinished ? 1 : 0,
+            incomplete: !complete || !!unfinished,
+          });
+        }
+      }
+    },
+  );
+
+  it.each([
+    ['remaining scenarios: 2', false],
+    ['remaining scenarios: 0', true],
+    ['UI would not launch', false],
+    ['UI would not launch was displayed as expected', true],
+    ['UI showed remaining scenarios: 2 as expected', true],
+  ])('retains remaining scenarios and unsuccessful launch coverage: %s', async (annotation, complete) => {
+    for (const [status, evidence] of [
+      [`✅ API executed; ${annotation}`, 'response.json'],
+      ['✅ API executed', `${annotation}; response.json`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        total: 1,
+        passed: complete ? 1 : 0,
+        incomplete: !complete,
+      });
+    }
+  });
+
+  it.each([
+    '`'.repeat(10000) + 'x',
+    '`'.repeat(10000),
+    '`'.repeat(10000) + 'response.json' + '`'.repeat(10000),
+  ])('bounds Markdown evidence delimiter scans (%#)', (evidence) => {
+    const source = readFileSync(new URL('../lib/findings.js', import.meta.url), 'utf8');
+    const parser = source.slice(
+      source.indexOf('function parseSheetVerdict('),
+      source.indexOf('// Missing, empty, manual and unexecuted sheets'),
+    );
+    const body = sheet([
+      `| 1 | API | curl | 200 | ✅ | ${evidence} |`,
+      '| 2 | UI | Open | Visible | ❌ | saw nothing |',
+    ]).body;
+    const result = execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `${parser}\nconsole.log(JSON.stringify(parseSheetVerdict(${JSON.stringify(body)})));`,
+      ],
+      { encoding: 'utf8', timeout: 2000 },
+    );
+    expect(JSON.parse(result)).toMatchObject({
+      total: 2,
+      passed: evidence === '`'.repeat(10000) ? 0 : 1,
+      failures: [{ number: '2' }],
+    });
+  });
+
+  it.each([
     ['Returns HTTP 422 validation error', 'API failed with HTTP 422 validation error'],
     ['Returns HTTP 500', 'API failed with HTTP 500'],
     ['Returns HTTP 401 Unauthorized', 'API login failed with HTTP 401 Unauthorized'],
