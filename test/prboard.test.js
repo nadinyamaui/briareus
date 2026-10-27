@@ -361,6 +361,52 @@ describe('stacked merge reconciliation', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each(['rate limit', 'transport', 'json'])(
+    'reconciles an accepted merge after a throwing %s status read',
+    async (failure) => {
+      await projectPulls(p);
+      status = 'pending';
+      const retryAt = Date.now() + 90_000;
+      const error =
+        failure === 'rate limit'
+          ? Object.assign(new Error('Core rate limited'), { status: 429, resource: 'core', retryAt })
+          : new Error(failure === 'json' ? 'Invalid JSON' : 'socket hang up');
+      const rest = gh.rest.getMockImplementation();
+      gh.rest.mockImplementation(async (...args) => {
+        if (args[2].endsWith('/merge-async/merge-1')) {
+          if (failure !== 'json') throw error;
+          return {
+            ok: true,
+            json: async () => {
+              throw error;
+            },
+          };
+        }
+        return rest(...args);
+      });
+      const merging = mergePullRequest(p, 2, options);
+      const rejected = expect(merging).rejects.toBe(error);
+      await vi.advanceTimersByTimeAsync(1000);
+      await rejected;
+      expect(vi.getTimerCount()).toBe(1);
+
+      // An immediate read can still observe the pre-completion stack.
+      expect((await projectPulls(p)).pulls.map((pull) => pull.number)).toEqual([1, 2, 3]);
+      expect(gh.graphql).toHaveBeenCalledTimes(1);
+      remote([3]);
+      const delay = failure === 'rate limit' ? retryAt - Date.now() : 15_000;
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(gh.graphql).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(saved.pulls.map((pull) => pull.number)).toEqual([3]);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(121_000);
+      expect((await projectPulls(p)).pulls.map((pull) => pull.number)).toEqual([3]);
+      expect(gh.graphql).toHaveBeenCalledTimes(2);
+      expect(gh.rest).toHaveBeenCalledTimes(3);
+    },
+  );
+
   it('retries failed board refreshes with rate-limit backoff', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     await mergePullRequest(p, 2, options);
@@ -1839,6 +1885,39 @@ describe('closing an issue', () => {
     await expect(closeIssue(project, 7, { comment: 'bye' })).rejects.toMatchObject({ status: 403 });
     expect(gh.rest.mock.calls.map(([, verb]) => verb)).toEqual(['GET', 'POST']);
   });
+
+  it.each(['response', 'transport'])(
+    'refreshes a posted comment even when closure fails with a %s error',
+    async (failure) => {
+      vi.useFakeTimers();
+      try {
+        const p = { repo: `acme/close-comment-${failure}` };
+        vi.mocked(githubStore.readBoard).mockResolvedValue({
+          pulls: [],
+          issues: [{ number: 7, title: 'Open issue', comments: 0, labels: [] }],
+          syncedAt: new Date().toISOString(),
+        });
+        expect((await projectPulls(p)).issues[0].comments).toBe(0);
+        github({ close: answer(503, {}) });
+        if (failure === 'transport') {
+          const rest = gh.rest.getMockImplementation();
+          gh.rest.mockImplementation(async (...args) => {
+            if (args[1] === 'PATCH') throw new Error('socket hang up');
+            return rest(...args);
+          });
+        }
+        await expect(closeIssue(p, 7, { comment: 'Closing note' })).rejects.toThrow();
+        serve([], 'main', false, [], [issueNode({ number: 7, comments: 1 })]);
+        await vi.advanceTimersByTimeAsync(121_000);
+        expect((await projectPulls(p)).issues[0].comments).toBe(1);
+        expect(gh.graphql).toHaveBeenCalledTimes(1);
+        expect(gh.rest.mock.calls.map(([, verb]) => verb)).toEqual(['GET', 'POST', 'PATCH']);
+        expect(githubStore.saveItem).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('drops the board’s cache so the next read stops listing the issue', async () => {
     gh.graphql.mockReset();

@@ -18,6 +18,8 @@ import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
 import { createUsers } from '../lib/users.js';
 import { createSlackService } from '../lib/slack.js';
 import { createSshService } from '../lib/ssh.js';
+import { githubStore } from '../lib/github-store.js';
+import { invalidateBoard, projectPulls } from '../lib/prboard.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
@@ -8750,6 +8752,8 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       },
       // Its approval label write fails, so its round must remain retryable.
       workerRow('tri-13', 'tri-orch'),
+      { ...workerRow('tri-labels-success', 'tri-orch'), repo: 'acme/triage-labels-success' },
+      { ...workerRow('tri-labels-partial', 'tri-orch'), repo: 'acme/triage-labels-partial' },
       // Closed with its round still on the screen.
       workerRow('tri-9', 'tri-orch'),
       // Merged under the hold, before the sync dropped the round.
@@ -8781,6 +8785,8 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       'tri-11',
       'tri-12',
       'tri-13',
+      'tri-labels-success',
+      'tri-labels-partial',
       'tri-save',
       'tri-free',
     ]) {
@@ -8967,6 +8973,62 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       /converged on PR #79: round 2 left nothing to implement after the orchestrator's triage/,
     );
   });
+
+  it.each(['success', 'partial'])(
+    'refreshes approval labels after each accepted write, including %s completion',
+    async (outcome) => {
+      const project = { repo: `acme/triage-labels-${outcome}` };
+      const stored = {
+        pulls: [{ number: 79, title: 'Reviewed pull', labels: [{ name: 'feedback-given' }] }],
+        issues: [],
+        syncedAt: new Date().toISOString(),
+      };
+      const read = vi.spyOn(githubStore, 'readBoard').mockResolvedValue(stored);
+      const save = vi.spyOn(githubStore, 'saveBoard').mockResolvedValue(undefined);
+      let labels = ['feedback-given'];
+      const graphql = githubGraphql.getMockImplementation();
+      githubGraphql.mockImplementation(async () => ({
+        repository: {
+          pullRequests: {
+            nodes: [{ number: 79, labels: { nodes: labels.map((name) => ({ name })) } }],
+          },
+          issues: { nodes: [] },
+        },
+      }));
+      invalidateBoard(project.repo, { refresh: false });
+      try {
+        expect((await projectPulls(project)).pulls[0].recommended).toBe('implement-feedback');
+        addPullRequestLabel.mockImplementationOnce(async () => {
+          labels.push('code-approved');
+          return [];
+        });
+        removePullRequestLabel.mockImplementationOnce(async () => {
+          // Observe partial success before the second write completes.
+          expect((await projectPulls(project)).pulls[0].labels.map((l) => l.name)).toEqual(labels);
+          if (outcome === 'partial') throw new Error('GitHub answered 503 removing feedback-given');
+          labels = ['code-approved'];
+          return [];
+        });
+        const approving = triageLoopFindings(`tri-labels-${outcome}`, {
+          verdicts: [
+            { key: 'k1', decision: 'optional' },
+            { key: 'k2', decision: 'dismissed' },
+          ],
+        });
+        if (outcome === 'partial') await expect(approving).rejects.toThrow(/503 removing feedback-given/);
+        else await expect(approving).resolves.toMatchObject({ approved: true });
+        const pull = (await projectPulls(project)).pulls[0];
+        expect(pull.labels.map((l) => l.name)).toEqual(labels);
+        expect(pull.recommended).toBe(outcome === 'success' ? 'qa' : 'implement-feedback');
+        expect(save).toHaveBeenCalledTimes(outcome === 'success' ? 2 : 1);
+      } finally {
+        read.mockRestore();
+        save.mockRestore();
+        githubGraphql.mockImplementation(graphql);
+        invalidateBoard(project.repo, { refresh: false });
+      }
+    },
+  );
 
   it('the stall gate runs on what the triage kept', async () => {
     // tri-3's previous round already sent k1 alone to a fix session.
