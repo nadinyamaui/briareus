@@ -300,6 +300,115 @@ describe('latestTestVerdict', () => {
     ].join('\n'),
   });
 
+  it.each([
+    'Unable to start Chromium (missing executable)',
+    'Unable to install Chromium (missing dependencies)',
+    'Cannot start the browser (missing executable)',
+    'UI 50% complete',
+    'UI 99.5% completed',
+    'browser scenarios are still pending',
+    'UI needs verification',
+    'UI blocked tests returned no results because browser never started',
+    'UI skipped checks returned no results',
+  ])('retains required browser setup and execution gaps: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅', `API curl passed; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each([
+    ['Return HTTP 422', 'API failed with 422 validation error as expected'],
+    ['Return HTTP 422', 'API failed with HTTP 422 validation response as expected'],
+    ['Return HTTP 500', 'API failed with HTTP 500 error as expected'],
+    ['Both work', 'API; UI: manual verification passed'],
+    ['Both work', 'API; UI: manual verification has passed'],
+  ])('accepts matching described errors and passed verification: %s / %s', async (expected, outcome) => {
+    for (const [status, evidence] of [
+      [`✅ ${outcome}`, '[recording](https://example.com/result.webm)'],
+      ['✅', `${outcome}; response.json`],
+    ]) {
+      for (const unfinished of ['', '; UI setup failed', '; browser scenarios are still pending']) {
+        gh.comments = [
+          sheet([
+            `| 1 | API and UI | curl then browser | ${expected} | ${status}${unfinished} | ${evidence} |`,
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          total: 1,
+          passed: unfinished ? 0 : 1,
+          incomplete: !!unfinished,
+        });
+      }
+    }
+  });
+
+  it.each([
+    ['Return HTTP 200', 'API failed with 422 validation error as expected'],
+    ['Return HTTP 422', 'API failed with 500 validation error as expected'],
+    ['Return HTTP 422', 'API failed with 422 validation error before testing'],
+    ['Return HTTP 422', 'UI setup failed with 422 validation error as expected'],
+    ['Both work', 'UI manual verification has not passed'],
+    ['Both work', 'UI manual verification still required'],
+  ])('retains mismatched errors and unfinished verification: %s / %s', async (expected, outcome) => {
+    for (const [status, evidence] of [
+      [`✅ ${outcome}`, 'response.json'],
+      ['✅', outcome],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | Execute | ${expected} | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each([
+    'No evidence was saved for either API or UI',
+    'Screenshot not taken',
+    'Not captured: response.json',
+    'No saved response',
+    'Video upload failed',
+  ])('rejects explicitly absent retained captures: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`]) {
+      gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each([
+    'Chromium started and UI assertions passed',
+    'Chromium installed and UI assertions passed',
+    'Unable to start Chromium was displayed as expected',
+    'Unable to install Chromium was displayed as expected',
+    'UI 100% complete',
+    'UI showed 50% complete as expected',
+    'browser scenarios completed',
+  ])('preserves completed browser execution and observations: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ ${annotation}`, 'response.json'],
+      ['✅', annotation],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    }
+  });
+
+  it.each([
+    'No evidence was saved for either API or UI was displayed as expected',
+    'Screenshot not taken was returned as expected',
+    'Not captured: response.json was shown as expected',
+    'No saved response was observed as expected',
+    'Video upload failed was displayed as expected',
+    '[Screenshot not taken](https://example.com/screenshot.png)',
+    '[No saved response](https://example.com/response.json)',
+    'Video upload succeeded: video.webm',
+    'Status 200 as expected; response was not saved',
+  ])('preserves retained artifacts and observed capture messages: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
   it('bounds whitespace-heavy result cells and header candidates', () => {
     const source = readFileSync(new URL('../lib/findings.js', import.meta.url), 'utf8');
     const parser = source.slice(
