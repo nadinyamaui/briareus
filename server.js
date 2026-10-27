@@ -31,6 +31,7 @@ import { shareRoutes } from './lib/share-routes.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
+import { projectEnvRoutes } from './lib/project-env.js';
 import { createSlackService } from './lib/slack.js';
 import { slackRoutes, slackEventsRouter } from './lib/slack-routes.js';
 import { createHomeAssistantService } from './lib/home-assistant.js';
@@ -136,6 +137,7 @@ import {
   webhookUnfit,
   setSlackAccess,
   setExternalMcp,
+  setProjectEnvOwner,
   setOwnerGithub,
   setInboxOwner,
   DEV_OPEN,
@@ -703,6 +705,27 @@ api.use(
   }),
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
+// Project settings are admin-only on /api/v1, so a session may edit its project's .env
+// template only for an enabled admin, or as the operator's when nobody started it.
+const projectEnvOwner = (job) => {
+  if (job?.ownerId == null) return true;
+  try {
+    const owner = users.get(job.ownerId);
+    return !!owner && owner.disabledAt == null && owner.role === 'admin';
+  } catch {
+    return false;
+  }
+};
+setProjectEnvOwner(projectEnvOwner);
+api.use(
+  projectEnvRoutes({
+    agentSession,
+    getProject,
+    updateProject,
+    ownerMayEdit: projectEnvOwner,
+    note: noteSession,
+  }),
+);
 // Each user's own Home Assistant (lib/me-routes.js). The one in .env was the operator's, so
 // it stands for the original operator until they connect one of their own.
 const homeAssistantOf = (user) => {
