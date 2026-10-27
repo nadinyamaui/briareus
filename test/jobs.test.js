@@ -18408,6 +18408,58 @@ describe('automatic recovery after a server restart', () => {
     },
   );
 
+  it.each(['initial', 'publish'])(
+    'retains the unfinished %s request when a queued instruction precedes the retry',
+    async (phase) => {
+      const original =
+        phase === 'initial' ? 'Review the full diff and verify findings' : 'Publish verified findings';
+      const review = row({
+        status: 'failed',
+        reviewBranch: 'feature',
+        autoClose: true,
+        orchestratorPrAction: 'review',
+        chatStarted: false,
+        chats: {},
+        turns: 0,
+        recoveryTurn: {
+          prompt: original,
+          opts: phase === 'initial' ? { review: true } : {},
+          phase,
+          completed: false,
+        },
+        recoveryQueue: [
+          {
+            prompt: 'Check the queue handling',
+            shown: 'Check the queue handling',
+            instruction: true,
+            files: [],
+          },
+        ],
+      });
+      state.stored = [review];
+      await initJobs();
+      sendDevMessage(review.id, 'Retry the failed stage');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(children[0].prompt).toContain(original);
+      expect(children[0].prompt).toContain('Check the queue handling');
+      expect(review.recoveryTurn).toMatchObject({ phase, completed: false });
+      expect(review.recoveryTurn.prompt).toContain(original);
+      if (phase === 'initial') {
+        expect(children[0].args[0]).toBe('exec');
+        finish(children[0]);
+        await vi.waitFor(() => expect(children).toHaveLength(2));
+        expect(children[1].prompt).toContain('PUBLISH THE REVIEW');
+      }
+      const live = children.at(-1);
+      await vi.waitFor(() => expect(live.rpc.some((m) => m.method === 'turn/steer')).toBe(true));
+      const steer = live.rpc.find((m) => m.method === 'turn/steer');
+      expect(steer.params.input).toEqual([{ type: 'text', text: 'Retry the failed stage' }]);
+      finish(live);
+      await vi.waitFor(() => expect(review.status).toBe('closed'));
+      expect(children).toHaveLength(phase === 'initial' ? 2 : 1);
+    },
+  );
+
   it('waits for answered-review findings before waking its idle orchestrator', async () => {
     const parent = row({ status: 'idle', recoveryTurn: null });
     const review = row({
@@ -19159,6 +19211,43 @@ describe('official orchestrator PR actions', () => {
       delete worker[field];
     }
   });
+
+  it.each(['review', 'implement-feedback', 'solve-conflicts'])(
+    'admits %s on a released launch branch while protecting current ownership',
+    async (action) => {
+      const worker = getJob('pr-cap-0');
+      Object.assign(worker, {
+        status: 'idle',
+        startBranch: 'feature',
+        branch: 'stacked-feature',
+        startedOnPr: 13,
+        prStatus: { number: 13, headRef: 'stacked-feature' },
+        releasedPrAttach: { number: 12, headRef: 'feature' },
+      });
+      try {
+        githubRest.mockResolvedValue({
+          ok: true,
+          json: async () => pull({ head: { ref: 'stacked-feature', repo: { full_name: 'acme/shop' } } }),
+        });
+        await expect(startOrchestratorPrAction(parent, { action, prNumber: 13 })).rejects.toThrow(
+          /already has an open session/,
+        );
+        // Returning to the released head must protect it again.
+        githubRest.mockResolvedValue({ ok: true, json: async () => pull() });
+        worker.branch = 'feature';
+        await expect(startOrchestratorPrAction(parent, { action, prNumber: 12 })).rejects.toThrow(
+          /already has an open session/,
+        );
+        worker.branch = 'stacked-feature';
+        const session = await startOrchestratorPrAction(parent, { action, prNumber: 12 });
+        expect(session.startedOnPr).toBe(12);
+      } finally {
+        worker.status = 'closed';
+        for (const key of ['startBranch', 'branch', 'startedOnPr', 'prStatus', 'releasedPrAttach'])
+          delete worker[key];
+      }
+    },
+  );
 
   it.each(['failed', 'closed', 'idle'])(
     'refuses to reactivate a %s official action while its replacement is open',
