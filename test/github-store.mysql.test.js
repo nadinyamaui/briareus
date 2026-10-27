@@ -378,6 +378,12 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
       kind: 'pull',
       state: 'open',
       body: 'Full body',
+      createdAt: '2026-10-01T00:00:00Z',
+      baseSha: 'b'.repeat(40),
+      additions: 12,
+      deletions: 3,
+      changedFiles: 4,
+      commits: 2,
       observedAt: 1000,
       sourceUpdatedAt: pull().updatedAt,
     };
@@ -389,10 +395,40 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     expect((await store.readBoard(r)).pulls[0]).toMatchObject({ title: 'New board', checks: 'failure' });
     expect((await store.syncedItems(r)).get(1)).toBe(row.sourceUpdatedAt);
     const [[saved]] = await pool.query(
-      'SELECT body, observed_at, full_observed_at FROM github_items i JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=? AND number=1',
+      'SELECT body, created_at, observed_at, full_observed_at FROM github_items i JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=? AND number=1',
       [r],
     );
     expect(saved.body).toBe('Full body');
+    expect(saved.created_at).toBe(row.createdAt);
+    const [[details]] = await pool.query(
+      'SELECT p.base_sha, p.additions, p.deletions, p.changed_files, p.commits FROM github_pull_requests p JOIN github_items i ON i.id=p.item_id JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=?',
+      [r],
+    );
+    expect(details).toEqual({
+      base_sha: row.baseSha,
+      additions: 12,
+      deletions: 3,
+      changed_files: 4,
+      commits: 2,
+    });
+    const fullIssue = {
+      ...issue(),
+      kind: 'issue',
+      state: 'open',
+      body: 'Issue body',
+      type: 'Bug',
+      stateReason: null,
+      closedAt: null,
+      sourceUpdatedAt: issue().updatedAt,
+      observedAt: 1000,
+    };
+    expect(await store.saveItem(r, fullIssue)).toBe(true);
+    const [[issueDetails]] = await pool.query(
+      'SELECT i.body, i.issue_type FROM github_items i JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=? AND i.number=2',
+      [r],
+    );
+    expect(issueDetails).toEqual({ body: 'Issue body', issue_type: 'Bug' });
+    expect((await store.syncedItems(r)).get(2)).toBe(fullIssue.sourceUpdatedAt);
     expect(Number(saved.observed_at)).toBe(2000);
     expect(Number(saved.full_observed_at)).toBe(1000);
     expect(await store.saveItem(r, { ...row, observedAt: 500 }, { comments: [] })).toBe(false);
@@ -580,6 +616,43 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     expect((await store.readBoard(r)).pulls[0].issues).toEqual([
       expect.objectContaining({ number: 2, state: 'closed' }),
     ]);
+  });
+
+  it('hides a deleted parent after a 410 webhook while retaining the edge and ordinary closed parents', async () => {
+    const r = repo();
+    const parent = { number: 3, title: 'Parent', url: `https://github.com/${r}/issues/3`, repo: r };
+    await store.saveBoard(
+      r,
+      board({ pulls: [], issues: [issue({ parent }), issue({ ...parent, parent: null })], observedAt: 100 }),
+    );
+    expect((await store.readBoard(r)).issues.find((i) => i.number === 2).parent).toEqual(parent);
+    const errors = [];
+    const service = createGithubSync({
+      projects: () => [{ repo: r }],
+      config: () => ({ githubToken: 'token' }),
+      store,
+      now: () => 200,
+      invalidate: () => {},
+      log: (message) => errors.push(message),
+      rest: async (_cfg, _method, path) => {
+        expect(path).toBe(`/repos/${r}/issues/3`);
+        return { ok: false, status: 410 };
+      },
+      board: async () => {
+        throw new Error('Board503');
+      },
+    });
+    service.onWebhook('issues', { action: 'deleted', repository: { full_name: r }, issue: { number: 3 } });
+    await service.flush(r);
+    expect((await store.readBoard(r)).issues).toEqual([expect.objectContaining({ number: 2, parent: null })]);
+    expect(errors).toEqual([`${r}: Board503`]);
+    const [[edge]] = await pool.query(
+      "SELECT COUNT(*) AS n FROM github_item_links l JOIN github_items i ON i.id=l.item_id JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=? AND i.number=2 AND l.relation='parent'",
+      [r],
+    );
+    expect(edge.n).toBe(1);
+    await store.saveItem(r, { ...issue(parent), kind: 'issue', state: 'closed', observedAt: 300 });
+    expect((await store.readBoard(r)).issues).toEqual([expect.objectContaining({ number: 2, parent })]);
   });
 
   it('reconciles fully paginated PR links while retaining bounded and historical issue links', async () => {

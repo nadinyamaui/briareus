@@ -187,6 +187,33 @@ describe('projectPulls', () => {
     expect(gh.graphql).not.toHaveBeenCalled();
   });
 
+  it.each([30 * 60_000, 10_000])(
+    'honors a stored snapshot age of %s ms on an immediate fresh read',
+    async (age) => {
+      vi.useFakeTimers();
+      try {
+        const p = project();
+        const syncedAt = new Date(Date.now() - age).toISOString();
+        vi.mocked(githubStore.readBoard).mockResolvedValue({ pulls: [], issues: [], syncedAt });
+        gh.graphql.mockResolvedValue({ repository: { pullRequests: { nodes: [] }, issues: { nodes: [] } } });
+        const initial = await projectPulls(p);
+        expect(gh.graphql).not.toHaveBeenCalled();
+        const refreshed = await projectPulls(p, { fresh: true });
+        if (age > 15_000) {
+          expect(gh.graphql).toHaveBeenCalledTimes(1);
+          expect(refreshed.syncedAt).not.toBe(syncedAt);
+        } else {
+          expect(refreshed).toBe(initial);
+          vi.advanceTimersByTime(6000);
+          await projectPulls(p, { fresh: true });
+          expect(gh.graphql).toHaveBeenCalledTimes(1);
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('persists successful GitHub reads before returning their board', async () => {
     const p = project();
     gh.graphql.mockResolvedValue({ repository: { pullRequests: { nodes: [] }, issues: { nodes: [] } } });

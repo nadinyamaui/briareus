@@ -212,6 +212,47 @@ describe('durable GitHub synchronization', () => {
     expect(h.errors).toEqual([expect.stringContaining('rate limited')]);
   });
 
+  it.each(['issues', 'pulls'])(
+    'reconciles the board after a %s inventory failure and retries without advancing the cursor',
+    async (inventory) => {
+      const h = harness({ cursor: 1000 });
+      h.routes.set(
+        `/repos/acme/shop/${inventory}`,
+        Object.assign(new Error('Inventory503'), { status: 503 }),
+      );
+      await h.service.tick();
+      expect(h.board).toHaveBeenCalledExactlyOnceWith(project, { complete: true });
+      expect(h.invalidate).toHaveBeenCalledWith(project.repo);
+      expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, null, 'Inventory503');
+      expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
+      expect(new URL(h.rest.mock.calls.at(-1)[2], 'https://api.github.com').pathname).toBe(
+        `/repos/acme/shop/${inventory}`,
+      );
+      h.routes.set(`/repos/acme/shop/${inventory}`, []);
+      await h.service.tick();
+      expect(h.board).toHaveBeenCalledTimes(2);
+      expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, Date.parse('2026-10-27T12:00:00Z'));
+      expect(
+        decodeURIComponent(h.rest.mock.calls.findLast((call) => call[2].includes('/issues?'))[2]),
+      ).toContain('since=1969-12-31T23:59:01.000Z');
+    },
+  );
+
+  it('preserves an inventory failure when the independent board hits a GraphQL cooldown', async () => {
+    const h = harness({ cursor: 1000 });
+    h.routes.set('/repos/acme/shop/issues', Object.assign(new Error('Inventory503'), { status: 503 }));
+    h.board.mockRejectedValue(
+      Object.assign(new Error('graphql exhausted'), { status: 429, resource: 'graphql' }),
+    );
+    await h.service.tick();
+    expect(h.board).toHaveBeenCalledTimes(1);
+    expect(h.invalidate).not.toHaveBeenCalled();
+    expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, null, 'Inventory503');
+    expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
+    expect(h.errors).toContain(`${project.repo}: graphql exhausted`);
+    expect(h.errors).toContain(`${project.repo}: Inventory503`);
+  });
+
   it('reconciles boards across repeated core windows while unchanged open PR detail work exhausts REST', async () => {
     const h = harness();
     h.routes.set('/repos/acme/shop/pulls', [pull(1), pull(2), pull(3)]);
