@@ -138,6 +138,7 @@ import {
   setSlackAccess,
   setExternalMcp,
   setProjectEnvOwner,
+  holdsWorkDir,
   setOwnerGithub,
   setInboxOwner,
   DEV_OPEN,
@@ -192,6 +193,7 @@ import {
   getProject,
   createProject,
   updateProject,
+  editProject,
   removeProject,
   reorderProjects,
   PROJECT_DEFAULTS,
@@ -721,8 +723,9 @@ api.use(
   projectEnvRoutes({
     agentSession,
     getProject,
-    updateProject,
+    editProject,
     ownerMayEdit: projectEnvOwner,
+    holdsCheckout: holdsWorkDir,
     note: noteSession,
   }),
 );
