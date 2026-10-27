@@ -216,12 +216,12 @@ describe('the WhatsApp core inbox', () => {
     ctx.setCurrent({
       name: 'default',
       status: 'WORKING',
-      me: { id: '49999999999@c.us', pushName: 'Nadin' },
+      me: { id: '49999999999@c.us', pushName: 'Morgan' },
       config: { apiKey: KEY },
     });
     const accounts = await (await ctx.request()).json();
     expect(accounts.accounts).toEqual([
-      { id: 'default', status: 'WORKING', me: { id: '49999999999@c.us', name: 'Nadin' } },
+      { id: 'default', status: 'WORKING', me: { id: '49999999999@c.us', name: 'Morgan' } },
     ]);
     const chats = await (await ctx.request('/default/conversations?limit=1')).json();
     expect(chats.conversations[0]).toMatchObject({

@@ -92,6 +92,11 @@ separately from the UI each client implements.
 Keep a pull request to one change. The template asks what it does and how you
 checked it.
 
+Use fictional names, `example.com` addresses, and documentation-only IPs in
+examples and test fixtures. Keep deployment paths, customer names, and
+installation-specific policies in private configuration. Use your GitHub
+no-reply email for public commits and co-author attribution.
+
 If you are planning something large, open an issue first: this app is
 shaped around one way of working, and it is kinder to find out early that a
 change cuts against it.

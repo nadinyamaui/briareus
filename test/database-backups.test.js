@@ -241,23 +241,24 @@ it('cancels the online SQLite copy at a progress boundary and removes its tempor
   await expect(fs.stat(`${file}.sqlite`)).rejects.toThrow(/ENOENT/);
 });
 
-it('retries the project backfill after ALTER succeeds but UPDATE fails', async () => {
-  let column = false;
-  const query = vi.fn(async (sql) => {
-    if (sql.includes('information_schema')) return [column ? [{}] : []];
-    if (sql.startsWith('ALTER')) {
-      column = true;
+it.each([false, true])(
+  'keeps backup opt-in settings unchanged when the column exists: %s',
+  async (existing) => {
+    let column = existing;
+    const query = vi.fn(async (sql) => {
+      if (sql.includes('information_schema')) return [column ? [{}] : []];
+      if (sql.startsWith('ALTER')) {
+        column = true;
+        return [];
+      }
       return [];
-    }
-    if (query.mock.calls.filter(([text]) => text.startsWith('UPDATE')).length === 1)
-      throw new Error('connection lost');
-    return [];
-  });
-  await expect(migrateBackups({ context: { query } })).rejects.toThrow('connection lost');
-  await migrateBackups({ context: { query } });
-  expect(query.mock.calls.filter(([sql]) => sql.startsWith('ALTER'))).toHaveLength(1);
-  expect(query.mock.calls.filter(([sql]) => sql.startsWith('UPDATE'))).toHaveLength(2);
-});
+    });
+    await migrateBackups({ context: { query } });
+    await migrateBackups({ context: { query } });
+    expect(query.mock.calls.filter(([sql]) => sql.startsWith('ALTER'))).toHaveLength(existing ? 0 : 1);
+    expect(query.mock.calls.some(([sql]) => /UPDATE|INSERT|DELETE/i.test(sql))).toBe(false);
+  },
+);
 
 it('backs up a live SQLite database and authenticates it before releasing the output', async () => {
   const dbFile = path.join(dir, 'main.sqlite');

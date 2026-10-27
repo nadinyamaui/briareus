@@ -22,7 +22,7 @@ const CONVERSATIONS = [
 async function setup({ signingSecret = SECRET } = {}) {
   const stored = {};
   const api = vi.fn(async (_token, method, params = {}) => {
-    if (method === 'auth.test') return { team_id: 'T1', team: 'Business', user_id: 'U3', user: 'nadin' };
+    if (method === 'auth.test') return { team_id: 'T1', team: 'Business', user_id: 'U3', user: 'morgan' };
     if (method === 'conversations.list')
       return { channels: CONVERSATIONS, response_metadata: { next_cursor: 'next-page' } };
     if (method === 'conversations.info')

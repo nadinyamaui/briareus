@@ -321,7 +321,7 @@ describe('projectPulls', () => {
     serve([
       prNode({
         labels: ['requires-dev-review'],
-        assignees: ['nadin'],
+        assignees: ['morgan'],
         reviewers: [
           { login: 'ana', state: 'APPROVED', url: 'review-url' },
           { login: 'bo', state: 'CHANGES_REQUESTED' },
@@ -346,7 +346,7 @@ describe('projectPulls', () => {
       branch: 'feature/1',
       baseBranch: 'main',
       crossRepository: false,
-      assignees: ['nadin'],
+      assignees: ['morgan'],
       reviewers: [
         { user: 'ana', state: 'approved', url: 'review-url' },
         { user: 'bo', state: 'requested', url: null },
@@ -377,7 +377,7 @@ describe('projectPulls', () => {
         'main',
         false,
         [prNode({ number: 1 })],
-        [issueNode({ number: 9, labels: ['bug'], assignees: ['nadin'], comments: 3, milestone: 'v2' })],
+        [issueNode({ number: 9, labels: ['bug'], assignees: ['morgan'], comments: 3, milestone: 'v2' })],
       );
       const { issues } = await projectPulls(project());
       expect(gh.graphql).toHaveBeenCalledTimes(1);
@@ -385,7 +385,7 @@ describe('projectPulls', () => {
         number: 9,
         title: 'Something is broken',
         author: 'reporter',
-        assignees: ['nadin'],
+        assignees: ['morgan'],
         labels: [{ name: 'bug', color: 'ededed' }],
         comments: 3,
         milestone: 'v2',

@@ -5230,7 +5230,7 @@ describe('webhook deliveries', () => {
     expect(refused(() => deliverToSession('hk-slack', { text: 'hi' }))).toMatchObject({ status: 409 });
     job.awaitingAnswer = true;
     expect(
-      deliverToSession('hk-slack', { text: 'Sounds good', source: 'Slack @andres' }, { via: 'slack' }),
+      deliverToSession('hk-slack', { text: 'Sounds good', source: 'Slack @alexei' }, { via: 'slack' }),
     ).toEqual({ status: 'held', held: 1 });
     setSessionWebhook('hk-slack', { armed: false });
     expect(job.pendingDeliveries).toHaveLength(1);
@@ -5238,7 +5238,7 @@ describe('webhook deliveries', () => {
     await cli.finish(job, 0, 0);
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
     expect(prompts[1]).toMatch(/^Slack reply, not from the operator\. /);
-    expect(prompts[1]).toMatch(/--- delivery, from Slack @andres, [^\n]+\nSounds good\n/);
+    expect(prompts[1]).toMatch(/--- delivery, from Slack @alexei, [^\n]+\nSounds good\n/);
     expect(job.unattendedTurn).toBe(true);
     await cli.finish(job, 0, 1);
   });
@@ -5825,8 +5825,8 @@ describe('webhook deliveries', () => {
 
   it('briefs a session about Slack only when its project has a workspace and the session takes replies', () => {
     const slack = {
-      team: 'Okanet',
-      user: 'nadin',
+      team: 'Exampleco',
+      user: 'morgan',
       permissionMode: 'ask',
       directMessages: true,
       channels: ['dev'],
@@ -5837,7 +5837,7 @@ describe('webhook deliveries', () => {
     try {
       const told = slackProtocol(getJob('hk-free'));
       expect(access).toHaveBeenCalledWith(getJob('hk-free'));
-      expect(told).toContain('in the Okanet workspace as nadin');
+      expect(told).toContain('in the Exampleco workspace as morgan');
       expect(told).toContain('direct messages to people and the channels #dev');
       expect(told).toContain('Each message waits for the user');
       expect(told).toContain('opening with "Slack reply"');
@@ -6211,7 +6211,7 @@ describe('webhook deliveries', () => {
         expect(
           deliverToSession(
             job.id,
-            { text: 'El martes', id: 'wa-emily' },
+            { text: 'El martes', id: 'wa-contact' },
             {
               via: 'whatsapp',
               whatsappGroup: job.webhook.whatsappGroup,
@@ -6634,7 +6634,7 @@ describe('standalone code-review findings', () => {
       round: 1,
       branch: 'task/review',
       standalone: true,
-      author: mine ? 'nadinyamaui' : 'a-colleague',
+      author: mine ? 'sampleuser' : 'a-colleague',
       mine,
       heldAt: '2026-09-07T10:05:00.000Z',
       findings,
@@ -6739,7 +6739,7 @@ describe('standalone code-review findings', () => {
     latestReviewFindings.mockResolvedValueOnce(found);
     sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
     githubRest.mockResolvedValueOnce({ ok: true, json: async () => ({ user: { login: 'a-colleague' } }) });
-    viewerLogin.mockResolvedValueOnce('nadinyamaui');
+    viewerLogin.mockResolvedValueOnce('sampleuser');
     const job = newReview('stand-theirs', 33);
 
     expect(await holdStandaloneReviewFindings(job)).toBe(true);
@@ -6751,12 +6751,12 @@ describe('standalone code-review findings', () => {
     const found = [finding('ours', 'Our finding')];
     latestReviewFindings.mockResolvedValueOnce(found);
     sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
-    githubRest.mockResolvedValueOnce({ ok: true, json: async () => ({ user: { login: 'NadinYamaui' } }) });
-    viewerLogin.mockResolvedValueOnce('nadinyamaui'); // GitHub logins are case-insensitive
+    githubRest.mockResolvedValueOnce({ ok: true, json: async () => ({ user: { login: 'Sampleuser' } }) });
+    viewerLogin.mockResolvedValueOnce('sampleuser'); // GitHub logins are case-insensitive
     const job = newReview('stand-ours', 34);
 
     expect(await holdStandaloneReviewFindings(job)).toBe(true);
-    expect(job.reviewTriage).toMatchObject({ author: 'NadinYamaui', mine: true });
+    expect(job.reviewTriage).toMatchObject({ author: 'Sampleuser', mine: true });
   });
 
   it('recognizes the session owner’s PR, with the project override and server fallback', async () => {
@@ -6810,7 +6810,7 @@ describe('standalone code-review findings', () => {
     latestReviewFindings.mockResolvedValueOnce(found);
     sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
     githubRest.mockResolvedValueOnce({ ok: false, status: 404 });
-    viewerLogin.mockResolvedValueOnce('nadinyamaui');
+    viewerLogin.mockResolvedValueOnce('sampleuser');
     const job = newReview('stand-unknown', 36);
 
     expect(await holdStandaloneReviewFindings(job)).toBe(true);
@@ -11743,8 +11743,8 @@ describe('the sync tick and the GitHub budget', () => {
             nodes: [
               { state: 'APPROVED', url: 'https://r/1', author: { login: 'codex' } },
               { state: 'COMMENTED', url: 'https://r/2', author: { login: 'codex' } },
-              { state: 'CHANGES_REQUESTED', url: 'https://r/3', author: { login: 'nadin' } },
-              { state: 'DISMISSED', url: 'https://r/4', author: { login: 'nadin' } },
+              { state: 'CHANGES_REQUESTED', url: 'https://r/3', author: { login: 'morgan' } },
+              { state: 'DISMISSED', url: 'https://r/4', author: { login: 'morgan' } },
             ],
           },
           commits: { nodes: [{ commit: { oid: 'abc', messageHeadline: 'Fix it', url: 'https://c/abc' } }] },
@@ -11794,7 +11794,7 @@ describe('the sync tick and the GitHub budget', () => {
     ).toBe(true);
     expect(status.reviews).toEqual([
       { user: 'codex', state: 'approved', url: 'https://r/1' },
-      { user: 'nadin', state: 'commented', url: 'https://r/4' },
+      { user: 'morgan', state: 'commented', url: 'https://r/4' },
     ]);
     expect(status.commitList).toEqual([{ sha: 'abc', message: 'Fix it', url: 'https://c/abc' }]);
     expect(status.issues).toEqual([{ number: 7, title: 'Bug', state: 'open', url: 'https://i/7' }]);
