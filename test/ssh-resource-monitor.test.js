@@ -110,6 +110,44 @@ describe('pushed resources and retention', () => {
     ]);
     expect(records[1].sample.metrics.network[0].rxBytesPerSecond).toBe(100);
   });
+  it('accepts more than 256 interfaces and still validates every interface', async () => {
+    const raw = snapshot({
+      network: Array.from({ length: 257 }, (_, i) => ({
+        name: `veth${i}`,
+        rxBytes: 1000,
+        txBytes: 500,
+      })),
+    });
+    expect(await monitor.ingest(1, token, [sample(clock - 60_000, raw), sample(clock)])).toEqual({
+      received: 2,
+      accepted: 2,
+    });
+    expect(records[0].sample.raw.network).toEqual(raw.network);
+    expect(records[0].sample.metrics.network).toHaveLength(257);
+    raw.network[256].rxBytes = -1;
+    await expect(monitor.ingest(1, token, [sample(clock, raw)])).rejects.toMatchObject({ status: 400 });
+    expect(store.save).toHaveBeenCalledTimes(2);
+  });
+  it.each([0, 1])('enforces the UTF-8 byte limit at 64 KiB plus %i bytes', async (extra) => {
+    const raw = snapshot({
+      disks: Array.from({ length: 40 }, () => ({
+        ...snapshot().disks[0],
+        mount: '/' + '界'.repeat(480),
+      })),
+    });
+    const size = 64 * 1024 + extra;
+    raw.disks[0].mount += 'a'.repeat(size - Buffer.byteLength(JSON.stringify(raw), 'utf8'));
+    expect(raw.disks[0].mount.length).toBeLessThanOrEqual(4096);
+    expect(JSON.stringify(raw).length).toBeLessThan(64 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(raw), 'utf8')).toBe(size);
+    if (extra) {
+      await expect(monitor.ingest(1, token, [sample(clock, raw)])).rejects.toMatchObject({ status: 400 });
+      expect(store.save).not.toHaveBeenCalled();
+    } else {
+      expect(await monitor.ingest(1, token, [sample(clock, raw)])).toEqual({ received: 1, accepted: 1 });
+      expect(records[0].sample.raw.disks).toEqual(raw.disks);
+    }
+  });
   it('prunes all expired samples with no hosts, clamps history and acknowledges expired backlog', async () => {
     await monitor.ingest(1, token, [sample(clock)]);
     expect(await monitor.ingest(1, token, [sample(clock - RESOURCE_RETENTION_MS - 60_000)])).toEqual({
