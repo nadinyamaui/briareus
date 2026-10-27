@@ -486,6 +486,26 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
           fetcher: waha,
         }).sendMedia,
       );
+      for (const extension of ['jpg', 'jpeg', 'jpe', 'jfif', 'JFIF']) {
+        const filename = `photo.${extension}`;
+        fs.writeFileSync(path.join(dir, filename), PNG);
+        for (const asDocument of [undefined, true]) {
+          const sent = await tool('whatsapp_send_media', {
+            account: 'default',
+            chat: CHAT,
+            path: path.join(dir, filename),
+            asDocument,
+            watch: false,
+          });
+          expect(sent.result.isError).not.toBe(true);
+          expect(waha.mock.lastCall[0]).toBe(`http://waha.test/api/send${asDocument ? 'File' : 'Image'}`);
+          expect(JSON.parse(waha.mock.lastCall[1].body).file).toEqual({
+            mimetype: 'image/jpeg',
+            filename,
+            data: PNG.toString('base64'),
+          });
+        }
+      }
       for (const [extension, mimetype] of [
         ['mpeg', 'video/mpeg'],
         ['mpg', 'video/mpeg'],

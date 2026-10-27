@@ -317,7 +317,36 @@ authorized. JPEG and PNG go through
 videos through `sendVideo` with `convert: true` so WAHA re-encodes them for
 WhatsApp, and every other type, or any file with `asDocument: true`, through
 `sendFile` under its file name. The installed WAHA edition/engine must support
-media sending (501 otherwise). In a group the caption starts with the bot
+media sending (501 when the operation is unsupported).
+
+For WEBJS video sends, WAHA requires its
+[Chrome image](https://waha.devlike.pro/docs/how-to/send-messages/#send-video),
+even with `convert: true`. The installer defaults to Chromium (`latest` on
+x86, `arm` on ARM). For a new x86 installation that needs video sending, run:
+
+```sh
+WAHA_IMAGE=devlikeapro/waha:chrome npm run install:waha
+```
+
+The installer pins the resolved digest. For an existing installation, setting
+`WAHA_IMAGE` on a rerun does not replace the saved image. Pull a reviewed Chrome
+image and inspect its digest (using `chrome` here):
+
+```sh
+docker pull devlikeapro/waha:chrome
+docker image inspect devlikeapro/waha:chrome --format '{{index .RepoDigests 0}}'
+```
+
+Change only `WAHA_IMAGE` in the private installation's `.env` to the returned
+`devlikeapro/waha@sha256:…` value. Apply it with the Compose command in
+[the installation instructions](#install-on-the-cores-machine), retaining the
+key and volumes. The Chrome image is x86-only; consult WAHA's
+[image/engine table](https://waha.devlike.pro/docs/how-to/engines/#docker-images)
+for architecture support. With WEBJS on Chromium, WAHA refuses video sends
+with 422, which Briareus reports as 409, “WAHA refused the operation; check the
+account connection and chat”; check the image when this happens.
+
+In a group the caption starts with the bot
 prefix like a text reply (an uncaptioned send gets a 📷, 🎬 or 📄 after it), so
 a linked group never hands the core’s own send back as an operator
 instruction. Media sends have the same permissions, reply watches and no
