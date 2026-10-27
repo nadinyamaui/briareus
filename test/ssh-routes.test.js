@@ -3,12 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createSshService } from '../lib/ssh.js';
 import { operationsRoutes } from '../lib/operations-routes.js';
 import { sshRoutes } from '../lib/ssh-routes.js';
+import { createSshResourceMonitor } from '../lib/ssh-resource-monitor.js';
+import { resourceTarget } from '../lib/ssh-resource-collector.js';
 import { agentOnly } from '../lib/auth.js';
 
 vi.mock('../lib/config.js', () => ({
   getConfig: () => ({ auth: { secret: 'secret' }, credentialsKey: 'k'.repeat(32) }),
 }));
-let server, base, service, job, execute, apiUser, apiRepos, monitor, sharedServers;
+let server, base, service, job, execute, apiUser, apiRepos, monitor, sharedServers, registry;
 const input = {
   repo: 'owner/repo',
   host: 'server.example',
@@ -26,11 +28,14 @@ beforeEach(async () => {
   };
   execute = vi.fn(async () => ({ stdout: 'done', exitCode: 0 }));
   let saved = [];
-  service = createSshService({
-    load: async () => structuredClone(saved),
+  registry = {
+    load: vi.fn(async () => structuredClone(saved)),
     save: async (_name, rows) => {
       saved = rows;
     },
+  };
+  service = createSshService({
+    ...registry,
     execute,
     getJob: () => job,
   });
@@ -136,6 +141,73 @@ describe('SSH HTTP authorization and registration', () => {
     expect(monitor.summary).not.toHaveBeenCalled();
     expect(monitor.history).not.toHaveBeenCalled();
   });
+  it('selects current target history and scope after another core edits or removes a server', async () => {
+    const row = await service.create(input);
+    const peer = createSshService(registry);
+    await peer.init();
+    const oldTarget = resourceTarget(row);
+    await peer.update(row.id, { host: 'replacement.example' });
+    const newTarget = resourceTarget(peer.list()[0]);
+    const oldSample = { at: Date.now() - 60_000, metrics: { host: 'old' }, error: null };
+    const newSample = { at: Date.now(), metrics: { host: 'new' }, error: null };
+    const samples = new Map([
+      [oldTarget, oldSample],
+      [newTarget, newSample],
+    ]);
+    Object.assign(
+      monitor,
+      createSshResourceMonitor({
+        ssh: service,
+        latest: async (_id, target) => samples.get(target),
+        history: async (_id, target) => [samples.get(target)],
+      }),
+    );
+    // This instance's execution cache still points to the original host.
+    expect(resourceTarget(service.list()[0])).toBe(oldTarget);
+    const path = `/api/ssh/servers/${row.id}/resources`;
+    const history = await request(path, { operator: true });
+    expect(history.status).toBe(200);
+    expect((await history.json()).samples).toEqual([newSample]);
+    const summary = await request('/api/ssh/monitoring', { operator: true });
+    expect((await summary.json()).servers[0].latest).toEqual(newSample);
+    apiUser = { id: 2, role: 'member' };
+    apiRepos = [input.repo];
+    sharedServers = [row.id];
+    await peer.update(row.id, { repo: 'other/repo' });
+    expect((await request(path, { operator: true })).status).toBe(404);
+    expect((await (await request('/api/ssh/monitoring', { operator: true })).json()).servers).toEqual([]);
+    apiUser = { id: 1, role: 'admin' };
+    apiRepos = null;
+    await peer.remove(row.id);
+    expect((await request(path, { operator: true })).status).toBe(404);
+    expect((await (await request('/api/ssh/monitoring', { operator: true })).json()).servers).toEqual([]);
+  });
+  it.each(['registry', 'samples'])(
+    'reports %s read failures as server errors on both resource APIs',
+    async (storage) => {
+      const row = await service.create(input);
+      const unavailable = new Error('connect ECONNREFUSED');
+      Object.assign(
+        monitor,
+        createSshResourceMonitor({
+          ssh: service,
+          latest: async () => {
+            throw unavailable;
+          },
+          history: async () => {
+            throw unavailable;
+          },
+        }),
+      );
+      for (const path of ['/api/ssh/monitoring', `/api/ssh/servers/${row.id}/resources`]) {
+        if (storage === 'registry') registry.load.mockRejectedValueOnce(unavailable);
+        expect((await request(path, { operator: true })).status).toBe(500);
+      }
+      const invalid = await request(`/api/ssh/servers/${row.id}/resources?since=invalid`, { operator: true });
+      expect(invalid.status).toBe(400);
+      expect((await invalid.json()).error).toContain('since');
+    },
+  );
   it('answers settings and decisions only through the API', async () => {
     expect((await request('/api/ssh/servers')).status).toBe(410);
     expect(

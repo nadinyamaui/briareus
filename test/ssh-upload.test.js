@@ -13,7 +13,7 @@ vi.mock('../lib/db.js', () => ({
   saveAppSetting: vi.fn(),
   updateAppSetting: vi.fn(),
 }));
-let dir, job, service, server, execute, sourcePath, destination, bytes;
+let dir, job, service, server, execute, sourcePath, destination, bytes, shared;
 const remote = { repo: 'owner/repo', host: 'fixture.example', username: 'deploy' };
 const shell = (command, payload) =>
   new Promise((resolve) => {
@@ -32,6 +32,7 @@ beforeEach(async () => {
   await fs.writeFile(sourcePath, bytes);
   execute = vi.fn((_server, command, _timeout, _sudo, payload) => shell(command, payload));
   let saved = [];
+  shared = true;
   service = createSshService({
     load: async () => structuredClone(saved),
     save: async (_name, rows) => {
@@ -39,6 +40,7 @@ beforeEach(async () => {
     },
     execute,
     getJob: () => job,
+    mayUse: () => shared,
   });
   await service.init();
   server = await service.create(remote);
@@ -148,10 +150,11 @@ describe('private SSH upload approval and transfer', { timeout: 30000 }, () => {
       vi.restoreAllMocks();
     },
   );
-  it.each(['ask', 'allow'].flatMap((mode) => ['turn', 'host', 'password'].map((change) => [mode, change])))(
-    'rejects a %s-mode upload when %s changes during the initial read',
-    async (permissionMode, change) => {
+  it.each(['ask', 'allow'])(
+    'preserves a %s-mode upload across an unrelated registry edit during its initial read',
+    async (permissionMode) => {
       await service.update(server.id, { permissionMode });
+      const other = await service.create({ ...remote, host: 'other.example' });
       let release, started;
       const paused = new Promise((resolve) => {
         started = resolve;
@@ -160,30 +163,71 @@ describe('private SSH upload approval and transfer', { timeout: 30000 }, () => {
         release = resolve;
       });
       const realpath = fs.realpath.bind(fs);
-      const read = vi.spyOn(fs, 'realpath').mockImplementationOnce(async (...args) => {
+      vi.spyOn(fs, 'realpath').mockImplementationOnce(async (...args) => {
         started();
         await resume;
         return realpath(...args);
       });
       const pending = upload();
-      const rejected = expect(pending).rejects.toThrow('changed');
       await paused;
       try {
-        if (change === 'turn') job.turns++;
-        else
-          await service.update(server.id, {
-            [change]: change === 'host' ? 'replacement.example' : 'new-password',
-          });
+        await service.update(other.id, { label: 'Renamed unrelated server' });
       } finally {
         release();
-        read.mockRestore();
       }
-      await rejected;
-      expect(service.pending()).toEqual([]);
-      expect(execute).not.toHaveBeenCalled();
-      expect(await fs.stat(destination).catch(() => null)).toBeNull();
+      const request = await pending;
+      if (permissionMode === 'ask') {
+        expect(request.status).toBe('pending');
+        expect(execute).not.toHaveBeenCalled();
+        service.decide(request.id, 'approve');
+      }
+      expect((await finished(request.id)).status).toBe('completed');
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(await fs.readFile(destination)).toEqual(bytes);
     },
   );
+  it.each(
+    ['ask', 'allow'].flatMap((mode) =>
+      ['turn', 'host', 'password', 'policy', 'disable', 'remove', 'access'].map((change) => [mode, change]),
+    ),
+  )('rejects a %s-mode upload when %s changes during the initial read', async (permissionMode, change) => {
+    await service.update(server.id, { permissionMode });
+    let release, started;
+    const paused = new Promise((resolve) => {
+      started = resolve;
+    });
+    const resume = new Promise((resolve) => {
+      release = resolve;
+    });
+    const realpath = fs.realpath.bind(fs);
+    const read = vi.spyOn(fs, 'realpath').mockImplementationOnce(async (...args) => {
+      started();
+      await resume;
+      return realpath(...args);
+    });
+    const pending = upload();
+    const rejected = expect(pending).rejects.toThrow('changed');
+    await paused;
+    try {
+      if (change === 'turn') job.turns++;
+      else if (change === 'access') shared = false;
+      else if (change === 'remove') await service.remove(server.id);
+      else if (change === 'disable') await service.update(server.id, { enabled: false });
+      else if (change === 'policy')
+        await service.update(server.id, { permissionMode: permissionMode === 'ask' ? 'allow' : 'ask' });
+      else
+        await service.update(server.id, {
+          [change]: change === 'host' ? 'replacement.example' : 'new-password',
+        });
+    } finally {
+      release();
+      read.mockRestore();
+    }
+    await rejected;
+    expect(service.pending()).toEqual([]);
+    expect(execute).not.toHaveBeenCalled();
+    expect(await fs.stat(destination).catch(() => null)).toBeNull();
+  });
   it.each(
     ['initial', 'approved'].flatMap((stage) => ['turnCanceled', 'closing'].map((flag) => [stage, flag])),
   )('rejects uploads when %s read is interrupted by %s', async (stage, flag) => {
