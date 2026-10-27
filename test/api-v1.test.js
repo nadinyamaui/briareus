@@ -1253,6 +1253,8 @@ describe('the contract', () => {
       'slack.workspaces',
       'ssh.decide',
       'ssh.requests',
+      'ssh.resources',
+      'ssh.servers',
       'stats.server',
       'stats.sessions',
       'tasks.get',

@@ -22,6 +22,7 @@ describe('shutdown persistence', () => {
             allowFlush = resolve;
           }),
       );
+      const stopMonitor = vi.fn(async () => {});
       new Function(
         'process',
         'stopAllJobProcesses',
@@ -31,9 +32,11 @@ describe('shutdown persistence', () => {
         'setTimeout',
         'clearTimeout',
         'console',
+        'sshResourceMonitor',
         shutdown,
-      )(process, stop, flush, vi.fn(), vi.fn(), vi.fn(), vi.fn(), { error: vi.fn() });
+      )(process, stop, flush, vi.fn(), vi.fn(), vi.fn(), vi.fn(), { error: vi.fn() }, { stop: stopMonitor });
       process.emit(signal, new Error('crash'));
+      expect(stopMonitor).toHaveBeenCalledOnce();
       await vi.waitFor(() => expect(flush).toHaveBeenCalledOnce());
       expect(process.exit).not.toHaveBeenCalled();
       allowFlush();

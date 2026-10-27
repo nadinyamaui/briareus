@@ -1482,6 +1482,24 @@ Download a video a test run recorded. Needs `admin`.
 
 **Returns** the file.
 
+### `GET /ssh/servers`
+
+List SSH servers with their latest resource sample and freshness. Needs `read`.
+
+**Returns** `{ servers: SshResourceServer[], intervalSeconds: integer, retentionHours: integer }`. Members see only shared SSH servers in their token’s projects. Admins also remain held to a project-limited token. Only an admin can enable monitoring in SSH settings.
+
+### `GET /ssh/servers/{id}/resources`
+
+Read an SSH server’s rolling 24-hour resource history. Needs `read`.
+
+**Query**
+
+| Field   | Type      |                                                                                            |
+| ------- | --------- | ------------------------------------------------------------------------------------------ |
+| `since` | `integer` | Unix milliseconds; clamped to the last 24 hours, omitted returns the whole retained window |
+
+**Returns** `{ serverId: integer, intervalSeconds: integer, retentionHours: integer, from: integer, to: integer, samples: SshResourceSample[] }`. Same server visibility as GET /ssh/servers; missing or unshared servers return 404. Samples are ordered oldest first, capped at 1441; gaps indicate missed collection. CPU and network rates require two samples. Connection/project changes start a separate history. Read from MySQL, with no remote command on client requests.
+
 ## Laravel Forge
 
 ### `GET /forge/accounts/{account}/servers`
@@ -3072,26 +3090,63 @@ A message’s content, as synced.
 
 A server an agent may run commands on, with approval.
 
-| Field              | Type         |                                                                                                                                                                                                                           |
-| ------------------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`               | `integer`    | Its id; set by the server                                                                                                                                                                                                 |
-| `label`            | `string`     | Its display name                                                                                                                                                                                                          |
-| `repo`             | `string`     | The project whose sessions may use it                                                                                                                                                                                     |
-| `host`             | `string`     | Its host                                                                                                                                                                                                                  |
-| `port`             | `integer`    | Its port                                                                                                                                                                                                                  |
-| `username`         | `string`     | The user to connect as                                                                                                                                                                                                    |
-| `identityFile`     | `string`     | The private key file on the Briareus server                                                                                                                                                                               |
-| `password`         | `string`     | SSH password (max 1023 UTF-8 bytes, no NUL or newlines). Write-only, stored encrypted; omitted keeps the stored value, empty clears it. When set, uses password authentication instead of a key. Requires CREDENTIALS_KEY |
-| `hasPassword`      | `boolean`    | Whether an SSH password is stored; set by the server                                                                                                                                                                      |
-| `sudoPassword`     | `string`     | Sudo password, separate from SSH authentication. Write-only, encrypted; omit to preserve, empty to clear                                                                                                                  |
-| `hasSudoPassword`  | `boolean`    | Whether a sudo password is stored; set by the server                                                                                                                                                                      |
-| `permissionMode`   | `ask\|allow` | `ask` waits for approval of every command; `allow` runs them                                                                                                                                                              |
-| `enabled`          | `boolean`    | Whether agents may use it                                                                                                                                                                                                 |
-| `dbHost`           | `string`     | Where its database listens, as seen from the server itself; `127.0.0.1` by default                                                                                                                                        |
-| `dbPort`           | `integer`    | Its database’s port; 3306 by default                                                                                                                                                                                      |
-| `dbUsername`       | `string`     | The database user. Write-only: stored encrypted and read back through `GET …/db-credentials`. Empty clears the login                                                                                                      |
-| `dbPassword`       | `string`     | That user’s password. Write-only, stored encrypted; left out, the stored one stays                                                                                                                                        |
-| `hasDbCredentials` | `boolean`    | Whether a database login is stored; set by the server                                                                                                                                                                     |
+| Field               | Type         |                                                                                                                                                                                                                                                                                                                  |
+| ------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                | `integer`    | Its id; set by the server                                                                                                                                                                                                                                                                                        |
+| `label`             | `string`     | Its display name                                                                                                                                                                                                                                                                                                 |
+| `repo`              | `string`     | The project whose sessions may use it                                                                                                                                                                                                                                                                            |
+| `host`              | `string`     | Its host                                                                                                                                                                                                                                                                                                         |
+| `port`              | `integer`    | Its port                                                                                                                                                                                                                                                                                                         |
+| `username`          | `string`     | The user to connect as                                                                                                                                                                                                                                                                                           |
+| `identityFile`      | `string`     | The private key file on the Briareus server                                                                                                                                                                                                                                                                      |
+| `password`          | `string`     | SSH password (max 1023 UTF-8 bytes, no NUL or newlines). Write-only, stored encrypted; omitted keeps the stored value, empty clears it. When set, uses password authentication instead of a key. Requires CREDENTIALS_KEY                                                                                        |
+| `hasPassword`       | `boolean`    | Whether an SSH password is stored; set by the server                                                                                                                                                                                                                                                             |
+| `sudoPassword`      | `string`     | Sudo password, separate from SSH authentication. Write-only, encrypted; omit to preserve, empty to clear                                                                                                                                                                                                         |
+| `hasSudoPassword`   | `boolean`    | Whether a sudo password is stored; set by the server                                                                                                                                                                                                                                                             |
+| `permissionMode`    | `ask\|allow` | `ask` waits for approval of every command; `allow` runs them                                                                                                                                                                                                                                                     |
+| `enabled`           | `boolean`    | Whether agents may use it                                                                                                                                                                                                                                                                                        |
+| `monitoringEnabled` | `boolean`    | Opt in to installing the fixed Linux/Python 3 resource collector under the SSH user’s ~/.local/share/briareus and polling over SSH once a minute; false by default. This authorizes only telemetry, independently of agent command approvals. No sudo, daemon or listening port; disabled servers are not polled |
+| `dbHost`            | `string`     | Where its database listens, as seen from the server itself; `127.0.0.1` by default                                                                                                                                                                                                                               |
+| `dbPort`            | `integer`    | Its database’s port; 3306 by default                                                                                                                                                                                                                                                                             |
+| `dbUsername`        | `string`     | The database user. Write-only: stored encrypted and read back through `GET …/db-credentials`. Empty clears the login                                                                                                                                                                                             |
+| `dbPassword`        | `string`     | That user’s password. Write-only, stored encrypted; left out, the stored one stays                                                                                                                                                                                                                               |
+| `hasDbCredentials`  | `boolean`    | Whether a database login is stored; set by the server                                                                                                                                                                                                                                                            |
+
+### SshResourceSample
+
+One minute of SSH telemetry; failed samples have null metrics and a safe error. CPU/network rates are null until two valid counter samples exist on the same boot.
+
+| Field     | Type                  |                                                                      |
+| --------- | --------------------- | -------------------------------------------------------------------- |
+| `at`      | `integer`             | Minute bucket as Unix milliseconds, stamped by Briareus              |
+| `metrics` | `SshResourceMetrics?` | Null when collection failed; never represent missing metrics as zero |
+| `error`   | `string?`             | Collection failure, or null on success                               |
+
+### SshResourceMetrics
+
+Linux host resources, independent of coding sessions.
+
+| Field           | Type       |                                                                                                                                                                                                              |
+| --------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `uptimeSeconds` | `number`   | Host uptime in seconds                                                                                                                                                                                       |
+| `cpu`           | `object`   | { cores, loadAverage: [1m, 5m, 15m], usagePercent }; usagePercent is 0–100 across all cores, or null without a valid baseline                                                                                |
+| `memory`        | `object`   | { totalBytes, availableBytes, usedBytes, usedPercent, swapTotalBytes, swapUsedBytes }; used excludes reclaimable memory using MemAvailable                                                                   |
+| `disks`         | `object[]` | Local mounted filesystems: { mount, device, filesystem, totalBytes, usedBytes, availableBytes, usedPercent }; excludes network/automount filesystems, deduplicates bind mounts                               |
+| `network`       | `object[]` | Per-interface { name, rxBytes, txBytes, rxBytesPerSecond, txBytesPerSecond }; rates average between samples, null after restart/counter reset, loopback excluded; do not sum virtual and physical interfaces |
+
+### SshResourceServer
+
+A server visible to the caller, without SSH credentials or identity paths.
+
+| Field               | Type                 |                                                          |
+| ------------------- | -------------------- | -------------------------------------------------------- |
+| `id`                | `integer`            | SSH server id                                            |
+| `label`             | `string`             | Display name                                             |
+| `repo`              | `string`             | Project                                                  |
+| `enabled`           | `boolean`            | SSH server enabled                                       |
+| `monitoringEnabled` | `boolean`            | Telemetry opted in                                       |
+| `latest`            | `SshResourceSample?` | Latest retained attempt, including failures, or null     |
+| `stale`             | `boolean`            | No sample, a failed sample, or more than two minutes old |
 
 ### WhatsAppAccount
 
@@ -3463,6 +3518,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/ssh/servers`                                                          | `POST /settings/ssh/servers`                                                    |
 | `PUT /api/ssh/servers/:id`                                                       | `PUT /settings/ssh/servers/{id}`                                                |
 | `DELETE /api/ssh/servers/:id`                                                    | `DELETE /settings/ssh/servers/{id}`                                             |
+| `GET /api/ssh/monitoring`                                                        | `GET /ssh/servers`                                                              |
+| `GET /api/ssh/servers/:id/resources`                                             | `GET /ssh/servers/{id}/resources`                                               |
 | `GET /api/ssh/servers/:id/db-credentials`                                        | `GET /settings/ssh/servers/{id}/db-credentials`                                 |
 | `GET /api/mcp/servers`                                                           | `GET /settings/mcp/servers`                                                     |
 | `POST /api/mcp/servers`                                                          | `POST /settings/mcp/servers`                                                    |

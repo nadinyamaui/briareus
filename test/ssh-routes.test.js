@@ -8,7 +8,7 @@ import { agentOnly } from '../lib/auth.js';
 vi.mock('../lib/config.js', () => ({
   getConfig: () => ({ auth: { secret: 'secret' }, credentialsKey: 'k'.repeat(32) }),
 }));
-let server, base, service, job, execute, apiUser, apiRepos;
+let server, base, service, job, execute, apiUser, apiRepos, monitor, sharedServers;
 const input = {
   repo: 'owner/repo',
   host: 'server.example',
@@ -19,6 +19,11 @@ beforeEach(async () => {
   job = { id: 'one', repo: input.repo, status: 'running', turns: 0, ownerId: 1 };
   apiUser = { id: 1, role: 'admin' };
   apiRepos = null;
+  sharedServers = [];
+  monitor = {
+    summary: vi.fn(async (servers) => servers.map(({ id, label, repo }) => ({ id, label, repo }))),
+    history: vi.fn(async (server, since) => ({ serverId: server.id, since, samples: [] })),
+  };
   execute = vi.fn(async () => ({ stdout: 'done', exitCode: 0 }));
   service = createSshService({ load: async () => [], save: async () => {}, execute, getJob: () => job });
   await service.init();
@@ -28,6 +33,8 @@ beforeEach(async () => {
   // only an agent's own routes answer at their own path, and the rest of /api is retired.
   const routes = sshRoutes({
     service,
+    monitor,
+    mayViewResources: (user, server) => user.role === 'admin' || sharedServers.includes(server.id),
     mayDecide: (user, request) =>
       user.role === 'admin' || (request.jobId === job.id && job.ownerId === user.id),
     getProject: (repo) => (repo === input.repo ? { repo } : null),
@@ -72,6 +79,33 @@ const request = (path, { operator = false, token = '', method = 'GET', body } = 
   });
 
 describe('SSH HTTP authorization and registration', () => {
+  it('shows telemetry only for shared servers inside the token’s project scope', async () => {
+    const mine = await service.create(input);
+    const other = await service.create({ ...input, repo: 'other/repo' });
+    apiUser = { id: 2, role: 'member' };
+    apiRepos = [input.repo];
+    sharedServers = [mine.id, other.id];
+    const response = await request('/api/ssh/monitoring', { operator: true });
+    expect(response.status).toBe(200);
+    expect((await response.json()).servers.map((server) => server.id)).toEqual([mine.id]);
+    expect((await request(`/api/ssh/servers/${other.id}/resources`, { operator: true })).status).toBe(404);
+    sharedServers = [];
+    expect((await request(`/api/ssh/servers/${mine.id}/resources`, { operator: true })).status).toBe(404);
+    expect(monitor.history).not.toHaveBeenCalled();
+    apiUser = { id: 1, role: 'admin' };
+    expect((await request(`/api/ssh/servers/${other.id}/resources`, { operator: true })).status).toBe(404);
+    const history = await request(`/api/ssh/servers/${mine.id}/resources?since=123`, { operator: true });
+    expect(await history.json()).toMatchObject({ serverId: mine.id, since: '123' });
+  });
+  it('keeps resource APIs unavailable to session tokens', async () => {
+    const row = await service.create(input);
+    for (const path of ['/api/ssh/monitoring', `/api/ssh/servers/${row.id}/resources`]) {
+      expect((await request(path, { operator: true, token: 'session-token' })).status).toBe(403);
+      expect((await request(path, { token: 'session-token' })).status).toBe(410);
+    }
+    expect(monitor.summary).not.toHaveBeenCalled();
+    expect(monitor.history).not.toHaveBeenCalled();
+  });
   it('answers settings and decisions only through the API', async () => {
     expect((await request('/api/ssh/servers')).status).toBe(410);
     expect(

@@ -31,6 +31,7 @@ import { shareRoutes } from './lib/share-routes.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
+import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
 import { createSlackService } from './lib/slack.js';
 import { slackRoutes, slackEventsRouter } from './lib/slack-routes.js';
 import { createHomeAssistantService } from './lib/home-assistant.js';
@@ -693,6 +694,7 @@ const sshService = createSshService({
   getJob,
   mayUse: (job, server) => sessionMayUse(job, 'sshServer', server.id),
 });
+const sshResourceMonitor = createSshResourceMonitor({ ssh: sshService });
 api.use(sessionFileRoutes({ agentSession, getJob }));
 api.use(
   sshRoutes({
@@ -700,6 +702,8 @@ api.use(
     agentSession,
     getProject,
     mayDecide: sshRuledBy,
+    monitor: sshResourceMonitor,
+    mayViewResources: (user, server) => shares.allows(user, 'sshServer', server.id),
   }),
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
@@ -2402,6 +2406,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     // Projects with `babysitPrs` get their pull requests' errands started every 15 minutes.
     createBabysitter().startTimer();
     databaseBackups.start();
+    sshResourceMonitor.start();
     // Recovered sessions must claim their slots before pruning unused clones.
     startWorkspacePruner();
     const projects = activeProjects();
@@ -2440,6 +2445,7 @@ let stopping = false;
 // On a crash, flush too (or a just-created session vanishes), then die so pm2 restarts clean.
 process.on('uncaughtException', (e) => {
   console.error('Uncaught exception:', e);
+  void sshResourceMonitor.stop();
   stopAllDevServes();
   stopAllBrowsers();
   const giveUp = setTimeout(() => process.exit(1), 5000);
@@ -2456,6 +2462,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
     if (stopping) process.exit(1); // a second Ctrl-C means "now"
     stopping = true;
+    void sshResourceMonitor.stop();
     stopAllDevServes();
     stopAllBrowsers();
     stopAllJobProcesses()
