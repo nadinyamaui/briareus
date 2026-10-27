@@ -214,6 +214,42 @@ describe('projectPulls', () => {
     },
   );
 
+  it.each([60 * 60_000, 10_000])(
+    'honors a stored snapshot age of %s ms when fresh reads join a pending ordinary load',
+    async (age) => {
+      vi.useFakeTimers();
+      try {
+        const p = project();
+        const syncedAt = new Date(Date.now() - age).toISOString();
+        const stored = { pulls: [], issues: [], syncedAt };
+        let finishRead;
+        vi.mocked(githubStore.readBoard)
+          .mockResolvedValue(stored)
+          .mockReturnValueOnce(new Promise((resolve) => (finishRead = resolve)));
+        serve([prNode({ number: 2 })]);
+        const ordinary = projectPulls(p);
+        const fresh = projectPulls(p, { fresh: true });
+        const anotherFresh = projectPulls(p, { fresh: true });
+        expect(gh.graphql).not.toHaveBeenCalled();
+        finishRead(stored);
+        const [initial, refreshed, shared] = await Promise.all([ordinary, fresh, anotherFresh]);
+        expect(initial.syncedAt).toBe(syncedAt);
+        expect(shared).toBe(refreshed);
+        if (age >= 15_000) {
+          expect(gh.graphql).toHaveBeenCalledTimes(1);
+          expect(refreshed.pulls[0].number).toBe(2);
+          expect(refreshed.syncedAt).not.toBe(syncedAt);
+        } else {
+          expect(gh.graphql).not.toHaveBeenCalled();
+          expect(refreshed).toBe(initial);
+        }
+        expect(await projectPulls(p)).toBe(refreshed);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('persists successful GitHub reads before returning their board', async () => {
     const p = project();
     gh.graphql.mockResolvedValue({ repository: { pullRequests: { nodes: [] }, issues: { nodes: [] } } });
