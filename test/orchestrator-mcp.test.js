@@ -159,6 +159,27 @@ describe('the worker tools', () => {
     expect(res.result.content[0].text).toMatch(/^Started worker w1 \[idle\] Fix the login/);
   });
 
+  it('advertises and forwards the explicit target without changing tooling targeting', async () => {
+    const fetched = stubFetch(reply({ status: 201, body: { session: worker({ repo: 'acme/companion' }) } }));
+    const s = await boot();
+    const [listed] = await s.send({ jsonrpc: '2.0', id: 20, method: 'tools/list' });
+    expect(listed.result.tools[0].inputSchema.properties.repo.type).toBe('string');
+    expect(listed.result.tools[1].inputSchema.properties).not.toHaveProperty('repo');
+    const [res] = await s.send(
+      callTool('spawn_worker', {
+        title: 'Companion',
+        prompt: 'Do it',
+        repo: 'acme/companion',
+        review_loop: true,
+      }),
+    );
+    expect(JSON.parse(fetched.mock.lastCall[1].body)).toMatchObject({
+      repo: 'acme/companion',
+      reviewLoop: true,
+    });
+    expect(res.result.content[0].text).toContain('repo acme/companion');
+  });
+
   it('spawn_worker passes the loops the orchestrator asked for', async () => {
     const fetched = stubFetch(reply({ status: 201, body: { session: worker() } }));
     const s = await boot();

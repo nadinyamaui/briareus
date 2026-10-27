@@ -183,8 +183,9 @@ vi.mock('../lib/providerstore.js', () => ({
 }));
 
 vi.mock('../lib/projects.js', () => ({
-  getProject: (repo) => state.projects.find((p) => p.repo === repo) || null,
-  activeProjects: () => state.projects,
+  getProject: (repo) =>
+    state.projects.find((p) => p.repo.toLowerCase() === String(repo).toLowerCase()) || null,
+  activeProjects: () => state.projects.filter((p) => p.enabled !== false),
   selfProject: () => state.projects.find((p) => p.isSelf) || null,
   render: vi.fn((s) => s),
   stepRuntime: vi.fn(() => null),
@@ -4198,7 +4199,7 @@ describe('spawnWorkerSession', () => {
   });
 });
 
-describe('spawnWorkerSession: tooling fixes', () => {
+describe('spawnWorkerSession: project targets and tooling fixes', () => {
   const row = (id, extra) => ({
     id,
     kind: 'devchat',
@@ -4246,6 +4247,118 @@ describe('spawnWorkerSession: tooling fixes', () => {
   afterEach(() => {
     setSessionProjectFilter(() => true);
     getJob('tool-orch').ownerId = null;
+  });
+
+  it('targets a companion project while retaining ownership, notices, spend and close behavior', async () => {
+    const parent = getJob('tool-orch');
+    parent.ownerId = 2;
+    parent.workerRuntime = { providerId: 1, model: 'claude-fable-5-1', effort: 'high' };
+    state.projects[1] = { ...dashboard, id: 12, isSelf: false };
+    const allowed = vi.fn(() => true);
+    setSessionProjectFilter(allowed);
+    const started = spawnWorkerSession(parent, {
+      prompt: 'Implement the companion change',
+      repo: ' ACME/Dashboard ',
+      branch: 'companion-base',
+      reviewLoop: true,
+      qaLoop: true,
+    });
+    const worker = getJob(started.id);
+    expect(worker).toMatchObject({
+      repo: dashboard.repo,
+      projectId: 12,
+      parentId: parent.id,
+      ownerId: 2,
+      startBranch: 'companion-base',
+      effort: 'low',
+      toolingFor: null,
+    });
+    expect(allowed).toHaveBeenCalledWith({ ownerId: 2 }, state.projects[1]);
+    expect(worker.reviewLoop).not.toBeNull();
+    expect(worker.qaLoop).not.toBeNull();
+    expect(workerSessionsFor(parent)).toContain(worker);
+    expect(workerSessionsFor({ id: 'another-orchestrator' })).not.toContain(worker);
+    expect(workerSummary(worker).repo).toBe(dashboard.repo);
+    const before = sessionUsage(parent).costUsd || 0;
+    worker.costUsd = 0.25;
+    expect(sessionUsage(parent).costUsd).toBe(before + 0.25);
+    // Missing checkout settles without running a paid agent; failure still notifies its parent.
+    await settleWorkers([parent.id]);
+    await closeDevSession(worker.id);
+    expect(worker.status).toBe('closed');
+    expect(parent.events.at(-1).text).toContain(`Worker ${worker.id} (${worker.title}) closed.`);
+  });
+
+  it.each([undefined, 'ACME/Shop'])('keeps the same-project runtime precedence for repo %s', (repo) => {
+    const parent = getJob('tool-orch');
+    parent.workerRuntime = { providerId: 1, model: 'claude-fable-5-1', effort: 'low' };
+    const worker = spawnWorkerSession(parent, { prompt: 'Same project', repo });
+    expect(worker).toMatchObject({ repo: parent.repo, effort: 'low', parentId: parent.id });
+  });
+
+  it('uses the orchestration worker pick when the companion has no configured runtime', () => {
+    const parent = getJob('tool-orch');
+    parent.workerRuntime = { providerId: 1, model: 'claude-fable-5-1', effort: 'high' };
+    state.projects[1] = { ...dashboard, workerProviderId: null };
+    const worker = spawnWorkerSession(parent, { prompt: 'Companion', repo: dashboard.repo });
+    expect(worker.effort).toBe('high');
+  });
+
+  it('honors an explicit runtime on a companion worker', () => {
+    const worker = spawnWorkerSession(getJob('tool-orch'), {
+      prompt: 'Companion',
+      repo: dashboard.repo,
+      providerId: 1,
+      model: 'claude-fable-5-1',
+      effort: 'high',
+    });
+    expect(worker).toMatchObject({ providerId: 1, model: 'claude-fable-5-1', effort: 'high' });
+  });
+
+  it.each(['acme/missing', 'acme/dashboard'])(
+    'refuses unknown/disabled target %s before allocation',
+    (repo) => {
+      state.projects[1] = { ...dashboard, enabled: false };
+      const parent = getJob('tool-orch');
+      const before = workerSessionsFor(parent).length;
+      acquireInstance.mockClear();
+      expect(() => spawnWorkerSession(parent, { prompt: 'Companion', repo })).toThrow(
+        /Unknown or disabled project/,
+      );
+      expect(workerSessionsFor(parent)).toHaveLength(before);
+      expect(acquireInstance).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([null, '', '  ', 12, {}, []])('refuses invalid repo %s instead of falling back', (repo) => {
+    expect(() => spawnWorkerSession(getJob('tool-orch'), { prompt: 'Companion', repo })).toThrow(
+      /repo must be/,
+    );
+  });
+
+  it('refuses an unshared companion using the inherited owner’s current grants', () => {
+    const parent = getJob('tool-orch');
+    parent.ownerId = 2;
+    const allowed = vi.fn((_job, project) => project.repo === parent.repo);
+    setSessionProjectFilter(allowed);
+    const before = workerSessionsFor(parent).length;
+    acquireInstance.mockClear();
+    expect(() => spawnWorkerSession(parent, { prompt: 'Companion', repo: dashboard.repo })).toThrow(
+      /Project unavailable/,
+    );
+    expect(allowed).toHaveBeenCalledWith({ ownerId: 2 }, dashboard);
+    expect(workerSessionsFor(parent)).toHaveLength(before);
+    expect(acquireInstance).not.toHaveBeenCalled();
+  });
+
+  it('refuses an explicit repo on tooling fixes instead of redirecting them', () => {
+    expect(() =>
+      spawnWorkerSession(getJob('tool-orch'), {
+        prompt: 'Fix',
+        tooling: true,
+        repo: 'acme/shop',
+      }),
+    ).toThrow(/always targets the dashboard/);
   });
 
   it('authorizes the inherited owner against the final tooling project before creating a worker', () => {
