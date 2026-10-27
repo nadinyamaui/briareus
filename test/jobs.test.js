@@ -17194,6 +17194,11 @@ describe('automatic recovery after a server restart', () => {
   it.each(['idle', 'running'])(
     'isolates PR admission refusal after restoring a newer %s ordinary worker',
     async (status) => {
+      const parent = row({
+        status: 'idle',
+        recoveryTurn: null,
+        awaitingAnswer: status === 'running',
+      });
       const ordinary = row({
         status,
         orchestrator: false,
@@ -17205,6 +17210,7 @@ describe('automatic recovery after a server restart', () => {
         status: 'idle',
         orchestrator: false,
         orchestratorPrAction: 'implement-feedback',
+        parentId: parent.id,
         branch: 'feature',
         startedOnPr: 77,
         dbServerId: 7,
@@ -17228,10 +17234,10 @@ describe('automatic recovery after a server restart', () => {
         claimSlot(checkout, saved.id, { prepared: true });
       }
       const unrelated = row({ status: 'idle', recoveryTurn: null });
-      state.stored = [ordinary, action, unrelated];
+      state.stored = [ordinary, action, unrelated, parent];
       releaseInstance.mockClear();
       await initJobs({ deferPolling: true });
-      expect(resumeRestartedSessions()).toBe(3);
+      expect(resumeRestartedSessions()).toBe(4);
       await vi.waitFor(() => {
         expect(ordinary.status, ordinary.error).toBe(status);
         expect(action).toMatchObject({
@@ -17245,7 +17251,22 @@ describe('automatic recovery after a server restart', () => {
       });
       expect(reclaimInstance).toHaveBeenCalledWith(action, 7);
       expect(releaseInstance).toHaveBeenCalledWith(action);
-      expect(children).toHaveLength(status === 'running' ? 1 : 0);
+      const notice = {
+        workerId: action.id,
+        kind: 'failed',
+        text: expect.stringContaining(`Worker ${action.id} (untitled) failed: ${action.error}`),
+      };
+      if (parent.awaitingAnswer) {
+        await vi.waitFor(() => expect(parent.pendingWorkerNotices).toEqual([notice]));
+        expect(children).toHaveLength(1);
+        parent.awaitingAnswer = false;
+        deliverWorkerNotices(parent);
+      }
+      await vi.waitFor(() => expect(children).toHaveLength(status === 'running' ? 2 : 1));
+      const parentTurn = children.find((child) => child.cwd === parent.workDir);
+      expect(parentTurn.prompt).toContain(`Worker ${action.id} (untitled) failed: ${action.error}`);
+      expect(parent.inFlightWorkerNotices).toEqual([notice]);
+      expect(parent.pendingWorkerNotices).toEqual([]);
       expect(resumeRestartedSessions()).toBe(0);
       expect(() => reopenDevSession(action.id)).toThrow(/already has an open session/);
       expect(() => sendDevMessage(action.id, 'Retry')).toThrow(/already has an open session/);
@@ -17257,10 +17278,12 @@ describe('automatic recovery after a server restart', () => {
           restartDbServerId: null,
         }),
       );
-      if (children.length) {
-        finish(children[0]);
+      if (status === 'running') {
+        finish(children.find((child) => child.cwd === ordinary.workDir));
         await vi.waitFor(() => expect(ordinary.status).toBe('idle'));
       }
+      finish(parentTurn);
+      await vi.waitFor(() => expect(parent.status).toBe('idle'));
     },
   );
 
