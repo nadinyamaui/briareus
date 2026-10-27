@@ -301,6 +301,98 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    ['Returns HTTP 422 validation error', 'API failed with HTTP 422 validation error'],
+    ['Returns HTTP 500', 'API failed with HTTP 500'],
+    ['Returns HTTP 401 Unauthorized', 'API login failed with HTTP 401 Unauthorized'],
+    ['Returns HTTP 403 Forbidden', 'API login failed with HTTP 403'],
+    ['Returns a timeout error', 'API timed out after 30 seconds'],
+    ['Returns HTTP 504', 'API timed out after 0.5 seconds with HTTP 504'],
+  ])('accepts matching negative observations without redundant prose: %s / %s', async (expected, outcome) => {
+    for (const [status, evidence] of [
+      [`✅ ${outcome}`, '[response](https://example.com/response.json)'],
+      ['✅', `${outcome}; [response](https://example.com/response.json)`],
+    ]) {
+      for (const unfinished of ['', '; UI not executed', '; UI setup failed']) {
+        gh.comments = [
+          sheet([`| 1 | Negative API check | curl | ${expected} | ${status}${unfinished} | ${evidence} |`]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          total: 1,
+          passed: unfinished ? 0 : 1,
+          incomplete: !!unfinished,
+        });
+      }
+    }
+  });
+
+  it.each([
+    ['Returns HTTP 200', 'API failed with HTTP 422 validation error'],
+    ['Returns HTTP 422', 'API failed with HTTP 500 validation error'],
+    ['Returns HTTP 403', 'API login failed with HTTP 401 Unauthorized'],
+    ['Returns HTTP 200', 'API login failed with HTTP 401'],
+    ['Returns HTTP 408', 'API timed out after 30 seconds with HTTP 504'],
+    ['Returns HTTP 200', 'API timed out after 30 seconds'],
+    ['Returns HTTP 422', 'UI setup failed with HTTP 422 validation error'],
+    ['Returns HTTP 401', 'UI browser login failed with HTTP 401'],
+    ['Returns a timeout error', 'API timed out after 30 seconds before tests started'],
+  ])('retains mismatches and setup gaps without expected prose: %s / %s', async (expected, outcome) => {
+    for (const [status, evidence] of [
+      [`✅ ${outcome}`, 'response.json'],
+      ['✅', `${outcome}; response.json`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | Execute | ${expected} | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each(['No execution was performed', 'This scenario has not been executed.'])(
+    'rejects explicit absence-only execution declarations: %s',
+    async (absence) => {
+      for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`, `Evidence: ${absence}`]) {
+        gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ✅ | ${evidence} |`])];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+      }
+    },
+  );
+
+  it.each([
+    'No execution was performed was shown as expected',
+    'This scenario has not been executed was returned as expected',
+  ])('preserves artifacts and observed execution-absence messages: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it.each([
+    'API executed but remaining checks: 2',
+    'API executed; remaining steps: 2',
+    'API executed but remaining checks: 2 because browser setup failed',
+    'API executed; remaining assertions: 1',
+  ])('retains unfinished counts and required coverage: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ ${annotation}`, 'response.json'],
+      ['✅', annotation],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each([
+    'API executed but remaining checks: 0',
+    'API executed; remaining steps: 0',
+    'API executed; UI showed remaining checks: 2 as expected',
+  ])('preserves completed counts and coverage observations: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ ${annotation}`, 'response.json'],
+      ['✅', annotation],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    }
+  });
+
+  it.each([
     'Unable to start Chromium (missing executable)',
     'Unable to install Chromium (missing dependencies)',
     'Cannot start the browser (missing executable)',
