@@ -235,6 +235,29 @@ describe('projectEnvRoutes', () => {
     expect(fs.readdirSync(dir)).toEqual(['.env']);
   });
 
+  it.each([true, false])('refuses to replace a checkout .env symlink (target exists: %s)', async (exists) => {
+    const file = path.join(dir, '.env');
+    const target = path.join(dir, '.env.testing');
+    const original = 'TOKEN=old\nLOCAL=keep\n';
+    if (exists) {
+      fs.writeFileSync(target, original);
+      fs.chmodSync(target, 0o640);
+    }
+    fs.symlinkSync('.env.testing', file);
+
+    const res = await request('POST', { set: { TOKEN: 'new' } });
+    expect(res.status).toBe(200);
+    expect(res.body.checkout).toBe('not updated: the checkout .env is a symbolic link');
+    expect(project.envTemplate).toContain('TOKEN=new\n');
+    expect(fs.lstatSync(file).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(file)).toBe('.env.testing');
+    if (exists) {
+      expect(fs.readFileSync(target, 'utf8')).toBe(original);
+      expect(fs.statSync(target).mode & 0o777).toBe(0o640);
+    } else expect(fs.existsSync(target)).toBe(false);
+    expect(fs.readdirSync(dir).sort()).toEqual(exists ? ['.env', '.env.testing'] : ['.env']);
+  });
+
   it('leaves the main checkout of a local session and an opted-out checkout alone', async () => {
     job.local = true;
     expect((await request('POST', { set: { A: '1' } })).body.checkout).toBe('not applicable');
