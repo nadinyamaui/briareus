@@ -300,6 +300,52 @@ describe('latestTestVerdict', () => {
     ].join('\n'),
   });
 
+  it.each([
+    'UI tests 1/2 verified',
+    'UI 1 of 2 assertions verified',
+    'UI: verified 1 of 2 checks',
+    'UI 50% verified',
+    'UI partially run',
+    'UI checks not all finished',
+    'UI checks have not all been finished',
+    'API requests were not sent',
+  ])('retains partial verification and unsent requests as incomplete: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API passed; ${annotation}`, 'response.json'],
+      ['✅', annotation],
+      ['✅', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        failures: [],
+        total: 1,
+        passed: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'UI tests 2/2 verified',
+    'UI 2 of 2 assertions verified',
+    'UI: verified 2 of 2 checks',
+    'UI 100% verified',
+    'UI fully run',
+    'UI checks all finished',
+    'API requests were sent',
+    'UI displayed 50% verified as expected',
+    'UI showed checks not all finished as expected',
+    'API requests were not sent was displayed as expected',
+  ])('preserves complete verification and observed execution messages: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ ${annotation}`, 'response.json'],
+      ['✅', annotation],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    }
+  });
+
   it.each(['UI 1/2 steps done', 'UI: done 1 of 2 checks', 'UI unchecked'])(
     'keeps unfinished progress and unchecked procedures incomplete: %s',
     async (annotation) => {
@@ -360,6 +406,9 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'No evidence available at this time',
+    'No test execution occurred',
+    'Pending execution',
     'No requests were executed.',
     'I did not execute this scenario.',
     'Run not attempted due to missing credentials.',
