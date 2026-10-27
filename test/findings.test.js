@@ -301,6 +301,101 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    ['Conflict', 'API failed with 409 Conflict as expected'],
+    ['Bad Request', 'API failed with 400 Bad Request as expected'],
+    ['Manual approval is required', 'API requires manual approval as expected'],
+    ['Manual approval required', 'API requires manual approval as expected'],
+  ])('accepts equivalent expected business outcomes: %s', async (expected, outcome) => {
+    for (const [status, evidence] of [
+      [`✅ ${outcome}`, 'response.json'],
+      ['✅', `${outcome}; response.json`],
+    ]) {
+      for (const unfinished of ['', '; UI not tested', '; UI setup failed']) {
+        gh.comments = [
+          sheet([
+            `| 1 | Negative check | curl then browser | ${expected} | ${status}${unfinished} | ${evidence} |`,
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          total: 1,
+          passed: unfinished ? 0 : 1,
+          incomplete: !!unfinished,
+        });
+      }
+    }
+  });
+
+  it.each([
+    ['HTTP 400 Conflict', 'API failed with 409 Conflict as expected'],
+    ['HTTP 409 Bad Request', 'API failed with 400 Bad Request as expected'],
+    ['Bad Request', 'API failed with 409 Conflict as expected'],
+    ['Conflict', 'API failed with 400 Bad Request as expected'],
+    ['Conflict', 'UI setup failed with 409 Conflict as expected'],
+    ['Automatic approval is required', 'API requires manual approval as expected'],
+    ['Manual approval is not required', 'API requires manual approval as expected'],
+  ])('keeps mismatched equivalent business outcomes incomplete: %s', async (expected, outcome) => {
+    gh.comments = [
+      sheet([`| 1 | Negative check | curl then browser | ${expected} | ✅ | ${outcome}; response.json |`]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
+  it.each(['No testing performed', 'Untested', 'unexecuted', 'Manual verification required'])(
+    'keeps explicit unexecuted annotations incomplete alongside artifacts: %s',
+    async (annotation) => {
+      for (const evidence of [
+        `response.json; ${annotation}`,
+        `${annotation}; response.json`,
+        `response.json<br>**${annotation}**`,
+      ]) {
+        gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ✅ | ${evidence} |`])];
+        expect(await latestTestVerdict(repo, 5)).toEqual({
+          failures: [],
+          total: 1,
+          passed: 0,
+          manual: 0,
+          incomplete: true,
+        });
+      }
+    },
+  );
+
+  it.each(['⏳ UI', 'UI ⏳', 'UI —', 'UI not undertaken'])(
+    'keeps named pending or unknown subprocedures incomplete: %s',
+    async (annotation) => {
+      for (const [status, evidence] of [
+        [`✅ API; ${annotation}`, 'response.json'],
+        ['✅', `response.json; ${annotation}`],
+      ]) {
+        gh.comments = [
+          sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+      }
+    },
+  );
+
+  it.each(['Will add evidence after deployment', 'Evidence was never gathered'])(
+    'rejects promised or ungathered evidence while retaining separate observations: %s',
+    async (absence) => {
+      for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`, `Evidence: ${absence}`]) {
+        gh.comments = [sheet([`| 1 | API | curl /api | Works | ✅ | ${evidence} |`])];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+      }
+      for (const retained of ['response.json', 'curl returned 200 and asserted the response body']) {
+        for (const evidence of [`${absence}; ${retained}`, `${retained}; ${absence}`]) {
+          gh.comments = [sheet([`| 1 | API | curl /api | Works | ✅ | ${evidence} |`])];
+          expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+        }
+      }
+      gh.comments = [
+        sheet([`| 1 | API | curl /api | Expected message | ✅ | ${absence} was displayed as expected |`]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    },
+  );
+
+  it.each([
     ['Unauthorized', 'API failed with 401 Unauthorized as expected'],
     ['Not Found', 'API failed with 404 Not Found as expected'],
     ['Validation rejects malformed payload', 'API failed with 422 validation error as expected'],
