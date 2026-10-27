@@ -604,6 +604,83 @@ describe('projectPulls', () => {
     },
   );
 
+  it.each([200, 409])(
+    'reconciles an unreadable merge result only after HTTP acceptance (%s)',
+    async (status) => {
+      vi.useFakeTimers();
+      try {
+        const p = project();
+        let saved = {
+          pulls: [{ number: 1, title: 'Saved pull', labels: [] }],
+          issues: [],
+          syncedAt: new Date().toISOString(),
+        };
+        vi.mocked(githubStore.readBoard).mockImplementation(async () => saved);
+        vi.mocked(githubStore.saveBoard).mockImplementation(async (_repo, board) => {
+          saved = board;
+        });
+        expect((await projectPulls(p)).pulls).toHaveLength(1);
+        serve([prNode()]);
+        gh.rest
+          .mockReset()
+          .mockImplementation(async (_cfg, method) =>
+            method === 'GET'
+              ? Response.json({ base: { ref: 'main' } })
+              : new Response('{"merged":', { status }),
+          );
+        const merging = mergePullRequest(p, 1, { headSha: 'a'.repeat(40), baseRef: 'main' });
+        if (status === 409) await expect(merging).rejects.toMatchObject({ status: 409 });
+        else await expect(merging).resolves.toMatchObject({ merged: false, status: 'pending' });
+        // A read before GitHub exposes completion must not end reconciliation.
+        expect((await projectPulls(p)).pulls).toHaveLength(1);
+        expect(vi.getTimerCount()).toBe(status === 200 ? 1 : 0);
+        serve([]);
+        await vi.advanceTimersByTimeAsync(121_000);
+        expect((await projectPulls(p)).pulls).toHaveLength(status === 200 ? 0 : 1);
+        expect(gh.graphql).toHaveBeenCalledTimes(status === 200 ? 2 : 0);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    { mutation: 'close', state: 'closed', reason: 'not_planned' },
+    { mutation: 'update', state: 'closed', reason: 'completed' },
+    { mutation: 'update', state: 'open', reason: 'reopened' },
+  ])(
+    'persists accepted $mutation state with unreadable JSON ($state)',
+    async ({ mutation, state, reason }) => {
+      const p = project();
+      const item = {
+        number: 9,
+        title: 'An issue',
+        html_url: `https://github.com/${p.repo}/issues/9`,
+        state: state === 'open' ? 'closed' : 'open',
+        state_reason: state === 'open' ? 'completed' : null,
+      };
+      gh.rest
+        .mockReset()
+        .mockImplementation(async (_cfg, method) =>
+          method === 'GET' ? Response.json(item) : new Response('{"state":', { status: 200 }),
+        );
+      if (mutation === 'close') await closeIssue(p, 9, { reason });
+      else await updateGithubItem(p, 9, 'issue', { state, stateReason: reason });
+      expect(githubStore.saveItem).toHaveBeenCalledWith(
+        p.repo,
+        expect.objectContaining({
+          number: 9,
+          kind: 'issue',
+          title: item.title,
+          state,
+          stateReason: reason,
+          observedAt: expect.any(Number),
+        }),
+      );
+    },
+  );
+
   it.each(['close', 'closed', 'open'])(
     'returns a successful mutation and invalidates the durable board when mirroring fails (%s)',
     async (mutation) => {

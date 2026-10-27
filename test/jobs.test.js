@@ -8754,6 +8754,10 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       workerRow('tri-13', 'tri-orch'),
       { ...workerRow('tri-labels-success', 'tri-orch'), repo: 'acme/triage-labels-success' },
       { ...workerRow('tri-labels-partial', 'tri-orch'), repo: 'acme/triage-labels-partial' },
+      ...['truncated-add', 'truncated-remove'].map((outcome) => ({
+        ...workerRow(`tri-labels-${outcome}`, 'tri-orch'),
+        repo: `acme/triage-labels-${outcome}`,
+      })),
       // Closed with its round still on the screen.
       workerRow('tri-9', 'tri-orch'),
       // Merged under the hold, before the sync dropped the round.
@@ -8787,6 +8791,8 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       'tri-13',
       'tri-labels-success',
       'tri-labels-partial',
+      'tri-labels-truncated-add',
+      'tri-labels-truncated-remove',
       'tri-save',
       'tri-free',
     ]) {
@@ -8974,7 +8980,7 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
     );
   });
 
-  it.each(['success', 'partial'])(
+  it.each(['success', 'partial', 'truncated-add', 'truncated-remove'])(
     'refreshes approval labels after each accepted write, including %s completion',
     async (outcome) => {
       const project = { repo: `acme/triage-labels-${outcome}` };
@@ -8986,6 +8992,14 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       const read = vi.spyOn(githubStore, 'readBoard').mockResolvedValue(stored);
       const save = vi.spyOn(githubStore, 'saveBoard').mockResolvedValue(undefined);
       let labels = ['feedback-given'];
+      const realGithub = await vi.importActual('../lib/github.js');
+      const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+        const adding = options.method === 'POST';
+        labels = adding ? [...labels, 'code-approved'] : ['code-approved'];
+        return (adding ? outcome === 'truncated-add' : outcome === 'truncated-remove')
+          ? new Response('[{"name":', { status: 200 })
+          : Response.json(labels.map((name) => ({ name })));
+      });
       const graphql = githubGraphql.getMockImplementation();
       githubGraphql.mockImplementation(async () => ({
         repository: {
@@ -8998,14 +9012,16 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       invalidateBoard(project.repo, { refresh: false });
       try {
         expect((await projectPulls(project)).pulls[0].recommended).toBe('implement-feedback');
-        addPullRequestLabel.mockImplementationOnce(async () => {
+        addPullRequestLabel.mockImplementationOnce(async (...args) => {
+          if (outcome.startsWith('truncated-')) return realGithub.addPullRequestLabel(...args);
           labels.push('code-approved');
           return [];
         });
-        removePullRequestLabel.mockImplementationOnce(async () => {
+        removePullRequestLabel.mockImplementationOnce(async (...args) => {
           // Observe partial success before the second write completes.
           expect((await projectPulls(project)).pulls[0].labels.map((l) => l.name)).toEqual(labels);
           if (outcome === 'partial') throw new Error('GitHub answered 503 removing feedback-given');
+          if (outcome.startsWith('truncated-')) return realGithub.removePullRequestLabel(...args);
           labels = ['code-approved'];
           return [];
         });
@@ -9019,9 +9035,10 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
         else await expect(approving).resolves.toMatchObject({ approved: true });
         const pull = (await projectPulls(project)).pulls[0];
         expect(pull.labels.map((l) => l.name)).toEqual(labels);
-        expect(pull.recommended).toBe(outcome === 'success' ? 'qa' : 'implement-feedback');
-        expect(save).toHaveBeenCalledTimes(outcome === 'success' ? 2 : 1);
+        expect(pull.recommended).toBe(outcome === 'partial' ? 'implement-feedback' : 'qa');
+        expect(save).toHaveBeenCalledTimes(outcome === 'partial' ? 1 : 2);
       } finally {
+        fetch.mockRestore();
         read.mockRestore();
         save.mockRestore();
         githubGraphql.mockImplementation(graphql);
