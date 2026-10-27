@@ -4940,6 +4940,36 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI only 1/2 checks successful',
+    'UI only 1 of 2 checks were successful',
+    'UI tests disabled',
+    'UI tests failing',
+    'UI tests have errors',
+  ])('retains partial and unsuccessful procedure outcomes: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅ API', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl and browser | Both pass | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'UI tests successful',
+    'UI only 2/2 checks successful',
+    'UI 2 of 2 checks were successful',
+    'UI tests ran successfully',
+    'UI disabled user receives 403',
+    'UI failing payment is displayed',
+    'UI tests have errors was shown as expected',
+    'UI showed only 1/2 checks successful as expected',
     'UI: only 2 of 2 checks completed',
     'UI: only 2 / 2 tests run',
     'UI: only 3 of 3 assertions were performed',
@@ -5273,6 +5303,36 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'No evidence exists and no response was saved',
+    'Evidence is unavailable and upload failed',
+    'N/A / no evidence',
+  ])('rejects coordinated evidence absence: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl and browser | Both pass | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
+    for (const evidence of [
+      `${absence}; response.json`,
+      `response.json; ${absence}`,
+      `${absence}; curl returned 200 as expected`,
+      `curl returned 200 as expected; ${absence}`,
+      `${absence} was shown as expected`,
+    ]) {
+      gh.comments = [sheet([`| 1 | API | curl /api | Expected message | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    }
+  });
+
+  it.each([
+    'No evidence exists and response.json',
+    'Evidence is unavailable and curl returned 200 as expected',
+    'N/A / [response](https://example.com/response.json)',
     'No evidence exists for API or UI was displayed as expected',
     'No evidence was kept was returned as expected',
     'No HTTP headers captured was shown as expected',
