@@ -301,6 +301,7 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    ['Request Timeout', 'API failed with 408 Request Timeout as expected'],
     ['Conflict', 'API failed with 409 Conflict as expected'],
     ['Bad Request', 'API failed with 400 Bad Request as expected'],
     ['Manual approval is required', 'API requires manual approval as expected'],
@@ -326,6 +327,9 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    ['HTTP 409 Request Timeout', 'API failed with 408 Request Timeout as expected'],
+    ['Request Timeout', 'API failed with 409 Conflict as expected'],
+    ['Request Timeout', 'UI setup failed with 408 Request Timeout as expected'],
     ['HTTP 400 Conflict', 'API failed with 409 Conflict as expected'],
     ['HTTP 409 Bad Request', 'API failed with 400 Bad Request as expected'],
     ['Bad Request', 'API failed with 409 Conflict as expected'],
@@ -339,6 +343,62 @@ describe('latestTestVerdict', () => {
     ];
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
   });
+
+  it.each([
+    '❌ UI failed',
+    'UI ❌',
+    'No test execution occurred',
+    'No execution took place because the test environment was unavailable',
+    'No requests were executed.',
+    'I did not execute this scenario.',
+    'Run not attempted due to missing credentials.',
+    'Did not execute this scenario',
+    'Skipped this scenario',
+    'No request was sent',
+    'No execution happened',
+    'None of the scenarios were executed',
+  ])('vetoes explicit nonexecution alongside retained artifacts: %s', async (annotation) => {
+    for (const evidence of [
+      `response.json; ${annotation}`,
+      `${annotation}; response.json`,
+      `response.json<br>**${annotation}**`,
+      `Evidence: ${annotation}; response.json`,
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ✅ API | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        failures: [],
+        total: 1,
+        passed: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'No evidence has been gathered',
+    'Response evidence will be provided later',
+    'No execution happened',
+    'None of the scenarios were executed',
+  ])('rejects further whole-cell absence declarations: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`, `Evidence: ${absence}`]) {
+      gh.comments = [sheet([`| 1 | API | curl | HTTP 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+    gh.comments = [sheet([`| 1 | API | curl | Expected message | ✅ | ${absence} was shown as expected |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it.each(['No evidence has been gathered', 'Response evidence will be provided later'])(
+    'preserves separate observations after capture-only absence: %s',
+    async (absence) => {
+      for (const retained of ['response.json', 'curl returned 200 as expected']) {
+        for (const evidence of [`${absence}; ${retained}`, `${retained}; ${absence}`]) {
+          gh.comments = [sheet([`| 1 | API | curl | HTTP 200 | ✅ | ${evidence} |`])];
+          expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+        }
+      }
+    },
+  );
 
   it.each(['No testing performed', 'Untested', 'unexecuted', 'Manual verification required'])(
     'keeps explicit unexecuted annotations incomplete alongside artifacts: %s',
@@ -840,6 +900,13 @@ describe('latestTestVerdict', () => {
     'No actual evidence',
     'No execution took place because the test environment was unavailable',
   ])('rejects qualified absence while retaining separate observations: %s', async (absence) => {
+    const unexecuted = [
+      'No test execution occurred',
+      'No requests were executed.',
+      'I did not execute this scenario.',
+      'Run not attempted due to missing credentials.',
+      'No execution took place because the test environment was unavailable',
+    ].includes(absence);
     for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`, `Evidence: ${absence}`]) {
       gh.comments = [sheet([`| 1 | API | curl | HTTP 200 | ✅ | ${evidence} |`])];
       expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
@@ -847,7 +914,11 @@ describe('latestTestVerdict', () => {
     for (const retained of ['response.json', 'curl returned 200 as expected']) {
       for (const evidence of [`${absence}; ${retained}`, `${retained}; ${absence}`]) {
         gh.comments = [sheet([`| 1 | API | curl | HTTP 200 | ✅ | ${evidence} |`])];
-        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          total: 1,
+          passed: unexecuted ? 0 : 1,
+          incomplete: unexecuted,
+        });
       }
     }
     gh.comments = [sheet([`| 1 | API | curl | Expected message | ✅ | ${absence} was shown as expected |`])];
@@ -959,6 +1030,11 @@ describe('latestTestVerdict', () => {
     'To be uploaded',
     'No video captured; nothing verified',
   ])('rejects explicit capture failure and whole-cell nonexecution: %s', async (absence) => {
+    const unexecuted = [
+      'Did not execute this scenario',
+      'Skipped this scenario',
+      'No request was sent',
+    ].includes(absence);
     for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`, `Evidence: ${absence}`]) {
       gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
       expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
@@ -966,7 +1042,11 @@ describe('latestTestVerdict', () => {
     for (const retained of ['response.json', 'curl returned 200 as expected']) {
       for (const evidence of [`${absence}; ${retained}`, `${retained}; ${absence}`]) {
         gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
-        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          total: 1,
+          passed: unexecuted ? 0 : 1,
+          incomplete: unexecuted,
+        });
       }
     }
     gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${absence} was shown as expected |`])];
@@ -2376,6 +2456,71 @@ describe('latestTestVerdict', () => {
       incomplete: false,
     });
   });
+
+  it.each([
+    ['- UI', '    '],
+    ['1. UI', '    '],
+    ['123. UI', '     '],
+    ['- [x] UI', '    '],
+    ['- Results\n\n    - UI', '        '],
+    ['- UI', '\t'],
+  ])('counts failed results inside list %j', async (list, indent) => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        '',
+        list,
+        '',
+        ...[
+          '| # | Scenario | Steps | Expected | Status | Evidence |',
+          '|---|---|---|---|---|---|',
+          '| 2 | UI | Open | Page | ❌ | screenshot.png |',
+        ].map((line) => indent + line),
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '2', scenario: 'UI', expected: 'Page', evidence: 'screenshot.png' }],
+      total: 2,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
+  it.each(['fenced', 'indented', 'outside list'])(
+    'excludes %s code tables beside list results',
+    async (context) => {
+      const sample = [
+        '| # | Scenario | Steps | Expected | Status | Evidence |',
+        '|---|---|---|---|---|---|',
+        '| 2 | Example | steps | value | ❌ | example only |',
+      ];
+      const hidden =
+        context === 'fenced'
+          ? ['    ```markdown', ...sample.map((line) => '    ' + line), '    ```']
+          : context === 'indented'
+            ? sample.map((line) => '      ' + line)
+            : ['Outside the list.', '', ...sample.map((line) => '    ' + line)];
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl | 200 | ✅ | response.json |',
+          '',
+          '- UI',
+          '',
+          ...hidden,
+          '',
+          ...sample.slice(0, 2).map((line) => '    ' + line),
+          '    | 3 | UI | Open | Page | ❌ | screenshot.png |',
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        failures: context === 'outside list' ? [] : [{ number: '3', scenario: 'UI' }],
+        total: context === 'outside list' ? 1 : 2,
+        passed: 1,
+        incomplete: false,
+      });
+    },
+  );
 
   it.each(['```markdown', '~~~~markdown', '````'])('ignores fenced result examples: %s', async (fence) => {
     gh.comments = [
