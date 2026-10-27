@@ -2595,6 +2595,29 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI: not actually tested',
+    'UI tests were not actually executed',
+    'UI: never actually verified',
+    'UI: only 1 of 2 checks completed',
+    'UI: only 1 / 2 tests run',
+    'UI: only 2 of 3 assertions were performed',
+  ])('keeps qualified unfinished procedures incomplete: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API passed; ${annotation}`, 'response.json'],
+      ['✅ API passed', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both pass | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
     'UI 1/5 tests run',
     'UI 1 of 5 checks executed',
     'UI 5 / 10 checks executed',
@@ -2626,6 +2649,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI: only 2 of 2 checks completed',
+    'UI: only 2 / 2 tests run',
+    'UI: only 3 of 3 assertions were performed',
+    'UI displayed not actually tested as expected',
+    'UI showed only 1 of 2 checks completed as expected',
     'UI 10/10 checks executed',
     'UI 12 of 12 assertions were performed',
     'UI tests remaining: 0',
@@ -2845,6 +2873,41 @@ describe('latestTestVerdict', () => {
   ])('keeps explicit failed capture and deleted evidence incomplete: %s', async (evidence) => {
     gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+  });
+
+  it.each([
+    'Response bodies and headers were not saved',
+    'No response bodies or headers were captured',
+    'HTTP response bodies and headers were not retained',
+    'No HTTP response body or headers were recorded',
+    'Response bodies and headers were not saved: response.json',
+    'No response bodies or headers were captured, upload failed for response.json',
+    'Response bodies and headers: not saved',
+  ])('rejects coordinated response evidence absence: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`]) {
+      gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'Response bodies and headers were saved: response.json',
+    'Response bodies and headers were not saved was displayed as expected',
+    'No response bodies or headers were captured was returned as expected',
+    'response-bodies-and-headers-not-saved.json',
+    'no-response-bodies-or-headers-captured.json',
+    '[Response bodies and headers were not saved](https://example.com/response.json)',
+    '[No response bodies or headers were captured](https://example.com/response.json)',
+    'Response bodies and headers: response.json',
+  ])('preserves response artifacts and observed absence messages: %s', async (evidence) => {
+    gh.comments = [sheet([`| 1 | API | curl /api | Expected message | ✅ | ${evidence} |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
   });
 
   it.each([
