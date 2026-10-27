@@ -2038,6 +2038,108 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    ['Return HTTP 500 and display fallback error', 'API failed with HTTP 500 as expected'],
+    ['API request is rejected with 422', 'API failed as expected (422 validation response)'],
+    ['Return HTTP 409', 'API failed as expected (HTTP 409 response)'],
+    ['Return HTTP 503', 'API failed with HTTP 503 as expected'],
+    ['Return a timeout error', 'API timed out after 30 seconds as expected'],
+    ['Return a timeout error', 'API timed out after 0.5 seconds as expected'],
+    ['Return a timeout error', 'API timed out after 500 ms as expected'],
+    ['Return HTTP 504', 'API timed out after 30 seconds with HTTP 504 as expected'],
+  ])('accepts matching expected API error outcomes: %s / %s', async (expected, outcome) => {
+    for (const [status, evidence] of [
+      [`✅ ${outcome}`, 'response.json'],
+      ['✅', `${outcome}; response.json`],
+    ]) {
+      for (const [statusSuffix, evidenceSuffix] of [
+        ['', ''],
+        ['; UI not run', ''],
+        ['', '; UI setup failed'],
+        ['', '; Unable to launch Chromium (missing executable).'],
+      ]) {
+        gh.comments = [
+          sheet([
+            `| 1 | Negative API check | Request failing upstream | ${expected} | ${status}${statusSuffix} | ${evidence}${evidenceSuffix} |`,
+          ]),
+        ];
+        const incomplete = !!(statusSuffix || evidenceSuffix);
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          failures: [],
+          total: 1,
+          passed: incomplete ? 0 : 1,
+          incomplete,
+        });
+      }
+    }
+  });
+
+  it.each([
+    ['HTTP 200', 'API failed with HTTP 500 as expected'],
+    ['HTTP 422', 'API failed with HTTP 500 as expected'],
+    ['HTTP 500', 'API failed as expected (422 validation response)'],
+    ['HTTP 200', 'API failed as expected (422 validation response)'],
+    ['HTTP 422', 'API failed as expected (422 checks were not run)'],
+    ['HTTP 500', 'API failed with HTTP 500 before tests started'],
+    ['HTTP 500', 'UI browser startup failed with HTTP 500 as expected'],
+    ['HTTP 500', 'UI setup failed as expected (500 response)'],
+    ['HTTP 200', 'API timed out after 30 seconds as expected'],
+    ['HTTP 408', 'API timed out after 30 seconds with HTTP 504 as expected'],
+    ['Return a timeout error', 'API timed out after 30 seconds before tests started'],
+  ])('keeps unexpected API errors and setup failures incomplete: %s / %s', async (expected, outcome) => {
+    for (const [status, evidence] of [
+      [`✅ ${outcome}`, 'response.json'],
+      ['✅', `${outcome}; response.json`],
+    ]) {
+      gh.comments = [sheet([`| 1 | Negative API check | Execute | ${expected} | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        failures: [],
+        total: 1,
+        passed: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'Unable to launch Chromium (missing executable).',
+    'Cannot launch Chrome (missing executable).',
+    'Could not launch Firefox (missing executable).',
+    "Couldn't launch browser (missing executable).",
+    '**Unable to launch Chromium** (missing executable).',
+    '<strong>Unable to launch Chromium</strong> (missing executable).',
+  ])('keeps blocked browser launches incomplete: %s', async (outcome) => {
+    for (const [status, evidence] of [
+      [`✅ API passed; ${outcome}`, 'response.json'],
+      ['✅', `API curl passed; ${outcome}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        failures: [],
+        total: 1,
+        passed: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each([
+    'Chromium launched and UI assertions passed',
+    'Unable to launch Chromium was displayed as expected',
+  ])('preserves completed browser-launch observations: %s', async (outcome) => {
+    gh.comments = [
+      sheet([
+        `| 1 | Browser launch | Launch Chromium | Show launch result | ✅ | API curl passed; ${outcome}; screenshot.png |`,
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({
+      failures: [],
+      total: 1,
+      passed: 1,
+      incomplete: false,
+    });
+  });
+
+  it.each([
     ['UI connects normally', 'UI cannot connect as expected'],
     ['Cannot complete registration', 'UI cannot complete checkout as expected'],
     ['Cannot finish checkout', 'UI cannot finish checkout before tests started'],
