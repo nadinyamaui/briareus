@@ -21,7 +21,12 @@ const pull = (number, extra = {}) => ({
   ...extra,
 });
 
-function harness({ initial = [], cursor = null, synced = new Map() } = {}) {
+function harness({
+  initial = [],
+  cursor = null,
+  synced = new Map(),
+  now = () => Date.parse('2026-10-27T12:00:00Z'),
+} = {}) {
   const routes = new Map([
     ['/repos/acme/shop/issues', initial],
     ['/repos/acme/shop/pulls', []],
@@ -70,7 +75,7 @@ function harness({ initial = [], cursor = null, synced = new Map() } = {}) {
     graphql,
     board,
     invalidate,
-    now: () => Date.parse('2026-10-27T12:00:00Z'),
+    now,
     log: (m) => errors.push(m),
   });
   return { service, store, rest, graphql, routes, board, invalidate, errors };
@@ -320,7 +325,7 @@ describe('durable GitHub synchronization', () => {
     h.routes.set('/repos/acme/shop/issues/2', () => ({ ok: false, status: 404 }));
     h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 2 } });
     await h.service.flush(project.repo);
-    expect(h.store.hideItem).toHaveBeenCalledWith(project.repo, 2);
+    expect(h.store.hideItem).toHaveBeenCalledWith(project.repo, 2, Date.parse('2026-10-27T12:00:00Z'));
     expect(h.store.saveItem).not.toHaveBeenCalled();
   });
 
@@ -330,7 +335,7 @@ describe('durable GitHub synchronization', () => {
     for (const number of [2, 3])
       h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number } });
     await h.service.flush(project.repo);
-    expect(h.store.hideItem).toHaveBeenCalledWith(project.repo, 2);
+    expect(h.store.hideItem).toHaveBeenCalledWith(project.repo, 2, Date.parse('2026-10-27T12:00:00Z'));
     expect(h.store.saveItem).toHaveBeenCalledWith(
       project.repo,
       expect.objectContaining({ number: 3 }),
@@ -415,6 +420,91 @@ describe('durable GitHub synchronization', () => {
     h.board.mockResolvedValue({ issuesError: 'Issues permission missing', issuesTruncated: false });
     await h.service.tick();
     expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, null, 'Issues permission missing');
+  });
+
+  it.each(['labels', 'milestones', 'write'])(
+    'reconciles current boards during %s metadata failures and retries without advancing the cursor',
+    async (failure) => {
+      const h = harness({ initial: [issue(2)], cursor: 1000 });
+      if (failure === 'write') h.store.saveMetadata.mockRejectedValue(new Error('metadata write failed'));
+      else h.routes.set(`/repos/acme/shop/${failure}`, () => ({ ok: false, status: 503 }));
+      await h.service.tick();
+      await h.service.tick();
+      expect(h.store.saveItem).toHaveBeenCalledTimes(1);
+      expect(h.board).toHaveBeenCalledTimes(2);
+      expect(h.invalidate).toHaveBeenCalledTimes(2);
+      expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
+      expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, null, expect.any(String));
+      expect(h.errors).toHaveLength(2);
+      if (failure === 'write') h.store.saveMetadata.mockResolvedValue();
+      else h.routes.delete(`/repos/acme/shop/${failure}`);
+      await h.service.tick();
+      expect(h.board).toHaveBeenCalledTimes(3);
+      expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, Date.parse('2026-10-27T12:00:00Z'));
+    },
+  );
+
+  it.each(['labels', 'milestones', 'write'])(
+    'continues healthy coalesced item webhooks after %s metadata failures',
+    async (failure) => {
+      const h = harness();
+      if (failure === 'write') h.store.saveMetadata.mockRejectedValue(new Error('metadata write failed'));
+      else h.routes.set(`/repos/acme/shop/${failure}`, () => ({ ok: false, status: 503 }));
+      h.service.onWebhook('label', { repository: { full_name: project.repo } });
+      h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 2 } });
+      await h.service.flush(project.repo);
+      expect(h.store.saveItem).toHaveBeenCalledWith(
+        project.repo,
+        expect.objectContaining({ number: 2 }),
+        expect.anything(),
+      );
+      expect(h.board).toHaveBeenCalledTimes(1);
+      expect(h.invalidate).toHaveBeenCalledWith(project.repo);
+      expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, null, expect.any(String));
+      expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
+      expect(h.errors).toHaveLength(1);
+    },
+  );
+
+  it.each(['hourly', 'webhook'])(
+    'aborts %s board reconciliation immediately on metadata rate limits',
+    async (source) => {
+      const h = harness();
+      h.routes.set('/repos/acme/shop/labels', Object.assign(new Error('rate limited'), { status: 429 }));
+      if (source === 'hourly') await h.service.tick();
+      else {
+        h.service.onWebhook('label', { repository: { full_name: project.repo } });
+        h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 2 } });
+        await h.service.flush(project.repo);
+      }
+      expect(h.store.saveItem).not.toHaveBeenCalled();
+      expect(h.store.saveMetadata).not.toHaveBeenCalled();
+      expect(h.board).not.toHaveBeenCalled();
+      expect(h.invalidate).not.toHaveBeenCalled();
+      expect(h.errors).toHaveLength(1);
+    },
+  );
+
+  it('retains inventory observation times when a newer webhook runs before a queued item', async () => {
+    let time = 100;
+    const h = harness({ initial: [issue(1), issue(2, { title: 'Old', state: 'closed' })], now: () => time });
+    h.routes.set('/repos/acme/shop/issues/2', issue(2, { title: 'New', state: 'closed' }));
+    let webhook;
+    h.routes.set('/repos/acme/shop/issues/1/comments', () => {
+      time = 200;
+      h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 2 } });
+      webhook = h.service.flush(project.repo);
+      return { ok: true, json: async () => [] };
+    });
+    await h.service.tick();
+    await webhook;
+    const snapshots = h.store.saveItem.mock.calls.map(([, row]) => [row.number, row.title, row.observedAt]);
+    expect(snapshots).toEqual([
+      [1, 'Issue 1', 100],
+      [2, 'New', 200],
+      [2, 'Old', 100],
+    ]);
+    expect(h.errors).toEqual([]);
   });
 
   it('refreshes label and milestone metadata for repository-level deliveries', async () => {

@@ -13,6 +13,10 @@ import {
   up as itemObservationUp,
   down as itemObservationDown,
 } from '../migrations/2026_10_27_140000_add_github_item_observation_times.js';
+import {
+  up as relationObservationUp,
+  down as relationObservationDown,
+} from '../migrations/2026_10_27_150000_order_github_removals_and_relations.js';
 
 // Opt in against a real MySQL server: the normal suite needs no infrastructure.
 // Only the randomly named database created by this file is ever dropped.
@@ -79,10 +83,14 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     await observationUp({ context: pool });
     await itemObservationUp({ context: pool });
     await itemObservationUp({ context: pool });
+    await relationObservationUp({ context: pool });
+    await relationObservationUp({ context: pool });
     store = createGithubStore({ connection: () => pool.getConnection() });
   });
   afterAll(async () => {
     if (pool) {
+      await relationObservationDown({ context: pool });
+      await relationObservationDown({ context: pool });
       await itemObservationDown({ context: pool });
       await itemObservationDown({ context: pool });
       await observationDown({ context: pool });
@@ -422,6 +430,231 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     });
     await store.saveBoard(r, board({ observedAt: 2000, syncedAt: new Date(2000).toISOString() }));
     expect((await store.readBoard(r)).pulls[0].title).toBe('New title');
+  });
+
+  it.each([false, true])(
+    'keeps deletion tombstones ahead of older boards (existing row: %s)',
+    async (existing) => {
+      const r = repo();
+      if (existing) await store.saveBoard(r, board({ observedAt: 100 }));
+      await store.hideItem(r, 2, 200);
+      await store.saveBoard(r, board({ observedAt: 150 }));
+      expect((await store.readBoard(r)).issues).toEqual([]);
+      expect(
+        await store.saveItem(r, {
+          ...issue(),
+          kind: 'issue',
+          state: 'open',
+          sourceUpdatedAt: issue().updatedAt,
+          observedAt: 150,
+        }),
+      ).toBe(false);
+      await store.saveBoard(r, board({ observedAt: 300 }));
+      expect((await store.readBoard(r)).issues.map((i) => i.number)).toEqual([2]);
+      await store.hideItem(r, 2, 250);
+      expect((await store.readBoard(r)).issues.map((i) => i.number)).toEqual([2]);
+    },
+  );
+
+  it('reconciles fully paginated PR links while retaining bounded and historical issue links', async () => {
+    const r = repo();
+    const external = repo();
+    await store.saveItem(r, {
+      ...issue({ pulls: [{ number: 9, title: 'Closed', state: 'closed', repo: external }] }),
+      kind: 'issue',
+      state: 'open',
+      observedAt: 500,
+    });
+    await store.saveBoard(
+      r,
+      board({
+        pulls: [pull({ issues: [{ number: 2, title: 'Issue', state: 'open', repo: r }] })],
+        issues: [issue({ pulls: [{ number: 1, title: 'Pull', repo: r }] })],
+        pullRelationsComplete: true,
+      }),
+    );
+    await store.saveBoard(r, board({ observedAt: 2000, pullRelationsComplete: true }));
+    const result = await store.readBoard(r);
+    expect(result.pulls[0].issues).toEqual([]);
+    expect(result.issues[0].pulls).toEqual([]);
+    const [history] = await pool.query(
+      `SELECT t.number FROM github_item_links l JOIN github_items i ON i.id=l.item_id
+      JOIN github_items t ON t.id=l.target_id JOIN github_repositories r ON r.id=i.repository_id
+      WHERE r.repo=? AND l.relation='closed_by'`,
+      [r],
+    );
+    expect(history.map((h) => h.number)).toEqual([9]);
+  });
+
+  it('does not advertise a PR absent from its repository complete open board as current work', async () => {
+    const r = repo();
+    await store.saveBoard(
+      r,
+      board({
+        pulls: [pull({ issues: [{ number: 2, title: 'Issue', state: 'open' }] })],
+        issues: [issue({ pulls: [{ number: 1, title: 'Pull', repo: r }] })],
+      }),
+    );
+    await store.saveBoard(r, board({ pulls: [], observedAt: 2000, pullRelationsComplete: true }));
+    expect((await store.readBoard(r)).pulls).toEqual([]);
+    expect((await store.readBoard(r)).issues[0].pulls).toEqual([]);
+    const [[history]] = await pool.query(
+      `SELECT COUNT(*) AS n FROM github_item_links l JOIN github_items i ON i.id=l.item_id
+      JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=?`,
+      [r],
+    );
+    expect(history.n).toBe(2);
+    // A later authoritative reopening makes the retained link current again.
+    await store.saveItem(r, {
+      ...pull({ issues: [{ number: 2, title: 'Issue', state: 'open' }] }),
+      kind: 'pull',
+      state: 'open',
+      observedAt: 3000,
+    });
+    expect((await store.readBoard(r)).issues[0].pulls.map((p) => p.number)).toEqual([1]);
+  });
+
+  it.each(['pull', 'issue'])(
+    'orders reciprocal removals behind newer cross-repository %s links',
+    async (kind) => {
+      const r = repo(),
+        external = repo();
+      const linkedIssue = { number: 2, title: 'Issue', state: 'open', repo: external };
+      const linkedPull = { number: 1, title: 'Pull', state: 'open', repo: r };
+      await store.saveBoard(
+        r,
+        board({ issues: [], pulls: [pull({ issues: [linkedIssue] })], observedAt: 50 }),
+      );
+      await store.saveBoard(
+        external,
+        board({ pulls: [], issues: [issue({ pulls: [linkedPull] })], observedAt: 50 }),
+      );
+      await store.saveItem(kind === 'pull' ? r : external, {
+        ...(kind === 'pull' ? pull({ issues: [linkedIssue] }) : issue({ pulls: [linkedPull] })),
+        kind,
+        state: 'open',
+        observedAt: 200,
+      });
+      await store.saveItem(kind === 'pull' ? external : r, {
+        ...(kind === 'pull' ? issue() : pull()),
+        kind: kind === 'pull' ? 'issue' : 'pull',
+        state: 'open',
+        observedAt: 100,
+      });
+      expect((await store.readBoard(r)).pulls[0].issues).toHaveLength(1);
+      expect((await store.readBoard(external)).issues[0].pulls).toHaveLength(1);
+      await store.saveItem(external, { ...issue(), kind: 'issue', state: 'open', observedAt: 300 });
+      expect((await store.readBoard(r)).pulls[0].issues).toEqual([]);
+      expect((await store.readBoard(external)).issues[0].pulls).toEqual([]);
+      // An older positive observation cannot undo the newer reciprocal removal.
+      await store.saveItem(r, {
+        ...pull({ issues: [linkedIssue] }),
+        kind: 'pull',
+        state: 'open',
+        observedAt: 250,
+      });
+      expect((await store.readBoard(r)).pulls[0].issues).toEqual([]);
+    },
+  );
+
+  it.each([false, true])(
+    'backfills collections without erasing newer board relationships (complete: %s)',
+    async (complete) => {
+      const r = repo();
+      await store.saveBoard(
+        r,
+        board({
+          pulls: [pull({ issues: [{ number: 2, title: 'Issue', state: 'open' }] })],
+          observedAt: 200,
+          pullRelationsComplete: complete,
+        }),
+      );
+      expect(
+        await store.saveItem(
+          r,
+          {
+            ...pull(),
+            kind: 'pull',
+            state: 'open',
+            sourceUpdatedAt: pull().updatedAt,
+            observedAt: 100,
+          },
+          { comments: [{ id: 1, body: 'Backfill' }] },
+        ),
+      ).toBe(true);
+      expect((await store.readBoard(r)).pulls[0].issues.map((i) => i.number)).toEqual([2]);
+      const [[comment]] = await pool.query(
+        `SELECT c.body FROM github_comments c JOIN github_items i ON i.id=c.item_id
+      JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=?`,
+        [r],
+      );
+      expect(comment.body).toBe('Backfill');
+    },
+  );
+
+  it('does not overwrite a completed webhook with an older queued inventory snapshot', async () => {
+    const r = repo();
+    const raw = (number, title) => ({
+      number,
+      title,
+      body: title,
+      html_url: `https://github.com/${r}/issues/${number}`,
+      state: 'closed',
+      updated_at: issue().updatedAt,
+    });
+    let time = 100,
+      webhook;
+    const errors = [];
+    const sync = createGithubSync({
+      projects: () => [{ repo: r }],
+      config: () => ({ githubToken: 'test' }),
+      store,
+      now: () => time,
+      log: (error) => errors.push(error),
+      board: async () => ({ issuesError: null, issuesTruncated: false }),
+      invalidate: () => {},
+      graphql: async () => ({
+        repository: {
+          issueOrPullRequest: {
+            __typename: 'Issue',
+            parent: null,
+            subIssuesSummary: { total: 0, completed: 0 },
+            subIssues: { nodes: [], pageInfo: { hasNextPage: false } },
+            closedByPullRequestsReferences: { nodes: [], pageInfo: { hasNextPage: false } },
+          },
+        },
+      }),
+      rest: async (_cfg, _method, path) => {
+        const url = new URL(path, 'https://api.github.com');
+        let data = [];
+        if (url.pathname === `/repos/${r}/issues`) data = [raw(1, 'First'), raw(2, 'Old')];
+        if (url.pathname === `/repos/${r}/issues/2`) data = raw(2, 'New');
+        if (url.pathname === `/repos/${r}/issues/1/comments`) {
+          time = 200;
+          sync.onWebhook('issues', { repository: { full_name: r }, issue: { number: 2 } });
+          webhook = sync.flush(r);
+        }
+        return { ok: true, json: async () => data };
+      },
+    });
+    await sync.tick();
+    await webhook;
+    const [[saved]] = await pool.query(
+      `SELECT title, body, full_observed_at, source_updated_at FROM github_items i
+      JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=? AND i.number=2`,
+      [r],
+    );
+    expect(saved.title).toBe('New');
+    expect(saved.body).toBe('New');
+    expect(Number(saved.full_observed_at)).toBe(200);
+    expect(saved.source_updated_at).toBe(issue().updatedAt);
+    expect(errors).toEqual([`${r}: Item #2 changed during synchronization; retry required`]);
+    expect((await store.syncState(r)).synced_at).toBeNull();
+    // The next pass sees the webhook's complete revision and recovers the cursor.
+    time = 300;
+    await sync.tick();
+    expect(Number((await store.syncState(r)).synced_at)).toBe(300);
+    sync.stop();
   });
 
   it('orders overlapping boards by observation time while returning completion time', async () => {

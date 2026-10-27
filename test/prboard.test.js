@@ -193,7 +193,12 @@ describe('projectPulls', () => {
     await projectPulls(p, { fresh: true });
     expect(githubStore.saveBoard).toHaveBeenCalledWith(
       p.repo,
-      expect.objectContaining({ pulls: [], issues: [], observedAt: expect.any(Number) }),
+      expect.objectContaining({
+        pulls: [],
+        issues: [],
+        observedAt: expect.any(Number),
+        pullRelationsComplete: true,
+      }),
     );
   });
 
