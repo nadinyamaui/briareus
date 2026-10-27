@@ -20,6 +20,7 @@ vi.mock('../lib/github.js', () => ({
 }));
 
 import { githubStore } from '../lib/github-store.js';
+import { mergePullRequest } from '../lib/prviewer.js';
 import {
   closeIssue,
   hasLabel,
@@ -195,6 +196,76 @@ describe('projectPulls', () => {
       expect.objectContaining({ pulls: [], issues: [], observedAt: expect.any(Number) }),
     );
   });
+
+  it.each(['merged', 'stack-merged', 'stack-enqueued', 'refused'])(
+    'refreshes the durable board only after a confirmed merge (%s)',
+    async (outcome) => {
+      vi.useFakeTimers();
+      try {
+        const p = project();
+        vi.mocked(githubStore.readBoard).mockResolvedValue({
+          pulls: [{ number: 1, title: 'Saved pull', labels: [] }],
+          issues: [],
+          syncedAt: new Date().toISOString(),
+        });
+        expect((await projectPulls(p)).pulls).toHaveLength(1);
+        serve([]);
+        const stacked = outcome.startsWith('stack-');
+        gh.rest.mockReset().mockImplementation(async (_cfg, method) => ({
+          ok: outcome !== 'refused' || method === 'GET',
+          status: method === 'PUT' && outcome === 'refused' ? 409 : 200,
+          json: async () =>
+            method === 'GET'
+              ? { base: { ref: 'main' }, ...(stacked ? { stack: { position: 1 } } : {}) }
+              : stacked
+                ? { status: outcome === 'stack-merged' ? 'merged' : 'enqueued' }
+                : { merged: true },
+        }));
+        const merging = mergePullRequest(p, 1, { headSha: 'a'.repeat(40), baseRef: 'main' });
+        if (outcome === 'refused') await expect(merging).rejects.toMatchObject({ status: 409 });
+        else await merging;
+        vi.advanceTimersByTime(121_000);
+        const confirmed = ['merged', 'stack-merged'].includes(outcome);
+        expect((await projectPulls(p)).pulls).toHaveLength(confirmed ? 0 : 1);
+        expect(gh.graphql).toHaveBeenCalledTimes(confirmed ? 1 : 0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['close', 'closed', 'open'])(
+    'returns a successful mutation and invalidates the durable board when mirroring fails (%s)',
+    async (mutation) => {
+      const p = project();
+      vi.mocked(githubStore.readBoard).mockResolvedValue({
+        pulls: [],
+        issues: [{ number: 9, title: 'Saved issue', labels: [] }],
+        syncedAt: new Date().toISOString(),
+      });
+      await projectPulls(p);
+      const state = mutation === 'close' ? 'closed' : mutation;
+      gh.rest.mockReset().mockResolvedValue({ ok: true, json: async () => ({ number: 9, state }) });
+      vi.mocked(githubStore.saveItem).mockRejectedValueOnce(new Error('ER_LOCK_DEADLOCK'));
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const result =
+          mutation === 'close'
+            ? closeIssue(p, 9, { comment: 'Done' })
+            : updateGithubItem(p, 9, 'issue', { state });
+        await expect(result).resolves.toMatchObject({ issue: { number: 9, state } });
+        expect(gh.rest.mock.calls.filter(([, method]) => method === 'POST')).toHaveLength(
+          mutation === 'close' ? 1 : 0,
+        );
+        expect(warning).toHaveBeenCalledWith(expect.stringContaining('ER_LOCK_DEADLOCK'));
+        serve([]);
+        expect((await projectPulls(p)).issues).toEqual([]);
+        expect(gh.graphql).toHaveBeenCalledTimes(1);
+      } finally {
+        warning.mockRestore();
+      }
+    },
+  );
 
   it('reports a failed database write instead of claiming an unsaved board was persisted', async () => {
     gh.graphql.mockResolvedValue({ repository: { pullRequests: { nodes: [] }, issues: { nodes: [] } } });

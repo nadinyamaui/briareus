@@ -281,6 +281,94 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     expect(result.issues.some((i) => i.number === 102)).toBe(true);
   });
 
+  it.each(['pull', 'issue'])(
+    'removes only obsolete reciprocal closing links after an authoritative %s refresh',
+    async (kind) => {
+      const r = repo(),
+        external = repo();
+      const linkedIssue = { number: 2, title: 'Issue', state: 'open', repo: external };
+      const linkedPull = { number: 1, title: 'Pull', state: 'open', repo: r };
+      await store.saveBoard(r, board({ issues: [], pulls: [pull({ issues: [linkedIssue] })] }));
+      await store.saveBoard(external, board({ pulls: [], issues: [issue({ pulls: [linkedPull] })] }));
+      // Bounded empty projections must retain both historical directions.
+      await store.saveBoard(r, board({ issues: [], observedAt: 1500 }));
+      await store.saveBoard(external, board({ pulls: [], observedAt: 1500 }));
+      expect((await store.readBoard(r)).pulls[0].issues).toHaveLength(1);
+      expect((await store.readBoard(external)).issues[0].pulls).toHaveLength(1);
+      // Keep an unrelated reciprocal link while removing the first one.
+      await store.saveItem(r, {
+        ...pull({ number: 3, issues: [linkedIssue] }),
+        kind: 'pull',
+        state: 'open',
+        observedAt: 1600,
+      });
+      await store.saveItem(external, {
+        ...issue({ pulls: [linkedPull, { ...linkedPull, number: 3 }] }),
+        kind: 'issue',
+        state: 'open',
+        observedAt: 1600,
+      });
+      // An obsolete complete refresh cannot unlink a newer observation.
+      await store.saveItem(kind === 'pull' ? r : external, {
+        ...(kind === 'pull' ? pull() : issue()),
+        kind,
+        state: 'open',
+        observedAt: 500,
+      });
+      expect((await store.readBoard(external)).issues[0].pulls).toHaveLength(2);
+      await store.saveItem(kind === 'pull' ? r : external, {
+        ...(kind === 'pull' ? pull() : issue({ pulls: [{ ...linkedPull, number: 3 }] })),
+        kind,
+        state: 'open',
+        observedAt: 2000,
+      });
+      await store.saveBoard(r, board({ issues: [], pulls: [pull(), pull({ number: 3 })], observedAt: 3000 }));
+      await store.saveBoard(external, board({ pulls: [], observedAt: 3000 }));
+      const result = await store.readBoard(r);
+      expect(result.pulls.find((p) => p.number === 1).issues).toEqual([]);
+      expect(result.pulls.find((p) => p.number === 3).issues).toHaveLength(1);
+      expect((await store.readBoard(external)).issues[0].pulls.map((p) => p.number)).toEqual([3]);
+    },
+  );
+
+  it('preserves absent stub fields in parent references but accepts explicit state changes', async () => {
+    const r = repo();
+    const closed = {
+      number: 8,
+      title: 'Closed parent',
+      url: issue().url,
+      state: 'closed',
+      stateReason: 'completed',
+    };
+    const parent = { number: 8, title: closed.title, url: closed.url };
+    await store.saveBoard(
+      r,
+      board({
+        pulls: [pull({ issues: [closed] })],
+        issues: [issue({ parent })],
+      }),
+    );
+    expect((await store.readBoard(r)).pulls[0].issues[0]).toMatchObject(closed);
+    await store.saveBoard(
+      r,
+      board({
+        pulls: [pull({ issues: [{ number: 8 }] })],
+        issues: [issue({ parent })],
+        observedAt: 2000,
+      }),
+    );
+    expect((await store.readBoard(r)).pulls[0].issues[0]).toMatchObject(closed);
+    await store.saveBoard(
+      r,
+      board({
+        pulls: [pull({ issues: [{ ...closed, state: 'open', stateReason: null }] })],
+        issues: [issue({ parent })],
+        observedAt: 3000,
+      }),
+    );
+    expect((await store.readBoard(r)).pulls[0].issues[0]).toMatchObject({ state: 'open', stateReason: null });
+  });
+
   it('updates external PR draft stubs in time order and protects complete PRs', async () => {
     const r = repo(),
       other = repo(),
