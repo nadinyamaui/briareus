@@ -4955,6 +4955,52 @@ describe('latestTestVerdict', () => {
     }
   });
 
+  it.each([
+    'response values were not asserted',
+    'Response body was not asserted',
+    'API response values have not yet been asserted',
+  ])('keeps required response assertions incomplete: %s', async (annotation) => {
+    for (const expected of ['HTTP 200 and JSON status=ok', 'HTTP 200 and JSON response body status=ok']) {
+      for (const [status, evidence] of [
+        ['✅', `API request succeeded; ${annotation}`],
+        ['✅', `response.json; ${annotation}`],
+        [`✅ API request succeeded; ${annotation}`, 'response.json'],
+      ]) {
+        gh.comments = [sheet([`| 1 | API response | curl /api | ${expected} | ${status} | ${evidence} |`])];
+        expect(await latestTestVerdict(repo, 5)).toEqual({
+          failures: [],
+          total: 1,
+          passed: 0,
+          manual: 0,
+          incomplete: true,
+        });
+      }
+    }
+  });
+
+  it.each([
+    ['HTTP 200', 'API request succeeded; response values were not asserted'],
+    ['HTTP 200', 'response.json; Response body was not asserted'],
+    ['HTTP 200 and JSON status=ok', 'API request succeeded; response values were asserted: status=ok'],
+    ['HTTP 200 and JSON status=ok', 'response.json; Response body was asserted: status=ok'],
+    [
+      'Response body was not asserted message is displayed',
+      'Response body was not asserted was displayed as expected',
+    ],
+  ])('preserves completed response checks: %s / %s', async (expected, annotation) => {
+    for (const [status, evidence] of [
+      ['✅', annotation],
+      [`✅ ${annotation}`, 'response.json'],
+    ]) {
+      gh.comments = [sheet([`| 1 | API response | curl /api | ${expected} | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        total: 1,
+        passed: 1,
+        incomplete: false,
+      });
+    }
+  });
+
   it.each(['pending checks', 'Not a single test was executed', 'Not a single check has been performed'])(
     'retains pending checks and negated execution quantities: %s',
     async (annotation) => {
