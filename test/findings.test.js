@@ -457,6 +457,79 @@ describe('sortFindingsForFix: the split as advice, nothing written', () => {
 });
 
 describe('recordTriage: the orchestrator’s verdicts on a round', () => {
+  it.each([false, true])(
+    'splits large declarations and retries partial writes without duplicates (%s)',
+    async (failSecond) => {
+      const selected = Array.from({ length: 50 }, (_, i) => ({
+        title: `Selected finding ${i}`,
+        severity: 'low',
+        file: 'lib/api.js',
+        line: i + 1,
+        sourceId: 'review:42',
+        url: 'https://github.com/acme/shop/pull/5#pullrequestreview-42',
+        decision: 'fix',
+        assessment: {
+          verified: true,
+          worthFixing: true,
+          evidence: '>"\n'.repeat(180),
+          reason: 'Protect private data. '.repeat(11),
+        },
+      }));
+      const original = githubRest.getMockImplementation();
+      let declarations = 0;
+      githubRest.mockImplementation(async (cfg, method, url, body) => {
+        if (method === 'POST' && body.body.startsWith('## Selected feedback findings')) {
+          expect(body.body.length).toBeLessThanOrEqual(65_536);
+          declarations++;
+          if (failSecond && declarations === 2) return { ok: false, status: 422 };
+        }
+        const res = await original(cfg, method, url, body);
+        if (res.ok && method === 'POST') gh.comments.push({ id: gh.comments.length + 1, body: body.body });
+        return res;
+      });
+      try {
+        if (failSecond) {
+          await expect(recordTriage(repo, 5, selected)).rejects.toThrow('saving selected feedback findings');
+          expect(db.decisions.size).toBe(0);
+          expect(gh.comments).toHaveLength(1);
+        }
+        await recordTriage(repo, 5, selected);
+        const bodies = gh.comments.filter((c) => c.body.startsWith('## Selected feedback findings'));
+        expect(bodies.length).toBeGreaterThan(1);
+        const entries = bodies.flatMap((c) =>
+          JSON.parse(c.body.match(/<!-- reviewer:findings\n([\s\S]*?)\n-->/)[1]),
+        );
+        expect(entries.map((f) => f.title)).toEqual(selected.map((f) => f.title));
+        expect(entries.map((f) => f.assessment)).toEqual(selected.map((f) => f.assessment));
+        const fresh = await getFindings(repo, 5, { fresh: true });
+        expect(fresh.findings).toHaveLength(50);
+        expect(fresh.findings.every((f) => f.decision === 'fix')).toBe(true);
+        const checklist = gh.comments.find((c) => c.body.includes(FIXES_ANCHOR)).body;
+        for (const f of selected) expect(checklist).toContain(`<!-- fix:${findingKey(f.title)} -->`);
+        const published = bodies.length;
+        await recordTriage(repo, 5, selected);
+        expect(gh.comments.filter((c) => c.body.startsWith('## Selected feedback findings'))).toHaveLength(
+          published,
+        );
+      } finally {
+        githubRest.mockImplementation(original);
+      }
+    },
+  );
+  it('retains an oversized individual finding without publishing a truncated declaration', async () => {
+    await expect(
+      recordTriage(repo, 5, [
+        {
+          title: 'Large finding',
+          sourceId: 'review:42',
+          decision: 'fix',
+          assessment: { evidence: 'x'.repeat(65_536) },
+        },
+      ]),
+    ).rejects.toThrow('exceeds the GitHub comment body limit');
+    expect(gh.writes).toEqual([]);
+    expect(db.decisions.size).toBe(0);
+  });
   it.each([1, 300])(
     'persists external Fix findings after %i comments before releasing the assessment',
     async (count) => {

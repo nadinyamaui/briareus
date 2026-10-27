@@ -18,6 +18,7 @@ import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
 import { createUsers } from '../lib/users.js';
 import { createSlackService } from '../lib/slack.js';
 import { createSshService } from '../lib/ssh.js';
+import { createIncomingFeedback } from '../lib/incoming-feedback.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
@@ -204,6 +205,7 @@ vi.mock('../lib/projects.js', () => ({
 }));
 
 vi.mock('../lib/prtasks.js', () => ({
+  feedbackAssessmentPrompt: vi.fn(() => 'ASSESS FEEDBACK'),
   testSheetPrompt: vi.fn(() => 'SHEET'),
   testRunPrompt: vi.fn(() => 'RUN'),
   implementFeedbackPrompt: vi.fn(() => 'FEEDBACK'),
@@ -16400,6 +16402,64 @@ describe('/btw side questions', () => {
       );
     } finally {
       setDraining(false);
+    }
+  });
+
+  it('persists serialized feedback intake while an unrelated side answer is pending', async () => {
+    saveJob.mockClear();
+    let finishAnswer;
+    askClaudeSideQuestion.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishAnswer = resolve;
+        }),
+    );
+    const asked = askDevSessionBtw('btw-session', 'What changed?');
+    const project = {
+      repo: 'acme/shop',
+      enabled: true,
+      babysitPrs: true,
+      reviewAuthor: 'owner',
+      reviewProviderId: 1,
+    };
+    const snapshot = {
+      repo: project.repo,
+      prNumber: 7,
+      author: 'owner',
+      sha: 'same-sha',
+      branch: 'feature',
+      sources: [
+        { id: 'review:42', author: 'reviewer', body: 'Missing guard', reviewId: 42, state: 'COMMENTED' },
+      ],
+      history: [],
+    };
+    const start = vi.fn(() => ({}));
+    const intake = createIncomingFeedback({
+      projects: () => [project],
+      read: async (_repo, prNumber) => ({ ...snapshot, prNumber }),
+      pending: () => false,
+      busy: () => false,
+      slots: () => 2,
+      start,
+    });
+    let completed = false;
+    const operations = Promise.all([
+      intake.assess(project, { number: 7, author: 'owner' }),
+      intake.assess(project, { number: 8, author: 'owner' }),
+      intake.remember({ ...snapshot, completed: true }),
+    ]).then(() => {
+      completed = true;
+    });
+    try {
+      await vi.waitFor(() => expect(completed).toBe(true));
+      expect(start).toHaveBeenCalledTimes(2);
+      expect(state.appSettings['incoming-feedback']['acme/shop#7'].reviews['review:42']).toBeTruthy();
+      expect(publicJob(getJob('btw-session')).sideQuestionsPending).toBe(1);
+      expect(saveJob.mock.calls.some(([j]) => j.id === 'btw-session')).toBe(true);
+    } finally {
+      finishAnswer({ text: 'Done', costUsd: 0.01 });
+      await asked.answer;
+      await operations;
     }
   });
 

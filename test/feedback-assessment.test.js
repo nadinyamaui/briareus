@@ -188,6 +188,31 @@ describe('feedback snapshot', () => {
       );
     },
   );
+  it.each(['added', 'edited', 'deleted'])(
+    'invalidates manually selected bot feedback when its author reply is %s',
+    (change) => {
+      const assessment = structuredClone(snapshot);
+      for (const s of [...assessment.sources, ...assessment.history]) {
+        if (s.author === 'sergio') {
+          s.author = 'review-bot';
+          s.bot = true;
+        }
+      }
+      assessment.sources = assessment.sources.filter((s) => s.id === 'comment:44');
+      const current = structuredClone(assessment);
+      expect(feedbackSnapshotCurrent(assessment, current)).toBe(true);
+      expect(externalFeedbackRevisions(assessment)).toEqual([]);
+      if (change === 'added')
+        current.history.push({
+          ...current.history.find((s) => s.id === 'comment:45'),
+          id: 'comment:47',
+          body: 'Withdrawn',
+        });
+      if (change === 'edited') current.history.find((s) => s.id === 'comment:45').body = 'Withdrawn';
+      if (change === 'deleted') current.history = current.history.filter((s) => s.id !== 'comment:45');
+      expect(feedbackSnapshotCurrent(assessment, current)).toBe(false);
+    },
+  );
   it('ignores unrelated threads and implementation notes when checking selected feedback', () => {
     const current = structuredClone(snapshot);
     current.history.push(
@@ -206,6 +231,7 @@ describe('feedback snapshot', () => {
       {
         ...current.history.find((s) => s.id === 'comment:45'),
         id: 'comment:49',
+        author: 'other-bot',
         bot: true,
         body: 'Bot note',
       },

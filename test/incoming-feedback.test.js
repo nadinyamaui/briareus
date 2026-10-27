@@ -5,7 +5,7 @@ vi.mock('../lib/jobs.js', () => ({
   devSessionSlots: vi.fn(),
   pullRequestHasOpenSession: vi.fn(),
   pendingFeedbackAssessment: vi.fn(),
-  flushJobs: vi.fn(),
+  flushJobState: vi.fn(),
 }));
 import { createIncomingFeedback } from '../lib/incoming-feedback.js';
 
