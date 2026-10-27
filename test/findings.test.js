@@ -451,6 +451,36 @@ describe('sortFindingsForFix: the split as advice, nothing written', () => {
 });
 
 describe('recordTriage: the orchestrator’s verdicts on a round', () => {
+  it('leaves a visible Not fixed note linking incoming feedback and separating optional from dismissed claims', async () => {
+    await recordTriage(
+      repo,
+      5,
+      [
+        {
+          title: 'Optional claim',
+          sourceId: 'review:42',
+          url: 'https://github.com/owner/repo/pull/5#pullrequestreview-42',
+          decision: 'optional',
+          reason: 'Confirmed but the rare outcome affects no data',
+        },
+        {
+          title: 'Incorrect claim',
+          sourceId: 'comment:43',
+          url: 'https://github.com/owner/repo/pull/5#discussion_r43',
+          decision: 'dismissed',
+          reason: 'The permission check already covers this request',
+        },
+      ],
+      { by: 'the user' },
+    );
+    const body = gh.writes.find((w) => w.method === 'POST').body.body;
+    expect(body).toContain('### Not fixed');
+    expect(body).toContain(
+      '([source](https://github.com/owner/repo/pull/5#pullrequestreview-42)) — left optional: Confirmed',
+    );
+    expect(body).toContain('— dismissed: The permission check');
+  });
+
   const round = [
     { key: findingKey('Needs fixing'), severity: 'high', title: 'Needs fixing', file: 'lib/x.js', line: 3 },
     { key: findingKey('Also this'), severity: 'low', title: 'Also this' },

@@ -364,6 +364,8 @@ import {
   childSessionsOf,
   triageLoopFindings,
   holdStandaloneReviewFindings,
+  holdFeedbackAssessment,
+  pendingFeedbackAssessment,
   completeStandaloneReview,
   triageStandaloneReviewFindings,
   triageReviewFindings,
@@ -18553,4 +18555,205 @@ describe('automatic recovery after a server restart', () => {
       }
     },
   );
+});
+
+describe('incoming feedback assessment gate', () => {
+  let workDir;
+  let snapshot;
+  let job;
+  const finding = {
+    source: 'review:42',
+    title: 'Already handled redirect',
+    recommendation: 'dismissed',
+    severity: 'low',
+    assessment: {
+      verified: true,
+      worthFixing: false,
+      evidence: 'Checked current controller and prior triage',
+      reason: 'This was fixed in the previous commit',
+    },
+  };
+  beforeEach(async () => {
+    workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'feedback-gate-'));
+    spawnSync('git', ['init', '-q', workDir]);
+    spawnSync('git', [
+      '-C',
+      workDir,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'fixture',
+    ]);
+    const sha = spawnSync('git', ['-C', workDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    snapshot = {
+      repo: 'acme/feedback',
+      prNumber: 31,
+      sha,
+      branch: 'feature',
+      author: 'nadin',
+      resultFile: '.briareus-feedback-fixture.json',
+      completed: false,
+      sources: [
+        {
+          id: 'review:42',
+          author: 'sergio',
+          bot: false,
+          body: 'The redirect is wrong',
+          url: 'https://github.com/acme/feedback/pull/31#pullrequestreview-42',
+          file: null,
+          line: null,
+          commitSha: sha,
+          reviewId: 42,
+          replyTo: null,
+          state: 'COMMENTED',
+          updatedAt: null,
+        },
+      ],
+      history: [],
+    };
+    fs.writeFileSync(
+      path.join(workDir, snapshot.resultFile),
+      JSON.stringify({ sha, complete: true, sourcesReviewed: ['review:42'], findings: [finding] }),
+    );
+    state.projects = [{ repo: 'acme/feedback', reviewAuthor: 'nadin', autonomousReviewLoop: true }];
+    state.stored = [
+      {
+        id: 'feedback-gate',
+        repo: 'acme/feedback',
+        kind: 'devchat',
+        status: 'closed',
+        ownerId: null,
+        providerId: 1,
+        provider: 'Claude entry',
+        model: 'claude-fable-5-1',
+        effort: 'low',
+        createdAt: new Date().toISOString(),
+        startedOnPr: 31,
+        startBranch: 'feature',
+        workDir,
+        autoClose: true,
+        feedbackAssessment: snapshot,
+        prStatus: { number: 31, state: 'open', author: 'nadin' },
+        events: [],
+        seq: 0,
+      },
+    ];
+    await initJobs();
+    job = getJob('feedback-gate');
+    job.status = 'idle';
+    vi.mocked(githubRest)
+      .mockReset()
+      .mockImplementation(async (_cfg, _method, route) => ({
+        ok: true,
+        json: async () => {
+          if (route.includes('/reviews?'))
+            return [
+              {
+                id: 42,
+                user: { login: 'sergio' },
+                body: 'The redirect is wrong',
+                state: 'COMMENTED',
+                commit_id: sha,
+                html_url: snapshot.sources[0].url,
+              },
+            ];
+          if (route.includes('/comments?')) return [];
+          return {
+            state: 'open',
+            user: { login: 'nadin' },
+            head: { sha: snapshot.sha, ref: 'feature', repo: { full_name: 'acme/feedback' } },
+          };
+        },
+      }));
+    vi.mocked(recordTriage).mockClear().mockResolvedValue({ error: null });
+    vi.mocked(addPullRequestLabel).mockClear();
+  });
+  afterEach(async () => {
+    if (getJob('feedback-gate')) await closeDevSession('feedback-gate');
+    if (getJob('feedback-gate')) await deleteJobById('feedback-gate');
+    fs.rmSync(workDir, { recursive: true, force: true });
+    vi.mocked(githubRest).mockReset();
+    state.projects = [];
+  });
+
+  it('holds optional and dismissed findings without automatically fixing or approving, retaining the card after resource cleanup', async () => {
+    expect(await holdFeedbackAssessment(job)).toBe(true);
+    expect(job.reviewLoop).toBeFalsy();
+    expect(job.reviewTriage).toMatchObject({
+      externalFeedback: true,
+      mine: true,
+      sha: snapshot.sha,
+      findings: [
+        expect.objectContaining({ sourceBody: 'The redirect is wrong', recommendation: 'dismissed' }),
+      ],
+    });
+    expect(recordTriage).not.toHaveBeenCalled();
+    expect(addPullRequestLabel).not.toHaveBeenCalled();
+    expect(pendingFeedbackAssessment(job.repo, 31)).toBe(job);
+    await closeDevSession(job.id);
+    expect(getJob(job.id)).toMatchObject({ status: 'closed', reviewTriage: { externalFeedback: true } });
+    expect(pendingFeedbackAssessment(job.repo, 31)).toBe(job);
+  });
+  it('records the user’s optional decision and its rationale without approving the pull request', async () => {
+    await holdFeedbackAssessment(job);
+    const key = job.reviewTriage.findings[0].key;
+    const result = await triageStandaloneReviewFindings(job.id, {
+      verdicts: [{ key, decision: 'optional' }],
+    });
+    expect(result).toMatchObject({ fixing: false, approved: false, session: null });
+    expect(recordTriage).toHaveBeenCalledWith(
+      job.repo,
+      31,
+      [expect.objectContaining({ decision: 'optional', reason: finding.assessment.reason })],
+      { by: 'the user', note: undefined },
+    );
+    expect(addPullRequestLabel).not.toHaveBeenCalled();
+  });
+  it('starts no fixes if the PR moved after assessment, keeping the card available for a refresh', async () => {
+    await holdFeedbackAssessment(job);
+    const key = job.reviewTriage.findings[0].key;
+    job.feedbackAssessment = { ...snapshot };
+    snapshot.sha = 'new-head';
+    await expect(
+      triageStandaloneReviewFindings(job.id, { verdicts: [{ key, decision: 'fix' }] }),
+    ).rejects.toThrow(/changed/);
+    expect(job.reviewTriage.stale).toBe(true);
+    expect(recordTriage).not.toHaveBeenCalled();
+    expect(pendingFeedbackAssessment(job.repo, 31)).toBeNull();
+  });
+  it('passes only selected findings and the original source to the implementation prompt after a manual decision', async () => {
+    await holdFeedbackAssessment(job);
+    const key = job.reviewTriage.findings[0].key;
+    state.projects = [{ repo: 'acme/other' }]; // refuse the paid fix session, after inspecting its composed prompt
+    vi.mocked(implementFeedbackPrompt).mockClear();
+    await expect(
+      triageStandaloneReviewFindings(job.id, { verdicts: [{ key, decision: 'fix' }] }),
+    ).rejects.toThrow(/Unknown project/);
+    expect(implementFeedbackPrompt).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        triaged: true,
+        by: 'the user',
+        findings: [expect.objectContaining({ sourceId: 'review:42', sourceBody: 'The redirect is wrong' })],
+      }),
+    );
+    expect(job.reviewTriage).toBeTruthy();
+  });
+  it('refuses to delete somebody else’s feedback or guess a reply thread for summary-only findings', async () => {
+    await holdFeedbackAssessment(job);
+    const key = job.reviewTriage.findings[0].key;
+    await expect(deleteReviewFinding(job.id, key)).rejects.toThrow(/belongs to its reviewer/);
+    await expect(replyToReviewFinding(job.id, key, 'Discuss')).rejects.toThrow(/review summary/);
+  });
+  it('keeps missing or partial output from becoming an empty clean result', async () => {
+    fs.writeFileSync(path.join(workDir, snapshot.resultFile), '{}');
+    await expect(holdFeedbackAssessment(job)).rejects.toThrow(/incomplete/);
+    expect(job.reviewTriage).toBeFalsy();
+    expect(job.feedbackAssessment.completed).toBe(false);
+    expect(addPullRequestLabel).not.toHaveBeenCalled();
+  });
 });

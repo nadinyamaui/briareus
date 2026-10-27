@@ -1,14 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const stubs = vi.hoisted(() => ({
-  latestReviewFindings: vi.fn(),
-  getFindings: vi.fn(),
+  readFeedbackSnapshot: vi.fn(),
+  feedbackAssessmentSpec: vi.fn(),
 }));
-
-vi.mock('../lib/findings.js', () => ({
-  latestReviewFindings: stubs.latestReviewFindings,
-  getFindings: stubs.getFindings,
-}));
+vi.mock('../lib/feedback-assessment.js', () => stubs);
 
 // The prompt builders are lib/prtasks.js's own business, tested there; here
 // they only need to prove the action handed them the right facts.
@@ -16,9 +12,7 @@ vi.mock('../lib/prtasks.js', () => ({
   testSheetPrompt: vi.fn(() => 'SHEET'),
   testRunPrompt: vi.fn(() => 'RUN'),
   solveConflictsPrompt: vi.fn(() => 'CONFLICTS'),
-  implementFeedbackPrompt: vi.fn(
-    ({ findings }) => `IMPLEMENT:${(findings || []).map((f) => f.title).join(',')}`,
-  ),
+  feedbackAssessmentPrompt: vi.fn(() => 'ASSESS'),
   deleteSelfCommentsPrompt: vi.fn(({ author }) => `DELETE:${author}`),
   fixFailingChecksPrompt: vi.fn(() => 'CHECKS'),
   customFeedbackPrompt: vi.fn(({ feedback }) => `FEEDBACK:${feedback}`),
@@ -30,8 +24,10 @@ import * as prtasks from '../lib/prtasks.js';
 
 beforeEach(() => {
   prtasks.testSheetPrompt.mockClear();
-  stubs.latestReviewFindings.mockReset().mockResolvedValue([]);
-  stubs.getFindings.mockReset().mockResolvedValue({ findings: [] });
+  stubs.readFeedbackSnapshot.mockReset().mockResolvedValue({ sha: 'abc', sources: [] });
+  stubs.feedbackAssessmentSpec
+    .mockReset()
+    .mockReturnValue({ prompt: 'ASSESS', autoClose: true, reviewLoop: false });
 });
 
 describe('the actions list', () => {
@@ -45,10 +41,8 @@ describe('the actions list', () => {
     }
   });
 
-  // An errand whose whole answer lands on the PR hands its clone, database server and record
-  // back when the turn ends. Those left open have something to come back to: a test run's
-  // videos, typed feedback, and 🛠 Implement feedback, which stays for the review loop after
-  // its push.
+  // Completed errands release their clone and database; an assessment keeps only
+  // its Findings card, while test videos and typed feedback keep a session open.
   it('closes the errands whose answer lands on the pull request', () => {
     const closing = ACTIONS.filter((a) => a.autoClose).map((a) => a.id);
     expect(closing).toEqual([
@@ -56,24 +50,14 @@ describe('the actions list', () => {
       'test-sheet',
       'solve-conflicts',
       'fix-checks',
+      'implement-feedback',
       'delete-self-comments',
     ]);
-    expect(ACTIONS.filter((a) => !a.autoClose).map((a) => a.id)).toEqual([
-      'test-run',
-      'implement-feedback',
-      'custom-feedback',
-    ]);
+    expect(ACTIONS.filter((a) => !a.autoClose).map((a) => a.id)).toEqual(['test-run', 'custom-feedback']);
   });
 
-  // The review loop needs a parent still around when the review reports, and a workspace clone
-  // to review in, so an action that arms it cannot auto-close or run locally.
-  it('an action that arms the review loop stays open in a worktree for it', () => {
-    const looping = ACTIONS.filter((a) => a.reviewLoop);
-    expect(looping.map((a) => a.id)).toEqual(['implement-feedback']);
-    for (const action of looping) {
-      expect(action.autoClose).toBeFalsy();
-      expect(action.workspace).toBe('worktree');
-    }
+  it('leaves board errands outside the review loop until the user triages findings', () => {
+    expect(ACTIONS.filter((a) => a.reviewLoop)).toEqual([]);
   });
 
   it('getAction finds by id and answers null for a made-up one', () => {
@@ -260,40 +244,16 @@ describe('custom-feedback', () => {
 describe('the remaining titles', () => {
   it('names the pull request each errand is for', () => {
     expect(getAction('delete-self-comments').title({ prNumber: 4 })).toBe('Delete comments: #4');
-    expect(getAction('implement-feedback').title({ prNumber: 6 })).toBe('Implement feedback: #6');
+    expect(getAction('implement-feedback').title({ prNumber: 6 })).toBe('Assess feedback: #6');
   });
 });
 
 describe('implement-feedback', () => {
-  const action = getAction('implement-feedback');
-  const args = { repo: 'a/b', prNumber: 1, branch: 'f', project: null };
-
-  it('stays open with the review loop armed so the fixes it pushes get reviewed', () => {
-    expect(action.reviewLoop).toBe(true);
-    expect(action.autoClose).toBeFalsy();
+  it('assesses feedback without arming the review loop', () => {
+    const action = getAction('implement-feedback');
+    expect(action.reviewLoop).toBeFalsy();
+    expect(action.autoClose).toBe(true);
     expect(action.workspace).toBe('worktree');
-  });
-
-  it("starts from the newest review's declared findings when there are any", async () => {
-    stubs.latestReviewFindings.mockResolvedValue([{ title: 'Fresh' }]);
-    expect(await action.prompt(args)).toBe('IMPLEMENT:Fresh');
-    expect(stubs.getFindings).not.toHaveBeenCalled();
-  });
-
-  it('falls back to the undecided, unfixed set when the newest review declared none', async () => {
-    stubs.getFindings.mockResolvedValue({
-      findings: [
-        { title: 'Open', decision: null, fixed: false },
-        { title: 'Dismissed', decision: 'dismissed', fixed: false },
-        { title: 'Done', decision: 'fix', fixed: true },
-      ],
-    });
-    expect(await action.prompt(args)).toBe('IMPLEMENT:Open');
-  });
-
-  it('a GitHub that will not answer still produces a prompt, with no head start', async () => {
-    stubs.latestReviewFindings.mockRejectedValue(new Error('rate limited'));
-    expect(await action.prompt(args)).toBe('IMPLEMENT:');
   });
 });
 
@@ -342,9 +302,12 @@ describe('actionSessionSpec', () => {
     expect(spec).toMatchObject({ branch: undefined, local: true, prBranch: 'feature/x', autoClose: true });
   });
 
-  it('arms the review loop for implement-feedback and awaits its prompt', async () => {
-    stubs.latestReviewFindings.mockResolvedValue([{ title: 'Fresh' }]);
+  it('requires a canonical feedback snapshot and prepares an assessment instead of a fix', async () => {
     const spec = await actionSessionSpec(getAction('implement-feedback'), context);
-    expect(spec).toMatchObject({ reviewLoop: true, autoClose: false, prompt: 'IMPLEMENT:Fresh' });
+    expect(stubs.readFeedbackSnapshot).toHaveBeenCalledWith('a/b', 4);
+    expect(stubs.feedbackAssessmentSpec).toHaveBeenCalledWith(null, { sha: 'abc', sources: [] });
+    expect(spec).toEqual({ reviewLoop: false, autoClose: true, prompt: 'ASSESS' });
+    stubs.readFeedbackSnapshot.mockRejectedValueOnce(new Error('rate limited'));
+    await expect(actionSessionSpec(getAction('implement-feedback'), context)).rejects.toThrow('rate limited');
   });
 });

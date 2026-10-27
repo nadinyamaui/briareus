@@ -199,9 +199,35 @@ push it made from one a human made.
 
 ### The review loop
 
-The composer's 🔁 chip arms a **review loop** on the next from-scratch session,
-and 🛠 Implement feedback, started from the board, arms the same loop so the
-fixes it pushes get reviewed. A review, a QA run, any other board errand or a
+The composer's 🔁 chip arms a **review loop** on the next from-scratch session.
+🛠 Implement feedback first assesses the PR's existing review bodies, inline
+comments and discussion on the project's configured review provider, model and
+effort. Its findings wait for **Fix / Optional / Dismiss** decisions in Findings;
+only the selected fixes start an implementation session with the review loop armed.
+The assessment includes source links, verification evidence, fix-value advice and
+previous fixes or dismissals, including feedback listed only in a review summary.
+Completing this assessment without fixes does not approve the PR or change its labels.
+The clone and database are released while its Findings card waits.
+
+With **Babysit PRs** enabled and a **PR author** configured, incoming reviews from
+another developer on that author's PRs automatically enter the same assessment
+flow. Submitted and edited GitHub reviews trigger it through the webhook, with the
+15-minute babysitter poll as a fallback. Review bodies with a `COMMENTED` verdict
+count too; tracking uses the review identity and content, so edits and new reviews
+on the same commit are assessed without repeating already imported feedback.
+An existing session or pending Findings card defers intake, and a full pool retries
+on a later tick. Automatic intake always waits for manual decisions, even when
+autonomous review-loop fixing is enabled. Closed PRs, drafts, forks and bot reviews
+are excluded from automatic intake. Use Implement feedback to assess existing
+feedback manually without enabling Babysit PRs.
+
+Assessment wording is editable as **Assess incoming feedback** in project or
+shared prompt settings; **Implement feedback** remains the template used to
+execute the selected fixes. The required assessment output and manual decision
+gate still apply when templates are overridden. If the head or selected feedback
+changes before fixes are submitted, refresh with Implement feedback first.
+
+A review, a QA run, any other board errand or a
 local session is never a loop. An armed session works its task as usual; every
 time it settles idle with new commits on its open pull request, the app starts
 a review session for it (the same auto-closing kind the board starts, on the

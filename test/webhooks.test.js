@@ -14,6 +14,9 @@ vi.mock('../lib/jobs.js', () => ({
   instructSession: vi.fn(() => ({ status: 'running' })),
 }));
 
+const feedback = vi.hoisted(() => ({ reviewEvent: vi.fn(async () => {}) }));
+vi.mock('../lib/incoming-feedback.js', () => ({ incomingFeedback: () => feedback }));
+
 const updater = vi.hoisted(() => ({ onMerged: vi.fn() }));
 vi.mock('../lib/local-update.js', () => ({ localUpdater: () => updater }));
 
@@ -63,6 +66,7 @@ beforeEach(() => {
   vi.mocked(deliverToSession).mockReturnValue({ status: 'running', held: 0 });
   vi.mocked(instructSession).mockReset();
   vi.mocked(instructSession).mockReturnValue({ status: 'running' });
+  feedback.reviewEvent.mockClear();
   hook.url = 'https://reviewer.example.com/webhooks/github';
 });
 
@@ -87,6 +91,22 @@ function githubDelivery(event, payload, { secret } = {}) {
 const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
 
 describe('POST /webhooks/github', () => {
+  it('forwards submitted and edited reviews to incoming feedback after authenticating GitHub', async () => {
+    const payload = { action: 'submitted', repository: { full_name: 'a/b' }, pull_request: { number: 7 } };
+    expect((await githubDelivery('pull_request_review', payload)).status).toBe(202);
+    await settle();
+    expect(feedback.reviewEvent).toHaveBeenCalledWith('a/b', payload);
+    const inline = { ...payload, action: 'created' };
+    await githubDelivery('pull_request_review_comment', inline);
+    await settle();
+    expect(feedback.reviewEvent).toHaveBeenCalledWith('a/b', inline);
+
+    feedback.reviewEvent.mockClear();
+    await githubDelivery('pull_request_review', payload, { secret: 'wrong' });
+    await settle();
+    expect(feedback.reviewEvent).not.toHaveBeenCalled();
+  });
+
   it('rejects a delivery with no signature at all', async () => {
     const res = await fetch(`${base}/github`, { method: 'POST', body: '{}' });
     expect(res.status).toBe(401);
@@ -448,7 +468,14 @@ describe('POST /webhooks/session/:id', () => {
 describe('ensureRepoWebhook', () => {
   const cfg = { githubToken: 'tok' };
   const url = 'https://reviewer.example.com/webhooks/github';
-  const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite', 'status'];
+  const events = [
+    'pull_request',
+    'pull_request_review',
+    'pull_request_review_comment',
+    'issue_comment',
+    'check_suite',
+    'status',
+  ];
 
   function restServing(hooks, responses = {}) {
     return vi.fn(async (c, method, _path, _body) => {
@@ -667,7 +694,14 @@ describe('ensureRepoWebhook without a hostname to point at', () => {
 describe('ensureRepoWebhook when GitHub refuses the write', () => {
   const cfg = { githubToken: 'tok' };
   const url = 'https://reviewer.example.com/webhooks/github';
-  const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite', 'status'];
+  const events = [
+    'pull_request',
+    'pull_request_review',
+    'pull_request_review_comment',
+    'issue_comment',
+    'check_suite',
+    'status',
+  ];
 
   const restServing = (hooks, responses = {}) =>
     vi.fn(async (c, method) => {
@@ -775,7 +809,14 @@ describe('installRepoWebhooks', () => {
   });
 
   it('stays quiet about a hook that was already right', async () => {
-    const events = ['pull_request', 'pull_request_review', 'issue_comment', 'check_suite', 'status'];
+    const events = [
+      'pull_request',
+      'pull_request_review',
+      'pull_request_review_comment',
+      'issue_comment',
+      'check_suite',
+      'status',
+    ];
     const url = 'https://reviewer.example.com/webhooks/github';
     const rest = vi.fn(async () => ({
       ok: true,

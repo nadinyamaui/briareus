@@ -22,7 +22,7 @@ import { operationsRoutes } from './lib/operations-routes.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
 import { createUsers } from './lib/users.js';
 import { createShares } from './lib/shares.js';
-import { seesSession } from './lib/ownership.js';
+import { seesSession, managesSession } from './lib/ownership.js';
 import { createUserCredentials } from './lib/user-credentials.js';
 import { createWhatsAppOwners } from './lib/whatsapp-owners.js';
 import { meRoutes } from './lib/me-routes.js';
@@ -87,6 +87,7 @@ import {
   listDevSessions,
   devSessionRecords,
   createDevSession,
+  pendingFeedbackAssessment,
   sendDevMessage,
   askDevSessionBtw,
   cancelDevTurn,
@@ -248,6 +249,7 @@ import { agentOnly, apiEnabled } from './lib/auth.js';
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
 import { localUpdater } from './lib/local-update.js';
 import { createBabysitter } from './lib/babysitter.js';
+import { incomingFeedback } from './lib/incoming-feedback.js';
 import { securityHeaders } from './lib/security.js';
 import { listWorkspaces, resetSetup, cleanWorkspace, startWorkspacePruner } from './lib/workspaces.js';
 import { githubWebhookUrl, sessionWebhookKey, sessionWebhookUrl } from './lib/webhooksecrets.js';
@@ -1836,6 +1838,11 @@ api.post('/api/dev/actions', async (req, res) => {
       .status(400)
       .json({ error: 'No GITHUB_TOKEN is configured, so the pull request cannot be looked up' });
   try {
+    if (actionId === 'implement-feedback') {
+      const pending = pendingFeedbackAssessment(project.repo, number);
+      if (pending && managesSession(res.locals.apiUser, pending))
+        return res.json({ session: publicJob(pending) });
+    }
     const lookup = await githubRest(cfg, 'GET', `/repos/${project.repo}/pulls/${number}`);
     if (lookup.status === 404)
       return res.status(404).json({ error: `${project.repo} has no pull request #${number}` });
@@ -1861,8 +1868,15 @@ api.post('/api/dev/actions', async (req, res) => {
     };
     // A prompt that refuses fails the request rather than starting an empty errand.
     const spec = await actionSessionSpec(action, context);
+    if ('feedbackAssessment' in spec) {
+      const pending = pendingFeedbackAssessment(project.repo, number);
+      if (pending && managesSession(res.locals.apiUser, pending))
+        return res.json({ session: publicJob(pending) });
+    }
+    const session = createDevSession({ provider, model, effort, ...spec, ownerId: requestOwner(res) });
+    if ('feedbackAssessment' in spec) await incomingFeedback().remember(spec.feedbackAssessment);
     res.status(201).json({
-      session: createDevSession({ provider, model, effort, ...spec, ownerId: requestOwner(res) }),
+      session,
     });
   } catch (e) {
     res.status(400).json({ error: e.message });
