@@ -4,6 +4,7 @@ const gh = vi.hoisted(() => ({ graphql: vi.fn(), rest: vi.fn() }));
 
 vi.mock('../lib/github-store.js', () => ({
   githubStore: {
+    saveItem: vi.fn(async () => true),
     readBoard: vi.fn(async () => null),
     saveBoard: vi.fn(async () => {}),
   },
@@ -153,6 +154,7 @@ beforeEach(() => {
   gh.graphql.mockReset();
   vi.mocked(githubStore.readBoard).mockReset().mockResolvedValue(null);
   vi.mocked(githubStore.saveBoard).mockClear();
+  vi.mocked(githubStore.saveItem).mockClear();
 });
 
 describe('projectPulls', () => {
@@ -1399,6 +1401,17 @@ describe('closing an issue', () => {
     github();
     await closeIssue(project, 7);
     expect(gh.rest.mock.calls.map(([, verb]) => verb)).toEqual(['GET', 'PATCH']);
+    expect(githubStore.saveItem).toHaveBeenCalledWith(
+      project.repo,
+      expect.objectContaining({
+        kind: 'issue',
+        number: 7,
+        state: 'closed',
+        stateReason: 'not_planned',
+        closedAt: '2026-10-01T12:00:00Z',
+        observedAt: expect.any(Number),
+      }),
+    );
     expect(gh.rest).toHaveBeenLastCalledWith(expect.anything(), 'PATCH', '/repos/acme/issues/issues/7', {
       state: 'closed',
       state_reason: 'completed',
@@ -1493,6 +1506,25 @@ describe('updateGithubItem', () => {
       });
     },
   );
+
+  it.each(['closed', 'open'])('persists a confirmed issue state of %s before refreshing', async (state) => {
+    gh.rest
+      .mockResolvedValueOnce(answer(200, item))
+      .mockResolvedValueOnce(
+        answer(200, { ...item, state, state_reason: state === 'closed' ? 'completed' : 'reopened' }),
+      );
+    const p = project();
+    await updateGithubItem(p, 7, 'issue', { state });
+    expect(githubStore.saveItem).toHaveBeenCalledWith(
+      p.repo,
+      expect.objectContaining({
+        number: 7,
+        kind: 'issue',
+        state,
+        observedAt: expect.any(Number),
+      }),
+    );
+  });
 
   it('clears lists and the description explicitly', async () => {
     github('pr');

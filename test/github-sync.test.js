@@ -262,6 +262,92 @@ describe('durable GitHub synchronization', () => {
     expect(h.store.saveItem).not.toHaveBeenCalled();
   });
 
+  it('continues a deletion batch after GitHub returns 410', async () => {
+    const h = harness();
+    h.routes.set('/repos/acme/shop/issues/2', () => ({ ok: false, status: 410 }));
+    for (const number of [2, 3])
+      h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number } });
+    await h.service.flush(project.repo);
+    expect(h.store.hideItem).toHaveBeenCalledWith(project.repo, 2);
+    expect(h.store.saveItem).toHaveBeenCalledWith(
+      project.repo,
+      expect.objectContaining({ number: 3 }),
+      expect.anything(),
+    );
+    expect(h.board).toHaveBeenCalledTimes(1);
+    expect(h.invalidate).toHaveBeenCalledWith(project.repo);
+    expect(h.errors).toEqual([]);
+  });
+
+  it('reconciles PRs and the board without optional Issues or Checks access', async () => {
+    const h = harness();
+    const forbidden = () => ({ ok: false, status: 403 });
+    h.routes.set('/repos/acme/shop/issues', forbidden);
+    h.routes.set('/repos/acme/shop/issues/1', forbidden);
+    h.routes.set('/repos/acme/shop/issues/1/comments', forbidden);
+    h.routes.set('/repos/acme/shop/labels', forbidden);
+    h.routes.set('/repos/acme/shop/milestones', forbidden);
+    h.routes.set('/repos/acme/shop/pulls', [pull(1)]);
+    h.routes.set('/repos/acme/shop/pulls/1', pull(1));
+    h.routes.set(`/repos/acme/shop/commits/${'a'.repeat(40)}/check-runs`, forbidden);
+    h.routes.set(`/repos/acme/shop/commits/${'a'.repeat(40)}/statuses`, forbidden);
+    h.graphql.mockRejectedValue(
+      Object.assign(new Error('Issues forbidden'), { errors: [{ type: 'FORBIDDEN' }] }),
+    );
+    h.board.mockResolvedValue({ issuesError: 'Issues forbidden', issuesTruncated: false });
+    await h.service.tick();
+    expect(h.store.saveItem).toHaveBeenCalledWith(
+      project.repo,
+      expect.objectContaining({ kind: 'pull', number: 1 }),
+      expect.objectContaining({ reviews: [], commits: [], files: [] }),
+    );
+    const [, row, collections] = h.store.saveItem.mock.calls[0];
+    expect(row).not.toHaveProperty('issues');
+    expect(row).not.toHaveProperty('checks');
+    expect(collections).not.toHaveProperty('comments');
+    expect(collections).not.toHaveProperty('checks');
+    expect(h.store.saveMetadata).not.toHaveBeenCalled();
+    expect(h.board).toHaveBeenCalledWith(project, { complete: true });
+    expect(h.invalidate).toHaveBeenCalledWith(project.repo);
+    // Keep the issue backfill watermark so granting access later recovers history.
+    expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
+    h.service.onWebhook('pull_request', {
+      repository: { full_name: project.repo },
+      pull_request: { number: 1 },
+    });
+    await h.service.flush(project.repo);
+    expect(h.store.saveItem).toHaveBeenCalledTimes(2);
+    expect(h.board).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves check collections when only Checks permission is absent', async () => {
+    const h = harness({ initial: [issue(1, { pull_request: {} })] });
+    h.routes.set('/repos/acme/shop/pulls/1', pull(1));
+    h.routes.set(`/repos/acme/shop/commits/${'a'.repeat(40)}/check-runs`, () => ({ ok: false, status: 403 }));
+    h.routes.set(`/repos/acme/shop/commits/${'a'.repeat(40)}/statuses`, [
+      { id: 1, context: 'deploy', state: 'success' },
+    ]);
+    await h.service.tick();
+    const [, row, collections] = h.store.saveItem.mock.calls[0];
+    expect(row).not.toHaveProperty('checks');
+    expect(collections).not.toHaveProperty('checks');
+    expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, expect.any(Number));
+    expect(h.errors).toEqual([]);
+  });
+
+  it.each([429, 503])('does not suppress check-run failures with status %s', async (status) => {
+    const h = harness({ initial: [issue(1, { pull_request: {} })] });
+    h.routes.set('/repos/acme/shop/pulls/1', pull(1));
+    h.routes.set(`/repos/acme/shop/commits/${'a'.repeat(40)}/check-runs`, () => ({ ok: false, status }));
+    await h.service.tick();
+    expect(h.store.saveItem).not.toHaveBeenCalled();
+    expect(h.store.finishSync).toHaveBeenCalledWith(
+      project.repo,
+      null,
+      expect.stringContaining(String(status)),
+    );
+  });
+
   it('does not advance the cursor after an incomplete issue board', async () => {
     const h = harness();
     h.board.mockResolvedValue({ issuesError: 'Issues permission missing', issuesTruncated: false });

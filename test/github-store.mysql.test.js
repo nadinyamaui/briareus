@@ -4,6 +4,10 @@ import { randomBytes } from 'node:crypto';
 import { getConfig } from '../lib/config.js';
 import { createGithubStore } from '../lib/github-store.js';
 import { up, down } from '../migrations/2026_10_27_120000_add_github_mirror.js';
+import {
+  up as observationUp,
+  down as observationDown,
+} from '../migrations/2026_10_27_130000_add_github_observation_times.js';
 
 // Opt in against a real MySQL server: the normal suite needs no infrastructure.
 // Only the randomly named database created by this file is ever dropped.
@@ -66,10 +70,14 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     pool = mysql.createPool({ ...config, database, connectionLimit: 2 });
     await up({ context: pool });
     await up({ context: pool }); // interrupted migrations can be retried
+    await observationUp({ context: pool });
+    await observationUp({ context: pool });
     store = createGithubStore({ connection: () => pool.getConnection() });
   });
   afterAll(async () => {
     if (pool) {
+      await observationDown({ context: pool });
+      await observationDown({ context: pool });
       await down({ context: pool });
       const [rows] = await pool.query('SHOW TABLES');
       expect(rows).toHaveLength(0);
@@ -205,6 +213,98 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     });
     await store.saveBoard(r, board({ observedAt: 2000, syncedAt: new Date(2000).toISOString() }));
     expect((await store.readBoard(r)).pulls[0].title).toBe('New title');
+  });
+
+  it('orders overlapping boards by observation time while returning completion time', async () => {
+    const r = repo();
+    await store.saveBoard(r, board({ observedAt: 100, syncedAt: new Date(300).toISOString() }));
+    await store.saveBoard(
+      r,
+      board({ pulls: [pull({ title: 'Newer' })], observedAt: 200, syncedAt: new Date(400).toISOString() }),
+    );
+    await store.saveBoard(r, board({ observedAt: 100, syncedAt: new Date(500).toISOString() }));
+    expect((await store.readBoard(r)).pulls[0].title).toBe('Newer');
+    expect((await store.readBoard(r)).syncedAt).toBe(new Date(400).toISOString());
+  });
+
+  it('preserves complete closing relationships through bounded board saves', async () => {
+    const r = repo();
+    const closed = { number: 8, title: 'Closed PR', state: 'closed', repo: r };
+    await store.saveItem(r, { ...issue({ pulls: [closed] }), kind: 'issue', state: 'open', observedAt: 500 });
+    const linked = Array.from({ length: 70 }, (_, i) => ({
+      number: i + 100,
+      title: 'Linked issue',
+      state: 'closed',
+      repo: r,
+    }));
+    await store.saveItem(r, { ...pull({ issues: linked }), kind: 'pull', state: 'open', observedAt: 500 });
+    await store.saveBoard(r, board({ pulls: [pull({ issues: linked.slice(0, 65) })] }));
+    const [[count]] = await pool.query(
+      `SELECT COUNT(*) AS n FROM github_item_links l
+      JOIN github_items i ON i.id=l.item_id JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=?`,
+      [r],
+    );
+    expect(count.n).toBe(71);
+    expect((await store.readBoard(r)).issues[0].pulls).toEqual([]);
+    await store.saveItem(r, { ...issue(), kind: 'issue', state: 'open', observedAt: 2000 });
+    const [[remaining]] = await pool.query(
+      `SELECT COUNT(*) AS n FROM github_item_links l
+      JOIN github_items i ON i.id=l.item_id JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=? AND l.relation='closed_by'`,
+      [r],
+    );
+    expect(remaining.n).toBe(0);
+  });
+
+  it('retains confirmed closures across truncated refreshes without hiding unpaged issues', async () => {
+    const r = repo();
+    const issues = Array.from({ length: 102 }, (_, i) => issue({ number: i + 2 }));
+    await store.saveBoard(r, board({ issues }));
+    await store.saveItem(r, {
+      ...issue({ number: 103 }),
+      kind: 'issue',
+      state: 'closed',
+      stateReason: 'completed',
+      observedAt: 2000,
+    });
+    await store.saveBoard(
+      r,
+      board({
+        issues: issues.slice(0, 100),
+        issuesTruncated: true,
+        observedAt: 3000,
+        syncedAt: new Date(3000).toISOString(),
+      }),
+    );
+    const result = await store.readBoard(r);
+    expect(result.issues).toHaveLength(101);
+    expect(result.issues.some((i) => i.number === 103)).toBe(false);
+    expect(result.issues.some((i) => i.number === 102)).toBe(true);
+  });
+
+  it('updates external PR draft stubs in time order and protects complete PRs', async () => {
+    const r = repo(),
+      other = repo(),
+      external = repo();
+    const linked = { number: 9, title: 'External PR', repo: external, draft: true };
+    await store.saveBoard(r, board({ issues: [issue({ pulls: [linked] })] }));
+    await store.saveBoard(
+      r,
+      board({ issues: [issue({ pulls: [{ ...linked, draft: false }] })], observedAt: 2000 }),
+    );
+    expect((await store.readBoard(r)).issues[0].pulls[0].draft).toBe(false);
+    // Another source's old reference must not roll back a newer stub flag.
+    await store.saveBoard(other, board({ issues: [issue({ pulls: [linked] })], observedAt: 1500 }));
+    expect((await store.readBoard(r)).issues[0].pulls[0].draft).toBe(false);
+    await store.saveBoard(r, board({ issues: [issue({ pulls: [linked] })], observedAt: 3000 }));
+    expect((await store.readBoard(r)).issues[0].pulls[0].draft).toBe(true);
+    await store.saveItem(external, {
+      ...pull({ number: 9, draft: false }),
+      kind: 'pull',
+      state: 'open',
+      observedAt: 4000,
+    });
+    await store.saveBoard(r, board({ issues: [issue({ pulls: [linked] })], observedAt: 5000 }));
+    expect((await store.readBoard(r)).issues[0].pulls[0].draft).toBe(false);
   });
 
   it('atomically replaces comments, reviews, commits, files and checks', async () => {
