@@ -300,6 +300,143 @@ describe('latestTestVerdict', () => {
     ].join('\n'),
   });
 
+  it.each(['-', '+', '*', '1.', '2)', '- -', '-\t'])(
+    'retains custom results whose header starts on list marker %s',
+    async (marker) => {
+      const indent = ' '.repeat(marker === '-\t' ? 5 : marker.length + 1);
+      gh.comments = [
+        sheet([
+          '| 1 | API | curl | 200 | ✅ | response.json |',
+          '',
+          `${marker} | Caso | Conducta | Acción | Esperado | Comprobación | Prueba |`,
+          `${indent}|---|---|---|---|---|---|`,
+          `${indent}| 2 | UI | Open | Visible | ❌ | saw nothing |`,
+        ]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [{ number: '2', scenario: 'UI', expected: 'Visible', evidence: 'saw nothing' }],
+        total: 2,
+        passed: 1,
+        manual: 0,
+        incomplete: false,
+      });
+    },
+  );
+
+  it.each([
+    ['-     ', '      ', ''],
+    ['- ```\n  ', '  ', '\n  ```'],
+    ['-     ```\n      ', '      ', '\n      ```'],
+  ])('excludes custom list tables inside code: %j', async (prefix, indent, suffix) => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        '',
+        `${prefix}| Caso | Conducta | Acción | Esperado | Comprobación | Prueba |`,
+        `${indent}|---|---|---|---|---|---|`,
+        `${indent}| 2 | UI | Open | Visible | ❌ | saw nothing |${suffix}`,
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({
+      failures: [],
+      total: 1,
+      passed: 1,
+      incomplete: false,
+    });
+  });
+
+  it('keeps custom marker lookahead within the list container', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | API | curl | 200 | ✅ | response.json |',
+        '',
+        '| a | b | c | d | e | f |',
+        '|---|---|---|---|---|---|',
+        '| 200 | Resource | GET | /resource | 200 | response.json |',
+        '- | Caso | Conducta | Acción | Esperado | Comprobación | Prueba |',
+        '  |---|---|---|---|---|---|',
+        '  | 2 | UI | Open | Visible | ❌ | saw nothing |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '2', scenario: 'UI', expected: 'Visible', evidence: 'saw nothing' }],
+      total: 2,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
+  it.each(['To be recorded.json', 'Awaiting recording.webm', 'Nothing was tested.json'])(
+    'preserves artifact filenames resembling the new absence declarations: %s',
+    async (evidence) => {
+      gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    },
+  );
+
+  it.each(['To be recorded', 'Awaiting recording', 'N/A pending execution', 'Nothing was tested'])(
+    'rejects the remaining whole-cell evidence declarations: %s',
+    async (absence) => {
+      for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`, `Evidence: ${absence}`]) {
+        gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+      }
+      gh.comments = [
+        sheet([`| 1 | Message | Run | Expected message | ✅ | ${absence} was shown as expected |`]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    },
+  );
+
+  it.each(['To be recorded', 'Awaiting recording'])(
+    'preserves retained evidence alongside recording deferral: %s',
+    async (absence) => {
+      for (const retained of ['response.json', 'curl returned 200 as expected']) {
+        for (const evidence of [`${absence}; ${retained}`, `${retained}; ${absence}`]) {
+          gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+          expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+        }
+      }
+    },
+  );
+
+  it.each([
+    'UI run failed',
+    'UI has no coverage',
+    'UI execution is on hold',
+    'UI was abandoned',
+    'Nothing was tested',
+    'N/A pending execution',
+  ])('vetoes unfinished work even with retained response evidence: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅ API', `${annotation}; response.json`],
+      ['✅ API', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each([
+    ['Both work', 'UI run completed successfully'],
+    ['Both work', 'UI has full coverage'],
+    ['HTTP 403', 'UI run failed with 403 Forbidden as expected'],
+    ['Abandoned order is displayed', 'UI abandoned order is displayed'],
+    ['On hold order is displayed', 'UI on hold order is displayed'],
+  ])('preserves completed runs and business observations: %s / %s', async (expected, annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅ API', `${annotation}; response.json`],
+    ]) {
+      gh.comments = [
+        sheet([`| 1 | API and UI | curl then browser | ${expected} | ${status} | ${evidence} |`]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    }
+  });
+
   it.each(['-- skipped', '--- blocked', '--: not run', '--- never tested'])(
     'reads wordless execution prefixes without losing later failures: %s',
     async (annotation) => {
