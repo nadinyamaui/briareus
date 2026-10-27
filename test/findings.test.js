@@ -302,6 +302,7 @@ describe('latestTestVerdict', () => {
 
   it.each([
     ['Unauthorized', 'API failed with 401 Unauthorized as expected'],
+    ['Not Found', 'API failed with 404 Not Found as expected'],
     ['Validation rejects malformed payload', 'API failed with 422 validation error as expected'],
     ['UI validation error is shown', 'UI failed validation as expected'],
     ['The connection attempt times out gracefully', 'API timed out as expected'],
@@ -328,6 +329,10 @@ describe('latestTestVerdict', () => {
   it.each([
     ['HTTP 403 Unauthorized', 'API failed with 401 Unauthorized as expected'],
     ['Unauthorized', 'API failed with 500 internal server error as expected'],
+    ['HTTP 403 Not Found', 'API failed with 404 Not Found as expected'],
+    ['Unauthorized', 'API failed with 404 Not Found as expected'],
+    ['Not Found', 'API failed with 403 Forbidden as expected'],
+    ['Not Found', 'UI setup failed with 404 Not Found as expected'],
     ['Validation rejects malformed payload', 'API failed with 500 validation error as expected'],
     ['Validation rejects malformed payload', 'UI setup failed as expected'],
     ['HTTP 400 validation error', 'API failed with 422 validation error as expected'],
@@ -347,6 +352,9 @@ describe('latestTestVerdict', () => {
     'Not attempted',
     'No curl requests made',
     'The scenario remains untested',
+    'Untested',
+    'unexecuted',
+    'No testing performed',
   ])('rejects whole-cell missing execution evidence: %s', async (evidence) => {
     gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ✅ | ${evidence} |`])];
     expect(await latestTestVerdict(repo, 5)).toEqual({
@@ -356,6 +364,29 @@ describe('latestTestVerdict', () => {
       manual: 0,
       incomplete: true,
     });
+  });
+
+  it.each([
+    ['UI 80% of steps executed', false],
+    ['UI only 80 percent of the checks verified', false],
+    ['UI 80% of tests completed', false],
+    ['UI 80% of assertions checked', false],
+    ['UI 80% of scenarios tested', false],
+    ['UI 100% of steps executed', true],
+    ['UI 100 percent of the checks verified', true],
+    ['UI displayed 80% of steps executed as expected', true],
+  ])('checks qualified procedure percentages: %s', async (annotation, complete) => {
+    for (const [status, evidence] of [
+      [`✅ API passed; ${annotation}`, 'response.json'],
+      ['✅', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        total: 1,
+        passed: complete ? 1 : 0,
+        incomplete: !complete,
+      });
+    }
   });
 
   it.each(['outstanding coverage', 'UI will be performed later'])(
@@ -373,21 +404,23 @@ describe('latestTestVerdict', () => {
     },
   );
 
-  it.each(['Evidence not supplied', 'TBD after deploy'])(
-    'rejects qualified missing evidence placeholders: %s',
-    async (absence) => {
-      for (const evidence of [absence, `**${absence}**`, `Evidence: ${absence}`]) {
+  it.each([
+    'Evidence not supplied',
+    'TBD after deploy',
+    'Evidence was never provided',
+    'Evidence was never supplied',
+  ])('rejects qualified missing evidence placeholders: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `Evidence: ${absence}`]) {
+      gh.comments = [sheet([`| 1 | API | curl /api | Works | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+    for (const retained of ['response.json', 'curl returned 200 and asserted the response body']) {
+      for (const evidence of [`${absence}; ${retained}`, `${retained}; ${absence}`]) {
         gh.comments = [sheet([`| 1 | API | curl /api | Works | ✅ | ${evidence} |`])];
-        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
       }
-      for (const retained of ['response.json', 'curl returned 200 and asserted the response body']) {
-        for (const evidence of [`${absence}; ${retained}`, `${retained}; ${absence}`]) {
-          gh.comments = [sheet([`| 1 | API | curl /api | Works | ✅ | ${evidence} |`])];
-          expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
-        }
-      }
-    },
-  );
+    }
+  });
 
   it.each([
     'UI manual verification passed',
@@ -396,6 +429,9 @@ describe('latestTestVerdict', () => {
     'UI displayed Awaiting manual testing as expected',
     'UI displayed Evidence not supplied as expected',
     'UI displayed TBD after deploy as expected',
+    'UI displayed Untested as expected',
+    'UI displayed No testing performed as expected',
+    'UI displayed Evidence was never provided as expected',
   ])('preserves completed or observed execution declarations: %s', async (annotation) => {
     gh.comments = [
       sheet([`| 1 | API and UI | curl then browser | Both work | ✅ | ${annotation}; response.json |`]),
