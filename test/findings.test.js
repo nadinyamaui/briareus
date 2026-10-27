@@ -4955,6 +4955,48 @@ describe('latestTestVerdict', () => {
     }
   });
 
+  it.each(['pending checks', 'Not a single test was executed', 'Not a single check has been performed'])(
+    'retains pending checks and negated execution quantities: %s',
+    async (annotation) => {
+      for (const [status, evidence] of [
+        [`✅ ${annotation}`, 'response.json'],
+        ['✅', annotation],
+        ['✅', `response.json; ${annotation}`],
+      ]) {
+        gh.comments = [
+          sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toEqual({
+          failures: [],
+          total: 1,
+          passed: 0,
+          manual: 0,
+          incomplete: true,
+        });
+      }
+    },
+  );
+
+  it.each([
+    'pending checks were shown as expected',
+    'Not a single test was executed was displayed as expected',
+    'All checks were performed',
+  ])('preserves completed checks and observed execution messages: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ ${annotation}`, 'response.json'],
+      ['✅', annotation],
+    ]) {
+      gh.comments = [
+        sheet([`| 1 | API and UI | curl then browser | Expected message | ${status} | ${evidence} |`]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({
+        total: 1,
+        passed: 1,
+        incomplete: false,
+      });
+    }
+  });
+
   it.each([
     'UI only 1/2 checks successful',
     'UI only 1 of 2 checks were successful',
@@ -5322,6 +5364,9 @@ describe('latestTestVerdict', () => {
     'No evidence exists and no response was saved',
     'Evidence is unavailable and upload failed',
     'N/A / no evidence',
+    'Neither screenshots nor responses were saved',
+    'Neither screenshots nor responses have been captured.',
+    'Neither evidence nor artifacts were retained',
   ])('rejects coordinated evidence absence: %s', async (absence) => {
     for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`]) {
       gh.comments = [sheet([`| 1 | API and UI | curl and browser | Both pass | ✅ | ${evidence} |`])];
@@ -5357,6 +5402,10 @@ describe('latestTestVerdict', () => {
     'no-http-headers-captured.json',
     'HTTP headers: headers.json',
     'HTTP headers were kept: headers.json',
+    'Neither screenshots nor responses were saved and response.json',
+    'Neither screenshots nor responses were saved and curl returned 200 as expected',
+    '[Neither screenshots nor responses were saved](https://example.com/response.json)',
+    'neither-screenshots-nor-responses-were-saved.json',
   ])('preserves artifacts and observed qualified absence wording: %s', async (evidence) => {
     gh.comments = [sheet([`| 1 | API | curl /api | Expected message | ✅ | ${evidence} |`])];
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
