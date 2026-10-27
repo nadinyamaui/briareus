@@ -301,6 +301,15 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI only 50% tested',
+    'UI only 0% tested',
+    'UI only 99.5% tested',
+    'UI coverage: only 50%',
+    'UI: testing planned',
+    'UI testing is planned',
+    'UI testing planned for tomorrow',
+    'UI did not perform',
+    "UI didn't perform",
     'UI 50% tested',
     'UI 0% tested',
     'UI 99.5% tested',
@@ -332,6 +341,12 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI only 100% tested',
+    'UI coverage: only 100%',
+    'UI testing performed',
+    'UI displayed only 50% tested as expected',
+    'UI testing planned was displayed as expected',
+    'UI did not perform was shown as expected',
     'UI 100% tested',
     'UI remaining 0 checks',
     'UI remaining checks: 0',
@@ -445,6 +460,10 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'No evidence was attached to the PR',
+    'No evidence was attached to the PR.',
+    'No evidence was attached to this pull request',
+    'No evidence was uploaded to the pull request',
     'Evidence will be uploaded later',
     'No evidence was attached to this comment',
     'Evidence collection is still pending',
