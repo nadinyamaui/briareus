@@ -300,6 +300,124 @@ describe('latestTestVerdict', () => {
     ].join('\n'),
   });
 
+  it.each(['UI 1/2 steps done', 'UI: done 1 of 2 checks', 'UI unchecked'])(
+    'keeps unfinished progress and unchecked procedures incomplete: %s',
+    async (annotation) => {
+      for (const [status, evidence] of [
+        [`✅ API passed; ${annotation}`, 'response.json'],
+        ['✅ API passed', `response.json; ${annotation}`],
+      ]) {
+        gh.comments = [
+          sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+      }
+    },
+  );
+
+  it.each(['<br class="break">', "<BR class='break' />", '<br data-break="true">'])(
+    'separates required procedures across attributed HTML breaks: %s',
+    async (breakTag) => {
+      for (const [status, evidence] of [
+        [`✅ API passed${breakTag}UI tests not executed`, 'response.json'],
+        ['✅ API passed', `response.json${breakTag}UI tests not executed`],
+      ]) {
+        gh.comments = [
+          sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+      }
+    },
+  );
+
+  it.each([
+    'UI 2/2 steps done',
+    'UI: done 2 of 2 checks',
+    'UI unchecked checkbox is displayed as expected',
+    'UI showed unchecked as expected',
+    'UI showed 1/2 steps done as expected',
+    'API passed<br class="break">UI tests executed',
+  ])('preserves completed progress and observed checkbox states: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ ${annotation}`, 'response.json'],
+      ['✅', `response.json; ${annotation}`],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    }
+  });
+
+  it.each([
+    'Evidence capture failed',
+    'Did not execute this scenario',
+    'Skipped this scenario',
+    'No request was sent',
+    'The evidence is missing',
+    'To be uploaded',
+    'No video captured; nothing verified',
+  ])('rejects explicit capture failure and whole-cell nonexecution: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`, `Evidence: ${absence}`]) {
+      gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+    for (const retained of ['response.json', 'curl returned 200 as expected']) {
+      for (const evidence of [`${absence}; ${retained}`, `${retained}; ${absence}`]) {
+        gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${evidence} |`])];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+      }
+    }
+    gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${absence} was shown as expected |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it.each([
+    ['Returns HTTP 422 for invalid input', 'API failed with HTTP 422 Unprocessable Content as expected'],
+    ['Returns HTTP 422 for invalid input', 'API failed with HTTP 422 Unprocessable Content'],
+    ['Returns 422 validation error for invalid input', 'API validation failed for invalid input as expected'],
+  ])('accepts matching executed validation errors: %s', async (expected, annotation) => {
+    for (const [status, evidence] of [
+      [`✅ ${annotation}`, 'response.json'],
+      ['✅', `${annotation}; response.json`],
+    ]) {
+      for (const unfinished of ['', '; UI not tested', '; UI setup failed']) {
+        gh.comments = [
+          sheet([
+            `| 1 | Invalid payload | POST /api/users with invalid email | ${expected} | ${status}${unfinished} | ${evidence} |`,
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          total: 1,
+          passed: unfinished ? 0 : 1,
+          incomplete: !!unfinished,
+        });
+      }
+    }
+  });
+
+  it.each([
+    ['Returns HTTP 200', 'API failed with HTTP 422 Unprocessable Content as expected'],
+    ['Returns HTTP 404', 'API failed with HTTP 422 Unprocessable Content as expected'],
+    ['Returns HTTP 422', 'UI setup failed with HTTP 422 Unprocessable Content as expected'],
+    ['Returns HTTP 200', 'API validation failed for invalid input as expected'],
+    ['Returns 422 validation error for missing email', 'API validation failed for invalid input as expected'],
+    ['Returns 422 validation error for invalid input', 'UI setup failed for invalid input as expected'],
+  ])(
+    'keeps mismatched validation observations and real setup failures incomplete: %s',
+    async (expected, annotation) => {
+      for (const [status, evidence] of [
+        [`✅ ${annotation}`, 'response.json'],
+        ['✅', `${annotation}; response.json`],
+      ]) {
+        gh.comments = [
+          sheet([
+            `| 1 | Invalid payload | POST /api/users with invalid email | ${expected} | ${status} | ${evidence} |`,
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+      }
+    },
+  );
+
   it.each([
     'No tests were run',
     'No checks were executed',
