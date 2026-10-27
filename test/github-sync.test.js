@@ -161,6 +161,68 @@ describe('durable GitHub synchronization', () => {
     expect(h.store.saveItem.mock.calls.map((c) => c[1].number)).toEqual([1, 2]);
   });
 
+  it('reconciles healthy history, open PRs and the board while retrying a failed historical item', async () => {
+    const h = harness({ initial: [issue(1, { state: 'closed', pull_request: {} }), issue(2)], cursor: 1000 });
+    h.routes.set('/repos/acme/shop/pulls/1', pull(1, { state: 'closed' }));
+    h.routes.set('/repos/acme/shop/pulls/1/files', () => ({ ok: false, status: 503 }));
+    h.routes.set('/repos/acme/shop/pulls', [pull(3)]);
+    h.routes.set('/repos/acme/shop/issues/3', issue(3, { pull_request: {} }));
+    h.routes.set('/repos/acme/shop/pulls/3', pull(3));
+    h.routes.set(`/repos/acme/shop/commits/${'a'.repeat(40)}/check-runs`, { check_runs: [] });
+    await h.service.tick();
+    await h.service.tick();
+    expect(h.store.saveItem.mock.calls.map((c) => c[1].number)).toEqual([2, 3, 3]);
+    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(h.invalidate).toHaveBeenCalledTimes(2);
+    expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
+    expect(h.errors).toHaveLength(2);
+    h.routes.set('/repos/acme/shop/pulls/1/files', []);
+    await h.service.tick();
+    expect(h.store.saveItem.mock.calls.map((c) => c[1].number)).toEqual([2, 3, 3, 1, 3]);
+    expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, Date.parse('2026-10-27T12:00:00Z'));
+  });
+
+  it('continues a webhook batch and reconciles the board after an item fails', async () => {
+    const h = harness();
+    h.routes.set('/repos/acme/shop/issues/1/comments', new Error('offline'));
+    for (const number of [1, 2])
+      h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number } });
+    await h.service.flush(project.repo);
+    expect(h.store.saveItem.mock.calls.map((c) => c[1].number)).toEqual([2]);
+    expect(h.board).toHaveBeenCalledTimes(1);
+    expect(h.invalidate).toHaveBeenCalledWith(project.repo);
+    expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, null, 'offline');
+  });
+
+  it('stops further requests when an item hits a repository-wide rate limit', async () => {
+    const h = harness({ initial: [issue(1), issue(2)] });
+    h.routes.set(
+      '/repos/acme/shop/issues/1/comments',
+      Object.assign(new Error('rate limited'), { status: 429 }),
+    );
+    await h.service.tick();
+    expect(h.store.saveItem).not.toHaveBeenCalled();
+    expect(h.board).not.toHaveBeenCalled();
+    expect(h.errors).toEqual([expect.stringContaining('rate limited')]);
+  });
+
+  it.each(['failure', 'error'])(
+    'retains a failed commit-status context (%s) while another is pending',
+    async (state) => {
+      const h = harness({ initial: [issue(1, { pull_request: {} })] });
+      h.routes.set('/repos/acme/shop/pulls/1', pull(1));
+      h.routes.set(`/repos/acme/shop/commits/${'a'.repeat(40)}/check-runs`, { check_runs: [] });
+      h.routes.set(`/repos/acme/shop/commits/${'a'.repeat(40)}/statuses`, [
+        { id: 1, context: 'build', state },
+        { id: 2, context: 'slow', state: 'pending' },
+      ]);
+      h.board.mockRejectedValue(new Error('board unavailable'));
+      await h.service.tick();
+      expect(h.store.saveItem.mock.calls[0][1].checks).toBe('failure');
+      expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, null, 'board unavailable');
+    },
+  );
+
   it('refreshes unchanged open PRs to catch missed CI and review events', async () => {
     const h = harness({
       initial: [issue(1, { pull_request: {} })],

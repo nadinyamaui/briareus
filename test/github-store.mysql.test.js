@@ -3,11 +3,16 @@ import mysql from 'mysql2/promise';
 import { randomBytes } from 'node:crypto';
 import { getConfig } from '../lib/config.js';
 import { createGithubStore } from '../lib/github-store.js';
+import { createGithubSync } from '../lib/github-sync.js';
 import { up, down } from '../migrations/2026_10_27_120000_add_github_mirror.js';
 import {
   up as observationUp,
   down as observationDown,
 } from '../migrations/2026_10_27_130000_add_github_observation_times.js';
+import {
+  up as itemObservationUp,
+  down as itemObservationDown,
+} from '../migrations/2026_10_27_140000_add_github_item_observation_times.js';
 
 // Opt in against a real MySQL server: the normal suite needs no infrastructure.
 // Only the randomly named database created by this file is ever dropped.
@@ -72,10 +77,14 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     await up({ context: pool }); // interrupted migrations can be retried
     await observationUp({ context: pool });
     await observationUp({ context: pool });
+    await itemObservationUp({ context: pool });
+    await itemObservationUp({ context: pool });
     store = createGithubStore({ connection: () => pool.getConnection() });
   });
   afterAll(async () => {
     if (pool) {
+      await itemObservationDown({ context: pool });
+      await itemObservationDown({ context: pool });
       await observationDown({ context: pool });
       await observationDown({ context: pool });
       await down({ context: pool });
@@ -201,6 +210,206 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
       }),
     );
     expect((await store.readBoard(r)).pulls[0].issues[0].title).toBe('Renamed');
+  });
+
+  it('orders shared external issue stubs without promoting them to complete items', async () => {
+    const r = repo(),
+      other = repo(),
+      external = repo();
+    const linked = {
+      number: 9,
+      repo: external,
+      title: 'New title',
+      state: 'closed',
+      stateReason: 'completed',
+      labels: [{ name: 'new', color: 'abcdef' }],
+    };
+    await store.saveBoard(r, board({ pulls: [pull({ issues: [linked] })], observedAt: 2000 }));
+    await store.saveBoard(
+      other,
+      board({
+        pulls: [
+          pull({
+            issues: [
+              {
+                ...linked,
+                title: 'Old title',
+                state: 'open',
+                stateReason: null,
+                labels: [{ name: 'old', color: '000000' }],
+              },
+            ],
+          }),
+        ],
+        observedAt: 1000,
+      }),
+    );
+    expect((await store.readBoard(r)).pulls[0].issues[0]).toMatchObject(linked);
+    const [[stub]] = await pool.query(
+      'SELECT observed_at, reference_observed_at FROM github_items i JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=? AND number=9',
+      [external],
+    );
+    expect(Number(stub.observed_at)).toBe(0);
+    expect(Number(stub.reference_observed_at)).toBe(2000);
+    await store.saveItem(external, {
+      ...issue({ number: 9, title: 'Complete', labels: [] }),
+      kind: 'issue',
+      state: 'open',
+      observedAt: 3000,
+    });
+    await store.saveBoard(r, board({ pulls: [pull({ issues: [linked] })], observedAt: 4000 }));
+    expect((await store.readBoard(r)).pulls[0].issues[0]).toMatchObject({
+      title: 'Complete',
+      state: 'open',
+      labels: [],
+    });
+  });
+
+  it('reopens an external PR stub from the open-only board connection', async () => {
+    const r = repo(),
+      external = repo();
+    const linked = {
+      number: 9,
+      repo: external,
+      title: 'External PR',
+      url: 'https://github.com/other/repo/pull/9',
+      draft: false,
+    };
+    await store.saveItem(r, {
+      ...issue({ pulls: [{ ...linked, state: 'closed' }] }),
+      kind: 'issue',
+      state: 'open',
+      observedAt: 1000,
+    });
+    await store.saveBoard(r, board({ issues: [issue({ pulls: [linked] })], observedAt: 2000 }));
+    expect((await store.readBoard(r)).issues[0].pulls).toEqual([linked]);
+  });
+
+  it('completes same-revision downloads behind newer boards without replacing their fields', async () => {
+    const r = repo();
+    const row = {
+      ...pull(),
+      kind: 'pull',
+      state: 'open',
+      body: 'Full body',
+      observedAt: 1000,
+      sourceUpdatedAt: pull().updatedAt,
+    };
+    await store.saveBoard(
+      r,
+      board({ pulls: [pull({ title: 'New board', checks: 'failure' })], observedAt: 2000 }),
+    );
+    expect(await store.saveItem(r, row, { comments: [{ id: 1, body: 'Complete comment' }] })).toBe(true);
+    expect((await store.readBoard(r)).pulls[0]).toMatchObject({ title: 'New board', checks: 'failure' });
+    expect((await store.syncedItems(r)).get(1)).toBe(row.sourceUpdatedAt);
+    const [[saved]] = await pool.query(
+      'SELECT body, observed_at, full_observed_at FROM github_items i JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=? AND number=1',
+      [r],
+    );
+    expect(saved.body).toBe('Full body');
+    expect(Number(saved.observed_at)).toBe(2000);
+    expect(Number(saved.full_observed_at)).toBe(1000);
+    expect(await store.saveItem(r, { ...row, observedAt: 500 }, { comments: [] })).toBe(false);
+    const [[comment]] = await pool.query(
+      'SELECT c.body FROM github_comments c JOIN github_items i ON i.id=c.item_id JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=?',
+      [r],
+    );
+    expect(comment.body).toBe('Complete comment');
+  });
+
+  it('backfills later history while every full PR download overlaps a newer partial board', async () => {
+    const r = repo();
+    let clock = 1000,
+      boardCalls = 0,
+      filesCalls = 0;
+    const errors = [];
+    const rawIssue = (number) => ({
+      number,
+      title: `Item ${number}`,
+      state: 'open',
+      html_url: `https://github.com/${r}/issues/${number}`,
+      updated_at: pull().updatedAt,
+      ...(number === 1 ? { pull_request: {} } : {}),
+    });
+    const rawPull = {
+      ...rawIssue(1),
+      head: { sha: pull().headSha, ref: 'fix' },
+      base: { sha: 'b'.repeat(40), ref: 'main' },
+    };
+    const newerBoard = async () => {
+      await store.saveBoard(
+        r,
+        board({ pulls: [pull({ title: 'New board', checks: 'failure' })], observedAt: ++clock }),
+      );
+    };
+    const service = createGithubSync({
+      projects: () => [{ repo: r }],
+      config: () => ({ githubToken: 'token' }),
+      store,
+      now: () => ++clock,
+      log: (message) => errors.push(message),
+      invalidate: () => {},
+      rest: async (_cfg, _method, path) => {
+        const resource = new URL(path, 'https://api.github.com').pathname.replace(`/repos/${r}`, '');
+        let result = [];
+        if (resource === '/issues') result = [rawIssue(1), rawIssue(2)];
+        else if (resource === '/pulls') result = [rawPull];
+        else if (resource === '/pulls/1') result = rawPull;
+        else if (resource === '/issues/1') result = rawIssue(1);
+        else if (resource.endsWith('/check-runs')) result = { check_runs: [] };
+        else if (resource === '/pulls/1/files') {
+          filesCalls++;
+          await newerBoard();
+          result = [{ filename: 'app.js', status: 'modified', additions: 1, deletions: 0 }];
+        }
+        return { ok: true, json: async () => result };
+      },
+      graphql: async (_cfg, _query, { number }) => ({
+        repository: {
+          issueOrPullRequest: {
+            __typename: number === 1 ? 'PullRequest' : 'Issue',
+            closingIssuesReferences: { nodes: [] },
+            closedByPullRequestsReferences: { nodes: [] },
+            subIssues: { nodes: [] },
+          },
+        },
+      }),
+      board: async () => {
+        boardCalls++;
+        await newerBoard();
+        return { issuesError: null, issuesTruncated: false };
+      },
+    });
+    await service.tick();
+    await service.tick();
+    expect(errors).toEqual([]);
+    expect(filesCalls).toBe(2);
+    expect(boardCalls).toBe(2);
+    expect([...(await store.syncedItems(r)).keys()].sort()).toEqual([1, 2]);
+    const [[file]] = await pool.query(
+      'SELECT filename FROM github_pull_files f JOIN github_items i ON i.id=f.item_id JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=?',
+      [r],
+    );
+    expect(file.filename).toBe('app.js');
+  });
+
+  it.each([
+    { headSha: 'c'.repeat(40) },
+    { baseBranch: 'release' },
+    { baseSha: 'd'.repeat(40) },
+    { updatedAt: '2026-10-27T11:00:00Z' },
+  ])('rejects a superseded full download after a board revision change: %j', async (change) => {
+    const r = repo();
+    const row = {
+      ...pull({ baseSha: 'b'.repeat(40) }),
+      kind: 'pull',
+      state: 'open',
+      observedAt: 1000,
+      sourceUpdatedAt: pull().updatedAt,
+    };
+    await store.saveBoard(r, board({ pulls: [pull({ baseSha: row.baseSha, ...change })], observedAt: 2000 }));
+    expect(await store.saveItem(r, row, { files: [] })).toBe(false);
+    expect((await store.syncedItems(r)).has(1)).toBe(false);
   });
 
   it('keeps a newer open item visible when GitHub returns older metadata', async () => {
@@ -472,5 +681,50 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     await store.saveMetadata(r, { labels: [], milestones: [] });
     const empty = await store.readBoard(r);
     expect(empty.issues[0]).toMatchObject({ labels: [], milestone: null });
+  });
+
+  it('preserves stable label and milestone assignments when names swap', async () => {
+    const r = repo();
+    const metadata = {
+      labels: [
+        { id: 11, name: 'A' },
+        { id: 22, name: 'B' },
+      ],
+      milestones: [
+        { id: 11, title: 'A' },
+        { id: 22, title: 'B' },
+      ],
+    };
+    await store.saveMetadata(r, metadata);
+    for (const [index, name] of ['A', 'B'].entries())
+      await store.saveItem(r, {
+        ...issue({ number: index + 1, labels: [{ name }], milestone: name }),
+        kind: 'issue',
+        state: 'closed',
+        observedAt: 1000,
+      });
+    await store.saveMetadata(r, {
+      labels: [
+        { id: 11, name: 'B' },
+        { id: 22, name: 'A' },
+      ],
+      milestones: [
+        { id: 11, title: 'B' },
+        { id: 22, title: 'A' },
+      ],
+    });
+    const [rows] = await pool.query(
+      `SELECT i.number, l.github_id AS label_id, l.name, m.github_id AS milestone_id, m.title
+      FROM github_items i JOIN github_repositories r ON r.id=i.repository_id
+      JOIN github_item_labels il ON il.item_id=i.id JOIN github_labels l ON l.id=il.label_id
+      JOIN github_milestones m ON m.id=i.milestone_id WHERE r.repo=? ORDER BY i.number`,
+      [r],
+    );
+    expect(
+      rows.map((row) => ({ ...row, label_id: Number(row.label_id), milestone_id: Number(row.milestone_id) })),
+    ).toEqual([
+      { number: 1, label_id: 11, name: 'B', milestone_id: 11, title: 'B' },
+      { number: 2, label_id: 22, name: 'A', milestone_id: 22, title: 'A' },
+    ]);
   });
 });
