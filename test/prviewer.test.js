@@ -596,7 +596,10 @@ describe('merging from the in-app viewer', () => {
     const pendingBody = { status: 'pending', details: { uuid: 'u-1', message: 'Merge requested' } };
 
     beforeEach(() => vi.useFakeTimers());
-    afterEach(() => vi.useRealTimers());
+    afterEach(() => {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    });
 
     it('merges through the asynchronous endpoint and waits for the result', async () => {
       githubStack(
@@ -642,15 +645,17 @@ describe('merging from the in-app viewer', () => {
         message: 'Added to the merge queue with the 1 below it in the stack',
       });
       expect(githubRest).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(1);
     });
 
     it('reports a merge still running after the wait as pending', async () => {
       githubStack(answer(202, pendingBody));
       const merging = mergePullRequest(project, 42, { headSha: sha, baseRef: 'main' });
-      await vi.runAllTimersAsync();
+      await vi.advanceTimersByTimeAsync(10_000);
       await expect(merging).resolves.toMatchObject({ merged: false, status: 'pending' });
       // The pull read, the request, then ten polls.
       expect(githubRest).toHaveBeenCalledTimes(12);
+      expect(vi.getTimerCount()).toBe(1);
     });
 
     it('refuses with 409 when GitHub reports the stacked merge failed', async () => {
@@ -665,6 +670,7 @@ describe('merging from the in-app viewer', () => {
       });
       await vi.runAllTimersAsync();
       await settled;
+      expect(vi.getTimerCount()).toBe(0);
     });
 
     it.each([
@@ -678,6 +684,7 @@ describe('merging from the in-app viewer', () => {
         status,
         message: 'GitHub refused the merge: Pull request is not mergeable',
       });
+      expect(vi.getTimerCount()).toBe(0);
     });
   });
 

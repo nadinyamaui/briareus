@@ -278,6 +278,142 @@ describe('branch update reconciliation', () => {
   });
 });
 
+describe('stacked merge reconciliation', () => {
+  const headSha = 'a'.repeat(40);
+  const options = { headSha, baseRef: 'main' };
+  let p, saved, status;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    p = project();
+    status = 'enqueued';
+    saved = {
+      pulls: [1, 2, 3].map((number) => ({ number, title: 'Saved pull', labels: [], headSha })),
+      issues: [],
+      syncedAt: new Date().toISOString(),
+    };
+    vi.mocked(githubStore.readBoard).mockImplementation(async () => saved);
+    vi.mocked(githubStore.saveBoard).mockImplementation(async (_repo, board) => {
+      saved = board;
+    });
+    gh.rest.mockReset().mockImplementation(async (_cfg, method, path) => ({
+      ok: true,
+      status: method === 'PUT' ? 202 : 200,
+      json: async () =>
+        path.includes('/merge-async')
+          ? { status, details: { uuid: 'merge-1' } }
+          : { state: 'open', head: { sha: headSha }, base: { ref: 'main' }, stack: { position: 2 } },
+    }));
+    remote([1, 2, 3]);
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.mocked(githubStore.saveBoard).mockResolvedValue(undefined);
+    vi.restoreAllMocks();
+  });
+
+  function remote(numbers, sha = headSha) {
+    serve(
+      numbers.map((number) => {
+        const node = prNode({ number });
+        node.commits.nodes[0].commit.oid = sha;
+        return node;
+      }),
+    );
+  }
+
+  it.each(['pending', 'enqueued'])(
+    'reconciles delayed %s merges after early refreshes still see the open stack',
+    async (outcome) => {
+      status = outcome;
+      expect((await projectPulls(p)).pulls.map((pull) => pull.number)).toEqual([1, 2, 3]);
+      const merging = mergePullRequest(p, 2, options);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(merging).resolves.toMatchObject({ merged: false, status: outcome });
+      const restCalls = outcome === 'pending' ? 12 : 2;
+      expect(gh.rest).toHaveBeenCalledTimes(restCalls);
+      expect((await projectPulls(p)).pulls.map((pull) => pull.number)).toEqual([1, 2, 3]);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(saved.pulls.map((pull) => pull.number)).toEqual([1, 2, 3]);
+
+      remote([3]);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(saved.pulls.map((pull) => pull.number)).toEqual([3]);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(121_000);
+      expect((await projectPulls(p)).pulls.map((pull) => pull.number)).toEqual([3]);
+      expect(gh.graphql).toHaveBeenCalledTimes(3);
+      expect(gh.rest).toHaveBeenCalledTimes(restCalls);
+    },
+  );
+
+  it('keeps reconciling a queued merge when the head changes before the PR leaves the board', async () => {
+    await mergePullRequest(p, 2, options);
+    remote([1, 2, 3], 'b'.repeat(40));
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(saved.pulls).toHaveLength(3);
+    expect(vi.getTimerCount()).toBe(1);
+    remote([3]);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(saved.pulls.map((pull) => pull.number)).toEqual([3]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retries failed board refreshes with rate-limit backoff', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await mergePullRequest(p, 2, options);
+    const retryAt = Date.now() + 90_000;
+    gh.graphql
+      .mockRejectedValueOnce(new Error('GitHub answered 503'))
+      .mockRejectedValueOnce(Object.assign(new Error('Rate limited'), { status: 429, retryAt }));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(gh.graphql).toHaveBeenCalledTimes(2);
+    remote([3]);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(gh.graphql).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(saved.pulls.map((pull) => pull.number)).toEqual([3]);
+    expect(gh.graphql).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('bounds merge reconciliation and leaves the next ordinary read eligible to refresh', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await mergePullRequest(p, 2, options);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(gh.graphql).toHaveBeenCalledTimes(8);
+    expect(vi.getTimerCount()).toBe(0);
+    remote([3]);
+    expect((await projectPulls(p)).pulls.map((pull) => pull.number)).toEqual([3]);
+    expect(gh.graphql).toHaveBeenCalledTimes(9);
+  });
+
+  it('replaces duplicate accepted merge polls', async () => {
+    await mergePullRequest(p, 2, options);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await mergePullRequest(p, 2, options);
+    expect(vi.getTimerCount()).toBe(1);
+    remote([3]);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(gh.graphql).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retains merge reconciliation when a branch update of the same PR is accepted', async () => {
+    await mergePullRequest(p, 2, options);
+    await updatePullRequestBranch(p, 2, options);
+    remote([1, 2, 3], 'b'.repeat(40));
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(vi.getTimerCount()).toBe(1);
+    remote([3]);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(saved.pulls.map((pull) => pull.number)).toEqual([3]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe('projectPulls', () => {
   it('serves a durable board after restart without calling GitHub', async () => {
     const p = project();
@@ -385,7 +521,7 @@ describe('projectPulls', () => {
     );
   });
 
-  it.each(['merged', 'stack-merged', 'stack-enqueued', 'refused'])(
+  it.each(['merged', 'stack-merged', 'refused'])(
     'refreshes the durable board only after a confirmed merge (%s)',
     async (outcome) => {
       vi.useFakeTimers();
