@@ -291,8 +291,8 @@ import { stepRuntime } from '../lib/projects.js';
 import {
   bus,
   DEV_OPEN,
-  initJobs,
-  resumeRestartedSessions,
+  initJobs as restoreJobs,
+  resumeRestartedSessions as resumeJobs,
   stopAllJobProcesses,
   sweepExpiredPreviews,
   PREVIEW_TTL_MS,
@@ -385,6 +385,40 @@ import {
   ensureClone,
 } from '../lib/jobs.js';
 
+// Registry fixtures are restored many times in this file. Real recurring
+// pollers must not consume a later test's GitHub responses or mutate its jobs.
+// Polling scenarios keep fake timers and callback spies, so they still exercise
+// the production scheduler and its cadence.
+function pauseRealJobPolling() {
+  const schedule = globalThis.setInterval;
+  globalThis.setInterval = (...args) => {
+    const timer = schedule(...args);
+    if (!vi.isFakeTimers()) clearInterval(timer);
+    return timer;
+  };
+  return () => {
+    globalThis.setInterval = schedule;
+  };
+}
+
+async function initJobs(options) {
+  const restore = pauseRealJobPolling();
+  try {
+    return await restoreJobs(options);
+  } finally {
+    restore();
+  }
+}
+
+function resumeRestartedSessions(...args) {
+  const restore = pauseRealJobPolling();
+  try {
+    return resumeJobs(...args);
+  } finally {
+    restore();
+  }
+}
+
 beforeEach(() => {
   forgetProviderUsage();
   transferClaudeSession.mockReset();
@@ -420,6 +454,44 @@ async function settleWorkers(orchestratorIds) {
     { timeout: 30_000 },
   );
 }
+
+describe('job polling isolation', () => {
+  it('does not let restored real pollers consume the next test response', async () => {
+    const schedule = globalThis.setInterval;
+    const intervals = vi
+      .spyOn(globalThis, 'setInterval')
+      .mockImplementation((fn, delay, ...args) =>
+        schedule(fn, fn.name === 'syncDevPrs' ? 1 : delay, ...args),
+      );
+    const previous = githubRest.getMockImplementation();
+    const fixture = {
+      id: 'poll-isolation',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/isolation',
+      providerId: 1,
+      turns: 1,
+      startedOnPr: 991,
+      prStatus: { number: 991, state: 'open' },
+    };
+    state.stored = [fixture];
+    try {
+      await initJobs();
+      fixture.status = 'idle';
+      githubRest.mockResolvedValue({ ok: true, json: async () => ({ number: 991, state: 'closed' }) });
+      const reads = githubRest.mock.calls.length;
+      // The next response belongs to another scenario, after registry setup.
+      // Accelerate the real PR interval so a leaked poller fails this test directly.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(githubRest.mock.calls.length).toBe(reads);
+      expect(fixture.prStatus).toEqual({ number: 991, state: 'open' });
+    } finally {
+      fixture.status = 'closed';
+      intervals.mockRestore();
+      githubRest.mockImplementation(previous);
+    }
+  });
+});
 
 describe('jobEventsSince', () => {
   const job = { events: [{ seq: 1 }, { seq: 2 }, { seq: 3 }] };
@@ -8357,9 +8429,8 @@ describe('the review loop: a pending round that is past giving up on', () => {
   const ancient = '2026-08-25T12:31:00.000Z';
   let recent;
   const workerIds = ['stuck-1', 'stuck-2', 'stuck-3', 'stuck-4', 'stuck-5', 'stuck-6'];
-  // Every earlier initJobs() leaves a real 20s syncDevPrs tick running, and a tick resolves
-  // any due round with whatever the mocks answer then. Each round stays parked until its
-  // own test nudges it, and the block's sessions are retired once it is done.
+  // Explicit polling scenarios also inspect this shared registry. Keep each round
+  // parked until its own test nudges it, and retire the block's sessions afterward.
   const PARKED = '2999-01-01T00:00:00.000Z';
   const DUE = '2026-08-25T12:35:00.000Z';
 
@@ -10192,10 +10263,9 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     ...extra,
   });
   const prOne = { number: 1, state: 'open', headRef: 'dev-a', headSha: 'sha-a' };
-  // Every earlier initJobs() leaves a real 20s syncDevPrs tick running: it resolves a due
-  // pendingResult and runs attachPrForBranch for an idle PR-less session, under whatever
-  // mocks another test has installed. So pending rounds stay parked, and the PR-less
-  // sessions stay closed (the tick only looks up idle ones) except inside their own test.
+  // Explicit polling scenarios can resolve due pending rounds and discover PRs
+  // across this shared registry. Keep these rounds parked and PR-less sessions
+  // closed except inside their own test.
   const PARKED = '2999-01-01T00:00:00.000Z';
 
   beforeAll(async () => {
@@ -16285,6 +16355,23 @@ describe('the shared browser in a session', () => {
 
 describe('/btw side questions', () => {
   let bin;
+  // A main turn and its later /context probe are separate CLI processes. Reusing
+  // the exited main child leaves the probe waiting forever for another close.
+  const withContextProbe =
+    (main, fallback) =>
+    (cmd, args, ...rest) => {
+      if (cmd !== '/mock/claude') return fallback(cmd, args, ...rest);
+      if (!args.includes('/context')) return main;
+      const probe = new EventEmitter();
+      probe.stdin = new PassThrough();
+      probe.stdout = new PassThrough();
+      probe.stderr = new PassThrough();
+      probe.stdin.once('finish', () => {
+        probe.stdout.end(JSON.stringify({ result: '' }));
+        setImmediate(() => probe.emit('close', 0));
+      });
+      return probe;
+    };
   beforeEach(async () => {
     bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/claude' });
     askClaudeSideQuestion.mockReset();
@@ -16610,7 +16697,7 @@ describe('/btw side questions', () => {
     child.stdin = new PassThrough();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
-    spawn.mockImplementation((cmd, ...rest) => (cmd === '/mock/claude' ? child : realSpawn(cmd, ...rest)));
+    spawn.mockImplementation(withContextProbe(child, realSpawn));
     captureProviderAuth.mockResolvedValue(undefined);
     askClaudeSideQuestion.mockResolvedValue({
       text: 'Answer',
@@ -16637,6 +16724,7 @@ describe('/btw side questions', () => {
       expect(sessionUsage(job)).toMatchObject({ inputTokens: 10300, outputTokens: 70 });
       child.emit('close', 0);
       await vi.waitFor(() => expect(job.status).toBe('idle'));
+      await flushJobs();
       expect(sessionUsage(job)).toEqual({
         sessions: 0,
         costUsd: 1.75,
@@ -16673,7 +16761,7 @@ describe('/btw side questions', () => {
       child.stdin = new PassThrough();
       child.stdout = new PassThrough();
       child.stderr = new PassThrough();
-      spawn.mockImplementation((cmd, ...rest) => (cmd === '/mock/claude' ? child : realSpawn(cmd, ...rest)));
+      spawn.mockImplementation(withContextProbe(child, realSpawn));
       captureProviderAuth.mockResolvedValue(undefined);
       askClaudeSideQuestion.mockResolvedValue({ text: 'The active run', costUsd: 0.01 });
       try {
@@ -16706,6 +16794,7 @@ describe('/btw side questions', () => {
         }
         child.emit('close', 0);
         await vi.waitFor(() => expect(job.status).toBe('idle'));
+        await flushJobs();
         await askDevSessionBtw(job.id, 'What was the original task?').answer;
         expect(askClaudeSideQuestion).toHaveBeenLastCalledWith(
           expect.objectContaining({
