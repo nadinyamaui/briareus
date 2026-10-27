@@ -301,6 +301,57 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'UI execution has yet to occur',
+    'UI tests scheduled',
+    'UI: Error: cannot start browser',
+    'UI result: ???',
+  ])('rejects unstarted, failed-start and unknown procedures: %s', async (annotation) => {
+    for (const retained of ['response.json', '[API](https://example.com/a.json)']) {
+      for (const [status, evidence] of [
+        [`✅ API; ${annotation}`, retained],
+        ['✅ API', `${retained}; ${annotation}`],
+      ]) {
+        gh.comments = [
+          sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toEqual({
+          failures: [],
+          total: 1,
+          passed: 0,
+          manual: 0,
+          incomplete: true,
+        });
+      }
+    }
+  });
+
+  it.each([
+    'UI execution has occurred',
+    'UI tests executed',
+    'UI displayed execution has yet to occur as expected',
+    'UI showed tests scheduled as expected',
+    'UI result: ??? was displayed as expected',
+  ])('preserves executed procedures and displayed execution wording: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅ API', `response.json; ${annotation}`],
+    ]) {
+      for (const unfinished of ['', '; UI not tested']) {
+        gh.comments = [
+          sheet([
+            `| 1 | API and UI | curl then browser | Both work | ${status}${unfinished} | ${evidence} |`,
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          total: 1,
+          passed: unfinished ? 0 : 1,
+          incomplete: !!unfinished,
+        });
+      }
+    }
+  });
+
+  it.each([
     'UI only 50% tested',
     'UI only 0% tested',
     'UI only 99.5% tested',
@@ -460,6 +511,11 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'No evidence has been recorded for this PR.',
+    'No evidence has been recorded for the PR',
+    'No evidence has been recorded for this pull request',
+    'No evidence was collected for the pull request.',
+    'Not recorded for this PR',
     'No evidence was attached to the PR',
     'No evidence was attached to the PR.',
     'No evidence was attached to this pull request',
@@ -505,6 +561,10 @@ describe('latestTestVerdict', () => {
     ['HTTP 422 for invalid payload', 'API failed with HTTP 422: name is required'],
     ['The purchase requires manual approval', 'UI requires manual approval as expected'],
     ['Order scheduled for tomorrow', 'UI scheduled for tomorrow as expected'],
+    [
+      'Cannot start browser message is displayed',
+      'UI: Error: cannot start browser was displayed as expected',
+    ],
     ['Setup did not succeed message is displayed', 'UI setup did not succeed was displayed as expected'],
     ['HTTP 200 with pending=0', 'API pending=0'],
     ['HTTP 200 with pending-count: 0', 'API pending-count: 0'],
