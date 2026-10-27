@@ -88,6 +88,7 @@ import {
   devSessionRecords,
   createDevSession,
   pendingFeedbackAssessment,
+  feedbackAssessmentReusable,
   sendDevMessage,
   askDevSessionBtw,
   cancelDevTurn,
@@ -249,7 +250,6 @@ import { agentOnly, apiEnabled } from './lib/auth.js';
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
 import { localUpdater } from './lib/local-update.js';
 import { createBabysitter } from './lib/babysitter.js';
-import { incomingFeedback } from './lib/incoming-feedback.js';
 import { securityHeaders } from './lib/security.js';
 import { listWorkspaces, resetSetup, cleanWorkspace, startWorkspacePruner } from './lib/workspaces.js';
 import { githubWebhookUrl, sessionWebhookKey, sessionWebhookUrl } from './lib/webhooksecrets.js';
@@ -1840,7 +1840,7 @@ api.post('/api/dev/actions', async (req, res) => {
   try {
     if (actionId === 'implement-feedback') {
       const pending = pendingFeedbackAssessment(project.repo, number);
-      if (pending && managesSession(res.locals.apiUser, pending))
+      if (pending && !pending.feedbackAssessment.completed && managesSession(res.locals.apiUser, pending))
         return res.json({ session: publicJob(pending) });
     }
     const lookup = await githubRest(cfg, 'GET', `/repos/${project.repo}/pulls/${number}`);
@@ -1870,11 +1870,14 @@ api.post('/api/dev/actions', async (req, res) => {
     const spec = await actionSessionSpec(action, context);
     if ('feedbackAssessment' in spec) {
       const pending = pendingFeedbackAssessment(project.repo, number);
-      if (pending && managesSession(res.locals.apiUser, pending))
+      if (
+        pending &&
+        managesSession(res.locals.apiUser, pending) &&
+        feedbackAssessmentReusable(pending, spec.feedbackAssessment)
+      )
         return res.json({ session: publicJob(pending) });
     }
     const session = createDevSession({ provider, model, effort, ...spec, ownerId: requestOwner(res) });
-    if ('feedbackAssessment' in spec) await incomingFeedback().remember(spec.feedbackAssessment);
     res.status(201).json({
       session,
     });

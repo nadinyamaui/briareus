@@ -49,6 +49,7 @@ const state = vi.hoisted(() => ({
   capacity: 3,
   // What initJobs loads: the only way to register a session here without spawning one.
   stored: [],
+  appSettings: {},
 }));
 
 vi.mock('child_process', async (importOriginal) => {
@@ -123,6 +124,10 @@ vi.mock('../lib/config.js', () => ({
 }));
 
 vi.mock('../lib/db.js', () => ({
+  loadAppSetting: vi.fn(async (key, fallback) => state.appSettings[key] || fallback),
+  saveAppSetting: vi.fn(async (key, value) => {
+    state.appSettings[key] = structuredClone(value);
+  }),
   saveJob: vi.fn(async () => {}),
   saveTaskSession: vi.fn(async () => {}),
   saveJobEvents: vi.fn(async () => {}),
@@ -366,6 +371,7 @@ import {
   holdStandaloneReviewFindings,
   holdFeedbackAssessment,
   pendingFeedbackAssessment,
+  feedbackAssessmentReusable,
   completeStandaloneReview,
   triageStandaloneReviewFindings,
   triageReviewFindings,
@@ -18574,6 +18580,7 @@ describe('incoming feedback assessment gate', () => {
     },
   };
   beforeEach(async () => {
+    state.appSettings = {};
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'feedback-gate-'));
     spawnSync('git', ['init', '-q', workDir]);
     spawnSync('git', [
@@ -18684,6 +18691,7 @@ describe('incoming feedback assessment gate', () => {
   it('holds optional and dismissed findings without automatically fixing or approving, retaining the card after resource cleanup', async () => {
     expect(await holdFeedbackAssessment(job)).toBe(true);
     expect(job.reviewLoop).toBeFalsy();
+    expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
     expect(job.reviewTriage).toMatchObject({
       externalFeedback: true,
       mine: true,
@@ -18743,6 +18751,70 @@ describe('incoming feedback assessment gate', () => {
     );
     expect(job.reviewTriage).toBeTruthy();
   });
+  it.each([
+    ['standalone', triageStandaloneReviewFindings],
+    ['dashboard', triageReviewFindings],
+  ])(
+    'allows an explicit Fix on a colleague’s feedback assessment through %s triage',
+    async (_name, triage) => {
+      state.projects[0].reviewAuthor = 'colleague';
+      await holdFeedbackAssessment(job);
+      expect(job.reviewTriage.mine).toBe(false);
+      const key = job.reviewTriage.findings[0].key;
+      await saveReviewFindingsDrafts(job.id, { verdicts: [{ key, decision: 'fix' }] });
+      expect(job.reviewTriage.drafts.verdicts[key].decision).toBe('fix');
+      state.projects = [{ repo: 'acme/other' }]; // Inspect dispatch without starting a paid implementation session.
+      vi.mocked(implementFeedbackPrompt).mockClear();
+      await expect(triage(job.id, { verdicts: [{ key, decision: 'fix' }] })).rejects.toThrow(
+        /Unknown project/,
+      );
+      expect(recordTriage).toHaveBeenCalled();
+      expect(implementFeedbackPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          triaged: true,
+          findings: [expect.objectContaining({ sourceId: 'review:42' })],
+        }),
+      );
+      expect(getJob(job.id).reviewTriage).toBeTruthy();
+    },
+  );
+  it('reuses running assessments and unchanged completed cards', async () => {
+    expect(feedbackAssessmentReusable(job, { ...snapshot, sources: [] })).toBe(true);
+    await holdFeedbackAssessment(job);
+    await closeDevSession(job.id);
+    expect(feedbackAssessmentReusable(job, structuredClone(snapshot))).toBe(true);
+    expect(pendingFeedbackAssessment(job.repo, 31)).toBe(job);
+    expect(job.reviewTriage.stale).toBeUndefined();
+  });
+  it.each(['edited', 'deleted'])(
+    'makes a completed card refreshable when a source is %s without a push',
+    async (change) => {
+      await holdFeedbackAssessment(job);
+      await closeDevSession(job.id);
+      const current = structuredClone(snapshot);
+      if (change === 'edited') current.sources[0].body = 'Corrected feedback';
+      else current.sources = [];
+      expect(feedbackAssessmentReusable(job, current)).toBe(false);
+      expect(job.reviewTriage.stale).toBe(true);
+      expect(pendingFeedbackAssessment(job.repo, 31)).toBeNull();
+      expect(recordTriage).not.toHaveBeenCalled();
+    },
+  );
+  it('remembers successful empty assessments as well as held cards', async () => {
+    fs.writeFileSync(
+      path.join(workDir, snapshot.resultFile),
+      JSON.stringify({
+        sha: snapshot.sha,
+        complete: true,
+        sourcesReviewed: ['review:42'],
+        findings: [],
+      }),
+    );
+    expect(await holdFeedbackAssessment(job)).toBe(false);
+    expect(job.feedbackAssessment.completed).toBe(true);
+    expect(job.reviewTriage).toBeFalsy();
+    expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
+  });
   it('refuses to delete somebody else’s feedback or guess a reply thread for summary-only findings', async () => {
     await holdFeedbackAssessment(job);
     const key = job.reviewTriage.findings[0].key;
@@ -18754,6 +18826,7 @@ describe('incoming feedback assessment gate', () => {
     await expect(holdFeedbackAssessment(job)).rejects.toThrow(/incomplete/);
     expect(job.reviewTriage).toBeFalsy();
     expect(job.feedbackAssessment.completed).toBe(false);
+    expect(state.appSettings['incoming-feedback']).toBeUndefined();
     expect(addPullRequestLabel).not.toHaveBeenCalled();
   });
 });

@@ -33,7 +33,11 @@ function harness(over = {}) {
     history: [],
   };
   let state = {};
-  const start = vi.fn(() => ({ id: 'assessment' }));
+  let active = null;
+  const start = vi.fn((spec) => {
+    active = { id: 'assessment', feedbackAssessment: spec.feedbackAssessment };
+    return active;
+  });
   const read = vi.fn(async () => structuredClone(snapshot));
   const save = vi.fn(async (next) => {
     state = structuredClone(next);
@@ -41,7 +45,7 @@ function harness(over = {}) {
   const service = createIncomingFeedback({
     projects: () => [project],
     read,
-    pending: () => null,
+    pending: () => active,
     busy: () => false,
     slots: () => 1,
     start,
@@ -50,12 +54,28 @@ function harness(over = {}) {
     save,
     ...over,
   });
-  return { service, start, read, save, snapshot, state: () => state };
+  return {
+    service,
+    start,
+    read,
+    save,
+    snapshot,
+    state: () => state,
+    fail: () => {
+      active = null;
+    },
+    complete: async () => {
+      active.feedbackAssessment.completed = true;
+      await service.remember(active.feedbackAssessment);
+      active = null;
+    },
+  };
 }
 
 describe('incoming feedback intake', () => {
   it('automatically assesses COMMENTED reviews on the project runtime and waits for manual triage', async () => {
-    const { service, start } = harness();
+    const h = harness();
+    const { service, start } = h;
     expect(await service.assess(project, pr)).toBe(true);
     expect(start).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -68,26 +88,47 @@ describe('incoming feedback intake', () => {
       }),
     );
     expect(start.mock.calls[0][0].feedbackAssessment.sources).toHaveLength(1);
+    expect(await service.assess(project, pr)).toBe(true);
+    await h.complete();
     expect(await service.assess(project, pr)).toBe(false);
     expect(start).toHaveBeenCalledTimes(1);
   });
   it('deduplicates across restart and admits a new review or edited body on the same head', async () => {
     const h = harness();
     await h.service.assess(project, pr);
+    await h.complete();
     const restored = harness({ load: async () => h.state() });
     await restored.service.assess(project, pr);
     expect(restored.start).not.toHaveBeenCalled();
     h.snapshot.sources[0].body += ' edited';
     await h.service.assess(project, { ...pr, updatedAt: 'later' });
+    await h.complete();
     h.snapshot.sources.push({ ...h.snapshot.sources[0], id: 'review:43', reviewId: 43 });
     await h.service.assess(project, { ...pr, updatedAt: 'latest' });
     expect(h.start).toHaveBeenCalledTimes(3);
   });
   it('a manual assessment is remembered so completing its card does not start the same review again', async () => {
     const h = harness();
-    await h.service.remember(h.snapshot);
+    await h.service.remember({ ...h.snapshot, completed: true });
     await h.service.assess(project, pr);
     expect(h.start).not.toHaveBeenCalled();
+  });
+  it('retries asynchronously failed assessments without a timestamp change, including after restart', async () => {
+    const h = harness();
+    await h.service.assess(project, pr);
+    expect(h.save).not.toHaveBeenCalled();
+    await h.service.remember(h.start.mock.calls[0][0].feedbackAssessment);
+    expect(h.save).not.toHaveBeenCalled();
+    h.fail();
+    const restored = harness({ load: async () => h.state() });
+    expect(await restored.service.assess(project, pr)).toBe(true);
+    expect(restored.start).toHaveBeenCalledTimes(1);
+    restored.fail();
+    expect(await restored.service.assess(project, { ...pr, updatedAt: 'later' })).toBe(true);
+    expect(restored.start).toHaveBeenCalledTimes(2);
+    await restored.complete();
+    expect(await restored.service.assess(project, pr)).toBe(false);
+    expect(restored.start).toHaveBeenCalledTimes(2);
   });
   it('defers while a card waits or capacity is full, without consuming the review', async () => {
     const pending = harness({ pending: () => ({ reviewTriage: {} }) });
@@ -138,6 +179,7 @@ describe('incoming feedback intake', () => {
     let busy = false;
     const h = harness({ busy: () => busy });
     await h.service.assess(project, pr);
+    await h.complete();
     busy = true;
     h.snapshot.sources.push({ ...h.snapshot.sources[0], id: 'review:43', reviewId: 43 });
     await h.service.reviewEvent(project.repo, {
@@ -171,6 +213,7 @@ describe('incoming feedback intake', () => {
       h.service.reviewEvent(project.repo, event),
     ]);
     expect(h.start).toHaveBeenCalledTimes(1);
+    await h.complete();
     h.snapshot.sources[0].body += ' more';
     await h.service.reviewEvent(project.repo, { ...event, action: 'edited' });
     expect(h.start).toHaveBeenCalledTimes(2);
