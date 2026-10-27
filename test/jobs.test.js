@@ -18712,6 +18712,20 @@ describe('official orchestrator PR actions', () => {
       }
     },
   );
+  it.each(['review', 'implement-feedback', 'solve-conflicts'])(
+    'accepts equivalent repository casing for %s scope',
+    async (action) => {
+      const session = await startOrchestratorPrAction(parent, {
+        action,
+        prNumber: 12,
+        repo: 'Acme/Shop',
+      });
+      expect(session.repo).toBe('acme/shop');
+      expect(session.parentId).toBe(parent.id);
+      expect(session.startedOnPr).toBe(12);
+      expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'GET', '/repos/acme/shop/pulls/12');
+    },
+  );
   it.each([0, -1, 1.2, '12', null, Number.MAX_SAFE_INTEGER + 1])(
     'rejects invalid PR %s',
     async (prNumber) => {
