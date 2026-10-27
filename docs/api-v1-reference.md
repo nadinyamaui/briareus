@@ -2074,6 +2074,18 @@ Remove a server. Needs `admin`.
 
 **Returns** `{ ok: boolean }`
 
+### `POST /settings/ssh/servers/{id}/monitor-token`
+
+Enable telemetry and issue or rotate the separate monitor service’s per-server credential. Needs `admin`.
+
+**Returns** `{ serverId: integer, endpoint: string, token: string, intervalSeconds: integer, retentionHours: integer }`. Token shown once, only its hash is stored; grants only sample ingestion for this server, never operator APIs or SSH. A new token revokes the previous one. Save the response as the service’s private config; never in Git. Install nadinyamaui/briareus-monitor once over SSH. Requires PUBLIC_BASE_URL with HTTPS.
+
+### `DELETE /settings/ssh/servers/{id}/monitor-token`
+
+Revoke a monitor credential and stop accepting that server’s telemetry. Needs `admin`.
+
+**Returns** `{ ok: boolean }`
+
 ### `GET /settings/ssh/servers/{id}/db-credentials`
 
 Read the server’s database login, decrypted, to connect through an SSH tunnel to `host`:`port` on it. 404 when none is stored. Needs `admin`.
@@ -3090,37 +3102,37 @@ A message’s content, as synced.
 
 A server an agent may run commands on, with approval.
 
-| Field               | Type         |                                                                                                                                                                                                                                                                                                                  |
-| ------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`                | `integer`    | Its id; set by the server                                                                                                                                                                                                                                                                                        |
-| `label`             | `string`     | Its display name                                                                                                                                                                                                                                                                                                 |
-| `repo`              | `string`     | The project whose sessions may use it                                                                                                                                                                                                                                                                            |
-| `host`              | `string`     | Its host                                                                                                                                                                                                                                                                                                         |
-| `port`              | `integer`    | Its port                                                                                                                                                                                                                                                                                                         |
-| `username`          | `string`     | The user to connect as                                                                                                                                                                                                                                                                                           |
-| `identityFile`      | `string`     | The private key file on the Briareus server                                                                                                                                                                                                                                                                      |
-| `password`          | `string`     | SSH password (max 1023 UTF-8 bytes, no NUL or newlines). Write-only, stored encrypted; omitted keeps the stored value, empty clears it. When set, uses password authentication instead of a key. Requires CREDENTIALS_KEY                                                                                        |
-| `hasPassword`       | `boolean`    | Whether an SSH password is stored; set by the server                                                                                                                                                                                                                                                             |
-| `sudoPassword`      | `string`     | Sudo password, separate from SSH authentication. Write-only, encrypted; omit to preserve, empty to clear                                                                                                                                                                                                         |
-| `hasSudoPassword`   | `boolean`    | Whether a sudo password is stored; set by the server                                                                                                                                                                                                                                                             |
-| `permissionMode`    | `ask\|allow` | `ask` waits for approval of every command; `allow` runs them                                                                                                                                                                                                                                                     |
-| `enabled`           | `boolean`    | Whether agents may use it                                                                                                                                                                                                                                                                                        |
-| `monitoringEnabled` | `boolean`    | Opt in to installing the fixed Linux/Python 3 resource collector under the SSH user’s ~/.local/share/briareus and polling over SSH once a minute; false by default. This authorizes only telemetry, independently of agent command approvals. No sudo, daemon or listening port; disabled servers are not polled |
-| `dbHost`            | `string`     | Where its database listens, as seen from the server itself; `127.0.0.1` by default                                                                                                                                                                                                                               |
-| `dbPort`            | `integer`    | Its database’s port; 3306 by default                                                                                                                                                                                                                                                                             |
-| `dbUsername`        | `string`     | The database user. Write-only: stored encrypted and read back through `GET …/db-credentials`. Empty clears the login                                                                                                                                                                                             |
-| `dbPassword`        | `string`     | That user’s password. Write-only, stored encrypted; left out, the stored one stays                                                                                                                                                                                                                               |
-| `hasDbCredentials`  | `boolean`    | Whether a database login is stored; set by the server                                                                                                                                                                                                                                                            |
+| Field               | Type         |                                                                                                                                                                                                                                      |
+| ------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`                | `integer`    | Its id; set by the server                                                                                                                                                                                                            |
+| `label`             | `string`     | Its display name                                                                                                                                                                                                                     |
+| `repo`              | `string`     | The project whose sessions may use it                                                                                                                                                                                                |
+| `host`              | `string`     | Its host                                                                                                                                                                                                                             |
+| `port`              | `integer`    | Its port                                                                                                                                                                                                                             |
+| `username`          | `string`     | The user to connect as                                                                                                                                                                                                               |
+| `identityFile`      | `string`     | The private key file on the Briareus server                                                                                                                                                                                          |
+| `password`          | `string`     | SSH password (max 1023 UTF-8 bytes, no NUL or newlines). Write-only, stored encrypted; omitted keeps the stored value, empty clears it. When set, uses password authentication instead of a key. Requires CREDENTIALS_KEY            |
+| `hasPassword`       | `boolean`    | Whether an SSH password is stored; set by the server                                                                                                                                                                                 |
+| `sudoPassword`      | `string`     | Sudo password, separate from SSH authentication. Write-only, encrypted; omit to preserve, empty to clear                                                                                                                             |
+| `hasSudoPassword`   | `boolean`    | Whether a sudo password is stored; set by the server                                                                                                                                                                                 |
+| `permissionMode`    | `ask\|allow` | `ask` waits for approval of every command; `allow` runs them                                                                                                                                                                         |
+| `enabled`           | `boolean`    | Whether agents may use it                                                                                                                                                                                                            |
+| `monitoringEnabled` | `boolean`    | Accept outbound HTTPS telemetry from the separate briareus-monitor service; false by default. Issue a per-server monitor token and install the service once over SSH. No periodic SSH connections. Disabled servers reject telemetry |
+| `dbHost`            | `string`     | Where its database listens, as seen from the server itself; `127.0.0.1` by default                                                                                                                                                   |
+| `dbPort`            | `integer`    | Its database’s port; 3306 by default                                                                                                                                                                                                 |
+| `dbUsername`        | `string`     | The database user. Write-only: stored encrypted and read back through `GET …/db-credentials`. Empty clears the login                                                                                                                 |
+| `dbPassword`        | `string`     | That user’s password. Write-only, stored encrypted; left out, the stored one stays                                                                                                                                                   |
+| `hasDbCredentials`  | `boolean`    | Whether a database login is stored; set by the server                                                                                                                                                                                |
 
 ### SshResourceSample
 
-One minute of SSH telemetry; failed samples have null metrics and a safe error. CPU/network rates are null until two valid counter samples exist on the same boot.
+One minute of telemetry pushed by the installed service; missing samples remain gaps. CPU/network rates are null until two valid counter samples exist on the same boot.
 
 | Field     | Type                  |                                                                      |
 | --------- | --------------------- | -------------------------------------------------------------------- |
 | `at`      | `integer`             | Minute bucket as Unix milliseconds, stamped by Briareus              |
 | `metrics` | `SshResourceMetrics?` | Null when collection failed; never represent missing metrics as zero |
-| `error`   | `string?`             | Collection failure, or null on success                               |
+| `error`   | `string?`             | Reserved; null for received samples                                  |
 
 ### SshResourceMetrics
 
@@ -3138,15 +3150,15 @@ Linux host resources, independent of coding sessions.
 
 A server visible to the caller, without SSH credentials or identity paths.
 
-| Field               | Type                 |                                                          |
-| ------------------- | -------------------- | -------------------------------------------------------- |
-| `id`                | `integer`            | SSH server id                                            |
-| `label`             | `string`             | Display name                                             |
-| `repo`              | `string`             | Project                                                  |
-| `enabled`           | `boolean`            | SSH server enabled                                       |
-| `monitoringEnabled` | `boolean`            | Telemetry opted in                                       |
-| `latest`            | `SshResourceSample?` | Latest retained attempt, including failures, or null     |
-| `stale`             | `boolean`            | No sample, a failed sample, or more than two minutes old |
+| Field               | Type                 |                                        |
+| ------------------- | -------------------- | -------------------------------------- |
+| `id`                | `integer`            | SSH server id                          |
+| `label`             | `string`             | Display name                           |
+| `repo`              | `string`             | Project                                |
+| `enabled`           | `boolean`            | SSH server enabled                     |
+| `monitoringEnabled` | `boolean`            | Telemetry opted in                     |
+| `latest`            | `SshResourceSample?` | Latest received sample, or null        |
+| `stale`             | `boolean`            | No sample or more than two minutes old |
 
 ### WhatsAppAccount
 
@@ -3324,223 +3336,226 @@ A session’s webhook: where an outside system posts to wake it, and the limits 
 
 The built-in dashboard, since removed, called its handlers by the paths on the left, with a login cookie. Those paths are retired and answer 410; each has the route on the right, for a client ported from the old pages.
 
-| Dashboard                                                                        | API                                                                             |
-| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `GET /api/me/github`                                                             | `GET /me/github`                                                                |
-| `PUT /api/me/github`                                                             | `PUT /me/github`                                                                |
-| `DELETE /api/me/github`                                                          | `DELETE /me/github`                                                             |
-| `GET /api/me/home-assistant`                                                     | `GET /me/home-assistant`                                                        |
-| `PUT /api/me/home-assistant`                                                     | `PUT /me/home-assistant`                                                        |
-| `DELETE /api/me/home-assistant`                                                  | `DELETE /me/home-assistant`                                                     |
-| `GET /api/dev/projects`                                                          | `GET /projects`                                                                 |
-| `GET /api/dev/branches`                                                          | `GET /branches`                                                                 |
-| `POST /api/dev/branches/serve`                                                   | `POST /branches/serve`                                                          |
-| `GET /api/dev/runtimes`                                                          | `GET /runtimes`                                                                 |
-| `GET /api/dev/usage`                                                             | `GET /usage`                                                                    |
-| `GET /api/dev/actions`                                                           | `GET /actions`                                                                  |
-| `POST /api/dev/actions`                                                          | `POST /actions`                                                                 |
-| `GET /api/dev/pulls`                                                             | `GET /pulls`                                                                    |
-| `GET /api/dev/pull`                                                              | `GET /pulls/{number}`                                                           |
-| `GET /api/pr/view?section=description`                                           | `GET /pulls/{number}/description`                                               |
-| `GET /api/pr/view?section=files`                                                 | `GET /pulls/{number}/files`                                                     |
-| `GET /api/pr/view?section=commits`                                               | `GET /pulls/{number}/commits`                                                   |
-| `GET /api/pr/view?section=checks`                                                | `GET /pulls/{number}/checks`                                                    |
-| `GET /api/pr/view?section=comments`                                              | `GET /pulls/{number}/comments`                                                  |
-| `GET /api/pr/view?section=reviews`                                               | `GET /pulls/{number}/reviews`                                                   |
-| `GET /api/pr/view?section=review-comments`                                       | `GET /pulls/{number}/review-comments`                                           |
-| `GET /api/pr/findings`                                                           | `GET /pulls/{number}/findings`                                                  |
-| `POST /api/pr/findings/decision`                                                 | `POST /pulls/{number}/findings/decision`                                        |
-| `PATCH /api/pr/update`                                                           | `PATCH /pulls/{number}`                                                         |
-| `PATCH /api/issues/update`                                                       | `PATCH /issues/{number}`                                                        |
-| `POST /api/pr/update-branch`                                                     | `POST /pulls/{number}/update-branch`                                            |
-| `POST /api/pr/merge`                                                             | `POST /pulls/{number}/merge`                                                    |
-| `POST /api/dev/pulls/:number/serve`                                              | `POST /pulls/{number}/serve`                                                    |
-| `GET /api/issues/view`                                                           | `GET /issues/{number}`                                                          |
-| `GET /api/issues/timeline`                                                       | `GET /issues/{number}/timeline`                                                 |
-| `POST /api/issues/close`                                                         | `POST /issues/{number}/close`                                                   |
-| `GET /api/dev/project-board`                                                     | `GET /project-board`                                                            |
-| `POST /api/dev/project-board/move`                                               | `POST /project-board/move`                                                      |
-| `GET /api/pr/commit`                                                             | `GET /commits/{sha}`                                                            |
-| `GET /api/repo/tree`                                                             | `GET /repo/tree`                                                                |
-| `GET /api/repo/file`                                                             | `GET /repo/file`                                                                |
-| `GET /api/repo/archive`                                                          | `GET /repo/archive`                                                             |
-| `GET /api/dev/sessions`                                                          | `GET /sessions`                                                                 |
-| `POST /api/dev/sessions`                                                         | `POST /sessions`                                                                |
-| `POST /api/dev/sessions/:id/files`                                               | `POST /sessions/{id}/files`                                                     |
-| `GET /api/dev/sessions/:id`                                                      | `GET /sessions/{id}`                                                            |
-| `GET /api/dev/sessions/:id/events`                                               | `GET /sessions/{id}/events`                                                     |
-| `PATCH /api/dev/sessions/:id`                                                    | `PATCH /sessions/{id}`                                                          |
-| `DELETE /api/dev/sessions/:id`                                                   | `DELETE /sessions/{id}`                                                         |
-| `GET /api/dev/sessions/:id/mail-wake`                                            | `GET /sessions/{id}/mail-wake`                                                  |
-| `PUT /api/dev/sessions/:id/mail-wake`                                            | `PUT /sessions/{id}/mail-wake`                                                  |
-| `POST /api/dev/sessions/:id/message`                                             | `POST /sessions/{id}/messages`                                                  |
-| `DELETE /api/dev/sessions/:id/queue/:index`                                      | `DELETE /sessions/{id}/queue/{index}`                                           |
-| `POST /api/dev/sessions/:id/cancel`                                              | `POST /sessions/{id}/cancel`                                                    |
-| `POST /api/dev/sessions/:id/close`                                               | `POST /sessions/{id}/close`                                                     |
-| `POST /api/dev/sessions/:id/reopen`                                              | `POST /sessions/{id}/reopen`                                                    |
-| `POST /api/dev/sessions/:id/serve`                                               | `POST /sessions/{id}/serve`                                                     |
-| `GET /api/dev/sessions/:id/browser`                                              | `GET /sessions/{id}/browser`                                                    |
-| `POST /api/dev/sessions/:id/browser`                                             | `POST /sessions/{id}/browser`                                                   |
-| `DELETE /api/dev/sessions/:id/browser`                                           | `DELETE /sessions/{id}/browser`                                                 |
-| `GET /api/dev/sessions/:id/browser/stream`                                       | `GET /sessions/{id}/browser/stream`                                             |
-| `GET /api/dev/sessions/:id/browser/screenshot`                                   | `GET /sessions/{id}/browser/screenshot`                                         |
-| `POST /api/dev/sessions/:id/browser/input`                                       | `POST /sessions/{id}/browser/input`                                             |
-| `GET /api/dev/sessions/:id/stats`                                                | `GET /sessions/{id}/stats`                                                      |
-| `GET /api/dev/stats/sessions`                                                    | `GET /stats/sessions`                                                           |
-| `GET /api/dev/stats/server`                                                      | `GET /stats/server`                                                             |
-| `POST /api/dev/sessions/:id/compact`                                             | `POST /sessions/{id}/compact`                                                   |
-| `POST /api/dev/sessions/:id/btw`                                                 | `POST /sessions/{id}/btw`                                                       |
-| `POST /api/dev/sessions/:id/clear`                                               | `POST /sessions/{id}/clear`                                                     |
-| `POST /api/dev/sessions/:id/loop`                                                | `POST /sessions/{id}/review-loop`                                               |
-| `POST /api/dev/sessions/:id/qa-loop`                                             | `POST /sessions/{id}/qa-loop`                                                   |
-| `POST /api/dev/sessions/:id/link-pr`                                             | `POST /sessions/{id}/link-pr`                                                   |
-| `POST /api/dev/sessions/:id/triage`                                              | `POST /sessions/{id}/findings/triage`                                           |
-| `POST /api/dev/sessions/:id/triage/save`                                         | `POST /sessions/{id}/findings/save`                                             |
-| `POST /api/dev/sessions/:id/findings/reply`                                      | `POST /sessions/{id}/findings/reply`                                            |
-| `POST /api/dev/sessions/:id/findings/delete`                                     | `POST /sessions/{id}/findings/delete`                                           |
-| `GET /api/operations/preview/:id`                                                | `GET /sessions/{id}/preview`                                                    |
-| `POST /api/operations/preview/:id`                                               | `POST /sessions/{id}/preview/feedback`                                          |
-| `GET /api/dev/sessions/:id/webhook`                                              | `GET /sessions/{id}/webhook`                                                    |
-| `PUT /api/dev/sessions/:id/webhook`                                              | `PUT /sessions/{id}/webhook`                                                    |
-| `POST /api/dev/sessions/:id/webhook/rotate`                                      | `POST /sessions/{id}/webhook/rotate`                                            |
-| `GET /api/operations/recovery/:id`                                               | `GET /sessions/{id}/recovery`                                                   |
-| `POST /api/operations/recovery/:id`                                              | `POST /sessions/{id}/recovery`                                                  |
-| `GET /api/operations/tasks/:id`                                                  | `GET /tasks/{id}`                                                               |
-| `GET /api/dev/prompts`                                                           | `GET /prompts`                                                                  |
-| `POST /api/dev/prompts`                                                          | `POST /prompts`                                                                 |
-| `PUT /api/dev/prompts/:id`                                                       | `PUT /prompts/{id}`                                                             |
-| `DELETE /api/dev/prompts/:id`                                                    | `DELETE /prompts/{id}`                                                          |
-| `POST /api/dev/uploads`                                                          | `POST /uploads`                                                                 |
-| `GET /api/dev/transcribe`                                                        | `GET /transcribe`                                                               |
-| `POST /api/dev/transcribe`                                                       | `POST /transcribe`                                                              |
-| `GET /api/dev/providers`                                                         | `GET /providers`                                                                |
-| `GET /api/memories`                                                              | `GET /memories`                                                                 |
-| `GET /api/operations/memories`                                                   | `GET /memories/health`                                                          |
-| `POST /api/operations/memories/merge/apply`                                      | `POST /memories/merge`                                                          |
-| `POST /api/operations/memories/:id`                                              | `POST /memories/{id}/policy`                                                    |
-| `POST /api/memories`                                                             | `POST /memories`                                                                |
-| `PUT /api/memories/:id`                                                          | `PUT /memories/{id}`                                                            |
-| `DELETE /api/memories/:id`                                                       | `DELETE /memories/{id}`                                                         |
-| `GET /api/dev/usage/all`                                                         | `GET /usage/all`                                                                |
-| `GET /api/operations/attention`                                                  | `GET /attention`                                                                |
-| `GET /api/operations/maintenance`                                                | `GET /maintenance`                                                              |
-| `POST /api/operations/maintenance`                                               | `POST /maintenance`                                                             |
-| `GET /api/ssh/requests`                                                          | `GET /ssh/requests`                                                             |
-| `POST /api/ssh/requests/:id/decision`                                            | `POST /ssh/requests/{id}/decision`                                              |
-| `GET /api/home-assistant`                                                        | `GET /home-assistant`                                                           |
-| `GET /api/home-assistant/entities`                                               | `GET /home-assistant/entities`                                                  |
-| `GET /api/home-assistant/entities/:id`                                           | `GET /home-assistant/entities/{id}`                                             |
-| `GET /api/home-assistant/services`                                               | `GET /home-assistant/services`                                                  |
-| `POST /api/home-assistant/services/:domain/:service`                             | `POST /home-assistant/services/{domain}/{service}`                              |
-| `POST /api/home-assistant/events/:type`                                          | `POST /home-assistant/events/{type}`                                            |
-| `GET /api/whatsapp/accounts`                                                     | `GET /whatsapp/accounts`                                                        |
-| `GET /api/whatsapp/accounts/:id`                                                 | `GET /whatsapp/accounts/{id}`                                                   |
-| `POST /api/whatsapp/accounts/:id/start`                                          | `POST /whatsapp/accounts/{id}/start`                                            |
-| `GET /api/whatsapp/accounts/:id/qr`                                              | `GET /whatsapp/accounts/{id}/qr`                                                |
-| `POST /api/whatsapp/accounts/:id/logout`                                         | `POST /whatsapp/accounts/{id}/logout`                                           |
-| `GET /api/whatsapp/accounts/:id/conversations`                                   | `GET /whatsapp/accounts/{id}/conversations`                                     |
-| `GET /api/whatsapp/accounts/:id/conversations/:chat/messages`                    | `GET /whatsapp/accounts/{id}/conversations/{chat}/messages`                     |
-| `POST /api/whatsapp/accounts/:id/conversations/:chat/messages`                   | `POST /whatsapp/accounts/{id}/conversations/{chat}/messages`                    |
-| `POST /api/whatsapp/accounts/:id/conversations/:chat/read`                       | `POST /whatsapp/accounts/{id}/conversations/{chat}/read`                        |
-| `GET /api/whatsapp/accounts/:id/conversations/:chat/messages/:message/media`     | `GET /whatsapp/accounts/{id}/conversations/{chat}/messages/{message}/media`     |
-| `GET /api/slack/inbox/workspaces`                                                | `GET /slack/workspaces`                                                         |
-| `GET /api/slack/inbox/:id/conversations`                                         | `GET /slack/workspaces/{id}/conversations`                                      |
-| `GET /api/slack/inbox/:id/conversations/:channel`                                | `GET /slack/workspaces/{id}/conversations/{channel}`                            |
-| `GET /api/slack/inbox/:id/people`                                                | `GET /slack/workspaces/{id}/people`                                             |
-| `POST /api/slack/inbox/:id/direct-messages`                                      | `POST /slack/workspaces/{id}/direct-messages`                                   |
-| `GET /api/slack/inbox/:id/conversations/:channel/messages`                       | `GET /slack/workspaces/{id}/conversations/{channel}/messages`                   |
-| `GET /api/slack/inbox/:id/conversations/:channel/threads/:ts`                    | `GET /slack/workspaces/{id}/conversations/{channel}/threads/{ts}`               |
-| `POST /api/slack/inbox/:id/conversations/:channel/messages`                      | `POST /slack/workspaces/{id}/conversations/{channel}/messages`                  |
-| `POST /api/slack/inbox/:id/conversations/:channel/read`                          | `POST /slack/workspaces/{id}/conversations/{channel}/read`                      |
-| `GET /api/slack/inbox/:id/events`                                                | `GET /slack/workspaces/{id}/events`                                             |
-| `GET /api/slack/requests`                                                        | `GET /slack/requests`                                                           |
-| `POST /api/slack/requests/:id/decision`                                          | `POST /slack/requests/{id}/decision`                                            |
-| `GET /api/operations/deployments`                                                | `GET /deployments`                                                              |
-| `GET /api/operations/deployments/config`                                         | `GET /deployments/config`                                                       |
-| `POST /api/operations/deployments/config`                                        | `POST /deployments/config`                                                      |
-| `POST /api/operations/deployments/plan`                                          | `POST /deployments/plan`                                                        |
-| `POST /api/operations/deployments/dispatch`                                      | `POST /deployments/dispatch`                                                    |
-| `POST /api/operations/deployments/acknowledge`                                   | `POST /deployments/acknowledge`                                                 |
-| `GET /api/forge/accounts/:account/servers`                                       | `GET /forge/accounts/{account}/servers`                                         |
-| `GET /api/forge/accounts/:account/servers/:server/sites`                         | `GET /forge/accounts/{account}/servers/{server}/sites`                          |
-| `GET /api/forge/accounts/:account/servers/:server/sites/:site`                   | `GET /forge/accounts/{account}/servers/{server}/sites/{site}`                   |
-| `GET /api/forge/accounts/:account/servers/:server/sites/:site/deployment-script` | `GET /forge/accounts/{account}/servers/{server}/sites/{site}/deployment-script` |
-| `PUT /api/forge/accounts/:account/servers/:server/sites/:site/deployment-script` | `PUT /forge/accounts/{account}/servers/{server}/sites/{site}/deployment-script` |
-| `GET /api/forge/accounts/:account/servers/:server/sites/:site/env`               | `GET /forge/accounts/{account}/servers/{server}/sites/{site}/env`               |
-| `PUT /api/forge/accounts/:account/servers/:server/sites/:site/env`               | `PUT /forge/accounts/{account}/servers/{server}/sites/{site}/env`               |
-| `GET /api/envoyer/available`                                                     | `GET /envoyer/accounts`                                                         |
-| `GET /api/envoyer/accounts/:id/projects`                                         | `GET /envoyer/accounts/{id}/projects`                                           |
-| `GET /api/envoyer/accounts/:id/projects/:project`                                | `GET /envoyer/accounts/{id}/projects/{project}`                                 |
-| `GET /api/envoyer/accounts/:id/projects/:project/servers`                        | `GET /envoyer/accounts/{id}/projects/{project}/servers`                         |
-| `GET /api/envoyer/accounts/:id/projects/:project/deployments`                    | `GET /envoyer/accounts/{id}/projects/{project}/deployments`                     |
-| `GET /api/envoyer/accounts/:id/projects/:project/deployments/:deployment`        | `GET /envoyer/accounts/{id}/projects/{project}/deployments/{deployment}`        |
-| `POST /api/envoyer/accounts/:id/projects/:project/deployments`                   | `POST /envoyer/accounts/{id}/projects/{project}/deployments`                    |
-| `GET /api/mail/messages`                                                         | `GET /mail/messages`                                                            |
-| `GET /api/mail/accounts/:account/messages/:id`                                   | `GET /mail/accounts/{account}/messages/{id}`                                    |
-| `DELETE /api/mail/accounts/:account/messages/:id`                                | `DELETE /mail/accounts/{account}/messages/{id}`                                 |
-| `POST /api/mail/accounts/:account/messages/:id/reply`                            | `POST /mail/accounts/{account}/messages/{id}/reply`                             |
-| `GET /videos/*file`                                                              | `GET /videos/{file}`                                                            |
-| `PUT /api/projects/order`                                                        | `PUT /settings/projects/order`                                                  |
-| `GET /api/projects`                                                              | `GET /settings/projects`                                                        |
-| `POST /api/projects`                                                             | `POST /settings/projects`                                                       |
-| `PUT /api/projects/:id`                                                          | `PUT /settings/projects/{id}`                                                   |
-| `DELETE /api/projects/:id`                                                       | `DELETE /settings/projects/{id}`                                                |
-| `GET /api/shares`                                                                | `GET /settings/shares`                                                          |
-| `PUT /api/shares`                                                                | `PUT /settings/shares`                                                          |
-| `GET /api/projects/:id/backup`                                                   | `GET /settings/projects/{id}/backup`                                            |
-| `POST /api/projects/:id/backup`                                                  | `POST /settings/projects/{id}/backup`                                           |
-| `GET /api/projects/:id/update`                                                   | `GET /settings/projects/{id}/update`                                            |
-| `POST /api/projects/:id/update`                                                  | `POST /settings/projects/{id}/update`                                           |
-| `GET /api/templates`                                                             | `GET /settings/templates`                                                       |
-| `PUT /api/templates/1`                                                           | `PUT /settings/templates`                                                       |
-| `POST /api/providers/test`                                                       | `POST /settings/providers/test`                                                 |
-| `GET /api/providers`                                                             | `GET /settings/providers`                                                       |
-| `POST /api/providers`                                                            | `POST /settings/providers`                                                      |
-| `PUT /api/providers/:id`                                                         | `PUT /settings/providers/{id}`                                                  |
-| `DELETE /api/providers/:id`                                                      | `DELETE /settings/providers/{id}`                                               |
-| `GET /api/providers/:id/status`                                                  | `GET /settings/providers/{id}/status`                                           |
-| `POST /api/providers/:id/login`                                                  | `POST /settings/providers/{id}/login`                                           |
-| `POST /api/providers/:id/login/start`                                            | `POST /settings/providers/{id}/login/start`                                     |
-| `POST /api/providers/:id/login/finish`                                           | `POST /settings/providers/{id}/login/finish`                                    |
-| `POST /api/dbservers/test`                                                       | `POST /settings/db-servers/test`                                                |
-| `GET /api/dbservers`                                                             | `GET /settings/db-servers`                                                      |
-| `POST /api/dbservers`                                                            | `POST /settings/db-servers`                                                     |
-| `PUT /api/dbservers/:id`                                                         | `PUT /settings/db-servers/{id}`                                                 |
-| `DELETE /api/dbservers/:id`                                                      | `DELETE /settings/db-servers/{id}`                                              |
-| `GET /api/workspaces`                                                            | `GET /settings/workspaces`                                                      |
-| `POST /api/workspaces/:slot/reset-setup`                                         | `POST /settings/workspaces/{slot}/reset-setup`                                  |
-| `POST /api/workspaces/:slot/clean`                                               | `POST /settings/workspaces/{slot}/clean`                                        |
-| `GET /api/forge/accounts`                                                        | `GET /settings/forge/accounts`                                                  |
-| `POST /api/forge/accounts`                                                       | `POST /settings/forge/accounts`                                                 |
-| `PUT /api/forge/accounts/:id`                                                    | `PUT /settings/forge/accounts/{id}`                                             |
-| `DELETE /api/forge/accounts/:id`                                                 | `DELETE /settings/forge/accounts/{id}`                                          |
-| `GET /api/ssh/servers`                                                           | `GET /settings/ssh/servers`                                                     |
-| `POST /api/ssh/servers`                                                          | `POST /settings/ssh/servers`                                                    |
-| `PUT /api/ssh/servers/:id`                                                       | `PUT /settings/ssh/servers/{id}`                                                |
-| `DELETE /api/ssh/servers/:id`                                                    | `DELETE /settings/ssh/servers/{id}`                                             |
-| `GET /api/ssh/monitoring`                                                        | `GET /ssh/servers`                                                              |
-| `GET /api/ssh/servers/:id/resources`                                             | `GET /ssh/servers/{id}/resources`                                               |
-| `GET /api/ssh/servers/:id/db-credentials`                                        | `GET /settings/ssh/servers/{id}/db-credentials`                                 |
-| `GET /api/mcp/servers`                                                           | `GET /settings/mcp/servers`                                                     |
-| `POST /api/mcp/servers`                                                          | `POST /settings/mcp/servers`                                                    |
-| `PUT /api/mcp/servers/:id`                                                       | `PUT /settings/mcp/servers/{id}`                                                |
-| `DELETE /api/mcp/servers/:id`                                                    | `DELETE /settings/mcp/servers/{id}`                                             |
-| `POST /api/mcp/servers/:id/connect`                                              | `POST /settings/mcp/servers/{id}/connect`                                       |
-| `POST /api/mcp/servers/:id/finish-sign-in`                                       | `POST /settings/mcp/servers/{id}/finish-sign-in`                                |
-| `GET /api/slack/workspaces`                                                      | `GET /settings/slack/workspaces`                                                |
-| `POST /api/slack/workspaces`                                                     | `POST /settings/slack/workspaces`                                               |
-| `PUT /api/slack/workspaces/:id`                                                  | `PUT /settings/slack/workspaces/{id}`                                           |
-| `DELETE /api/slack/workspaces/:id`                                               | `DELETE /settings/slack/workspaces/{id}`                                        |
-| `GET /api/mail/accounts`                                                         | `GET /settings/mail/accounts`                                                   |
-| `POST /api/mail/connect`                                                         | `POST /settings/mail/accounts/connect`                                          |
-| `POST /api/mail/connect/finish`                                                  | `POST /settings/mail/accounts/connect/finish`                                   |
-| `PUT /api/mail/accounts/:id`                                                     | `PUT /settings/mail/accounts/{id}`                                              |
-| `DELETE /api/mail/accounts/:id`                                                  | `DELETE /settings/mail/accounts/{id}`                                           |
-| `POST /api/mail/accounts/:id/sync`                                               | `POST /settings/mail/accounts/{id}/sync`                                        |
-| `GET /api/envoyer/accounts`                                                      | `GET /settings/envoyer/accounts`                                                |
-| `POST /api/envoyer/accounts`                                                     | `POST /settings/envoyer/accounts`                                               |
-| `PUT /api/envoyer/accounts/:id`                                                  | `PUT /settings/envoyer/accounts/{id}`                                           |
-| `DELETE /api/envoyer/accounts/:id`                                               | `DELETE /settings/envoyer/accounts/{id}`                                        |
-| `GET /api/mobile-devices`                                                        | Not in the API: `npm run create-token -- --list` on the server                  |
-| `POST /api/mobile-devices`                                                       | Not in the API: `npm run create-token` on the server                            |
-| `DELETE /api/mobile-devices/:id`                                                 | Not in the API: `npm run create-token -- --revoke <id>` on the server           |
+| Dashboard                                                                        | API                                                                                                                               |
+| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/me/github`                                                             | `GET /me/github`                                                                                                                  |
+| `PUT /api/me/github`                                                             | `PUT /me/github`                                                                                                                  |
+| `DELETE /api/me/github`                                                          | `DELETE /me/github`                                                                                                               |
+| `GET /api/me/home-assistant`                                                     | `GET /me/home-assistant`                                                                                                          |
+| `PUT /api/me/home-assistant`                                                     | `PUT /me/home-assistant`                                                                                                          |
+| `DELETE /api/me/home-assistant`                                                  | `DELETE /me/home-assistant`                                                                                                       |
+| `GET /api/dev/projects`                                                          | `GET /projects`                                                                                                                   |
+| `GET /api/dev/branches`                                                          | `GET /branches`                                                                                                                   |
+| `POST /api/dev/branches/serve`                                                   | `POST /branches/serve`                                                                                                            |
+| `GET /api/dev/runtimes`                                                          | `GET /runtimes`                                                                                                                   |
+| `GET /api/dev/usage`                                                             | `GET /usage`                                                                                                                      |
+| `GET /api/dev/actions`                                                           | `GET /actions`                                                                                                                    |
+| `POST /api/dev/actions`                                                          | `POST /actions`                                                                                                                   |
+| `GET /api/dev/pulls`                                                             | `GET /pulls`                                                                                                                      |
+| `GET /api/dev/pull`                                                              | `GET /pulls/{number}`                                                                                                             |
+| `GET /api/pr/view?section=description`                                           | `GET /pulls/{number}/description`                                                                                                 |
+| `GET /api/pr/view?section=files`                                                 | `GET /pulls/{number}/files`                                                                                                       |
+| `GET /api/pr/view?section=commits`                                               | `GET /pulls/{number}/commits`                                                                                                     |
+| `GET /api/pr/view?section=checks`                                                | `GET /pulls/{number}/checks`                                                                                                      |
+| `GET /api/pr/view?section=comments`                                              | `GET /pulls/{number}/comments`                                                                                                    |
+| `GET /api/pr/view?section=reviews`                                               | `GET /pulls/{number}/reviews`                                                                                                     |
+| `GET /api/pr/view?section=review-comments`                                       | `GET /pulls/{number}/review-comments`                                                                                             |
+| `GET /api/pr/findings`                                                           | `GET /pulls/{number}/findings`                                                                                                    |
+| `POST /api/pr/findings/decision`                                                 | `POST /pulls/{number}/findings/decision`                                                                                          |
+| `PATCH /api/pr/update`                                                           | `PATCH /pulls/{number}`                                                                                                           |
+| `PATCH /api/issues/update`                                                       | `PATCH /issues/{number}`                                                                                                          |
+| `POST /api/pr/update-branch`                                                     | `POST /pulls/{number}/update-branch`                                                                                              |
+| `POST /api/pr/merge`                                                             | `POST /pulls/{number}/merge`                                                                                                      |
+| `POST /api/dev/pulls/:number/serve`                                              | `POST /pulls/{number}/serve`                                                                                                      |
+| `GET /api/issues/view`                                                           | `GET /issues/{number}`                                                                                                            |
+| `GET /api/issues/timeline`                                                       | `GET /issues/{number}/timeline`                                                                                                   |
+| `POST /api/issues/close`                                                         | `POST /issues/{number}/close`                                                                                                     |
+| `GET /api/dev/project-board`                                                     | `GET /project-board`                                                                                                              |
+| `POST /api/dev/project-board/move`                                               | `POST /project-board/move`                                                                                                        |
+| `GET /api/pr/commit`                                                             | `GET /commits/{sha}`                                                                                                              |
+| `GET /api/repo/tree`                                                             | `GET /repo/tree`                                                                                                                  |
+| `GET /api/repo/file`                                                             | `GET /repo/file`                                                                                                                  |
+| `GET /api/repo/archive`                                                          | `GET /repo/archive`                                                                                                               |
+| `GET /api/dev/sessions`                                                          | `GET /sessions`                                                                                                                   |
+| `POST /api/dev/sessions`                                                         | `POST /sessions`                                                                                                                  |
+| `POST /api/dev/sessions/:id/files`                                               | `POST /sessions/{id}/files`                                                                                                       |
+| `GET /api/dev/sessions/:id`                                                      | `GET /sessions/{id}`                                                                                                              |
+| `GET /api/dev/sessions/:id/events`                                               | `GET /sessions/{id}/events`                                                                                                       |
+| `PATCH /api/dev/sessions/:id`                                                    | `PATCH /sessions/{id}`                                                                                                            |
+| `DELETE /api/dev/sessions/:id`                                                   | `DELETE /sessions/{id}`                                                                                                           |
+| `GET /api/dev/sessions/:id/mail-wake`                                            | `GET /sessions/{id}/mail-wake`                                                                                                    |
+| `PUT /api/dev/sessions/:id/mail-wake`                                            | `PUT /sessions/{id}/mail-wake`                                                                                                    |
+| `POST /api/dev/sessions/:id/message`                                             | `POST /sessions/{id}/messages`                                                                                                    |
+| `DELETE /api/dev/sessions/:id/queue/:index`                                      | `DELETE /sessions/{id}/queue/{index}`                                                                                             |
+| `POST /api/dev/sessions/:id/cancel`                                              | `POST /sessions/{id}/cancel`                                                                                                      |
+| `POST /api/dev/sessions/:id/close`                                               | `POST /sessions/{id}/close`                                                                                                       |
+| `POST /api/dev/sessions/:id/reopen`                                              | `POST /sessions/{id}/reopen`                                                                                                      |
+| `POST /api/dev/sessions/:id/serve`                                               | `POST /sessions/{id}/serve`                                                                                                       |
+| `GET /api/dev/sessions/:id/browser`                                              | `GET /sessions/{id}/browser`                                                                                                      |
+| `POST /api/dev/sessions/:id/browser`                                             | `POST /sessions/{id}/browser`                                                                                                     |
+| `DELETE /api/dev/sessions/:id/browser`                                           | `DELETE /sessions/{id}/browser`                                                                                                   |
+| `GET /api/dev/sessions/:id/browser/stream`                                       | `GET /sessions/{id}/browser/stream`                                                                                               |
+| `GET /api/dev/sessions/:id/browser/screenshot`                                   | `GET /sessions/{id}/browser/screenshot`                                                                                           |
+| `POST /api/dev/sessions/:id/browser/input`                                       | `POST /sessions/{id}/browser/input`                                                                                               |
+| `GET /api/dev/sessions/:id/stats`                                                | `GET /sessions/{id}/stats`                                                                                                        |
+| `GET /api/dev/stats/sessions`                                                    | `GET /stats/sessions`                                                                                                             |
+| `GET /api/dev/stats/server`                                                      | `GET /stats/server`                                                                                                               |
+| `POST /api/dev/sessions/:id/compact`                                             | `POST /sessions/{id}/compact`                                                                                                     |
+| `POST /api/dev/sessions/:id/btw`                                                 | `POST /sessions/{id}/btw`                                                                                                         |
+| `POST /api/dev/sessions/:id/clear`                                               | `POST /sessions/{id}/clear`                                                                                                       |
+| `POST /api/dev/sessions/:id/loop`                                                | `POST /sessions/{id}/review-loop`                                                                                                 |
+| `POST /api/dev/sessions/:id/qa-loop`                                             | `POST /sessions/{id}/qa-loop`                                                                                                     |
+| `POST /api/dev/sessions/:id/link-pr`                                             | `POST /sessions/{id}/link-pr`                                                                                                     |
+| `POST /api/dev/sessions/:id/triage`                                              | `POST /sessions/{id}/findings/triage`                                                                                             |
+| `POST /api/dev/sessions/:id/triage/save`                                         | `POST /sessions/{id}/findings/save`                                                                                               |
+| `POST /api/dev/sessions/:id/findings/reply`                                      | `POST /sessions/{id}/findings/reply`                                                                                              |
+| `POST /api/dev/sessions/:id/findings/delete`                                     | `POST /sessions/{id}/findings/delete`                                                                                             |
+| `GET /api/operations/preview/:id`                                                | `GET /sessions/{id}/preview`                                                                                                      |
+| `POST /api/operations/preview/:id`                                               | `POST /sessions/{id}/preview/feedback`                                                                                            |
+| `GET /api/dev/sessions/:id/webhook`                                              | `GET /sessions/{id}/webhook`                                                                                                      |
+| `PUT /api/dev/sessions/:id/webhook`                                              | `PUT /sessions/{id}/webhook`                                                                                                      |
+| `POST /api/dev/sessions/:id/webhook/rotate`                                      | `POST /sessions/{id}/webhook/rotate`                                                                                              |
+| `GET /api/operations/recovery/:id`                                               | `GET /sessions/{id}/recovery`                                                                                                     |
+| `POST /api/operations/recovery/:id`                                              | `POST /sessions/{id}/recovery`                                                                                                    |
+| `GET /api/operations/tasks/:id`                                                  | `GET /tasks/{id}`                                                                                                                 |
+| `GET /api/dev/prompts`                                                           | `GET /prompts`                                                                                                                    |
+| `POST /api/dev/prompts`                                                          | `POST /prompts`                                                                                                                   |
+| `PUT /api/dev/prompts/:id`                                                       | `PUT /prompts/{id}`                                                                                                               |
+| `DELETE /api/dev/prompts/:id`                                                    | `DELETE /prompts/{id}`                                                                                                            |
+| `POST /api/dev/uploads`                                                          | `POST /uploads`                                                                                                                   |
+| `GET /api/dev/transcribe`                                                        | `GET /transcribe`                                                                                                                 |
+| `POST /api/dev/transcribe`                                                       | `POST /transcribe`                                                                                                                |
+| `GET /api/dev/providers`                                                         | `GET /providers`                                                                                                                  |
+| `GET /api/memories`                                                              | `GET /memories`                                                                                                                   |
+| `GET /api/operations/memories`                                                   | `GET /memories/health`                                                                                                            |
+| `POST /api/operations/memories/merge/apply`                                      | `POST /memories/merge`                                                                                                            |
+| `POST /api/operations/memories/:id`                                              | `POST /memories/{id}/policy`                                                                                                      |
+| `POST /api/memories`                                                             | `POST /memories`                                                                                                                  |
+| `PUT /api/memories/:id`                                                          | `PUT /memories/{id}`                                                                                                              |
+| `DELETE /api/memories/:id`                                                       | `DELETE /memories/{id}`                                                                                                           |
+| `GET /api/dev/usage/all`                                                         | `GET /usage/all`                                                                                                                  |
+| `GET /api/operations/attention`                                                  | `GET /attention`                                                                                                                  |
+| `GET /api/operations/maintenance`                                                | `GET /maintenance`                                                                                                                |
+| `POST /api/operations/maintenance`                                               | `POST /maintenance`                                                                                                               |
+| `GET /api/ssh/requests`                                                          | `GET /ssh/requests`                                                                                                               |
+| `POST /api/ssh/requests/:id/decision`                                            | `POST /ssh/requests/{id}/decision`                                                                                                |
+| `GET /api/home-assistant`                                                        | `GET /home-assistant`                                                                                                             |
+| `GET /api/home-assistant/entities`                                               | `GET /home-assistant/entities`                                                                                                    |
+| `GET /api/home-assistant/entities/:id`                                           | `GET /home-assistant/entities/{id}`                                                                                               |
+| `GET /api/home-assistant/services`                                               | `GET /home-assistant/services`                                                                                                    |
+| `POST /api/home-assistant/services/:domain/:service`                             | `POST /home-assistant/services/{domain}/{service}`                                                                                |
+| `POST /api/home-assistant/events/:type`                                          | `POST /home-assistant/events/{type}`                                                                                              |
+| `GET /api/whatsapp/accounts`                                                     | `GET /whatsapp/accounts`                                                                                                          |
+| `GET /api/whatsapp/accounts/:id`                                                 | `GET /whatsapp/accounts/{id}`                                                                                                     |
+| `POST /api/whatsapp/accounts/:id/start`                                          | `POST /whatsapp/accounts/{id}/start`                                                                                              |
+| `GET /api/whatsapp/accounts/:id/qr`                                              | `GET /whatsapp/accounts/{id}/qr`                                                                                                  |
+| `POST /api/whatsapp/accounts/:id/logout`                                         | `POST /whatsapp/accounts/{id}/logout`                                                                                             |
+| `GET /api/whatsapp/accounts/:id/conversations`                                   | `GET /whatsapp/accounts/{id}/conversations`                                                                                       |
+| `GET /api/whatsapp/accounts/:id/conversations/:chat/messages`                    | `GET /whatsapp/accounts/{id}/conversations/{chat}/messages`                                                                       |
+| `POST /api/whatsapp/accounts/:id/conversations/:chat/messages`                   | `POST /whatsapp/accounts/{id}/conversations/{chat}/messages`                                                                      |
+| `POST /api/whatsapp/accounts/:id/conversations/:chat/read`                       | `POST /whatsapp/accounts/{id}/conversations/{chat}/read`                                                                          |
+| `GET /api/whatsapp/accounts/:id/conversations/:chat/messages/:message/media`     | `GET /whatsapp/accounts/{id}/conversations/{chat}/messages/{message}/media`                                                       |
+| `GET /api/slack/inbox/workspaces`                                                | `GET /slack/workspaces`                                                                                                           |
+| `GET /api/slack/inbox/:id/conversations`                                         | `GET /slack/workspaces/{id}/conversations`                                                                                        |
+| `GET /api/slack/inbox/:id/conversations/:channel`                                | `GET /slack/workspaces/{id}/conversations/{channel}`                                                                              |
+| `GET /api/slack/inbox/:id/people`                                                | `GET /slack/workspaces/{id}/people`                                                                                               |
+| `POST /api/slack/inbox/:id/direct-messages`                                      | `POST /slack/workspaces/{id}/direct-messages`                                                                                     |
+| `GET /api/slack/inbox/:id/conversations/:channel/messages`                       | `GET /slack/workspaces/{id}/conversations/{channel}/messages`                                                                     |
+| `GET /api/slack/inbox/:id/conversations/:channel/threads/:ts`                    | `GET /slack/workspaces/{id}/conversations/{channel}/threads/{ts}`                                                                 |
+| `POST /api/slack/inbox/:id/conversations/:channel/messages`                      | `POST /slack/workspaces/{id}/conversations/{channel}/messages`                                                                    |
+| `POST /api/slack/inbox/:id/conversations/:channel/read`                          | `POST /slack/workspaces/{id}/conversations/{channel}/read`                                                                        |
+| `GET /api/slack/inbox/:id/events`                                                | `GET /slack/workspaces/{id}/events`                                                                                               |
+| `GET /api/slack/requests`                                                        | `GET /slack/requests`                                                                                                             |
+| `POST /api/slack/requests/:id/decision`                                          | `POST /slack/requests/{id}/decision`                                                                                              |
+| `GET /api/operations/deployments`                                                | `GET /deployments`                                                                                                                |
+| `GET /api/operations/deployments/config`                                         | `GET /deployments/config`                                                                                                         |
+| `POST /api/operations/deployments/config`                                        | `POST /deployments/config`                                                                                                        |
+| `POST /api/operations/deployments/plan`                                          | `POST /deployments/plan`                                                                                                          |
+| `POST /api/operations/deployments/dispatch`                                      | `POST /deployments/dispatch`                                                                                                      |
+| `POST /api/operations/deployments/acknowledge`                                   | `POST /deployments/acknowledge`                                                                                                   |
+| `GET /api/forge/accounts/:account/servers`                                       | `GET /forge/accounts/{account}/servers`                                                                                           |
+| `GET /api/forge/accounts/:account/servers/:server/sites`                         | `GET /forge/accounts/{account}/servers/{server}/sites`                                                                            |
+| `GET /api/forge/accounts/:account/servers/:server/sites/:site`                   | `GET /forge/accounts/{account}/servers/{server}/sites/{site}`                                                                     |
+| `GET /api/forge/accounts/:account/servers/:server/sites/:site/deployment-script` | `GET /forge/accounts/{account}/servers/{server}/sites/{site}/deployment-script`                                                   |
+| `PUT /api/forge/accounts/:account/servers/:server/sites/:site/deployment-script` | `PUT /forge/accounts/{account}/servers/{server}/sites/{site}/deployment-script`                                                   |
+| `GET /api/forge/accounts/:account/servers/:server/sites/:site/env`               | `GET /forge/accounts/{account}/servers/{server}/sites/{site}/env`                                                                 |
+| `PUT /api/forge/accounts/:account/servers/:server/sites/:site/env`               | `PUT /forge/accounts/{account}/servers/{server}/sites/{site}/env`                                                                 |
+| `GET /api/envoyer/available`                                                     | `GET /envoyer/accounts`                                                                                                           |
+| `GET /api/envoyer/accounts/:id/projects`                                         | `GET /envoyer/accounts/{id}/projects`                                                                                             |
+| `GET /api/envoyer/accounts/:id/projects/:project`                                | `GET /envoyer/accounts/{id}/projects/{project}`                                                                                   |
+| `GET /api/envoyer/accounts/:id/projects/:project/servers`                        | `GET /envoyer/accounts/{id}/projects/{project}/servers`                                                                           |
+| `GET /api/envoyer/accounts/:id/projects/:project/deployments`                    | `GET /envoyer/accounts/{id}/projects/{project}/deployments`                                                                       |
+| `GET /api/envoyer/accounts/:id/projects/:project/deployments/:deployment`        | `GET /envoyer/accounts/{id}/projects/{project}/deployments/{deployment}`                                                          |
+| `POST /api/envoyer/accounts/:id/projects/:project/deployments`                   | `POST /envoyer/accounts/{id}/projects/{project}/deployments`                                                                      |
+| `GET /api/mail/messages`                                                         | `GET /mail/messages`                                                                                                              |
+| `GET /api/mail/accounts/:account/messages/:id`                                   | `GET /mail/accounts/{account}/messages/{id}`                                                                                      |
+| `DELETE /api/mail/accounts/:account/messages/:id`                                | `DELETE /mail/accounts/{account}/messages/{id}`                                                                                   |
+| `POST /api/mail/accounts/:account/messages/:id/reply`                            | `POST /mail/accounts/{account}/messages/{id}/reply`                                                                               |
+| `GET /videos/*file`                                                              | `GET /videos/{file}`                                                                                                              |
+| `PUT /api/projects/order`                                                        | `PUT /settings/projects/order`                                                                                                    |
+| `GET /api/projects`                                                              | `GET /settings/projects`                                                                                                          |
+| `POST /api/projects`                                                             | `POST /settings/projects`                                                                                                         |
+| `PUT /api/projects/:id`                                                          | `PUT /settings/projects/{id}`                                                                                                     |
+| `DELETE /api/projects/:id`                                                       | `DELETE /settings/projects/{id}`                                                                                                  |
+| `GET /api/shares`                                                                | `GET /settings/shares`                                                                                                            |
+| `PUT /api/shares`                                                                | `PUT /settings/shares`                                                                                                            |
+| `GET /api/projects/:id/backup`                                                   | `GET /settings/projects/{id}/backup`                                                                                              |
+| `POST /api/projects/:id/backup`                                                  | `POST /settings/projects/{id}/backup`                                                                                             |
+| `GET /api/projects/:id/update`                                                   | `GET /settings/projects/{id}/update`                                                                                              |
+| `POST /api/projects/:id/update`                                                  | `POST /settings/projects/{id}/update`                                                                                             |
+| `GET /api/templates`                                                             | `GET /settings/templates`                                                                                                         |
+| `PUT /api/templates/1`                                                           | `PUT /settings/templates`                                                                                                         |
+| `POST /api/providers/test`                                                       | `POST /settings/providers/test`                                                                                                   |
+| `GET /api/providers`                                                             | `GET /settings/providers`                                                                                                         |
+| `POST /api/providers`                                                            | `POST /settings/providers`                                                                                                        |
+| `PUT /api/providers/:id`                                                         | `PUT /settings/providers/{id}`                                                                                                    |
+| `DELETE /api/providers/:id`                                                      | `DELETE /settings/providers/{id}`                                                                                                 |
+| `GET /api/providers/:id/status`                                                  | `GET /settings/providers/{id}/status`                                                                                             |
+| `POST /api/providers/:id/login`                                                  | `POST /settings/providers/{id}/login`                                                                                             |
+| `POST /api/providers/:id/login/start`                                            | `POST /settings/providers/{id}/login/start`                                                                                       |
+| `POST /api/providers/:id/login/finish`                                           | `POST /settings/providers/{id}/login/finish`                                                                                      |
+| `POST /api/dbservers/test`                                                       | `POST /settings/db-servers/test`                                                                                                  |
+| `GET /api/dbservers`                                                             | `GET /settings/db-servers`                                                                                                        |
+| `POST /api/dbservers`                                                            | `POST /settings/db-servers`                                                                                                       |
+| `PUT /api/dbservers/:id`                                                         | `PUT /settings/db-servers/{id}`                                                                                                   |
+| `DELETE /api/dbservers/:id`                                                      | `DELETE /settings/db-servers/{id}`                                                                                                |
+| `GET /api/workspaces`                                                            | `GET /settings/workspaces`                                                                                                        |
+| `POST /api/workspaces/:slot/reset-setup`                                         | `POST /settings/workspaces/{slot}/reset-setup`                                                                                    |
+| `POST /api/workspaces/:slot/clean`                                               | `POST /settings/workspaces/{slot}/clean`                                                                                          |
+| `GET /api/forge/accounts`                                                        | `GET /settings/forge/accounts`                                                                                                    |
+| `POST /api/forge/accounts`                                                       | `POST /settings/forge/accounts`                                                                                                   |
+| `PUT /api/forge/accounts/:id`                                                    | `PUT /settings/forge/accounts/{id}`                                                                                               |
+| `DELETE /api/forge/accounts/:id`                                                 | `DELETE /settings/forge/accounts/{id}`                                                                                            |
+| `GET /api/ssh/servers`                                                           | `GET /settings/ssh/servers`                                                                                                       |
+| `POST /api/ssh/servers`                                                          | `POST /settings/ssh/servers`                                                                                                      |
+| `PUT /api/ssh/servers/:id`                                                       | `PUT /settings/ssh/servers/{id}`                                                                                                  |
+| `DELETE /api/ssh/servers/:id`                                                    | `DELETE /settings/ssh/servers/{id}`                                                                                               |
+| `GET /api/ssh/monitoring`                                                        | `GET /ssh/servers`                                                                                                                |
+| `GET /api/ssh/servers/:id/resources`                                             | `GET /ssh/servers/{id}/resources`                                                                                                 |
+| `POST /api/ssh/servers/:id/monitor-token`                                        | `POST /settings/ssh/servers/{id}/monitor-token`                                                                                   |
+| `DELETE /api/ssh/servers/:id/monitor-token`                                      | `DELETE /settings/ssh/servers/{id}/monitor-token`                                                                                 |
+| `GET /api/ssh/servers/:id/db-credentials`                                        | `GET /settings/ssh/servers/{id}/db-credentials`                                                                                   |
+| `GET /api/mcp/servers`                                                           | `GET /settings/mcp/servers`                                                                                                       |
+| `POST /api/mcp/servers`                                                          | `POST /settings/mcp/servers`                                                                                                      |
+| `PUT /api/mcp/servers/:id`                                                       | `PUT /settings/mcp/servers/{id}`                                                                                                  |
+| `DELETE /api/mcp/servers/:id`                                                    | `DELETE /settings/mcp/servers/{id}`                                                                                               |
+| `POST /api/mcp/servers/:id/connect`                                              | `POST /settings/mcp/servers/{id}/connect`                                                                                         |
+| `POST /api/mcp/servers/:id/finish-sign-in`                                       | `POST /settings/mcp/servers/{id}/finish-sign-in`                                                                                  |
+| `GET /api/slack/workspaces`                                                      | `GET /settings/slack/workspaces`                                                                                                  |
+| `POST /api/slack/workspaces`                                                     | `POST /settings/slack/workspaces`                                                                                                 |
+| `PUT /api/slack/workspaces/:id`                                                  | `PUT /settings/slack/workspaces/{id}`                                                                                             |
+| `DELETE /api/slack/workspaces/:id`                                               | `DELETE /settings/slack/workspaces/{id}`                                                                                          |
+| `GET /api/mail/accounts`                                                         | `GET /settings/mail/accounts`                                                                                                     |
+| `POST /api/mail/connect`                                                         | `POST /settings/mail/accounts/connect`                                                                                            |
+| `POST /api/mail/connect/finish`                                                  | `POST /settings/mail/accounts/connect/finish`                                                                                     |
+| `PUT /api/mail/accounts/:id`                                                     | `PUT /settings/mail/accounts/{id}`                                                                                                |
+| `DELETE /api/mail/accounts/:id`                                                  | `DELETE /settings/mail/accounts/{id}`                                                                                             |
+| `POST /api/mail/accounts/:id/sync`                                               | `POST /settings/mail/accounts/{id}/sync`                                                                                          |
+| `GET /api/envoyer/accounts`                                                      | `GET /settings/envoyer/accounts`                                                                                                  |
+| `POST /api/envoyer/accounts`                                                     | `POST /settings/envoyer/accounts`                                                                                                 |
+| `PUT /api/envoyer/accounts/:id`                                                  | `PUT /settings/envoyer/accounts/{id}`                                                                                             |
+| `DELETE /api/envoyer/accounts/:id`                                               | `DELETE /settings/envoyer/accounts/{id}`                                                                                          |
+| `GET /api/mobile-devices`                                                        | Not in the API: `npm run create-token -- --list` on the server                                                                    |
+| `POST /api/mobile-devices`                                                       | Not in the API: `npm run create-token` on the server                                                                              |
+| `DELETE /api/mobile-devices/:id`                                                 | Not in the API: `npm run create-token -- --revoke <id>` on the server                                                             |
+| `POST /api/v1/telemetry/ssh/:id/samples`                                         | Machine ingress authenticated by a per-server monitor token, never an operator/session token; see docs/ssh-resource-monitoring.md |

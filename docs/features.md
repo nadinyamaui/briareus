@@ -97,7 +97,7 @@ resuming them. Maintenance draining blocks new work while existing work
 settles. Registered SSH servers support explicit approval or immediate
 execution according to their configured permissions.
 Linux servers can opt into [resource monitoring](ssh-resource-monitoring.md)
-over SSH: CPU, memory, disks and network sampled once a minute, with a persistent
+through a separate outbound HTTPS service: CPU, memory, disks and network sampled once a minute, with a persistent
 rolling 24-hour history exposed through the API.
 
 Deployment planning and dispatch use GitHub workflows and immutable source

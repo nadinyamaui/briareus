@@ -34,6 +34,7 @@ beforeEach(async () => {
   const routes = sshRoutes({
     service,
     monitor,
+    monitorEndpoint: (id) => `https://core.example/api/v1/telemetry/ssh/${id}/samples`,
     mayViewResources: (user, server) => user.role === 'admin' || sharedServers.includes(server.id),
     mayDecide: (user, request) =>
       user.role === 'admin' || (request.jobId === job.id && job.ownerId === user.id),
@@ -79,6 +80,27 @@ const request = (path, { operator = false, token = '', method = 'GET', body } = 
   });
 
 describe('SSH HTTP authorization and registration', () => {
+  it('issues and revokes a per-host machine credential only through operator settings', async () => {
+    const row = await service.create(input);
+    const path = `/api/ssh/servers/${row.id}/monitor-token`;
+    expect((await request(path, { operator: true, token: 'session-token', method: 'POST' })).status).toBe(
+      403,
+    );
+    const issued = await request(path, { operator: true, method: 'POST' });
+    expect(issued.status).toBe(200);
+    const config = await issued.json();
+    expect(config).toMatchObject({
+      serverId: row.id,
+      intervalSeconds: 60,
+      retentionHours: 24,
+      endpoint: `https://core.example/api/v1/telemetry/ssh/${row.id}/samples`,
+    });
+    expect(config.token).toMatch(/^brm_/);
+    expect(service.authorizeMonitor(row.id, config.token)).toBeTruthy();
+    expect(JSON.stringify(service.list())).not.toContain(config.token);
+    expect((await request(path, { operator: true, method: 'DELETE' })).status).toBe(200);
+    expect(service.authorizeMonitor(row.id, config.token)).toBeNull();
+  });
   it('shows telemetry only for shared servers inside the token’s project scope', async () => {
     const mine = await service.create(input);
     const other = await service.create({ ...input, repo: 'other/repo' });

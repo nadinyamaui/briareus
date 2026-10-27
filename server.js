@@ -32,6 +32,7 @@ import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
+import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
 import { createSlackService } from './lib/slack.js';
 import { slackRoutes, slackEventsRouter } from './lib/slack-routes.js';
 import { createHomeAssistantService } from './lib/home-assistant.js';
@@ -371,6 +372,8 @@ app.use('/webhooks', webhookRouter());
 
 // The only client API: owner-issued tokens (`npm run create-token`) in front of the handlers below.
 const mobileAuth = createMobileAuth();
+// Dedicated per-host telemetry credentials; never operator or agent tokens.
+app.use((req, res, next) => sshTelemetry(req, res, next));
 app.use(
   apiV1Routes({
     auth: mobileAuth,
@@ -695,6 +698,7 @@ const sshService = createSshService({
   mayUse: (job, server) => sessionMayUse(job, 'sshServer', server.id),
 });
 const sshResourceMonitor = createSshResourceMonitor({ ssh: sshService });
+const sshTelemetry = sshTelemetryRoutes({ ssh: sshService, monitor: sshResourceMonitor });
 api.use(sessionFileRoutes({ agentSession, getJob }));
 api.use(
   sshRoutes({
@@ -703,6 +707,8 @@ api.use(
     getProject,
     mayDecide: sshRuledBy,
     monitor: sshResourceMonitor,
+    monitorEndpoint: (id) =>
+      `${getConfig().publicBaseUrl.replace(/\/$/, '')}/api/v1/telemetry/ssh/${id}/samples`,
     mayViewResources: (user, server) => shares.allows(user, 'sshServer', server.id),
   }),
 );
