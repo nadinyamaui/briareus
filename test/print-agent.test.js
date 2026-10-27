@@ -441,7 +441,7 @@ describe('print submission lifecycle', () => {
     expect(run).toHaveBeenLastCalledWith('cancel', ['Office-42']);
   });
 
-  it('reserves history slots before concurrent reads and keeps unknown jobs at capacity', async () => {
+  it('reserves history slots before concurrent reads and keeps pending jobs at capacity', async () => {
     for (let i = 0; i < 99; i++) await request('/jobs', 'POST', { path: '/w/a.pdf' });
     let release;
     readFile.mockImplementationOnce(
@@ -452,12 +452,32 @@ describe('print submission lifecycle', () => {
     );
     const pending = request('/jobs', 'POST', { path: '/w/a.pdf' });
     await vi.waitFor(() => expect(readFile).toHaveBeenCalledTimes(100));
-    service.jobs.mockImplementation(async (ids) => ids.map((jobId) => ({ jobId, state: 'unknown' })));
     expect((await request('/jobs', 'POST', { path: '/w/a.pdf' })).status).toBe(409);
     expect(readFile).toHaveBeenCalledTimes(100);
     release(Buffer.from('x'));
     expect((await pending).status).toBe(200);
     expect((await (await request('/jobs')).json()).jobs).toHaveLength(100);
+  });
+
+  it('reclaims acknowledged jobs CUPS no longer retains, keeping uncertain submissions', async () => {
+    const submission = { jobId: 'briareus-token', marker: 'briareus-token', printer: 'Office', copies: 1 };
+    service.print.mockImplementationOnce(async (_bytes, _options, control) => {
+      control.submitting(submission);
+      throw Object.assign(new Error('lp timed out'), { status: 502 });
+    });
+    service.recover = vi.fn(async () => []);
+    expect((await request('/jobs', 'POST', { path: '/w/a.pdf' })).status).toBe(502);
+    for (let i = 0; i < 99; i++)
+      expect((await request('/jobs', 'POST', { path: '/w/a.pdf' })).status).toBe(200);
+    expect((await request('/jobs', 'POST', { path: '/w/a.pdf' })).status).toBe(409);
+    // CUPS purged its job history: every acknowledged job is now unknown to a successful query.
+    service.jobs.mockImplementation(async (ids) => ids.map((jobId) => ({ jobId, state: 'unknown' })));
+    expect((await request('/jobs', 'POST', { path: '/w/a.pdf' })).status).toBe(200);
+    expect((await request('/jobs', 'POST', { path: '/w/a.pdf' })).status).toBe(200);
+    expect(service.jobs.mock.calls.flat(2)).not.toContain('briareus-token');
+    const jobs = (await (await request('/jobs')).json()).jobs;
+    expect(jobs).toContainEqual({ jobId: 'briareus-token', printer: 'Office', state: 'uncertain' });
+    expect(jobs.length).toBeLessThan(100);
   });
 
   it.each(['closed', 'deleted'])(
