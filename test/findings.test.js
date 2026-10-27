@@ -300,6 +300,92 @@ describe('latestTestVerdict', () => {
     ].join('\n'),
   });
 
+  it.each(['-- skipped', '--- blocked', '--: not run', '--- never tested'])(
+    'reads wordless execution prefixes without losing later failures: %s',
+    async (annotation) => {
+      for (const [status, evidence] of [
+        [`✅ ${annotation}`, 'response.json'],
+        ['✅', annotation],
+      ]) {
+        gh.comments = [
+          sheet([
+            `| 1 | API | curl /api | 200 | ${status} | ${evidence} |`,
+            '| 2 | Failure | curl /api | 200 | ❌ | saw 500 |',
+            '| 3 | API | curl /api | 200 | ✅ | response.json |',
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toEqual({
+          failures: [{ number: '2', scenario: 'Failure', expected: '200', evidence: 'saw 500' }],
+          total: 3,
+          passed: 1,
+          manual: 0,
+          incomplete: true,
+        });
+      }
+    },
+  );
+
+  it.each([
+    'UI status: failed',
+    'UI status: blocked',
+    'UI status: skipped',
+    'UI status: FAIL',
+    'FAIL',
+    'Manual verification needed',
+  ])('keeps explicit execution qualifiers incomplete: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅', annotation],
+      ['✅', `response.json; ${annotation}`],
+    ]) {
+      // Bare FAIL is a Status verdict; ordinary Evidence prose keeps its existing contract.
+      if (annotation === 'FAIL' && status === '✅') continue;
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toEqual({
+        failures: [],
+        total: 1,
+        passed: 0,
+        manual: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it.each(['Evidence to follow', 'Pending evidence', 'No evidence available for any scenario'])(
+    'rejects deferred or universally absent evidence without losing retained observations: %s',
+    async (absence) => {
+      for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`, `Evidence: ${absence}`]) {
+        gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+      }
+      for (const retained of ['response.json', 'curl returned 200 and asserted the response body']) {
+        for (const evidence of [`${absence}; ${retained}`, `${retained}; ${absence}`]) {
+          gh.comments = [sheet([`| 1 | API | curl /api | 200 | ✅ | ${evidence} |`])];
+          expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+        }
+      }
+      gh.comments = [
+        sheet([`| 1 | API | curl /api | Expected message | ✅ | ${absence} was displayed as expected |`]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+    },
+  );
+
+  it.each([
+    ['Both work', 'UI status: passed', 'response.json'],
+    ['Both work', 'UI manual verification passed', 'response.json'],
+    ['HTTP 403', 'API status: failed with 403 Forbidden as expected', 'response.json'],
+    ['Blocked user receives 403', 'API status: blocked user receives 403', 'response.json'],
+    ['Expected message', 'API', 'Manual verification needed was displayed as expected'],
+    ['HTTP 200', 'API', 'evidence-to-follow.json'],
+    ['HTTP 200', 'API', 'pending-evidence.json'],
+  ])('preserves evidenced passing execution qualifiers: %s / %s / %s', async (expected, status, evidence) => {
+    gh.comments = [
+      sheet([`| 1 | API and UI | curl then browser | ${expected} | ✅ ${status} | ${evidence} |`]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
   it.each([
     ['Request Timeout', 'API failed with 408 Request Timeout as expected'],
     ['Conflict', 'API failed with 409 Conflict as expected'],
