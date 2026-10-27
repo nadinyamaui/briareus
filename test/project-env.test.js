@@ -150,6 +150,7 @@ describe('projectEnvRoutes', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -194,6 +195,44 @@ describe('projectEnvRoutes', () => {
     expect(res.body.checkout).toBe('unchanged');
     expect(project.envTemplate).toBe('APP_KEY=secret\nDB_DATABASE=other\n');
     expect(fs.readFileSync(path.join(dir, '.env'), 'utf8')).toBe('DB_DATABASE=session_one\n');
+  });
+
+  it.each(['write', 'rename'])('preserves the checkout and cleans up after a failed %s', async (stage) => {
+    const file = path.join(dir, '.env');
+    const original = 'TOKEN=old\nOTHER=keep\n';
+    fs.writeFileSync(file, original);
+    fs.chmodSync(file, 0o640);
+    const value = 'x'.repeat(4096);
+    const error = Object.assign(new Error('simulated filesystem failure'), { code: 'EIO' });
+    if (stage === 'write') {
+      const write = fs.writeFileSync;
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce((target, contents, options) => {
+        write(target, String(contents).slice(0, 1024), options);
+        throw error;
+      });
+    } else
+      vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+        throw error;
+      });
+
+    const res = await request('POST', { set: { TOKEN: value } });
+    expect(res.status).toBe(200);
+    expect(res.body.checkout).toBe('not updated: simulated filesystem failure');
+    expect(project.envTemplate).toContain(`TOKEN=${value}\n`);
+    expect(fs.readFileSync(file, 'utf8')).toBe(original);
+    expect(fs.statSync(file).mode & 0o777).toBe(0o640);
+    expect(fs.readdirSync(dir)).toEqual(['.env']);
+  });
+
+  it('preserves the checkout file mode when replacing it', async () => {
+    const file = path.join(dir, '.env');
+    fs.writeFileSync(file, 'TOKEN=old\nOTHER=keep\n');
+    fs.chmodSync(file, 0o664);
+    const res = await request('POST', { set: { TOKEN: 'new' } });
+    expect(res.body.checkout).toBe('updated');
+    expect(fs.readFileSync(file, 'utf8')).toBe('TOKEN=new\nOTHER=keep\n');
+    expect(fs.statSync(file).mode & 0o777).toBe(0o664);
+    expect(fs.readdirSync(dir)).toEqual(['.env']);
   });
 
   it('leaves the main checkout of a local session and an opted-out checkout alone', async () => {
