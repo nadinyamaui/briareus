@@ -177,7 +177,7 @@ describe('session printing', () => {
 });
 
 describe('print submission lifecycle', () => {
-  it.each(['project', 'closed', 'closing'])(
+  it.each(['project', 'closed', 'closing', 'stopped', 'restarted'])(
     'rechecks %s authorization after stalled discovery',
     async (revocation) => {
       let release;
@@ -192,7 +192,12 @@ describe('print submission lifecycle', () => {
       await vi.waitFor(() => expect(run).toHaveBeenCalled());
       if (revocation === 'project') project.printToolsEnabled = false;
       else if (revocation === 'closed') job.status = 'closed';
-      else job.closing = true;
+      else if (revocation === 'closing') job.closing = true;
+      else {
+        // Stop, as cancelDevTurn does; a restart begins a new turn before the request resumes.
+        Object.assign(job, { turnCanceled: true, status: 'idle', sshCancellationVersion: 1 });
+        if (revocation === 'restarted') Object.assign(job, { turnCanceled: false, status: 'running' });
+      }
       release({
         code: 0,
         stdout: 'printer Office is idle.\nsystem default destination: Office\n',
@@ -273,6 +278,66 @@ describe('print submission lifecycle', () => {
     expect(service.print).toHaveBeenCalledTimes(1);
     expect(service.cancel).toHaveBeenCalledWith('Office-42');
   });
+
+  it('keeps confirmed jobs listable and cancelable when recovery fails', async () => {
+    await request('/jobs', 'POST', { path: '/w/a.pdf' });
+    const submission = { jobId: 'briareus-token', marker: 'briareus-token', printer: 'Office', copies: 1 };
+    service.print.mockImplementationOnce(async (_bytes, _options, control) => {
+      control.submitting(submission);
+      throw Object.assign(new Error('lp timed out'), { status: 502 });
+    });
+    expect((await request('/jobs', 'POST', { path: '/w/a.pdf' })).status).toBe(502);
+    service.recover = vi.fn(async () => {
+      throw Object.assign(new Error('Printing is unavailable: CUPS command ipptool is not installed'), {
+        status: 503,
+      });
+    });
+    const res = await request('/jobs');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      jobs: [
+        { jobId: 'Office-1', state: 'pending' },
+        { jobId: 'briareus-token', printer: 'Office', state: 'uncertain' },
+      ],
+      recoveryError: 'Printing is unavailable: CUPS command ipptool is not installed',
+    });
+    service.recover.mockClear();
+    expect((await request('/jobs/Office-1', 'DELETE')).status).toBe(200);
+    expect(service.recover).not.toHaveBeenCalled();
+    expect(service.cancel).toHaveBeenCalledWith('Office-1');
+    expect((await request('/jobs/Office-9', 'DELETE')).status).toBe(503);
+  });
+
+  it.each(['project', 'closed', 'deleted', 'unattended', 'stopped'])(
+    'rechecks %s authorization after recovery before canceling',
+    async (revocation) => {
+      const submission = { jobId: 'briareus-token', marker: 'briareus-token', printer: 'Office', copies: 1 };
+      service.print.mockImplementationOnce(async (_bytes, _options, control) => {
+        control.submitting(submission);
+        throw Object.assign(new Error('lp timed out'), { status: 502 });
+      });
+      expect((await request('/jobs', 'POST', { path: '/w/a.pdf' })).status).toBe(502);
+      let release;
+      service.recover = vi.fn(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      );
+      const pending = request('/jobs/Office-42', 'DELETE');
+      await vi.waitFor(() => expect(service.recover).toHaveBeenCalled());
+      if (revocation === 'project') project.printToolsEnabled = false;
+      else if (revocation === 'closed') {
+        job.status = 'closed';
+        sessions.emit('job', job);
+      } else if (revocation === 'deleted') sessions.emit('deleted', job.id);
+      else if (revocation === 'unattended') job.unattendedTurn = true;
+      else Object.assign(job, { turnCanceled: true, status: 'idle', sshCancellationVersion: 1 });
+      release([{ ...submission, jobId: 'Office-42' }]);
+      expect((await pending).status).toBe(403);
+      expect(service.cancel).not.toHaveBeenCalled();
+    },
+  );
 
   it('recovers a timed-out real service submission for direct cancellation and isolates the other session', async () => {
     let marker;

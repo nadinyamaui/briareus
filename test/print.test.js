@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi } from 'vitest';
 import { createPrintService, parseJobs, parsePrinters } from '../lib/print.js';
 
@@ -50,6 +51,23 @@ describe('parsing lpstat', () => {
       ],
     });
     expect(parsePrinters('no system default destination\n')).toEqual({ printers: [], default: null });
+  });
+
+  it('lists a queue holding new jobs, which CUPS still accepts', async () => {
+    const run = fakeCups({
+      'lpstat -p -d': {
+        code: 0,
+        stdout:
+          'printer Office is holding new jobs.  enabled since Tue Oct 27 11:30:32 2026\nsystem default destination: Office\n',
+        stderr: '',
+      },
+    });
+    const service = createPrintService({ run });
+    expect(await service.printers()).toEqual({
+      default: 'Office',
+      printers: [{ name: 'Office', state: 'holding', default: true }],
+    });
+    expect(await service.print(Buffer.from('x'))).toMatchObject({ jobId: 'Office-12', printer: 'Office' });
   });
 
   it('reads job ids and their alerts from the long listing', () => {
@@ -282,6 +300,11 @@ describe('the print service', () => {
     ]);
     expect(await service.recover([{ ...submission, marker: 'another-session' }])).toEqual([]);
     expect(await service.recover([])).toEqual([]);
+  });
+
+  it('queries as the submitting user, whom default CUPS privacy shows job names', () => {
+    const script = readFileSync(new URL('../scripts/print-recovery.ipp', import.meta.url), 'utf8');
+    expect(script).toMatch(/^\s*ATTR name requesting-user-name \$user$/m);
   });
 
   it('rejects failed or malformed recovery queries', async () => {

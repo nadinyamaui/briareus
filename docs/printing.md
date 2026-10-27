@@ -56,9 +56,11 @@ acknowledgement, `print_jobs` retains an `uncertain` entry and uses CUPS's
 `ipptool` to recover the job ID by marker and printer, including completed jobs.
 After recovery the session can cancel a pending job normally. No match still
 means uncertain, never permission to print again. Recovery requires `ipptool`
-(usually the `cups-ipp-utils` package) and retained CUPS job names/history;
-a missing tool or failed query is reported as an error without discarding the
-submission. Standard local socket configurations are queried through localhost
+(usually the `cups-ipp-utils` package) and retained CUPS job names/history; the
+query identifies itself as the core's user, who owns the job, so default CUPS
+job privacy still shows its name. A missing tool or failed query is reported as
+`recoveryError` next to the other jobs without discarding the submission, and
+canceling a confirmed job does not depend on it. Standard local socket configurations are queried through localhost
 port 631; that HTTP listener must reach the same scheduler as the socket.
 
 ## Set up a printer
