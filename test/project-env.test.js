@@ -52,6 +52,35 @@ describe('editEnvText', () => {
     expect(util.parseEnv(replaced)).toEqual({ PATH_WIN: 'new', TOKEN: 'old', OTHER: 'ok', TAIL: '1' });
   });
 
+  it('reads a blank value and a bare `=` running on past their line, as Node does', () => {
+    const text = 'A=  \nB=old\nC=end\n';
+    expect(util.parseEnv(text)).toEqual({ A: 'B=old', C: 'end' });
+    // B=old is A's value, not an assignment of B.
+    expect(util.parseEnv(editEnvText(text, { set: { B: 'new' } }))).toEqual({
+      A: 'B=old',
+      B: 'new',
+      C: 'end',
+    });
+    expect(editEnvText(text, { unset: ['B'] })).toBe(text);
+    const replaced = editEnvText(text, { set: { A: 'x' } });
+    expect(replaced).toBe('A=x\nC=end\n');
+    expect(util.parseEnv(replaced)).toEqual({ A: 'x', C: 'end' });
+    // An empty key leaves the rest of its line to be read again.
+    const bare = '=  D=1\nE=2\n';
+    expect(util.parseEnv(bare)).toEqual({ D: '1', E: '2' });
+    expect(util.parseEnv(editEnvText(bare, { unset: ['D'] }))).toEqual({ E: '2' });
+    // A blank value at the very end reads as empty, and stays empty with a key appended.
+    expect(util.parseEnv(editEnvText('A=1\nZ=  ', { set: { B: '2' } }))).toEqual({ A: '1', Z: '', B: '2' });
+  });
+
+  it('refuses a value Node would not read on its own line', () => {
+    expect(() => editEnvText('A=1\nB=2\n', { set: { A: '  ' } })).toThrow(/own line/);
+    expect(() => editEnvText('A=1\nB="x"\n', { set: { A: '"open' } })).toThrow(/own line/);
+    // Its quote would close one an earlier line left open.
+    expect(() => editEnvText('A="open\nB=2\n', { set: { C: '"q"' } })).toThrow(/own line/);
+    expect(editEnvText('A=1\nB=2\n', { set: { A: '' } })).toBe('A=\nB=2\n');
+  });
+
   it('refuses bad keys, multi-line values and empty edits', () => {
     expect(() => editEnvText('', { set: { 'A B': '1' } })).toThrow(/not a valid/);
     expect(() => editEnvText('', { set: { A: 'one\nB=two' } })).toThrow(/one line/);
