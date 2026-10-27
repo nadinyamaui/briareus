@@ -463,6 +463,54 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
       const relative = await tool('whatsapp_send_media', { account: 'default', chat: CHAT, path: 'a.jpg' });
       expect(relative.result.isError).toBe(true);
       expect(service.sendMedia).toHaveBeenCalledTimes(1);
+      for (const extension of ['unknown', 'constructor', '__proto__']) {
+        const filename = `file.${extension}`;
+        fs.writeFileSync(path.join(dir, filename), PNG);
+        const sent = await tool('whatsapp_send_media', {
+          account: 'default',
+          chat: CHAT,
+          path: path.join(dir, filename),
+        });
+        expect(sent.result.isError).not.toBe(true);
+        expect(service.sendMedia).toHaveBeenLastCalledWith('default', CHAT, {
+          data: PNG,
+          mimetype: 'application/octet-stream',
+          filename,
+        });
+      }
+      for (const [mimetype, extension] of [
+        ['video/mp4', 'mp4'],
+        ['video/quicktime', 'mov'],
+        ['video/x-m4v', 'm4v'],
+        ['video/webm', 'webm'],
+        ['video/3gpp', '3gp'],
+        ['video/x-matroska', 'mkv'],
+        ['video/x-msvideo', 'avi'],
+      ]) {
+        service.media.mockImplementationOnce(
+          async () => new Response(PNG, { headers: { 'Content-Type': mimetype } }),
+        );
+        const downloaded = JSON.parse(
+          (await tool('whatsapp_media', { account: 'default', chat: CHAT, message: 'm1' })).result.content[0]
+            .text,
+        );
+        try {
+          expect(path.basename(downloaded.path)).toBe(`media.${extension}`);
+          const forwarded = await tool('whatsapp_send_media', {
+            account: 'default',
+            chat: CHAT,
+            path: downloaded.path,
+          });
+          expect(forwarded.result.isError).not.toBe(true);
+          expect(service.sendMedia).toHaveBeenLastCalledWith('default', CHAT, {
+            data: PNG,
+            mimetype,
+            filename: `media.${extension}`,
+          });
+        } finally {
+          fs.rmSync(path.dirname(downloaded.path), { recursive: true });
+        }
+      }
     } finally {
       fs.rmSync(dir, { recursive: true });
     }
@@ -553,16 +601,22 @@ describe('voice note sends', () => {
 describe('media sends', () => {
   const endpoint = `/accounts/default/conversations/${CHAT}/media`;
   const file = { mimetype: 'video/mp4', filename: 'floor.mp4' };
-  it('takes a file larger than the app-wide JSON limit and watches the chat', async () => {
-    const video = Buffer.alloc(3 * 1024 * 1024, 7);
-    const res = await request(endpoint, 'POST', { ...file, data: video.toString('base64') });
-    expect(res.status).toBe(201);
-    const [, , input] = service.sendMedia.mock.calls[0];
-    // Buffer.equals: a deep comparison of megabytes is too slow for the test.
-    expect(input.data.equals(video)).toBe(true);
-    expect({ ...input, data: null }).toEqual({ ...file, data: null });
-    expect(watcher.watching(job.id, 'default', CHAT)).toBe(true);
-  });
+  it.each(['media', 'Media'])(
+    'takes a file larger than the app-wide JSON limit at /%s and watches the chat',
+    async (route) => {
+      const video = Buffer.alloc(3 * 1024 * 1024, 7);
+      const res = await request(endpoint.replace(/media$/, route), 'POST', {
+        ...file,
+        data: video.toString('base64'),
+      });
+      expect(res.status).toBe(201);
+      const [, , input] = service.sendMedia.mock.calls[0];
+      // Buffer.equals: a deep comparison of megabytes is too slow for the test.
+      expect(input.data.equals(video)).toBe(true);
+      expect({ ...input, data: null }).toEqual({ ...file, data: null });
+      expect(watcher.watching(job.id, 'default', CHAT)).toBe(true);
+    },
+  );
   it('rejects bad data or watch before sending, and never retries an uncertain send', async () => {
     for (const body of [
       { ...file },
