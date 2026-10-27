@@ -35,13 +35,13 @@
     "node": ">=24"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "^2.1.306",
+    "@anthropic-ai/claude-code": "^2.1.311",
     "@iarna/toml": "^3.0.0",
     "@openai/codex": "^0.163.0",
-    "@xai-official/grok": "^1.0.66",
+    "@xai-official/grok": "^1.0.70",
     "express": "^5.3.0",
     "mysql2": "^3.24.6",
-    "opencode-ai": "^1.19.3",
+    "opencode-ai": "^1.19.4",
     "umzug": "^3.8.3"
   },
   "devDependencies": {
