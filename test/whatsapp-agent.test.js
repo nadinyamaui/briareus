@@ -490,6 +490,9 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
         ['mpeg', 'video/mpeg'],
         ['mpg', 'video/mpeg'],
         ['ogv', 'video/ogg'],
+        ['wmv', 'video/x-ms-wmv'],
+        ['flv', 'video/x-flv'],
+        ['m2ts', 'video/mp2t'],
       ]) {
         const filename = `video.${extension}`;
         fs.writeFileSync(path.join(dir, filename), PNG);
@@ -516,6 +519,9 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
         ['video/x-msvideo', 'avi'],
         ['video/mpeg', 'mpeg'],
         ['video/ogg', 'ogv'],
+        ['video/x-ms-wmv', 'wmv'],
+        ['video/x-flv', 'flv'],
+        ['video/mp2t', 'm2ts'],
         ['audio/ogg', 'ogg'],
       ]) {
         service.media.mockImplementationOnce(
