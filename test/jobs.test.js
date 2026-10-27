@@ -18366,6 +18366,89 @@ describe('automatic recovery after a server restart', () => {
     },
   );
 
+  it.each(['initial', 'publish'])(
+    'retains the unfinished %s request when retrying without a conversation',
+    async (phase) => {
+      const original =
+        phase === 'initial' ? 'Review the full diff and verify findings' : 'Publish verified findings';
+      const review = row({
+        status: 'failed',
+        reviewBranch: 'feature',
+        autoClose: true,
+        orchestratorPrAction: 'review',
+        chatStarted: false,
+        chats: {},
+        turns: 0,
+        recoveryTurn: {
+          prompt: original,
+          opts: phase === 'initial' ? { review: true } : {},
+          phase,
+          completed: false,
+        },
+      });
+      state.stored = [review];
+      await initJobs();
+      sendDevMessage(review.id, 'Retry the failed stage');
+      expect(review.recoveryTurn.prompt).toContain(original);
+      expect(review.recoveryTurn.prompt).toContain('Retry the failed stage');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(children[0].args).not.toContain('resume');
+      expect(children[0].rpc?.some((m) => m.method === 'thread/resume')).not.toBe(true);
+      expect(children[0].prompt).toContain(original);
+      expect(children[0].prompt).toContain('Retry the failed stage');
+      expect(review.recoveryTurn).toMatchObject({ phase, completed: false });
+      finish(children[0]);
+      if (phase === 'initial') {
+        await vi.waitFor(() => expect(children).toHaveLength(2));
+        expect(children[1].prompt).toContain('PUBLISH THE REVIEW');
+        finish(children[1]);
+      }
+      await vi.waitFor(() => expect(review.status).toBe('closed'));
+      expect(children).toHaveLength(phase === 'initial' ? 2 : 1);
+    },
+  );
+
+  it('waits for answered-review findings before waking its idle orchestrator', async () => {
+    const parent = row({ status: 'idle', recoveryTurn: null });
+    const review = row({
+      status: 'idle',
+      parentId: parent.id,
+      reviewBranch: 'answered-review',
+      startedOnPr: 13201,
+      autoClose: true,
+      orchestratorPrAction: 'review',
+      awaitingAnswer: true,
+      recoveryTurn: { prompt: 'Publish review', opts: {}, phase: 'publish', completed: true },
+    });
+    state.stored = [parent, review];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect([parent.status, review.status]).toEqual(['idle', 'idle']));
+    let release;
+    const delayed = new Promise((resolve) => {
+      release = resolve;
+    });
+    latestReviewFindings.mockImplementationOnce(() => delayed);
+    try {
+      sendDevMessage(review.id, 'Use the current head');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      const reads = latestReviewFindings.mock.calls.length;
+      finish(children[0]);
+      await vi.waitFor(() => expect(latestReviewFindings.mock.calls.length).toBe(reads + 1));
+      expect(review.reviewTriage).toBeFalsy();
+      expect(children).toHaveLength(1);
+      expect(parent.events.some((e) => e.text?.includes('finished its turn'))).toBe(false);
+      release([{ key: 'fresh', severity: 'medium', title: 'Fresh finding' }]);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(workerSummary(review).reviewTriage).toBeTruthy();
+      expect(children[1].prompt).toContain('finished its turn');
+      finish(children[1]);
+      await vi.waitFor(() => expect([parent.status, review.status]).toEqual(['idle', 'closed']));
+    } finally {
+      release([]);
+    }
+  });
+
   it('keeps a completed official review follow-up out of the review sequence', async () => {
     const review = row({
       status: 'idle',
@@ -19076,6 +19159,61 @@ describe('official orchestrator PR actions', () => {
       delete worker[field];
     }
   });
+
+  it.each(['failed', 'closed', 'idle'])(
+    'refuses to reactivate a %s official action while its replacement is open',
+    async (status) => {
+      const original = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+      await settleWorkers([parent.id]);
+      const replacement = await startOrchestratorPrAction(parent, {
+        action: 'solve-conflicts',
+        prNumber: 12,
+      });
+      original.status = status;
+      const checkpoint = original.recoveryTurn;
+      expect(() => sendDevMessage(original.id, 'Retry the failed stage')).toThrow(
+        /already has an open session/,
+      );
+      if (status !== 'idle') {
+        expect(() => reopenDevSession(original.id)).toThrow(/already has an open session/);
+      }
+      expect(original.status).toBe(status);
+      expect(original.recoveryTurn).toBe(checkpoint);
+      expect(DEV_OPEN).toContain(replacement.status);
+    },
+  );
+
+  it.each(['startBranch', 'standalone findings', 'loop findings'])(
+    'checks %s before retrying an official action',
+    async (kind) => {
+      const original = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+      await settleWorkers([parent.id]);
+      original.status = 'failed';
+      const other = getJob('pr-cap-0');
+      other.repo = 'Acme/Shop';
+      if (kind === 'startBranch') {
+        other.startBranch = 'feature';
+        other.status = 'idle';
+      } else {
+        other.startedOnPr = 12;
+        if (kind === 'standalone findings') hold(other);
+        else other.reviewLoop = { triage: { prNumber: 12, findings: [] } };
+      }
+      try {
+        expect(() => sendDevMessage(original.id, 'Retry')).toThrow(
+          kind === 'startBranch' ? /already has an open session/ : /awaiting user triage/,
+        );
+        expect(original.status).toBe('failed');
+      } finally {
+        other.repo = 'acme/shop';
+        other.status = 'closed';
+        other.startedOnPr = null;
+        delete other.startBranch;
+        other.reviewTriage = null;
+        other.reviewLoop = null;
+      }
+    },
+  );
 
   it.each([false, true])(
     'enforces capacity before dispatch (filled during GitHub: %s)',
