@@ -7,6 +7,7 @@ import readline from 'node:readline';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { whatsappAgentRoutes, whatsappMediaPath, whatsappSessionAllowed } from '../lib/whatsapp-agent.js';
 import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
+import { createWhatsAppService } from '../lib/whatsapp.js';
 
 const CHAT = '34600000000@c.us';
 const OTHER = '34611111111@c.us';
@@ -478,6 +479,33 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
           filename,
         });
       }
+      const waha = vi.fn(async () => Response.json({ id: 'media-sent', hasMedia: true }));
+      service.sendMedia.mockImplementation(
+        createWhatsAppService({
+          config: () => ({ url: 'http://waha.test', apiKey: 'test-key' }),
+          fetcher: waha,
+        }).sendMedia,
+      );
+      for (const [extension, mimetype] of [
+        ['mpeg', 'video/mpeg'],
+        ['mpg', 'video/mpeg'],
+        ['ogv', 'video/ogg'],
+      ]) {
+        const filename = `video.${extension}`;
+        fs.writeFileSync(path.join(dir, filename), PNG);
+        const sent = await tool('whatsapp_send_media', {
+          account: 'default',
+          chat: CHAT,
+          path: path.join(dir, filename),
+          watch: false,
+        });
+        expect(sent.result.isError).not.toBe(true);
+        expect(waha.mock.lastCall[0]).toBe('http://waha.test/api/sendVideo');
+        expect(JSON.parse(waha.mock.lastCall[1].body)).toMatchObject({
+          convert: true,
+          file: { mimetype, filename, data: PNG.toString('base64') },
+        });
+      }
       for (const [mimetype, extension] of [
         ['video/mp4', 'mp4'],
         ['video/quicktime', 'mov'],
@@ -486,6 +514,9 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
         ['video/3gpp', '3gp'],
         ['video/x-matroska', 'mkv'],
         ['video/x-msvideo', 'avi'],
+        ['video/mpeg', 'mpeg'],
+        ['video/ogg', 'ogv'],
+        ['audio/ogg', 'ogg'],
       ]) {
         service.media.mockImplementationOnce(
           async () => new Response(PNG, { headers: { 'Content-Type': mimetype } }),
@@ -507,6 +538,15 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
             mimetype,
             filename: `media.${extension}`,
           });
+          const video = mimetype.startsWith('video/');
+          expect(waha.mock.lastCall[0]).toBe(`http://waha.test/api/send${video ? 'Video' : 'File'}`);
+          const body = JSON.parse(waha.mock.lastCall[1].body);
+          expect(body.file).toEqual({
+            mimetype,
+            filename: `media.${extension}`,
+            data: PNG.toString('base64'),
+          });
+          expect(body.convert).toBe(video ? true : undefined);
         } finally {
           fs.rmSync(path.dirname(downloaded.path), { recursive: true });
         }
@@ -630,6 +670,30 @@ describe('media sends', () => {
     );
     expect((await request(endpoint, 'POST', { ...file, data: 'eA==' })).status).toBe(502);
     expect(service.sendMedia).toHaveBeenCalledTimes(1);
+    expect(watcher.watching(job.id, 'default', CHAT)).toBe(false);
+  });
+  it.each(['', 'A', 'eAAxA', 'AAAAA==', 'eA=', 'eAA==', 'AAAA=', '=eA=', 'eA==='])(
+    'rejects malformed base64 %j without sending or watching',
+    async (data) => {
+      expect((await request(endpoint, 'POST', { ...file, data })).status).toBe(400);
+      expect(service.sendMedia).not.toHaveBeenCalled();
+      expect(watcher.watching(job.id, 'default', CHAT)).toBe(false);
+    },
+  );
+  it.each([
+    ['eA==', 'x'],
+    ['eA', 'x'],
+    ['eHk=', 'xy'],
+    ['eHk', 'xy'],
+    ['eHl6', 'xyz'],
+    ['+/8=', Buffer.from([0xfb, 0xff])],
+  ])('preserves valid padded or unpadded base64 %j', async (data, bytes) => {
+    const res = await request(endpoint, 'POST', { ...file, data, watch: false });
+    expect(res.status).toBe(201);
+    expect(service.sendMedia).toHaveBeenCalledExactlyOnceWith('default', CHAT, {
+      ...file,
+      data: Buffer.from(bytes),
+    });
     expect(watcher.watching(job.id, 'default', CHAT)).toBe(false);
   });
   it('parses no body for a session that may not send', async () => {
