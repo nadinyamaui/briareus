@@ -250,14 +250,19 @@ describe('print submission lifecycle', () => {
     expect((await (await request('/jobs')).json()).jobs).toHaveLength(100);
     expect((await request('/jobs/Office-1', 'DELETE')).status).toBe(200);
     service.jobs.mockImplementation(async (ids) =>
-      ids.map((jobId) => ({ jobId, state: jobId === 'Office-2' ? 'completed' : 'pending' })),
+      ids.map((jobId) => ({
+        jobId,
+        state: jobId === 'Office-2' ? 'completed' : jobId === 'Office-3' ? 'ended' : 'pending',
+      })),
     );
+    expect((await request('/jobs', 'POST', { path: '/w/a.pdf' })).status).toBe(200);
     expect((await request('/jobs', 'POST', { path: '/w/a.pdf' })).status).toBe(200);
     const ids = (await (await request('/jobs')).json()).jobs.map((j) => j.jobId);
     expect(ids).toHaveLength(100);
     expect(ids).toContain('Office-1');
-    expect(ids).toContain('Office-101');
+    expect(ids).toContain('Office-102');
     expect(ids).not.toContain('Office-2');
+    expect(ids).not.toContain('Office-3');
   });
 
   it.each(['missing', 'not executable'])(

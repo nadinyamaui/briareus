@@ -35,10 +35,20 @@ Office-11               briareus          1024   Tue Oct 27 11:10:00 2026
 `,
         stderr: '',
       };
+    if (key === 'lpstat -H') return { code: 0, stdout: '/run/cups/cups.sock\n', stderr: '' };
+    if (command === 'ipptool')
+      return {
+        code: 0,
+        stdout: `<key>ResponseAttributes</key><array>${ippJob(10, 9)}${ippJob(11, 7)}${ippJob(12, 3)}</array>`,
+        stderr: '',
+      };
     if (command === 'cancel') return { code: 0, stdout: '', stderr: '' };
     throw new Error(`unexpected ${key}`);
   });
 }
+
+const ippJob = (id, state, queue = 'Office') =>
+  `<dict><key>job-id</key><integer>${id}</integer><key>job-state</key><integer>${state}</integer><key>job-printer-uri</key><string>ipp://localhost/printers/${queue}</string></dict>`;
 
 describe('parsing lpstat', () => {
   it('reads printer states and the default', () => {
@@ -75,6 +85,12 @@ describe('parsing lpstat', () => {
       ['A-1', 'job-printing'],
       ['B-2', ''],
     ]);
+  });
+
+  it('decodes the URI-escaped queue in job ids to the ids lp acknowledges', () => {
+    expect([
+      ...parseJobs('Caf%C3%A9-2  u  1  date\nPercent%25Queue-3  u  1  date\nBad%E9-4  u  1  date\n').keys(),
+    ]).toEqual(['Café-2', 'Percent%Queue-3', 'Bad%E9-4']);
   });
 });
 
@@ -126,6 +142,18 @@ describe('the print service', () => {
       'fit-to-page',
     ]);
     expect(lp[2]).toBe(bytes);
+  });
+
+  it("overrides the printer's saved landscape and fit-to-page with an explicit false, inheriting when omitted", async () => {
+    const run = fakeCups();
+    const service = createPrintService({ run });
+    await service.print(Buffer.from('x'), { landscape: false, fitToPage: false });
+    await service.print(Buffer.from('x'));
+    const [explicit, omitted] = run.mock.calls
+      .filter(([command]) => command === 'lp')
+      .map(([, args]) => args);
+    expect(explicit.slice(6)).toEqual(['-o', 'landscape=false', '-o', 'fit-to-page=false']);
+    expect(omitted).toHaveLength(6);
   });
 
   it.each([
@@ -190,6 +218,69 @@ describe('the print service', () => {
       { jobId: 'Office-9', state: 'unknown' },
     ]);
     expect(await service.jobs([])).toEqual([]);
+  });
+
+  it("reads how a job ended from CUPS's job-state, not lpstat's alerts", async () => {
+    const run = fakeCups({
+      'lpstat -l -W completed -o': {
+        code: 0,
+        stdout:
+          'Office-11  briareus  1024  date\n\tAlerts: none\nOffice-13  briareus  1024  date\n\tAlerts: none\n',
+        stderr: '',
+      },
+    });
+    const fallback = run.getMockImplementation();
+    run.mockImplementation((command, args) =>
+      command === 'ipptool'
+        ? {
+            code: 0,
+            stdout: `<key>ResponseAttributes</key><array>${ippJob(11, 7)}${ippJob(13, 8)}</array>`,
+            stderr: '',
+          }
+        : fallback(command, args),
+    );
+    expect(await createPrintService({ run }).jobs(['Office-11', 'Office-13'])).toEqual([
+      { jobId: 'Office-11', state: 'canceled' },
+      { jobId: 'Office-13', state: 'aborted' },
+    ]);
+  });
+
+  it('matches jobs on a queue whose name lpstat escapes', async () => {
+    const run = fakeCups({
+      'lpstat -o': { code: 0, stdout: 'Caf%C3%A9-2  briareus  1024  date\n', stderr: '' },
+      'lpstat -l -W completed -o': { code: 0, stdout: 'Caf%C3%A9-1  briareus  1024  date\n', stderr: '' },
+    });
+    const fallback = run.getMockImplementation();
+    run.mockImplementation((command, args) =>
+      command === 'ipptool'
+        ? {
+            code: 0,
+            stdout: `<key>ResponseAttributes</key><array>${ippJob(1, 9, 'Caf%C3%A9')}</array>`,
+            stderr: '',
+          }
+        : fallback(command, args),
+    );
+    expect(await createPrintService({ run }).jobs(['Café-2', 'Café-1'])).toEqual([
+      { jobId: 'Café-2', state: 'pending' },
+      { jobId: 'Café-1', state: 'completed' },
+    ]);
+  });
+
+  it('reports an ended job without its outcome when the job-state query fails, and skips it when none ended', async () => {
+    const run = fakeCups();
+    const fallback = run.getMockImplementation();
+    run.mockImplementation((command, args) =>
+      command === 'ipptool' ? { code: null, stdout: '', stderr: 'Timed out' } : fallback(command, args),
+    );
+    const service = createPrintService({ run });
+    expect(await service.jobs(['Office-12', 'Office-10', 'Office-9'])).toEqual([
+      { jobId: 'Office-12', state: 'pending' },
+      { jobId: 'Office-10', state: 'ended', stateError: 'Timed out' },
+      { jobId: 'Office-9', state: 'unknown' },
+    ]);
+    run.mockClear();
+    await service.jobs(['Office-12', 'Office-9']);
+    expect(run.mock.calls.some(([command]) => command === 'ipptool')).toBe(false);
   });
 
   it.each([{}, { printer: 'Office/photo' }])('accepts a listed printer instance: %j', async (options) => {
@@ -354,6 +445,7 @@ describe('the print service', () => {
   it('queries as the submitting user, whom default CUPS privacy shows job names', () => {
     const script = readFileSync(new URL('../scripts/print-recovery.ipp', import.meta.url), 'utf8');
     expect(script).toMatch(/^\s*ATTR name requesting-user-name \$user$/m);
+    expect(script).toMatch(/^\s*ATTR keyword requested-attributes .*\bjob-state\b/m);
   });
 
   it('rejects failed or malformed recovery queries', async () => {

@@ -17,7 +17,14 @@ The tools are `print_printers` (each printer, its state and the default),
 `print_file` (a file, with optional printer, copies up to 20, pages, sides,
 color mode, paper size, landscape and fit-to-page), `print_jobs` (this session's
 jobs and their state) and `print_cancel` (one of this session's jobs). The
-internal HTTP endpoints live under `/api/agent/print`.
+internal HTTP endpoints live under `/api/agent/print`. Landscape and fit-to-page
+follow the printer's saved defaults unless the request sets them, `false`
+included.
+
+A job's state comes from CUPS: `pending` while queued or printing, then
+`completed`, `canceled` or `aborted` as CUPS's `job-state` reports it, read with
+`ipptool`. If that query fails the job shows as `ended` with the error in
+`stateError`; `unknown` means CUPS no longer retains it.
 
 ## Select projects
 

@@ -8,6 +8,6 @@
   # Default CUPS policy hides job names from anonymous requests; lp submitted as this user.
   ATTR name requesting-user-name $user
   ATTR keyword which-jobs all
-  ATTR keyword requested-attributes job-id,job-name,job-printer-uri
+  ATTR keyword requested-attributes job-id,job-name,job-printer-uri,job-state
   STATUS successful-ok
 }
