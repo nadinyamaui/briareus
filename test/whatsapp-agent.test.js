@@ -509,6 +509,8 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
       for (const [extension, mimetype] of [
         ['mpeg', 'video/mpeg'],
         ['mpg', 'video/mpeg'],
+        ['vob', 'video/mpeg'],
+        ['VOB', 'video/mpeg'],
         ['ogv', 'video/ogg'],
         ['wmv', 'video/x-ms-wmv'],
         ['flv', 'video/x-flv'],
