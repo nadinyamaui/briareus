@@ -18200,6 +18200,103 @@ describe('automatic recovery after a server restart', () => {
     expect(children).toHaveLength(1);
   });
 
+  it.each(['success', 'question', 'canceled'])(
+    'settles an answered official conflict action (%s)',
+    async (outcome) => {
+      const worker = row({ autoClose: true, orchestratorPrAction: 'solve-conflicts' });
+      state.stored = [worker];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      children[0].notify('item/completed', {
+        item: { type: 'agent_message', text: '<ask-user>Which resolution?</ask-user>' },
+      });
+      finish(children[0]);
+      await vi.waitFor(() => expect(worker.status).toBe('idle'));
+      expect(worker.awaitingAnswer).toBe(true);
+      const releases = releaseInstance.mock.calls.length;
+      sendDevMessage(worker.id, 'Keep the new implementation');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      if (outcome === 'question') {
+        children[1].notify('item/completed', {
+          item: { type: 'agent_message', text: '<ask-user>Keep the tests too?</ask-user>' },
+        });
+      } else if (outcome === 'canceled') cancelDevTurn(worker.id);
+      finish(children[1]);
+      await vi.waitFor(() => expect(worker.status).toBe(outcome === 'success' ? 'closed' : 'idle'));
+      if (outcome === 'success') {
+        expect(releaseInstance.mock.calls.slice(releases)).toEqual([[worker]]);
+        expect(dropSessionDatabase).toHaveBeenCalledWith(worker, expect.any(Function));
+      } else {
+        expect(worker.workDir).toBeTruthy();
+        expect(releaseInstance.mock.calls).toHaveLength(releases);
+        expect(outcome === 'question' ? worker.awaitingAnswer : worker.turnCanceled).toBe(true);
+      }
+    },
+  );
+
+  it.each(['initial', 'publish'])(
+    'retries a failed official review in its unfinished %s stage',
+    async (phase) => {
+      const review = row({
+        reviewBranch: 'feature',
+        autoClose: true,
+        orchestratorPrAction: 'review',
+        recoveryTurn: {
+          prompt: phase === 'initial' ? 'Review the PR' : 'PUBLISH THE REVIEW',
+          opts: phase === 'initial' ? { review: true } : {},
+          phase,
+          completed: false,
+        },
+      });
+      state.stored = [review];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      if (children[0].complete) children[0].complete(null, 'failed');
+      children[0].emit('close', 1);
+      await vi.waitFor(() => expect(review.status).toBe('failed'));
+      expect(review.awaitingAnswer).toBeFalsy();
+      expect(review.recoveryTurn).toMatchObject({ phase, completed: false });
+      sendDevMessage(review.id, 'Retry the failed stage');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(review.recoveryTurn.phase).toBe(phase);
+      if (phase === 'initial') {
+        expect(children[1].args[0]).toBe('exec');
+        expect(children[1].args.join(' ')).toContain('multi_agent');
+        expect(review.recoveryTurn.opts.review).toBe(true);
+      } else expect(children[1].args[0]).toBe('app-server');
+      finish(children[1]);
+      if (phase === 'initial') {
+        await vi.waitFor(() => expect(children).toHaveLength(3));
+        expect(children[2].prompt).toContain('PUBLISH THE REVIEW');
+        finish(children[2]);
+      }
+      await vi.waitFor(() => expect(review.status).toBe('closed'));
+      expect(children).toHaveLength(phase === 'initial' ? 3 : 2);
+    },
+  );
+
+  it('keeps a completed official review follow-up out of the review sequence', async () => {
+    const review = row({
+      status: 'idle',
+      reviewBranch: 'feature',
+      orchestratorPrAction: 'review',
+      recoveryTurn: { prompt: 'Published', opts: {}, phase: 'publish', completed: true },
+    });
+    state.stored = [review];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(review.status).toBe('idle'));
+    sendDevMessage(review.id, 'Explain the findings');
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].args[0]).toBe('app-server');
+    expect(review.recoveryTurn.phase).toBe('followup');
+    finish(children[0]);
+    await vi.waitFor(() => expect(review.status).toBe('idle'));
+    expect(children).toHaveLength(1);
+  });
+
   it.each([
     ['project', false],
     ['database', false],
