@@ -301,6 +301,99 @@ describe('latestTestVerdict', () => {
   });
 
   it.each([
+    'No tests were run',
+    'No checks were executed',
+    'N/A — no browser installed',
+    'None — video not recorded',
+  ])('rejects the remaining execution and evidence absence declarations: %s', async (absence) => {
+    for (const evidence of [absence, `**${absence}**`, `<span>${absence}</span>`, `Evidence: ${absence}`]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ✅ | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+    gh.comments = [sheet([`| 1 | API | curl | 200 | ✅ | ${absence} was shown as expected |`])];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it.each([
+    'UI: 2 checks remaining',
+    'UI: completed 1 of 2 checks',
+    'UI: only first check run',
+    'curl failed: could not resolve host',
+    'API request could not be sent',
+    'All tests skipped',
+    'No test execution',
+    'API: all steps skipped',
+    'API passed; mobile not tested',
+    '(all tests skipped)',
+  ])('retains the reported unfinished subprocedures: %s', async (annotation) => {
+    for (const [status, evidence] of [
+      [`✅ API; ${annotation}`, 'response.json'],
+      ['✅', annotation],
+    ]) {
+      gh.comments = [sheet([`| 1 | API and UI | curl then browser | Both work | ${status} | ${evidence} |`])];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each([
+    'UI: 0 checks remaining',
+    'UI: completed 2 of 2 checks',
+    'All tests completed',
+    'API: all steps completed',
+    'API passed; mobile tested',
+    'UI showed all tests skipped as expected',
+    'UI showed No test execution as expected',
+  ])('preserves completed progress and observed execution messages: %s', async (annotation) => {
+    gh.comments = [
+      sheet([`| 1 | API and UI | curl then browser | Both work | ✅ ${annotation} | response.json |`]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 1, incomplete: false });
+  });
+
+  it.each([
+    ['Returns HTTP 404 Not Found', 'API failed with HTTP 404 Not Found'],
+    ['Returns HTTP 422 Unprocessable Entity', 'API failed with HTTP 422 Unprocessable Entity'],
+    ['Invalid credentials cannot log in', 'UI cannot log in with invalid credentials as expected'],
+    ['Not available message is returned', 'API: not available message was returned as expected'],
+  ])('preserves matching negative observations with reason phrases: %s', async (expected, annotation) => {
+    for (const [status, evidence] of [
+      [`✅ ${annotation}`, 'response.json'],
+      ['✅', `${annotation}; [response](https://example.com/response.json)`],
+    ]) {
+      for (const unfinished of ['', '; UI not tested']) {
+        gh.comments = [
+          sheet([
+            `| 1 | Negative test | curl then browser | ${expected} | ${status}${unfinished} | ${evidence} |`,
+          ]),
+        ];
+        expect(await latestTestVerdict(repo, 5)).toMatchObject({
+          total: 1,
+          passed: unfinished ? 0 : 1,
+          incomplete: !!unfinished,
+        });
+      }
+    }
+  });
+
+  it.each([
+    ['Returns HTTP 200', 'API failed with HTTP 404 Not Found'],
+    ['Returns HTTP 404 Not Found', 'API failed with HTTP 422 Unprocessable Entity'],
+    ['Returns HTTP 404 Not Found', 'UI setup failed with HTTP 404 Not Found'],
+    ['Valid credentials log in successfully', 'UI cannot log in with invalid credentials as expected'],
+    ['Home is displayed', 'API: not available message was returned as expected'],
+  ])('retains mismatched outcomes and actual setup errors: %s', async (expected, annotation) => {
+    for (const [status, evidence] of [
+      [`✅ ${annotation}`, 'response.json'],
+      ['✅', annotation],
+    ]) {
+      gh.comments = [
+        sheet([`| 1 | Negative test | curl then browser | ${expected} | ${status} | ${evidence} |`]),
+      ];
+      expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 1, passed: 0, incomplete: true });
+    }
+  });
+
+  it.each([
     'No evidence captured; upload returned 500',
     'No evidence was recorded; nothing was shown',
     'No evidence at all',
