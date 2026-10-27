@@ -42,7 +42,10 @@ variables precedence, so keep both forms consistent. The setting applies to
 the core's outbound HTTP requests, including transcription, voice generation,
 GitHub, and object storage; internal services must bypass the proxy.
 
-Install the drop-in to load the file when the service starts:
+Install the drop-in to load the file when the service starts. If you reuse an
+existing environment file at another path, change the drop-in's
+`EnvironmentFile` to that path before installing it. If the service already
+loads that file, keep its existing directive and skip installing this drop-in:
 
 ```bash
 install -D -m 644 deploy/briareus-proxy.conf "$HOME/.config/systemd/user/briareus.service.d/node-proxy.conf"
