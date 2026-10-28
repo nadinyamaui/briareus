@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import mysql from 'mysql2/promise';
 import { randomBytes } from 'node:crypto';
 import { getConfig } from '../lib/config.js';
@@ -219,6 +219,96 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
       expect(requested.filter((sha) => sha === rows[0].head_sha)).toHaveLength(1);
     } finally {
       service.stop();
+    }
+  });
+
+  it('recovers pending checks and discovers default heads despite a discovery exhausting every quota window', async () => {
+    const repo = 'acme/source-recovery';
+    const pending = check({ head_sha: 'pending', status: 'queued', conclusion: null });
+    const completed = { ...pending, status: 'completed', conclusion: 'success' };
+    const defaultCheck = check({ head_sha: 'default' });
+    await save([pending], {}, repo);
+    vi.resetModules();
+    const { githubRest } = await import('../lib/github.js');
+    let clock = start + 180000;
+    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    let remaining = 100;
+    let unavailable = true;
+    const requests = [];
+    vi.stubGlobal('fetch', async (input) => {
+      const url = new URL(input);
+      requests.push(url.pathname + url.search);
+      if (remaining-- <= 0)
+        return new Response('{}', {
+          status: 403,
+          headers: {
+            'x-ratelimit-resource': 'core',
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': String(Math.floor((clock + 60000) / 1000)),
+          },
+        });
+      let body = [];
+      if (url.pathname === `/repos/${repo}`) body = { default_branch: 'main' };
+      else if (url.pathname.endsWith('/commits/main')) body = { sha: 'default' };
+      else if (url.pathname.endsWith('/check-runs'))
+        body = { check_runs: url.pathname.includes('/pending/') ? [completed] : [defaultCheck] };
+      else if (url.pathname.endsWith('/commits/expensive/statuses')) {
+        if (unavailable) return new Response('{}', { status: 503 });
+        const page = Number(url.searchParams.get('page'));
+        body =
+          page > 3
+            ? []
+            : Array.from({ length: 100 }, (_, i) => ({
+                id: page * 100 + i,
+                context: 'deploy',
+                state: 'success',
+              }));
+      }
+      return Response.json(body);
+    });
+    const errors = [];
+    const pendingCommits = vi.spyOn(store, 'pendingCommits');
+    const service = createGithubSync({
+      projects: () => [{ repo }],
+      config: () => ({ githubToken: 'token' }),
+      rest: githubRest,
+      ci: store,
+      store: {
+        syncState: async () => ({}),
+        syncedItems: async () => new Map(),
+        openPullNumbers: async () => [],
+        saveMetadata: async () => {},
+        finishSync: async () => {},
+      },
+      board: async () => ({}),
+      invalidate: () => {},
+      log: (message) => errors.push(message),
+    });
+    try {
+      service.onWebhook('status', { repository: { full_name: repo }, sha: 'expensive' });
+      await service.flush(repo);
+      unavailable = false;
+      requests.length = 0;
+      for (let tick = 0; tick < 6; tick++) {
+        clock += 3600000;
+        remaining = 8; // Four inventory/metadata calls, then one recovery source can exhaust quota.
+        await service.tick();
+      }
+      expect(requests).toContain(`/repos/${repo}/commits/expensive/statuses?per_page=100&page=4`);
+      expect(errors.some((message) => message.includes('core rate limit exhausted'))).toBe(true);
+      expect(pendingCommits).toHaveBeenCalledWith(repo);
+      const result = await store.runs({ ...query, repos: [repo] });
+      expect(result.runs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ headSha: 'pending', status: 'completed' }),
+          expect.objectContaining({ headSha: 'default', status: 'completed' }),
+        ]),
+      );
+    } finally {
+      service.stop();
+      pendingCommits.mockRestore();
+      dateNow.mockRestore();
+      vi.unstubAllGlobals();
     }
   });
 
