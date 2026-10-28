@@ -77,6 +77,12 @@ email through the internal mail MCP in projects with `mailToolsEnabled: true`
 you reconnect them with management permissions. See [Email from a session](docs/email-mcp.md)
 for setup and access details.
 
+## Printing in agent sessions
+
+Ask the agent to print a file it made or one you attached, on the core
+machine's CUPS printers, through the internal print MCP in projects with
+`printToolsEnabled: true` (off by default). See [Printing from a session](docs/printing.md).
+
 ## How a session runs
 
 1. **Claim resources.** The session takes an idle workspace clone from the
@@ -665,6 +671,14 @@ commits, changed files and head checks. The lists read this durable mirror; its
 read, and `fresh=1` requests a GitHub refresh (with the existing 15-second minimum).
 Detailed viewers and merge validation still read GitHub on demand.
 
+Background synchronization pauses when the shared allowance reaches 1,000 REST
+requests or 500 GraphQL points remaining, leaving headroom for interactive reads
+and agent sessions; these reserves do not block foreground requests. Repeated
+REST reads use ETags. Sustained webhook traffic is coalesced every 15 seconds per
+repository, and webhook board refreshes run at most once a minute, including a
+trailing refresh after the last event; affected items are saved between refreshes.
+Paused webhook deliveries are coalesced and retried after the allowance resets.
+
 An in-process scheduled task runs at startup and every hour for enabled projects.
 The first pass backfills all issue/PR pages; subsequent passes use an overlapping
 update cursor and recheck open PRs for CI changes. Completed historical items are
@@ -680,7 +694,7 @@ What each delivery does: no agent session is started by one. The hook subscribes
 `pull_request`, `pull_request_review`, `pull_request_review_comment`, `issues`,
 `issue_comment`, `check_suite`, `check_run`, `status`, `label`, `milestone` and
 `sub_issues`. Authenticated deliveries for enabled repositories refresh affected
-items and their board, coalescing bursts for two seconds; hourly sync catches
+items and their board, coalescing the first burst for two seconds; hourly sync catches
 missed events. Existing session events also refresh the PR panel of any open
 session on that branch as the event lands rather
 than on the next twenty-second tick (a commit status still `pending` refreshes

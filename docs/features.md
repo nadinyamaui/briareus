@@ -33,8 +33,9 @@ second user needs WAHA Plus to link a phone). See
 Sessions run Claude Code, Codex, Grok, opencode or Z.AI in their own workspace
 clones. Projects can reserve a database server per open session or use a
 local checkout. An admin's interactive session can edit its project's `.env`
-template, the file every checkout is seeded from, with MCP tools. Clients can stream transcripts, send or queue messages,
-cancel turns, compact context, close and reopen sessions, and attach files
+template, the file every checkout is seeded from, with MCP tools. Clients can
+stream transcripts, send or queue messages, cancel turns, compact context,
+pin sessions to the top of the list, close and reopen sessions, and attach files
 or transcribed voice notes. Claude `/btw` questions use a separate fork of
 the conversation. Orchestrators coordinate worker sessions and their
 review, fix and QA work.
@@ -76,11 +77,11 @@ See [the shared browser](api-v1.md#the-shared-browser) and
 
 ## Business inboxes and session tools
 
-| Service           | Client API                                                                                                     | Interactive session tools                                                                                      |
-| ----------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| Slack             | Channels, DMs, threads, replies, read positions and live events as the connected user                          | Read permitted channels and the user's DMs; send with the project's approval rules                             |
-| Gmail and Outlook | Connect and sync mailboxes, search messages, read bodies, reply and move individual messages to provider trash | Opt-in projects can search, read, connect, sync, send, reply, mark read/unread, archive and trash              |
-| WhatsApp          | Link through WAHA, read chats, send text replies, mark read and download attachments                           | Opt-in projects read, open or transcribe media, reply, mark read, open groups; replies (voice as text) wake it |
+| Service           | Client API                                                                                                     | Interactive session tools                                                                                                                                |
+| ----------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Slack             | Channels, DMs, threads, replies, read positions and live events as the connected user                          | Read permitted channels and the user's DMs; send with the project's approval rules                                                                       |
+| Gmail and Outlook | Connect and sync mailboxes, search messages, read bodies, reply and move individual messages to provider trash | Opt-in projects can search, read, connect, sync, send, reply, mark read/unread, archive and trash                                                        |
+| WhatsApp          | Link through WAHA, read chats, send text replies, mark read and download attachments                           | Opt-in projects read, open or transcribe media, reply with text, voice, photos, videos or files, mark read, open groups; replies (voice as text) wake it |
 
 These client inbox routes require admin tokens and work independently of
 coding sessions. Session tools enforce their own project and turn access
@@ -89,6 +90,11 @@ permanently delete messages.
 
 See [Slack setup](../README.md#slack), [mailbox setup](../README.md#mail),
 [session email access](email-mcp.md), and [WhatsApp setup](whatsapp.md).
+
+Projects with `printToolsEnabled` (off by default) also give their interactive
+sessions print tools: list the core machine's CUPS printers, print a session
+file with copies, pages, sides, color and paper size, and follow or cancel the
+jobs the session sent. See [printing from a session](printing.md).
 
 ## Operations, integrations and memory
 
@@ -168,6 +174,8 @@ These additions are present in the server revision documented here:
   storage is enabled for accounts created by the core. Replies in a chat a
   session watches wake it, with voice notes transcribed by the core first.
   `WAHA_ACCOUNTS` limits a shared WAHA to the accounts the core may use.
+- Opt-in projects can print session files on the core machine's CUPS
+  printers through the internal print MCP.
 - Open sessions recover automatically after server restarts, retaining
   queued instructions and workflow stages. Workspace cleanup preserves
   checkouts for inspection and recovery instead of deleting them.
@@ -183,6 +191,10 @@ These additions are present in the server revision documented here:
 - Reviews assess verification and fix value independently, leave notes for
   feedback not fixed, and let orchestrators reach pending worker review/fix
   questions. Worker QA can be controlled independently.
+- Orchestrators can start official Code review, Implement feedback and Solve
+  conflicts actions on existing PRs in their own project using `start_pr_action`
+  (or `POST /api/agent/sessions/pr-actions`), then observe them through worker
+  tools and updates; project runtimes and user triage gates still apply.
 - Pull request reads share cached work and return a retryable 429 when the
   GitHub allowance is exhausted.
 

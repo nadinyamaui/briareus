@@ -3,7 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { workerTranscript } from '../lib/worker-transcript.js';
 import { orchestratorRoutes } from '../lib/orchestrator-routes.js';
 
-let server, base, worker, setQaLoop, child, sendDevMessage, jobEventsFor, spawnWorkerSession;
+let server,
+  base,
+  worker,
+  setQaLoop,
+  child,
+  sendDevMessage,
+  jobEventsFor,
+  startOrchestratorPrAction,
+  spawnWorkerSession;
 beforeEach(async () => {
   worker = {
     id: 'w1',
@@ -31,8 +39,10 @@ beforeEach(async () => {
     worker.qaLoop = on ? { running: false } : null;
   });
   const sessions = { o1: { id: 'o1', orchestrator: true }, o2: { id: 'o2', orchestrator: true }, w1: worker };
+  startOrchestratorPrAction = vi.fn(async () => worker);
   spawnWorkerSession = vi.fn((parent, opts) => ({ ...worker, ...opts, parentId: parent.id }));
   const routes = orchestratorRoutes({
+    startOrchestratorPrAction,
     spawnWorkerSession,
     agentSession(req, res) {
       const job = sessions[req.headers.authorization?.replace('Bearer ', '')];
@@ -49,6 +59,7 @@ beforeEach(async () => {
   });
   const app = express();
   app.use(express.json());
+  app.post('/api/agent/sessions/pr-actions', routes.prAction);
   app.post('/api/agent/sessions', routes.spawn);
   app.post('/api/agent/sessions/:id/qa-loop', routes.qaLoop);
   app.get('/api/agent/sessions/:id/question', routes.readQuestion);
@@ -269,5 +280,43 @@ describe('owning worker question proxy', () => {
     worker.qaLoop = { running: true, sessionId: child.id };
     expect((await readQuestion()).status).toBe(409);
     expect((await answerQuestion()).status).toBe(409);
+  });
+});
+
+describe('scoped PR action route', () => {
+  const action = (token, body) =>
+    fetch(`${base}/pr-actions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  it.each([
+    ['invalid', 401],
+    ['w1', 403],
+  ])('rejects %s tokens', async (token, status) => {
+    expect((await action(token, { action: 'review', prNumber: 1 })).status).toBe(status);
+    expect(startOrchestratorPrAction).not.toHaveBeenCalled();
+  });
+  it('forwards only action, PR and scope assertion, preserving the authenticated parent', async () => {
+    const response = await action('o1', {
+      action: 'review',
+      prNumber: 12,
+      repo: 'own/repo',
+      provider: 999,
+      model: 'unapproved',
+      ownerId: 999,
+      parentId: 'o2',
+      prompt: 'bypass',
+    });
+    expect(response.status).toBe(201);
+    expect(startOrchestratorPrAction).toHaveBeenCalledExactlyOnceWith(
+      { id: 'o1', orchestrator: true },
+      { action: 'review', prNumber: 12, repo: 'own/repo' },
+    );
+    expect(await response.json()).toEqual({ session: worker });
+  });
+  it('preserves explicit scope and validation failures', async () => {
+    startOrchestratorPrAction.mockRejectedValue(Object.assign(new Error('wrong project'), { status: 403 }));
+    expect((await action('o1', { action: 'review', prNumber: 12, repo: 'other/repo' })).status).toBe(403);
   });
 });

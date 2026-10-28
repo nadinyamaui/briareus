@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createGithubSync, GITHUB_SYNC_INTERVAL_MS } from '../lib/github-sync.js';
+import { createGithubSync, GITHUB_SYNC_INTERVAL_MS, GITHUB_WEBHOOK_INTERVAL_MS } from '../lib/github-sync.js';
 
 const project = { repo: 'acme/shop', enabled: true };
 const issue = (number, extra = {}) => ({
@@ -20,6 +20,8 @@ const pull = (number, extra = {}) => ({
   base: { ref: 'main', sha: 'b'.repeat(40), repo: { id: 1 } },
   ...extra,
 });
+
+const services = [];
 
 function harness({
   initial = [],
@@ -62,6 +64,7 @@ function harness({
   });
   const board = vi.fn(async () => ({ issuesError: null, issuesTruncated: false }));
   const invalidate = vi.fn();
+  const budget = vi.fn();
   const graphql = vi.fn(async (_cfg, _query, { number }) => ({
     repository: {
       issueOrPullRequest: {
@@ -82,16 +85,420 @@ function harness({
     rest,
     graphql,
     board,
+    budget,
     invalidate,
     now,
     log: (m) => errors.push(m),
   });
-  return { service, store, ci, rest, graphql, routes, board, invalidate, errors };
+  services.push(service);
+  return { service, store, ci, rest, graphql, routes, board, budget, invalidate, errors };
 }
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  for (const service of services.splice(0)) service.stop();
+  vi.useRealTimers();
+});
 
 describe('durable GitHub synchronization', () => {
+  it('checkpoints completed CI targets and retains newer deliveries across a quota retry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const h = harness({ now: () => Date.now() });
+    const deliver = (sha, id) =>
+      h.service.onWebhook('check_run', {
+        repository: { full_name: project.repo },
+        check_run: { head_sha: sha, id },
+      });
+    const check = (id, sha) => ({ id, head_sha: sha, name: 'deploy', status: 'completed' });
+    h.routes.set('/repos/acme/shop/commits/done/check-runs', { check_runs: [check(1, 'done')] });
+    h.routes.set('/repos/acme/shop/commits/retry/check-runs', () => {
+      deliver('retry', 3);
+      throw Object.assign(new Error('core exhausted'), { status: 429, resource: 'core', retryAt: 60000 });
+    });
+    deliver('done', 1);
+    deliver('retry', 2);
+    await h.service.flush(project.repo);
+    h.rest.mockClear();
+    h.ci.save.mockClear();
+    h.routes.set('/repos/acme/shop/commits/retry/check-runs', {
+      check_runs: [check(2, 'retry'), check(3, 'retry')],
+    });
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(h.rest.mock.calls.some((call) => call[2].includes('/commits/done/'))).toBe(false);
+    expect(h.ci.save).toHaveBeenCalledExactlyOnceWith(
+      project.repo,
+      [check(2, 'retry'), check(3, 'retry')],
+      expect.objectContaining({ sha: 'retry' }),
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retains discovery received during hourly recovery while its webhook batch is still pending', async () => {
+    const h = harness();
+    const sha = 'release';
+    const endpoint = `/repos/acme/shop/commits/${sha}/check-runs`;
+    const older = { id: 1, head_sha: sha, name: 'deploy', status: 'completed' };
+    const newer = { ...older, id: 2 };
+    const deliver = (id) =>
+      h.service.onWebhook('check_run', {
+        repository: { full_name: project.repo },
+        check_run: { head_sha: sha, id },
+      });
+    deliver(1);
+    h.routes.set(endpoint, { check_runs: [older] });
+    h.routes.set(`/repos/acme/shop/commits/${sha}/statuses`, () => {
+      deliver(2);
+      return { ok: true, json: async () => [] };
+    });
+    await h.service.tick();
+    h.routes.delete(`/repos/acme/shop/commits/${sha}/statuses`);
+    // Abort the pending batch before CI reads. Hourly recovery must still own
+    // the newer target even though the older collection completed successfully.
+    h.budget.mockImplementationOnce(() => {
+      throw Object.assign(new Error('core exhausted'), { status: 429, resource: 'core' });
+    });
+    await h.service.flush(project.repo);
+    h.ci.save.mockClear();
+    h.routes.set(endpoint, { check_runs: [older, newer] });
+    await h.service.tick();
+    expect(h.ci.save).toHaveBeenCalledWith(project.repo, [older, newer], expect.objectContaining({ sha }));
+  });
+
+  it('uses conditional REST reads for repeated synchronization', async () => {
+    const h = harness({ initial: [issue(1)] });
+    await h.service.tick();
+    expect(h.rest.mock.calls.length).toBeGreaterThan(0);
+    for (const call of h.rest.mock.calls)
+      expect(call.slice(3)).toEqual([undefined, { conditional: true, reserve: 1000 }]);
+  });
+
+  it('does no REST work for hourly or webhook updates while GraphQL background work is paused', async () => {
+    const h = harness();
+    h.budget.mockImplementation(() => {
+      throw Object.assign(new Error('reserved'), { status: 429, resource: 'graphql' });
+    });
+    await h.service.tick();
+    h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 1 } });
+    await h.service.flush(project.repo);
+    expect(h.rest).not.toHaveBeenCalled();
+    expect(h.graphql).not.toHaveBeenCalled();
+    expect(h.board).not.toHaveBeenCalled();
+    expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
+  });
+
+  it('retains and coalesces webhook deliveries until the shared budget resets', async () => {
+    vi.useFakeTimers();
+    const h = harness({ now: () => Date.now() });
+    const retryAt = Date.now() + 120000;
+    h.budget.mockImplementation(() => {
+      if (Date.now() < retryAt)
+        throw Object.assign(new Error('paused'), { status: 429, resource: 'graphql', retryAt });
+    });
+    h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 1 } });
+    await h.service.flush(project.repo);
+    h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 2 } });
+    await vi.advanceTimersByTimeAsync(119999);
+    expect(h.rest).not.toHaveBeenCalled();
+    expect(h.errors).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1, 2]);
+    expect(h.board).toHaveBeenCalledTimes(1);
+    expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
+  });
+
+  it('coalesces sustained webhook traffic and performs one trailing board refresh', async () => {
+    vi.useFakeTimers();
+    const h = harness({ now: () => Date.now() });
+    const deliver = (number) =>
+      h.service.onWebhook('issues', {
+        repository: { full_name: project.repo },
+        issue: { number },
+      });
+    deliver(1);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(h.store.saveItem).toHaveBeenCalledTimes(1);
+    expect(h.board).toHaveBeenCalledTimes(1);
+    deliver(2);
+    await vi.advanceTimersByTimeAsync(2000);
+    deliver(2);
+    deliver(3);
+    await vi.advanceTimersByTimeAsync(GITHUB_WEBHOOK_INTERVAL_MS - 2001);
+    expect(h.store.saveItem).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1, 2, 3]);
+    expect(h.board).toHaveBeenCalledTimes(1);
+    expect(h.invalidate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(60000 - GITHUB_WEBHOOK_INTERVAL_MS);
+    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(h.invalidate).toHaveBeenCalledTimes(3);
+    expect(h.store.finishSync).not.toHaveBeenCalled();
+  });
+
+  it.each([6000, 7000])(
+    'retains webhook work when core recovery finishes at %s after reset',
+    async (recoveryAt) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const h = harness({ now: () => Date.now() });
+      h.budget.mockImplementation(() => {
+        if (Date.now() < 6000)
+          throw Object.assign(new Error('core exhausted'), { status: 429, resource: 'core', retryAt: 6000 });
+      });
+      h.board.mockImplementationOnce(async () => {
+        await new Promise((resolve) => setTimeout(resolve, recoveryAt));
+        return { issuesError: null, issuesTruncated: false };
+      });
+      h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 1 } });
+      const work = h.service.flush(project.repo);
+      await vi.advanceTimersByTimeAsync(recoveryAt);
+      await work;
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1]);
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each([
+    Object.assign(new Error('bad gateway'), { status: 502 }),
+    new Error('network unavailable'),
+    Object.assign(new Error('graphql exhausted'), { status: 429, resource: 'graphql', retryAt: 9000 }),
+  ])('retains the core retry when independent board recovery fails with $message', async (boardError) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const h = harness({ now: () => Date.now() });
+    h.budget.mockImplementation(() => {
+      if (Date.now() < 6000)
+        throw Object.assign(new Error('core exhausted'), { status: 429, resource: 'core', retryAt: 6000 });
+    });
+    h.board.mockRejectedValueOnce(boardError);
+    h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 1 } });
+    await h.service.flush(project.repo);
+    expect(h.store.saveItem).not.toHaveBeenCalled();
+    expect(h.errors).toEqual([`${project.repo}: ${boardError.message}`, `${project.repo}: core exhausted`]);
+    expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, null, boardError.message);
+    await vi.advanceTimersByTimeAsync(5999);
+    expect(h.rest).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1]);
+    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('checkpoints webhook items, expanded targets and metadata across quota windows', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const h = harness({ now: () => Date.now() });
+    h.store.openPullNumbers.mockResolvedValue([1, 2, 3, 4, 5]);
+    const relationships = h.graphql.getMockImplementation();
+    let window = -1;
+    let remaining = 0;
+    h.graphql.mockImplementation(async (...args) => {
+      const current = Math.floor(Date.now() / 60000);
+      if (current !== window) {
+        window = current;
+        remaining = 2;
+      }
+      if (!remaining--)
+        throw Object.assign(new Error('graphql exhausted'), {
+          status: 429,
+          resource: 'graphql',
+          retryAt: (current + 1) * 60000,
+        });
+      return relationships(...args);
+    });
+    h.service.onWebhook('label', { repository: { full_name: project.repo } });
+    h.service.onWebhook('push', { repository: { full_name: project.repo }, ref: 'refs/heads/fix' });
+    await h.service.flush(project.repo);
+    expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1, 2]);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1, 2, 3, 4]);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1, 2, 3, 4, 5]);
+    expect(h.store.openPullNumbers).toHaveBeenCalledTimes(1);
+    expect(h.store.saveMetadata).toHaveBeenCalledTimes(1);
+    expect(h.board).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retains failed work and fresh deliveries while checkpointing a rate-limited batch', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const h = harness({ now: () => Date.now() });
+    const deliver = (number) =>
+      h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number } });
+    h.store.saveMetadata.mockRejectedValueOnce(new Error('metadata unavailable'));
+    h.routes.set('/repos/acme/shop/issues/1/comments', new Error('offline'));
+    h.routes.set('/repos/acme/shop/issues/3/comments', () => {
+      deliver(2); // A new update to an item already completed by the in-flight batch.
+      deliver(4);
+      throw Object.assign(new Error('graphql exhausted'), {
+        status: 429,
+        resource: 'graphql',
+        retryAt: 60000,
+      });
+    });
+    h.service.onWebhook('label', { repository: { full_name: project.repo } });
+    for (const number of [1, 2, 3]) deliver(number);
+    await h.service.flush(project.repo);
+    expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([2]);
+    h.routes.delete('/repos/acme/shop/issues/1/comments');
+    h.routes.delete('/repos/acme/shop/issues/3/comments');
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([2, 2, 4, 1, 3]);
+    expect(h.store.saveMetadata).toHaveBeenCalledTimes(2);
+    expect(h.board).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retries a deferred board refresh after repeated GraphQL cooldowns without replaying details', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const h = harness({ now: () => Date.now() });
+    const times = [];
+    h.board.mockImplementation(async () => {
+      times.push(Date.now());
+      if (Date.now() > 0 && Date.now() < 180000)
+        throw Object.assign(new Error('graphql exhausted'), {
+          status: 429,
+          resource: 'graphql',
+          retryAt: Date.now() + 60000,
+        });
+      return { issuesError: null, issuesTruncated: false };
+    });
+    h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 1 } });
+    await h.service.flush(project.repo);
+    await vi.advanceTimersByTimeAsync(15000);
+    h.service.onWebhook('push', { repository: { full_name: project.repo }, ref: 'refs/heads/main' });
+    await h.service.flush(project.repo);
+    const detailReads = h.rest.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(164999);
+    expect(times).toEqual([0, 60000, 120000]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(times).toEqual([0, 60000, 120000, 180000]);
+    expect(h.rest).toHaveBeenCalledTimes(detailReads);
+    expect(h.store.saveItem).toHaveBeenCalledTimes(1);
+    expect(h.invalidate).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retries a deferred board when error recording outlasts its cooldown', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const h = harness({ now: () => Date.now() });
+    h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 1 } });
+    await h.service.flush(project.repo);
+    await vi.advanceTimersByTimeAsync(15000);
+    h.service.onWebhook('push', { repository: { full_name: project.repo }, ref: 'refs/heads/main' });
+    await h.service.flush(project.repo);
+    const detailReads = h.rest.mock.calls.length;
+    h.board.mockRejectedValueOnce(
+      Object.assign(new Error('graphql exhausted'), { status: 429, resource: 'graphql', retryAt: 66000 }),
+    );
+    h.store.finishSync.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 7000));
+    });
+    await vi.advanceTimersByTimeAsync(51999);
+    expect(h.board).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(h.board).toHaveBeenCalledTimes(3);
+    expect(h.rest).toHaveBeenCalledTimes(detailReads);
+    expect(h.store.saveItem).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('rechecks the board throttle after a deferred callback waits behind a slow webhook', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const h = harness({ now: () => Date.now() });
+    const times = [];
+    h.board.mockImplementation(async () => {
+      times.push(Date.now());
+      return { issuesError: null, issuesTruncated: false };
+    });
+    for (const number of [1, 2]) {
+      h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number } });
+      await h.service.flush(project.repo);
+      await vi.advanceTimersByTimeAsync(15000);
+    }
+    let release;
+    h.routes.set('/repos/acme/shop/issues/3/comments', async () => {
+      await new Promise((resolve) => (release = resolve));
+      return { ok: true, json: async () => [] };
+    });
+    h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 3 } });
+    const slow = h.service.flush(project.repo);
+    await vi.advanceTimersByTimeAsync(35000);
+    expect(times).toEqual([0]);
+    release();
+    await slow;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(times).toEqual([0, 65000]);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(times).toEqual([0, 65000, 125000]);
+  });
+
+  it('cancels a pending trailing board refresh on shutdown', async () => {
+    vi.useFakeTimers();
+    const h = harness({ now: () => Date.now() });
+    for (const number of [1, 2]) {
+      h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number } });
+      await h.service.flush(project.repo);
+    }
+    expect(h.board).toHaveBeenCalledTimes(1);
+    h.service.stop();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(h.board).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels a deferred board cooldown retry on shutdown', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const h = harness({ now: () => Date.now() });
+    for (const number of [1, 2]) {
+      h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number } });
+      await h.service.flush(project.repo);
+    }
+    h.board.mockRejectedValue(
+      Object.assign(new Error('graphql exhausted'), { status: 429, resource: 'graphql', retryAt: 120000 }),
+    );
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(1);
+    h.service.stop();
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('mirrors a changed review decision while the full board refresh is deferred', async () => {
+    const h = harness();
+    await h.service.tick();
+    h.routes.set('/repos/acme/shop/issues/1', issue(1, { pull_request: {} }));
+    h.routes.set('/repos/acme/shop/pulls/1', pull(1));
+    h.routes.set(`/repos/acme/shop/commits/${'a'.repeat(40)}/check-runs`, { check_runs: [] });
+    h.graphql.mockResolvedValue({
+      repository: {
+        issueOrPullRequest: {
+          __typename: 'PullRequest',
+          reviewDecision: 'CHANGES_REQUESTED',
+          closingIssuesReferences: { nodes: [], pageInfo: { hasNextPage: false } },
+        },
+      },
+    });
+    h.service.onWebhook('pull_request_review', {
+      repository: { full_name: project.repo },
+      pull_request: { number: 1 },
+    });
+    await h.service.flush(project.repo);
+    expect(h.board).toHaveBeenCalledTimes(1);
+    expect(h.store.saveItem).toHaveBeenCalledWith(
+      project.repo,
+      expect.objectContaining({ reviewDecision: 'changes_requested' }),
+      expect.anything(),
+    );
+  });
+
   it.each([403, 503, 429])(
     'persists complete checks despite status pagination failing with %i and retains retry',
     async (status) => {
@@ -876,7 +1283,7 @@ describe('durable GitHub synchronization', () => {
     await h.service.tick();
     await h.service.tick();
     expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1, 2, 1, 2]);
-    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(h.board).toHaveBeenCalledTimes(1);
     expect(h.invalidate).toHaveBeenCalledTimes(2);
     expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
     expect(h.errors).toEqual([`${project.repo}: core exhausted`, `${project.repo}: core exhausted`]);
@@ -948,7 +1355,7 @@ describe('durable GitHub synchronization', () => {
     expect(h.errors).toEqual([`${project.repo}: graphql exhausted`]);
   });
 
-  it('records a GraphQL board rate limit without retrying after core exhaustion', async () => {
+  it('records both board and core rate limits after core exhaustion', async () => {
     const h = harness({ initial: [issue(1)] });
     h.routes.set(
       '/repos/acme/shop/issues/1/comments',
@@ -967,7 +1374,9 @@ describe('durable GitHub synchronization', () => {
     expect(h.board).toHaveBeenCalledTimes(1);
     expect(h.invalidate).not.toHaveBeenCalled();
     expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
-    expect(h.errors).toEqual([`${project.repo}: graphql exhausted`]);
+    expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, null, 'graphql exhausted');
+    expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, null, 'core exhausted');
+    expect(h.errors).toEqual([`${project.repo}: graphql exhausted`, `${project.repo}: core exhausted`]);
   });
 
   it.each(['failure', 'error'])(
@@ -1076,7 +1485,7 @@ describe('durable GitHub synchronization', () => {
     release({});
     await Promise.all([first, second]);
     expect(h.store.saveItem.mock.calls.map((c) => c[1].number)).toEqual([1, 2]);
-    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(h.board).toHaveBeenCalledTimes(1);
   });
 
   it('hides a deleted or transferred issue without deleting its history', async () => {
@@ -1143,7 +1552,7 @@ describe('durable GitHub synchronization', () => {
     });
     await h.service.flush(project.repo);
     expect(h.store.saveItem).toHaveBeenCalledTimes(2);
-    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(h.board).toHaveBeenCalledTimes(1);
   });
 
   it('preserves check collections when only Checks permission is absent', async () => {

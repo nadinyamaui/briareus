@@ -88,6 +88,14 @@ async function setup({ initialAccount = null, accounts = undefined, ownershipErr
     if (path.endsWith(`/messages/${MID}`))
       return res.json({ ...RAW_MESSAGE, hasMedia: true, media: { url: mediaUrl } });
     if (path.endsWith('/messages')) return res.json([RAW_MESSAGE]);
+    if (['/api/sendImage', '/api/sendVideo', '/api/sendFile'].includes(path))
+      return res.status(201).json({
+        ...RAW_MESSAGE,
+        body: req.body.caption || '',
+        fromMe: true,
+        hasMedia: true,
+        media: { mimetype: req.body.file.mimetype, filename: req.body.file.filename },
+      });
     if (path === '/api/sendVoice')
       return res
         .status(201)
@@ -816,6 +824,90 @@ it('sends generated Ogg/Opus through WAHA as a voice note without conversion', a
   expect(ctx.calls.filter((c) => c.path === '/api/sendVoice')).toHaveLength(1);
 });
 
+describe('sendMedia', () => {
+  const data = Buffer.from('media bytes');
+  const sent = (ctx, path) => ctx.calls.filter((c) => c.path === path).map((c) => c.body);
+
+  it('sends JPEG/PNG as photos, videos converted, and the rest as files', async () => {
+    const ctx = await setup();
+    const photo = await ctx.service.sendMedia('default', CHAT, {
+      data,
+      mimetype: 'image/jpeg',
+      filename: 'grout.jpg',
+      caption: '  Bathroom joints ',
+      replyTo: MID,
+    });
+    expect(photo.message).toMatchObject({ fromMe: true, hasMedia: true, text: 'Bathroom joints' });
+    expect(sent(ctx, '/api/sendImage')).toEqual([
+      {
+        session: 'default',
+        chatId: CHAT,
+        reply_to: MID,
+        caption: 'Bathroom joints',
+        file: { mimetype: 'image/jpeg', filename: 'grout.jpg', data: data.toString('base64') },
+      },
+    ]);
+    await ctx.service.sendMedia('default', CHAT, {
+      data,
+      mimetype: 'video/quicktime',
+      filename: 'floor.mov',
+    });
+    expect(sent(ctx, '/api/sendVideo')).toEqual([
+      {
+        session: 'default',
+        chatId: CHAT,
+        convert: true,
+        asNote: false,
+        file: { mimetype: 'video/quicktime', filename: 'floor.mov', data: data.toString('base64') },
+      },
+    ]);
+    await ctx.service.sendMedia('default', CHAT, {
+      data,
+      mimetype: 'application/pdf',
+      filename: 'quote.pdf',
+    });
+    await ctx.service.sendMedia('default', CHAT, {
+      data,
+      mimetype: 'image/png',
+      filename: 'plan.png',
+      asDocument: true,
+    });
+    expect(sent(ctx, '/api/sendFile').map((b) => b.file.filename)).toEqual(['quote.pdf', 'plan.png']);
+  });
+
+  it('marks a group send with the bot prefix even without a caption', async () => {
+    const ctx = await setup();
+    const group = '120363000000000000@g.us';
+    await ctx.service.sendMedia('default', group, { data, mimetype: 'image/png', filename: 'a.png' });
+    await ctx.service.sendMedia('default', group, {
+      data,
+      mimetype: 'video/mp4',
+      filename: 'b.mp4',
+      caption: 'Floor',
+    });
+    expect(sent(ctx, '/api/sendImage')[0].caption).toBe('🤖 📷');
+    expect(sent(ctx, '/api/sendVideo')[0].caption).toBe('🤖 Floor');
+  });
+
+  it('refuses invalid input without calling WAHA', async () => {
+    const ctx = await setup();
+    const ok = { data, mimetype: 'image/jpeg', filename: 'a.jpg' };
+    for (const input of [
+      { ...ok, data: Buffer.alloc(0) },
+      { ...ok, data: 'bytes' },
+      { ...ok, mimetype: 'jpeg' },
+      { ...ok, filename: '../etc/passwd' },
+      { ...ok, filename: '' },
+      { ...ok, caption: 'x'.repeat(4001) },
+      { ...ok, asDocument: 'yes' },
+      { ...ok, replyTo: '' },
+    ])
+      await expect(ctx.service.sendMedia('default', CHAT, input)).rejects.toMatchObject({ status: 400 });
+    await expect(ctx.service.sendMedia('default', 'bad', ok)).rejects.toMatchObject({ status: 400 });
+    expect(ctx.calls.filter((c) => c.path.startsWith('/api/send'))).toEqual([]);
+  });
+});
+
 describe('WAHA_ACCOUNTS on a shared WAHA', () => {
   async function shared() {
     const calls = [];
@@ -866,6 +958,12 @@ describe('WAHA_ACCOUNTS on a shared WAHA', () => {
       () => service.messages('default', CHAT),
       () => service.send('default', CHAT, { text: 'hi' }),
       () => service.sendVoice('default', CHAT, Buffer.from('OggS')),
+      () =>
+        service.sendMedia('default', CHAT, {
+          data: Buffer.from('x'),
+          mimetype: 'image/png',
+          filename: 'a.png',
+        }),
       () => service.createGroup('default', { name: 'g', participants: [CHAT] }),
       () => service.addParticipants('default', '120363000000000000@g.us', { participants: [CHAT] }),
       () => service.markRead('default', CHAT),

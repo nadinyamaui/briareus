@@ -31,6 +31,9 @@ import { shareRoutes } from './lib/share-routes.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
+import { readSessionFile } from './lib/ssh-upload.js';
+import { createPrintService } from './lib/print.js';
+import { printAgentRoutes } from './lib/print-agent.js';
 import { projectEnvRoutes } from './lib/project-env.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
 import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
@@ -40,7 +43,7 @@ import { createHomeAssistantService } from './lib/home-assistant.js';
 import { homeAssistantRoutes } from './lib/home-assistant-routes.js';
 import { createWhatsAppService, readMedia } from './lib/whatsapp.js';
 import { whatsappRoutes } from './lib/whatsapp-routes.js';
-import { whatsappAgentRoutes, whatsappWatchAllowed } from './lib/whatsapp-agent.js';
+import { whatsappAgentRoutes, whatsappMediaPath, whatsappWatchAllowed } from './lib/whatsapp-agent.js';
 import { createWhatsAppWatcher } from './lib/whatsapp-watch.js';
 import { createMcpService, MCP_OAUTH_CALLBACK_PATH } from './lib/mcp-servers.js';
 import { mcpRoutes, mcpProxyRouter, mcpOAuthCallbackRouter } from './lib/mcp-routes.js';
@@ -106,6 +109,7 @@ import {
   renameDevSession,
   setDevSessionAutoCompact,
   setDevSessionCompactInstructions,
+  setDevSessionPinned,
   linkPrToSession,
   dropQueuedMessage,
   startDevServe,
@@ -117,6 +121,7 @@ import {
   openSessionBrowser,
   closeSessionBrowser,
   spawnWorkerSession,
+  startOrchestratorPrAction,
   workerSessionsFor,
   workerSummary,
   assertWorkerSlot,
@@ -408,8 +413,11 @@ app.use(
   }),
 );
 const jsonBody = express.json({ limit: '1mb' });
-// Mail sends carry their attachments in the body; lib/mail-agent.js parses those after auth.
-app.use((req, res, next) => (mailActionPath(req.path) ? next() : jsonBody(req, res, next)));
+// Mail sends and WhatsApp media sends carry their files in the body; lib/mail-agent.js and
+// lib/whatsapp-agent.js parse those after auth.
+app.use((req, res, next) =>
+  mailActionPath(req.path) || whatsappMediaPath(req.path) ? next() : jsonBody(req, res, next),
+);
 
 // Of all the handlers added for the rest of this file, only an agent's own are
 // answered at their own path.
@@ -731,6 +739,15 @@ api.use(
   }),
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
+api.use(
+  printAgentRoutes({
+    service: createPrintService(),
+    agentSession,
+    getProject,
+    readFile: readSessionFile,
+    sessions: bus,
+  }),
+);
 // Project settings are admin-only on /api/v1, so a session may edit its project's .env
 // template only for an enabled admin, or as the operator's when nobody started it.
 const projectEnvOwner = (job) => {
@@ -949,6 +966,7 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 // its own workers".
 
 const workerRoutes = orchestratorRoutes({
+  startOrchestratorPrAction,
   agentSession,
   spawnWorkerSession,
   workerSessionsFor,
@@ -960,6 +978,7 @@ const workerRoutes = orchestratorRoutes({
   sendDevMessage,
 });
 const { orchestratorSession, workerOf } = workerRoutes;
+api.post('/api/agent/sessions/pr-actions', workerRoutes.prAction);
 api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
 api.get('/api/agent/sessions/:id/question', workerRoutes.readQuestion);
 api.post('/api/agent/sessions/:id/question', workerRoutes.answerQuestion);
@@ -2198,6 +2217,7 @@ const editSession = sessionEditRoute({
   renameDevSession,
   setDevSessionAutoCompact,
   setDevSessionCompactInstructions,
+  setDevSessionPinned,
 });
 api.patch('/api/dev/sessions/:id', editSession);
 
