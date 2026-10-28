@@ -899,6 +899,94 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     sync.stop();
   });
 
+  it.each(['status', 'check_run'])(
+    'orders queued hourly %s reads after an intervening CI webhook independently of inventory time',
+    async (kind) => {
+      const r = repo();
+      const sha = 'a'.repeat(40);
+      const raw = (number) => ({
+        number,
+        title: `Closed item ${number}`,
+        html_url: `https://github.com/${r}/issues/${number}`,
+        state: 'closed',
+        updated_at: issue().updatedAt,
+        ...(number === 2 ? { pull_request: {} } : {}),
+      });
+      const rawPull = {
+        ...raw(2),
+        head: { sha, ref: 'fix' },
+        base: { sha: 'b'.repeat(40), ref: 'main' },
+      };
+      let time = 100,
+        reads = 0,
+        webhook;
+      const errors = [];
+      const sync = createGithubSync({
+        ci,
+        store,
+        projects: () => [{ repo: r }],
+        config: () => ({ githubToken: 'test' }),
+        now: () => time,
+        log: (error) => errors.push(error),
+        board: async () => ({ issuesError: null, issuesTruncated: false }),
+        invalidate: () => {},
+        graphql: async (_cfg, _query, { number }) => ({
+          repository: {
+            issueOrPullRequest: {
+              __typename: number === 2 ? 'PullRequest' : 'Issue',
+              subIssues: { nodes: [] },
+              closedByPullRequestsReferences: { nodes: [] },
+              closingIssuesReferences: { nodes: [] },
+            },
+          },
+        }),
+        rest: async (_cfg, _method, path) => {
+          const resource = new URL(path, 'https://api.github.com').pathname.replace(`/repos/${r}`, '');
+          let data = [];
+          if (resource === '/issues') data = [raw(1), raw(2)];
+          if (resource === '/pulls/2') data = rawPull;
+          if (resource === '/issues/1/comments') {
+            time = 200;
+            sync.onWebhook('status', { repository: { full_name: r }, sha });
+            webhook = sync.flush(r);
+          }
+          if (resource.endsWith('/check-runs')) data = { check_runs: [] };
+          if (resource === `/commits/${sha}/${kind === 'status' ? 'statuses' : 'check-runs'}`) {
+            const first = reads++ === 0;
+            const result = first ? 'success' : 'failure';
+            data =
+              kind === 'status'
+                ? [{ id: first ? 100 : 101, context: 'deploy', state: result }]
+                : { check_runs: [{ id: 100, name: 'deploy', status: 'completed', conclusion: result }] };
+            time = 300;
+          }
+          return { ok: true, json: async () => data };
+        },
+      });
+      try {
+        await sync.tick();
+        await webhook;
+        const filters = { repos: [r], kind, since: 0, until: 1000 };
+        expect((await ci.runs(filters)).runs).toEqual([
+          expect.objectContaining({ conclusion: 'failure', observedAt: 300 }),
+        ]);
+        expect((await ci.stats(filters)).totals).toMatchObject({ total: 1, failed: 1, succeeded: 0 });
+        const [[saved]] = await pool.query(
+          `SELECT full_observed_at FROM github_items i
+           JOIN github_repositories r ON r.id=i.repository_id WHERE r.repo=? AND i.number=2`,
+          [r],
+        );
+        expect(Number(saved.full_observed_at)).toBe(100);
+        const firstReads = reads;
+        await sync.tick();
+        expect(reads).toBe(firstReads); // Closed PRs and completed checks are not refetched.
+        expect(errors).toEqual([]);
+      } finally {
+        sync.stop();
+      }
+    },
+  );
+
   it('orders overlapping boards by observation time while returning completion time', async () => {
     const r = repo();
     await store.saveBoard(r, board({ observedAt: 100, syncedAt: new Date(300).toISOString() }));
