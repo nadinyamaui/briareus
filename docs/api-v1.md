@@ -122,6 +122,15 @@ shared with them. An Envoyer account must also be shared with a member before
 they can list or deploy with it. `GET /settings/shares` lists the shares, by
 kind, resource or user.
 
+### What waits on you
+
+`GET /attention` lists what waits on the caller: an admin sees every
+session's questions, findings and failures, a member their own and the
+ownerless ones of their projects. SSH commands appear for whoever rules on
+them, and Slack messages only for the owner of the workspace they would go out
+through. `GET /tasks/{id}`, a task's history kept after its sessions are
+deleted, answers any user for the tasks they may see and 404 otherwise.
+
 ### Sessions belong to users
 
 A session belongs to the user who started it (`ownerId`). A loop's review,
@@ -201,22 +210,22 @@ What is there, by area:
 
 See the [feature overview](features.md) for server capabilities and recent additions.
 
-| Area                     | Paths                                                                                                                                                                                                | Needs               |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| The token                | `/`, `/openapi.json`, `/token`, `/events`, `/me/github`, `/me/home-assistant`; `/users`                                                                                                              | read; admin         |
-| Projects                 | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                                                                                                                                          | read / manage       |
-| Pull requests and issues | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits`; `/repo/tree`, `/repo/file`, `/repo/archive`; `/issues/{number}` and its timeline, close; `/project-board` | read / manage       |
-| Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops; `/preview/access`                                                                                                  | read / manage       |
-| Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                                                                                                  | read to admin       |
-| Memory                   | `/memories`, `/memories/health`                                                                                                                                                                      | read / admin        |
-| Slack inbox              | `/slack/workspaces`, `/slack/workspaces/{id}/conversations`, `people`, `direct-messages`, `events`; conversation history, threads, replies and read positions                                        | your own            |
-| WhatsApp inbox           | `/whatsapp/accounts`, account linking, QR codes, conversations, messages, read receipts and media downloads                                                                                          | your own            |
-| Operations               | `/attention`, `/maintenance`, `/deployments`, `/tasks`, `/videos`; `/ssh/requests`, `/slack/requests`                                                                                                | admin; manage Slack |
-| Home Assistant           | `/home-assistant`, `/home-assistant/entities`, `/home-assistant/services`, `/home-assistant/events/{type}`; `/me/home-assistant`                                                                     | your own            |
-| Mail                     | `/mail/messages`, `/mail/accounts/{account}/messages/{id}`                                                                                                                                           | your own            |
-| Laravel Forge            | `/forge/accounts/{account}/servers`, sites, deployment scripts and environment files                                                                                                                 | admin               |
-| Laravel Envoyer          | `/envoyer/accounts`, account projects, servers and deployments                                                                                                                                       | read / manage       |
-| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `mcp/servers`, `forge/accounts`, `envoyer/accounts`, `templates`, `shares`; `slack/workspaces`, `mail/accounts`        | admin; your own     |
+| Area                     | Paths                                                                                                                                                                                                | Needs                     |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| The token                | `/`, `/openapi.json`, `/token`, `/events`, `/me/github`, `/me/home-assistant`; `/users`                                                                                                              | read; admin               |
+| Projects                 | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                                                                                                                                          | read / manage             |
+| Pull requests and issues | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits`; `/repo/tree`, `/repo/file`, `/repo/archive`; `/issues/{number}` and its timeline, close; `/project-board` | read / manage             |
+| Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops; `/preview/access`                                                                                                  | read / manage             |
+| Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                                                                                                  | read to admin             |
+| Memory                   | `/memories`, `/memories/health`                                                                                                                                                                      | read / admin              |
+| Slack inbox              | `/slack/workspaces`, `/slack/workspaces/{id}/conversations`, `people`, `direct-messages`, `events`; conversation history, threads, replies and read positions                                        | your own                  |
+| WhatsApp inbox           | `/whatsapp/accounts`, account linking, QR codes, conversations, messages, read receipts and media downloads                                                                                          | your own                  |
+| Operations               | `/maintenance`, `/deployments`, `/videos`; `/ssh/requests`, `/slack/requests`; `/attention`, `/tasks`                                                                                                | admin; manage Slack; read |
+| Home Assistant           | `/home-assistant`, `/home-assistant/entities`, `/home-assistant/services`, `/home-assistant/events/{type}`; `/me/home-assistant`                                                                     | your own                  |
+| Mail                     | `/mail/messages`, `/mail/accounts/{account}/messages/{id}`                                                                                                                                           | your own                  |
+| Laravel Forge            | `/forge/accounts/{account}/servers`, sites, deployment scripts and environment files                                                                                                                 | admin                     |
+| Laravel Envoyer          | `/envoyer/accounts`, account projects, servers and deployments                                                                                                                                       | read / manage             |
+| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `mcp/servers`, `forge/accounts`, `envoyer/accounts`, `templates`, `shares`; `slack/workspaces`, `mail/accounts`        | admin; your own           |
 
 Everything the removed dashboard could do has a route, except its browser push
 notifications, which went with it. The reference ends with a table from each of
@@ -579,3 +588,63 @@ command as root using the stored sudo password. The approval shows the elevated
 command; the password is sent over SSH stdin and never included in command text.
 Elevated commands have stdin closed, so they cannot consume the password when
 sudo uses cached credentials or a NOPASSWD rule.
+
+### Private SSH file upload (agent API)
+
+`POST /api/agent/ssh/upload` takes JSON `{serverId, sourcePath, destination, timeoutSeconds?}`
+under the session bearer token and returns `{request}`; it shares SSH approvals and
+`GET /api/agent/ssh/requests/:id` polling with command execution.
+`request.upload` contains `{sourcePath, destination, size, sha256}` for approval and history;
+`request.command` describes the upload without file bytes or credentials.
+Only enabled servers assigned to the session project and shared with its owner are usable.
+Sources are limited to 25 MiB and to non-hidden regular workspace files or attachments
+delivered to the session; arbitrary local paths and symlinks are rejected.
+The remote destination is an absolute file path, atomically replaced as the SSH user
+with mode `0600` after size and SHA-256 verification; `python3` is required and sudo is
+unsupported. Changed sources fail before connecting. No public file URL is involved.
+
+## Main database backups to R2
+
+Set `databaseBackupEnabled: true` with `PUT /api/v1/settings/projects/{id}`.
+The server backs up the database in the main `localDir/.env` every 24 hours,
+including projects disabled for new sessions; it never uses a session database or
+`envTemplate`. Projects without a main database are recorded as skipped.
+Backups require explicit opt-in for every project, including existing projects.
+
+`POST /api/v1/settings/projects/{id}/backup` starts a backup immediately (202),
+and `GET` at the same path returns its status, last successful upload time,
+R2 object key and size, or the failure reason. Both routes require an admin token.
+Overlapping runs for one project are coalesced; failed scheduled backups retry
+hourly. MySQL needs `mysqldump`, PostgreSQL needs `pg_dump` compatible with the
+server version, and SQLite uses Node's online backup API. Database URL query
+options are rejected; databases requiring custom connection options need separate
+backup configuration.
+The self-project uses Briareus's environment parsing and separate `DB_*` fields,
+ignoring `DB_URL` and `DATABASE_URL`. MySQL projects declaring
+`mysql2` as a runtime dependency (and the self-project) use TCP, including for
+`localhost`. Other MySQL projects using `localhost` must set `DB_SOCKET` for socket
+transport or use an explicit TCP host such as `127.0.0.1`. Backups ignore MySQL
+option and login files so ambient filters cannot silently omit tables or data.
+MySQL's consistent snapshot covers transactional tables; schema changes during a
+backup and nontransactional tables require a separate maintenance window.
+
+Backups stream through gzip and AES-256-GCM before upload to the existing `R2_*`
+bucket under `database-backups/<owner>/<repo>/`. No unencrypted dump is uploaded,
+and temporary files are removed after the attempt. Keep a separate secure copy of
+`CREDENTIALS_KEY`: the original key is required to recover these backups, even if
+it has since been rotated on the server. Objects are retained until removed by
+an operator or an R2 lifecycle rule; this feature does not delete older backups.
+
+Download the encrypted object using your R2 console, then authenticate and decrypt
+it on a machine configured with the original `CREDENTIALS_KEY`:
+
+```sh
+node scripts/decrypt-database-backup.js backup.sql.gz.enc database.sql.gz
+gunzip database.sql.gz
+```
+
+The decrypt command refuses to overwrite an existing output. Import the resulting
+SQL with `mysql` or `psql` into a separate database first to verify recovery.
+For SQLite, the decrypted gzip contains the SQLite database file instead of SQL;
+unzip it to a new `.sqlite` file. Restoration is an operator action; the backup
+feature never writes to the source database.

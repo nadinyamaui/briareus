@@ -60,7 +60,7 @@ const {
   PROJECT_DEFAULTS,
 } = await import('../lib/projects.js');
 
-const base = { repo: 'nadinyamaui/casos-ia', dbPoolDatabase: 'casos' };
+const base = { repo: 'exampleco/sample-app', dbPoolDatabase: 'sample' };
 
 // The table is read into memory at boot and refreshed on every write, so each
 // test seeds the rows and re-reads them into that cache.
@@ -110,9 +110,9 @@ describe('the cache', () => {
   it('finds a project whatever the casing of the repo', async () => {
     // GitHub repo names are case-insensitive, and a project typed into the
     // settings form will not always match how a session was created.
-    await seed([project({ repo: 'NadinYamaui/Casos-IA' })]);
+    await seed([project({ repo: 'Exampleco/sample-app' })]);
 
-    expect(getProject('nadinyamaui/casos-ia').repo).toBe('NadinYamaui/Casos-IA');
+    expect(getProject('exampleco/sample-app').repo).toBe('Exampleco/sample-app');
   });
 
   it('answers null for a repo that is not set up', async () => {
@@ -125,7 +125,9 @@ describe('the repository name', () => {
   it('must be owner/name', async () => {
     // Only the stable half of the message is pinned: the dash in it is
     // currently mojibake in the source, and this test must not enshrine that.
-    await expect(createProject({ repo: 'casos-ia' })).rejects.toThrow(/"casos-ia" is not a valid repository/);
+    await expect(createProject({ repo: 'sample-app' })).rejects.toThrow(
+      /"sample-app" is not a valid repository/,
+    );
   });
 
   it.each(['', '   ', 'a/b/c', 'a b/c', 'owner/', '/name'])('refuses %o', async (repo) => {
@@ -143,23 +145,23 @@ describe('the repository name', () => {
   });
 
   it('refuses a second project for a repo already set up', async () => {
-    await seed([project({ repo: 'nadinyamaui/casos-ia' })]);
+    await seed([project({ repo: 'exampleco/sample-app' })]);
 
-    await expect(createProject({ repo: 'NadinYamaui/Casos-IA' })).rejects.toThrow(/is already set up/);
+    await expect(createProject({ repo: 'Exampleco/sample-app' })).rejects.toThrow(/is already set up/);
   });
 });
 
 describe('the label', () => {
   it('falls back to the repository name without its owner', async () => {
-    expect((await createProject({ ...base })).label).toBe('casos-ia');
+    expect((await createProject({ ...base })).label).toBe('sample-app');
   });
 
   it('keeps a label that was given, trimmed', async () => {
-    expect((await createProject({ ...base, label: '  Casos  ' })).label).toBe('Casos');
+    expect((await createProject({ ...base, label: '  Sample  ' })).label).toBe('Sample');
   });
 
   it('falls back when the label given is blank', async () => {
-    expect((await createProject({ ...base, label: '   ' })).label).toBe('casos-ia');
+    expect((await createProject({ ...base, label: '   ' })).label).toBe('sample-app');
   });
 });
 
@@ -172,12 +174,12 @@ describe('the database settings', () => {
 
   it('accepts a pooled project that names one', async () => {
     await expect(
-      createProject({ repo: 'a/b', dbPoolEnabled: true, dbPoolDatabase: 'casos' }),
-    ).resolves.toMatchObject({ dbPoolEnabled: true, dbPoolDatabase: 'casos' });
+      createProject({ repo: 'a/b', dbPoolEnabled: true, dbPoolDatabase: 'sample' }),
+    ).resolves.toMatchObject({ dbPoolEnabled: true, dbPoolDatabase: 'sample' });
   });
 
   it('refuses a database name that is not an identifier', async () => {
-    await expect(createProject({ repo: 'a/b', dbPoolDatabase: 'casos; drop database x' })).rejects.toThrow(
+    await expect(createProject({ repo: 'a/b', dbPoolDatabase: 'sample; drop database x' })).rejects.toThrow(
       /is not a plain database identifier/,
     );
   });
@@ -303,7 +305,7 @@ describe('the text fields', () => {
     });
 
     expect(saved).toMatchObject({
-      label: 'casos-ia', // falls back rather than staying blank
+      label: 'sample-app', // falls back rather than staying blank
       phpBinDir: '',
       localDir: '',
       dbRestoreSql: '',
@@ -337,9 +339,7 @@ describe('the QA chain', () => {
 
 describe('the review author', () => {
   it('drops a leading @', async () => {
-    expect((await createProject({ ...base, reviewAuthor: ' @nadinyamaui ' })).reviewAuthor).toBe(
-      'nadinyamaui',
-    );
+    expect((await createProject({ ...base, reviewAuthor: ' @sampleuser ' })).reviewAuthor).toBe('sampleuser');
   });
 
   it('allows no author at all', async () => {
@@ -354,8 +354,8 @@ describe('the review author', () => {
   );
 
   it('accepts a plain login', async () => {
-    await expect(createProject({ ...base, reviewAuthor: 'nadin-yamaui1' })).resolves.toMatchObject({
-      reviewAuthor: 'nadin-yamaui1',
+    await expect(createProject({ ...base, reviewAuthor: 'sample-user1' })).resolves.toMatchObject({
+      reviewAuthor: 'sample-user1',
     });
   });
 });
@@ -464,10 +464,10 @@ describe('the project board', () => {
   it('keeps an organization board with a view, numbers from a form taken as numbers', async () => {
     const saved = await createProject({
       ...base,
-      projectBoard: { owner: ' @hqrentalsoftware ', ownerType: 'Organization', number: '1', view: '42' },
+      projectBoard: { owner: ' @exampleco ', ownerType: 'Organization', number: '1', view: '42' },
     });
     expect(saved.projectBoard).toEqual({
-      owner: 'hqrentalsoftware',
+      owner: 'exampleco',
       ownerType: 'organization',
       number: 1,
       view: 42,
@@ -840,5 +840,23 @@ describe('WhatsApp tool project opt-in', () => {
   it.each(['true', 1, null])('rejects non-boolean permission values: %j', async (whatsappToolsEnabled) => {
     await expect(createProject({ ...base, whatsappToolsEnabled })).rejects.toThrow(/must be true or false/);
     expect(state.saved).toHaveLength(0);
+  });
+});
+
+describe('main database backup settings', () => {
+  it('defaults off and preserves explicit choices through unrelated edits', async () => {
+    const saved = await createProject(base);
+    expect(saved.databaseBackupEnabled).toBe(false);
+    expect((await updateProject(saved.id, { databaseBackupEnabled: true })).databaseBackupEnabled).toBe(true);
+    expect((await updateProject(saved.id, { label: 'Backed up' })).databaseBackupEnabled).toBe(true);
+    expect((await updateProject(saved.id, { databaseBackupEnabled: false })).databaseBackupEnabled).toBe(
+      false,
+    );
+  });
+
+  it.each(['false', 1, null])('rejects a non-boolean backup choice: %s', async (value) => {
+    await expect(createProject({ ...base, databaseBackupEnabled: value })).rejects.toThrow(
+      'must be true or false',
+    );
   });
 });

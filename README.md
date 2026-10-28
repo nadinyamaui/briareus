@@ -298,6 +298,24 @@ the evidence. If every executed scenario passes, the QA loop stops. Failed
 scenarios are reported back to the task session as QA feedback, and the loop
 stops there too, since acting on that feedback stays a human decision for now.
 Turning the review loop off also cancels the QA run waiting behind it.
+An orchestrator can start companion work with
+`spawn_worker({ title, prompt, repo: "owner/companion", review_loop: true })`,
+or `POST /api/agent/sessions` with `{ "title": "…", "prompt": "…", "repo": "owner/companion", "reviewLoop": true }`
+using its session bearer token. `repo` is optional and defaults to the
+orchestrator's project. It must name an already registered, enabled project
+accessible to the session's inherited owner under current project sharing rules;
+unknown, disabled and unauthorized targets are refused without creating a project.
+The operator must register, enable and grant access to a companion before it can
+be used. This does not expose operator APIs to agent tokens.
+A different target uses its configured worker runtime, then the orchestrator's
+worker pick, then the orchestrator's own runtime; explicit runtime arguments
+still apply. Same-project workers keep the existing worker-pick precedence.
+Workspace, memories, setup, PR tracking, reviews and QA all use the target
+project; parent ownership, updates, spend and close controls stay with the
+orchestrator. `fix_tooling` still targets the dashboard with review armed and
+rejects a `repo` override in the HTTP body. Existing triage and approval gates
+continue to apply.
+
 An orchestrator can toggle QA on its own open task workers independently with
 `set_worker_qa_loop({ id, on })`, or `POST /api/agent/sessions/:id/qa-loop`
 with `{ "on": false }` using its session bearer token; `on` must be a boolean.
@@ -871,13 +889,33 @@ Each server has one permission mode:
   (`POST /api/v1/ssh/requests/:id/decision`) executes it once, and denying returns the denial to the agent.
 - **Don't ask anything**: every command submitted through the SSH tool starts immediately.
 
-Claude and Codex sessions receive `ssh_list_servers`, `ssh_execute` and `ssh_result` MCP
+Claude and Codex sessions receive `ssh_list_servers`, `ssh_execute`, `ssh_upload` and `ssh_result` MCP
 tools. Providers without headless MCP configuration use the equivalent session-authenticated
 HTTP routes described in their briefing. Only enabled servers assigned to the session's
 project are available. Each command runs in a fresh noninteractive shell, so include `cd`
 in the command when a working directory is needed. Execution defaults to a 60-second timeout
 (maximum 300 seconds) and 256 KiB per output stream; timeout or excess output terminates the
 local SSH client, but cannot guarantee that a remote process has stopped.
+
+`ssh_upload` sends a private local file to one registered server using the same approval,
+polling, authentication and strict host-key checks as commands. Submit
+`{serverId, sourcePath, destination, timeoutSeconds?}` to the tool or
+`POST /api/agent/ssh/upload` with the session's bearer token; poll `ssh_result` with the
+returned ID. The source must be an absolute path to a non-hidden regular file in the
+session's owned workspace (excluding `node_modules` and `vendor`), or an attachment
+delivered to that session after this feature was installed. Other sessions' files and
+symlinks are rejected. Files are limited to 25 MiB. The approval displays the exact
+server, source path, destination, size and SHA-256; a changed source fails before SSH
+starts. The destination must be an absolute file path in an existing directory writable
+by the SSH user; uploads do not support sudo. The server needs `python3`.
+
+File bytes travel on SSH stdin, never in command text or public download URLs. The remote
+receiver writes a private `0600` staging file beside the destination, verifies byte count
+and SHA-256, then atomically replaces the destination (including any existing file).
+Failures clean up staging when the receiver can finish; a killed remote process can leave
+a private staging file. A connection loss after replacement can leave an uncertain result:
+inspect the destination through the SSH tools before deciding whether to submit again.
+Denied, cancelled and failed requests are never automatically retried.
 
 Approvals expire after ten minutes and are cancelled when the session turn ends or the
 server registration changes. Switching to “Don't ask anything” does not execute already

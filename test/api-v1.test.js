@@ -383,7 +383,8 @@ describe('who gets in', () => {
       ['manage', '/sessions/mine/messages', 'POST', 200],
       ['manage', '/settings/providers', 'GET', 403],
       ['manage', '/sessions/mine/webhook', 'GET', 403],
-      ['manage', '/attention', 'GET', 403],
+      ['manage', '/attention', 'GET', 200],
+      ['manage', '/maintenance', 'GET', 403],
       ['admin', '/settings/providers', 'GET', 200],
       ['admin', '/sessions/mine/webhook', 'GET', 200],
     ];
@@ -1205,6 +1206,7 @@ describe('the contract', () => {
         .sort(),
     ).toEqual([
       'actions.list',
+      'attention.list',
       'client.get',
       'events.stream',
       'homeAssistant.call',
@@ -1253,6 +1255,7 @@ describe('the contract', () => {
       'ssh.requests',
       'stats.server',
       'stats.sessions',
+      'tasks.get',
       'token.revoke',
       'transcribe.create',
       'transcribe.status',

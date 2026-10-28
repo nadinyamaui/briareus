@@ -3,11 +3,13 @@ import { EventEmitter } from 'events';
 import { AsyncResource } from 'async_hooks';
 import { PassThrough } from 'stream';
 import fs from 'fs';
+import fsp from 'node:fs/promises';
 import os from 'os';
 import path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import { BINARIES } from '../lib/providers.js';
 import * as r2 from '../lib/r2.js';
+import { getUpload } from '../lib/uploads.js';
 import * as providerTools from '../lib/providers.js';
 import { compactCodexThread } from '../lib/codex-session.js';
 import { askClaudeSideQuestion, transferClaudeSession } from '../lib/claude-session.js';
@@ -15,6 +17,7 @@ import { forgetProviderUsage, providerUsage } from '../lib/balancer.js';
 import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
 import { createUsers } from '../lib/users.js';
 import { createSlackService } from '../lib/slack.js';
+import { createSshService } from '../lib/ssh.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
@@ -181,8 +184,9 @@ vi.mock('../lib/providerstore.js', () => ({
 }));
 
 vi.mock('../lib/projects.js', () => ({
-  getProject: (repo) => state.projects.find((p) => p.repo === repo) || null,
-  activeProjects: () => state.projects,
+  getProject: (repo) =>
+    state.projects.find((p) => p.repo.toLowerCase() === String(repo).toLowerCase()) || null,
+  activeProjects: () => state.projects.filter((p) => p.enabled !== false),
   selfProject: () => state.projects.find((p) => p.isSelf) || null,
   render: vi.fn((s) => s),
   stepRuntime: vi.fn(() => null),
@@ -235,6 +239,7 @@ vi.mock('../lib/findings.js', () => {
 });
 
 vi.mock('../lib/uploads.js', () => ({
+  MAX_UPLOAD_BYTES: 25 * 1024 * 1024,
   initUploads: vi.fn(),
   getUpload: vi.fn(() => null),
 }));
@@ -1541,6 +1546,20 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(createDevSession(base).ownerId).toBeNull();
   });
 
+  it('keeps delivered attachment identities private and scoped to the session for SSH uploads', async () => {
+    const file = { id: '1234abcd', name: 'fixture.xlsx', path: '/tmp/fixture/fixture.xlsx', size: 7 };
+    getUpload.mockReturnValueOnce(file);
+    const started = createDevSession({ ...base, attachments: [file.id] });
+    expect(getJob(started.id).sshUploadAttachments).toEqual([file.path]);
+    expect(started).not.toHaveProperty('sshUploadAttachments');
+    const other = createDevSession(base);
+    expect(getJob(other.id).sshUploadAttachments).toEqual([]);
+    await flushJobs();
+    expect(saveJob.mock.calls.findLast(([row]) => row.id === started.id)[0].sshUploadAttachments).toEqual([
+      file.path,
+    ]);
+  });
+
   it('announces a background review with the server identity outside the request', async () => {
     const gh = await vi.importActual('../lib/github.js');
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
@@ -2688,6 +2707,338 @@ describe('spawnWorkerSession', () => {
       restore();
     }
   });
+
+  it.each([false, true])(
+    'keeps an unattended SSH approval after ask-user ends the real session turn (quota fallback: %s)',
+    async (fallback) => {
+      const job = getJob('bg-claude');
+      job.status = 'idle';
+      job.awaitingAnswer = false;
+      if (fallback) {
+        job.providerId = 1;
+        job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+        state.otherProviders = [{ ...state.provider, id: 2, label: 'Claude spare' }];
+        state.group = [state.provider, ...state.otherProviders];
+      }
+      const { children, settled, restore } = fakeClaude();
+      if (fallback)
+        getProviderForJob.mockImplementation((j) => state.group.find((p) => p.id === j.providerId));
+      const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+      const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+      await ssh.init();
+      const server = await ssh.create({
+        repo: job.repo,
+        host: 'fixture.example',
+        username: 'deploy',
+        permissionMode: 'allow',
+      });
+      try {
+        const done = settled(job);
+        sendDevMessage(job.id, 'Check the server', undefined, { unattended: true });
+        let child = children[0];
+        child.emitLines(init, replay('Check the server'));
+        if (fallback) {
+          const previous = ssh.request(job, { serverId: server.id, command: 'pwd' });
+          child.emitLines({ type: 'result', is_error: true, result: "You've hit your limit" });
+          child.emit('close', 1);
+          await vi.waitFor(() => expect(children).toHaveLength(2));
+          expect(job.providerId).toBe(2);
+          expect(ssh.pending()).toEqual([]);
+          expect(() => ssh.decide(previous.id, 'approve')).toThrow('no longer');
+          child = children[1];
+          child.emitLines(init, replay(child.writes[0]));
+        }
+        const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+        expect(request).toMatchObject({ status: 'pending', unattended: true });
+        child.emitLines(
+          said('<ask-user>Approve the SSH request in Attention, then tell me to continue.</ask-user>'),
+          result('Asked.'),
+        );
+        await vi.waitFor(() => expect(child.ended).toBe(true));
+        child.emit('close', 0);
+        await done;
+        expect(job.status).toBe('idle');
+        expect(job.awaitingAnswer).toBe(true);
+        expect(ssh.pending()).toEqual([request]);
+        expect(execute).not.toHaveBeenCalled();
+        ssh.decide(request.id, 'approve');
+        await Promise.resolve();
+        expect(ssh.result(job, request.id).status).toBe('completed');
+        expect(execute).toHaveBeenCalledTimes(1);
+      } finally {
+        job.providerId = 1;
+        restore();
+      }
+    },
+  );
+
+  it('invalidates pending SSH approvals while a reply waits for browser startup', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.awaitingAnswer = false;
+    const { children, settled, restore } = fakeClaude();
+    const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+    await ssh.init();
+    const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+    let release;
+    try {
+      let done = settled(job);
+      sendDevMessage(job.id, 'Check the server');
+      children[0].emitLines(init, replay('Check the server'));
+      const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+      children[0].emitLines(said('<ask-user>Approve SSH first?</ask-user>'), result('Asked.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(ssh.pending()).toEqual([request]);
+      job.browser = true;
+      startBrowser.mockImplementationOnce(() => new Promise((resolve) => (release = resolve)));
+      done = settled(job);
+      sendDevMessage(job.id, 'Skip that command; do something else');
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      expect(job.status).toBe('running');
+      expect(job.awaitingAnswer).toBe(false);
+      expect(children).toHaveLength(1);
+      const pending = ssh.pending();
+      let approvalError;
+      try {
+        ssh.decide(request.id, 'approve');
+      } catch (error) {
+        approvalError = error;
+      }
+      // Finish the held turn before assertions so a red run leaves no background turn.
+      release();
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      children[1].emitLines(init, replay('Skip that command; do something else'), result('Done.'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+      expect(pending).toEqual([]);
+      expect(approvalError?.message).toContain('no longer');
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      release?.();
+      delete job.browser;
+      restore();
+    }
+  });
+
+  it.each(['reply', 'stop', 'close'])('keeps upload cancellation across turns (%s)', async (action) => {
+    const job = getJob('bg-claude');
+    const workspaceDir = state.workspaceDir;
+    const workDir = job.workDir;
+    state.workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-close-'));
+    job.status = 'idle';
+    job.awaitingAnswer = false;
+    const { children, settled, restore } = fakeClaude();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-stop-restart-'));
+    const sourcePath = path.join(dir, 'payload.txt');
+    fs.writeFileSync(sourcePath, 'private payload');
+    const attachments = job.sshUploadAttachments;
+    job.sshUploadAttachments = [sourcePath];
+    let request, release;
+    const execute = vi.fn(async () => ({
+      stdout: `${request.upload.size} ${request.upload.sha256}\n`,
+      error: null,
+    }));
+    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+    await ssh.init();
+    const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+    const open = fsp.open.bind(fsp);
+    let read;
+    try {
+      let done = settled(job);
+      sendDevMessage(job.id, 'Upload the file');
+      children[0].emitLines(init, replay('Upload the file'));
+      request = await ssh.upload(job, { serverId: server.id, sourcePath, destination: '/tmp/payload.txt' });
+      read = vi.spyOn(fsp, 'open').mockImplementationOnce(async (...args) => {
+        await new Promise((resolve) => (release = resolve));
+        return open(...args);
+      });
+      ssh.decide(request.id, 'approve');
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      if (action === 'stop') cancelDevTurn(job.id);
+      children[0].emitLines(result('Done.'));
+      if (action !== 'stop') await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      if (action === 'close') {
+        await closeDevSession(job.id);
+        job.orchestrator = true;
+        reopenDevSession(job.id);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        delete job.orchestrator;
+        job.workDir = workDir;
+      }
+      done = settled(job);
+      sendDevMessage(job.id, 'Do something else');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(job.turnCanceled).toBe(false);
+      release();
+      await vi.waitFor(() => expect(ssh.result(job, request.id).status).not.toBe('running'));
+      children[1].emitLines(init, replay('Do something else'), result('Done.'));
+      await vi.waitFor(() => expect(children[1].ended).toBe(true));
+      children[1].emit('close', 0);
+      await done;
+      expect(ssh.result(job, request.id).status).toBe(action === 'reply' ? 'completed' : 'failed');
+      expect(execute).toHaveBeenCalledTimes(action === 'reply' ? 1 : 0);
+    } finally {
+      release?.();
+      read?.mockRestore();
+      job.sshUploadAttachments = attachments;
+      fs.rmSync(dir, { recursive: true, force: true });
+      delete job.orchestrator;
+      job.workDir = workDir;
+      fs.rmSync(state.workspaceDir, { recursive: true, force: true });
+      state.workspaceDir = workspaceDir;
+      restore();
+    }
+  });
+
+  it('does not revive an unswept SSH approval after stopping and restarting compaction', async () => {
+    const job = getJob('bg-claude');
+    const workDir = job.workDir;
+    const contextUsage = job.contextUsage;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-compact-'));
+    job.status = 'idle';
+    job.awaitingAnswer = false;
+    const { children, settled, restore } = fakeClaude();
+    const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+    await ssh.init();
+    const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+    try {
+      const done = settled(job);
+      sendDevMessage(job.id, 'Check the server');
+      children[0].emitLines(init, replay('Check the server'));
+      const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+      children[0].emitLines(said('<ask-user>Approve SSH first?</ask-user>'), result('Asked.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(ssh.pending()).toEqual([request]);
+      job.workDir = dir;
+      job.contextUsage = { providerId: 1, sessionId: 'bg-sid', model: job.model };
+      const first = expect(compactDevSession(job.id)).rejects.toThrow('claude exited with code null');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      cancelDevTurn(job.id);
+      children[1].emit('close', null);
+      await first;
+      // No SSH poll between Stop and the next compaction: cancellation must persist.
+      const second = expect(compactDevSession(job.id)).rejects.toThrow('claude exited with code 1');
+      await vi.waitFor(() => expect(children).toHaveLength(3));
+      expect(job.turnCanceled).toBe(false);
+      let approvalError;
+      try {
+        ssh.decide(request.id, 'approve');
+      } catch (error) {
+        approvalError = error;
+      }
+      children[2].emit('close', 1);
+      await second;
+      expect(approvalError?.message).toContain('no longer');
+      expect(ssh.pending()).toEqual([]);
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      job.workDir = workDir;
+      job.contextUsage = contextUsage;
+      restore();
+    }
+  });
+
+  it('does not revive an unswept SSH approval after Close and reopen without a new turn', async () => {
+    const job = getJob('bg-claude');
+    const workspaceDir = state.workspaceDir;
+    const workDir = job.workDir;
+    state.workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-close-'));
+    job.status = 'idle';
+    job.awaitingAnswer = false;
+    const { children, settled, restore } = fakeClaude();
+    const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+    const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+    await ssh.init();
+    const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+    try {
+      const done = settled(job);
+      sendDevMessage(job.id, 'Check the server');
+      children[0].emitLines(init, replay('Check the server'));
+      const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+      children[0].emitLines(said('<ask-user>Approve SSH first?</ask-user>'), result('Asked.'));
+      await vi.waitFor(() => expect(children[0].ended).toBe(true));
+      children[0].emit('close', 0);
+      await done;
+      expect(ssh.pending()).toEqual([request]);
+      await closeDevSession(job.id);
+      // Do not sweep SSH requests while closed: reopening must not revive the old identity.
+      job.orchestrator = true;
+      reopenDevSession(job.id);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      delete job.orchestrator;
+      job.workDir = workDir;
+      expect(job.awaitingAnswer).toBe(true);
+      expect(children).toHaveLength(1);
+      expect(ssh.pending()).toEqual([]);
+      expect(() => ssh.decide(request.id, 'approve')).toThrow('no longer');
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      delete job.orchestrator;
+      job.workDir = workDir;
+      fs.rmSync(state.workspaceDir, { recursive: true, force: true });
+      state.workspaceDir = workspaceDir;
+      restore();
+    }
+  });
+
+  it.each(['publication', 'compaction'])(
+    'expires unanswered SSH requests before %s can expose a finished turn as running',
+    async (window) => {
+      const job = getJob('bg-claude');
+      job.status = 'idle';
+      job.awaitingAnswer = false;
+      const { children, settled, restore } = fakeClaude();
+      const execute = vi.fn(async () => ({ stdout: 'ok', error: null }));
+      const ssh = createSshService({ load: async () => [], save: async () => {}, getJob, execute });
+      await ssh.init();
+      const server = await ssh.create({ repo: job.repo, host: 'fixture.example', username: 'deploy' });
+      let release;
+      const sync = vi.spyOn(r2, 'syncVideos').mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve({ uploaded: [], failed: [], deferred: 0 });
+          }),
+      );
+      try {
+        const done = settled(job);
+        sendDevMessage(job.id, 'Check the server');
+        children[0].emitLines(init, replay('Check the server'));
+        const request = ssh.request(job, { serverId: server.id, command: 'pwd' });
+        children[0].emitLines(said('Done.'), result('Done.'));
+        await vi.waitFor(() => expect(children[0].ended).toBe(true));
+        children[0].emit('close', 0);
+        await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+        if (window === 'compaction') {
+          release();
+          await done;
+          expect(job.status).toBe('idle');
+          // No SSH sweep during idle: manual compaction exposes this same identity as running.
+          job.status = 'running';
+        }
+        expect(job.status).toBe('running');
+        expect(ssh.pending()).toEqual([]);
+        expect(() => ssh.decide(request.id, 'approve')).toThrow('no longer');
+        expect(execute).not.toHaveBeenCalled();
+        release();
+        await done;
+      } finally {
+        release?.();
+        sync.mockRestore();
+        job.status = 'idle';
+        restore();
+      }
+    },
+  );
 
   it('keeps every question a turn asks for the inbox, and starts over once they are answered', async () => {
     const job = getJob('bg-claude');
@@ -3855,7 +4206,7 @@ describe('spawnWorkerSession', () => {
   });
 });
 
-describe('spawnWorkerSession: tooling fixes', () => {
+describe('spawnWorkerSession: project targets and tooling fixes', () => {
   const row = (id, extra) => ({
     id,
     kind: 'devchat',
@@ -3903,6 +4254,118 @@ describe('spawnWorkerSession: tooling fixes', () => {
   afterEach(() => {
     setSessionProjectFilter(() => true);
     getJob('tool-orch').ownerId = null;
+  });
+
+  it('targets a companion project while retaining ownership, notices, spend and close behavior', async () => {
+    const parent = getJob('tool-orch');
+    parent.ownerId = 2;
+    parent.workerRuntime = { providerId: 1, model: 'claude-fable-5-1', effort: 'high' };
+    state.projects[1] = { ...dashboard, id: 12, isSelf: false };
+    const allowed = vi.fn(() => true);
+    setSessionProjectFilter(allowed);
+    const started = spawnWorkerSession(parent, {
+      prompt: 'Implement the companion change',
+      repo: ' ACME/Dashboard ',
+      branch: 'companion-base',
+      reviewLoop: true,
+      qaLoop: true,
+    });
+    const worker = getJob(started.id);
+    expect(worker).toMatchObject({
+      repo: dashboard.repo,
+      projectId: 12,
+      parentId: parent.id,
+      ownerId: 2,
+      startBranch: 'companion-base',
+      effort: 'low',
+      toolingFor: null,
+    });
+    expect(allowed).toHaveBeenCalledWith({ ownerId: 2 }, state.projects[1]);
+    expect(worker.reviewLoop).not.toBeNull();
+    expect(worker.qaLoop).not.toBeNull();
+    expect(workerSessionsFor(parent)).toContain(worker);
+    expect(workerSessionsFor({ id: 'another-orchestrator' })).not.toContain(worker);
+    expect(workerSummary(worker).repo).toBe(dashboard.repo);
+    const before = sessionUsage(parent).costUsd || 0;
+    worker.costUsd = 0.25;
+    expect(sessionUsage(parent).costUsd).toBe(before + 0.25);
+    // Missing checkout settles without running a paid agent; failure still notifies its parent.
+    await settleWorkers([parent.id]);
+    await closeDevSession(worker.id);
+    expect(worker.status).toBe('closed');
+    expect(parent.events.at(-1).text).toContain(`Worker ${worker.id} (${worker.title}) closed.`);
+  });
+
+  it.each([undefined, 'ACME/Shop'])('keeps the same-project runtime precedence for repo %s', (repo) => {
+    const parent = getJob('tool-orch');
+    parent.workerRuntime = { providerId: 1, model: 'claude-fable-5-1', effort: 'low' };
+    const worker = spawnWorkerSession(parent, { prompt: 'Same project', repo });
+    expect(worker).toMatchObject({ repo: parent.repo, effort: 'low', parentId: parent.id });
+  });
+
+  it('uses the orchestration worker pick when the companion has no configured runtime', () => {
+    const parent = getJob('tool-orch');
+    parent.workerRuntime = { providerId: 1, model: 'claude-fable-5-1', effort: 'high' };
+    state.projects[1] = { ...dashboard, workerProviderId: null };
+    const worker = spawnWorkerSession(parent, { prompt: 'Companion', repo: dashboard.repo });
+    expect(worker.effort).toBe('high');
+  });
+
+  it('honors an explicit runtime on a companion worker', () => {
+    const worker = spawnWorkerSession(getJob('tool-orch'), {
+      prompt: 'Companion',
+      repo: dashboard.repo,
+      providerId: 1,
+      model: 'claude-fable-5-1',
+      effort: 'high',
+    });
+    expect(worker).toMatchObject({ providerId: 1, model: 'claude-fable-5-1', effort: 'high' });
+  });
+
+  it.each(['acme/missing', 'acme/dashboard'])(
+    'refuses unknown/disabled target %s before allocation',
+    (repo) => {
+      state.projects[1] = { ...dashboard, enabled: false };
+      const parent = getJob('tool-orch');
+      const before = workerSessionsFor(parent).length;
+      acquireInstance.mockClear();
+      expect(() => spawnWorkerSession(parent, { prompt: 'Companion', repo })).toThrow(
+        /Unknown or disabled project/,
+      );
+      expect(workerSessionsFor(parent)).toHaveLength(before);
+      expect(acquireInstance).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([null, '', '  ', 12, {}, []])('refuses invalid repo %s instead of falling back', (repo) => {
+    expect(() => spawnWorkerSession(getJob('tool-orch'), { prompt: 'Companion', repo })).toThrow(
+      /repo must be/,
+    );
+  });
+
+  it('refuses an unshared companion using the inherited owner’s current grants', () => {
+    const parent = getJob('tool-orch');
+    parent.ownerId = 2;
+    const allowed = vi.fn((_job, project) => project.repo === parent.repo);
+    setSessionProjectFilter(allowed);
+    const before = workerSessionsFor(parent).length;
+    acquireInstance.mockClear();
+    expect(() => spawnWorkerSession(parent, { prompt: 'Companion', repo: dashboard.repo })).toThrow(
+      /Project unavailable/,
+    );
+    expect(allowed).toHaveBeenCalledWith({ ownerId: 2 }, dashboard);
+    expect(workerSessionsFor(parent)).toHaveLength(before);
+    expect(acquireInstance).not.toHaveBeenCalled();
+  });
+
+  it('refuses an explicit repo on tooling fixes instead of redirecting them', () => {
+    expect(() =>
+      spawnWorkerSession(getJob('tool-orch'), {
+        prompt: 'Fix',
+        tooling: true,
+        repo: 'acme/shop',
+      }),
+    ).toThrow(/always targets the dashboard/);
   });
 
   it('authorizes the inherited owner against the final tooling project before creating a worker', () => {
@@ -4887,7 +5350,7 @@ describe('webhook deliveries', () => {
     expect(refused(() => deliverToSession('hk-slack', { text: 'hi' }))).toMatchObject({ status: 409 });
     job.awaitingAnswer = true;
     expect(
-      deliverToSession('hk-slack', { text: 'Sounds good', source: 'Slack @andres' }, { via: 'slack' }),
+      deliverToSession('hk-slack', { text: 'Sounds good', source: 'Slack @alexei' }, { via: 'slack' }),
     ).toEqual({ status: 'held', held: 1 });
     setSessionWebhook('hk-slack', { armed: false });
     expect(job.pendingDeliveries).toHaveLength(1);
@@ -4895,7 +5358,7 @@ describe('webhook deliveries', () => {
     await cli.finish(job, 0, 0);
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
     expect(prompts[1]).toMatch(/^Slack reply, not from the operator\. /);
-    expect(prompts[1]).toMatch(/--- delivery, from Slack @andres, [^\n]+\nSounds good\n/);
+    expect(prompts[1]).toMatch(/--- delivery, from Slack @alexei, [^\n]+\nSounds good\n/);
     expect(job.unattendedTurn).toBe(true);
     await cli.finish(job, 0, 1);
   });
@@ -5482,8 +5945,8 @@ describe('webhook deliveries', () => {
 
   it('briefs a session about Slack only when its project has a workspace and the session takes replies', () => {
     const slack = {
-      team: 'Okanet',
-      user: 'nadin',
+      team: 'Exampleco',
+      user: 'morgan',
       permissionMode: 'ask',
       directMessages: true,
       channels: ['dev'],
@@ -5494,7 +5957,7 @@ describe('webhook deliveries', () => {
     try {
       const told = slackProtocol(getJob('hk-free'));
       expect(access).toHaveBeenCalledWith(getJob('hk-free'));
-      expect(told).toContain('in the Okanet workspace as nadin');
+      expect(told).toContain('in the Exampleco workspace as morgan');
       expect(told).toContain('direct messages to people and the channels #dev');
       expect(told).toContain('Each message waits for the user');
       expect(told).toContain('opening with "Slack reply"');
@@ -5868,7 +6331,7 @@ describe('webhook deliveries', () => {
         expect(
           deliverToSession(
             job.id,
-            { text: 'El martes', id: 'wa-emily' },
+            { text: 'El martes', id: 'wa-contact' },
             {
               via: 'whatsapp',
               whatsappGroup: job.webhook.whatsappGroup,
@@ -6291,7 +6754,7 @@ describe('standalone code-review findings', () => {
       round: 1,
       branch: 'task/review',
       standalone: true,
-      author: mine ? 'nadinyamaui' : 'a-colleague',
+      author: mine ? 'sampleuser' : 'a-colleague',
       mine,
       heldAt: '2026-09-07T10:05:00.000Z',
       findings,
@@ -6396,7 +6859,7 @@ describe('standalone code-review findings', () => {
     latestReviewFindings.mockResolvedValueOnce(found);
     sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
     githubRest.mockResolvedValueOnce({ ok: true, json: async () => ({ user: { login: 'a-colleague' } }) });
-    viewerLogin.mockResolvedValueOnce('nadinyamaui');
+    viewerLogin.mockResolvedValueOnce('sampleuser');
     const job = newReview('stand-theirs', 33);
 
     expect(await holdStandaloneReviewFindings(job)).toBe(true);
@@ -6408,12 +6871,12 @@ describe('standalone code-review findings', () => {
     const found = [finding('ours', 'Our finding')];
     latestReviewFindings.mockResolvedValueOnce(found);
     sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
-    githubRest.mockResolvedValueOnce({ ok: true, json: async () => ({ user: { login: 'NadinYamaui' } }) });
-    viewerLogin.mockResolvedValueOnce('nadinyamaui'); // GitHub logins are case-insensitive
+    githubRest.mockResolvedValueOnce({ ok: true, json: async () => ({ user: { login: 'Sampleuser' } }) });
+    viewerLogin.mockResolvedValueOnce('sampleuser'); // GitHub logins are case-insensitive
     const job = newReview('stand-ours', 34);
 
     expect(await holdStandaloneReviewFindings(job)).toBe(true);
-    expect(job.reviewTriage).toMatchObject({ author: 'NadinYamaui', mine: true });
+    expect(job.reviewTriage).toMatchObject({ author: 'Sampleuser', mine: true });
   });
 
   it('recognizes the session owner’s PR, with the project override and server fallback', async () => {
@@ -6467,7 +6930,7 @@ describe('standalone code-review findings', () => {
     latestReviewFindings.mockResolvedValueOnce(found);
     sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
     githubRest.mockResolvedValueOnce({ ok: false, status: 404 });
-    viewerLogin.mockResolvedValueOnce('nadinyamaui');
+    viewerLogin.mockResolvedValueOnce('sampleuser');
     const job = newReview('stand-unknown', 36);
 
     expect(await holdStandaloneReviewFindings(job)).toBe(true);
@@ -11131,13 +11594,28 @@ describe('the CI verdict a worker hands its orchestrator', () => {
         awaitingAnswer: true,
       },
       worker('ci-green', 201),
-      worker('ci-qa-incomplete', 215, {
+      worker('ci-cancelled', 215),
+      worker('ci-neutral', 216),
+      worker('ci-qa', 217, { qaLoop: { done: false } }),
+      worker('ci-pending', 218),
+      worker('ci-terminal', 219),
+      ...[
+        ['ci-qa-failed', 220, { done: true, failedScenarios: 1 }],
+        ['ci-qa-error', 221, { done: true, failedScenarios: 0, verdictError: 'could not read sheet' }],
+        [
+          'ci-qa-failure',
+          222,
+          { done: true, failedScenarios: 0, failure: { kind: 'interrupted', reason: 'session stopped' } },
+        ],
+        ['ci-qa-passed', 223, { done: true, failedScenarios: 0 }],
+        ['ci-qa-verdict', 224, { done: true, failedScenarios: 0, pendingVerdict: { prNumber: 224 } }],
+      ].map(([id, number, qaLoop]) => worker(id, number, { reviewLoop: { done: true, rounds: 1 }, qaLoop })),
+      worker('ci-qa-incomplete', 225, {
         reviewLoop: { done: true },
         qaLoop: { done: true, incomplete: true, failedScenarios: 0 },
       }),
-      worker('ci-qa-failed', 216, {
-        reviewLoop: { done: true },
-        qaLoop: { done: true, incomplete: false, failedScenarios: 1 },
+      worker('ci-qa-incomplete-no-review', 226, {
+        qaLoop: { done: true, incomplete: true, failedScenarios: 0 },
       }),
       worker('ci-red', 202),
       worker('ci-loop', 203, { reviewLoop: { rounds: 2, done: false } }),
@@ -11330,6 +11808,106 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     });
   });
 
+  it('reports two successes and two cancellations without a green or repeated notice', async () => {
+    answers.set(215, () =>
+      rollupOf([
+        identified(1, 'Gitleaks secrets', 'success', 't1'),
+        identified(2, 'Semgrep security', 'success', 't2'),
+        identified(3, 'Fast checks', 'cancelled', 't3'),
+        identified(4, 'Tests and mutation', 'cancelled', 't4'),
+      ]),
+    );
+    syncSessionsOn('acme/ci', null, 215);
+    await vi.waitFor(() => expect(notices('ci-cancelled')).toContain('2 of 4 failing'));
+    const job = getJob('ci-cancelled');
+    expect(job.prStatus.checks).toMatchObject({ total: 4, passed: 2, failed: 2, pending: 0 });
+    expect(workerSummary(job).pr.checks).toBe('✓2 ✗2 ●0; cancelled: 2');
+    const notice = notices('ci-cancelled');
+    expect(notice).toContain('Fast checks: cancelled');
+    expect(notice).toContain('Tests and mutation: cancelled');
+    expect(notice).not.toContain('every check');
+    expect(notice).not.toContain('ready to merge');
+    const syncedAt = job.prStatus.syncedAt;
+    syncSessionsOn('acme/ci', null, 215);
+    await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe(syncedAt));
+    expect(notices('ci-cancelled')).toBe(notice);
+  });
+
+  it.each(['timed_out', 'action_required', 'stale', 'startup_failure', 'unknown'])(
+    'does not announce %s as green',
+    async (conclusion) => {
+      answers.set(219, () => rollupOf([identified(conclusion, 'Tests', conclusion, conclusion)]));
+      syncSessionsOn('acme/ci', null, 219);
+      await vi.waitFor(() => expect(notices('ci-terminal')).toContain(`Tests: ${conclusion}`));
+      expect(notices('ci-terminal')).not.toContain('ready to merge');
+      expect(notices('ci-terminal')).not.toContain('every check');
+    },
+  );
+
+  it('labels skipped and neutral honestly while keeping their non-blocking semantics', async () => {
+    answers.set(216, () =>
+      rollupOf([
+        identified(1, 'Fast checks', 'success', 't1'),
+        identified(2, 'Optional', 'skipped', 't2'),
+        identified(3, 'Advisory', 'neutral', 't3'),
+      ]),
+    );
+    syncSessionsOn('acme/ci', null, 216);
+    await vi.waitFor(() => expect(notices('ci-neutral')).toContain('neutral: 1, skipped: 1'));
+    expect(notices('ci-neutral')).not.toContain('every check');
+    expect(notices('ci-neutral')).toContain('ready to merge');
+    expect(workerSummary(getJob('ci-neutral')).pr.checks).toBe('✓1 ✗0 ●0; neutral: 1, skipped: 1');
+  });
+
+  it('waits for QA even without a review loop', async () => {
+    syncSessionsOn('acme/ci', null, 217);
+    await vi.waitFor(() => expect(notices('ci-qa')).toContain('Its QA run has not reported yet'));
+    expect(notices('ci-qa')).not.toContain('ready to merge');
+    expect(getJob('ci-qa').qaLoop.done).toBe(false);
+  });
+
+  it.each([
+    ['ci-qa-failed', 220, 'QA failed 1 scenario(s)'],
+    ['ci-qa-error', 221, 'the QA verdict could not be read: could not read sheet'],
+    ['ci-qa-failure', 222, 'QA interrupted: session stopped'],
+  ])('does not announce readiness after green CI with unresolved QA: %s', async (id, number, problem) => {
+    const job = getJob(id);
+    const qaBefore = structuredClone(job.qaLoop);
+    syncSessionsOn('acme/ci', null, number);
+    await vi.waitFor(() => expect(notices(id)).toContain(problem));
+    expect(job.prStatus.checks).toMatchObject({ total: 2, passed: 2, failed: 0, pending: 0 });
+    expect(notices(id)).toContain('Do not merge');
+    expect(notices(id)).not.toContain('ready to merge');
+    expect(notices(id)).not.toContain('Nothing is pending');
+    expect(job.qaLoop).toEqual(qaBefore);
+  });
+
+  it('keeps waiting for an explicitly pending QA verdict', async () => {
+    syncSessionsOn('acme/ci', null, 224);
+    await vi.waitFor(() => expect(notices('ci-qa-verdict')).toContain('Its QA run has not reported yet'));
+    expect(notices('ci-qa-verdict')).not.toContain('ready to merge');
+  });
+
+  it('announces readiness after green CI with review and QA passed', async () => {
+    syncSessionsOn('acme/ci', null, 223);
+    await vi.waitFor(() => expect(notices('ci-qa-passed')).toContain('every check on PR #223 passed (2/2)'));
+    expect(notices('ci-qa-passed')).toContain('ready to merge');
+    expect(notices('ci-qa-passed')).not.toContain('Do not merge');
+    expect(getJob('ci-qa-passed').qaLoop).toMatchObject({ done: true, failedScenarios: 0 });
+  });
+
+  it('does not announce a partially pending rollup', async () => {
+    answers.set(218, () =>
+      rollupOf([
+        identified(1, 'Fast checks', 'success', 't1'),
+        { __typename: 'CheckRun', name: 'Tests', status: 'IN_PROGRESS', conclusion: null },
+      ]),
+    );
+    syncSessionsOn('acme/ci', null, 218);
+    await vi.waitFor(() => expect(getJob('ci-pending').prStatus.checks.pending).toBe(1));
+    expect(notices('ci-pending')).toBe('');
+  });
+
   it('hands a green run to the orchestrator as the cue to merge', async () => {
     syncSessionsOn('acme/ci', null, 201);
     await vi.waitFor(() => expect(notices('ci-green')).toContain('PR #201'));
@@ -11341,8 +11919,9 @@ describe('the CI verdict a worker hands its orchestrator', () => {
   });
 
   it.each([
-    ['ci-qa-incomplete', 215, 'QA coverage is incomplete'],
-    ['ci-qa-failed', 216, 'QA failed 1 scenario(s)'],
+    ['ci-qa-incomplete', 225, 'QA coverage is incomplete'],
+    ['ci-qa-failed', 220, 'QA failed 1 scenario(s)'],
+    ['ci-qa-incomplete-no-review', 226, 'QA coverage is incomplete'],
   ])('green CI cannot certify %s as ready to merge', async (id, pr, reason) => {
     syncSessionsOn('acme/ci', null, pr);
     await vi.waitFor(() => expect(notices(id)).toContain(`PR #${pr}`));
@@ -11649,8 +12228,8 @@ describe('the sync tick and the GitHub budget', () => {
             nodes: [
               { state: 'APPROVED', url: 'https://r/1', author: { login: 'codex' } },
               { state: 'COMMENTED', url: 'https://r/2', author: { login: 'codex' } },
-              { state: 'CHANGES_REQUESTED', url: 'https://r/3', author: { login: 'nadin' } },
-              { state: 'DISMISSED', url: 'https://r/4', author: { login: 'nadin' } },
+              { state: 'CHANGES_REQUESTED', url: 'https://r/3', author: { login: 'morgan' } },
+              { state: 'DISMISSED', url: 'https://r/4', author: { login: 'morgan' } },
             ],
           },
           commits: { nodes: [{ commit: { oid: 'abc', messageHeadline: 'Fix it', url: 'https://c/abc' } }] },
@@ -11700,7 +12279,7 @@ describe('the sync tick and the GitHub budget', () => {
     ).toBe(true);
     expect(status.reviews).toEqual([
       { user: 'codex', state: 'approved', url: 'https://r/1' },
-      { user: 'nadin', state: 'commented', url: 'https://r/4' },
+      { user: 'morgan', state: 'commented', url: 'https://r/4' },
     ]);
     expect(status.commitList).toEqual([{ sha: 'abc', message: 'Fix it', url: 'https://c/abc' }]);
     expect(status.issues).toEqual([{ number: 7, title: 'Bug', state: 'open', url: 'https://i/7' }]);

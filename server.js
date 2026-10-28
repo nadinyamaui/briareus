@@ -1,4 +1,5 @@
 // @ts-check
+import { createDatabaseBackups } from './lib/database-backups.js';
 import express from 'express';
 import { createDeploymentService } from './lib/deployments.js';
 import { deploymentRoutes } from './lib/deployment-routes.js';
@@ -69,6 +70,7 @@ import {
   loadAppSetting,
   updateAppSetting,
   getProviderRow,
+  getProjectRow,
 } from './lib/db.js';
 import {
   initJobs,
@@ -542,6 +544,22 @@ api.delete('/api/projects/:id', async (req, res) => {
   }
 });
 
+const databaseBackups = createDatabaseBackups();
+
+api.get('/api/projects/:id/backup', async (req, res) => {
+  const project = await getProjectRow(Number(req.params.id));
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  res.json({ status: await databaseBackups.status(project) });
+});
+
+api.post('/api/projects/:id/backup', async (req, res) => {
+  const project = await getProjectRow(Number(req.params.id));
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (!project.databaseBackupEnabled) return res.status(400).json({ error: 'Database backup is disabled' });
+  databaseBackups.run(project).catch((e) => console.error('Database backup failed:', e.message));
+  res.status(202).json({ status: await databaseBackups.status(project) });
+});
+
 // The local checkout's auto-update (lib/local-update.js): how its last run
 // went, and Settings' "Update now".
 const projectRepo = (id) => (listProjects().find((p) => p.id === Number(id)) || {}).repo;
@@ -668,6 +686,9 @@ function agentSession(req, res) {
   return job;
 }
 
+// Who rules on an SSH command: an admin on every one, a member on their own sessions' only.
+const sshRuledBy = (user, request) =>
+  !!user && (user.role === 'admin' || getJob(request.jobId)?.ownerId === user.id);
 const sshService = createSshService({
   getJob,
   mayUse: (job, server) => sessionMayUse(job, 'sshServer', server.id),
@@ -678,9 +699,7 @@ api.use(
     service: sshService,
     agentSession,
     getProject,
-    // An admin rules on every command; a member on their own sessions' only.
-    mayDecide: (user, request) =>
-      !!user && (user.role === 'admin' || getJob(request.jobId)?.ownerId === user.id),
+    mayDecide: sshRuledBy,
   }),
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
@@ -749,6 +768,7 @@ api.use(
     slack: slackService,
     getJob,
     sendMessage: sendDevMessage,
+    sshVisible: sshRuledBy,
   }),
 );
 
@@ -880,6 +900,7 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 
 const workerRoutes = orchestratorRoutes({
   agentSession,
+  spawnWorkerSession,
   workerSessionsFor,
   setQaLoop,
   workerSummary,
@@ -893,30 +914,7 @@ api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
 api.get('/api/agent/sessions/:id/question', workerRoutes.readQuestion);
 api.post('/api/agent/sessions/:id/question', workerRoutes.answerQuestion);
 
-api.post('/api/agent/sessions', (req, res) => {
-  const orchestrator = orchestratorSession(req, res);
-  if (!orchestrator) return;
-  try {
-    // `reviewLoop` reviews every push the worker settles with and returns findings as a fix
-    // session (lib/jobs.js); `qaLoop` queues the test run behind it. `tooling` (fix_tooling)
-    // targets the dashboard's own project with the review loop armed regardless.
-    const { title, prompt, providerId, model, effort, branch, reviewLoop, qaLoop, tooling } = req.body || {};
-    const session = spawnWorkerSession(orchestrator, {
-      title,
-      prompt,
-      providerId,
-      model,
-      effort,
-      branch,
-      reviewLoop: reviewLoop === true,
-      qaLoop: qaLoop === true,
-      tooling: tooling === true,
-    });
-    res.status(201).json({ session: workerSummary(session) });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
+api.post('/api/agent/sessions', workerRoutes.spawn);
 
 api.get('/api/agent/sessions', (req, res) => {
   const orchestrator = orchestratorSession(req, res);
@@ -2381,6 +2379,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     sessionStats.start();
     // Projects with `babysitPrs` get their pull requests' errands started every 15 minutes.
     createBabysitter().startTimer();
+    databaseBackups.start();
     // Recovered sessions must claim their slots before pruning unused clones.
     startWorkspacePruner();
     const projects = activeProjects();

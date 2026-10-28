@@ -18,6 +18,58 @@ the user it runs as and the tunnel in front of it are all yours to decide.
 There is nothing to build: `node server.js` runs the source as it is, and the
 server has no frontend to compile.
 
+## Outbound proxy
+
+Voice transcription and generation use Node's built-in `fetch`. Setting
+`HTTPS_PROXY` alone does not enable proxy support: on Node 24.5 or later, also
+set `NODE_USE_ENV_PROXY=1` before starting the server, as described in
+[Node's proxy documentation](https://nodejs.org/docs/latest-v24.x/api/http.html#built-in-proxy-support).
+Briareus's `.env` parser does not configure Node's networking; these variables
+must be in the process environment at startup.
+
+For an existing user-level `briareus.service`, start with the examples below
+if you have no proxy configuration yet; otherwise update your existing proxy
+environment file and keep its address and service dependencies:
+
+```bash
+install -d -m 700 "$HOME/.config/briareus"
+install -m 600 deploy/proxy.env.example "$HOME/.config/briareus/proxy.env"
+```
+
+Edit that file to use your proxy's address, and add internal HTTP services'
+hostnames and LAN IPs to both `NO_PROXY` and `no_proxy`. Node gives lowercase
+variables precedence, so keep both forms consistent. The setting applies to
+the core's outbound HTTP requests, including transcription, voice generation,
+GitHub, and object storage; internal services must bypass the proxy.
+
+Install the drop-in to load the file when the service starts. If you reuse an
+existing environment file at another path, change the drop-in's
+`EnvironmentFile` to that path before installing it. If the service already
+loads that file, keep its existing directive and skip installing this drop-in:
+
+```bash
+install -D -m 644 deploy/briareus-proxy.conf "$HOME/.config/systemd/user/briareus.service.d/node-proxy.conf"
+systemctl --user daemon-reload
+```
+
+For a system-level service, use `/etc/systemd/system/briareus.service.d/` and
+replace `%h` in the drop-in with the absolute home path of the service user.
+For a shell launch, export the variables before `npm start`; for Docker, pass
+them into the app container's environment and use a proxy address reachable
+from inside that container.
+
+Preparing the file and reloading systemd leaves the running server unchanged.
+Restart only when sessions can be interrupted:
+
+```bash
+systemctl --user restart briareus.service
+curl --fail http://127.0.0.1:4300/healthz
+```
+
+Then transcribe a short voice note and check access to internal HTTP services.
+To roll back, restore the previous environment file or remove the example's
+proxy variables, then restart at a suitable time.
+
 ## Shared browser with a virtual display
 
 Set `BROWSER_DISPLAY=:98` and `BROWSER_BIN=/usr/bin/google-chrome` in the
