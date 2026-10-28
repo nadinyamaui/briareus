@@ -1,7 +1,7 @@
 import { it, expect } from 'vitest';
 import { createServer } from 'node:http';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -9,8 +9,12 @@ import { codexLiveTurn } from '../lib/codex-live.js';
 import { BINARIES } from '../lib/providers.js';
 
 // The installed CLI talks only to this local Responses stub, never a paid provider.
-it('steers new and resumed turns through the installed Codex App Server', async () => {
+async function steerCodexTurns(linked) {
   const root = mkdtempSync(join(tmpdir(), 'codex.live-'));
+  const workspace = join(root, 'repo.with dots');
+  mkdirSync(workspace);
+  const cwd = linked ? join(root, 'workspace-link') : workspace;
+  if (linked) symlinkSync(workspace, cwd, 'dir');
   const requests = [];
   let live, child, steered;
   const server = createServer(async (req, res) => {
@@ -67,9 +71,12 @@ it('steers new and resumed turns through the installed Codex App Server', async 
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   try {
-    execFileSync('git', ['init', '-q', root]);
-    mkdirSync(join(root, '.codex'));
-    writeFileSync(join(root, '.codex/config.toml'), 'developer_instructions="PROJECT_LOCAL_CONFIG_LOADED"\n');
+    execFileSync('git', ['init', '-q', workspace]);
+    mkdirSync(join(workspace, '.codex'));
+    writeFileSync(
+      join(workspace, '.codex/config.toml'),
+      'developer_instructions="PROJECT_LOCAL_CONFIG_LOADED"\n',
+    );
     writeFileSync(
       join(root, 'config.toml'),
       `model="gpt-6.1-sol"\nmodel_provider="local_test"\n[model_providers.local_test]\nname="Local test"\nbase_url="http://127.0.0.1:${server.address().port}/v1"\nwire_api="responses"\nrequires_openai_auth=false\n`,
@@ -85,10 +92,10 @@ it('steers new and resumed turns through the installed Codex App Server', async 
         model: 'gpt-6.1-sol',
         effort: 'medium',
         live: true,
-        cwd: root,
+        cwd,
       });
       child = spawn(resolve('node_modules/.bin/codex'), args, {
-        cwd: root,
+        cwd,
         env: { ...process.env, CODEX_HOME: root },
       });
       const exited = new Promise((r, reject) => {
@@ -105,7 +112,7 @@ it('steers new and resumed turns through the installed Codex App Server', async 
         send: (m) => child.stdin.write(`${JSON.stringify(m)}\n`),
         prompt: 'Reply ORIGINAL.',
         threadId,
-        cwd: root,
+        cwd,
         model: 'gpt-6.1-sol',
         effort: 'medium',
         onActive: () => {},
@@ -157,4 +164,6 @@ it('steers new and resumed turns through the installed Codex App Server', async 
     await new Promise((r) => server.close(r));
     rmSync(root, { recursive: true, force: true });
   }
-}, 25000);
+}
+
+it.each([false, true])('steers Codex turns (symlink: %s)', steerCodexTurns, 25000);
