@@ -2372,6 +2372,15 @@ describe('the DeepSeek Harness binary', () => {
         id: 'agent-default-model',
         config: { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' },
       },
+      // headless --json drops sub-agents' usage; this plugin reports it.
+      {
+        insert: [
+          {
+            id: 'briareus-subagent-usage',
+            name: new URL('../lib/dsh-subagent-usage.js', import.meta.url).href,
+          },
+        ],
+      },
     ]);
   });
 
@@ -2392,7 +2401,7 @@ describe('the DeepSeek Harness binary', () => {
         ],
       }),
     );
-    expect(rows[1].insert).toEqual([
+    expect(rows[1].insert.slice(1)).toEqual([
       {
         id: 'mcp-reviewer_memory',
         name: '@deepseek-ai/dsh-mcp-client',
@@ -2597,6 +2606,40 @@ describe('the DeepSeek Harness parser', () => {
     parser.feed(stepEnd({ inputTokens: 50, outputTokens: 10, cacheReadTokens: 900 }));
     expect(turn.inputTokens).toBe(2000);
     expect(turn.cachedInputTokens).toBeNull();
+  });
+
+  it("adds a sub-agent's usage to the turn, by model, without taking it for the session's context", () => {
+    const { turn, parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    const child = (model, usage) => ({
+      type: 'subagent_usage',
+      sessionId: 'c',
+      parentSessionId: 's',
+      model,
+      usage,
+    });
+    expect(
+      parser.feed(child('deepseek-flash', { inputTokens: 99000, outputTokens: 2000, cacheReadTokens: 1000 })),
+    ).toEqual([]);
+    parser.feed(child('deepseek-v4-pro', { inputTokens: 300, outputTokens: 30, cacheReadTokens: 200 }));
+    parser.feed(child('deepseek-v4-pro', { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0 }));
+    expect(turn).toMatchObject({ inputTokens: 101600, outputTokens: 2060, cachedInputTokens: 1200 });
+    expect(turn.contextTokens).toBe(1020);
+    expect(turn.subagentUsage).toEqual({
+      'deepseek-flash': { inputTokens: 100000, outputTokens: 2000, cachedInputTokens: 1000 },
+      'deepseek-v4-pro': { inputTokens: 600, outputTokens: 40, cachedInputTokens: 200 },
+    });
+    parser.feed({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
+    expect(parser.flush().at(-1)).toMatchObject({ inputTokens: 101600, outputTokens: 2060, tokens: 1020 });
+
+    // A child step that leaves its cache reads out leaves the turn's unmeasured, as a root one does.
+    parser.feed(child('deepseek-flash', { inputTokens: 5, outputTokens: 1 }));
+    expect(turn.cachedInputTokens).toBeNull();
+    expect(turn.subagentUsage['deepseek-flash']).toEqual({
+      inputTokens: 100005,
+      outputTokens: 2001,
+      cachedInputTokens: null,
+    });
   });
 
   it('logs the end of an answer the text event cut, once', () => {

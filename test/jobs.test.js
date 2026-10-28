@@ -270,9 +270,11 @@ vi.mock('../lib/browser.js', async (original) => ({
   },
 }));
 
-vi.mock('../lib/usage.js', () => ({
+vi.mock('../lib/usage.js', async (importOriginal) => ({
   jobUsageEstimates: vi.fn(async () => new Map()),
   recordTurnUsage: vi.fn(),
+  // Arithmetic only, so the real one.
+  splitSubagentUsage: (await importOriginal()).splitSubagentUsage,
 }));
 
 import {
@@ -16676,7 +16678,14 @@ describe('the shared browser in a session', () => {
   async function turn(
     job,
     text,
-    { hold = false, binary = 'claude', workerNotice = false, unattended = false, provider = {} } = {},
+    {
+      hold = false,
+      binary = 'claude',
+      workerNotice = false,
+      unattended = false,
+      provider = {},
+      dshLines = [],
+    } = {},
   ) {
     job.status = 'idle';
     getProviderForJob.mockReturnValue({ ...state.provider, binary, ...provider });
@@ -16698,7 +16707,10 @@ describe('the shared browser in a session', () => {
         seen.patchFile = args[args.indexOf('--patch') + 1];
         const patch = JSON.parse(fs.readFileSync(seen.patchFile, 'utf8'));
         seen.model = patch[0].config;
-        seen.mcp = Object.fromEntries((patch[1]?.insert || []).map((r) => [r.config.serverName, r.config]));
+        seen.mcp = Object.fromEntries(
+          (patch[1]?.insert || []).filter((r) => r.config).map((r) => [r.config.serverName, r.config]),
+        );
+        seen.plugins = (patch[1]?.insert || []).map((r) => r.id);
         seen.shellEnv = opts.env.BASH_ENV ? fs.readFileSync(opts.env.BASH_ENV, 'utf8') : null;
       }
       const child = new EventEmitter();
@@ -16718,6 +16730,7 @@ describe('the shared browser in a session', () => {
               step: 1,
               usage: { inputTokens: 10, outputTokens: 2 },
             },
+            ...dshLines,
             { type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } },
             { type: 'final', text: 'ok' },
           ])
@@ -16911,6 +16924,54 @@ describe('the shared browser in a session', () => {
       fs.rmSync(home, { recursive: true, force: true });
       job.chats = chats;
       job.browser = false;
+    }
+  });
+
+  it("books a DeepSeek Harness turn's sub-agents with it, each under the model it ran on", async () => {
+    const job = getJob('br-turn');
+    const { chats, model, inputTokens, outputTokens } = job;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-home-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    job.chats = {};
+    job.model = 'deepseek-flash';
+    job.inputTokens = 0;
+    job.outputTokens = 0;
+    const child = (model, usage) => ({
+      type: 'subagent_usage',
+      sessionId: 'c',
+      parentSessionId: 's',
+      model,
+      usage,
+    });
+    recordTurnUsage.mockClear();
+    try {
+      const run = await turn(job, 'Fan it out', {
+        binary: 'dsh',
+        provider: { apiKey: 'sk-entry' },
+        dshLines: [
+          child('deepseek-flash', { inputTokens: 100, outputTokens: 20, cacheReadTokens: 0 }),
+          child('deepseek-v4-pro', { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 0 }),
+        ],
+      });
+      await run.settled;
+      // The patch mounts the plugin that reports them.
+      expect(run.seen.plugins[0]).toBe('briareus-subagent-usage');
+      // The session's totals carry every agent's spend.
+      expect(job).toMatchObject({ inputTokens: 1110, outputTokens: 222 });
+      await vi.waitFor(() => expect(recordTurnUsage).toHaveBeenCalledTimes(2));
+      const rows = recordTurnUsage.mock.calls.map(([, part, , m]) => [
+        m,
+        part.inputTokens,
+        part.outputTokens,
+      ]);
+      expect(rows).toEqual([
+        ['deepseek-flash', 110, 22],
+        ['deepseek-v4-pro', 1000, 200],
+      ]);
+    } finally {
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      Object.assign(job, { chats, model, inputTokens, outputTokens });
     }
   });
 

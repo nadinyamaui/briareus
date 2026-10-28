@@ -41,6 +41,7 @@ const {
   estimateEventCosts,
   recordTurnUsage,
   resetUsageCalibration,
+  splitSubagentUsage,
 } = await import('../lib/usage.js');
 const { loadTurnUsage, loadAllTurnUsage, loadJobTurnUsage, loadTurnUsageCalibration, saveTurnUsage } =
   await import('../lib/db.js');
@@ -848,6 +849,57 @@ describe('recordTurnUsage', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('splitSubagentUsage', () => {
+  const part = {
+    inputTokens: 101600,
+    outputTokens: 2060,
+    cachedInputTokens: 1200,
+    costUsd: null,
+    durationMs: 9000,
+  };
+  const children = {
+    'deepseek-flash': { inputTokens: 100000, outputTokens: 2000, cachedInputTokens: 1000 },
+    'deepseek-v4-pro': { inputTokens: 600, outputTokens: 40, cachedInputTokens: 200 },
+  };
+
+  it("books a sub-agent on another model under that model, out of the turn's own row", () => {
+    const { part: own, rows } = splitSubagentUsage(part, children, 'deepseek-flash');
+    expect(own).toEqual({
+      inputTokens: 101000,
+      outputTokens: 2020,
+      cachedInputTokens: 1000,
+      costUsd: null,
+      durationMs: 9000,
+    });
+    expect(rows).toEqual([
+      {
+        model: 'deepseek-v4-pro',
+        usage: {
+          inputTokens: 600,
+          outputTokens: 40,
+          cachedInputTokens: 200,
+          costUsd: null,
+          durationMs: null,
+        },
+      },
+    ]);
+    // Nothing is lost or counted twice.
+    expect(own.inputTokens + rows[0].usage.inputTokens).toBe(part.inputTokens);
+  });
+
+  it('leaves the turn whole without children, a part or a model to compare with, and keeps an unmeasured cache unmeasured', () => {
+    expect(splitSubagentUsage(part, undefined, 'deepseek-flash')).toEqual({ part, rows: [] });
+    expect(splitSubagentUsage(null, children, 'deepseek-flash')).toEqual({ part: null, rows: [] });
+    expect(splitSubagentUsage(part, children, '')).toEqual({ part, rows: [] });
+    const { part: own } = splitSubagentUsage(
+      { ...part, cachedInputTokens: null },
+      children,
+      'deepseek-v4-pro',
+    );
+    expect(own).toMatchObject({ inputTokens: 1600, outputTokens: 60, cachedInputTokens: null });
   });
 });
 
