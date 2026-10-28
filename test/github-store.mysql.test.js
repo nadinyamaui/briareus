@@ -987,6 +987,53 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     },
   );
 
+  it('enriches a tag-first CI discovery with its real branch after a status webhook', async () => {
+    const r = repo();
+    const sha = 'e'.repeat(40);
+    const errors = [];
+    const sync = createGithubSync({
+      ci,
+      store,
+      projects: () => [{ repo: r }],
+      config: () => ({ githubToken: 'test' }),
+      now: () => 100,
+      log: (error) => errors.push(error),
+      board: async () => ({ issuesError: null, issuesTruncated: false }),
+      invalidate: () => {},
+      rest: async (_cfg, _method, path) => {
+        const data = path.includes('/check-runs')
+          ? { check_runs: [{ id: 1, name: 'deploy', status: 'completed', conclusion: 'success' }] }
+          : [];
+        return { ok: true, json: async () => data };
+      },
+    });
+    try {
+      sync.onWebhook('push', { repository: { full_name: r }, ref: 'refs/tags/v1', after: sha });
+      await sync.flush(r);
+      const filters = { repos: [r], kind: 'check_run', since: 0, until: 1000 };
+      expect((await ci.runs(filters)).runs).toEqual([
+        expect.objectContaining({ id: '1', headSha: sha, branch: null, conclusion: 'success' }),
+      ]);
+      sync.onWebhook('status', {
+        repository: { full_name: r },
+        sha,
+        branches: [{ name: 'release', commit: { sha } }],
+      });
+      await sync.flush(r);
+      expect((await ci.runs({ ...filters, branch: 'release' })).runs).toEqual([
+        expect.objectContaining({ id: '1', headSha: sha, branch: 'release', conclusion: 'success' }),
+      ]);
+      expect((await ci.stats({ ...filters, branch: 'release' })).totals).toMatchObject({
+        total: 1,
+        succeeded: 1,
+      });
+      expect((await ci.runs({ ...filters, branch: 'refs/tags/v1' })).runs).toEqual([]);
+      expect(errors).toEqual([]);
+    } finally {
+      sync.stop();
+    }
+  });
+
   it('orders overlapping boards by observation time while returning completion time', async () => {
     const r = repo();
     await store.saveBoard(r, board({ observedAt: 100, syncedAt: new Date(300).toISOString() }));

@@ -392,6 +392,22 @@ describe('durable GitHub synchronization', () => {
     expect(h.errors).toEqual([]);
   });
 
+  it.each([
+    ['refs/heads/release/candidate', 'release/candidate'],
+    ['refs/tags/v1', null],
+    ['refs/pull/1/head', null],
+    [undefined, null],
+  ])('collects push checks using only branch refs as hints: %s', async (ref, branch) => {
+    const h = harness();
+    const sha = 'e'.repeat(40);
+    const check = { id: 1, name: 'deploy', status: 'completed', conclusion: 'success' };
+    h.routes.set(`/repos/acme/shop/commits/${sha}/check-runs`, { check_runs: [check] });
+    h.service.onWebhook('push', { repository: { full_name: project.repo }, ref, after: sha });
+    await h.service.flush(project.repo);
+    expect(h.ci.save).toHaveBeenCalledWith(project.repo, [check], expect.objectContaining({ sha, branch }));
+    expect(h.errors).toEqual([]);
+  });
+
   it('records push checks without a PR and ignores deleted refs', async () => {
     const h = harness();
     const sha = 'e'.repeat(40);
