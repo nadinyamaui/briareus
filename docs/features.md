@@ -32,9 +32,10 @@ second user needs WAHA Plus to link a phone). See
 
 Sessions run Claude Code, Codex, Grok, opencode or Z.AI in their own workspace
 clones. Projects can reserve a database server per open session or use a
-local checkout. Clients can stream transcripts, send or queue messages,
-cancel turns, compact context, pin sessions to the top of the list, close and
-reopen sessions, and attach files
+local checkout. An admin's interactive session can edit its project's `.env`
+template, the file every checkout is seeded from, with MCP tools. Clients can
+stream transcripts, send or queue messages, cancel turns, compact context,
+pin sessions to the top of the list, close and reopen sessions, and attach files
 or transcribed voice notes. Claude `/btw` questions use a separate fork of
 the conversation. Orchestrators coordinate worker sessions and their
 review, fix and QA work.
@@ -151,6 +152,8 @@ These additions are present in the server revision documented here:
 - Per-user Home Assistant connections.
 - Per-user WhatsApp accounts for the inbox, session tools and watches.
 - Per-user attention feed and task history.
+- Sessions can edit their project's `.env` template through MCP (admins'
+  interactive sessions only).
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.

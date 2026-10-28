@@ -50,6 +50,7 @@ const {
   getProject,
   createProject,
   updateProject,
+  editProject,
   removeProject,
   reorderProjects,
   stepRuntime,
@@ -726,6 +727,41 @@ describe('updating a project', () => {
 
   it('refuses an id that is not there', async () => {
     await expect(updateProject(99, { label: 'x' })).rejects.toThrow(/Project not found/);
+  });
+
+  it('runs one update at a time, so a concurrent one does not save back the row it read', async () => {
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    state.during = async () => {
+      state.during = null;
+      await held;
+    };
+    const first = editProject(1, (stored) => ({ envTemplate: `${stored.envTemplate}A=1\n` }));
+    const second = updateProject(1, { label: 'renamed' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    release();
+    await Promise.all([first, second]);
+
+    expect(getProject('a/b')).toMatchObject({ label: 'renamed', envTemplate: 'A=1\n' });
+  });
+
+  it('hands an edit the stored row even when the reload after a save failed', async () => {
+    state.loadError = new Error('gone away');
+    await editProject(1, (stored) => ({ envTemplate: `${stored.envTemplate}A=1\n` }));
+    expect(getProject('a/b').envTemplate).toBe('A=1\n');
+
+    await editProject(1, (stored) => ({ envTemplate: `${stored.envTemplate}B=2\n` }));
+    expect(state.rows.find((r) => r.id === 1).envTemplate).toBe('A=1\nB=2\n');
+    expect(getProject('a/b').envTemplate).toBe('A=1\nB=2\n');
+  });
+
+  it('saves nothing when an edit refuses', async () => {
+    await expect(
+      editProject(1, () => {
+        throw new Error('no');
+      }),
+    ).rejects.toThrow('no');
+    expect(state.saved).toEqual([]);
   });
 
   it('lets a project keep its own repo', async () => {
