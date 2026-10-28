@@ -1003,8 +1003,10 @@ describe('contextWindowFor', () => {
     expect(contextWindowFor('grok', 'grok-4.6')).toBe(500000);
   });
 
-  it("qwen states no window, so the current models' 256k is assumed", () => {
-    expect(contextWindowFor('qwen', 'qwen3.8-max')).toBe(262144);
+  it("qwen states no window: its bundled models' 1M is known, an endpoint's own assumed 256k", () => {
+    for (const model of ['qwen3.8-max', 'qwen3.8-flash', 'qwen3.7-plus', 'qwen3-coder-plus'])
+      expect(contextWindowFor('qwen', model)).toBe(1000000);
+    expect(contextWindowFor('qwen', 'local-model')).toBe(262144);
   });
 
   it('claude states its window in the stream, so no fallback exists', () => {
@@ -2067,21 +2069,38 @@ describe('a qwen entry', () => {
 
   it('gets a home of its own whose settings read the effort from the turn and keep memory off', () => {
     useHome();
-    const env = qwenEnv({ id: 9, baseUrl: 'http://127.0.0.1:8000/v1', apiKey: '' }, 'low');
+    const env = qwenEnv({ id: 9, baseUrl: 'http://127.0.0.1:8000/v1', apiKey: '' }, 'low', 'qwen3.8-max');
     expect(env.QWEN_HOME).toBe(path.join(home, '.qwen-provider-9'));
     expect(env).toMatchObject({
       OPENAI_BASE_URL: 'http://127.0.0.1:8000/v1',
       // A local endpoint may take no key; the client still needs one.
       OPENAI_API_KEY: 'none',
+      QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(env.QWEN_HOME, 'effort-defaults.json'),
       BRIAREUS_QWEN_EFFORT: 'low',
     });
     const settings = JSON.parse(fs.readFileSync(path.join(env.QWEN_HOME, 'settings.json'), 'utf8'));
-    expect(settings.model.generationConfig.samplingParams.reasoning_effort).toBe('${BRIAREUS_QWEN_EFFORT}');
+    expect(settings.model).toBeUndefined();
     expect(settings.memory).toEqual({ enableManagedAutoMemory: false, enableManagedAutoDream: false });
-    // The CLI may rewrite it; the next turn puts it back.
+    const effort = JSON.parse(fs.readFileSync(env.QWEN_CODE_SYSTEM_DEFAULTS_PATH, 'utf8'));
+    expect(effort.model.generationConfig.samplingParams.reasoning_effort).toBe('${BRIAREUS_QWEN_EFFORT}');
+    // The CLI may rewrite them; the next turn puts them back.
     fs.writeFileSync(path.join(env.QWEN_HOME, 'settings.json'), '{}');
+    fs.writeFileSync(env.QWEN_CODE_SYSTEM_DEFAULTS_PATH, '{}');
     ensureQwenHome({ id: 9 });
     expect(JSON.parse(fs.readFileSync(path.join(env.QWEN_HOME, 'settings.json'), 'utf8'))).toEqual(settings);
+    expect(JSON.parse(fs.readFileSync(env.QWEN_CODE_SYSTEM_DEFAULTS_PATH, 'utf8'))).toEqual(effort);
+  });
+
+  it("sends an endpoint's own model no effort unless the entry lists its efforts", () => {
+    useHome();
+    const entry = { id: 9, baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-1', efforts: [] };
+    const plain = qwenEnv(entry, 'high', 'gpt-4.1');
+    expect(plain).not.toHaveProperty('QWEN_CODE_SYSTEM_DEFAULTS_PATH');
+    expect(plain).not.toHaveProperty('BRIAREUS_QWEN_EFFORT');
+    expect(qwenEnv({ ...entry, efforts: ['low', 'high'] }, 'high', 'o4-mini')).toMatchObject({
+      QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(home, '.qwen-provider-9', 'effort-defaults.json'),
+      BRIAREUS_QWEN_EFFORT: 'high',
+    });
   });
 
   it('runs on Model Studio with its key when it names no endpoint', () => {

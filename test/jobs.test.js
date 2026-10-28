@@ -16820,10 +16820,11 @@ describe('the shared browser in a session', () => {
 
   it("mounts a qwen turn's MCP servers from a file, on the entry's endpoint at the turn's effort", async () => {
     const job = getJob('br-turn');
-    const { chats, effort } = job;
+    const { chats, effort, model } = job;
     job.browser = true;
     job.chats = {};
     job.effort = 'low';
+    job.model = 'qwen3.8-max';
     browserState.endpoint = ENDPOINT;
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-qwen-turn-'));
     const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
@@ -16838,6 +16839,11 @@ describe('the shared browser in a session', () => {
       expect(seen.prompt).toContain('`browser` MCP tools');
       expect(seen.env).toMatchObject({
         QWEN_HOME: path.join(home, `.qwen-provider-${state.provider.id}`),
+        QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(
+          home,
+          `.qwen-provider-${state.provider.id}`,
+          'effort-defaults.json',
+        ),
         BRIAREUS_QWEN_EFFORT: 'low',
         OPENAI_BASE_URL: expect.any(String),
       });
@@ -16846,7 +16852,94 @@ describe('the shared browser in a session', () => {
       fs.rmSync(home, { recursive: true, force: true });
       job.chats = chats;
       job.effort = effort;
+      job.model = model;
       job.browser = false;
+    }
+  });
+
+  it("sends a qwen turn on an endpoint's own model no effort, even one the server's environment names", async () => {
+    const job = getJob('br-turn');
+    const { chats, model } = job;
+    job.browser = false;
+    job.chats = {};
+    job.model = 'gpt-4.1';
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-qwen-turn-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    vi.stubEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', '/etc/elsewhere.json');
+    vi.stubEnv('BRIAREUS_QWEN_EFFORT', 'high');
+    try {
+      const { seen, settled } = await turn(job, 'Plain model', { binary: 'qwen' });
+      await settled;
+      expect(seen.args).toEqual(expect.arrayContaining(['--model', 'gpt-4.1']));
+      expect(seen.env).not.toHaveProperty('QWEN_CODE_SYSTEM_DEFAULTS_PATH');
+      expect(seen.env).not.toHaveProperty('BRIAREUS_QWEN_EFFORT');
+    } finally {
+      vi.unstubAllEnvs();
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      job.chats = chats;
+      job.model = model;
+    }
+  });
+
+  it("keeps a qwen session's baseline across a turn that ends without totals, with that turn's calls on top", async () => {
+    const job = getJob('br-turn');
+    const { chats, inputTokens, outputTokens } = job;
+    const sessionId = '7a2c3b4d-2222-4333-8444-555566667777';
+    job.browser = false;
+    job.chats = { [state.provider.id]: { started: true, sessionId } };
+    job.qwenSessionTotals = { [sessionId]: { inputTokens: 1000, outputTokens: 5, cachedInputTokens: 0 } };
+    job.inputTokens = 0;
+    job.outputTokens = 0;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-qwen-turn-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    try {
+      // Stopped after one model call: no result, so no session totals.
+      const stopped = await turn(job, 'Start it', {
+        binary: 'qwen',
+        result: {
+          type: 'assistant',
+          session_id: sessionId,
+          message: {
+            content: [],
+            usage: { input_tokens: 100, output_tokens: 5, cache_read_input_tokens: 0 },
+          },
+        },
+      });
+      await stopped.settled;
+      expect(job.inputTokens).toBe(100);
+      expect(job.qwenSessionTotals[sessionId]).toEqual({
+        inputTokens: 1100,
+        outputTokens: 10,
+        cachedInputTokens: 0,
+      });
+      // The next turn delegates: a child's 10000/2000 shows only in the session's totals.
+      const resumed = await turn(job, 'Delegate it', {
+        binary: 'qwen',
+        result: {
+          type: 'result',
+          subtype: 'success',
+          session_id: sessionId,
+          is_error: false,
+          result: 'ok',
+          usage: { input_tokens: 11300, output_tokens: 2020, cache_read_input_tokens: 0 },
+        },
+      });
+      await resumed.settled;
+      expect(job.inputTokens).toBe(100 + 10200);
+      expect(job.outputTokens).toBe(5 + 2010);
+      expect(job.qwenSessionTotals[sessionId]).toEqual({
+        inputTokens: 11300,
+        outputTokens: 2020,
+        cachedInputTokens: 0,
+      });
+    } finally {
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      job.chats = chats;
+      job.inputTokens = inputTokens;
+      job.outputTokens = outputTokens;
+      delete job.qwenSessionTotals;
     }
   });
 

@@ -549,7 +549,9 @@ written idempotently so a database from before then just gets its row in
   the entry's API key, or to the entry's base URL (a local vLLM, OpenRouter...),
   where the key is optional and the model ids are the endpoint's own. It runs with
   `QWEN_HOME=~/.qwen-provider-<id>`, the effort becomes the request's
-  `reasoning_effort`, and Qwen Code's own memory extraction is switched off
+  `reasoning_effort` (for the bundled models; an endpoint's own models get one
+  only when the entry lists its efforts, since a model without reasoning rejects
+  it), and Qwen Code's own memory extraction is switched off
 - A GitHub token in `.env` (`GITHUB_TOKEN`) for the sessions' `gh` CLI and the
   PR/CI sync. A classic `repo` PAT covers everything; a fine-grained token wants
   Pull requests: read/write and Contents: read, plus Issues: read for the
