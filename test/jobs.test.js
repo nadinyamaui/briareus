@@ -16968,10 +16968,48 @@ describe('the shared browser in a session', () => {
         ['deepseek-flash', 110, 22],
         ['deepseek-v4-pro', 1000, 200],
       ]);
+      // Still one turn: the rows share a key and a time, so the footer and the counts join them.
+      const [own, other] = recordTurnUsage.mock.calls.map(([, part]) => part);
+      expect(own.turnKey).toEqual(expect.any(String));
+      expect(other).toMatchObject({ turnKey: own.turnKey, at: own.at });
     } finally {
       homeSpy.mockRestore();
       fs.rmSync(home, { recursive: true, force: true });
       Object.assign(job, { chats, model, inputTokens, outputTokens });
+    }
+  });
+
+  it('starts a fresh DeepSeek Harness conversation, briefed, once the session moved to another clone', async () => {
+    const job = getJob('br-turn');
+    const { chats, workDir } = job;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-home-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    job.chats = {};
+    job.workDir = path.join(home, 'acme__shop');
+    try {
+      const first = await turn(job, 'Fix the cart', { binary: 'dsh', provider: { apiKey: 'sk-entry' } });
+      await first.settled;
+      expect(job.chats[state.provider.id]).toMatchObject({
+        sessionId: 'session-dsh-1',
+        cwd: path.join(home, 'acme__shop'),
+      });
+
+      // dsh refuses a session recorded in another directory, so a reopen elsewhere starts afresh.
+      job.workDir = path.join(home, 'acme__shop-2');
+      const moved = await turn(job, 'And the checkout', { binary: 'dsh', provider: { apiKey: 'sk-entry' } });
+      await moved.settled;
+      expect(moved.seen.args).not.toContain('--session-id');
+      expect(moved.seen.prompt).toContain('<workspace-context>');
+      expect(job.chats[state.provider.id].cwd).toBe(path.join(home, 'acme__shop-2'));
+
+      const after = await turn(job, 'And the totals', { binary: 'dsh', provider: { apiKey: 'sk-entry' } });
+      await after.settled;
+      expect(after.seen.args.slice(-3)).toEqual(['--session-id', 'session-dsh-1', '-']);
+      expect(after.seen.prompt).not.toContain('<workspace-context>');
+    } finally {
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      Object.assign(job, { chats, workDir });
     }
   });
 

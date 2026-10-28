@@ -2,20 +2,39 @@ import { describe, it, expect } from 'vitest';
 import { apply, name } from '../lib/dsh-subagent-usage.js';
 
 // The plugin against a stand-in for dsh's Cordis context: whatever it registers for
-// `session/event` is driven with the events dsh's agent loop appends.
+// `session/event` is driven with the events dsh's agent loop appends, and its `llm/stream`
+// waterfall wraps a stand-in model stream.
 function mount() {
   const lines = [];
-  let listener = null;
+  const listeners = {};
   const ctx = {
     on(event, fn) {
-      expect(event).toBe('session/event');
-      listener = fn;
+      expect(['session/event', 'llm/stream']).toContain(event);
+      listeners[event] = fn;
       return () => {};
     },
   };
   apply(ctx, {}, { write: (line) => lines.push(JSON.parse(line)) });
-  return { lines, emit: (s, event) => listener(s, event) };
+  return {
+    lines,
+    emit: (s, event) => listeners['session/event'](s, event),
+    stream: (options, chunks) =>
+      listeners['llm/stream'](options, () =>
+        (async function* () {
+          for (const chunk of chunks) {
+            if (chunk instanceof Error) throw chunk;
+            yield chunk;
+          }
+        })(),
+      ),
+  };
 }
+
+const drain = async (stream) => {
+  const seen = [];
+  for await (const chunk of stream) seen.push(chunk);
+  return seen;
+};
 
 const usageStream = (usage) => [
   { type: 'chunk', chunk: { type: 'text-delta', text: 'x' } },
@@ -97,6 +116,51 @@ describe('the dsh sub-agent usage plugin', () => {
     emit(child, message('deepseek-flash', { inputTokens: 9, outputTokens: 9 }));
     emit(child, stepEnd);
     expect(lines.map((l) => l.usage)).toEqual([{ inputTokens: 3, outputTokens: 3 }]);
+  });
+
+  it("reports every compaction call's usage and model, the root's included", async () => {
+    const { lines, stream } = mount();
+    const chunks = [
+      { type: 'text-delta', text: 'summary' },
+      { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } },
+      { type: 'usage', usage: { inputTokens: 700000, outputTokens: 20, cacheReadTokens: 0 } },
+      { type: 'finish', reason: { kind: 'completed' } },
+    ];
+    const compaction = { purpose: 'compaction', sessionId: 'session-root', model: 'deepseek-flash' };
+    // Passed through untouched, so dsh still assembles its summary.
+    expect(await drain(stream(compaction, chunks))).toEqual(chunks);
+    expect(
+      await drain(stream({ ...compaction, sessionId: 'child-1', model: 'deepseek-v4-pro' }, chunks)),
+    ).toEqual(chunks);
+    expect(lines).toEqual([
+      {
+        type: 'compaction_usage',
+        sessionId: 'session-root',
+        model: 'deepseek-flash',
+        usage: { inputTokens: 700000, outputTokens: 20, cacheReadTokens: 0 },
+      },
+      {
+        type: 'compaction_usage',
+        sessionId: 'child-1',
+        model: 'deepseek-v4-pro',
+        usage: { inputTokens: 700000, outputTokens: 20, cacheReadTokens: 0 },
+      },
+    ]);
+  });
+
+  it('counts a compaction call that failed after reporting usage, and leaves other calls to the steps', async () => {
+    const { lines, stream } = mount();
+    const usage = { type: 'usage', usage: { inputTokens: 500, outputTokens: 5 } };
+    await expect(
+      drain(stream({ purpose: 'compaction', sessionId: 's', model: 'm' }, [usage, new Error('cut')])),
+    ).rejects.toThrow('cut');
+    // An agent-loop request, a title and a compaction that reported nothing write no line.
+    await drain(stream({ sessionId: 's', model: 'm' }, [usage]));
+    await drain(stream({ purpose: 'session-title', sessionId: 's', model: 'm' }, [usage]));
+    await drain(stream({ purpose: 'compaction', sessionId: 's', model: 'm' }, [{ type: 'finish' }]));
+    expect(lines).toEqual([
+      { type: 'compaction_usage', sessionId: 's', model: 'm', usage: { inputTokens: 500, outputTokens: 5 } },
+    ]);
   });
 
   it('never throws into dsh on an event it cannot read', () => {

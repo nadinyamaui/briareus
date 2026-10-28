@@ -2384,6 +2384,27 @@ describe('the DeepSeek Harness binary', () => {
     ]);
   });
 
+  it("names a server past dsh's 32-character namespace by its head and a hash, the same every turn", () => {
+    const long = 'a'.repeat(64);
+    const sibling = `${'a'.repeat(63)}b`;
+    const names = (mcp) =>
+      JSON.parse(dshPatchContent({ model: 'm', effort: 'high', mcp }))[1]
+        .insert.slice(1)
+        .map((row) => [row.id, row.config.serverName]);
+    const [[id, serverName], [, other], [, short]] = names([
+      { name: long, url: 'https://b.test/mcp' },
+      { name: sibling, command: '/node', args: [] },
+      { name: 'a'.repeat(32), command: '/node', args: [] },
+    ]);
+    // dsh-mcp-client's own SERVER_NAME_PATTERN.
+    for (const n of [serverName, other, short]) expect(n).toMatch(/^[A-Za-z0-9_-]{1,32}$/);
+    expect(serverName.startsWith('a'.repeat(23))).toBe(true);
+    expect(id).toBe(`mcp-${serverName}`);
+    expect(other).not.toBe(serverName);
+    expect(short).toBe('a'.repeat(32));
+    expect(names([{ name: long, url: 'https://b.test/mcp' }])[0][1]).toBe(serverName);
+  });
+
   it('mounts each MCP server as a client row, local or remote, with the env and headers it was given', () => {
     const rows = JSON.parse(
       dshPatchContent({
@@ -2640,6 +2661,62 @@ describe('the DeepSeek Harness parser', () => {
       outputTokens: 2001,
       cachedInputTokens: null,
     });
+  });
+
+  it("adds a compaction call to the turn, by model, without taking it for the session's context", () => {
+    const { turn, parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    expect(
+      parser.feed({
+        type: 'compaction_usage',
+        sessionId: 's',
+        model: 'deepseek-flash',
+        usage: { inputTokens: 700000, outputTokens: 20, cacheReadTokens: 0 },
+      }),
+    ).toEqual([]);
+    expect(turn).toMatchObject({
+      inputTokens: 701000,
+      outputTokens: 40,
+      cachedInputTokens: 0,
+      contextTokens: 1020,
+    });
+    expect({ ...turn.subagentUsage }).toEqual({
+      'deepseek-flash': { inputTokens: 700000, outputTokens: 20, cachedInputTokens: 0 },
+    });
+  });
+
+  it("keeps the root's own cache reads apart from a child's that left them out", () => {
+    const { turn, parser } = fresh();
+    for (let i = 0; i < 3; i++)
+      parser.feed(stepEnd({ inputTokens: 100000, outputTokens: 20, cacheReadTokens: 0 }));
+    parser.feed({
+      type: 'subagent_usage',
+      model: 'deepseek-flash',
+      usage: { inputTokens: 1000, outputTokens: 20 },
+    });
+    expect(turn.cachedInputTokens).toBeNull();
+    expect(turn.rootCachedInputTokens).toBe(0);
+    // A root step without them leaves the root's unmeasured too.
+    parser.feed(stepEnd({ inputTokens: 1, outputTokens: 1 }));
+    expect(turn.rootCachedInputTokens).toBeNull();
+  });
+
+  it('books a model id named like an Object property under its own key', () => {
+    const { turn, parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 300000, outputTokens: 60, cacheReadTokens: 0 }));
+    for (const model of ['constructor', '__proto__', 'toString'])
+      parser.feed({
+        type: 'subagent_usage',
+        model,
+        usage: { inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 },
+      });
+    expect(Object.entries(turn.subagentUsage)).toEqual(
+      ['constructor', '__proto__', 'toString'].map((model) => [
+        model,
+        { inputTokens: 1000, outputTokens: 20, cachedInputTokens: 0 },
+      ]),
+    );
+    expect(Object.prototype.constructor).toBe(Object);
   });
 
   it('logs the end of an answer the text event cut, once', () => {
