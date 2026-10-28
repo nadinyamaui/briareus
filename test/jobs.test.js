@@ -4808,6 +4808,7 @@ describe('webhook deliveries', () => {
     'hk-rotate',
     'hk-public',
     'hk-guard',
+    'hk-pr-body',
     'hk-drain',
     'hk-keep',
     'hk-open',
@@ -6103,6 +6104,30 @@ describe('webhook deliveries', () => {
     expect(context.trimEnd()).toMatch(/default branch\.$/);
     expect(context.indexOf('# Pending commits')).toBeGreaterThan(context.indexOf('# Webhook deliveries'));
     await cli.finish(job);
+  });
+
+  it('a PR body action borrowing another branch is told not to publish its pending commits', async () => {
+    const { prompts } = fakeCli();
+    const job = getJob('hk-pr-body');
+    Object.assign(job, {
+      chats: undefined,
+      local: true,
+      activity: 'pr-body-summary',
+      branch: 'feature-b',
+      prBranch: 'pr-a',
+      startedOnPr: 221,
+    });
+    sendDevMessage(job.id, 'Update the description of PR #221.');
+    const context = prompts[0].split('</workspace-context>')[0];
+    expect(context).toContain('Do not commit or push');
+    expect(context).toContain("any pending commits belong to the developer's work");
+    expect(context).not.toContain('# Pending commits');
+    expect(context).not.toContain('git push -u origin HEAD');
+    await cli.finish(job);
+
+    // Ordinary local coding sessions and actions that own their clone still push.
+    expect(pushProtocol({ local: true, activity: 'chat' })).toContain('# Pending commits');
+    expect(pushProtocol({ local: false, activity: 'fix-checks' })).toContain('# Pending commits');
   });
 
   it('rotating raises the epoch the key is derived from, and nothing else', () => {
