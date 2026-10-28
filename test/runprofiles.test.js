@@ -10,7 +10,7 @@ import {
   unknownHostTenant,
 } from '../lib/runprofiles.js';
 
-const HEEDLY = `
+const DEMOAPP = `
 # the issue's example
 profile: projects
 env:
@@ -29,7 +29,7 @@ env:
 
 describe('parseRunProfiles', () => {
   it('reads profiles, their env, tenants and commands, in order', () => {
-    expect(parseRunProfiles(HEEDLY)).toEqual([
+    expect(parseRunProfiles(DEMOAPP)).toEqual([
       {
         name: 'projects',
         env: [
@@ -140,11 +140,11 @@ describe('parseRunProfiles', () => {
 });
 
 describe('pickRunProfile', () => {
-  const project = { repo: 'acme/heedly', runProfiles: HEEDLY };
+  const project = { repo: 'acme/demoapp', runProfiles: DEMOAPP };
 
   it('picks the one asked for, and refuses one nobody defines', () => {
     expect(pickRunProfile(project, 'veterinary').name).toBe('veterinary');
-    expect(() => pickRunProfile(project, 'commerce')).toThrow('acme/heedly has no run profile "commerce"');
+    expect(() => pickRunProfile(project, 'commerce')).toThrow('acme/demoapp has no run profile "commerce"');
   });
 
   it('falls back to the remembered one, then the first, when none is asked for', () => {
@@ -174,17 +174,17 @@ describe('pickRunProfile', () => {
     expect(runProfilesError({ runProfiles: 'env:\n  A=1' })).toMatch(
       /line 1: "env:" comes before any "profile:"/,
     );
-    expect(runProfilesError({ runProfiles: HEEDLY })).toBeNull();
+    expect(runProfilesError({ runProfiles: DEMOAPP })).toBeNull();
     expect(runProfilesError(null)).toBeNull();
   });
 });
 
 describe('filling a profile in', () => {
-  const [profile] = parseRunProfiles(HEEDLY);
+  const [profile] = parseRunProfiles(DEMOAPP);
   const vars = runVars({
     port: 8101,
-    dir: '/w/heedly',
-    database: 'heedly',
+    dir: '/w/demoapp',
+    database: 'demoapp',
     profile,
     hostFor: (tenant) => (tenant ? `${tenant}--preview-8101.example.com` : 'preview-8101.example.com'),
   });
@@ -192,9 +192,9 @@ describe('filling a profile in', () => {
   it('offers the port, the checkout, the profile, the database and one host per tenant', () => {
     expect(vars).toEqual({
       port: '8101',
-      dir: '/w/heedly',
+      dir: '/w/demoapp',
       profile: 'projects',
-      database: 'heedly',
+      database: 'demoapp',
       host: 'preview-8101.example.com',
       'host:central': 'central--preview-8101.example.com',
       'host:demo': 'demo--preview-8101.example.com',
@@ -207,7 +207,7 @@ describe('filling a profile in', () => {
         'php artisan migrate --force',
         'php artisan tenants:register-domain central central--preview-8101.example.com',
       ],
-      env: { VERTICAL: 'projects', TENANT_SIGNUP_STATUS: 'active', DB_DATABASE: 'heedly_projects' },
+      env: { VERTICAL: 'projects', TENANT_SIGNUP_STATUS: 'active', DB_DATABASE: 'demoapp_projects' },
     });
   });
 

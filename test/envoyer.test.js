@@ -6,7 +6,7 @@ import { envoyerRoutes } from '../lib/envoyer-routes.js';
 
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ credentialsKey: 'k'.repeat(32) }) }));
 
-const REPO = 'okanet/buddy';
+const REPO = 'exampleco/buddy';
 
 async function envoyer(...answers) {
   let stored = [];
@@ -19,14 +19,14 @@ async function envoyer(...answers) {
   });
   const service = createEnvoyerService({ load: async () => [], save, request });
   await service.init();
-  const account = await service.create({ label: 'Okanet', repo: REPO, token: 'envoyer-secret' });
+  const account = await service.create({ label: 'Exampleco', repo: REPO, token: 'envoyer-secret' });
   return { service, request, account, stored: () => stored };
 }
 
 describe('the Envoyer accounts', () => {
   it('keeps the token sealed and never hands it back', async () => {
     const { service, account, stored } = await envoyer();
-    expect(account).toEqual({ id: account.id, label: 'Okanet', repo: REPO });
+    expect(account).toEqual({ id: account.id, label: 'Exampleco', repo: REPO });
     expect(stored()[0].token).toMatch(/^v1:/);
     expect(JSON.stringify(stored())).not.toContain('envoyer-secret');
     expect(service.list()).toEqual([account]);
@@ -34,17 +34,17 @@ describe('the Envoyer accounts', () => {
 
   it('lists only the accounts available to a project', async () => {
     const { service, account } = await envoyer();
-    await service.create({ label: 'Other', repo: 'okanet/other', token: 't2' });
+    await service.create({ label: 'Other', repo: 'exampleco/other', token: 't2' });
     expect(service.list(REPO)).toEqual([account]);
   });
 
   it('moves an account to another project without its token, and refuses one without a token', async () => {
     const { service, account, request } = await envoyer([200, { projects: [] }]);
-    const moved = await service.update(account.id, { repo: 'okanet/other' });
-    expect(moved.repo).toBe('okanet/other');
+    const moved = await service.update(account.id, { repo: 'exampleco/other' });
+    expect(moved.repo).toBe('exampleco/other');
     await expect(service.create({ label: 'No token', repo: REPO })).rejects.toThrow(/token/);
     await expect(service.create({ label: 'x', repo: 'nope', token: 't' })).rejects.toThrow(/project/);
-    await service.projects(account.id, 'okanet/other');
+    await service.projects(account.id, 'exampleco/other');
     expect(request.mock.calls[0][1].headers.Authorization).toBe('Bearer envoyer-secret');
   });
 });
@@ -60,7 +60,7 @@ describe('the Envoyer proxy', () => {
 
   it('answers 404 for an account not available to the project named, and calls nothing', async () => {
     const { service, account, request } = await envoyer();
-    await expect(service.projects(account.id, 'okanet/other')).rejects.toMatchObject({ status: 404 });
+    await expect(service.projects(account.id, 'exampleco/other')).rejects.toMatchObject({ status: 404 });
     await expect(service.projects(account.id, undefined)).rejects.toMatchObject({ status: 404 });
     expect(request).not.toHaveBeenCalled();
   });
@@ -107,7 +107,7 @@ describe('the Envoyer proxy', () => {
     const { service, account } = await envoyer([401, { message: 'Unauthenticated.' }], [404, {}]);
     await expect(service.projects(account.id, REPO)).rejects.toMatchObject({
       status: 502,
-      message: expect.stringContaining('Okanet'),
+      message: expect.stringContaining('Exampleco'),
     });
     await expect(service.project(account.id, REPO, '3')).rejects.toMatchObject({ status: 404 });
   });
@@ -140,7 +140,7 @@ describe('the Envoyer routes', () => {
     const bad = await fetch(`${base}/api/envoyer/accounts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label: 'x', repo: 'okanet/nope', token: 't' }),
+      body: JSON.stringify({ label: 'x', repo: 'exampleco/nope', token: 't' }),
     });
     expect(bad.status).toBe(400);
     const listed = await fetch(`${base}/api/envoyer/available?repo=${REPO}`);
