@@ -67,6 +67,157 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
     expect((await store.runs(query)).runs).toEqual([]);
   });
 
+  it('distinguishes trailing spaces in exact-name filters and groups without trimming display names', async () => {
+    const repo = 'acme/whitespace';
+    await save(
+      [
+        { id: 1, context: 'deploy', state: 'success' },
+        { id: 2, context: 'deploy ', state: 'pending' },
+      ],
+      { sha: 'abc' },
+      repo,
+    );
+    const filters = { ...query, repos: [repo], kind: 'status' };
+    const result = await store.stats(filters);
+    expect(result.checks.map((row) => row.name)).toEqual(['deploy', 'deploy ']);
+    expect((await store.stats({ ...filters, name: 'deploy' })).totals).toMatchObject({
+      total: 1,
+      succeeded: 1,
+      pending: 0,
+    });
+    expect((await store.runs({ ...filters, name: 'deploy ' })).runs).toEqual([
+      expect.objectContaining({ name: 'deploy ', status: 'in_progress' }),
+    ]);
+    expect((await store.stats(filters)).totals.total).toBe(2);
+  });
+
+  it('retains long external names and Unicode names without rolling back healthy batch members', async () => {
+    const repo = 'acme/external-names';
+    const long = 'build '.repeat(300);
+    const unicode = '🚀'.repeat(128);
+    const app = 'provider'.repeat(50);
+    const branch = 'release/'.repeat(50);
+    await save(
+      [
+        check({ name: long, app: { slug: app } }),
+        check({ name: `${long}other`, app: { slug: app } }),
+        check({ name: unicode }),
+        check({ name: 'healthy' }),
+      ],
+      { branch },
+      repo,
+    );
+    const filters = { ...query, repos: [repo], branch };
+    const stats = await store.stats(filters);
+    expect(stats.totals.total).toBe(4);
+    expect(stats.checks).toHaveLength(4);
+    expect(stats.checks.every((row) => row.total === 1)).toBe(true);
+    expect((await store.runs({ ...filters, name: long })).runs).toEqual([
+      expect.objectContaining({ name: long, app, branch }),
+    ]);
+    expect((await store.runs({ ...filters, name: unicode })).runs).toEqual([
+      expect.objectContaining({ name: unicode }),
+    ]);
+  });
+
+  it('admits CI recovery before repeatedly quota-limited PR downloads with the actual GitHub client', async () => {
+    const repo = 'acme/pr-admission';
+    const pending = check({ head_sha: 'pending', status: 'queued', conclusion: null });
+    const completed = { ...pending, status: 'completed', conclusion: 'success' };
+    const defaultCheck = check({ head_sha: 'default' });
+    await save([pending], {}, repo);
+    vi.resetModules();
+    const { githubRest } = await import('../lib/github.js');
+    let clock = start + 180000;
+    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    let remaining = 12;
+    const requests = [];
+    const pull = {
+      number: 1,
+      title: 'CI',
+      state: 'open',
+      updated_at: '2026-10-28T10:00:00Z',
+      head: { sha: 'current', ref: 'feature' },
+      base: { sha: 'base', ref: 'main' },
+    };
+    vi.stubGlobal('fetch', async (input) => {
+      const url = new URL(input);
+      requests.push(url.pathname + url.search);
+      if (remaining-- <= 0)
+        return new Response('{}', {
+          status: 403,
+          headers: {
+            'x-ratelimit-resource': 'core',
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': String(Math.floor((clock + 60000) / 1000)),
+          },
+        });
+      let body = [];
+      if (url.pathname === `/repos/${repo}`) body = { default_branch: 'main' };
+      else if (url.pathname === `/repos/${repo}/pulls`) body = [pull];
+      else if (url.pathname.endsWith('/issues/1')) body = { ...pull, pull_request: {} };
+      else if (url.pathname.endsWith('/pulls/1')) body = pull;
+      else if (url.pathname.endsWith('/pulls/1/files'))
+        body = Array.from({ length: 100 }, (_, i) => ({ filename: `file-${i}` }));
+      else if (url.pathname.endsWith('/commits/main')) body = { sha: 'default' };
+      else if (url.pathname.endsWith('/check-runs'))
+        body = { check_runs: url.pathname.includes('/pending/') ? [completed] : [defaultCheck] };
+      return Response.json(body);
+    });
+    const board = vi.fn(async () => ({}));
+    const saveItem = vi.fn(async () => {});
+    const finishSync = vi.fn(async () => {});
+    const errors = [];
+    const service = createGithubSync({
+      projects: () => [{ repo }],
+      config: () => ({ githubToken: 'token' }),
+      rest: githubRest,
+      ci: store,
+      graphql: async () => ({
+        repository: {
+          issueOrPullRequest: {
+            __typename: 'PullRequest',
+            closingIssuesReferences: { nodes: [], pageInfo: { hasNextPage: false } },
+          },
+        },
+      }),
+      store: {
+        syncState: async () => ({}),
+        syncedItems: async () => new Map([[1, pull.updated_at]]),
+        saveItem,
+        finishSync,
+        saveMetadata: async () => {},
+      },
+      board,
+      invalidate: () => {},
+      log: (message) => errors.push(message),
+    });
+    try {
+      for (let tick = 0; tick < 6; tick++) {
+        clock += 3600000;
+        remaining = 12;
+        await service.tick();
+      }
+      const result = await store.runs({ ...query, repos: [repo] });
+      expect(result.runs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ headSha: 'pending', status: 'completed' }),
+          expect.objectContaining({ headSha: 'default', status: 'completed' }),
+        ]),
+      );
+      expect(errors).toHaveLength(6);
+      expect(errors.every((error) => error.includes('core rate limit exhausted'))).toBe(true);
+      expect(board).toHaveBeenCalledTimes(6);
+      expect(saveItem).not.toHaveBeenCalled();
+      expect(finishSync).not.toHaveBeenCalledWith(repo, expect.any(Number));
+      expect(requests).toContain(`/repos/${repo}/pulls/1/files?per_page=100&page=5`);
+    } finally {
+      service.stop();
+      dateNow.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('deduplicates observations across PRs and restarts, retains old heads and retries, and prevents regressions', async () => {
     const original = check();
     await save([original, original]);
@@ -227,6 +378,7 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
     const pending = check({ head_sha: 'pending', status: 'queued', conclusion: null });
     const completed = { ...pending, status: 'completed', conclusion: 'success' };
     const defaultCheck = check({ head_sha: 'default' });
+    const expensiveCheck = check({ head_sha: 'expensive' });
     await save([pending], {}, repo);
     vi.resetModules();
     const { githubRest } = await import('../lib/github.js');
@@ -251,7 +403,13 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
       if (url.pathname === `/repos/${repo}`) body = { default_branch: 'main' };
       else if (url.pathname.endsWith('/commits/main')) body = { sha: 'default' };
       else if (url.pathname.endsWith('/check-runs'))
-        body = { check_runs: url.pathname.includes('/pending/') ? [completed] : [defaultCheck] };
+        body = {
+          check_runs: url.pathname.includes('/pending/')
+            ? [completed]
+            : url.pathname.includes('/expensive/')
+              ? [{ ...expensiveCheck, conclusion: unavailable ? 'success' : 'failure' }]
+              : [defaultCheck],
+        };
       else if (url.pathname.endsWith('/commits/expensive/statuses')) {
         if (unavailable) return new Response('{}', { status: 503 });
         const page = Number(url.searchParams.get('page'));
@@ -293,10 +451,21 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
         clock += 3600000;
         remaining = 8; // Four inventory/metadata calls, then one recovery source can exhaust quota.
         await service.tick();
+        if (tick === 0) {
+          // Status pagination exhausted this window, but the complete check
+          // source still updates its independently persisted observation.
+          expect(errors.at(-1)).toContain('core rate limit exhausted');
+          expect((await store.runs({ ...query, repos: [repo] })).runs).toContainEqual(
+            expect.objectContaining({ headSha: 'expensive', conclusion: 'failure' }),
+          );
+        }
       }
       expect(requests).toContain(`/repos/${repo}/commits/expensive/statuses?per_page=100&page=4`);
       expect(errors.some((message) => message.includes('core rate limit exhausted'))).toBe(true);
       expect(pendingCommits).toHaveBeenCalledWith(repo);
+      expect(requests.some((path) => path.startsWith(`/repos/${repo}/commits/default/check-runs?`))).toBe(
+        true,
+      );
       const result = await store.runs({ ...query, repos: [repo] });
       expect(result.runs).toEqual(
         expect.arrayContaining([

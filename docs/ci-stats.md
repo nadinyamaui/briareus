@@ -16,6 +16,12 @@ Collection uses the existing GitHub token and signed repository webhooks:
   order, to recover completions missed by webhooks. Failed webhook discoveries
   remain queued in memory for hourly retry, up to 100 per repository per pass.
   Restarting the core clears these discovery retries.
+  Recovery alternates turns ahead of bulk PR downloads and rotates its first
+  source so repeated quota exhaustion cannot always exclude the same work.
+  Delivered check and suite IDs are fetched directly when the commit list omits
+  them. Each fully paginated source is saved independently; incomplete pages
+  are never published. Permission denials are reported and retained for retry.
+  Validated PR snapshots can save while failed history remains queued separately.
 
 The GitHub credential needs read access to checks and commit statuses on the
 repositories being tracked. Unreadable lists never delete stored observations.
@@ -69,7 +75,7 @@ or first observation when no start is available. `limit` (1–100, default 50) a
   Providers that reset an existing check ID update that record instead of
   adding an inferred attempt.
 - `kind=status` reports legacy statuses separately, keeping the latest transition
-  per commit SHA and exact context. Pending and success notifications count as
+  per commit SHA and case-insensitive context. Pending and success notifications count as
   one result. Legacy statuses do not provide execution duration or reliable
   attempt identity, so retry counts and durations are not inferred.
 - `successRate = succeeded / (succeeded + failed)`, or null without decided results.

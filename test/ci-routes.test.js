@@ -2,6 +2,7 @@ import { createCiStore } from '../lib/ci-store.js';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { createServer } from 'node:http';
 import { ciRoutes } from '../lib/ci-routes.js';
 import { apiV1Routes } from '../lib/api-v1.js';
 import { createMobileAuth } from '../lib/mobile-auth.js';
@@ -50,7 +51,7 @@ beforeEach(async () => {
     }),
   );
   await new Promise((resolve) => {
-    server = app.listen(0, '127.0.0.1', resolve);
+    server = createServer({ maxHeaderSize: 1024 * 1024 }, app).listen(0, '127.0.0.1', resolve);
   });
   url = `http://127.0.0.1:${server.address().port}/api/v1`;
 });
@@ -62,6 +63,19 @@ const get = (path, token = 'read') =>
   fetch(`${url}${path}`, { headers: { Authorization: `Bearer ${tokens[token]}` } });
 
 describe('CI dashboard API through the authenticated gateway', () => {
+  it.each(['🚀'.repeat(128), 'build'.repeat(100)])(
+    'accepts a persisted Unicode or long name filter',
+    async (name) => {
+      expect((await get(`/ci/runs?name=${encodeURIComponent(name)}`)).status).toBe(200);
+      expect(store.runs).toHaveBeenCalledWith(expect.objectContaining({ name }), { limit: 50, offset: 0 });
+    },
+  );
+
+  it('rejects text filters beyond the storage byte limit', async () => {
+    const response = await get(`/ci/runs?name=${encodeURIComponent('🚀'.repeat(16384))}`);
+    expect(response.status).toBe(400);
+    expect(store.runs).not.toHaveBeenCalled();
+  });
   it('applies the project scope to both queries, with bounded default windows', async () => {
     const res = await get('/stats/ci');
     expect(res.status).toBe(200);
