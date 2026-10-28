@@ -12,6 +12,7 @@ describe('shutdown persistence', () => {
     async (signal) => {
       const process = new EventEmitter();
       process.exit = vi.fn();
+      const githubSync = { stop: vi.fn() };
       const stop = vi.fn(async () => {
         throw new Error('escaped tool still holds stdio');
       });
@@ -31,9 +32,11 @@ describe('shutdown persistence', () => {
         'setTimeout',
         'clearTimeout',
         'console',
+        'githubSync',
         shutdown,
-      )(process, stop, flush, vi.fn(), vi.fn(), vi.fn(), vi.fn(), { error: vi.fn() });
+      )(process, stop, flush, vi.fn(), vi.fn(), vi.fn(), vi.fn(), { error: vi.fn() }, githubSync);
       process.emit(signal, new Error('crash'));
+      expect(githubSync.stop).toHaveBeenCalledOnce();
       await vi.waitFor(() => expect(flush).toHaveBeenCalledOnce());
       expect(process.exit).not.toHaveBeenCalled();
       allowFlush();
