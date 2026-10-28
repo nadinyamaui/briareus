@@ -22,7 +22,7 @@ import { operationsRoutes } from './lib/operations-routes.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
 import { createUsers } from './lib/users.js';
 import { createShares } from './lib/shares.js';
-import { seesSession } from './lib/ownership.js';
+import { seesSession, managesSession } from './lib/ownership.js';
 import { createUserCredentials } from './lib/user-credentials.js';
 import { createWhatsAppOwners } from './lib/whatsapp-owners.js';
 import { meRoutes } from './lib/me-routes.js';
@@ -87,6 +87,8 @@ import {
   listDevSessions,
   devSessionRecords,
   createDevSession,
+  pendingFeedbackAssessment,
+  feedbackAssessmentReusable,
   sendDevMessage,
   askDevSessionBtw,
   cancelDevTurn,
@@ -1825,6 +1827,11 @@ api.post('/api/dev/actions', async (req, res) => {
       .status(400)
       .json({ error: 'No GITHUB_TOKEN is configured, so the pull request cannot be looked up' });
   try {
+    if (actionId === 'implement-feedback') {
+      const pending = pendingFeedbackAssessment(project.repo, number);
+      if (pending && !pending.feedbackAssessment.completed && managesSession(res.locals.apiUser, pending))
+        return res.json({ session: publicJob(pending) });
+    }
     const lookup = await githubRest(cfg, 'GET', `/repos/${project.repo}/pulls/${number}`);
     if (lookup.status === 404)
       return res.status(404).json({ error: `${project.repo} has no pull request #${number}` });
@@ -1850,8 +1857,18 @@ api.post('/api/dev/actions', async (req, res) => {
     };
     // A prompt that refuses fails the request rather than starting an empty errand.
     const spec = await actionSessionSpec(action, context);
+    if ('feedbackAssessment' in spec) {
+      const pending = pendingFeedbackAssessment(project.repo, number);
+      if (
+        pending &&
+        managesSession(res.locals.apiUser, pending) &&
+        feedbackAssessmentReusable(pending, spec.feedbackAssessment)
+      )
+        return res.json({ session: publicJob(pending) });
+    }
+    const session = createDevSession({ provider, model, effort, ...spec, ownerId: requestOwner(res) });
     res.status(201).json({
-      session: createDevSession({ provider, model, effort, ...spec, ownerId: requestOwner(res) }),
+      session,
     });
   } catch (e) {
     res.status(400).json({ error: e.message });
