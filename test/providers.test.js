@@ -2147,12 +2147,29 @@ describe('a qwen entry', () => {
       baseUrl: 'http://127.0.0.1:8000/v1',
       apiKey: '',
       defaultModel: 'Qwen3.8-Flash-Next',
-      models: [],
+      models: ['Qwen3.8-Flash-Next'],
     });
     expect(auth).toMatchObject({ loggedIn: true });
     expect(calls[1].url).toBe('http://127.0.0.1:8000/v1/chat/completions');
     expect(calls[1].opts.headers.Authorization).toBe('Bearer none');
     expect(JSON.parse(calls[1].opts.body).model).toBe('Qwen3.8-Flash-Next');
+  });
+
+  it('probes the model a turn would run, not a saved default the entry no longer offers', async () => {
+    const bodies = [];
+    vi.stubGlobal('fetch', async (url, opts) => {
+      if (url.endsWith('/models')) return { ok: false, status: 404, text: async () => 'Not Found' };
+      bodies.push(JSON.parse(opts.body));
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ id: 'c1', object: 'chat.completion' }),
+      };
+    });
+    const entry = { binary: 'qwen', baseUrl: 'http://127.0.0.1:8000/v1', apiKey: '' };
+    await probeProviderAuth({ ...entry, defaultModel: 'removed-model', models: ['available-model'] });
+    await probeProviderAuth({ ...entry, defaultModel: '', models: [] });
+    expect(bodies.map((b) => b.model)).toEqual(['available-model', 'qwen3.8-max']);
   });
 });
 

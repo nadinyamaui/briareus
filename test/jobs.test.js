@@ -16671,12 +16671,14 @@ describe('the shared browser in a session', () => {
   });
 
   // One claude turn on a stand-in CLI: its args, the MCP servers its config mounts, and its
-  // first message. It answers and exits at once unless `hold`.
+  // first message. It answers and exits at once unless `hold`; `keepOpen` keeps it running
+  // after its input ends.
   async function turn(
     job,
     text,
     {
       hold = false,
+      keepOpen = false,
       binary = 'claude',
       workerNotice = false,
       unattended = false,
@@ -16708,7 +16710,7 @@ describe('the shared browser in a session', () => {
         if (hold) return;
         child.stdout.write(JSON.stringify(result) + '\n');
       });
-      child.stdin.on('finish', () => setImmediate(() => child.emit('close', 0)));
+      if (!keepOpen) child.stdin.on('finish', () => setImmediate(() => child.emit('close', 0)));
       if (binary === 'grok') setImmediate(() => child.emit('close', 0));
       seen.child = child;
       return child;
@@ -16723,15 +16725,13 @@ describe('the shared browser in a session', () => {
     });
     if (workerNotice) deliverWorkerNotices(job);
     else sendDevMessage(job.id, text, undefined, unattended ? { unattended: true } : {});
-    return {
-      seen,
-      settled: settled.finally(() => {
-        bin.mockRestore();
-        spawn.mockReset();
-        getProviderForJob.mockReset();
-        captureProviderAuth.mockReset();
-      }),
+    const restore = () => {
+      bin.mockRestore();
+      spawn.mockReset();
+      getProviderForJob.mockReset();
+      captureProviderAuth.mockReset();
     };
+    return { seen, restore, settled: settled.finally(restore) };
   }
 
   it('opens: starts the browser, switches it on and says so once', async () => {
@@ -17333,6 +17333,67 @@ describe('the shared browser in a session', () => {
     bus.off('job', onJob);
     expect(records).toHaveLength(1);
     expect(records[0].browser).toEqual({ running: false });
+  });
+
+  // Last here: shutdown holds every later turn until the next describe's initJobs.
+  it("books a qwen turn's calls at shutdown and checkpoints its session on them, a first turn too", async () => {
+    const job = getJob('br-turn');
+    const { chats, inputTokens, outputTokens } = job;
+    const sessionId = '8b3d4c5e-3333-4444-8555-666677778888';
+    job.browser = false;
+    // The session's first turn: no conversation yet, so its baseline is zeros.
+    job.chats = { [state.provider.id]: { started: false, sessionId } };
+    job.inputTokens = 0;
+    job.outputTokens = 0;
+    delete job.qwenSessionTotals;
+    recordTurnUsage.mockClear();
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-qwen-turn-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const { seen, restore } = await turn(job, 'Start it', { binary: 'qwen', hold: true, keepOpen: true });
+    let kill;
+    try {
+      await vi.waitFor(() => expect(seen.child).toBeDefined());
+      seen.child.stdout.write(
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId, model: 'qwen3.8-max' }) +
+          '\n' +
+          JSON.stringify({
+            type: 'assistant',
+            session_id: sessionId,
+            message: {
+              content: [],
+              usage: { input_tokens: 200, output_tokens: 4, cache_read_input_tokens: 0 },
+            },
+          }) +
+          '\n',
+      );
+      await vi.waitFor(() => expect(job.inputTokens).toBe(200));
+      seen.child.pid = 123456789;
+      kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+        seen.child.emit('close', null, 'SIGKILL');
+        return true;
+      });
+      await stopAllJobProcesses();
+      await flushJobs();
+      expect(recordTurnUsage).toHaveBeenCalledOnce();
+      expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({ inputTokens: 200, outputTokens: 4 });
+      expect(job.inputTokens).toBe(200);
+      // The recovery turn's totals book only what this checkpoint does not hold.
+      expect(job.qwenSessionTotals[sessionId]).toEqual({
+        inputTokens: 200,
+        outputTokens: 4,
+        cachedInputTokens: 0,
+      });
+    } finally {
+      kill?.mockRestore();
+      setDraining(false);
+      restore();
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      job.chats = chats;
+      job.inputTokens = inputTokens;
+      job.outputTokens = outputTokens;
+      delete job.qwenSessionTotals;
+    }
   });
 });
 
