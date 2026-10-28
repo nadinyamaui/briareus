@@ -551,7 +551,10 @@ written idempotently so a database from before then just gets its row in
   `QWEN_HOME=~/.qwen-provider-<id>`, the effort becomes the request's
   `reasoning_effort` (for the bundled models; an endpoint's own models get one
   only when the entry lists its efforts, since a model without reasoning rejects
-  it), and Qwen Code's own memory extraction is switched off
+  it), and Qwen Code's own memory extraction is switched off. The entry's
+  endpoint and key also win over a `modelProviders` entry for the same model in
+  the checkout's `.qwen/settings.json`; the project's other Qwen settings still
+  apply
 - A GitHub token in `.env` (`GITHUB_TOKEN`) for the sessions' `gh` CLI and the
   PR/CI sync. A classic `repo` PAT covers everything; a fine-grained token wants
   Pull requests: read/write and Contents: read, plus Issues: read for the

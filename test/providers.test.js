@@ -1985,6 +1985,48 @@ describe('the qwen parser', () => {
     ]);
   });
 
+  it("never takes a sub-agent's result for the session's totals when the turn stops on it", () => {
+    const { turn, parser } = fresh();
+    turn.qwenBaseline = { inputTokens: 1000, outputTokens: 50, cachedInputTokens: 0 };
+    parser.feed(
+      assistant([{ type: 'tool_use', id: 'call_a', name: 'agent', input: { description: 'Dig' } }], {
+        input_tokens: 0,
+        output_tokens: 0,
+      }),
+    );
+    // The child fails and the turn is stopped before the parent carries on.
+    parser.feed({
+      type: 'result',
+      subtype: 'error_during_execution',
+      session_id: id,
+      is_error: true,
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 },
+      error: { message: 'Subagent failed' },
+    });
+    parser.flush();
+    // The caller keeps the baseline plus this turn's calls instead.
+    expect(turn.qwenTotals).toBeUndefined();
+    // Once the agent call has its result, a later result is the turn's again.
+    const next = fresh();
+    next.parser.feed(
+      assistant([{ type: 'tool_use', id: 'call_b', name: 'agent', input: { description: 'Dig' } }]),
+    );
+    next.parser.feed({
+      type: 'user',
+      parent_tool_use_id: null,
+      message: { content: [{ type: 'tool_result', tool_use_id: 'call_b', content: 'found' }] },
+    });
+    next.parser.feed({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      result: 'Done',
+      usage: { input_tokens: 500, output_tokens: 9, cache_read_input_tokens: 0 },
+    });
+    next.parser.flush();
+    expect(next.turn.qwenTotals).toEqual({ inputTokens: 500, outputTokens: 9, cachedInputTokens: 0 });
+  });
+
   it('a failed call is an error result carrying its message', () => {
     const { parser } = fresh();
     expect(
@@ -2075,30 +2117,58 @@ describe('a qwen entry', () => {
       OPENAI_BASE_URL: 'http://127.0.0.1:8000/v1',
       // A local endpoint may take no key; the client still needs one.
       OPENAI_API_KEY: 'none',
-      QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(env.QWEN_HOME, 'effort-defaults.json'),
+      QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(env.QWEN_HOME, 'endpoint-effort-settings.json'),
+      BRIAREUS_QWEN_MODEL: 'qwen3.8-max',
       BRIAREUS_QWEN_EFFORT: 'low',
     });
     const settings = JSON.parse(fs.readFileSync(path.join(env.QWEN_HOME, 'settings.json'), 'utf8'));
     expect(settings.model).toBeUndefined();
     expect(settings.memory).toEqual({ enableManagedAutoMemory: false, enableManagedAutoDream: false });
-    const effort = JSON.parse(fs.readFileSync(env.QWEN_CODE_SYSTEM_DEFAULTS_PATH, 'utf8'));
-    expect(effort.model.generationConfig.samplingParams.reasoning_effort).toBe('${BRIAREUS_QWEN_EFFORT}');
+    // Puts `openai` first among the merged providers.
+    expect(settings.modelProviders).toEqual({ openai: [] });
+    const layer = JSON.parse(fs.readFileSync(env.QWEN_CODE_SYSTEM_SETTINGS_PATH, 'utf8'));
+    expect(layer).toEqual({
+      modelProviders: {
+        openai: [
+          {
+            id: '${BRIAREUS_QWEN_MODEL}',
+            name: '${BRIAREUS_QWEN_MODEL}',
+            baseUrl: '${OPENAI_BASE_URL}',
+            envKey: 'OPENAI_API_KEY',
+            generationConfig: { samplingParams: { reasoning_effort: '${BRIAREUS_QWEN_EFFORT}' } },
+          },
+        ],
+      },
+    });
     // The CLI may rewrite them; the next turn puts them back.
     fs.writeFileSync(path.join(env.QWEN_HOME, 'settings.json'), '{}');
-    fs.writeFileSync(env.QWEN_CODE_SYSTEM_DEFAULTS_PATH, '{}');
+    fs.writeFileSync(env.QWEN_CODE_SYSTEM_SETTINGS_PATH, '{}');
     ensureQwenHome({ id: 9 });
     expect(JSON.parse(fs.readFileSync(path.join(env.QWEN_HOME, 'settings.json'), 'utf8'))).toEqual(settings);
-    expect(JSON.parse(fs.readFileSync(env.QWEN_CODE_SYSTEM_DEFAULTS_PATH, 'utf8'))).toEqual(effort);
+    expect(JSON.parse(fs.readFileSync(env.QWEN_CODE_SYSTEM_SETTINGS_PATH, 'utf8'))).toEqual(layer);
   });
 
   it("sends an endpoint's own model no effort unless the entry lists its efforts", () => {
     useHome();
     const entry = { id: 9, baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-1', efforts: [] };
     const plain = qwenEnv(entry, 'high', 'gpt-4.1');
-    expect(plain).not.toHaveProperty('QWEN_CODE_SYSTEM_DEFAULTS_PATH');
     expect(plain).not.toHaveProperty('BRIAREUS_QWEN_EFFORT');
+    // The entry's endpoint is pinned all the same, on the layer without an effort.
+    expect(plain).toMatchObject({
+      QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(home, '.qwen-provider-9', 'endpoint-settings.json'),
+      BRIAREUS_QWEN_MODEL: 'gpt-4.1',
+    });
+    const layer = JSON.parse(fs.readFileSync(plain.QWEN_CODE_SYSTEM_SETTINGS_PATH, 'utf8'));
+    expect(layer.modelProviders.openai).toEqual([
+      {
+        id: '${BRIAREUS_QWEN_MODEL}',
+        name: '${BRIAREUS_QWEN_MODEL}',
+        baseUrl: '${OPENAI_BASE_URL}',
+        envKey: 'OPENAI_API_KEY',
+      },
+    ]);
     expect(qwenEnv({ ...entry, efforts: ['low', 'high'] }, 'high', 'o4-mini')).toMatchObject({
-      QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(home, '.qwen-provider-9', 'effort-defaults.json'),
+      QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(home, '.qwen-provider-9', 'endpoint-effort-settings.json'),
       BRIAREUS_QWEN_EFFORT: 'high',
     });
   });
