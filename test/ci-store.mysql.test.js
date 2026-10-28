@@ -120,6 +120,91 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
     ]);
   });
 
+  it('preserves full display names and distinct apps in aggregate groups', async () => {
+    const repo = 'acme/aggregate-groups';
+    const name = 'build'.repeat(300);
+    const app = 'provider'.repeat(200);
+    const rows = [
+      check({ name, app: { slug: app } }),
+      check({ name, app: { slug: `${app} ` } }),
+      check({ name: `${name} `, app: { slug: app } }),
+      check({ name, app: null }),
+    ];
+    await save(rows, {}, repo);
+    const result = await store.stats({ ...query, repos: [repo] });
+    expect(result.totals.total).toBe(4);
+    expect(result.checks).toHaveLength(4);
+    expect(result.checks).toEqual(
+      expect.arrayContaining(
+        rows.map((row) => expect.objectContaining({ name: row.name, app: row.app?.slug || null, total: 1 })),
+      ),
+    );
+  });
+
+  it.each([503, 429])(
+    'retains a pending-only discovery after completing its check before statuses fail with %i',
+    async (status) => {
+      const repo = `acme/pending-source-${status}`;
+      const sha = 'old-head';
+      const pending = check({ head_sha: sha, status: 'queued', conclusion: null });
+      const completed = { ...pending, status: 'completed', conclusion: 'success' };
+      const legacy = { id: 1, context: 'deploy', state: 'success' };
+      await save([pending], { branch: 'old' }, repo);
+      let failing = true;
+      const requests = [];
+      const finishSync = vi.fn(async () => {});
+      const service = createGithubSync({
+        projects: () => [{ repo }],
+        config: () => ({ githubToken: 'token' }),
+        ci: store,
+        store: {
+          syncState: async () => ({}),
+          syncedItems: async () => new Map(),
+          saveMetadata: async () => {},
+          finishSync,
+        },
+        board: async () => ({}),
+        invalidate: () => {},
+        log: () => {},
+        now: () => start + 180000,
+        rest: async (_cfg, _method, path) => {
+          requests.push(path);
+          const url = new URL(path, 'https://api.github.com');
+          let body = [];
+          if (url.pathname.endsWith(`/commits/${sha}/check-runs`)) body = { check_runs: [completed] };
+          else if (url.pathname.endsWith(`/commits/${sha}/statuses`)) {
+            if (failing) throw Object.assign(new Error('statuses unavailable'), { status, resource: 'core' });
+            body = [legacy];
+          }
+          return { ok: true, json: async () => body };
+        },
+      });
+      const filters = { ...query, repos: [repo], branch: 'old' };
+      try {
+        await service.tick();
+        expect((await store.runs(filters)).runs).toEqual([
+          expect.objectContaining({ headSha: sha, status: 'completed' }),
+        ]);
+        expect(await store.pendingCommits(repo)).toEqual([]);
+        expect((await store.runs({ ...filters, kind: 'status' })).runs).toEqual([]);
+        expect(finishSync).toHaveBeenCalledWith(repo, null, expect.stringContaining('statuses unavailable'));
+        if (status === 429) expect(requests.at(-1)).toContain(`/commits/${sha}/statuses`);
+
+        failing = false;
+        await service.tick();
+        expect((await store.runs({ ...filters, kind: 'status' })).runs).toEqual([
+          expect.objectContaining({ headSha: sha, name: 'deploy', status: 'completed' }),
+        ]);
+        expect(finishSync).toHaveBeenLastCalledWith(repo, expect.any(Number));
+        requests.length = 0;
+        await service.tick();
+        expect(requests.some((path) => path.includes(`/commits/${sha}/`))).toBe(false);
+      } finally {
+        service.stop();
+      }
+    },
+  );
+
   it('admits CI recovery before repeatedly quota-limited PR downloads with the actual GitHub client', async () => {
     const repo = 'acme/pr-admission';
     const pending = check({ head_sha: 'pending', status: 'queued', conclusion: null });
@@ -346,8 +431,12 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
               { ...row, status: sha === rows[100].head_sha ? 'queued' : 'completed', conclusion: 'success' },
             ],
           };
-        } else if (sha === rows[0].head_sha && url.pathname.endsWith('/statuses')) {
-          // Three full status pages exhaust the allowance before page four.
+        } else if (
+          sha === rows[0].head_sha &&
+          url.pathname.endsWith('/statuses') &&
+          Number(url.searchParams.get('page')) <= 9
+        ) {
+          // Status history exhausts every small window before its final page.
           body = Array.from({ length: 100 }, (_, i) => ({
             id: Number(url.searchParams.get('page')) * 100 + i,
             context: 'deploy',
@@ -367,7 +456,17 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
       expect(result.runs).toContainEqual(
         expect.objectContaining({ headSha: rows[1].head_sha, status: 'completed' }),
       );
-      expect(requested.filter((sha) => sha === rows[0].head_sha)).toHaveLength(1);
+      // Its check is complete, but the failed status source must keep retrying.
+      expect(requested.filter((sha) => sha === rows[0].head_sha)).toHaveLength(4);
+      remaining = 1000;
+      await service.tick();
+      expect((await store.runs({ ...query, repos: [repo], kind: 'status' })).runs).toEqual([
+        expect.objectContaining({ headSha: rows[0].head_sha, name: 'deploy', status: 'completed' }),
+      ]);
+      requested.length = 0;
+      remaining = 1000;
+      await service.tick();
+      expect(requested).not.toContain(rows[0].head_sha);
     } finally {
       service.stop();
     }
