@@ -108,6 +108,7 @@ describe('the JSON-RPC frame', () => {
     const [res] = await s.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
 
     expect(res.result.tools.map((t) => t.name)).toEqual([
+      'start_pr_action',
       'spawn_worker',
       'fix_tooling',
       'list_workers',
@@ -120,9 +121,15 @@ describe('the JSON-RPC frame', () => {
       'set_worker_qa_loop',
       'close_worker',
     ]);
-    expect(res.result.tools[0].inputSchema.required).toEqual(['title', 'prompt']);
+    expect(res.result.tools.find((t) => t.name === 'spawn_worker').inputSchema.required).toEqual([
+      'title',
+      'prompt',
+    ]);
     expect(res.result.tools[0].inputSchema.properties).not.toHaveProperty('role');
-    expect(res.result.tools[1].inputSchema.required).toEqual(['title', 'prompt']);
+    expect(res.result.tools.find((t) => t.name === 'fix_tooling').inputSchema.required).toEqual([
+      'title',
+      'prompt',
+    ]);
   });
 });
 
@@ -163,8 +170,10 @@ describe('the worker tools', () => {
     const fetched = stubFetch(reply({ status: 201, body: { session: worker({ repo: 'acme/companion' }) } }));
     const s = await boot();
     const [listed] = await s.send({ jsonrpc: '2.0', id: 20, method: 'tools/list' });
-    expect(listed.result.tools[0].inputSchema.properties.repo.type).toBe('string');
-    expect(listed.result.tools[1].inputSchema.properties).not.toHaveProperty('repo');
+    const spawn = listed.result.tools.find((tool) => tool.name === 'spawn_worker');
+    const tooling = listed.result.tools.find((tool) => tool.name === 'fix_tooling');
+    expect(spawn.inputSchema.properties.repo.type).toBe('string');
+    expect(tooling.inputSchema.properties).not.toHaveProperty('repo');
     const [res] = await s.send(
       callTool('spawn_worker', {
         title: 'Companion',
@@ -749,4 +758,26 @@ describe('review/fix question tools', () => {
       text: 'Option one',
     });
   });
+});
+
+it('starts an official PR action with the session bearer and no runtime overrides', async () => {
+  const server = await boot();
+  const fetch = stubFetch(
+    reply({
+      body: { session: { id: 'review-1', status: 'preparing', provider: 'codex', model: 'configured' } },
+    }),
+  );
+  const [response] = await server.send(
+    callTool('start_pr_action', { action: 'review', pr_number: 12, provider_id: 999 }),
+  );
+  expect(fetch).toHaveBeenCalledWith(
+    `${URL_BASE}/api/agent/sessions/pr-actions`,
+    expect.objectContaining({
+      method: 'POST',
+      headers: expect.objectContaining({ Authorization: `Bearer ${TOKEN}` }),
+      body: JSON.stringify({ action: 'review', prNumber: 12 }),
+    }),
+  );
+  expect(response.result.content[0].text).toContain('review-1');
+  expect(response.result.content[0].text).toContain('list_workers/read_worker');
 });

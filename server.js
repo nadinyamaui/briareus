@@ -120,6 +120,7 @@ import {
   openSessionBrowser,
   closeSessionBrowser,
   spawnWorkerSession,
+  startOrchestratorPrAction,
   workerSessionsFor,
   workerSummary,
   assertWorkerSlot,
@@ -964,6 +965,7 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 // its own workers".
 
 const workerRoutes = orchestratorRoutes({
+  startOrchestratorPrAction,
   agentSession,
   spawnWorkerSession,
   workerSessionsFor,
@@ -975,6 +977,7 @@ const workerRoutes = orchestratorRoutes({
   sendDevMessage,
 });
 const { orchestratorSession, workerOf } = workerRoutes;
+api.post('/api/agent/sessions/pr-actions', workerRoutes.prAction);
 api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
 api.get('/api/agent/sessions/:id/question', workerRoutes.readQuestion);
 api.post('/api/agent/sessions/:id/question', workerRoutes.answerQuestion);

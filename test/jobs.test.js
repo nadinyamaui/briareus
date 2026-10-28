@@ -213,6 +213,7 @@ vi.mock('../lib/prtasks.js', () => ({
   testSheetPrompt: vi.fn(() => 'SHEET'),
   testRunPrompt: vi.fn(() => 'RUN'),
   implementFeedbackPrompt: vi.fn(() => 'FEEDBACK'),
+  solveConflictsPrompt: vi.fn(() => 'CONFLICTS'),
 }));
 
 vi.mock('../lib/findings.js', () => {
@@ -310,8 +311,8 @@ import { stepRuntime } from '../lib/projects.js';
 import {
   bus,
   DEV_OPEN,
-  initJobs,
-  resumeRestartedSessions,
+  initJobs as restoreJobs,
+  resumeRestartedSessions as resumeJobs,
   stopAllJobProcesses,
   sweepExpiredPreviews,
   PREVIEW_TTL_MS,
@@ -355,6 +356,7 @@ import {
   attachPrForBranch,
   refreshJobBranch,
   spawnWorkerSession,
+  startOrchestratorPrAction,
   workerSessionsFor,
   workerSummary,
   deliverWorkerNotices,
@@ -410,6 +412,40 @@ import {
   ensureClone,
 } from '../lib/jobs.js';
 
+// Registry fixtures are restored many times in this file. Real recurring
+// pollers must not consume a later test's GitHub responses or mutate its jobs.
+// Polling scenarios keep fake timers and callback spies, so they still exercise
+// the production scheduler and its cadence.
+function pauseRealJobPolling() {
+  const schedule = globalThis.setInterval;
+  globalThis.setInterval = (...args) => {
+    const timer = schedule(...args);
+    if (!vi.isFakeTimers()) clearInterval(timer);
+    return timer;
+  };
+  return () => {
+    globalThis.setInterval = schedule;
+  };
+}
+
+async function initJobs(options) {
+  const restore = pauseRealJobPolling();
+  try {
+    return await restoreJobs(options);
+  } finally {
+    restore();
+  }
+}
+
+function resumeRestartedSessions(...args) {
+  const restore = pauseRealJobPolling();
+  try {
+    return resumeJobs(...args);
+  } finally {
+    restore();
+  }
+}
+
 beforeEach(() => {
   forgetProviderUsage();
   transferClaudeSession.mockReset();
@@ -445,6 +481,44 @@ async function settleWorkers(orchestratorIds) {
     { timeout: 30_000 },
   );
 }
+
+describe('job polling isolation', () => {
+  it('does not let restored real pollers consume the next test response', async () => {
+    const schedule = globalThis.setInterval;
+    const intervals = vi
+      .spyOn(globalThis, 'setInterval')
+      .mockImplementation((fn, delay, ...args) =>
+        schedule(fn, fn.name === 'syncDevPrs' ? 1 : delay, ...args),
+      );
+    const previous = githubRest.getMockImplementation();
+    const fixture = {
+      id: 'poll-isolation',
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/isolation',
+      providerId: 1,
+      turns: 1,
+      startedOnPr: 991,
+      prStatus: { number: 991, state: 'open' },
+    };
+    state.stored = [fixture];
+    try {
+      await initJobs();
+      fixture.status = 'idle';
+      githubRest.mockResolvedValue({ ok: true, json: async () => ({ number: 991, state: 'closed' }) });
+      const reads = githubRest.mock.calls.length;
+      // The next response belongs to another scenario, after registry setup.
+      // Accelerate the real PR interval so a leaked poller fails this test directly.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(githubRest.mock.calls.length).toBe(reads);
+      expect(fixture.prStatus).toEqual({ number: 991, state: 'open' });
+    } finally {
+      fixture.status = 'closed';
+      intervals.mockRestore();
+      githubRest.mockImplementation(previous);
+    }
+  });
+});
 
 describe('jobEventsSince', () => {
   const job = { events: [{ seq: 1 }, { seq: 2 }, { seq: 3 }] };
@@ -4645,6 +4719,28 @@ describe('the unattended-turn breaker and the delivery holds', () => {
     expect(getJob('brk-w1').noticeUnheard).toBe(true);
   });
 
+  it('keeps completed action payloads after source closure or deletion while dropping stale questions', () => {
+    const orch = getJob('brk-orch');
+    orch.status = 'idle';
+    orch.unattendedTurns = 10;
+    orch.pendingWorkerNotices = [
+      { workerId: 'brk-closed', kind: 'action-completed', text: 'Closed action completed.' },
+      { workerId: 'deleted-action', kind: 'action-completed', text: 'Deleted action completed.' },
+      { workerId: 'brk-closed', kind: 'ask', text: 'Stale question.' },
+      { workerId: 'deleted-action', kind: 'triage', text: 'Stale hold.' },
+    ];
+    deliverWorkerNotices(orch);
+    expect(orch.pendingWorkerNotices).toHaveLength(0);
+    const text = orch.events
+      .filter((e) => e.kind === 'info')
+      .map((e) => e.text)
+      .join('\n');
+    expect(text).toContain('Closed action completed.');
+    expect(text).toContain('Deleted action completed.');
+    expect(text).not.toContain('Stale question.');
+    expect(text).not.toContain('Stale hold.');
+  });
+
   it('a genuine user message re-arms the breaker; an injected one would not', () => {
     sendDevMessage('brk-reset', 'sigue');
     const orch = getJob('brk-reset');
@@ -7472,6 +7568,11 @@ describe('the review loop: what a closing loop review reports back', () => {
       { ...parentRow('auto-declared-clean', 'auto-declared-clean-rev'), qaLoop: { done: false } },
       reviewRow('auto-declared-clean-rev', 'auto-declared-clean', true),
       parentRow('auto-filtered', 'auto-filtered-rev'),
+      {
+        ...parentRow('official-filtered', 'official-filtered-rev'),
+        orchestratorPrAction: 'implement-feedback',
+      },
+      reviewRow('official-filtered-rev', 'official-filtered', true),
       reviewRow('auto-filtered-rev', 'auto-filtered', true),
       parentRow('auto-filtered-approved', 'auto-filtered-approved-rev'),
       reviewRow('auto-filtered-approved-rev', 'auto-filtered-approved', true),
@@ -7485,6 +7586,8 @@ describe('the review loop: what a closing loop review reports back', () => {
       reviewRow('auto-optional-rev', 'auto-optional', true),
       parentRow('auto-fail', 'auto-fail-rev'),
       reviewRow('auto-fail-rev', 'auto-fail', true),
+      { ...parentRow('manual-action', 'manual-action-rev'), orchestratorPrAction: 'implement-feedback' },
+      reviewRow('manual-action-rev', 'manual-action', true),
       parentRow('incomplete-par', 'incomplete-rev'),
       reviewRow('incomplete-rev', 'incomplete-par', true),
       parentRow('par-1', 'rev-1'),
@@ -7654,6 +7757,34 @@ describe('the review loop: what a closing loop review reports back', () => {
     throw new Error('the loop never reached the expected state');
   };
 
+  it('keeps official orchestrator action findings manual even in an autonomous project', async () => {
+    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+    const parent = getJob('manual-action');
+    parent.status = 'idle';
+    getJob('manual-action-rev').status = 'idle';
+    const findings = [
+      {
+        key: 'manual',
+        severity: 'high',
+        title: 'Needs a fix',
+        assessment: { verified: true, evidence: 'Reproduced', worthFixing: true, reason: 'Worth fixing' },
+      },
+    ];
+    latestReviewFindings.mockResolvedValueOnce(findings);
+    sortFindingsForFix.mockResolvedValueOnce({ kept: findings, parked: [] });
+    const triages = recordTriage.mock.calls.length;
+    try {
+      await closeDevSession('manual-action-rev');
+      await waitFor(() => !!parent.reviewLoop.triage);
+      expect(recordTriage.mock.calls.length).toBe(triages);
+      expect(parent.reviewLoop.fixing).toBeFalsy();
+      expect(parent.reviewLoop.done).toBeFalsy();
+      expect(parent.reviewLoop.triage.findings).toHaveLength(1);
+    } finally {
+      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+    }
+  });
+
   it('automatically fixes confirmed worthwhile findings, including later-round lows', async () => {
     state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
     try {
@@ -7745,39 +7876,44 @@ describe('the review loop: what a closing loop review reports back', () => {
     }
   });
 
-  it('requires approval when prior verdicts filter out every autonomous finding', async () => {
-    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-    const parent = getJob('auto-filtered');
-    const approvals = addPullRequestLabel.mock.calls.length;
-    const records = recordTriage.mock.calls.length;
-    const reads = githubRest.mock.calls.length;
-    latestReviewFindings.mockResolvedValue([{ key: 'prior', severity: 'high', title: 'Prior finding' }]);
-    sortFindingsForFix.mockResolvedValue({ kept: [], parked: [] });
-    githubRest.mockResolvedValue({
-      ok: true,
-      json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
-    });
-    try {
-      await closeDevSession('auto-filtered-rev');
-      await waitFor(() => !!parent.reviewLoop.pendingResult?.error || !!parent.reviewLoop.done);
-      expect(parent.reviewLoop.done).toBeFalsy();
-      expect(parent.reviewLoop.pendingResult.error).toMatch(/has not applied the code-approved label/);
-      // On the read-failure backoff, so the deadline can end it.
-      expect(parent.reviewLoop.pendingResult).toMatchObject({ attempts: 1, approvalSaid: true });
-      expect(parent.reviewLoop.pendingResult.failingSince).toBeTruthy();
-      expect(githubRest.mock.calls.length).toBeGreaterThan(reads);
-      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
-      expect(recordTriage.mock.calls.length).toBe(records);
-    } finally {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-      parent.reviewLoop.pendingResult = null;
-      latestReviewFindings.mockReset().mockResolvedValue([]);
-      sortFindingsForFix
-        .mockReset()
-        .mockImplementation(async (repo, prNumber, findings) => ({ kept: findings, parked: [] }));
-      githubRest.mockReset();
-    }
-  });
+  it.each(['auto-filtered', 'official-filtered'])(
+    'requires approval when prior verdicts filter out every finding for %s',
+    async (id) => {
+      state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
+      const parent = getJob(id);
+      parent.status = 'idle';
+      getJob(`${id}-rev`).status = 'idle';
+      const approvals = addPullRequestLabel.mock.calls.length;
+      const records = recordTriage.mock.calls.length;
+      const reads = githubRest.mock.calls.length;
+      latestReviewFindings.mockResolvedValue([{ key: 'prior', severity: 'high', title: 'Prior finding' }]);
+      sortFindingsForFix.mockResolvedValue({ kept: [], parked: [] });
+      githubRest.mockResolvedValue({
+        ok: true,
+        json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
+      });
+      try {
+        await closeDevSession(`${id}-rev`);
+        await waitFor(() => !!parent.reviewLoop.pendingResult?.error || !!parent.reviewLoop.done);
+        expect(parent.reviewLoop.done).toBeFalsy();
+        expect(parent.reviewLoop.pendingResult.error).toMatch(/has not applied the code-approved label/);
+        // On the read-failure backoff, so the deadline can end it.
+        expect(parent.reviewLoop.pendingResult).toMatchObject({ attempts: 1, approvalSaid: true });
+        expect(parent.reviewLoop.pendingResult.failingSince).toBeTruthy();
+        expect(githubRest.mock.calls.length).toBeGreaterThan(reads);
+        expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
+        expect(recordTriage.mock.calls.length).toBe(records);
+      } finally {
+        state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
+        parent.reviewLoop.pendingResult = null;
+        latestReviewFindings.mockReset().mockResolvedValue([]);
+        sortFindingsForFix
+          .mockReset()
+          .mockImplementation(async (repo, prNumber, findings) => ({ kept: findings, parked: [] }));
+        githubRest.mockReset();
+      }
+    },
+  );
 
   it.each([
     ['approved', { ok: true, json: async () => ({ labels: [{ name: 'code-approved' }] }) }],
@@ -8432,9 +8568,8 @@ describe('the review loop: a pending round that is past giving up on', () => {
   const ancient = '2026-08-25T12:31:00.000Z';
   let recent;
   const workerIds = ['stuck-1', 'stuck-2', 'stuck-3', 'stuck-4', 'stuck-5', 'stuck-6'];
-  // Every earlier initJobs() leaves a real 20s syncDevPrs tick running, and a tick resolves
-  // any due round with whatever the mocks answer then. Each round stays parked until its
-  // own test nudges it, and the block's sessions are retired once it is done.
+  // Explicit polling scenarios also inspect this shared registry. Keep each round
+  // parked until its own test nudges it, and retire the block's sessions afterward.
   const PARKED = '2999-01-01T00:00:00.000Z';
   const DUE = '2026-08-25T12:35:00.000Z';
 
@@ -10344,10 +10479,9 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     ...extra,
   });
   const prOne = { number: 1, state: 'open', headRef: 'dev-a', headSha: 'sha-a' };
-  // Every earlier initJobs() leaves a real 20s syncDevPrs tick running: it resolves a due
-  // pendingResult and runs attachPrForBranch for an idle PR-less session, under whatever
-  // mocks another test has installed. So pending rounds stay parked, and the PR-less
-  // sessions stay closed (the tick only looks up idle ones) except inside their own test.
+  // Explicit polling scenarios can resolve due pending rounds and discover PRs
+  // across this shared registry. Keep these rounds parked and PR-less sessions
+  // closed except inside their own test.
   const PARKED = '2999-01-01T00:00:00.000Z';
 
   beforeAll(async () => {
@@ -11507,6 +11641,29 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       worker('ci-loop', 203, { reviewLoop: { rounds: 2, done: false } }),
       // Converged on an empty block whose publishing policy withheld code-approved.
       worker('ci-withheld', 214, { reviewLoop: { rounds: 1, done: true, approvalWithheld: true } }),
+      ...['question', 'findings', 'completed', 'closed', 'initial', 'publish'].map((kind, index) => {
+        const number = 225 + index;
+        return worker(`ci-review-${kind}`, number, {
+          reviewBranch: `dev-ci-${number}`,
+          orchestratorPrAction: 'review',
+          awaitingAnswer: kind === 'question',
+          recoveryTurn: {
+            phase: kind === 'initial' ? 'initial' : 'publish',
+            completed: kind !== 'initial' && kind !== 'publish',
+          },
+          reviewTriage:
+            kind === 'findings' || kind === 'closed'
+              ? { prNumber: number, findings: [{ title: 'A pending finding', severity: 'low' }] }
+              : null,
+          prStatus: {
+            number,
+            state: 'open',
+            headSha: `sha${number}`,
+            checks: { total: 2, passed: 1, failed: 1, pending: 0, runs: [] },
+            syncedAt: '2026-08-25T13:00:00.000Z',
+          },
+        });
+      }),
       // Nothing mirrored yet: the PR's first sync, which must stay quiet.
       worker('ci-first', 204, { prStatus: null }),
       // Head seen moments ago, before its CI registered: an unseen pending run is still awaited.
@@ -11824,6 +11981,51 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       'The publishing policy withheld code-approved, so wait for that before merging.',
     );
     expect(notices('ci-withheld')).not.toContain('ready to merge');
+  });
+
+  it.each([
+    ['question', 225, 'Its review is waiting for an answer'],
+    ['findings', 226, 'Its review findings await user triage in the dashboard'],
+    ['completed', 227, 'Nothing is pending on it'],
+    ['closed', 228, null],
+    ['initial', 229, 'Its review has not finished yet'],
+    ['publish', 230, 'Its review has not finished yet'],
+  ])('keeps standalone review state in a green CI rerun notice (%s)', async (kind, number, expected) => {
+    const id = `ci-review-${kind}`;
+    const job = getJob(id);
+    const parent = getJob('ci-orch');
+    if (kind === 'closed') job.status = 'closed';
+    if (kind === 'initial' || kind === 'publish') job.status = 'running';
+    syncSessionsOn('acme/ci', null, number);
+    await vi.waitFor(() => expect(notices(id)).toContain(`every check on PR #${number} passed`));
+    if (expected) expect(notices(id)).toContain(expected);
+    if (expected && kind !== 'completed') {
+      expect(notices(id)).not.toContain('Nothing is pending');
+      expect(notices(id)).not.toContain('ready to merge');
+    }
+    const eventsBefore = parent.events.length;
+    parent.awaitingAnswer = false;
+    parent.unattendedTurns = 10;
+    try {
+      deliverWorkerNotices(parent);
+      const delivered = parent.events
+        .slice(eventsBefore)
+        .map((event) => event.text || '')
+        .join('\n')
+        .split('\n')
+        .filter((line) => line.startsWith(`Worker ${id} (`))
+        .join('\n');
+      if (expected) expect(delivered).toContain(expected);
+      else expect(delivered).not.toContain(`PR #${number}`);
+      if (expected && kind !== 'completed') {
+        expect(delivered).not.toContain('Nothing is pending');
+        expect(delivered).not.toContain('ready to merge');
+      }
+      expect(notices(id)).toBe('');
+    } finally {
+      parent.awaitingAnswer = true;
+      parent.unattendedTurns = 0;
+    }
   });
 
   it('hands over the verdict of a run that registered after the push was first read', async () => {
@@ -16636,6 +16838,23 @@ describe('the shared browser in a session', () => {
 
 describe('/btw side questions', () => {
   let bin;
+  // A main turn and its later /context probe are separate CLI processes. Reusing
+  // the exited main child leaves the probe waiting forever for another close.
+  const withContextProbe =
+    (main, fallback) =>
+    (cmd, args, ...rest) => {
+      if (cmd !== '/mock/claude') return fallback(cmd, args, ...rest);
+      if (!args.includes('/context')) return main;
+      const probe = new EventEmitter();
+      probe.stdin = new PassThrough();
+      probe.stdout = new PassThrough();
+      probe.stderr = new PassThrough();
+      probe.stdin.once('finish', () => {
+        probe.stdout.end(JSON.stringify({ result: '' }));
+        setImmediate(() => probe.emit('close', 0));
+      });
+      return probe;
+    };
   beforeEach(async () => {
     bin = vi.spyOn(BINARIES.claude, 'bin').mockReturnValue({ bin: '/mock/claude' });
     askClaudeSideQuestion.mockReset();
@@ -17019,7 +17238,7 @@ describe('/btw side questions', () => {
     child.stdin = new PassThrough();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
-    spawn.mockImplementation((cmd, ...rest) => (cmd === '/mock/claude' ? child : realSpawn(cmd, ...rest)));
+    spawn.mockImplementation(withContextProbe(child, realSpawn));
     captureProviderAuth.mockResolvedValue(undefined);
     askClaudeSideQuestion.mockResolvedValue({
       text: 'Answer',
@@ -17046,6 +17265,7 @@ describe('/btw side questions', () => {
       expect(sessionUsage(job)).toMatchObject({ inputTokens: 10300, outputTokens: 70 });
       child.emit('close', 0);
       await vi.waitFor(() => expect(job.status).toBe('idle'));
+      await flushJobs();
       expect(sessionUsage(job)).toEqual({
         sessions: 0,
         costUsd: 1.75,
@@ -17082,7 +17302,7 @@ describe('/btw side questions', () => {
       child.stdin = new PassThrough();
       child.stdout = new PassThrough();
       child.stderr = new PassThrough();
-      spawn.mockImplementation((cmd, ...rest) => (cmd === '/mock/claude' ? child : realSpawn(cmd, ...rest)));
+      spawn.mockImplementation(withContextProbe(child, realSpawn));
       captureProviderAuth.mockResolvedValue(undefined);
       askClaudeSideQuestion.mockResolvedValue({ text: 'The active run', costUsd: 0.01 });
       try {
@@ -17115,6 +17335,7 @@ describe('/btw side questions', () => {
         }
         child.emit('close', 0);
         await vi.waitFor(() => expect(job.status).toBe('idle'));
+        await flushJobs();
         await askDevSessionBtw(job.id, 'What was the original task?').answer;
         expect(askClaudeSideQuestion).toHaveBeenLastCalledWith(
           expect.objectContaining({
@@ -17438,6 +17659,174 @@ describe('automatic recovery after a server restart', () => {
       );
     child.emit('close', 0);
   };
+
+  it.each(['review', 'fix', 'qa', 'stale qa'])(
+    'restores an official action after its active %s child and continues unrelated recovery',
+    async (kind) => {
+      const parent = row({
+        status: 'idle',
+        orchestrator: false,
+        orchestratorPrAction: 'implement-feedback',
+        branch: 'feature',
+        startedOnPr: 77,
+        recoveryTurn: null,
+      });
+      const child = row({
+        orchestrator: false,
+        branch: 'feature',
+        startedOnPr: 77,
+        ...(kind === 'review'
+          ? { loopParentId: parent.id }
+          : kind === 'fix'
+            ? { loopFixParentId: parent.id }
+            : { qaParentId: parent.id }),
+      });
+      parent.reviewLoop = {
+        rounds: 1,
+        ...(kind === 'review'
+          ? { reviewing: true, reviewSessionId: child.id }
+          : kind === 'fix'
+            ? { fixing: true, fixSessionId: child.id }
+            : { done: kind === 'qa' }),
+      };
+      if (kind === 'qa' || kind === 'stale qa')
+        parent.qaLoop = {
+          running: true,
+          [kind === 'qa' ? 'sessionId' : 'staleSessionId']: child.id,
+        };
+      for (const [index, saved] of [child, parent].entries()) {
+        const checkout = path.join(root, index ? 'acme__restart__2' : 'acme__restart');
+        fs.mkdirSync(checkout);
+        const git = (...args) => {
+          const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
+          expect(result.status, result.stderr).toBe(0);
+        };
+        git('init', '-b', 'feature');
+        fs.writeFileSync(path.join(checkout, 'work'), 'original');
+        git('add', '.');
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture');
+        const remote = path.join(root, `remote-${index}.git`);
+        expect(spawnSync('git', ['clone', '--bare', checkout, remote]).status).toBe(0);
+        git('remote', 'add', 'origin', remote);
+        Object.assign(saved, { workDir: checkout, workspacePrepared: true });
+        claimSlot(checkout, saved.id, { prepared: true });
+      }
+      const unrelated = row({ status: 'idle', recoveryTurn: null });
+      // Database restoration orders the newer child before its idle action parent.
+      state.stored = [child, parent, unrelated];
+      await initJobs({ deferPolling: true });
+      expect(resumeRestartedSessions()).toBe(3);
+      await vi.waitFor(() => {
+        expect(child.status, child.error).toBe('running');
+        expect(parent.status, parent.error).toBe('idle');
+        expect(unrelated.status, unrelated.error).toBe('idle');
+      });
+      expect(children).toHaveLength(1);
+      if (parent.qaLoop) expect(parent.qaLoop.sessionId || parent.qaLoop.staleSessionId).toBe(child.id);
+      else expect(parent.reviewLoop[kind === 'review' ? 'reviewSessionId' : 'fixSessionId']).toBe(child.id);
+      expect(() => sendDevMessage(parent.id, 'Start another parent turn')).toThrow(
+        /already has an open session/,
+      );
+      finish(children[0]);
+      await vi.waitFor(() => expect(child.status).toBe('idle'));
+    },
+  );
+
+  it.each(['idle', 'running'])(
+    'isolates PR admission refusal after restoring a newer %s ordinary worker',
+    async (status) => {
+      const parent = row({
+        status: 'idle',
+        recoveryTurn: null,
+        awaitingAnswer: status === 'running',
+      });
+      const ordinary = row({
+        status,
+        orchestrator: false,
+        branch: 'feature',
+        startedOnPr: 77,
+        ...(status === 'idle' ? { recoveryTurn: null } : {}),
+      });
+      const action = row({
+        status: 'idle',
+        orchestrator: false,
+        orchestratorPrAction: 'implement-feedback',
+        parentId: parent.id,
+        branch: 'feature',
+        startedOnPr: 77,
+        dbServerId: 7,
+        recoveryTurn: null,
+      });
+      for (const [index, saved] of [ordinary, action].entries()) {
+        const checkout = path.join(root, index ? 'acme__restart__2' : 'acme__restart');
+        fs.mkdirSync(checkout);
+        const git = (...args) => {
+          const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
+          expect(result.status, result.stderr).toBe(0);
+        };
+        git('init', '-b', 'feature');
+        fs.writeFileSync(path.join(checkout, 'work'), 'original');
+        git('add', '.');
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture');
+        const remote = path.join(root, `remote-${index}.git`);
+        expect(spawnSync('git', ['clone', '--bare', checkout, remote]).status).toBe(0);
+        git('remote', 'add', 'origin', remote);
+        Object.assign(saved, { workDir: checkout, workspacePrepared: true });
+        claimSlot(checkout, saved.id, { prepared: true });
+      }
+      const unrelated = row({ status: 'idle', recoveryTurn: null });
+      state.stored = [ordinary, action, unrelated, parent];
+      releaseInstance.mockClear();
+      await initJobs({ deferPolling: true });
+      expect(resumeRestartedSessions()).toBe(4);
+      await vi.waitFor(() => {
+        expect(ordinary.status, ordinary.error).toBe(status);
+        expect(action).toMatchObject({
+          status: 'failed',
+          error: 'This pull request already has an open session',
+          restartPending: false,
+          restartDbServerId: null,
+          endedAt: expect.any(String),
+        });
+        expect(unrelated.status, unrelated.error).toBe('idle');
+      });
+      expect(reclaimInstance).toHaveBeenCalledWith(action, 7);
+      expect(releaseInstance).toHaveBeenCalledWith(action);
+      const notice = {
+        workerId: action.id,
+        kind: 'failed',
+        text: expect.stringContaining(`Worker ${action.id} (untitled) failed: ${action.error}`),
+      };
+      if (parent.awaitingAnswer) {
+        await vi.waitFor(() => expect(parent.pendingWorkerNotices).toEqual([notice]));
+        expect(children).toHaveLength(1);
+        parent.awaitingAnswer = false;
+        deliverWorkerNotices(parent);
+      }
+      await vi.waitFor(() => expect(children).toHaveLength(status === 'running' ? 2 : 1));
+      const parentTurn = children.find((child) => child.cwd === parent.workDir);
+      expect(parentTurn.prompt).toContain(`Worker ${action.id} (untitled) failed: ${action.error}`);
+      expect(parent.inFlightWorkerNotices).toEqual([notice]);
+      expect(parent.pendingWorkerNotices).toEqual([]);
+      expect(resumeRestartedSessions()).toBe(0);
+      expect(() => reopenDevSession(action.id)).toThrow(/already has an open session/);
+      expect(() => sendDevMessage(action.id, 'Retry')).toThrow(/already has an open session/);
+      expect(fs.readFileSync(path.join(action.workDir, 'work'), 'utf8')).toBe('original');
+      await vi.waitFor(() =>
+        expect(saveJob.mock.calls.findLast(([j]) => j.id === action.id)?.[0]).toMatchObject({
+          status: 'failed',
+          restartPending: false,
+          restartDbServerId: null,
+        }),
+      );
+      if (status === 'running') {
+        finish(children.find((child) => child.cwd === ordinary.workDir));
+        await vi.waitFor(() => expect(ordinary.status).toBe('idle'));
+      }
+      finish(parentTurn);
+      await vi.waitFor(() => expect(parent.status).toBe('idle'));
+    },
+  );
 
   it('uses server GitHub identity for automatic triage after reopening a failed queued session', async () => {
     const gh = await vi.importActual('../lib/github.js');
@@ -18739,6 +19128,238 @@ describe('automatic recovery after a server restart', () => {
     expect(children).toHaveLength(1);
   });
 
+  it.each(['success', 'question', 'canceled'])(
+    'settles an answered official conflict action (%s)',
+    async (outcome) => {
+      const worker = row({ autoClose: true, orchestratorPrAction: 'solve-conflicts' });
+      state.stored = [worker];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      children[0].notify('item/completed', {
+        item: { type: 'agent_message', text: '<ask-user>Which resolution?</ask-user>' },
+      });
+      finish(children[0]);
+      await vi.waitFor(() => expect(worker.status).toBe('idle'));
+      expect(worker.awaitingAnswer).toBe(true);
+      const releases = releaseInstance.mock.calls.length;
+      sendDevMessage(worker.id, 'Keep the new implementation');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      if (outcome === 'question') {
+        children[1].notify('item/completed', {
+          item: { type: 'agent_message', text: '<ask-user>Keep the tests too?</ask-user>' },
+        });
+      } else if (outcome === 'canceled') cancelDevTurn(worker.id);
+      finish(children[1]);
+      await vi.waitFor(() => expect(worker.status).toBe(outcome === 'success' ? 'closed' : 'idle'));
+      if (outcome === 'success') {
+        expect(releaseInstance.mock.calls.slice(releases)).toEqual([[worker]]);
+        expect(dropSessionDatabase).toHaveBeenCalledWith(worker, expect.any(Function));
+      } else {
+        expect(worker.workDir).toBeTruthy();
+        expect(releaseInstance.mock.calls).toHaveLength(releases);
+        expect(outcome === 'question' ? worker.awaitingAnswer : worker.turnCanceled).toBe(true);
+      }
+    },
+  );
+
+  it.each(['initial', 'publish'])(
+    'retries a failed official review in its unfinished %s stage',
+    async (phase) => {
+      const review = row({
+        reviewBranch: 'feature',
+        autoClose: true,
+        orchestratorPrAction: 'review',
+        recoveryTurn: {
+          prompt: phase === 'initial' ? 'Review the PR' : 'PUBLISH THE REVIEW',
+          opts: phase === 'initial' ? { review: true } : {},
+          phase,
+          completed: false,
+        },
+      });
+      state.stored = [review];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      if (children[0].complete) children[0].complete(null, 'failed');
+      children[0].emit('close', 1);
+      await vi.waitFor(() => expect(review.status).toBe('failed'));
+      expect(review.awaitingAnswer).toBeFalsy();
+      expect(review.recoveryTurn).toMatchObject({ phase, completed: false });
+      sendDevMessage(review.id, 'Retry the failed stage');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(review.recoveryTurn.phase).toBe(phase);
+      if (phase === 'initial') {
+        expect(children[1].args[0]).toBe('exec');
+        expect(children[1].args.join(' ')).toContain('multi_agent');
+        expect(review.recoveryTurn.opts.review).toBe(true);
+      } else expect(children[1].args[0]).toBe('app-server');
+      finish(children[1]);
+      if (phase === 'initial') {
+        await vi.waitFor(() => expect(children).toHaveLength(3));
+        expect(children[2].prompt).toContain('PUBLISH THE REVIEW');
+        finish(children[2]);
+      }
+      await vi.waitFor(() => expect(review.status).toBe('closed'));
+      expect(children).toHaveLength(phase === 'initial' ? 3 : 2);
+    },
+  );
+
+  it.each(['initial', 'publish'])(
+    'retains the unfinished %s request when retrying without a conversation',
+    async (phase) => {
+      const original =
+        phase === 'initial' ? 'Review the full diff and verify findings' : 'Publish verified findings';
+      const review = row({
+        status: 'failed',
+        reviewBranch: 'feature',
+        autoClose: true,
+        orchestratorPrAction: 'review',
+        chatStarted: false,
+        chats: {},
+        turns: 0,
+        recoveryTurn: {
+          prompt: original,
+          opts: phase === 'initial' ? { review: true } : {},
+          phase,
+          completed: false,
+        },
+      });
+      state.stored = [review];
+      await initJobs();
+      sendDevMessage(review.id, 'Retry the failed stage');
+      expect(review.recoveryTurn.prompt).toContain(original);
+      expect(review.recoveryTurn.prompt).toContain('Retry the failed stage');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(children[0].args).not.toContain('resume');
+      expect(children[0].rpc?.some((m) => m.method === 'thread/resume')).not.toBe(true);
+      expect(children[0].prompt).toContain(original);
+      expect(children[0].prompt).toContain('Retry the failed stage');
+      expect(review.recoveryTurn).toMatchObject({ phase, completed: false });
+      finish(children[0]);
+      if (phase === 'initial') {
+        await vi.waitFor(() => expect(children).toHaveLength(2));
+        expect(children[1].prompt).toContain('PUBLISH THE REVIEW');
+        finish(children[1]);
+      }
+      await vi.waitFor(() => expect(review.status).toBe('closed'));
+      expect(children).toHaveLength(phase === 'initial' ? 2 : 1);
+    },
+  );
+
+  it.each(['initial', 'publish'])(
+    'retains the unfinished %s request when a queued instruction precedes the retry',
+    async (phase) => {
+      const original =
+        phase === 'initial' ? 'Review the full diff and verify findings' : 'Publish verified findings';
+      const review = row({
+        status: 'failed',
+        reviewBranch: 'feature',
+        autoClose: true,
+        orchestratorPrAction: 'review',
+        chatStarted: false,
+        chats: {},
+        turns: 0,
+        recoveryTurn: {
+          prompt: original,
+          opts: phase === 'initial' ? { review: true } : {},
+          phase,
+          completed: false,
+        },
+        recoveryQueue: [
+          {
+            prompt: 'Check the queue handling',
+            shown: 'Check the queue handling',
+            instruction: true,
+            files: [],
+          },
+        ],
+      });
+      state.stored = [review];
+      await initJobs();
+      sendDevMessage(review.id, 'Retry the failed stage');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(children[0].prompt).toContain(original);
+      expect(children[0].prompt).toContain('Check the queue handling');
+      expect(review.recoveryTurn).toMatchObject({ phase, completed: false });
+      expect(review.recoveryTurn.prompt).toContain(original);
+      if (phase === 'initial') {
+        expect(children[0].args[0]).toBe('exec');
+        finish(children[0]);
+        await vi.waitFor(() => expect(children).toHaveLength(2));
+        expect(children[1].prompt).toContain('PUBLISH THE REVIEW');
+      }
+      const live = children.at(-1);
+      await vi.waitFor(() => expect(live.rpc.some((m) => m.method === 'turn/steer')).toBe(true));
+      const steer = live.rpc.find((m) => m.method === 'turn/steer');
+      expect(steer.params.input).toEqual([{ type: 'text', text: 'Retry the failed stage' }]);
+      finish(live);
+      await vi.waitFor(() => expect(review.status).toBe('closed'));
+      expect(children).toHaveLength(phase === 'initial' ? 2 : 1);
+    },
+  );
+
+  it('waits for answered-review findings before waking its idle orchestrator', async () => {
+    const parent = row({ status: 'idle', recoveryTurn: null });
+    const review = row({
+      status: 'idle',
+      parentId: parent.id,
+      reviewBranch: 'answered-review',
+      startedOnPr: 13201,
+      autoClose: true,
+      orchestratorPrAction: 'review',
+      awaitingAnswer: true,
+      recoveryTurn: { prompt: 'Publish review', opts: {}, phase: 'publish', completed: true },
+    });
+    state.stored = [parent, review];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect([parent.status, review.status]).toEqual(['idle', 'idle']));
+    let release;
+    const delayed = new Promise((resolve) => {
+      release = resolve;
+    });
+    latestReviewFindings.mockImplementationOnce(() => delayed);
+    try {
+      sendDevMessage(review.id, 'Use the current head');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      const reads = latestReviewFindings.mock.calls.length;
+      finish(children[0]);
+      await vi.waitFor(() => expect(latestReviewFindings.mock.calls.length).toBe(reads + 1));
+      expect(review.reviewTriage).toBeFalsy();
+      expect(children).toHaveLength(1);
+      expect(parent.events.some((e) => e.text?.includes('finished its turn'))).toBe(false);
+      release([{ key: 'fresh', severity: 'medium', title: 'Fresh finding' }]);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(workerSummary(review).reviewTriage).toBeTruthy();
+      expect(children[1].prompt).toContain('finished its turn');
+      finish(children[1]);
+      await vi.waitFor(() => expect([parent.status, review.status]).toEqual(['idle', 'closed']));
+    } finally {
+      release([]);
+    }
+  });
+
+  it('keeps a completed official review follow-up out of the review sequence', async () => {
+    const review = row({
+      status: 'idle',
+      reviewBranch: 'feature',
+      orchestratorPrAction: 'review',
+      recoveryTurn: { prompt: 'Published', opts: {}, phase: 'publish', completed: true },
+    });
+    state.stored = [review];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(review.status).toBe('idle'));
+    sendDevMessage(review.id, 'Explain the findings');
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].args[0]).toBe('app-server');
+    expect(review.recoveryTurn.phase).toBe('followup');
+    finish(children[0]);
+    await vi.waitFor(() => expect(review.status).toBe('idle'));
+    expect(children).toHaveLength(1);
+  });
+
   it.each([
     ['project', false],
     ['database', false],
@@ -19101,6 +19722,70 @@ describe('automatic recovery after a server restart', () => {
     expect(children).toHaveLength(1);
   });
 
+  it.each([
+    ['initial', 'queued'],
+    ['publish', 'queued'],
+    ['initial', 'direct'],
+    ['publish', 'direct'],
+  ])('does not restore a canceled review %s stage for a %s replacement', async (phase, delivery) => {
+    const checkout = path.join(root, 'canceled-review');
+    fs.mkdirSync(checkout);
+    const git = (...args) => {
+      const result = spawnSync('git', args, { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git('-C', checkout, 'init', '-b', 'feature');
+    git(
+      '-C',
+      checkout,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'fixture',
+    );
+    git('-C', checkout, 'remote', 'add', 'origin', checkout);
+    const review = row({
+      status: delivery === 'queued' ? 'running' : 'idle',
+      orchestrator: false,
+      local: false,
+      workDir: checkout,
+      workspacePrepared: true,
+      branch: 'feature',
+      reviewBranch: 'feature',
+      startedOnPr: 77,
+      autoClose: true,
+      orchestratorPrAction: 'review',
+      recoveryTurn: {
+        prompt: 'Canceled review contract',
+        opts: phase === 'initial' ? { review: true } : {},
+        phase,
+        canceled: true,
+        completed: false,
+      },
+      recoveryQueue:
+        delivery === 'queued' ? [{ prompt: 'Do this instead', shown: 'Do this instead', files: [] }] : [],
+    });
+    state.stored = [review];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(1);
+    if (delivery === 'direct') {
+      await vi.waitFor(() => expect(review.restartPending).toBe(false));
+      sendDevMessage(review.id, 'Do this instead');
+    }
+    await vi.waitFor(() => expect(children, review.error).toHaveLength(1));
+    expect(children[0].prompt).toBe('Do this instead');
+    expect(children[0].args[0]).toBe('app-server');
+    expect(review.recoveryTurn).toMatchObject({ phase: 'followup', opts: {}, completed: false });
+    expect(review.recoveryTurn.canceled).toBeUndefined();
+    finish(children[0]);
+    await vi.waitFor(() => expect(review.status).toBe('closed'));
+    expect(children, review.error).toHaveLength(1);
+  });
+
   it.each([false, true])(
     'kills a detached provider group and preserves its checkpoint (leader exited: %s)',
     async (leaderExits) => {
@@ -19156,6 +19841,516 @@ describe('automatic recovery after a server restart', () => {
       }
     },
   );
+});
+
+describe('official orchestrator PR actions', () => {
+  let parent;
+  const pull = (extra = {}) => ({
+    state: 'open',
+    head: { ref: 'feature', sha: 'feedback-head', repo: { full_name: 'acme/shop' } },
+    base: { ref: 'main' },
+    ...extra,
+  });
+  const respondPull = (_cfg, _method, route) =>
+    Promise.resolve({ ok: true, json: async () => (/\/pulls\/\d+$/.test(route) ? pull() : []) });
+  beforeAll(async () => {
+    state.stored = [
+      {
+        id: 'pr-orch',
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/shop',
+        orchestrator: true,
+        providerId: 1,
+        model: 'claude-fable-5-1',
+        effort: 'high',
+        turns: 1,
+        createdAt: '2026-09-02T00:00:00.000Z',
+        meta: {},
+      },
+    ];
+    state.stored.push(
+      { ...state.stored[0], id: 'orphan-pr-orch' },
+      ...Array.from({ length: 8 }, (_, i) => ({
+        id: `pr-cap-${i}`,
+        createdAt: '2026-09-02T00:00:00.000Z',
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/shop',
+        parentId: 'pr-orch',
+        providerId: 1,
+        turns: 1,
+      })),
+    );
+    await initJobs();
+    parent = getJob('pr-orch');
+    parent.status = 'idle';
+  });
+  beforeEach(() => {
+    state.otherProviders = [{ id: 2, label: 'Project reviewer', binary: 'claude', active: true }];
+    state.projects = [
+      {
+        repo: 'acme/shop',
+        label: 'Shop',
+        localDir: '',
+        reviewProviderId: 2,
+        reviewModel: 'claude-fable-5-1',
+        reviewEffort: 'low',
+      },
+    ];
+    githubRest.mockReset();
+    githubRest.mockImplementation(respondPull);
+    parent.status = 'idle';
+    parent.ownerId = null;
+    for (const worker of workerSessionsFor(parent)) {
+      worker.status = 'closed';
+      worker.reviewTriage = null;
+      worker.reviewLoop = null;
+    }
+  });
+  afterEach(async () => {
+    setSessionProjectFilter(() => true);
+    await settleWorkers([parent.id]);
+  });
+  it.each(['review', 'implement-feedback', 'solve-conflicts'])(
+    'starts official %s and exposes it to its parent',
+    async (action) => {
+      const session = await startOrchestratorPrAction(parent, { action, prNumber: 12 });
+      expect(session.parentId).toBe(parent.id);
+      expect(session.startedOnPr).toBe(12);
+      expect(session.startBranch).toBe('feature');
+      expect(session.effort).toBe('low');
+      expect(session.providerId).toBe(2);
+      expect(workerSessionsFor(parent)).toContain(session);
+      expect(workerSummary(session)).toMatchObject({ id: session.id, effort: 'low' });
+      if (action === 'review') {
+        expect(session.reviewBranch).toBe('feature');
+        expect(session.reviewPrompt).toBeTruthy();
+      } else {
+        expect(session.reviewBranch).toBeNull();
+        expect(session.activity).toBe(action === 'implement-feedback' ? 'assess-feedback' : action);
+        expect(session.reviewLoop).toBeFalsy();
+        if (action === 'implement-feedback') {
+          expect(session.feedbackAssessment).toMatchObject({ sha: 'feedback-head', completed: false });
+          expect(session.recoveryTurn.prompt).toContain('ASSESS FEEDBACK');
+          expect(session.recoveryTurn.prompt).toContain('does not delegate review triage');
+        } else {
+          expect(session.recoveryTurn.prompt).toContain('CONFLICTS');
+        }
+      }
+    },
+  );
+  it.each(['review', 'implement-feedback', 'solve-conflicts'])(
+    'accepts equivalent repository casing for %s scope',
+    async (action) => {
+      const session = await startOrchestratorPrAction(parent, {
+        action,
+        prNumber: 12,
+        repo: 'Acme/Shop',
+      });
+      expect(session.repo).toBe('acme/shop');
+      expect(session.parentId).toBe(parent.id);
+      expect(session.startedOnPr).toBe(12);
+      expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'GET', '/repos/acme/shop/pulls/12');
+    },
+  );
+  it.each([0, -1, 1.2, '12', null, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid PR %s',
+    async (prNumber) => {
+      await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber })).rejects.toMatchObject({
+        status: 400,
+      });
+      expect(githubRest).not.toHaveBeenCalled();
+    },
+  );
+  it('rejects another project and arbitrary actions before GitHub', async () => {
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'review', prNumber: 12, repo: 'other/repo' }),
+    ).rejects.toMatchObject({ status: 403 });
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'custom-feedback', prNumber: 12 }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(githubRest).not.toHaveBeenCalled();
+  });
+  it('checks current owner access before reading the PR', async () => {
+    parent.ownerId = 2;
+    setSessionProjectFilter(() => false);
+    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toThrow(
+      /Project unavailable/,
+    );
+    expect(githubRest).not.toHaveBeenCalled();
+  });
+  it.each([
+    [pull({ state: 'closed' }), 409],
+    [pull({ head: { ref: 'feature', repo: { full_name: 'other/repo' } } }), 400],
+    [pull({ head: null }), 400],
+  ])('rejects closed or foreign PR heads', async (pr, status) => {
+    githubRest.mockResolvedValueOnce({ ok: true, json: async () => pr });
+    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toMatchObject(
+      { status },
+    );
+  });
+  it.each([404, 403, 500])('surfaces GitHub failure %s', async (status) => {
+    githubRest.mockResolvedValueOnce({ ok: false, status });
+    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toMatchObject(
+      { status: status === 404 ? 404 : 502 },
+    );
+  });
+  it('refuses a missing configured reviewer instead of changing provider', async () => {
+    state.projects[0].reviewProviderId = 999;
+    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toMatchObject(
+      { status: 409 },
+    );
+  });
+  it('keeps an auto-closing review result readable after releasing its resources', async () => {
+    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+    expect(session.autoClose).toBe(true);
+    expect(session.orchestratorPrAction).toBe('review');
+    await settleWorkers([parent.id]);
+    await closeDevSession(session.id);
+    expect(getJob(session.id)?.status).toBe('closed');
+    expect(workerSessionsFor(parent).map((j) => j.id)).toContain(session.id);
+  });
+
+  it('keeps the user-triaged fix under the orchestrator with manual triage and updates', async () => {
+    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+    await settleWorkers([parent.id]);
+    // The operator's Findings decision uses the official standalone review flow.
+    session.reviewTriage = {
+      mine: true,
+      prNumber: 12,
+      branch: 'feature',
+      findings: [{ key: 'fix-me', title: 'A confirmed defect', severity: 'high' }],
+    };
+    const result = await triageStandaloneReviewFindings(session.id, {
+      verdicts: [{ key: 'fix-me', decision: 'fix' }],
+    });
+    const fix = getJob(result.session.id);
+    expect(fix.parentId).toBe(parent.id);
+    expect(fix.orchestratorPrAction).toBe('implement-feedback');
+    expect(fix.reviewLoop).toBeTruthy();
+    expect(workerSessionsFor(parent)).toContain(fix);
+  });
+
+  const hold = (session) => {
+    session.status = 'closed';
+    session.reviewTriage = {
+      mine: true,
+      prNumber: 12,
+      branch: 'feature',
+      findings: [{ key: 'fix-me', title: 'A confirmed defect', severity: 'high' }],
+    };
+  };
+  const fixVerdicts = { verdicts: [{ key: 'fix-me', decision: 'fix' }] };
+
+  it.each(['open worker', 'standalone findings', 'loop findings'])(
+    'blocks %s from a differently cased repository name',
+    async (kind) => {
+      const worker = getJob('pr-cap-0');
+      worker.repo = 'Acme/Shop';
+      worker.startedOnPr = 12;
+      if (kind === 'open worker') worker.status = 'idle';
+      else if (kind === 'standalone findings') hold(worker);
+      else worker.reviewLoop = { triage: { prNumber: 12, findings: [] } };
+      try {
+        await expect(
+          startOrchestratorPrAction(parent, { action: 'implement-feedback', prNumber: 12 }),
+        ).rejects.toThrow(kind === 'open worker' ? /already has an open session/ : /awaiting user triage/);
+      } finally {
+        worker.repo = 'acme/shop';
+        worker.status = 'closed';
+        worker.startedOnPr = null;
+        worker.reviewTriage = null;
+        worker.reviewLoop = null;
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'delivers another author review completion after source deletion (buffered: %s)',
+    async (buffered) => {
+      const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+      await settleWorkers([parent.id]);
+      hold(session);
+      session.reviewTriage.mine = false;
+      parent.status = 'idle';
+      parent.awaitingAnswer = buffered;
+      parent.unattendedTurns = 10;
+      try {
+        const result = await triageReviewFindings(session.id, { by: 'the operator' });
+        expect(result).toEqual({ completed: true, prNumber: 12, findings: 1 });
+        expect(getJob(session.id)).toBeNull();
+        if (buffered) {
+          expect(parent.pendingWorkerNotices).toContainEqual(
+            expect.objectContaining({
+              workerId: session.id,
+              kind: 'action-completed',
+              text: expect.stringContaining('completed by the operator'),
+            }),
+          );
+          parent.awaitingAnswer = false;
+          deliverWorkerNotices(parent);
+        }
+        expect(
+          parent.events.some(
+            (e) =>
+              e.text?.includes(`Review session ${session.id} on PR #12 was completed by the operator`) &&
+              e.text.includes('findings remain on the pull request for its author'),
+          ),
+        ).toBe(true);
+      } finally {
+        parent.awaitingAnswer = false;
+        parent.unattendedTurns = 0;
+      }
+    },
+  );
+
+  it.each(['startBranch', 'branch', 'prBranch'])('blocks a branch-only worker using %s', async (field) => {
+    const worker = getJob('pr-cap-0');
+    worker.status = 'idle';
+    worker[field] = 'feature';
+    try {
+      await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toThrow(
+        /already has an open session/,
+      );
+    } finally {
+      worker.status = 'closed';
+      delete worker[field];
+    }
+  });
+
+  it.each(['review', 'implement-feedback', 'solve-conflicts'])(
+    'admits %s on a released launch branch while protecting current ownership',
+    async (action) => {
+      const worker = getJob('pr-cap-0');
+      Object.assign(worker, {
+        status: 'idle',
+        startBranch: 'feature',
+        branch: 'stacked-feature',
+        startedOnPr: 13,
+        prStatus: { number: 13, headRef: 'stacked-feature' },
+        releasedPrAttach: { number: 12, headRef: 'feature' },
+      });
+      try {
+        githubRest.mockResolvedValue({
+          ok: true,
+          json: async () => pull({ head: { ref: 'stacked-feature', repo: { full_name: 'acme/shop' } } }),
+        });
+        await expect(startOrchestratorPrAction(parent, { action, prNumber: 13 })).rejects.toThrow(
+          /already has an open session/,
+        );
+        // Returning to the released head must protect it again.
+        githubRest.mockImplementation(respondPull);
+        worker.branch = 'feature';
+        await expect(startOrchestratorPrAction(parent, { action, prNumber: 12 })).rejects.toThrow(
+          /already has an open session/,
+        );
+        worker.branch = 'stacked-feature';
+        const session = await startOrchestratorPrAction(parent, { action, prNumber: 12 });
+        expect(session.startedOnPr).toBe(12);
+      } finally {
+        worker.status = 'closed';
+        for (const key of ['startBranch', 'branch', 'startedOnPr', 'prStatus', 'releasedPrAttach'])
+          delete worker[key];
+      }
+    },
+  );
+
+  it.each(['failed', 'closed', 'idle'])(
+    'refuses to reactivate a %s official action while its replacement is open',
+    async (status) => {
+      const original = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+      await settleWorkers([parent.id]);
+      const replacement = await startOrchestratorPrAction(parent, {
+        action: 'solve-conflicts',
+        prNumber: 12,
+      });
+      original.status = status;
+      const checkpoint = original.recoveryTurn;
+      expect(() => sendDevMessage(original.id, 'Retry the failed stage')).toThrow(
+        /already has an open session/,
+      );
+      if (status !== 'idle') {
+        expect(() => reopenDevSession(original.id)).toThrow(/already has an open session/);
+        expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
+          /already has an open session/,
+        );
+      }
+      expect(original.status).toBe(status);
+      expect(original.recoveryTurn).toBe(checkpoint);
+      expect(DEV_OPEN).toContain(replacement.status);
+    },
+  );
+
+  it.each(['review', 'fix', 'qa', 'stale qa'])(
+    'requires both active loop links when recovering an official action with a %s child',
+    async (kind) => {
+      const original = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+      await settleWorkers([parent.id]);
+      original.status = 'failed';
+      const other = getJob('pr-cap-0');
+      const qa = kind === 'qa' || kind === 'stale qa';
+      const parentKey = qa ? 'qaParentId' : kind === 'review' ? 'loopParentId' : 'loopFixParentId';
+      const sessionKey = qa
+        ? kind === 'qa'
+          ? 'sessionId'
+          : 'staleSessionId'
+        : kind === 'review'
+          ? 'reviewSessionId'
+          : 'fixSessionId';
+      const activeKey = qa ? 'running' : kind === 'review' ? 'reviewing' : 'fixing';
+      other.status = 'idle';
+      other.startedOnPr = 12;
+      const loop = { [activeKey]: true, [sessionKey]: other.id };
+      original[qa ? 'qaLoop' : 'reviewLoop'] = loop;
+      try {
+        other[parentKey] = 'another-action';
+        expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
+          /already has an open session/,
+        );
+        other[parentKey] = original.id;
+        loop[sessionKey] = 'another-child';
+        expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
+          /already has an open session/,
+        );
+        loop[sessionKey] = other.id;
+        loop[activeKey] = false;
+        expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
+          /already has an open session/,
+        );
+      } finally {
+        other.status = 'closed';
+        other.startedOnPr = null;
+        delete other[parentKey];
+        original.reviewLoop = null;
+        original.qaLoop = null;
+      }
+    },
+  );
+
+  it.each(['startBranch', 'standalone findings', 'loop findings'])(
+    'checks %s before retrying an official action',
+    async (kind) => {
+      const original = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+      await settleWorkers([parent.id]);
+      original.status = 'failed';
+      const other = getJob('pr-cap-0');
+      other.repo = 'Acme/Shop';
+      if (kind === 'startBranch') {
+        other.startBranch = 'feature';
+        other.status = 'idle';
+      } else {
+        other.startedOnPr = 12;
+        if (kind === 'standalone findings') hold(other);
+        else other.reviewLoop = { triage: { prNumber: 12, findings: [] } };
+      }
+      try {
+        expect(() => sendDevMessage(original.id, 'Retry')).toThrow(
+          kind === 'startBranch' ? /already has an open session/ : /awaiting user triage/,
+        );
+        expect(original.status).toBe('failed');
+      } finally {
+        other.repo = 'acme/shop';
+        other.status = 'closed';
+        other.startedOnPr = null;
+        delete other.startBranch;
+        other.reviewTriage = null;
+        other.reviewLoop = null;
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'enforces capacity before dispatch (filled during GitHub: %s)',
+    async (duringRead) => {
+      const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+      await settleWorkers([parent.id]);
+      hold(session);
+      const fill = () => {
+        for (let i = 0; i < 8; i++) getJob(`pr-cap-${i}`).status = 'idle';
+      };
+      recordTriage.mockClear();
+      if (duringRead)
+        recordTriage.mockImplementationOnce(async () => {
+          fill();
+          return {};
+        });
+      else fill();
+      try {
+        await expect(triageStandaloneReviewFindings(session.id, fixVerdicts)).rejects.toThrow(
+          /Already 8 open workers/,
+        );
+        expect(recordTriage).toHaveBeenCalledTimes(duringRead ? 1 : 0);
+        expect(session.reviewTriage).toBeTruthy();
+        expect(
+          workerSessionsFor(parent).filter(
+            (w) => w.activity === 'implement-feedback' && w.status !== 'closed',
+          ),
+        ).toHaveLength(0);
+      } finally {
+        for (let i = 0; i < 8; i++) getJob(`pr-cap-${i}`).status = 'closed';
+      }
+    },
+  );
+
+  it('dispatches an orphaned review fix with its owner and manual triage policy', async () => {
+    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+    await settleWorkers([parent.id]);
+    hold(session);
+    session.parentId = 'orphan-pr-orch';
+    session.ownerId = 2;
+    await deleteJobById('orphan-pr-orch');
+    const result = await triageStandaloneReviewFindings(session.id, fixVerdicts);
+    const fix = getJob(result.session.id);
+    expect(fix.parentId).toBeFalsy();
+    expect(fix.ownerId).toBe(2);
+    expect(fix.orchestratorPrAction).toBe('implement-feedback');
+    expect(fix.reviewLoop).toBeTruthy();
+    await closeDevSession(fix.id);
+  });
+
+  it('delivers triage completion with the fix ID after deleting the source review', async () => {
+    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+    await settleWorkers([parent.id]);
+    hold(session);
+    parent.awaitingAnswer = true;
+    try {
+      const result = await triageStandaloneReviewFindings(session.id, fixVerdicts);
+      expect(getJob(session.id)).toBeNull();
+      expect(parent.pendingWorkerNotices).toContainEqual(
+        expect.objectContaining({
+          kind: 'action-completed',
+          text: expect.stringContaining(result.session.id),
+        }),
+      );
+      parent.unattendedTurns = 10;
+      parent.awaitingAnswer = false;
+      parent.status = 'idle';
+      deliverWorkerNotices(parent);
+      expect(
+        parent.events.some((e) => e.text?.includes(`follow Implement feedback session ${result.session.id}`)),
+      ).toBe(true);
+    } finally {
+      parent.awaitingAnswer = false;
+      parent.unattendedTurns = 0;
+    }
+  });
+
+  it('inherits the owner and refuses duplicate actions, then preserves standalone triage after closure', async () => {
+    parent.ownerId = 2;
+    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+    expect(session.ownerId).toBe(2);
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'implement-feedback', prNumber: 12 }),
+    ).rejects.toMatchObject({ status: 409 });
+    await settleWorkers([parent.id]);
+    session.status = 'closed';
+    session.reviewTriage = { findings: [{ title: 'Pending' }], prNumber: 12 };
+    expect(workerSummary(session).reviewTriage.findings).toHaveLength(1);
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'implement-feedback', prNumber: 12 }),
+    ).rejects.toThrow(/awaiting user triage/);
+  });
 });
 
 describe('incoming feedback assessment gate', () => {

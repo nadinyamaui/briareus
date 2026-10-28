@@ -188,6 +188,10 @@ These additions are present in the server revision documented here:
 - Reviews assess verification and fix value independently, leave notes for
   feedback not fixed, and let orchestrators reach pending worker review/fix
   questions. Worker QA can be controlled independently.
+- Orchestrators can start official Code review, Implement feedback and Solve
+  conflicts actions on existing PRs in their own project using `start_pr_action`
+  (or `POST /api/agent/sessions/pr-actions`), then observe them through worker
+  tools and updates; project runtimes and user triage gates still apply.
 - Pull request reads share cached work and return a retryable 429 when the
   GitHub allowance is exhausted.
 
