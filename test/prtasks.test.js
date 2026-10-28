@@ -149,7 +149,7 @@ describe('testRunPrompt', () => {
       ...base,
       portHint: 8101,
       profile: 'projects',
-      database: 'heedly',
+      database: 'demoapp',
       project: {
         runCommands: ['php -S 127.0.0.1:{port} -t public server.php'],
         runProfiles: [
@@ -169,7 +169,7 @@ describe('testRunPrompt', () => {
 
     expect(prompt).toContain('run profile `projects`');
     expect(prompt).toContain(
-      "export VERTICAL='it'\\''s projects' && export DB_DATABASE='heedly_projects' && php artisan tenants:register-domain demo demo--preview-{port}.localhost && php -S 127.0.0.1:{port} -t public server.php",
+      "export VERTICAL='it'\\''s projects' && export DB_DATABASE='demoapp_projects' && php artisan tenants:register-domain demo demo--preview-{port}.localhost && php -S 127.0.0.1:{port} -t public server.php",
     );
     expect(prompt).toContain('`central` at `http://central--preview-{port}.localhost:{port}`');
     expect(prompt).not.toContain('`{database}` is');
@@ -179,7 +179,7 @@ describe('testRunPrompt', () => {
     const prompt = testRunPrompt({
       ...base,
       profile: 'projects',
-      database: 'heedly',
+      database: 'demoapp',
       project: {
         runCommands: ['VERTICAL={profile} DB={database} php -S {host}:{port} -t {dir}/public {host:demo}'],
         runProfiles: 'profile: projects\ntenants: demo',
@@ -187,7 +187,7 @@ describe('testRunPrompt', () => {
     });
 
     expect(prompt).toContain(
-      'VERTICAL=projects DB=heedly php -S 127.0.0.1:{port} -t {dir}/public demo--preview-{port}.localhost',
+      'VERTICAL=projects DB=demoapp php -S 127.0.0.1:{port} -t {dir}/public demo--preview-{port}.localhost',
     );
   });
 

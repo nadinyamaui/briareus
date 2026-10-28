@@ -159,6 +159,27 @@ describe('the worker tools', () => {
     expect(res.result.content[0].text).toMatch(/^Started worker w1 \[idle\] Fix the login/);
   });
 
+  it('advertises and forwards the explicit target without changing tooling targeting', async () => {
+    const fetched = stubFetch(reply({ status: 201, body: { session: worker({ repo: 'acme/companion' }) } }));
+    const s = await boot();
+    const [listed] = await s.send({ jsonrpc: '2.0', id: 20, method: 'tools/list' });
+    expect(listed.result.tools[0].inputSchema.properties.repo.type).toBe('string');
+    expect(listed.result.tools[1].inputSchema.properties).not.toHaveProperty('repo');
+    const [res] = await s.send(
+      callTool('spawn_worker', {
+        title: 'Companion',
+        prompt: 'Do it',
+        repo: 'acme/companion',
+        review_loop: true,
+      }),
+    );
+    expect(JSON.parse(fetched.mock.lastCall[1].body)).toMatchObject({
+      repo: 'acme/companion',
+      reviewLoop: true,
+    });
+    expect(res.result.content[0].text).toContain('repo acme/companion');
+  });
+
   it('spawn_worker passes the loops the orchestrator asked for', async () => {
     const fetched = stubFetch(reply({ status: 201, body: { session: worker() } }));
     const s = await boot();
@@ -390,6 +411,7 @@ describe('the worker tools', () => {
           sessions: [
             worker({ awaitingAnswer: true, pr: { number: 7, state: 'open', checks: '✓2 ✗0 ●1' } }),
             worker({ id: 'w2', title: 'Docs', status: 'running', costUsd: null, lastText: null }),
+            worker({ id: 'w3', pr: { number: 8, state: 'open', checks: '✓2 ✗2 ●0; cancelled: 2' } }),
           ],
         },
       }),
@@ -403,6 +425,7 @@ describe('the worker tools', () => {
     expect(lines[0]).toContain('PR #7 open (✓2 ✗0 ●1)');
     expect(lines[0]).toContain('$0.50');
     expect(lines[1]).toBe('w2 [running] Docs · branch dev-w1 · Cheap entry claude-haiku-4-5');
+    expect(lines[2]).toContain('PR #8 open (✓2 ✗2 ●0; cancelled: 2)');
   });
 
   it('list_workers says so when there are none yet', async () => {

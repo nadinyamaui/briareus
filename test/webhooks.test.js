@@ -5,6 +5,8 @@ import express from 'express';
 
 const GITHUB_SECRET = 'gh-secret';
 
+vi.mock('../lib/github-sync.js', () => ({ githubSync: { onWebhook: vi.fn() } }));
+
 vi.mock('../lib/jobs.js', () => ({
   syncSessionsOn: vi.fn(),
   noteWebhookDelivery: vi.fn(),
@@ -472,9 +474,14 @@ describe('ensureRepoWebhook', () => {
     'pull_request',
     'pull_request_review',
     'pull_request_review_comment',
+    'issues',
     'issue_comment',
     'check_suite',
+    'check_run',
     'status',
+    'label',
+    'milestone',
+    'sub_issues',
   ];
 
   function restServing(hooks, responses = {}) {
@@ -698,9 +705,14 @@ describe('ensureRepoWebhook when GitHub refuses the write', () => {
     'pull_request',
     'pull_request_review',
     'pull_request_review_comment',
+    'issues',
     'issue_comment',
     'check_suite',
+    'check_run',
     'status',
+    'label',
+    'milestone',
+    'sub_issues',
   ];
 
   const restServing = (hooks, responses = {}) =>
@@ -813,9 +825,14 @@ describe('installRepoWebhooks', () => {
       'pull_request',
       'pull_request_review',
       'pull_request_review_comment',
+      'issues',
       'issue_comment',
       'check_suite',
+      'check_run',
       'status',
+      'label',
+      'milestone',
+      'sub_issues',
     ];
     const url = 'https://reviewer.example.com/webhooks/github';
     const rest = vi.fn(async () => ({

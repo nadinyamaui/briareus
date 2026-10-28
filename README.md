@@ -327,6 +327,24 @@ the evidence. If every executed scenario passes, the QA loop stops. Failed
 scenarios are reported back to the task session as QA feedback, and the loop
 stops there too, since acting on that feedback stays a human decision for now.
 Turning the review loop off also cancels the QA run waiting behind it.
+An orchestrator can start companion work with
+`spawn_worker({ title, prompt, repo: "owner/companion", review_loop: true })`,
+or `POST /api/agent/sessions` with `{ "title": "…", "prompt": "…", "repo": "owner/companion", "reviewLoop": true }`
+using its session bearer token. `repo` is optional and defaults to the
+orchestrator's project. It must name an already registered, enabled project
+accessible to the session's inherited owner under current project sharing rules;
+unknown, disabled and unauthorized targets are refused without creating a project.
+The operator must register, enable and grant access to a companion before it can
+be used. This does not expose operator APIs to agent tokens.
+A different target uses its configured worker runtime, then the orchestrator's
+worker pick, then the orchestrator's own runtime; explicit runtime arguments
+still apply. Same-project workers keep the existing worker-pick precedence.
+Workspace, memories, setup, PR tracking, reviews and QA all use the target
+project; parent ownership, updates, spend and close controls stay with the
+orchestrator. `fix_tooling` still targets the dashboard with review armed and
+rejects a `repo` override in the HTTP body. Existing triage and approval gates
+continue to apply.
+
 An orchestrator can toggle QA on its own open task workers independently with
 `set_worker_qa_loop({ id, on })`, or `POST /api/agent/sessions/:id/qa-loop`
 with `{ "on": false }` using its session bearer token; `on` must be a boolean.
@@ -640,10 +658,31 @@ every project it works on (the `repo` scope the token already needs
 covers it), recognising its own by URL so an existing deploy hook is never
 touched, and re-pointing it if the hostname changes.
 
-What each delivery does: nothing is started by one. The hook subscribes to
-`pull_request`, `pull_request_review`, `issue_comment`, `check_suite` and `status`
-(not `check_run`: a repository hook hears a suite finish, not a run start), and each
-refreshes the PR panel of any open session on that branch as the event lands rather
+The core keeps PRs and issues in normalized MySQL tables, including closed issues
+and merged PRs, bodies, labels, assignees, milestones, links, comments, reviews,
+commits, changed files and head checks. The lists read this durable mirror; its
+`syncedAt` identifies the last board refresh. A missing mirror is filled on first
+read, and `fresh=1` requests a GitHub refresh (with the existing 15-second minimum).
+Detailed viewers and merge validation still read GitHub on demand.
+
+An in-process scheduled task runs at startup and every hour for enabled projects.
+The first pass backfills all issue/PR pages; subsequent passes use an overlapping
+update cursor and recheck open PRs for CI changes. Completed historical items are
+remembered so a rate limit can interrupt a backfill without restarting it. The
+cursor advances only after a complete pass, and failed pages leave the previous
+collections intact. Tables are migrated at boot; no operating-system crontab is
+required. See [GitHub's issues API](https://docs.github.com/en/rest/issues/issues#list-repository-issues)
+for the shared issue/PR listing and update cursor. GitHub's own limits on commit
+and file lists still apply; this mirror does not archive repository blobs or
+attachments.
+
+What each delivery does: no agent session is started by one. The hook subscribes to
+`pull_request`, `pull_request_review`, `pull_request_review_comment`, `issues`,
+`issue_comment`, `check_suite`, `check_run`, `status`, `label`, `milestone` and
+`sub_issues`. Authenticated deliveries for enabled repositories refresh affected
+items and their board, coalescing bursts for two seconds; hourly sync catches
+missed events. Existing session events also refresh the PR panel of any open
+session on that branch as the event lands rather
 than on the next twenty-second tick (a commit status still `pending` refreshes
 nothing). A repository whose hook has delivered within the last hour, and which
 this boot found or left carrying every one of those events, is polled only every

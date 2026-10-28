@@ -609,9 +609,7 @@ Set `databaseBackupEnabled: true` with `PUT /api/v1/settings/projects/{id}`.
 The server backs up the database in the main `localDir/.env` every 24 hours,
 including projects disabled for new sessions; it never uses a session database or
 `envTemplate`. Projects without a main database are recorded as skipped.
-Existing projects are enabled by the migration except HQ (`hqrentalsoftware/*`)
-and Heedly (including its current name `okanetsolutions/oka-core`); new projects
-start with backups disabled.
+Backups require explicit opt-in for every project, including existing projects.
 
 `POST /api/v1/settings/projects/{id}/backup` starts a backup immediately (202),
 and `GET` at the same path returns its status, last successful upload time,

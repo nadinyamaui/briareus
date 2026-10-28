@@ -248,6 +248,7 @@ import { previewAccess } from './lib/tunnel.js';
 import { projectUsage, overallUsage, jobUsageEstimates, estimateEventCosts } from './lib/usage.js';
 import { agentOnly, apiEnabled } from './lib/auth.js';
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
+import { githubSync } from './lib/github-sync.js';
 import { localUpdater } from './lib/local-update.js';
 import { createBabysitter } from './lib/babysitter.js';
 import { securityHeaders } from './lib/security.js';
@@ -513,7 +514,12 @@ api.get('/api/projects', (req, res) => {
 
 api.post('/api/projects', async (req, res) => {
   try {
-    res.status(201).json({ project: await createProject(req.body || {}) });
+    const project = await createProject(req.body || {});
+    res.status(201).json({ project });
+    if (project.enabled)
+      installRepoWebhooks([project], getConfig(), githubRest).catch((e) =>
+        console.error('Could not install GitHub webhook:', e.message),
+      );
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
   }
@@ -530,7 +536,12 @@ api.put('/api/projects/order', async (req, res) => {
 
 api.put('/api/projects/:id', async (req, res) => {
   try {
-    res.json({ project: await updateProject(Number(req.params.id), req.body || {}) });
+    const project = await updateProject(Number(req.params.id), req.body || {});
+    res.json({ project });
+    if (project.enabled)
+      installRepoWebhooks([project], getConfig(), githubRest).catch((e) =>
+        console.error('Could not install GitHub webhook:', e.message),
+      );
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
   }
@@ -902,6 +913,7 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 
 const workerRoutes = orchestratorRoutes({
   agentSession,
+  spawnWorkerSession,
   workerSessionsFor,
   setQaLoop,
   workerSummary,
@@ -915,30 +927,7 @@ api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
 api.get('/api/agent/sessions/:id/question', workerRoutes.readQuestion);
 api.post('/api/agent/sessions/:id/question', workerRoutes.answerQuestion);
 
-api.post('/api/agent/sessions', (req, res) => {
-  const orchestrator = orchestratorSession(req, res);
-  if (!orchestrator) return;
-  try {
-    // `reviewLoop` reviews every push the worker settles with and returns findings as a fix
-    // session (lib/jobs.js); `qaLoop` queues the test run behind it. `tooling` (fix_tooling)
-    // targets the dashboard's own project with the review loop armed regardless.
-    const { title, prompt, providerId, model, effort, branch, reviewLoop, qaLoop, tooling } = req.body || {};
-    const session = spawnWorkerSession(orchestrator, {
-      title,
-      prompt,
-      providerId,
-      model,
-      effort,
-      branch,
-      reviewLoop: reviewLoop === true,
-      qaLoop: qaLoop === true,
-      tooling: tooling === true,
-    });
-    res.status(201).json({ session: workerSummary(session) });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
+api.post('/api/agent/sessions', workerRoutes.spawn);
 
 api.get('/api/agent/sessions', (req, res) => {
   const orchestrator = orchestratorSession(req, res);
@@ -2419,6 +2408,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     // Projects with `babysitPrs` get their pull requests' errands started every 15 minutes.
     createBabysitter().startTimer();
     databaseBackups.start();
+    githubSync.start();
     // Recovered sessions must claim their slots before pruning unused clones.
     startWorkspacePruner();
     const projects = activeProjects();
@@ -2457,6 +2447,7 @@ let stopping = false;
 // On a crash, flush too (or a just-created session vanishes), then die so pm2 restarts clean.
 process.on('uncaughtException', (e) => {
   console.error('Uncaught exception:', e);
+  githubSync.stop();
   stopAllDevServes();
   stopAllBrowsers();
   const giveUp = setTimeout(() => process.exit(1), 5000);
@@ -2473,6 +2464,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
     if (stopping) process.exit(1); // a second Ctrl-C means "now"
     stopping = true;
+    githubSync.stop();
     stopAllDevServes();
     stopAllBrowsers();
     stopAllJobProcesses()
