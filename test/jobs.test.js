@@ -18,6 +18,9 @@ import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
 import { createUsers } from '../lib/users.js';
 import { createSlackService } from '../lib/slack.js';
 import { createSshService } from '../lib/ssh.js';
+import { createIncomingFeedback } from '../lib/incoming-feedback.js';
+import { githubStore } from '../lib/github-store.js';
+import { invalidateBoard, projectPulls } from '../lib/prboard.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
@@ -49,6 +52,7 @@ const state = vi.hoisted(() => ({
   capacity: 3,
   // What initJobs loads: the only way to register a session here without spawning one.
   stored: [],
+  appSettings: {},
 }));
 
 vi.mock('child_process', async (importOriginal) => {
@@ -123,6 +127,10 @@ vi.mock('../lib/config.js', () => ({
 }));
 
 vi.mock('../lib/db.js', () => ({
+  loadAppSetting: vi.fn(async (key, fallback) => state.appSettings[key] || fallback),
+  saveAppSetting: vi.fn(async (key, value) => {
+    state.appSettings[key] = structuredClone(value);
+  }),
   saveJob: vi.fn(async () => {}),
   saveTaskSession: vi.fn(async () => {}),
   saveJobEvents: vi.fn(async () => {}),
@@ -200,6 +208,7 @@ vi.mock('../lib/projects.js', () => ({
 }));
 
 vi.mock('../lib/prtasks.js', () => ({
+  feedbackAssessmentPrompt: vi.fn(() => 'ASSESS FEEDBACK'),
   testSheetPrompt: vi.fn(() => 'SHEET'),
   testRunPrompt: vi.fn(() => 'RUN'),
   implementFeedbackPrompt: vi.fn(() => 'FEEDBACK'),
@@ -257,7 +266,15 @@ vi.mock('../lib/usage.js', () => ({
   recordTurnUsage: vi.fn(),
 }));
 
-import { deleteJob, jobEventMaxSeqs, loadJobs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
+import {
+  deleteJob,
+  jobEventMaxSeqs,
+  loadJobs,
+  loadJobEvents,
+  saveJob,
+  saveJobEvents,
+  saveAppSetting,
+} from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
 import {
   acquireInstance,
@@ -278,6 +295,7 @@ import {
   replyOnFindingThread,
 } from '../lib/findings.js';
 import { implementFeedbackPrompt } from '../lib/prtasks.js';
+import { feedbackSnapshotCurrent } from '../lib/feedback-assessment.js';
 import { jobUsageEstimates } from '../lib/usage.js';
 import {
   addPullRequestLabel,
@@ -367,6 +385,9 @@ import {
   childSessionsOf,
   triageLoopFindings,
   holdStandaloneReviewFindings,
+  holdFeedbackAssessment,
+  pendingFeedbackAssessment,
+  feedbackAssessmentReusable,
   completeStandaloneReview,
   triageStandaloneReviewFindings,
   triageReviewFindings,
@@ -8998,6 +9019,12 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       },
       // Its approval label write fails, so its round must remain retryable.
       workerRow('tri-13', 'tri-orch'),
+      { ...workerRow('tri-labels-success', 'tri-orch'), repo: 'acme/triage-labels-success' },
+      { ...workerRow('tri-labels-partial', 'tri-orch'), repo: 'acme/triage-labels-partial' },
+      ...['truncated-add', 'truncated-remove'].map((outcome) => ({
+        ...workerRow(`tri-labels-${outcome}`, 'tri-orch'),
+        repo: `acme/triage-labels-${outcome}`,
+      })),
       // Closed with its round still on the screen.
       workerRow('tri-9', 'tri-orch'),
       // Merged under the hold, before the sync dropped the round.
@@ -9029,6 +9056,10 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       'tri-11',
       'tri-12',
       'tri-13',
+      'tri-labels-success',
+      'tri-labels-partial',
+      'tri-labels-truncated-add',
+      'tri-labels-truncated-remove',
       'tri-save',
       'tri-free',
     ]) {
@@ -9215,6 +9246,73 @@ describe('the review loop: the orchestrator’s triage of a held round', () => {
       /converged on PR #79: round 2 left nothing to implement after the orchestrator's triage/,
     );
   });
+
+  it.each(['success', 'partial', 'truncated-add', 'truncated-remove'])(
+    'refreshes approval labels after each accepted write, including %s completion',
+    async (outcome) => {
+      const project = { repo: `acme/triage-labels-${outcome}` };
+      const stored = {
+        pulls: [{ number: 79, title: 'Reviewed pull', labels: [{ name: 'feedback-given' }] }],
+        issues: [],
+        syncedAt: new Date().toISOString(),
+      };
+      const read = vi.spyOn(githubStore, 'readBoard').mockResolvedValue(stored);
+      const save = vi.spyOn(githubStore, 'saveBoard').mockResolvedValue(undefined);
+      let labels = ['feedback-given'];
+      const realGithub = await vi.importActual('../lib/github.js');
+      const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+        const adding = options.method === 'POST';
+        labels = adding ? [...labels, 'code-approved'] : ['code-approved'];
+        return (adding ? outcome === 'truncated-add' : outcome === 'truncated-remove')
+          ? new Response('[{"name":', { status: 200 })
+          : Response.json(labels.map((name) => ({ name })));
+      });
+      const graphql = githubGraphql.getMockImplementation();
+      githubGraphql.mockImplementation(async () => ({
+        repository: {
+          pullRequests: {
+            nodes: [{ number: 79, labels: { nodes: labels.map((name) => ({ name })) } }],
+          },
+          issues: { nodes: [] },
+        },
+      }));
+      invalidateBoard(project.repo, { refresh: false });
+      try {
+        expect((await projectPulls(project)).pulls[0].recommended).toBe('implement-feedback');
+        addPullRequestLabel.mockImplementationOnce(async (...args) => {
+          if (outcome.startsWith('truncated-')) return realGithub.addPullRequestLabel(...args);
+          labels.push('code-approved');
+          return [];
+        });
+        removePullRequestLabel.mockImplementationOnce(async (...args) => {
+          // Observe partial success before the second write completes.
+          expect((await projectPulls(project)).pulls[0].labels.map((l) => l.name)).toEqual(labels);
+          if (outcome === 'partial') throw new Error('GitHub answered 503 removing feedback-given');
+          if (outcome.startsWith('truncated-')) return realGithub.removePullRequestLabel(...args);
+          labels = ['code-approved'];
+          return [];
+        });
+        const approving = triageLoopFindings(`tri-labels-${outcome}`, {
+          verdicts: [
+            { key: 'k1', decision: 'optional' },
+            { key: 'k2', decision: 'dismissed' },
+          ],
+        });
+        if (outcome === 'partial') await expect(approving).rejects.toThrow(/503 removing feedback-given/);
+        else await expect(approving).resolves.toMatchObject({ approved: true });
+        const pull = (await projectPulls(project)).pulls[0];
+        expect(pull.labels.map((l) => l.name)).toEqual(labels);
+        expect(pull.recommended).toBe(outcome === 'partial' ? 'implement-feedback' : 'qa');
+        expect(save).toHaveBeenCalledTimes(outcome === 'partial' ? 1 : 2);
+      } finally {
+        fetch.mockRestore();
+        read.mockRestore();
+        save.mockRestore();
+        githubGraphql.mockImplementation(graphql);
+        invalidateBoard(project.repo, { refresh: false });
+      }
+    },
+  );
 
   it('the stall gate runs on what the triage kept', async () => {
     // tri-3's previous round already sent k1 alone to a fix session.
@@ -16834,6 +16932,64 @@ describe('/btw side questions', () => {
     }
   });
 
+  it('persists serialized feedback intake while an unrelated side answer is pending', async () => {
+    saveJob.mockClear();
+    let finishAnswer;
+    askClaudeSideQuestion.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishAnswer = resolve;
+        }),
+    );
+    const asked = askDevSessionBtw('btw-session', 'What changed?');
+    const project = {
+      repo: 'acme/shop',
+      enabled: true,
+      babysitPrs: true,
+      reviewAuthor: 'owner',
+      reviewProviderId: 1,
+    };
+    const snapshot = {
+      repo: project.repo,
+      prNumber: 7,
+      author: 'owner',
+      sha: 'same-sha',
+      branch: 'feature',
+      sources: [
+        { id: 'review:42', author: 'reviewer', body: 'Missing guard', reviewId: 42, state: 'COMMENTED' },
+      ],
+      history: [],
+    };
+    const start = vi.fn(() => ({}));
+    const intake = createIncomingFeedback({
+      projects: () => [project],
+      read: async (_repo, prNumber) => ({ ...snapshot, prNumber }),
+      pending: () => false,
+      busy: () => false,
+      slots: () => 2,
+      start,
+    });
+    let completed = false;
+    const operations = Promise.all([
+      intake.assess(project, { number: 7, author: 'owner' }),
+      intake.assess(project, { number: 8, author: 'owner' }),
+      intake.remember({ ...snapshot, completed: true }),
+    ]).then(() => {
+      completed = true;
+    });
+    try {
+      await vi.waitFor(() => expect(completed).toBe(true));
+      expect(start).toHaveBeenCalledTimes(2);
+      expect(state.appSettings['incoming-feedback']['acme/shop#7'].reviews['review:42']).toBeTruthy();
+      expect(publicJob(getJob('btw-session')).sideQuestionsPending).toBe(1);
+      expect(saveJob.mock.calls.some(([j]) => j.id === 'btw-session')).toBe(true);
+    } finally {
+      finishAnswer({ text: 'Done', costUsd: 0.01 });
+      await asked.answer;
+      await operations;
+    }
+  });
+
   it('settles failed side answers and ledger failures before flushing', async () => {
     const job = getJob('btw-session');
     let failAnswer;
@@ -17989,6 +18145,91 @@ describe('automatic recovery after a server restart', () => {
     await vi.waitFor(() => expect(getJob(saved.id).status).toBe('idle'));
     expect(children).toHaveLength(1);
   });
+
+  it.each(['missing', 'invalid', 'changed', 'asking'])(
+    'releases an assessment after its answered turn fails completion (%s)',
+    async (outcome) => {
+      const checkout = path.join(root, 'assessment');
+      fs.mkdirSync(checkout);
+      spawnSync('git', ['init', '-q', checkout]);
+      spawnSync('git', [
+        '-C',
+        checkout,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'fixture',
+      ]);
+      const sha = spawnSync('git', ['-C', checkout, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+      const assessment = {
+        repo: 'acme/restart',
+        prNumber: 77,
+        branch: 'feature',
+        sha,
+        resultFile: '.briareus-feedback-test.json',
+        completed: false,
+        sources: [],
+        history: [],
+      };
+      if (outcome !== 'missing')
+        fs.writeFileSync(
+          path.join(checkout, assessment.resultFile),
+          outcome === 'invalid'
+            ? '{}'
+            : JSON.stringify({ sha, complete: true, sourcesReviewed: [], findings: [] }),
+        );
+      const child = row({
+        status: 'closed',
+        orchestrator: false,
+        workDir: checkout,
+        startedOnPr: 77,
+        awaitingAnswer: true,
+        autoClose: true,
+        feedbackAssessment: assessment,
+      });
+      state.stored = [child];
+      await initJobs();
+      child.status = 'idle';
+      githubRest.mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({
+              state: 'open',
+              user: { login: 'nadin' },
+              head: { sha: 'changed-sha', ref: 'feature', repo: { full_name: child.repo } },
+            }),
+          ),
+      );
+      const releases = releaseInstance.mock.calls.length;
+      try {
+        sendDevMessage(child.id, 'The operator answer');
+        await vi.waitFor(() => expect(children).toHaveLength(1));
+        if (outcome === 'asking')
+          children[0].notify('item/completed', {
+            item: { type: 'agentMessage', text: '<ask-user>More detail?</ask-user>' },
+          });
+        finish(children[0]);
+        await vi.waitFor(() => expect(child.status).toBe(outcome === 'asking' ? 'idle' : 'failed'));
+        if (outcome === 'asking') {
+          expect(child.awaitingAnswer).toBe(true);
+          expect(pendingFeedbackAssessment(child.repo, 77)).toBe(child);
+          expect(releaseInstance.mock.calls).toHaveLength(releases);
+        } else {
+          await vi.waitFor(() => expect(releaseInstance.mock.calls.slice(releases)).toEqual([[child]]));
+          expect(child.feedbackAssessment.completed).toBe(false);
+          expect(child.reviewTriage).toBeFalsy();
+          expect(pendingFeedbackAssessment(child.repo, 77)).toBeNull();
+        }
+      } finally {
+        githubRest.mockReset();
+      }
+    },
+  );
 
   it.each(['current', 'stale', 'replaced', 'asking'])(
     'handles failed deferred QA execution after an answer (%s child)',
@@ -19473,10 +19714,12 @@ describe('official orchestrator PR actions', () => {
   let parent;
   const pull = (extra = {}) => ({
     state: 'open',
-    head: { ref: 'feature', repo: { full_name: 'acme/shop' } },
+    head: { ref: 'feature', sha: 'feedback-head', repo: { full_name: 'acme/shop' } },
     base: { ref: 'main' },
     ...extra,
   });
+  const respondPull = (_cfg, _method, route) =>
+    Promise.resolve({ ok: true, json: async () => (/\/pulls\/\d+$/.test(route) ? pull() : []) });
   beforeAll(async () => {
     state.stored = [
       {
@@ -19523,7 +19766,7 @@ describe('official orchestrator PR actions', () => {
       },
     ];
     githubRest.mockReset();
-    githubRest.mockResolvedValue({ ok: true, json: async () => pull() });
+    githubRest.mockImplementation(respondPull);
     parent.status = 'idle';
     parent.ownerId = null;
     for (const worker of workerSessionsFor(parent)) {
@@ -19552,13 +19795,15 @@ describe('official orchestrator PR actions', () => {
         expect(session.reviewPrompt).toBeTruthy();
       } else {
         expect(session.reviewBranch).toBeNull();
-        expect(session.activity).toBe(action);
-        expect(!!session.reviewLoop).toBe(action === 'implement-feedback');
-        expect(session.recoveryTurn.prompt).toContain(
-          action === 'implement-feedback' ? 'FEEDBACK' : 'CONFLICTS',
-        );
-        if (action === 'implement-feedback')
+        expect(session.activity).toBe(action === 'implement-feedback' ? 'assess-feedback' : action);
+        expect(session.reviewLoop).toBeFalsy();
+        if (action === 'implement-feedback') {
+          expect(session.feedbackAssessment).toMatchObject({ sha: 'feedback-head', completed: false });
+          expect(session.recoveryTurn.prompt).toContain('ASSESS FEEDBACK');
           expect(session.recoveryTurn.prompt).toContain('does not delegate review triage');
+        } else {
+          expect(session.recoveryTurn.prompt).toContain('CONFLICTS');
+        }
       }
     },
   );
@@ -19762,7 +20007,7 @@ describe('official orchestrator PR actions', () => {
           /already has an open session/,
         );
         // Returning to the released head must protect it again.
-        githubRest.mockResolvedValue({ ok: true, json: async () => pull() });
+        githubRest.mockImplementation(respondPull);
         worker.branch = 'feature';
         await expect(startOrchestratorPrAction(parent, { action, prNumber: 12 })).rejects.toThrow(
           /already has an open session/,
@@ -19972,5 +20217,432 @@ describe('official orchestrator PR actions', () => {
     await expect(
       startOrchestratorPrAction(parent, { action: 'implement-feedback', prNumber: 12 }),
     ).rejects.toThrow(/awaiting user triage/);
+  });
+});
+
+describe('incoming feedback assessment gate', () => {
+  let workDir;
+  let snapshot;
+  let job;
+  const finding = {
+    source: 'review:42',
+    title: 'Already handled redirect',
+    recommendation: 'dismissed',
+    severity: 'low',
+    assessment: {
+      verified: true,
+      worthFixing: false,
+      evidence: 'Checked current controller and prior triage',
+      reason: 'This was fixed in the previous commit',
+    },
+  };
+  beforeEach(async () => {
+    state.appSettings = {};
+    workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'feedback-gate-'));
+    spawnSync('git', ['init', '-q', workDir]);
+    spawnSync('git', [
+      '-C',
+      workDir,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'fixture',
+    ]);
+    const sha = spawnSync('git', ['-C', workDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    snapshot = {
+      repo: 'acme/feedback',
+      prNumber: 31,
+      sha,
+      branch: 'feature',
+      author: 'nadin',
+      resultFile: '.briareus-feedback-fixture.json',
+      completed: false,
+      sources: [
+        {
+          id: 'review:42',
+          author: 'sergio',
+          bot: false,
+          body: 'The redirect is wrong',
+          url: 'https://github.com/acme/feedback/pull/31#pullrequestreview-42',
+          file: null,
+          line: null,
+          commitSha: sha,
+          reviewId: 42,
+          replyTo: null,
+          state: 'COMMENTED',
+          updatedAt: null,
+        },
+      ],
+      history: [],
+    };
+    fs.writeFileSync(
+      path.join(workDir, snapshot.resultFile),
+      JSON.stringify({ sha, complete: true, sourcesReviewed: ['review:42'], findings: [finding] }),
+    );
+    state.projects = [{ repo: 'acme/feedback', reviewAuthor: 'nadin', autonomousReviewLoop: true }];
+    state.stored = [
+      {
+        id: 'feedback-gate',
+        repo: 'acme/feedback',
+        kind: 'devchat',
+        status: 'closed',
+        ownerId: null,
+        providerId: 1,
+        provider: 'Claude entry',
+        model: 'claude-fable-5-1',
+        effort: 'low',
+        createdAt: new Date().toISOString(),
+        startedOnPr: 31,
+        startBranch: 'feature',
+        workDir,
+        autoClose: true,
+        feedbackAssessment: snapshot,
+        prStatus: { number: 31, state: 'open', author: 'nadin' },
+        events: [],
+        seq: 0,
+      },
+    ];
+    await initJobs();
+    job = getJob('feedback-gate');
+    job.status = 'idle';
+    vi.mocked(githubRest)
+      .mockReset()
+      .mockImplementation(async (_cfg, _method, route) => ({
+        ok: true,
+        json: async () => {
+          if (route.includes('/reviews?'))
+            return [
+              {
+                id: 42,
+                user: { login: 'sergio' },
+                body: 'The redirect is wrong',
+                state: 'COMMENTED',
+                commit_id: sha,
+                html_url: snapshot.sources[0].url,
+              },
+            ];
+          if (route.includes('/comments?')) return [];
+          return {
+            state: 'open',
+            user: { login: 'nadin' },
+            head: { sha: snapshot.sha, ref: 'feature', repo: { full_name: 'acme/feedback' } },
+          };
+        },
+      }));
+    vi.mocked(recordTriage).mockClear().mockResolvedValue({ error: null });
+    vi.mocked(addPullRequestLabel).mockClear();
+  });
+  afterEach(async () => {
+    if (getJob('feedback-gate')) await closeDevSession('feedback-gate');
+    if (getJob('feedback-gate')) await deleteJobById('feedback-gate');
+    fs.rmSync(workDir, { recursive: true, force: true });
+    vi.mocked(githubRest).mockReset();
+    state.projects = [];
+  });
+
+  it('holds optional and dismissed findings without automatically fixing or approving, retaining the card after resource cleanup', async () => {
+    expect(await holdFeedbackAssessment(job)).toBe(true);
+    expect(job.reviewLoop).toBeFalsy();
+    expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
+    expect(job.reviewTriage).toMatchObject({
+      externalFeedback: true,
+      mine: true,
+      sha: snapshot.sha,
+      findings: [
+        expect.objectContaining({ sourceBody: 'The redirect is wrong', recommendation: 'dismissed' }),
+      ],
+    });
+    expect(recordTriage).not.toHaveBeenCalled();
+    expect(addPullRequestLabel).not.toHaveBeenCalled();
+    expect(pendingFeedbackAssessment(job.repo, 31)).toBe(job);
+    await closeDevSession(job.id);
+    expect(getJob(job.id)).toMatchObject({ status: 'closed', reviewTriage: { externalFeedback: true } });
+    expect(pendingFeedbackAssessment(job.repo, 31)).toBe(job);
+  });
+  it('records the user’s optional decision and its rationale without approving the pull request', async () => {
+    await holdFeedbackAssessment(job);
+    const key = job.reviewTriage.findings[0].key;
+    const result = await triageStandaloneReviewFindings(job.id, {
+      verdicts: [{ key, decision: 'optional' }],
+    });
+    expect(result).toMatchObject({ fixing: false, approved: false, session: null });
+    expect(recordTriage).toHaveBeenCalledWith(
+      job.repo,
+      31,
+      [expect.objectContaining({ decision: 'optional', reason: finding.assessment.reason })],
+      { by: 'the user', note: undefined },
+    );
+    expect(addPullRequestLabel).not.toHaveBeenCalled();
+  });
+  it('does not consume feedback when its completed assessment cannot be saved', async () => {
+    const original = saveJob.getMockImplementation();
+    saveJob.mockImplementation(async (row) => {
+      if (row.id === job.id && row.feedbackAssessment?.completed) throw new Error('Database unavailable');
+      return original(row);
+    });
+    try {
+      await expect(holdFeedbackAssessment(job)).rejects.toThrow(/persist/);
+      expect(state.appSettings['incoming-feedback']).toBeUndefined();
+      expect(job.feedbackAssessment.consumed).toBeFalsy();
+    } finally {
+      saveJob.mockImplementation(original);
+    }
+    // Retrying persistence uses the validated in-memory result, even if the file is gone.
+    fs.unlinkSync(path.join(workDir, snapshot.resultFile));
+    await holdFeedbackAssessment(job);
+    expect(job.feedbackAssessment.consumed).toBe(true);
+    expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
+  });
+  it.each([false, true])(
+    'retries consumption after a settings failure across restart (empty: %s)',
+    async (empty) => {
+      if (empty) {
+        const file = path.join(workDir, snapshot.resultFile);
+        const result = JSON.parse(fs.readFileSync(file, 'utf8'));
+        result.findings = [];
+        fs.writeFileSync(file, JSON.stringify(result));
+      }
+      const originalSave = saveAppSetting.getMockImplementation();
+      saveAppSetting.mockRejectedValue(new Error('Settings unavailable'));
+      try {
+        await expect(holdFeedbackAssessment(job)).rejects.toThrow('Settings unavailable');
+        expect(job.feedbackAssessment.completed).toBe(true);
+        expect(job.feedbackAssessment.consumed).toBeFalsy();
+        expect(state.appSettings['incoming-feedback']).toBeUndefined();
+        await closeDevSession(job.id);
+        expect(getJob(job.id)).toBe(job);
+        expect(pendingFeedbackAssessment(job.repo, 31)).toBe(job);
+        // The shutdown flush also waits for unrelated lifecycle fixtures' probes.
+        // Only this closed assessment's persisted row is needed for restart.
+        let stored;
+        await vi.waitFor(() => {
+          stored = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
+          expect(stored.status).toBe('closed');
+          expect(stored.feedbackAssessment.consumed).toBeFalsy();
+        });
+        state.stored = [structuredClone(stored)];
+        fs.unlinkSync(path.join(workDir, snapshot.resultFile));
+        const intervals = vi.spyOn(globalThis, 'setInterval');
+        let poll;
+        try {
+          await initJobs();
+          poll = intervals.mock.calls.find(([fn]) => fn.name === 'syncDevPrs')[0];
+        } finally {
+          intervals.mockRestore();
+        }
+        job = getJob('feedback-gate');
+        await expect(holdFeedbackAssessment(job)).rejects.toThrow('Settings unavailable');
+        saveAppSetting.mockImplementation(originalSave);
+        poll();
+        await vi.waitFor(() => expect(job.feedbackAssessment.consumed).toBe(true));
+        await holdFeedbackAssessment(job);
+        expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
+        if (empty) await vi.waitFor(() => expect(getJob(job.id)).toBeNull());
+        else expect(job.reviewTriage.findings).toHaveLength(1);
+      } finally {
+        saveAppSetting.mockImplementation(originalSave);
+      }
+    },
+  );
+  it('retries consumption before completing and deleting a held card', async () => {
+    saveAppSetting.mockRejectedValueOnce(new Error('Settings unavailable'));
+    await expect(holdFeedbackAssessment(job)).rejects.toThrow('Settings unavailable');
+    const key = job.reviewTriage.findings[0].key;
+    await triageStandaloneReviewFindings(job.id, { verdicts: [{ key, decision: 'optional' }] });
+    expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
+    expect(getJob(job.id)).toBeNull();
+  });
+  it('starts no fixes if the PR moved after assessment, keeping the card available for a refresh', async () => {
+    await holdFeedbackAssessment(job);
+    const key = job.reviewTriage.findings[0].key;
+    job.feedbackAssessment = { ...snapshot };
+    snapshot.sha = 'new-head';
+    await expect(
+      triageStandaloneReviewFindings(job.id, { verdicts: [{ key, decision: 'fix' }] }),
+    ).rejects.toThrow(/changed/);
+    expect(job.reviewTriage.stale).toBe(true);
+    expect(recordTriage).not.toHaveBeenCalled();
+    expect(pendingFeedbackAssessment(job.repo, 31)).toBeNull();
+  });
+  it.each(['known stale', 'moved head', 'edited source'])(
+    'discards an obsolete card without overwriting newer Fix decisions (%s)',
+    async (change) => {
+      await holdFeedbackAssessment(job);
+      const key = job.reviewTriage.findings[0].key;
+      if (change === 'known stale') job.reviewTriage.stale = true;
+      else if (change === 'moved head') {
+        job.feedbackAssessment = structuredClone(snapshot);
+        snapshot.sha = 'replacement-head';
+      } else job.feedbackAssessment.sources[0].body = 'Old evidence';
+      // The actual durable decision/checklist writer must never be called on
+      // this path: a replacement assessment may already have selected Fix.
+      recordTriage.mockClear();
+      implementFeedbackPrompt.mockClear();
+      const result = await triageStandaloneReviewFindings(job.id, {
+        verdicts: [{ key, decision: 'dismissed' }],
+      });
+      expect(result).toMatchObject({ dismissed: true, fixing: false, approved: false });
+      expect(recordTriage).not.toHaveBeenCalled();
+      expect(implementFeedbackPrompt).not.toHaveBeenCalled();
+      expect(addPullRequestLabel).not.toHaveBeenCalled();
+      expect(getJob(job.id)).toBeNull();
+    },
+  );
+  it('passes only selected findings and the original source to the implementation prompt after a manual decision', async () => {
+    await holdFeedbackAssessment(job);
+    const key = job.reviewTriage.findings[0].key;
+    state.projects = [{ repo: 'acme/other' }]; // refuse the paid fix session, after inspecting its composed prompt
+    vi.mocked(implementFeedbackPrompt).mockClear();
+    await expect(
+      triageStandaloneReviewFindings(job.id, { verdicts: [{ key, decision: 'fix' }] }),
+    ).rejects.toThrow(/Unknown project/);
+    expect(implementFeedbackPrompt).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        triaged: true,
+        by: 'the user',
+        findings: [expect.objectContaining({ sourceId: 'review:42', sourceBody: 'The redirect is wrong' })],
+      }),
+    );
+    expect(job.reviewTriage).toBeTruthy();
+  });
+  it.each([
+    ['standalone', triageStandaloneReviewFindings],
+    ['dashboard', triageReviewFindings],
+  ])(
+    'allows an explicit Fix on a colleague’s feedback assessment through %s triage',
+    async (_name, triage) => {
+      state.projects[0].reviewAuthor = 'colleague';
+      await holdFeedbackAssessment(job);
+      expect(job.reviewTriage.mine).toBe(false);
+      const key = job.reviewTriage.findings[0].key;
+      await saveReviewFindingsDrafts(job.id, { verdicts: [{ key, decision: 'fix' }] });
+      expect(job.reviewTriage.drafts.verdicts[key].decision).toBe('fix');
+      state.projects = [{ repo: 'acme/other' }]; // Inspect dispatch without starting a paid implementation session.
+      vi.mocked(implementFeedbackPrompt).mockClear();
+      await expect(triage(job.id, { verdicts: [{ key, decision: 'fix' }] })).rejects.toThrow(
+        /Unknown project/,
+      );
+      expect(recordTriage).toHaveBeenCalled();
+      expect(implementFeedbackPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          triaged: true,
+          findings: [expect.objectContaining({ sourceId: 'review:42' })],
+        }),
+      );
+      expect(getJob(job.id).reviewTriage).toBeTruthy();
+    },
+  );
+  it('reuses running assessments and unchanged completed cards', async () => {
+    expect(feedbackAssessmentReusable(job, { ...snapshot, sources: [] })).toBe(true);
+    await holdFeedbackAssessment(job);
+    await closeDevSession(job.id);
+    expect(feedbackAssessmentReusable(job, structuredClone(snapshot))).toBe(true);
+    expect(pendingFeedbackAssessment(job.repo, 31)).toBe(job);
+    expect(job.reviewTriage.stale).toBeUndefined();
+  });
+  it('retains the external assessment card if selected findings cannot be persisted', async () => {
+    await holdFeedbackAssessment(job);
+    const held = job.reviewTriage;
+    recordTriage.mockRejectedValueOnce(new Error('Could not save selected feedback findings'));
+    implementFeedbackPrompt.mockClear();
+    await expect(
+      triageStandaloneReviewFindings(job.id, {
+        verdicts: [{ key: held.findings[0].key, decision: 'fix' }],
+      }),
+    ).rejects.toThrow('Could not save selected feedback findings');
+    expect(job.reviewTriage).toBe(held);
+    expect(getJob(job.id)).toBe(job);
+    expect(implementFeedbackPrompt).not.toHaveBeenCalled();
+  });
+  it.each(['edited', 'deleted', 'added'])(
+    'makes a completed card refreshable when a source is %s without a push',
+    async (change) => {
+      await holdFeedbackAssessment(job);
+      await closeDevSession(job.id);
+      const current = structuredClone(snapshot);
+      if (change === 'edited') current.sources[0].body = 'Corrected feedback';
+      else if (change === 'deleted') current.sources = [];
+      else current.sources.push({ ...current.sources[0], id: 'review:43', reviewId: 43 });
+      expect(feedbackAssessmentReusable(job, current)).toBe(false);
+      expect(job.reviewTriage.stale).toBe(true);
+      expect(pendingFeedbackAssessment(job.repo, 31)).toBeNull();
+      expect(recordTriage).not.toHaveBeenCalled();
+    },
+  );
+  it('keeps selected-source validation valid when unrelated feedback is added', async () => {
+    await holdFeedbackAssessment(job);
+    const current = structuredClone(snapshot);
+    current.sources.push({ ...current.sources[0], id: 'review:43', reviewId: 43 });
+    expect(feedbackSnapshotCurrent(job.feedbackAssessment, current)).toBe(true);
+  });
+  it('remembers successful empty assessments as well as held cards', async () => {
+    fs.writeFileSync(
+      path.join(workDir, snapshot.resultFile),
+      JSON.stringify({
+        sha: snapshot.sha,
+        complete: true,
+        sourcesReviewed: ['review:42'],
+        findings: [],
+      }),
+    );
+    expect(await holdFeedbackAssessment(job)).toBe(false);
+    expect(job.feedbackAssessment.completed).toBe(true);
+    expect(job.reviewTriage).toBeFalsy();
+    expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
+  });
+  it('refuses to delete somebody else’s feedback or guess a reply thread for summary-only findings', async () => {
+    await holdFeedbackAssessment(job);
+    const key = job.reviewTriage.findings[0].key;
+    await expect(deleteReviewFinding(job.id, key)).rejects.toThrow(/belongs to its reviewer/);
+    await expect(replyToReviewFinding(job.id, key, 'Discuss')).rejects.toThrow(/review summary/);
+  });
+  it('keeps missing or partial output from becoming an empty clean result', async () => {
+    fs.writeFileSync(path.join(workDir, snapshot.resultFile), '{}');
+    await expect(holdFeedbackAssessment(job)).rejects.toThrow(/incomplete/);
+    expect(job.reviewTriage).toBeFalsy();
+    expect(job.feedbackAssessment.completed).toBe(false);
+    expect(state.appSettings['incoming-feedback']).toBeUndefined();
+    expect(addPullRequestLabel).not.toHaveBeenCalled();
+  });
+  it('rejects a FIFO assessment result without blocking the event loop', () => {
+    const resultPath = path.join(workDir, snapshot.resultFile);
+    fs.unlinkSync(resultPath);
+    expect(spawnSync('mkfifo', [resultPath]).status).toBe(0);
+    // Isolate the actual handler so a regression times out instead of hanging Vitest.
+    const source = fs.readFileSync(new URL('../lib/jobs.js', import.meta.url), 'utf8');
+    const handler = source
+      .slice(
+        source.indexOf('export async function holdFeedbackAssessment('),
+        source.indexOf('\nconst feedbackConsumption ='),
+      )
+      .replace(/^export /, '');
+    const child = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `
+      import fs from 'node:fs';
+      import path from 'node:path';
+      ${handler}
+      try {
+        await holdFeedbackAssessment(${JSON.stringify({ workDir, feedbackAssessment: { resultFile: snapshot.resultFile } })});
+        process.exitCode = 1;
+      } catch (error) {
+        if (error.message !== 'Invalid feedback assessment result file') throw error;
+        setTimeout(() => process.stdout.write('event loop responsive'), 0);
+      }
+    `,
+      ],
+      { encoding: 'utf8', timeout: 2000 },
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(0);
+    expect(child.stdout).toBe('event loop responsive');
   });
 });

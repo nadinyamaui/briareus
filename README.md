@@ -199,9 +199,38 @@ push it made from one a human made.
 
 ### The review loop
 
-The composer's 🔁 chip arms a **review loop** on the next from-scratch session,
-and 🛠 Implement feedback, started from the board, arms the same loop so the
-fixes it pushes get reviewed. A review, a QA run, any other board errand or a
+The composer's 🔁 chip arms a **review loop** on the next from-scratch session.
+🛠 Implement feedback first assesses the PR's existing review bodies, inline
+comments and discussion on the project's configured review provider, model and
+effort. Its findings wait for **Fix / Optional / Dismiss** decisions in Findings;
+only the selected fixes start an implementation session with the review loop armed.
+The assessment includes source links, verification evidence, fix-value advice and
+previous fixes or dismissals, including feedback listed only in a review summary.
+Completing this assessment without fixes does not approve the PR or change its labels.
+The clone and database are released while its Findings card waits.
+
+With **Babysit PRs** enabled and a **PR author** configured, incoming reviews from
+another developer on that author's PRs automatically enter the same assessment
+flow. Submitted and edited GitHub reviews trigger it through the webhook, with the
+15-minute babysitter poll as a fallback. Review bodies with a `COMMENTED` verdict
+count too; tracking uses the review identity and content, so edits and new reviews
+on the same commit are assessed without repeating already imported feedback.
+An existing session or pending Findings card defers intake, and a full pool retries
+on a later tick. Automatic intake always waits for manual decisions, even when
+autonomous review-loop fixing is enabled. Closed PRs, drafts, forks and bot reviews
+are excluded from automatic intake. Use Implement feedback to assess existing
+feedback manually without enabling Babysit PRs.
+Automatic attempts are limited to three per review revision and head commit,
+including across restarts. After repeated failures, use Implement feedback to
+retry explicitly; edited feedback or a new head receives a fresh attempt budget.
+
+Assessment wording is editable as **Assess incoming feedback** in project or
+shared prompt settings; **Implement feedback** remains the template used to
+execute the selected fixes. The required assessment output and manual decision
+gate still apply when templates are overridden. If the head or selected feedback
+changes before fixes are submitted, refresh with Implement feedback first.
+
+A review, a QA run, any other board errand or a
 local session is never a loop. An armed session works its task as usual; every
 time it settles idle with new commits on its open pull request, the app starts
 a review session for it (the same auto-closing kind the board starts, on the
@@ -629,10 +658,31 @@ every project it works on (the `repo` scope the token already needs
 covers it), recognising its own by URL so an existing deploy hook is never
 touched, and re-pointing it if the hostname changes.
 
-What each delivery does: nothing is started by one. The hook subscribes to
-`pull_request`, `pull_request_review`, `issue_comment`, `check_suite` and `status`
-(not `check_run`: a repository hook hears a suite finish, not a run start), and each
-refreshes the PR panel of any open session on that branch as the event lands rather
+The core keeps PRs and issues in normalized MySQL tables, including closed issues
+and merged PRs, bodies, labels, assignees, milestones, links, comments, reviews,
+commits, changed files and head checks. The lists read this durable mirror; its
+`syncedAt` identifies the last board refresh. A missing mirror is filled on first
+read, and `fresh=1` requests a GitHub refresh (with the existing 15-second minimum).
+Detailed viewers and merge validation still read GitHub on demand.
+
+An in-process scheduled task runs at startup and every hour for enabled projects.
+The first pass backfills all issue/PR pages; subsequent passes use an overlapping
+update cursor and recheck open PRs for CI changes. Completed historical items are
+remembered so a rate limit can interrupt a backfill without restarting it. The
+cursor advances only after a complete pass, and failed pages leave the previous
+collections intact. Tables are migrated at boot; no operating-system crontab is
+required. See [GitHub's issues API](https://docs.github.com/en/rest/issues/issues#list-repository-issues)
+for the shared issue/PR listing and update cursor. GitHub's own limits on commit
+and file lists still apply; this mirror does not archive repository blobs or
+attachments.
+
+What each delivery does: no agent session is started by one. The hook subscribes to
+`pull_request`, `pull_request_review`, `pull_request_review_comment`, `issues`,
+`issue_comment`, `check_suite`, `check_run`, `status`, `label`, `milestone` and
+`sub_issues`. Authenticated deliveries for enabled repositories refresh affected
+items and their board, coalescing bursts for two seconds; hourly sync catches
+missed events. Existing session events also refresh the PR panel of any open
+session on that branch as the event lands rather
 than on the next twenty-second tick (a commit status still `pending` refreshes
 nothing). A repository whose hook has delivered within the last hour, and which
 this boot found or left carrying every one of those events, is polled only every

@@ -22,7 +22,7 @@ import { operationsRoutes } from './lib/operations-routes.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
 import { createUsers } from './lib/users.js';
 import { createShares } from './lib/shares.js';
-import { seesSession } from './lib/ownership.js';
+import { seesSession, managesSession } from './lib/ownership.js';
 import { createUserCredentials } from './lib/user-credentials.js';
 import { createWhatsAppOwners } from './lib/whatsapp-owners.js';
 import { meRoutes } from './lib/me-routes.js';
@@ -87,6 +87,8 @@ import {
   listDevSessions,
   devSessionRecords,
   createDevSession,
+  pendingFeedbackAssessment,
+  feedbackAssessmentReusable,
   sendDevMessage,
   askDevSessionBtw,
   cancelDevTurn,
@@ -247,6 +249,7 @@ import { previewAccess } from './lib/tunnel.js';
 import { projectUsage, overallUsage, jobUsageEstimates, estimateEventCosts } from './lib/usage.js';
 import { agentOnly, apiEnabled } from './lib/auth.js';
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
+import { githubSync } from './lib/github-sync.js';
 import { localUpdater } from './lib/local-update.js';
 import { createBabysitter } from './lib/babysitter.js';
 import { securityHeaders } from './lib/security.js';
@@ -512,7 +515,12 @@ api.get('/api/projects', (req, res) => {
 
 api.post('/api/projects', async (req, res) => {
   try {
-    res.status(201).json({ project: await createProject(req.body || {}) });
+    const project = await createProject(req.body || {});
+    res.status(201).json({ project });
+    if (project.enabled)
+      installRepoWebhooks([project], getConfig(), githubRest).catch((e) =>
+        console.error('Could not install GitHub webhook:', e.message),
+      );
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
   }
@@ -529,7 +537,12 @@ api.put('/api/projects/order', async (req, res) => {
 
 api.put('/api/projects/:id', async (req, res) => {
   try {
-    res.json({ project: await updateProject(Number(req.params.id), req.body || {}) });
+    const project = await updateProject(Number(req.params.id), req.body || {});
+    res.json({ project });
+    if (project.enabled)
+      installRepoWebhooks([project], getConfig(), githubRest).catch((e) =>
+        console.error('Could not install GitHub webhook:', e.message),
+      );
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
   }
@@ -1817,6 +1830,11 @@ api.post('/api/dev/actions', async (req, res) => {
       .status(400)
       .json({ error: 'No GITHUB_TOKEN is configured, so the pull request cannot be looked up' });
   try {
+    if (actionId === 'implement-feedback') {
+      const pending = pendingFeedbackAssessment(project.repo, number);
+      if (pending && !pending.feedbackAssessment.completed && managesSession(res.locals.apiUser, pending))
+        return res.json({ session: publicJob(pending) });
+    }
     const lookup = await githubRest(cfg, 'GET', `/repos/${project.repo}/pulls/${number}`);
     if (lookup.status === 404)
       return res.status(404).json({ error: `${project.repo} has no pull request #${number}` });
@@ -1842,8 +1860,18 @@ api.post('/api/dev/actions', async (req, res) => {
     };
     // A prompt that refuses fails the request rather than starting an empty errand.
     const spec = await actionSessionSpec(action, context);
+    if ('feedbackAssessment' in spec) {
+      const pending = pendingFeedbackAssessment(project.repo, number);
+      if (
+        pending &&
+        managesSession(res.locals.apiUser, pending) &&
+        feedbackAssessmentReusable(pending, spec.feedbackAssessment)
+      )
+        return res.json({ session: publicJob(pending) });
+    }
+    const session = createDevSession({ provider, model, effort, ...spec, ownerId: requestOwner(res) });
     res.status(201).json({
-      session: createDevSession({ provider, model, effort, ...spec, ownerId: requestOwner(res) }),
+      session,
     });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -2383,6 +2411,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     // Projects with `babysitPrs` get their pull requests' errands started every 15 minutes.
     createBabysitter().startTimer();
     databaseBackups.start();
+    githubSync.start();
     // Recovered sessions must claim their slots before pruning unused clones.
     startWorkspacePruner();
     const projects = activeProjects();
@@ -2421,6 +2450,7 @@ let stopping = false;
 // On a crash, flush too (or a just-created session vanishes), then die so pm2 restarts clean.
 process.on('uncaughtException', (e) => {
   console.error('Uncaught exception:', e);
+  githubSync.stop();
   stopAllDevServes();
   stopAllBrowsers();
   const giveUp = setTimeout(() => process.exit(1), 5000);
@@ -2437,6 +2467,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
     if (stopping) process.exit(1); // a second Ctrl-C means "now"
     stopping = true;
+    githubSync.stop();
     stopAllDevServes();
     stopAllBrowsers();
     stopAllJobProcesses()
