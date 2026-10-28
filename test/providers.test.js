@@ -1881,6 +1881,9 @@ describe('the qwen parser', () => {
       { kind: 'text', text: 'Let me look.' },
       { kind: 'tool', name: 'Shell', summary: 'echo hi' },
       { kind: 'text', text: 'Done: hi' },
+    ]);
+    // The outcome waits for the stream's end; no baseline, so the turn's own calls count.
+    expect(parser.flush()).toEqual([
       {
         kind: 'result',
         subtype: 'success',
@@ -1895,19 +1898,105 @@ describe('the qwen parser', () => {
       },
     ]);
     expect(turn.sessionId).toBe(id);
+    expect(turn.cachedInputTokens).toBe(100);
+    expect(turn.qwenTotals).toEqual({ inputTokens: 9200, outputTokens: 90, cachedInputTokens: 100 });
+  });
+
+  it('keeps a reported zero cache read, which prices.js must not take for unknown', () => {
+    const { turn, parser } = fresh();
+    parser.feed(assistant([{ type: 'text', text: 'hi' }], { input_tokens: 100000, output_tokens: 1 }));
+    expect(turn.cachedInputTokens).toBeUndefined();
+    parser.feed(
+      assistant([{ type: 'text', text: 'again' }], {
+        input_tokens: 100000,
+        output_tokens: 1,
+        cache_read_input_tokens: 0,
+      }),
+    );
+    expect(turn.cachedInputTokens).toBe(0);
+  });
+
+  it("books a delegated sub-agent's calls from the session's totals less the baseline", () => {
+    const { turn, parser } = fresh();
+    turn.qwenBaseline = { inputTokens: 1000, outputTokens: 50, cachedInputTokens: 200 };
+    // The parent's two calls; the foreground child's 10000/2000 shows only in the totals.
+    parser.feed(
+      assistant([{ type: 'tool_use', id: 'call_a', name: 'agent', input: { description: 'Dig' } }], {
+        input_tokens: 100,
+        output_tokens: 5,
+        cache_read_input_tokens: 40,
+      }),
+    );
+    parser.feed(
+      assistant([{ type: 'text', text: 'Found it.' }], {
+        input_tokens: 100,
+        output_tokens: 5,
+        cache_read_input_tokens: 60,
+      }),
+    );
+    parser.feed({
+      type: 'result',
+      subtype: 'success',
+      session_id: id,
+      is_error: false,
+      result: 'Found it.',
+      usage: { input_tokens: 11200, output_tokens: 2060, cache_read_input_tokens: 300 },
+    });
+    expect(parser.flush()[0]).toMatchObject({ kind: 'result', inputTokens: 10200, outputTokens: 2010 });
+    expect(turn.cachedInputTokens).toBe(100);
+    expect(turn.qwenTotals).toEqual({ inputTokens: 11200, outputTokens: 2060, cachedInputTokens: 300 });
+  });
+
+  it('takes totals below the baseline as a count started over, never as a negative turn', () => {
+    const { turn, parser } = fresh();
+    turn.qwenBaseline = { inputTokens: 50000, outputTokens: 900, cachedInputTokens: 4000 };
+    parser.feed(assistant([{ type: 'text', text: 'x' }], { input_tokens: 300, output_tokens: 9 }));
+    parser.feed({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      usage: { input_tokens: 700, output_tokens: 20, cache_read_input_tokens: 0 },
+    });
+    expect(parser.flush()[0]).toMatchObject({ inputTokens: 700, outputTokens: 20 });
+    expect(turn.cachedInputTokens).toBe(0);
+  });
+
+  it("a failed sub-agent's result is not the turn's when the parent recovers", () => {
+    const { parser } = fresh();
+    expect(
+      parser.feed({
+        type: 'result',
+        subtype: 'error_during_execution',
+        session_id: id,
+        is_error: true,
+        error: { message: 'Subagent failed: model timeout' },
+      }),
+    ).toEqual([]);
+    // The parent carries on: the earlier result was the sub-agent's, shown as its error.
+    expect(parser.feed(assistant([{ type: 'text', text: 'Retrying myself.' }]))).toEqual([
+      { kind: 'tool_error', text: 'Subagent failed: model timeout' },
+      { kind: 'text', text: 'Retrying myself.' },
+    ]);
+    parser.feed({ type: 'result', subtype: 'success', session_id: id, is_error: false, result: 'Done' });
+    expect(parser.flush()).toEqual([
+      expect.objectContaining({ kind: 'result', isError: false, text: 'Done' }),
+    ]);
   });
 
   it('a failed call is an error result carrying its message', () => {
     const { parser } = fresh();
-    const [result] = parser.feed({
-      type: 'result',
-      subtype: 'error_during_execution',
-      is_error: true,
-      duration_ms: 161,
-      num_turns: 1,
-      usage: { input_tokens: 0, output_tokens: 0 },
-      error: { message: '[API Error: 401 Incorrect API key provided]' },
-    });
+    expect(
+      parser.feed({
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        duration_ms: 161,
+        num_turns: 1,
+        usage: { input_tokens: 0, output_tokens: 0 },
+        error: { message: '[API Error: 401 Incorrect API key provided]' },
+      }),
+    ).toEqual([]);
+    const [result] = parser.flush();
     expect(result).toMatchObject({
       kind: 'result',
       isError: true,

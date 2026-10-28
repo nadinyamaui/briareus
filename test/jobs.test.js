@@ -16675,7 +16675,13 @@ describe('the shared browser in a session', () => {
   async function turn(
     job,
     text,
-    { hold = false, binary = 'claude', workerNotice = false, unattended = false } = {},
+    {
+      hold = false,
+      binary = 'claude',
+      workerNotice = false,
+      unattended = false,
+      result = { type: 'result', subtype: 'success', result: 'ok' },
+    } = {},
   ) {
     job.status = 'idle';
     getProviderForJob.mockReturnValue({ ...state.provider, binary });
@@ -16700,7 +16706,7 @@ describe('the shared browser in a session', () => {
       child.stdin.on('data', (chunk) => {
         seen.prompt ??= binary === 'claude' ? JSON.parse(chunk.toString()).message.content : chunk.toString();
         if (hold) return;
-        child.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' }) + '\n');
+        child.stdout.write(JSON.stringify(result) + '\n');
       });
       child.stdin.on('finish', () => setImmediate(() => child.emit('close', 0)));
       if (binary === 'grok') setImmediate(() => child.emit('close', 0));
@@ -16841,6 +16847,48 @@ describe('the shared browser in a session', () => {
       job.chats = chats;
       job.effort = effort;
       job.browser = false;
+    }
+  });
+
+  it("books a resumed qwen turn from the session's totals less the last turn's, then keeps them", async () => {
+    const job = getJob('br-turn');
+    const { chats, inputTokens, outputTokens } = job;
+    const sessionId = '6f1b2a3c-1111-4222-8333-444455556666';
+    job.browser = false;
+    job.chats = { [state.provider.id]: { started: true, sessionId } };
+    job.qwenSessionTotals = { [sessionId]: { inputTokens: 1000, outputTokens: 50, cachedInputTokens: 200 } };
+    job.inputTokens = 0;
+    job.outputTokens = 0;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-qwen-turn-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    try {
+      const { seen, settled } = await turn(job, 'Delegate it', {
+        binary: 'qwen',
+        result: {
+          type: 'result',
+          subtype: 'success',
+          session_id: sessionId,
+          is_error: false,
+          result: 'ok',
+          usage: { input_tokens: 11200, output_tokens: 2060, cache_read_input_tokens: 300 },
+        },
+      });
+      await settled;
+      expect(seen.args).toEqual(expect.arrayContaining(['--resume', sessionId]));
+      expect(job.inputTokens).toBe(10200);
+      expect(job.outputTokens).toBe(2010);
+      expect(job.qwenSessionTotals[sessionId]).toEqual({
+        inputTokens: 11200,
+        outputTokens: 2060,
+        cachedInputTokens: 300,
+      });
+    } finally {
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      job.chats = chats;
+      job.inputTokens = inputTokens;
+      job.outputTokens = outputTokens;
+      delete job.qwenSessionTotals;
     }
   });
 
@@ -17101,6 +17149,31 @@ describe('the shared browser in a session', () => {
       expect(seen.mcp.__proto__).toEqual({ command: 'node', args: [], env: {} });
     } finally {
       setExternalMcp(() => []);
+    }
+  });
+
+  it("gives a qwen turn a remote MCP server as Qwen's Streamable HTTP entry", async () => {
+    const job = getJob('br-turn');
+    const { chats } = job;
+    job.browser = false;
+    job.chats = {};
+    setExternalMcp(() => [{ id: 7, name: 'meta', transport: 'http' }]);
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-qwen-turn-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    try {
+      const { seen, settled } = await turn(job, 'List my apps', { binary: 'qwen' });
+      await settled;
+      // Qwen takes `url` for SSE, which the proxy does not speak.
+      expect(seen.mcp.meta).toEqual({
+        httpUrl: expect.stringMatching(/\/api\/agent\/mcp\/7$/),
+        headers: { Authorization: expect.stringMatching(/^Bearer [0-9a-f]{48}$/) },
+      });
+      expect(seen.mcp.reviewer_memory).toHaveProperty('command');
+    } finally {
+      setExternalMcp(() => []);
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      job.chats = chats;
     }
   });
 
