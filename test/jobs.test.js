@@ -120,6 +120,7 @@ vi.mock('../lib/config.js', () => ({
     codexBin: '',
     grokBin: '',
     opencodeBin: '',
+    dshBin: '',
     githubToken: 'tok',
     workspaceDir: state.workspaceDir,
     dev: { maxSessions: 3, timeoutMin: 60, autoCompactTokens: 250000 },
@@ -16615,7 +16616,7 @@ describe('the shared browser', () => {
 
   it('points claude and codex at the MCP tools, and the rest at connectOverCDP', () => {
     browserState.endpoint = 'http://127.0.0.1:41234';
-    for (const binary of ['claude', 'codex']) {
+    for (const binary of ['claude', 'codex', 'dsh']) {
       const note = sharedBrowserNote({ id: 'b1', browser: true }, binary);
       expect(note).toContain('`browser` MCP tools');
       expect(note).toContain('http://127.0.0.1:41234');
@@ -16675,23 +16676,31 @@ describe('the shared browser in a session', () => {
   async function turn(
     job,
     text,
-    { hold = false, binary = 'claude', workerNotice = false, unattended = false } = {},
+    { hold = false, binary = 'claude', workerNotice = false, unattended = false, provider = {} } = {},
   ) {
     job.status = 'idle';
-    getProviderForJob.mockReturnValue({ ...state.provider, binary });
+    getProviderForJob.mockReturnValue({ ...state.provider, binary, ...provider });
     captureProviderAuth.mockResolvedValue(undefined);
     const bin = vi.spyOn(BINARIES[binary], 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
     const seen = { spawned: false, args: null, mcp: null, prompt: null };
     const realSpawn = spawn.getMockImplementation();
     spawn.mockImplementation((cmd, ...rest) => {
       if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
-      const [args] = rest;
+      const [args, opts] = rest;
       seen.spawned = true;
       seen.args = args;
+      seen.env = opts.env;
       // The file goes with the turn, so it is read while the turn is alive.
       if (binary === 'claude')
         seen.mcp = JSON.parse(fs.readFileSync(args[args.indexOf('--mcp-config') + 1], 'utf8')).mcpServers;
       if (binary === 'grok') seen.prompt = fs.readFileSync(args[args.indexOf('--prompt-file') + 1], 'utf8');
+      if (binary === 'dsh') {
+        seen.patchFile = args[args.indexOf('--patch') + 1];
+        const patch = JSON.parse(fs.readFileSync(seen.patchFile, 'utf8'));
+        seen.model = patch[0].config;
+        seen.mcp = Object.fromEntries((patch[1]?.insert || []).map((r) => [r.config.serverName, r.config]));
+        seen.shellEnv = opts.env.BASH_ENV ? fs.readFileSync(opts.env.BASH_ENV, 'utf8') : null;
+      }
       const child = new EventEmitter();
       child.stdin = new PassThrough();
       child.stdout = new PassThrough();
@@ -16699,6 +16708,22 @@ describe('the shared browser in a session', () => {
       child.stdin.on('data', (chunk) => {
         seen.prompt ??= binary === 'claude' ? JSON.parse(chunk.toString()).message.content : chunk.toString();
         if (hold) return;
+        if (binary === 'dsh') {
+          for (const line of [
+            { type: 'session', sessionId: 'session-dsh-1', cwd: job.workDir },
+            {
+              type: 'status',
+              phase: 'step_end',
+              turn: 1,
+              step: 1,
+              usage: { inputTokens: 10, outputTokens: 2 },
+            },
+            { type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } },
+            { type: 'final', text: 'ok' },
+          ])
+            child.stdout.write(JSON.stringify(line) + '\n');
+          return;
+        }
         child.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' }) + '\n');
       });
       child.stdin.on('finish', () => setImmediate(() => child.emit('close', 0)));
@@ -16841,6 +16866,53 @@ describe('the shared browser in a session', () => {
       }
     },
   );
+
+  it('runs a DeepSeek Harness turn on its own home and key, with its tools and scrubbed variables handed back', async () => {
+    const job = getJob('br-turn');
+    const chats = job.chats;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-home-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    job.browser = true;
+    browserState.endpoint = ENDPOINT;
+    job.chats = {};
+    try {
+      const first = await turn(job, 'Fix the cart', {
+        binary: 'dsh',
+        provider: { apiKey: 'sk-entry', baseUrl: 'https://gw.test', defaultModel: 'deepseek-v4-pro' },
+      });
+      await first.settled;
+      expect(first.seen.args.slice(0, 3)).toEqual(['headless', '--patch', first.seen.patchFile]);
+      expect(first.seen.args).not.toContain('--session-id');
+      expect(first.seen.env.DSH_HOME).toBe(path.join(home, `.dsh-provider-${state.provider.id}`));
+      expect(first.seen.env.DSH_PERMISSION_MODE).toBe('danger-full-access');
+      expect(first.seen.env.DEEPSEEK_API_KEY).toBe('sk-entry');
+      expect(first.seen.env.DEEPSEEK_BASE_URL).toBe('https://gw.test');
+      expect(first.seen.model).toMatchObject({ provider: 'deepseek-official' });
+      // The Briareus tools and the shared browser ride in the patch, as MCP clients.
+      expect(first.seen.mcp.reviewer_memory.transport).toBe('stdio');
+      expect(first.seen.mcp.browser.args).toContain(ENDPOINT);
+      expect(first.seen.prompt).toContain('`browser` MCP tools');
+      // What dsh scrubs from its agent's shell comes back through BASH_ENV, never the entry's key.
+      expect(first.seen.shellEnv).toMatch(/^export GH_TOKEN=/m);
+      expect(first.seen.shellEnv).toMatch(/^export REVIEWER_MEMORY_TOKEN=/m);
+      expect(first.seen.shellEnv).not.toContain('sk-entry');
+      // Both files carry tokens and go with the turn.
+      expect(fs.existsSync(first.seen.patchFile)).toBe(false);
+      expect(fs.existsSync(first.seen.env.BASH_ENV)).toBe(false);
+      // The id dsh issued is the one the next turn resumes.
+      expect(job.chats[state.provider.id]).toMatchObject({ started: true, sessionId: 'session-dsh-1' });
+
+      job.browser = false;
+      const second = await turn(job, 'And the checkout', { binary: 'dsh', provider: { apiKey: 'sk-entry' } });
+      await second.settled;
+      expect(second.seen.args.slice(-3)).toEqual(['--session-id', 'session-dsh-1', '-']);
+    } finally {
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      job.chats = chats;
+      job.browser = false;
+    }
+  });
 
   it('refuses mail tools during automatic worker-notice turns and restores them for the user', async () => {
     const job = getJob('br-turn');

@@ -493,7 +493,7 @@ tabs, so a client can watch the agent work, log in for it, or take over a step
 and hand back with a message.
 
 1. `POST /sessions/{id}/browser` switches it on and starts it. The agent is told
-   about it from its next turn (Claude and Codex get Playwright's MCP tools,
+   about it from its next turn (Claude, Codex and DeepSeek Harness get Playwright's MCP tools,
    Grok and opencode the DevTools endpoint for `connectOverCDP`), and every turn
    that finds it down starts it again, so it survives a close and reopen. The
    profile, cookies and logins included, lasts until the session is deleted.

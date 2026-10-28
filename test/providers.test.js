@@ -23,6 +23,9 @@ import {
   opencodeServiceId,
   opencodeAuthContent,
   opencodeConfigContent,
+  dshPatchContent,
+  dshShellEnvContent,
+  dshEndpointUrl,
   refreshCodexModelCache,
   splitCodexModel,
   codexWideVariants,
@@ -39,8 +42,8 @@ import {
 // parsers, the arg builders and the report reader are exercised as they are.
 
 describe('getBinary / BINARIES', () => {
-  it('knows the four binaries and nothing else', () => {
-    expect(Object.keys(BINARIES)).toEqual(['claude', 'codex', 'grok', 'opencode']);
+  it('knows the five binaries and nothing else', () => {
+    expect(Object.keys(BINARIES)).toEqual(['claude', 'codex', 'grok', 'opencode', 'dsh']);
     expect(getBinary('claude').label).toBe('Claude Code');
     expect(getBinary('vim')).toBeNull();
   });
@@ -849,6 +852,7 @@ describe('buildArgs', () => {
       ['codex', { prNumber: 7, branch: 'b', base: 'main' }],
       ['grok', { prNumber: 7 }],
       ['opencode', { prNumber: 7, branch: 'b', base: 'main' }],
+      ['dsh', { prNumber: 7, branch: 'b', base: 'main' }],
     ]) {
       expect(BINARIES[id].reviewPrompt(opts)).toContain('reviewer:findings');
       expect(BINARIES[id].reviewPrompt(opts)).toContain('<!-- reviewer:incomplete -->');
@@ -863,6 +867,7 @@ describe('buildArgs', () => {
       ['codex', { prNumber: 7, branch: 'b', base: 'main' }],
       ['grok', { prNumber: 7 }],
       ['opencode', { prNumber: 7, branch: 'b', base: 'main' }],
+      ['dsh', { prNumber: 7, branch: 'b', base: 'main' }],
     ]) {
       const prompt = BINARIES[id].reviewPrompt(opts);
       expect(prompt).not.toContain('rather than as a fresh finding');
@@ -888,6 +893,7 @@ describe('buildArgs', () => {
     expect(verifies(BINARIES.codex.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
     expect(verifies(BINARIES.grok.reviewPrompt({ prNumber: 7 }))).toBe(true);
     expect(verifies(BINARIES.opencode.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
+    expect(verifies(BINARIES.dsh.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
   });
 
   // A loop round that had read the earlier rounds reviewed only the newest
@@ -897,6 +903,7 @@ describe('buildArgs', () => {
       BINARIES.claude.reviewPrompt({ prNumber: 7, effort: 'high' }),
       BINARIES.codex.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
       BINARIES.opencode.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
+      BINARIES.dsh.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
     ]) {
       expect(prompt).toContain('fresh discovery sub-agent');
       expect(prompt).toContain('not the prior PR discussion');
@@ -917,7 +924,7 @@ describe('buildArgs', () => {
     }
     // grok's /review does its own discovery; it gets only the scope rule.
     expect(BINARIES.grok.reviewPrompt({ prNumber: 7 })).not.toContain('fresh discovery sub-agent');
-    for (const id of ['claude', 'codex', 'grok', 'opencode']) {
+    for (const id of ['claude', 'codex', 'grok', 'opencode', 'dsh']) {
       expect(BINARIES[id].reviewPrompt({ prNumber: 7, effort: 'high', branch: 'b', base: 'main' })).toContain(
         'every review covers the whole base-to-head diff, including code an earlier round already reviewed',
       );
@@ -2314,5 +2321,321 @@ describe('an opencode endpoint under Test', () => {
     expect(calls[0].url).toBe('https://x.test/v1/chat/completions');
     expect(calls[0].opts.headers.Authorization).toBe('Bearer k');
     expect(JSON.parse(calls[0].opts.body).model).toBe('anthropic/claude-sonnet-4-5');
+  });
+});
+
+describe('the DeepSeek Harness binary', () => {
+  it('runs headless with JSON events and the prompt on stdin, resuming only an id dsh issued', () => {
+    const fresh = BINARIES.dsh.buildArgs({
+      model: 'deepseek-flash',
+      effort: 'high',
+      resume: false,
+      sessionId: 'session-1',
+      patchFile: '/tmp/p.json',
+    });
+    expect(fresh.args).toEqual(['headless', '--patch', '/tmp/p.json', '--json', '-']);
+    expect(fresh.promptVia).toBe('stdin');
+    expect(fresh.briefingInPrompt).toBe(true);
+
+    const resumed = BINARIES.dsh.buildArgs({
+      model: 'deepseek-flash',
+      effort: 'high',
+      resume: true,
+      sessionId: 'session-1',
+      patchFile: '/tmp/p.json',
+    });
+    expect(resumed.args).toEqual([
+      'headless',
+      '--patch',
+      '/tmp/p.json',
+      '--json',
+      '--session-id',
+      'session-1',
+      '-',
+    ]);
+    // dsh fails an id it never issued instead of starting fresh, so the creation UUID is never sent.
+    const uuid = BINARIES.dsh.buildArgs({
+      model: 'm',
+      effort: 'low',
+      resume: true,
+      sessionId: '0f9d1e7a-9f3a-4a41-8f5f-0c4b8c9a1d22',
+    });
+    expect(uuid.args).toEqual(['headless', '--json', '-']);
+    expect(canResume('dsh', 'session-abc')).toBe(true);
+    expect(canResume('dsh', '0f9d1e7a-9f3a-4a41-8f5f-0c4b8c9a1d22')).toBe(false);
+  });
+
+  it("hands the turn's model and effort to the runner through the patch", () => {
+    const { patch } = BINARIES.dsh.buildArgs({ model: 'deepseek-v4-pro', effort: 'max', resume: false });
+    expect(JSON.parse(patch)).toEqual([
+      {
+        id: 'agent-default-model',
+        config: { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' },
+      },
+    ]);
+  });
+
+  it('mounts each MCP server as a client row, local or remote, with the env and headers it was given', () => {
+    const rows = JSON.parse(
+      dshPatchContent({
+        model: 'm',
+        effort: 'high',
+        mcp: [
+          {
+            name: 'reviewer_memory',
+            command: '/node',
+            args: ['memory-mcp.js'],
+            env: { REVIEWER_MEMORY_TOKEN: 't' },
+          },
+          { name: 'reviewer_mail', command: '/node', args: ['mail-mcp.js'], env: {} },
+          { name: 'sentry', url: 'https://b.test/api/agent/mcp/1', headers: { Authorization: 'Bearer t' } },
+        ],
+      }),
+    );
+    expect(rows[1].insert).toEqual([
+      {
+        id: 'mcp-reviewer_memory',
+        name: '@deepseek-ai/dsh-mcp-client',
+        config: {
+          serverName: 'reviewer_memory',
+          transport: 'stdio',
+          command: '/node',
+          args: ['memory-mcp.js'],
+          env: { REVIEWER_MEMORY_TOKEN: 't' },
+        },
+      },
+      {
+        id: 'mcp-reviewer_mail',
+        name: '@deepseek-ai/dsh-mcp-client',
+        // Sends outlast dsh's 60s default, as on codex.
+        config: {
+          serverName: 'reviewer_mail',
+          transport: 'stdio',
+          command: '/node',
+          args: ['mail-mcp.js'],
+          env: {},
+          toolCallTimeoutMs: 240000,
+        },
+      },
+      {
+        id: 'mcp-sentry',
+        name: '@deepseek-ai/dsh-mcp-client',
+        config: {
+          serverName: 'sentry',
+          transport: 'streamable-http',
+          url: 'https://b.test/api/agent/mcp/1',
+          headers: { Authorization: 'Bearer t' },
+        },
+      },
+    ]);
+  });
+
+  it('hands back exactly the variables dsh would scrub from its agent, quoted for bash', () => {
+    const content = dshShellEnvContent({
+      PATH: '/usr/bin',
+      GH_TOKEN: 'gh',
+      DB_PASSWORD: "it's",
+      REVIEWER_MEMORY_TOKEN: 'mem',
+      // The entry's own key and dsh's facts are not the agent's.
+      DEEPSEEK_API_KEY: 'sk',
+      DSH_HOME: '/h',
+      GIT_AUTHOR_NAME: 'bob',
+    });
+    expect(content).toBe(
+      [
+        "export GH_TOKEN='gh'",
+        "export DB_PASSWORD='it'\\''s'",
+        "export REVIEWER_MEMORY_TOKEN='mem'",
+        '',
+      ].join('\n'),
+    );
+    expect(dshShellEnvContent({ PATH: '/usr/bin' })).toBeNull();
+    // A BASH_ENV of the server's own still runs after them.
+    expect(dshShellEnvContent({ BASH_ENV: '/etc/env.sh' })).toBe("[ -f '/etc/env.sh' ] && . '/etc/env.sh'\n");
+  });
+
+  it("finds the Messages routes the way dsh's adapter does", () => {
+    expect(dshEndpointUrl('', 'messages')).toBe('https://api.deepseek.com/anthropic/v1/messages');
+    expect(dshEndpointUrl('https://gw.test/', 'messages')).toBe('https://gw.test/v1/messages');
+    // An exact final /v1 is reused, not doubled.
+    expect(dshEndpointUrl('https://gw.test/v1', 'models')).toBe('https://gw.test/v1/models');
+  });
+
+  it('declares the context window of its catalog models and the adapter fallback for others', () => {
+    expect(contextWindowFor('dsh', 'deepseek-flash')).toBe(1048576);
+    expect(contextWindowFor('dsh', 'deepseek-v4.1-flash')).toBe(1000000);
+  });
+});
+
+describe('a DeepSeek Harness endpoint under Test', () => {
+  function stubFetch(body, status = 200) {
+    const calls = [];
+    vi.stubGlobal('fetch', async (url, opts) => {
+      calls.push({ url, opts });
+      return { ok: status < 400, status, text: async () => JSON.stringify(body) };
+    });
+    return calls;
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("lists DeepSeek's own models without a base URL, and a gateway's on its Messages root", async () => {
+    let calls = stubFetch({ object: 'list', data: [{ id: 'deepseek-flash' }] });
+    expect(await testProviderEndpoint({ binary: 'dsh', baseUrl: '', apiKey: 'k' })).toEqual([
+      'deepseek-flash',
+    ]);
+    expect(calls[0].url).toBe('https://api.deepseek.com/models');
+    expect(calls[0].opts.headers['x-api-key']).toBe('k');
+    expect(calls[0].opts.headers.Authorization).toBe('Bearer k');
+
+    calls = stubFetch({ data: [{ id: 'deepseek-v4.1-flash' }] });
+    await testProviderEndpoint({ binary: 'dsh', baseUrl: 'https://gw.test', apiKey: 'k' });
+    expect(calls[0].url).toBe('https://gw.test/v1/models');
+  });
+
+  it('probes chat over Messages', async () => {
+    const calls = stubFetch({ id: 'msg_1', type: 'message' });
+    await probeChatEndpoint({ binary: 'dsh', baseUrl: '', apiKey: 'k', model: 'deepseek-flash' });
+    expect(calls[0].url).toBe('https://api.deepseek.com/anthropic/v1/messages');
+    expect(calls[0].opts.headers['x-api-key']).toBe('k');
+    expect(JSON.parse(calls[0].opts.body).model).toBe('deepseek-flash');
+  });
+
+  it('an entry without a key is not connected, and one with a key is checked live', async () => {
+    expect(await probeProviderAuth({ id: 9, binary: 'dsh', apiKey: '', baseUrl: '', models: [] })).toEqual({
+      loggedIn: false,
+      detail: 'no API key yet: add one on the settings page',
+    });
+    stubFetch({ error: { message: 'Authentication Fails' } }, 401);
+    const auth = await probeProviderAuth({
+      id: 9,
+      binary: 'dsh',
+      apiKey: 'bad-key-for-this-test',
+      baseUrl: '',
+      models: [],
+    });
+    expect(auth.loggedIn).toBe(false);
+    expect(auth.detail).toMatch(/401: Authentication Fails/);
+  });
+});
+
+describe('the DeepSeek Harness parser', () => {
+  function fresh() {
+    const turn = newTurn();
+    const parser = parserFor('dsh', turn);
+    return { turn, parser };
+  }
+  const stepEnd = (usage) => ({ type: 'status', phase: 'step_end', turn: 1, step: 1, usage });
+
+  it('takes the session id from the opening event and announces it once', () => {
+    const { turn, parser } = fresh();
+    expect(parser.feed({ type: 'session', sessionId: 'session-1', cwd: '/w' })).toEqual([
+      { kind: 'info', text: 'DeepSeek Harness session started: session-1' },
+    ]);
+    expect(turn.sessionId).toBe('session-1');
+    // A resumed turn reports the id it was given.
+    expect(parser.feed({ type: 'session', sessionId: 'session-1', cwd: '/w' })).toEqual([]);
+  });
+
+  it('logs text and tool calls under the names the dashboard uses, and failed results as errors', () => {
+    const { parser } = fresh();
+    expect(parser.feed({ type: 'text', text: 'Running the tests.' })).toEqual([
+      { kind: 'text', text: 'Running the tests.' },
+    ]);
+    expect(parser.feed({ type: 'thinking', text: 'hmm' })).toEqual([]);
+    expect(
+      parser.feed({
+        type: 'tool_call',
+        callId: 'c1',
+        tool: 'bash',
+        input: { description: 'Run', command: 'npm test' },
+      }),
+    ).toEqual([{ kind: 'tool', name: 'Shell', summary: 'npm test' }]);
+    expect(
+      parser.feed({ type: 'tool_call', callId: 'c2', tool: 'edit', input: { file_path: '/a.js' } }),
+    ).toEqual([{ kind: 'tool', name: 'Edit', summary: '/a.js' }]);
+    expect(
+      parser.feed({
+        type: 'tool_call',
+        callId: 'c3',
+        tool: 'mcp__reviewer_memory__memory_save',
+        input: {},
+      })[0].name,
+    ).toBe('mcp__reviewer_memory__memory_save');
+    expect(parser.feed({ type: 'tool_result', callId: 'c1', status: 'completed', result: 'ok' })).toEqual([]);
+    expect(
+      parser.feed({
+        type: 'tool_result',
+        callId: 'c2',
+        status: 'error',
+        result: 'Error: file has not been read',
+      }),
+    ).toEqual([{ kind: 'tool_error', text: 'Error: file has not been read' }]);
+  });
+
+  it('counts cache reads as input across the steps, and the newest step as the live context', () => {
+    const { turn, parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 900 }));
+    parser.feed(stepEnd({ inputTokens: 50, outputTokens: 10, cacheReadTokens: 1000, cacheWriteTokens: 5 }));
+    // A step whose usage dsh could not total carries none.
+    parser.feed({ type: 'status', phase: 'step_end', turn: 1, step: 3 });
+    expect(turn.inputTokens).toBe(2055);
+    expect(turn.outputTokens).toBe(30);
+    expect(turn.contextTokens).toBe(1065);
+  });
+
+  it('closes a completed turn as a success, with the final answer', () => {
+    const { parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 2 }));
+    parser.feed({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
+    parser.feed({ type: 'final', text: 'All green.' });
+    const [result] = parser.flush({ canceled: false, code: 0 });
+    expect(result).toMatchObject({
+      kind: 'result',
+      subtype: 'success',
+      isError: false,
+      costUsd: null,
+      numTurns: 1,
+      tokens: 12,
+      inputTokens: 10,
+      outputTokens: 2,
+      text: 'All green.',
+    });
+  });
+
+  it("fails a turn that ended in error, with the provider's reason as the line to read", () => {
+    const { parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 0 }));
+    parser.feed({
+      type: 'final',
+      sessionId: 'session-1',
+      reason: { kind: 'error', error: { code: 'AUTH', message: 'invalid API key' } },
+      text: '',
+    });
+    const events = parser.flush({ canceled: false, code: 1 });
+    expect(events[0]).toEqual({ kind: 'tool_error', text: 'AUTH: invalid API key' });
+    expect(events[1]).toMatchObject({ kind: 'result', subtype: 'error', isError: true });
+  });
+
+  it('fails a turn whose stream stopped before it ended, even on a clean exit', () => {
+    const { parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 0 }));
+    expect(parser.flush({ canceled: false, code: 0 })[0]).toMatchObject({ kind: 'result', isError: true });
+  });
+
+  it('surfaces a runner failure outside any turn as an error', () => {
+    const { parser } = fresh();
+    expect(parser.feed({ type: 'error', message: 'session "session-9" does not exist' })).toEqual([
+      { kind: 'tool_error', text: 'session "session-9" does not exist' },
+    ]);
+    expect(parser.flush({ canceled: false, code: 1 })).toEqual([
+      expect.objectContaining({ kind: 'result', subtype: 'error', isError: true }),
+    ]);
+  });
+
+  it('leaves a turn that said nothing to its exit code', () => {
+    const { parser } = fresh();
+    parser.feed({ type: 'session', sessionId: 'session-1', cwd: '/w' });
+    expect(parser.flush({ canceled: false, code: 1 })).toEqual([]);
   });
 });
