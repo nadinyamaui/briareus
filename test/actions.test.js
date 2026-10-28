@@ -130,11 +130,11 @@ describe('delete-self-comments', () => {
 describe('pr-body-summary', () => {
   const action = getAction('pr-body-summary');
 
-  it('needs only the project to compose from: the diff is read on the PR', async () => {
+  it('passes the target repository and PR number because the checkout may be on another branch', async () => {
     const project = { repo: 'acme/shop' };
 
     expect(await action.prompt({ repo: 'acme/shop', prNumber: 5, project })).toBe('BODY');
-    expect(prtasks.prBodyPrompt).toHaveBeenCalledWith({ project });
+    expect(prtasks.prBodyPrompt).toHaveBeenCalledWith({ repo: 'acme/shop', prNumber: 5, project });
   });
 
   it('titles the session after the pull request', () => {
@@ -294,13 +294,22 @@ describe('actionSessionSpec', () => {
     });
   });
 
-  it('leaves the local checkout alone for a gh-only errand, still filed under the PR branch', async () => {
-    const spec = await actionSessionSpec(getAction('delete-self-comments'), {
-      ...context,
-      project: { reviewAuthor: 'morgan' },
-    });
-    expect(spec).toMatchObject({ branch: undefined, local: true, prBranch: 'feature/x', autoClose: true });
-  });
+  it.each(['pr-body-summary', 'test-sheet', 'delete-self-comments'])(
+    '%s leaves the local checkout alone even when the PR branch is unavailable locally',
+    async (id) => {
+      const spec = await actionSessionSpec(getAction(id), {
+        ...context,
+        project: { reviewAuthor: 'morgan' },
+      });
+      expect(spec).toMatchObject({
+        branch: undefined,
+        local: true,
+        prNumber: 4,
+        prBranch: 'feature/x',
+        autoClose: true,
+      });
+    },
+  );
 
   it('requires a canonical feedback snapshot and prepares an assessment instead of a fix', async () => {
     const spec = await actionSessionSpec(getAction('implement-feedback'), context);
