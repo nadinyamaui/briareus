@@ -12,6 +12,10 @@ vi.mock('../lib/github.js', () => ({
 }));
 
 import {
+  checkRunsOf,
+  checksSummary,
+  formatChecksSummary,
+  restCheckRun,
   closeIssue,
   hasLabel,
   LABELS,
@@ -1521,5 +1525,40 @@ describe('updateGithubItem', () => {
     await updateGithubItem(p, 7, kind, { labels: [] });
     await projectPulls(p);
     expect(gh.graphql).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('CI conclusion summaries', () => {
+  it.each([
+    'CANCELLED',
+    'FAILURE',
+    'TIMED_OUT',
+    'ACTION_REQUIRED',
+    'STALE',
+    'STARTUP_FAILURE',
+    'NEW_STATE',
+    null,
+  ])('counts terminal %s as non-success through GraphQL and REST', (conclusion) => {
+    const node = { __typename: 'CheckRun', name: 'Tests', status: 'COMPLETED', conclusion };
+    const graphql = checkRunsOf({ contexts: { nodes: [node] } });
+    const rest = [restCheckRun(node)];
+    for (const runs of [graphql, rest]) {
+      expect(checksSummary(runs)).toMatchObject({ total: 1, passed: 0, failed: 1, pending: 0 });
+      if (conclusion !== 'FAILURE')
+        expect(formatChecksSummary(checksSummary(runs))).toContain((conclusion || 'unknown').toLowerCase());
+    }
+  });
+
+  it.each([
+    ['SUCCESS', 'COMPLETED', 1, 0, 0],
+    ['SKIPPED', 'COMPLETED', 0, 0, 0],
+    ['NEUTRAL', 'COMPLETED', 0, 0, 0],
+    [null, 'IN_PROGRESS', 0, 0, 1],
+    [null, 'QUEUED', 0, 0, 1],
+  ])('preserves %s/%s semantics', (conclusion, status, passed, failed, pending) => {
+    const runs = checkRunsOf({ contexts: { nodes: [{ __typename: 'CheckRun', status, conclusion }] } });
+    expect(checksSummary(runs)).toMatchObject({ total: 1, passed, failed, pending });
+    if (conclusion === 'SKIPPED' || conclusion === 'NEUTRAL')
+      expect(formatChecksSummary(checksSummary(runs))).toContain(`${conclusion.toLowerCase()}: 1`);
   });
 });

@@ -298,6 +298,24 @@ the evidence. If every executed scenario passes, the QA loop stops. Failed
 scenarios are reported back to the task session as QA feedback, and the loop
 stops there too, since acting on that feedback stays a human decision for now.
 Turning the review loop off also cancels the QA run waiting behind it.
+An orchestrator can start companion work with
+`spawn_worker({ title, prompt, repo: "owner/companion", review_loop: true })`,
+or `POST /api/agent/sessions` with `{ "title": "…", "prompt": "…", "repo": "owner/companion", "reviewLoop": true }`
+using its session bearer token. `repo` is optional and defaults to the
+orchestrator's project. It must name an already registered, enabled project
+accessible to the session's inherited owner under current project sharing rules;
+unknown, disabled and unauthorized targets are refused without creating a project.
+The operator must register, enable and grant access to a companion before it can
+be used. This does not expose operator APIs to agent tokens.
+A different target uses its configured worker runtime, then the orchestrator's
+worker pick, then the orchestrator's own runtime; explicit runtime arguments
+still apply. Same-project workers keep the existing worker-pick precedence.
+Workspace, memories, setup, PR tracking, reviews and QA all use the target
+project; parent ownership, updates, spend and close controls stay with the
+orchestrator. `fix_tooling` still targets the dashboard with review armed and
+rejects a `repo` override in the HTTP body. Existing triage and approval gates
+continue to apply.
+
 An orchestrator can toggle QA on its own open task workers independently with
 `set_worker_qa_loop({ id, on })`, or `POST /api/agent/sessions/:id/qa-loop`
 with `{ "on": false }` using its session bearer token; `on` must be a boolean.

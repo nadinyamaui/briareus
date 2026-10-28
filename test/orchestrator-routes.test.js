@@ -3,7 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { workerTranscript } from '../lib/worker-transcript.js';
 import { orchestratorRoutes } from '../lib/orchestrator-routes.js';
 
-let server, base, worker, setQaLoop, child, sendDevMessage, jobEventsFor, startOrchestratorPrAction;
+let server,
+  base,
+  worker,
+  setQaLoop,
+  child,
+  sendDevMessage,
+  jobEventsFor,
+  startOrchestratorPrAction,
+  spawnWorkerSession;
 beforeEach(async () => {
   worker = {
     id: 'w1',
@@ -32,8 +40,10 @@ beforeEach(async () => {
   });
   const sessions = { o1: { id: 'o1', orchestrator: true }, o2: { id: 'o2', orchestrator: true }, w1: worker };
   startOrchestratorPrAction = vi.fn(async () => worker);
+  spawnWorkerSession = vi.fn((parent, opts) => ({ ...worker, ...opts, parentId: parent.id }));
   const routes = orchestratorRoutes({
     startOrchestratorPrAction,
+    spawnWorkerSession,
     agentSession(req, res) {
       const job = sessions[req.headers.authorization?.replace('Bearer ', '')];
       if (!job) res.status(401).json({ error: 'Invalid session token' });
@@ -50,6 +60,7 @@ beforeEach(async () => {
   const app = express();
   app.use(express.json());
   app.post('/api/agent/sessions/pr-actions', routes.prAction);
+  app.post('/api/agent/sessions', routes.spawn);
   app.post('/api/agent/sessions/:id/qa-loop', routes.qaLoop);
   app.get('/api/agent/sessions/:id/question', routes.readQuestion);
   app.post('/api/agent/sessions/:id/question', routes.answerQuestion);
@@ -67,6 +78,73 @@ const post = (body, token = 'o1', id = 'w1') =>
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+
+const spawnWorker = (body, token = 'o1') =>
+  fetch(base, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+describe('scoped worker spawning', () => {
+  it.each([
+    ['invalid', 401],
+    ['w1', 403],
+  ])('refuses %s before spawning', async (token, status) => {
+    expect((await spawnWorker({ prompt: 'x', repo: 'companion/repo' }, token)).status).toBe(status);
+    expect(spawnWorkerSession).not.toHaveBeenCalled();
+  });
+
+  it('forwards the target and loop options without allowing ownership injection', async () => {
+    const res = await spawnWorker({
+      title: 'Companion',
+      prompt: 'x',
+      repo: 'companion/repo',
+      branch: 'stack-base',
+      reviewLoop: true,
+      qaLoop: true,
+      ownerId: 99,
+      parentId: 'o2',
+    });
+    expect(res.status).toBe(201);
+    expect(spawnWorkerSession).toHaveBeenCalledExactlyOnceWith(
+      { id: 'o1', orchestrator: true },
+      {
+        title: 'Companion',
+        prompt: 'x',
+        repo: 'companion/repo',
+        branch: 'stack-base',
+        reviewLoop: true,
+        qaLoop: true,
+        tooling: false,
+        providerId: undefined,
+        model: undefined,
+        effort: undefined,
+      },
+    );
+    expect(await res.json()).toMatchObject({ session: { repo: 'companion/repo', parentId: 'o1' } });
+  });
+
+  it('leaves repo omitted for default and tooling spawns', async () => {
+    for (const tooling of [false, true]) {
+      expect((await spawnWorker({ prompt: 'x', tooling })).status).toBe(201);
+      expect(spawnWorkerSession.mock.lastCall[1]).toMatchObject({ repo: undefined, tooling });
+    }
+  });
+
+  it.each(['Unknown or disabled project', 'Project unavailable for the user who owns this session'])(
+    'returns a refused target without retry or fallback: %s',
+    async (error) => {
+      spawnWorkerSession.mockImplementation(() => {
+        throw new Error(error);
+      });
+      const res = await spawnWorker({ prompt: 'x', repo: 'companion/repo' });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error });
+      expect(spawnWorkerSession).toHaveBeenCalledTimes(1);
+    },
+  );
+});
 
 describe('the scoped worker QA toggle', () => {
   it.each([
