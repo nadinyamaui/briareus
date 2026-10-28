@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import mysql from 'mysql2/promise';
 import { randomBytes } from 'node:crypto';
 import { getConfig } from '../lib/config.js';
+import { createGithubSync } from '../lib/github-sync.js';
 import { createCiStore } from '../lib/ci-store.js';
 import { up, down } from '../migrations/2026_10_28_100000_add_ci_checks.js';
 
@@ -140,6 +141,87 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
     });
   });
 
+  it('imports repeated case variants as one completed legacy execution without false pending recovery', async () => {
+    const repo = 'acme/case-status';
+    const history = [
+      { id: 2, context: 'Deploy', state: 'success', created_at: new Date(start).toISOString() },
+      { id: 1, context: 'deploy', state: 'pending', created_at: new Date(start - 1000).toISOString() },
+    ];
+    await save(history, { sha: 'abc' }, repo);
+    await save(history, { sha: 'abc', observedAt: start + 180000 }, repo);
+    const filters = { ...query, repos: [repo], kind: 'status' };
+    expect((await store.stats(filters)).totals).toMatchObject({ total: 1, pending: 0, succeeded: 1 });
+    expect((await store.stats(filters)).checks).toEqual([
+      expect.objectContaining({ name: 'Deploy', total: 1 }),
+    ]);
+    expect((await store.runs(filters)).runs).toEqual([
+      expect.objectContaining({ id: '2', name: 'Deploy', status: 'completed', runAt: start - 1000 }),
+    ]);
+    expect(await store.pendingCommits(repo)).toEqual([]);
+  });
+
+  it('reaches unattempted pending commits after recurring pagination rate limits', async () => {
+    const repo = 'acme/quota-recovery';
+    const rows = Array.from({ length: 101 }, (_, i) =>
+      check({ head_sha: String(i).padStart(40, '0'), status: 'queued', conclusion: null }),
+    );
+    await save(rows, {}, repo);
+    const requested = [];
+    let remaining;
+    const service = createGithubSync({
+      projects: () => [{ repo }],
+      config: () => ({ githubToken: 'token' }),
+      ci: store,
+      store: {
+        syncState: async () => ({}),
+        syncedItems: async () => new Map(),
+        saveMetadata: async () => {},
+        finishSync: async () => {},
+      },
+      board: async () => ({}),
+      invalidate: () => {},
+      log: () => {},
+      rest: async (_cfg, _method, path) => {
+        if (remaining-- <= 0)
+          throw Object.assign(new Error('rate limited'), { status: 429, resource: 'core' });
+        const url = new URL(path, 'https://api.github.com');
+        const sha = /\/commits\/([^/]+)\//.exec(url.pathname)?.[1];
+        let body = [];
+        if (url.pathname.endsWith('/check-runs')) {
+          requested.push(sha);
+          const row = rows.find((r) => r.head_sha === sha);
+          body = {
+            check_runs: [
+              { ...row, status: sha === rows[100].head_sha ? 'queued' : 'completed', conclusion: 'success' },
+            ],
+          };
+        } else if (sha === rows[0].head_sha && url.pathname.endsWith('/statuses')) {
+          // Three full status pages exhaust the allowance before page four.
+          body = Array.from({ length: 100 }, (_, i) => ({
+            id: Number(url.searchParams.get('page')) * 100 + i,
+            context: 'deploy',
+            state: 'success',
+          }));
+        }
+        return { ok: true, json: async () => body };
+      },
+    });
+    try {
+      for (let tick = 0; tick < 6; tick++) {
+        remaining = 8; // inventory + metadata cost four shared core requests.
+        await service.tick();
+      }
+      expect(requested).toContain(rows[1].head_sha);
+      const result = await store.runs({ ...query, repos: [repo], status: 'completed' });
+      expect(result.runs).toContainEqual(
+        expect.objectContaining({ headSha: rows[1].head_sha, status: 'completed' }),
+      );
+      expect(requested.filter((sha) => sha === rows[0].head_sha)).toHaveLength(1);
+    } finally {
+      service.stop();
+    }
+  });
+
   it('imports newest-first legacy history with the same earliest day and latest verdict as live observations', async () => {
     const early = Date.parse('2026-10-27T23:59:00Z');
     const late = Date.parse('2026-10-28T00:01:00Z');
@@ -185,12 +267,16 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
     const first = await store.pendingCommits('acme/recovery');
     expect(first).toHaveLength(100);
     expect(first[0].sha).toBe(rows[0].head_sha);
+    expect(await store.pendingCommits('acme/recovery')).toEqual(first);
     // Neither unreadable nor empty GitHub reads write observations back.
+    for (const row of first) store.markPendingAttempt('acme/recovery', row.sha);
     expect(await store.pendingCommits('ACME/RECOVERY')).toEqual([
       { sha: rows[100].head_sha, branch: 'main' },
     ]);
+    store.markPendingAttempt('acme/recovery', rows[100].head_sha);
     expect(await store.pendingCommits('acme/recovery')).toEqual(first);
     expect(await store.pendingCommits('acme/other')).toEqual([]);
+    for (const row of first) store.markPendingAttempt('ACME/RECOVERY', row.sha);
     expect(await store.pendingCommits('acme/recovery')).toEqual([
       { sha: rows[100].head_sha, branch: 'main' },
     ]);

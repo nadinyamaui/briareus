@@ -33,7 +33,11 @@ function harness({
     ['/repos/acme/shop/pulls', []],
   ]);
   const errors = [];
-  const ci = { save: vi.fn(async () => {}), pendingCommits: vi.fn(async () => []) };
+  const ci = {
+    save: vi.fn(async () => {}),
+    pendingCommits: vi.fn(async () => []),
+    markPendingAttempt: vi.fn(),
+  };
   const store = {
     syncState: vi.fn(async () => ({ synced_at: cursor })),
     syncedItems: vi.fn(async () => synced),
@@ -112,6 +116,36 @@ describe('durable GitHub synchronization', () => {
       expect.stringContaining('CI collection: GitHub answered 404'),
     );
   });
+
+  it.each(['GitHub', 'ledger', 'rate limit'])(
+    'retains a failed default head after a %s failure even when the branch advances',
+    async (failure) => {
+      const h = harness();
+      const check = { id: 42, name: 'deploy', head_sha: 'old', status: 'completed', conclusion: 'success' };
+      h.routes.set('/repos/acme/shop', { default_branch: 'main' });
+      h.routes.set('/repos/acme/shop/commits/main', { sha: 'old' });
+      h.routes.set('/repos/acme/shop/commits/old/check-runs', { check_runs: [check] });
+      const statuses = '/repos/acme/shop/commits/old/statuses';
+      if (failure === 'GitHub') h.routes.set(statuses, () => ({ ok: false, status: 503 }));
+      if (failure === 'ledger') h.ci.save.mockRejectedValueOnce(new Error('ledger unavailable'));
+      if (failure === 'rate limit')
+        h.routes.set(statuses, Object.assign(new Error('rate limited'), { status: 429, resource: 'core' }));
+      await h.service.tick();
+      expect(h.errors).toHaveLength(1);
+      h.routes.set(statuses, []);
+      h.routes.set('/repos/acme/shop/commits/main', { sha: 'new' });
+      h.ci.save.mockClear();
+      await h.service.tick();
+      expect(h.ci.save).toHaveBeenCalledWith(
+        project.repo,
+        [check],
+        expect.objectContaining({ sha: 'old', branch: 'main' }),
+      );
+      h.rest.mockClear();
+      await h.service.tick();
+      expect(h.rest.mock.calls.some((call) => call[2].includes('/commits/old/'))).toBe(false);
+    },
+  );
 
   it.each(['pending', 'empty repository'])(
     'advances the issue cursor despite unavailable %s CI',

@@ -16,15 +16,21 @@ describe('CI normalization', () => {
     expect(ciCheck({ ...raw, started_at: 'invalid' }, hints).started_at).toBeNull();
   });
 
-  it('coalesces legacy transitions by SHA/context and separates check runs and case-sensitive contexts', () => {
+  it('coalesces case-insensitive legacy contexts while preserving names and check-run identities', () => {
     const pending = ciCheck({ id: 1, context: 'deploy', state: 'pending' }, { sha: 'abc' });
     const success = ciCheck({ id: 2, context: 'deploy', state: 'success' }, { sha: 'abc' });
     expect(pending.external_key).toBe(success.external_key);
     expect(pending).toMatchObject({ status: 'in_progress', conclusion: null, duration_ms: null });
     expect(success).toMatchObject({ status: 'completed', conclusion: 'success' });
-    expect(ciCheck({ id: 3, context: 'Deploy', state: 'success' }, { sha: 'abc' }).external_key).not.toBe(
+    expect(ciCheck({ id: 3, context: 'Deploy', state: 'success' }, { sha: 'abc' }).external_key).toBe(
       success.external_key,
     );
+    expect(ciCheck({ id: 3, context: 'Deploy', state: 'success' }, { sha: 'abc' }).name).toBe('Deploy');
+    expect(ciCheck({ id: 2, context: 'deploy', state: 'success' }, { sha: 'other' }).external_key).not.toBe(
+      success.external_key,
+    );
+    expect(ciCheck({ id: 1, name: 'Deploy', head_sha: 'abc' }).external_key).toBe('1');
+    expect(ciCheck({ id: 2, name: 'deploy', head_sha: 'abc' }).external_key).toBe('2');
     expect(() => ciCheck({ id: 1, name: 'build' })).toThrow('Incomplete CI check');
   });
 });
