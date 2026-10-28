@@ -420,6 +420,30 @@ describe('githubGraphql', () => {
 
     await expect(githubGraphql(cfg, 'q', {})).resolves.toEqual({ ok: 1 });
   });
+
+  it('preserves partial PR data and issue permission errors on the final GraphQL point', async () => {
+    const { githubGraphql } = await freshGithub();
+    const data = { repository: { pullRequests: { nodes: [{ number: 1 }] }, issues: null } };
+    const errors = [
+      { type: 'FORBIDDEN', message: 'Issues permission missing', path: ['repository', 'issues'] },
+    ];
+    const fetchMock = stubFetch(
+      reply({
+        headers: {
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 600),
+        },
+        body: { data, errors },
+      }),
+    );
+    const caught = await githubGraphql(cfg, 'query {}', {}).catch((e) => e);
+    expect(caught).toMatchObject({ data, errors });
+    await expect(githubGraphql(cfg, 'query {}', {})).rejects.toMatchObject({
+      status: 429,
+      rateLimited: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('upsertPrComment', () => {

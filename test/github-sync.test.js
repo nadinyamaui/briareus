@@ -163,6 +163,57 @@ describe('durable GitHub synchronization', () => {
     expect(h.store.finishSync).not.toHaveBeenCalled();
   });
 
+  it.each([6000, 7000])(
+    'retains webhook work when core recovery finishes at %s after reset',
+    async (recoveryAt) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const h = harness({ now: () => Date.now() });
+      h.budget.mockImplementation(() => {
+        if (Date.now() < 6000)
+          throw Object.assign(new Error('core exhausted'), { status: 429, resource: 'core', retryAt: 6000 });
+      });
+      h.board.mockImplementationOnce(async () => {
+        await new Promise((resolve) => setTimeout(resolve, recoveryAt));
+        return { issuesError: null, issuesTruncated: false };
+      });
+      h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 1 } });
+      const work = h.service.flush(project.repo);
+      await vi.advanceTimersByTimeAsync(recoveryAt);
+      await work;
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1]);
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each([
+    Object.assign(new Error('bad gateway'), { status: 502 }),
+    new Error('network unavailable'),
+    Object.assign(new Error('graphql exhausted'), { status: 429, resource: 'graphql', retryAt: 9000 }),
+  ])('retains the core retry when independent board recovery fails with $message', async (boardError) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const h = harness({ now: () => Date.now() });
+    h.budget.mockImplementation(() => {
+      if (Date.now() < 6000)
+        throw Object.assign(new Error('core exhausted'), { status: 429, resource: 'core', retryAt: 6000 });
+    });
+    h.board.mockRejectedValueOnce(boardError);
+    h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 1 } });
+    await h.service.flush(project.repo);
+    expect(h.store.saveItem).not.toHaveBeenCalled();
+    expect(h.errors).toEqual([`${project.repo}: ${boardError.message}`, `${project.repo}: core exhausted`]);
+    expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, null, boardError.message);
+    await vi.advanceTimersByTimeAsync(5999);
+    expect(h.rest).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1]);
+    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('checkpoints webhook items, expanded targets and metadata across quota windows', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
@@ -257,6 +308,31 @@ describe('durable GitHub synchronization', () => {
     expect(h.rest).toHaveBeenCalledTimes(detailReads);
     expect(h.store.saveItem).toHaveBeenCalledTimes(1);
     expect(h.invalidate).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retries a deferred board when error recording outlasts its cooldown', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const h = harness({ now: () => Date.now() });
+    h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 1 } });
+    await h.service.flush(project.repo);
+    await vi.advanceTimersByTimeAsync(15000);
+    h.service.onWebhook('push', { repository: { full_name: project.repo }, ref: 'refs/heads/main' });
+    await h.service.flush(project.repo);
+    const detailReads = h.rest.mock.calls.length;
+    h.board.mockRejectedValueOnce(
+      Object.assign(new Error('graphql exhausted'), { status: 429, resource: 'graphql', retryAt: 66000 }),
+    );
+    h.store.finishSync.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 7000));
+    });
+    await vi.advanceTimersByTimeAsync(51999);
+    expect(h.board).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(h.board).toHaveBeenCalledTimes(3);
+    expect(h.rest).toHaveBeenCalledTimes(detailReads);
+    expect(h.store.saveItem).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -624,7 +700,7 @@ describe('durable GitHub synchronization', () => {
     expect(h.errors).toEqual([`${project.repo}: graphql exhausted`]);
   });
 
-  it('records a GraphQL board rate limit without retrying after core exhaustion', async () => {
+  it('records both board and core rate limits after core exhaustion', async () => {
     const h = harness({ initial: [issue(1)] });
     h.routes.set(
       '/repos/acme/shop/issues/1/comments',
@@ -643,7 +719,9 @@ describe('durable GitHub synchronization', () => {
     expect(h.board).toHaveBeenCalledTimes(1);
     expect(h.invalidate).not.toHaveBeenCalled();
     expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
-    expect(h.errors).toEqual([`${project.repo}: graphql exhausted`]);
+    expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, null, 'graphql exhausted');
+    expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, null, 'core exhausted');
+    expect(h.errors).toEqual([`${project.repo}: graphql exhausted`, `${project.repo}: core exhausted`]);
   });
 
   it.each(['failure', 'error'])(
