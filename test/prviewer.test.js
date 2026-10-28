@@ -206,7 +206,7 @@ describe('in-app pull request content', () => {
     expect(result.warnings).toEqual([]);
   });
 
-  it('does not mark cancelled or stale check runs as failed', async () => {
+  it('marks cancelled and stale check runs as failed', async () => {
     respond = (path) => {
       if (path.endsWith('/pulls/42')) return ok(raw);
       if (path.includes('/status?')) return ok({ total_count: 0, statuses: [] });
@@ -220,8 +220,8 @@ describe('in-app pull request content', () => {
     };
     const result = await pullRequestView(project, 42, { section: 'checks' });
     expect(result.checks).toMatchObject([
-      { name: 'old', conclusion: 'cancelled', failed: false },
-      { name: 'stale', conclusion: 'stale', failed: false },
+      { name: 'old', conclusion: 'cancelled', failed: true },
+      { name: 'stale', conclusion: 'stale', failed: true },
     ]);
   });
 

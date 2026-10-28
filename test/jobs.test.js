@@ -11356,6 +11356,22 @@ describe('the CI verdict a worker hands its orchestrator', () => {
         awaitingAnswer: true,
       },
       worker('ci-green', 201),
+      worker('ci-cancelled', 215),
+      worker('ci-neutral', 216),
+      worker('ci-qa', 217, { qaLoop: { done: false } }),
+      worker('ci-pending', 218),
+      worker('ci-terminal', 219),
+      ...[
+        ['ci-qa-failed', 220, { done: true, failedScenarios: 1 }],
+        ['ci-qa-error', 221, { done: true, failedScenarios: 0, verdictError: 'could not read sheet' }],
+        [
+          'ci-qa-failure',
+          222,
+          { done: true, failedScenarios: 0, failure: { kind: 'interrupted', reason: 'session stopped' } },
+        ],
+        ['ci-qa-passed', 223, { done: true, failedScenarios: 0 }],
+        ['ci-qa-verdict', 224, { done: true, failedScenarios: 0, pendingVerdict: { prNumber: 224 } }],
+      ].map(([id, number, qaLoop]) => worker(id, number, { reviewLoop: { done: true, rounds: 1 }, qaLoop })),
       worker('ci-red', 202),
       worker('ci-loop', 203, { reviewLoop: { rounds: 2, done: false } }),
       // Converged on an empty block whose publishing policy withheld code-approved.
@@ -11545,6 +11561,106 @@ describe('the CI verdict a worker hands its orchestrator', () => {
         },
       };
     });
+  });
+
+  it('reports two successes and two cancellations without a green or repeated notice', async () => {
+    answers.set(215, () =>
+      rollupOf([
+        identified(1, 'Gitleaks secrets', 'success', 't1'),
+        identified(2, 'Semgrep security', 'success', 't2'),
+        identified(3, 'Fast checks', 'cancelled', 't3'),
+        identified(4, 'Tests and mutation', 'cancelled', 't4'),
+      ]),
+    );
+    syncSessionsOn('acme/ci', null, 215);
+    await vi.waitFor(() => expect(notices('ci-cancelled')).toContain('2 of 4 failing'));
+    const job = getJob('ci-cancelled');
+    expect(job.prStatus.checks).toMatchObject({ total: 4, passed: 2, failed: 2, pending: 0 });
+    expect(workerSummary(job).pr.checks).toBe('✓2 ✗2 ●0; cancelled: 2');
+    const notice = notices('ci-cancelled');
+    expect(notice).toContain('Fast checks: cancelled');
+    expect(notice).toContain('Tests and mutation: cancelled');
+    expect(notice).not.toContain('every check');
+    expect(notice).not.toContain('ready to merge');
+    const syncedAt = job.prStatus.syncedAt;
+    syncSessionsOn('acme/ci', null, 215);
+    await vi.waitFor(() => expect(job.prStatus.syncedAt).not.toBe(syncedAt));
+    expect(notices('ci-cancelled')).toBe(notice);
+  });
+
+  it.each(['timed_out', 'action_required', 'stale', 'startup_failure', 'unknown'])(
+    'does not announce %s as green',
+    async (conclusion) => {
+      answers.set(219, () => rollupOf([identified(conclusion, 'Tests', conclusion, conclusion)]));
+      syncSessionsOn('acme/ci', null, 219);
+      await vi.waitFor(() => expect(notices('ci-terminal')).toContain(`Tests: ${conclusion}`));
+      expect(notices('ci-terminal')).not.toContain('ready to merge');
+      expect(notices('ci-terminal')).not.toContain('every check');
+    },
+  );
+
+  it('labels skipped and neutral honestly while keeping their non-blocking semantics', async () => {
+    answers.set(216, () =>
+      rollupOf([
+        identified(1, 'Fast checks', 'success', 't1'),
+        identified(2, 'Optional', 'skipped', 't2'),
+        identified(3, 'Advisory', 'neutral', 't3'),
+      ]),
+    );
+    syncSessionsOn('acme/ci', null, 216);
+    await vi.waitFor(() => expect(notices('ci-neutral')).toContain('neutral: 1, skipped: 1'));
+    expect(notices('ci-neutral')).not.toContain('every check');
+    expect(notices('ci-neutral')).toContain('ready to merge');
+    expect(workerSummary(getJob('ci-neutral')).pr.checks).toBe('✓1 ✗0 ●0; neutral: 1, skipped: 1');
+  });
+
+  it('waits for QA even without a review loop', async () => {
+    syncSessionsOn('acme/ci', null, 217);
+    await vi.waitFor(() => expect(notices('ci-qa')).toContain('Its QA run has not reported yet'));
+    expect(notices('ci-qa')).not.toContain('ready to merge');
+    expect(getJob('ci-qa').qaLoop.done).toBe(false);
+  });
+
+  it.each([
+    ['ci-qa-failed', 220, 'QA failed 1 scenario(s)'],
+    ['ci-qa-error', 221, 'the QA verdict could not be read: could not read sheet'],
+    ['ci-qa-failure', 222, 'QA interrupted: session stopped'],
+  ])('does not announce readiness after green CI with unresolved QA: %s', async (id, number, problem) => {
+    const job = getJob(id);
+    const qaBefore = structuredClone(job.qaLoop);
+    syncSessionsOn('acme/ci', null, number);
+    await vi.waitFor(() => expect(notices(id)).toContain(problem));
+    expect(job.prStatus.checks).toMatchObject({ total: 2, passed: 2, failed: 0, pending: 0 });
+    expect(notices(id)).toContain('Do not merge');
+    expect(notices(id)).not.toContain('ready to merge');
+    expect(notices(id)).not.toContain('Nothing is pending');
+    expect(job.qaLoop).toEqual(qaBefore);
+  });
+
+  it('keeps waiting for an explicitly pending QA verdict', async () => {
+    syncSessionsOn('acme/ci', null, 224);
+    await vi.waitFor(() => expect(notices('ci-qa-verdict')).toContain('Its QA run has not reported yet'));
+    expect(notices('ci-qa-verdict')).not.toContain('ready to merge');
+  });
+
+  it('announces readiness after green CI with review and QA passed', async () => {
+    syncSessionsOn('acme/ci', null, 223);
+    await vi.waitFor(() => expect(notices('ci-qa-passed')).toContain('every check on PR #223 passed (2/2)'));
+    expect(notices('ci-qa-passed')).toContain('ready to merge');
+    expect(notices('ci-qa-passed')).not.toContain('Do not merge');
+    expect(getJob('ci-qa-passed').qaLoop).toMatchObject({ done: true, failedScenarios: 0 });
+  });
+
+  it('does not announce a partially pending rollup', async () => {
+    answers.set(218, () =>
+      rollupOf([
+        identified(1, 'Fast checks', 'success', 't1'),
+        { __typename: 'CheckRun', name: 'Tests', status: 'IN_PROGRESS', conclusion: null },
+      ]),
+    );
+    syncSessionsOn('acme/ci', null, 218);
+    await vi.waitFor(() => expect(getJob('ci-pending').prStatus.checks.pending).toBe(1));
+    expect(notices('ci-pending')).toBe('');
   });
 
   it('hands a green run to the orchestrator as the cue to merge', async () => {

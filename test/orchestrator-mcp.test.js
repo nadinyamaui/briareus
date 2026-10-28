@@ -411,6 +411,7 @@ describe('the worker tools', () => {
           sessions: [
             worker({ awaitingAnswer: true, pr: { number: 7, state: 'open', checks: '✓2 ✗0 ●1' } }),
             worker({ id: 'w2', title: 'Docs', status: 'running', costUsd: null, lastText: null }),
+            worker({ id: 'w3', pr: { number: 8, state: 'open', checks: '✓2 ✗2 ●0; cancelled: 2' } }),
           ],
         },
       }),
@@ -424,6 +425,7 @@ describe('the worker tools', () => {
     expect(lines[0]).toContain('PR #7 open (✓2 ✗0 ●1)');
     expect(lines[0]).toContain('$0.50');
     expect(lines[1]).toBe('w2 [running] Docs · branch dev-w1 · Cheap entry claude-haiku-4-5');
+    expect(lines[2]).toContain('PR #8 open (✓2 ✗2 ●0; cancelled: 2)');
   });
 
   it('list_workers says so when there are none yet', async () => {
