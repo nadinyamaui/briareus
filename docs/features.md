@@ -96,6 +96,9 @@ and pending approvals. Recovery reports inspect interrupted sessions before
 resuming them. Maintenance draining blocks new work while existing work
 settles. Registered SSH servers support explicit approval or immediate
 execution according to their configured permissions.
+Linux servers can opt into [resource monitoring](ssh-resource-monitoring.md)
+through a separate outbound HTTPS service: CPU, memory, disks and network sampled once a minute, with a persistent
+rolling 24-hour history exposed through the API.
 
 Deployment planning and dispatch use GitHub workflows and immutable source
 revisions. Laravel Forge and Envoyer expose their configured accounts through

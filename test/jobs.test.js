@@ -131,6 +131,7 @@ vi.mock('../lib/db.js', () => ({
   saveAppSetting: vi.fn(async (key, value) => {
     state.appSettings[key] = structuredClone(value);
   }),
+  updateAppSetting: vi.fn(),
   saveJob: vi.fn(async () => {}),
   saveTaskSession: vi.fn(async () => {}),
   saveJobEvents: vi.fn(async () => {}),
