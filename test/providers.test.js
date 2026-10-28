@@ -2701,6 +2701,45 @@ describe('the DeepSeek Harness parser', () => {
     expect(turn.rootCachedInputTokens).toBeNull();
   });
 
+  it("adds a partial step's measured usage as a floor, leaving its cache reads and the context alone", () => {
+    const { turn, parser } = fresh();
+    for (let i = 0; i < 3; i++)
+      parser.feed(stepEnd({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    // A child's step whose first attempt got an HTTP 429 before its retry succeeded.
+    parser.feed({
+      type: 'subagent_usage',
+      sessionId: 'c',
+      parentSessionId: 's',
+      model: 'deepseek-flash',
+      usage: { inputTokens: 100000, outputTokens: 2000, cacheReadTokens: 0 },
+      partial: true,
+    });
+    expect(turn).toMatchObject({ inputTokens: 103000, outputTokens: 2060, cachedInputTokens: null });
+    expect(turn.rootCachedInputTokens).toBe(0);
+    expect(turn.subagentUsage['deepseek-flash']).toEqual({
+      inputTokens: 100000,
+      outputTokens: 2000,
+      cachedInputTokens: null,
+    });
+
+    // A root step the projection left without usage after a context-overflow retry.
+    parser.feed({ type: 'status', phase: 'step_end', turn: 1, step: 4 });
+    expect(
+      parser.feed({
+        type: 'root_usage',
+        sessionId: 's',
+        model: 'deepseek-flash',
+        usage: { inputTokens: 800000, outputTokens: 2000, cacheReadTokens: 0 },
+        partial: true,
+      }),
+    ).toEqual([]);
+    expect(turn).toMatchObject({ inputTokens: 903000, outputTokens: 4060, contextTokens: 1020 });
+    expect(turn.rootCachedInputTokens).toBeNull();
+    expect(Object.keys(turn.subagentUsage)).toEqual(['deepseek-flash']);
+    parser.feed({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
+    expect(parser.flush().at(-1)).toMatchObject({ inputTokens: 903000, outputTokens: 4060, tokens: 1020 });
+  });
+
   it('books a model id named like an Object property under its own key', () => {
     const { turn, parser } = fresh();
     parser.feed(stepEnd({ inputTokens: 300000, outputTokens: 60, cacheReadTokens: 0 }));

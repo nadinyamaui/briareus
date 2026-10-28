@@ -104,7 +104,7 @@ describe('the dsh sub-agent usage plugin', () => {
     expect(lines.map((l) => l.usage)).toEqual([{ inputTokens: 100, outputTokens: 10, cacheReadTokens: 30 }]);
   });
 
-  it('drops a cache bucket one attempt left out, and a step with an attempt that reported nothing', () => {
+  it('drops a cache bucket one attempt left out', () => {
     const { lines, emit } = mount();
     emit(child, {
       type: 'assistant/attempt',
@@ -112,10 +112,47 @@ describe('the dsh sub-agent usage plugin', () => {
     });
     emit(child, message('deepseek-flash', { inputTokens: 2, outputTokens: 2, cacheReadTokens: 2 }));
     emit(child, stepEnd);
-    emit(child, { type: 'assistant/attempt', data: { stream: [] } });
-    emit(child, message('deepseek-flash', { inputTokens: 9, outputTokens: 9 }));
-    emit(child, stepEnd);
     expect(lines.map((l) => l.usage)).toEqual([{ inputTokens: 3, outputTokens: 3 }]);
+  });
+
+  it('keeps what a retried child step measured, as partial, when an attempt reported nothing', () => {
+    const { lines, emit } = mount();
+    // An HTTP 429 attempt, then its retry.
+    emit(child, { type: 'assistant/attempt', data: { stream: [] } });
+    emit(child, message('deepseek-flash', { inputTokens: 100000, outputTokens: 2000, cacheReadTokens: 0 }));
+    emit(child, stepEnd);
+    // A step where nothing was measured writes nothing.
+    emit(child, { type: 'assistant/attempt', data: { stream: [] } });
+    emit(child, message('deepseek-flash', undefined));
+    emit(child, stepEnd);
+    expect(lines).toEqual([
+      {
+        type: 'subagent_usage',
+        sessionId: 'child-1',
+        parentSessionId: 'session-root',
+        model: 'deepseek-flash',
+        usage: { inputTokens: 100000, outputTokens: 2000, cacheReadTokens: 0 },
+        partial: true,
+      },
+    ]);
+  });
+
+  it('writes a root step only when the projection drops its usage for an unmeasured attempt', () => {
+    const { lines, emit } = mount();
+    emit(root, message('deepseek-flash', { inputTokens: 1000, outputTokens: 20 }));
+    emit(root, stepEnd);
+    emit(root, { type: 'assistant/attempt', data: { stream: [] } });
+    emit(root, message('deepseek-flash', { inputTokens: 802000, outputTokens: 2060, cacheReadTokens: 0 }));
+    emit(root, stepEnd);
+    expect(lines).toEqual([
+      {
+        type: 'root_usage',
+        sessionId: 'session-root',
+        model: 'deepseek-flash',
+        usage: { inputTokens: 802000, outputTokens: 2060, cacheReadTokens: 0 },
+        partial: true,
+      },
+    ]);
   });
 
   it("reports every compaction call's usage and model, the root's included", async () => {
