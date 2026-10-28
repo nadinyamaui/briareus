@@ -11304,8 +11304,8 @@ describe('manual session metadata', () => {
   it('lists pinned sessions first, the most recently pinned leading, until unpinned', () => {
     const order = () =>
       listDevSessions()
-        .map((s) => s.id)
-        .filter((id) => id.startsWith('manual-'));
+        .filter((s) => s.repo === 'acme/manual')
+        .map((s) => s.id);
     const unpinned = order();
     vi.useFakeTimers({ now: Date.parse('2026-10-27T10:00:00Z'), toFake: ['Date'] });
     try {
