@@ -394,15 +394,26 @@ describe('solveConflicts / fixFailingChecks', () => {
 
 describe('prBodyPrompt', () => {
   it('sends the team template verbatim inside a fence', () => {
-    const prompt = prBodyPrompt({ project: null });
-    expect(prompt).toMatch(/^Update the PR body with the following/);
+    const prompt = prBodyPrompt({ ...base, project: null });
+    expect(prompt).toContain('pull request #12 in acme/shop');
     expect(prompt).toContain('```');
     expect(prompt).toContain('Risk Assessment');
   });
 
   it('a project override replaces the fenced template', () => {
-    const prompt = prBodyPrompt({ project: { promptTemplates: { prBody: 'OUR TEMPLATE' } } });
-    expect(prompt).toContain('OUR TEMPLATE');
+    const prompt = prBodyPrompt({ ...base, project: { promptTemplates: { prBody: 'OUR TEMPLATE' } } });
+    expect(prompt).toContain('```\nOUR TEMPLATE\n```');
     expect(prompt).not.toContain('Risk Assessment');
+  });
+
+  it('reads and edits the named PR through GitHub while leaving the local checkout alone', () => {
+    const prompt = prBodyPrompt(base);
+    expect(prompt).toContain('gh pr view 12 --repo acme/shop');
+    expect(prompt).toContain('gh pr diff 12 --repo acme/shop');
+    expect(prompt).toContain('gh pr edit 12 --repo acme/shop --body-file <file>');
+    expect(prompt).toContain('unrelated branch');
+    expect(prompt).toContain('never let gh infer the pull request');
+    expect(prompt).toContain('never work from `git diff`, `git log` or the working tree');
+    expect(prompt).toContain('Do not switch branches');
   });
 });

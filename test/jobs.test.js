@@ -4815,6 +4815,7 @@ describe('webhook deliveries', () => {
     'hk-rotate',
     'hk-public',
     'hk-guard',
+    'hk-pr-body',
     'hk-drain',
     'hk-keep',
     'hk-open',
@@ -6111,6 +6112,50 @@ describe('webhook deliveries', () => {
     expect(context.indexOf('# Pending commits')).toBeGreaterThan(context.indexOf('# Webhook deliveries'));
     await cli.finish(job);
   });
+
+  it.each(['opencode', 'claude'])(
+    'a PR body action protects pending commits and allows authorized follow-ups (%s)',
+    async (binary) => {
+      const { prompts } = fakeCli(binary);
+      const job = getJob('hk-pr-body');
+      Object.assign(job, {
+        chats: undefined,
+        local: true,
+        activity: 'pr-body-summary',
+        branch: 'feature-b',
+        prBranch: 'pr-a',
+        startedOnPr: 221,
+      });
+      sendDevMessage(job.id, 'Update the description of PR #221.');
+      const systemPrompt = () => {
+        const args = spawn.mock.calls.findLast(([cmd]) => cmd === '/mock/agent')[1];
+        return fs.readFileSync(args[args.indexOf('--append-system-prompt-file') + 1], 'utf8');
+      };
+      const context = binary === 'claude' ? systemPrompt() : prompts[0].split('</workspace-context>')[0];
+      expect(context).toContain('Do not commit or push');
+      expect(context).toContain('for this description-only task');
+      expect(context).toContain("any pending commits belong to the developer's work");
+      expect(context).toContain('For a later coding follow-up explicitly authorized by the user');
+      expect(context).toContain('you may modify files, commit and push the authorized changes');
+      expect(context).toContain('Do not automatically publish unrelated pending commits');
+      expect(context).toContain("or include them in a push without the user's explicit authorization");
+      expect(context).not.toContain('# Pending commits');
+      expect(context).not.toContain('git push -u origin HEAD');
+      await cli.finish(job);
+
+      if (binary === 'claude') {
+        sendDevMessage(job.id, 'Implement the follow-up, commit it and push it.');
+        expect(job.activity).toBe('pr-body-summary');
+        expect(systemPrompt()).toBe(context);
+        expect(prompts.at(-1)).toContain('Implement the follow-up, commit it and push it.');
+        await cli.finish(job);
+      }
+
+      // Ordinary local coding sessions and actions that own their clone still push.
+      expect(pushProtocol({ local: true, activity: 'chat' })).toContain('# Pending commits');
+      expect(pushProtocol({ local: false, activity: 'fix-checks' })).toContain('# Pending commits');
+    },
+  );
 
   it('rotating raises the epoch the key is derived from, and nothing else', () => {
     const job = getJob('hk-rotate');
