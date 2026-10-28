@@ -33,8 +33,9 @@ second user needs WAHA Plus to link a phone). See
 Sessions run Claude Code, Codex, Grok, opencode or Z.AI in their own workspace
 clones. Projects can reserve a database server per open session or use a
 local checkout. An admin's interactive session can edit its project's `.env`
-template, the file every checkout is seeded from, with MCP tools. Clients can stream transcripts, send or queue messages,
-cancel turns, compact context, close and reopen sessions, and attach files
+template, the file every checkout is seeded from, with MCP tools. Clients can
+stream transcripts, send or queue messages, cancel turns, compact context,
+pin sessions to the top of the list, close and reopen sessions, and attach files
 or transcribed voice notes. Claude `/btw` questions use a separate fork of
 the conversation. Orchestrators coordinate worker sessions and their
 review, fix and QA work.
