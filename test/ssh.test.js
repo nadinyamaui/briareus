@@ -11,7 +11,12 @@ beforeEach(async () => {
   job = { id: 'session', repo: input.repo, status: 'running', turns: 0, title: 'Deploy' };
   execute = vi.fn(async () => ({ stdout: 'ok', stderr: '', exitCode: 0, error: null }));
   save = vi.fn(async () => {});
-  service = createSshService({ load: async () => [], save, execute, getJob: () => job });
+  service = createSshService({
+    load: async () => structuredClone(save.mock.calls.at(-1)?.[1] ?? []),
+    save,
+    execute,
+    getJob: () => job,
+  });
   await service.init();
 });
 afterEach(() => {
@@ -242,7 +247,13 @@ describe('SSH permission boundary', () => {
     let shared = true;
     job.ownerId = 2;
     const mayUse = vi.fn((current) => shared && !current.disabled);
-    service = createSshService({ load: async () => [], save, execute, getJob: () => job, mayUse });
+    service = createSshService({
+      load: async () => structuredClone(save.mock.calls.at(-1)?.[1] ?? []),
+      save,
+      execute,
+      getJob: () => job,
+      mayUse,
+    });
     await service.init();
     const { request } = await submit();
     job.status = 'idle';
@@ -259,7 +270,13 @@ describe('SSH permission boundary', () => {
 
   it('holds a session to the servers its owner may use', async () => {
     const mayUse = vi.fn((session, server) => session.ownerId !== 2 || server.label === 'shared');
-    service = createSshService({ load: async () => [], save, execute, getJob: () => job, mayUse });
+    service = createSshService({
+      load: async () => structuredClone(save.mock.calls.at(-1)?.[1] ?? []),
+      save,
+      execute,
+      getJob: () => job,
+      mayUse,
+    });
     await service.init();
     const shared = await service.create({ ...input, label: 'shared' });
     const other = await service.create({ ...input, label: 'other', host: 'other.example.com' });
