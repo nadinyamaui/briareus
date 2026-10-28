@@ -51,6 +51,7 @@ function sitter({ projects = [project()], pulls = [pr()], stored = {}, ...over }
     hasSession: () => false,
     slots: () => Infinity,
     start,
+    assessFeedback: async () => false,
     load: async () => stored,
     save: async (v) => saved.push(JSON.parse(JSON.stringify(v))),
     ...over,
@@ -103,6 +104,28 @@ describe('errandsFor', () => {
 });
 
 describe('babysitter tick', () => {
+  it('defers normal errands while feedback is held and continues them after intake failures', async () => {
+    const held = sitter({ assessFeedback: async () => true });
+    await held.b.tick();
+    expect(held.start).not.toHaveBeenCalled();
+    const partial = sitter({
+      pulls: [pr({ recommended: 'solve-conflicts', checks: 'failure' }), pr({ number: 8 })],
+      assessFeedback: async (_project, row) => {
+        if (row.number === 7) throw new Error('closed during lookup');
+        return false;
+      },
+    });
+    await partial.b.tick();
+    expect(partial.start).toHaveBeenCalledTimes(2);
+    expect(partial.start.mock.calls[0][0]).toBe('solve-conflicts');
+    expect(partial.start.mock.calls[0][2].number).toBe(7);
+    expect(partial.start.mock.calls[1][2].number).toBe(8);
+    await partial.b.tick();
+    expect(partial.start).toHaveBeenCalledTimes(3);
+    expect(partial.start.mock.calls[2][0]).toBe('fix-checks');
+    expect(partial.start.mock.calls[2][2].number).toBe(7);
+  });
+
   it('starts the errand on the project’s review runtime and remembers the head commit', async () => {
     const { b, start, saved } = sitter();
     await b.tick();
