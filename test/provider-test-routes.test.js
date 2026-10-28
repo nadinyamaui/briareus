@@ -116,6 +116,11 @@ describe('POST /api/providers/test on a gateway with no model list', () => {
     expect(chats[0].path).toBe('/v1/messages');
   });
 
+  it("probes a dsh form without models as dsh's own default", async () => {
+    expect(await test({ binary: 'dsh', models: [], defaultModel: '' })).toBe('deepseek-flash');
+    expect(chats[0].path).toBe('/v1/messages');
+  });
+
   it("keeps a claude form's stored default", async () => {
     expect(
       await test({

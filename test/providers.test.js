@@ -2582,6 +2582,56 @@ describe('the DeepSeek Harness parser', () => {
     expect(turn.inputTokens).toBe(2055);
     expect(turn.outputTokens).toBe(30);
     expect(turn.contextTokens).toBe(1065);
+    // The reads are kept as measured, so cost estimates need not assume a cache share.
+    expect(turn.cachedInputTokens).toBe(1900);
+  });
+
+  it('keeps a measured zero of cache reads, and none once a step leaves them out', () => {
+    const cold = fresh();
+    cold.parser.feed(stepEnd({ inputTokens: 100000, outputTokens: 20, cacheReadTokens: 0 }));
+    expect(cold.turn.cachedInputTokens).toBe(0);
+
+    const { turn, parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 900 }));
+    parser.feed(stepEnd({ inputTokens: 50, outputTokens: 10 }));
+    parser.feed(stepEnd({ inputTokens: 50, outputTokens: 10, cacheReadTokens: 900 }));
+    expect(turn.inputTokens).toBe(2000);
+    expect(turn.cachedInputTokens).toBeNull();
+  });
+
+  it('logs the end of an answer the text event cut, once', () => {
+    const { parser } = fresh();
+    const answer = `${'x'.repeat(10000)}TAIL`;
+    const capped = answer.slice(0, 8192);
+    expect(parser.feed({ type: 'text', text: capped, truncated: true })).toEqual([
+      { kind: 'text', text: capped },
+    ]);
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 2 }));
+    parser.feed({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
+    const events = parser.feed({ type: 'final', text: answer });
+    expect(events).toEqual([{ kind: 'text', text: answer.slice(8192) }]);
+    expect(capped + events[0].text).toBe(answer);
+  });
+
+  it('logs nothing more when the streamed text was the whole answer', () => {
+    const { parser } = fresh();
+    parser.feed({ type: 'text', text: 'Looking.' });
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 2 }));
+    parser.feed({ type: 'text', text: 'All ' });
+    parser.feed({ type: 'text', text: 'green.' });
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 2 }));
+    parser.feed({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
+    expect(parser.feed({ type: 'final', text: 'All green.' })).toEqual([]);
+  });
+
+  it('logs the whole answer when the streamed blocks were each cut', () => {
+    const { parser } = fresh();
+    parser.feed({ type: 'text', text: 'aaa', truncated: true });
+    parser.feed({ type: 'text', text: 'bbb', truncated: true });
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 2 }));
+    expect(parser.feed({ type: 'final', text: 'aaaaabbbbb' })).toEqual([
+      { kind: 'text', text: 'aaaaabbbbb' },
+    ]);
   });
 
   it('closes a completed turn as a success, with the final answer', () => {
