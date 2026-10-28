@@ -806,6 +806,14 @@ row, edited through **`/api/v1/settings/projects`**:
   (label moves, issue updates, whatever the team's workflow asks for), and
   whether the session goes on to **fix** what it found
 - **Checkout .env**: written into the clone as `.env` before setup runs
+  each time it is prepared, so an edit to a checkout's own `.env` does not last.
+  An admin's interactive Claude or Codex session can change the template
+  itself with the `project_env_read` / `project_env_set` MCP tools
+  (`GET`/`POST /api/agent/project-env` for other CLIs): keys are set or
+  removed in place, the same edit goes into that session's checkout (its
+  session `DB_DATABASE` kept), and the transcript notes the key names, never
+  their values. Members' sessions, reviews, QA, workers, previews and
+  unattended turns do not get the tools
 - **Prompts**: this repository's own wording for any of the prompts below;
   anything left empty uses the shared text
 - **Run**: the shell commands ▶ Run executes in the checkout (`{port}`,

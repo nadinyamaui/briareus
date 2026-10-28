@@ -371,6 +371,7 @@ import {
   setSessionWebhook,
   setSlackAccess,
   setExternalMcp,
+  setProjectEnvOwner,
   slackProtocol,
   mailProtocol,
   whatsappProtocol,
@@ -16449,6 +16450,30 @@ describe('the shared browser in a session', () => {
     },
   );
 
+  it.each(['grok', 'opencode'])(
+    'delivers project .env instructions to resumed %s sessions once their owner may edit',
+    async (binary) => {
+      const job = getJob('br-turn');
+      const chats = job.chats;
+      job.browser = false;
+      job.chats = { [state.provider.id]: { started: true, sessionId: 'ses_project_env_existing' } };
+      try {
+        setProjectEnvOwner(() => false);
+        const off = await turn(job, 'Continue', { binary });
+        await off.settled;
+        expect(off.seen.prompt).not.toContain('# Project .env');
+        setProjectEnvOwner(() => true);
+        const on = await turn(job, 'Add MAIL_HOST to the project .env', { binary });
+        await on.settled;
+        expect(on.seen.prompt).toContain('# Project .env');
+        expect(on.seen.prompt).toContain('$REVIEWER_MEMORY_URL/api/agent/project-env');
+      } finally {
+        setProjectEnvOwner(() => false);
+        job.chats = chats;
+      }
+    },
+  );
+
   it('mounts the project’s own MCP servers: a remote one through the proxy, behind the session token', async () => {
     const job = getJob('br-turn');
     job.browser = false;
@@ -18281,6 +18306,51 @@ describe('automatic recovery after a server restart', () => {
     );
     expect(child.error).not.toContain('\x1b');
     expect(child.events.filter((e) => e.kind === 'setup').map((e) => e.text)).toContain('+1 vendor frames');
+  });
+
+  it.each([
+    ['an emptied template ("\\n") empties', '\n', '\n'],
+    ['no template ("") leaves', '', 'OLD=secret\n'],
+  ])('%s a reused checkout’s .env', async (_label, template, expected) => {
+    const checkout = path.join(root, 'acme__restart');
+    fs.mkdirSync(checkout);
+    const git = (args) => {
+      const result = spawnSync('git', args, { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git(['-C', checkout, 'init', '-b', 'feature']);
+    git([
+      '-C',
+      checkout,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'fixture',
+    ]);
+    const remote = path.join(root, 'remote.git');
+    git(['clone', '--bare', checkout, remote]);
+    git(['-C', checkout, 'remote', 'add', 'origin', remote]);
+    state.projects[0].setupCommands = [];
+    state.projects[0].envTemplate = template;
+    fs.writeFileSync(path.join(checkout, '.env'), 'OLD=secret\n');
+    const child = row({
+      status: 'preparing',
+      orchestrator: false,
+      workDir: checkout,
+      branch: 'feature',
+      workspacePrepared: false,
+    });
+    state.stored = [child];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children, child.error).toHaveLength(1));
+    finish(children[0]);
+    await vi.waitFor(() => expect(child.status, child.error).toBe('idle'));
+    expect(fs.readFileSync(path.join(checkout, '.env'), 'utf8')).toBe(expected);
   });
 
   it.each(['idle', 'running', 'preparing'])(
