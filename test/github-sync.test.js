@@ -189,6 +189,77 @@ describe('durable GitHub synchronization', () => {
     },
   );
 
+  it.each([
+    { source: 'webhook', outcome: 'success' },
+    { source: 'hourly', outcome: 'success' },
+    { source: 'webhook', outcome: 'failure' },
+    { source: 'hourly', outcome: 'failure' },
+  ])(
+    'retains a newer discovery after older $source $outcome and a newer batch abort',
+    async ({ source, outcome }) => {
+      const h = harness();
+      const sha = 'f'.repeat(40);
+      const endpoint = `/repos/acme/shop/commits/${sha}/check-runs`;
+      const statuses = `/repos/acme/shop/commits/${sha}/statuses`;
+      const older = { id: 99, head_sha: sha, name: 'deploy', status: 'completed', conclusion: 'success' };
+      const newer = { ...older, id: 100 };
+      const discover = (branch) =>
+        h.service.onWebhook('check_run', {
+          repository: { full_name: project.repo },
+          check_run: { head_sha: sha, check_suite: { head_branch: branch } },
+        });
+      discover('old-release');
+      if (source === 'hourly') {
+        h.routes.set(endpoint, () => ({ ok: false, status: 503 }));
+        await h.service.flush(project.repo);
+      }
+      h.routes.set(endpoint, { check_runs: [older] });
+      const readingStatuses = Promise.withResolvers();
+      const releaseStatuses = Promise.withResolvers();
+      h.routes.set(statuses, () => {
+        readingStatuses.resolve();
+        return releaseStatuses.promise;
+      });
+      const first = source === 'hourly' ? h.service.tick() : h.service.flush(project.repo);
+      await readingStatuses.promise;
+
+      // Register the next discovery while the older authoritative read is in flight.
+      discover('release');
+      h.service.onWebhook('label', { repository: { full_name: project.repo } });
+      h.routes.set(
+        '/repos/acme/shop/labels',
+        Object.assign(new Error('rate limited'), { status: 429, resource: 'core' }),
+      );
+      const second = h.service.flush(project.repo);
+      releaseStatuses.resolve(
+        outcome === 'success' ? { ok: true, json: async () => [] } : { ok: false, status: 503 },
+      );
+      await Promise.all([first, second]);
+      if (outcome === 'success')
+        expect(h.ci.save).toHaveBeenCalledWith(
+          project.repo,
+          [older],
+          expect.objectContaining({ sha, branch: 'old-release' }),
+        );
+      else expect(h.ci.save).not.toHaveBeenCalled();
+      expect(h.errors).toContain('acme/shop: rate limited');
+
+      h.routes.delete('/repos/acme/shop/labels');
+      h.routes.set(statuses, []);
+      h.routes.set(endpoint, { check_runs: [older, newer] });
+      h.ci.save.mockClear();
+      await h.service.tick();
+      expect(h.ci.save).toHaveBeenCalledWith(
+        project.repo,
+        [older, newer],
+        expect.objectContaining({ sha, branch: 'release' }),
+      );
+      h.rest.mockClear();
+      await h.service.tick();
+      expect(h.rest.mock.calls.some((call) => call[2].includes(`/commits/${sha}/`))).toBe(false);
+    },
+  );
+
   it('bounds hourly discovery retries and rotates failed targets past the first hundred', async () => {
     const h = harness();
     const shas = Array.from({ length: 101 }, (_, i) => i.toString(16).padStart(40, 'f'));
