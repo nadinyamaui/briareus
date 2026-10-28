@@ -8,8 +8,9 @@ import { createInterface } from 'node:readline';
 import { BINARIES, newTurn, parserFor } from '../lib/providers.js';
 
 // Runs one turn of the installed dsh, with the patch Briareus mounts, against the given stub and
-// returns the parser's turn once dsh has exited cleanly.
-async function runTurn(root, server) {
+// returns the parser's turn once dsh has exited cleanly; or, given `stopAt`, once the first line it
+// matches has been followed by a Stop, which SIGKILLs the process group as lib/jobs.js does.
+async function runTurn(root, server, { stopAt } = {}) {
   const cwd = join(root, 'work');
   mkdirSync(cwd);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -24,6 +25,7 @@ async function runTurn(root, server) {
   });
   const child = spawn(resolve('node_modules/.bin/dsh'), args, {
     cwd,
+    detached: true,
     env: {
       ...process.env,
       DSH_HOME: join(root, 'home'),
@@ -35,18 +37,28 @@ async function runTurn(root, server) {
   const turn = newTurn();
   const parser = parserFor('dsh', turn);
   const lines = createInterface({ input: child.stdout });
-  lines.on('line', (line) => parser.feed(JSON.parse(line)));
+  let stopping = null;
+  lines.on('line', (line) => {
+    const msg = JSON.parse(line);
+    parser.feed(msg);
+    if (stopAt?.(msg) && !stopping) stopping = setTimeout(() => process.kill(-child.pid, 'SIGKILL'), 300);
+  });
   let stderr = '';
   child.stderr.on('data', (c) => {
     stderr += c;
   });
-  const timer = setTimeout(() => child.kill('SIGKILL'), 30000);
+  const timer = setTimeout(() => process.kill(-child.pid, 'SIGKILL'), 30000);
   child.stdin.end('PARENT_TASK delegate it');
   const code = await new Promise((r, reject) => {
     child.once('error', reject);
     child.once('close', r);
   });
   clearTimeout(timer);
+  if (stopAt) {
+    expect(stopping, stderr).not.toBeNull();
+    parser.flush({ canceled: true, code });
+    return turn;
+  }
   expect(code, stderr).toBe(0);
   expect(parser.flush({ code }).at(-1)).toMatchObject({ subtype: 'success' });
   return turn;
@@ -321,6 +333,72 @@ it('counts a sub-agent step retried after an unmeasured attempt, as what was mea
       outputTokens: 2000 + 20 * seen.root,
       cachedInputTokens: null,
       rootCachedInputTokens: 0,
+      contextTokens: 1020,
+    });
+  } finally {
+    server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60000);
+
+// The root's first request is answered with a long shell command, and Stop kills dsh while it runs:
+// the request was billed when its message committed, before the step's end that never comes.
+it('counts a step whose tool a Stop interrupted', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh.stop-'));
+  const seen = { root: 0 };
+  const server = createServer(async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    if (req.method !== 'POST' || !req.url.endsWith('/messages')) {
+      res.writeHead(404).end();
+      return;
+    }
+    const request = JSON.parse(body);
+    // Session titles ask without tools.
+    if (!request.tools?.length) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'no title' } }),
+      );
+      return;
+    }
+    seen.root++;
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    const event = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+    event('message_start', {
+      message: {
+        id: 'msg',
+        type: 'message',
+        role: 'assistant',
+        content: [],
+        model: request.model,
+        stop_reason: null,
+        usage: { input_tokens: 1000, cache_read_input_tokens: 0, output_tokens: 0 },
+      },
+    });
+    event('content_block_start', {
+      index: 0,
+      content_block: { type: 'tool_use', id: 'tu1', name: 'bash', input: {} },
+    });
+    event('content_block_delta', {
+      index: 0,
+      delta: {
+        type: 'input_json_delta',
+        partial_json: JSON.stringify({ description: 'Wait', command: 'sleep 20' }),
+      },
+    });
+    event('content_block_stop', { index: 0 });
+    event('message_delta', { delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 20 } });
+    event('message_stop', {});
+    res.end();
+  });
+  try {
+    const turn = await runTurn(root, server, { stopAt: (msg) => msg.type === 'tool_call' });
+    expect(seen.root).toBe(1);
+    expect(turn).toMatchObject({
+      inputTokens: 1000,
+      outputTokens: 20,
+      cachedInputTokens: 0,
       contextTokens: 1020,
     });
   } finally {

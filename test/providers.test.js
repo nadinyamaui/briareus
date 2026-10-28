@@ -2521,14 +2521,29 @@ describe('a DeepSeek Harness endpoint under Test', () => {
     calls = stubFetch({ data: [{ id: 'deepseek-v4.1-flash' }] });
     await testProviderEndpoint({ binary: 'dsh', baseUrl: 'https://gw.test', apiKey: 'k' });
     expect(calls[0].url).toBe('https://gw.test/v1/models');
+    // dsh sends a gateway x-api-key alone, so a gateway that wants a Bearer token must fail Test.
+    expect(calls[0].opts.headers['x-api-key']).toBe('k');
+    expect(calls[0].opts.headers).not.toHaveProperty('Authorization');
   });
 
-  it('probes chat over Messages', async () => {
-    const calls = stubFetch({ id: 'msg_1', type: 'message' });
+  it('probes chat over Messages with the key header dsh sends', async () => {
+    let calls = stubFetch({ id: 'msg_1', type: 'message' });
     await probeChatEndpoint({ binary: 'dsh', baseUrl: '', apiKey: 'k', model: 'deepseek-flash' });
     expect(calls[0].url).toBe('https://api.deepseek.com/anthropic/v1/messages');
     expect(calls[0].opts.headers['x-api-key']).toBe('k');
+    expect(calls[0].opts.headers).not.toHaveProperty('Authorization');
     expect(JSON.parse(calls[0].opts.body).model).toBe('deepseek-flash');
+
+    calls = stubFetch({ id: 'msg_1', type: 'message' });
+    await probeChatEndpoint({
+      binary: 'dsh',
+      baseUrl: 'https://gw.test',
+      apiKey: 'k',
+      model: 'deepseek-flash',
+    });
+    expect(calls[0].url).toBe('https://gw.test/v1/messages');
+    expect(calls[0].opts.headers['x-api-key']).toBe('k');
+    expect(calls[0].opts.headers).not.toHaveProperty('Authorization');
   });
 
   it('an entry without a key is not connected, and one with a key is checked live', async () => {
@@ -2738,6 +2753,55 @@ describe('the DeepSeek Harness parser', () => {
     expect(Object.keys(turn.subagentUsage)).toEqual(['deepseek-flash']);
     parser.feed({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
     expect(parser.flush().at(-1)).toMatchObject({ inputTokens: 903000, outputTokens: 4060, tokens: 1020 });
+  });
+
+  it("books a root step whose message committed when a Stop kills dsh before the step's end", () => {
+    const pending = (usage) => ({
+      type: 'pending_root_usage',
+      sessionId: 's',
+      model: 'deepseek-flash',
+      usage,
+    });
+    // A step that reached its end is the projection's: the pending line is not counted again.
+    const done = fresh();
+    expect(done.parser.feed(pending({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }))).toEqual(
+      [],
+    );
+    expect(done.turn.inputTokens).toBeNull();
+    done.parser.feed(stepEnd({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    done.parser.feed({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
+    expect(done.parser.flush().at(-1)).toMatchObject({ inputTokens: 1000, outputTokens: 20 });
+
+    // Killed during the first step's tool: no step_end, yet the request was billed.
+    const first = fresh();
+    first.parser.feed({ type: 'session', sessionId: 's' });
+    first.parser.feed(pending({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    first.parser.feed({ type: 'tool_call', callId: 'c1', tool: 'bash', input: { command: 'sleep 20' } });
+    expect(first.parser.flush({ canceled: true, code: null })).toEqual([]);
+    expect(first.turn).toMatchObject({
+      inputTokens: 1000,
+      outputTokens: 20,
+      cachedInputTokens: 0,
+      rootCachedInputTokens: 0,
+      contextTokens: 1020,
+    });
+    expect(first.turn.durationMs).toEqual(expect.any(Number));
+
+    // Killed during a later step's tool: the finished steps and the pending one, once.
+    const later = fresh();
+    later.parser.feed(pending({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    later.parser.feed(stepEnd({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    later.parser.feed(pending({ inputTokens: 2000, outputTokens: 30, cacheReadTokens: 500 }));
+    expect(later.parser.flush({ canceled: true, code: null }).at(-1)).toMatchObject({
+      isError: true,
+      inputTokens: 3500,
+      outputTokens: 50,
+      tokens: 2530,
+    });
+    expect(later.turn.cachedInputTokens).toBe(500);
+    // A second flush books nothing more.
+    later.parser.flush({ canceled: true, code: null });
+    expect(later.turn.inputTokens).toBe(3500);
   });
 
   it('books a model id named like an Object property under its own key', () => {

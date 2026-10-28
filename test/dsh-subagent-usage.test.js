@@ -61,7 +61,7 @@ describe('the dsh sub-agent usage plugin', () => {
     expect(name).toBe('briareus-subagent-usage');
   });
 
-  it("reports each child step's usage and model, and leaves the root to the projection", () => {
+  it("reports each child step's usage and model, and the root's only as pending on the projection", () => {
     const { lines, emit } = mount();
     emit(root, message('deepseek-flash', { inputTokens: 1000, outputTokens: 20 }));
     emit(root, stepEnd);
@@ -70,6 +70,12 @@ describe('the dsh sub-agent usage plugin', () => {
     emit(grandchild, message('deepseek-flash', { inputTokens: 5, outputTokens: 1, cacheReadTokens: 3 }));
     emit(grandchild, stepEnd);
     expect(lines).toEqual([
+      {
+        type: 'pending_root_usage',
+        sessionId: 'session-root',
+        model: 'deepseek-flash',
+        usage: { inputTokens: 1000, outputTokens: 20 },
+      },
       {
         type: 'subagent_usage',
         sessionId: 'child-1',
@@ -137,14 +143,21 @@ describe('the dsh sub-agent usage plugin', () => {
     ]);
   });
 
-  it('writes a root step only when the projection drops its usage for an unmeasured attempt', () => {
+  it('writes a root step as booked only when the projection drops its usage for an unmeasured attempt', () => {
     const { lines, emit } = mount();
     emit(root, message('deepseek-flash', { inputTokens: 1000, outputTokens: 20 }));
     emit(root, stepEnd);
     emit(root, { type: 'assistant/attempt', data: { stream: [] } });
     emit(root, message('deepseek-flash', { inputTokens: 802000, outputTokens: 2060, cacheReadTokens: 0 }));
     emit(root, stepEnd);
-    expect(lines).toEqual([
+    // A step that ended without a message, every attempt measured, is the projection's alone.
+    emit(root, {
+      type: 'assistant/attempt',
+      data: { stream: usageStream({ inputTokens: 7, outputTokens: 0 }) },
+    });
+    emit(root, stepEnd);
+    expect(lines.map((l) => l.type)).toEqual(['pending_root_usage', 'root_usage']);
+    expect(lines.slice(1)).toEqual([
       {
         type: 'root_usage',
         sessionId: 'session-root',
@@ -153,6 +166,34 @@ describe('the dsh sub-agent usage plugin', () => {
         partial: true,
       },
     ]);
+  });
+
+  it('writes a step when its message commits, before its tools run, so a Stop during one loses nothing', () => {
+    const { lines, emit } = mount();
+    emit(root, message('deepseek-flash', { inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    emit(child, { type: 'assistant/attempt', data: { stream: [] } });
+    emit(child, message('deepseek-v4-pro', { inputTokens: 300, outputTokens: 3 }));
+    // No step/end: dsh was killed while both steps' tools ran.
+    expect(lines).toEqual([
+      {
+        type: 'pending_root_usage',
+        sessionId: 'session-root',
+        model: 'deepseek-flash',
+        usage: { inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 },
+      },
+      {
+        type: 'subagent_usage',
+        sessionId: 'child-1',
+        parentSessionId: 'session-root',
+        model: 'deepseek-v4-pro',
+        usage: { inputTokens: 300, outputTokens: 3 },
+        partial: true,
+      },
+    ]);
+    // The step's end, when it does come, writes nothing more.
+    emit(root, stepEnd);
+    emit(child, stepEnd);
+    expect(lines).toHaveLength(2);
   });
 
   it("reports every compaction call's usage and model, the root's included", async () => {
