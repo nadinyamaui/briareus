@@ -308,7 +308,7 @@ describe('WhatsApp watches', () => {
     chats[GROUP] = [
       msg('old', T0 - 1000, { fromMe: true }),
       msg('owner', T0 + 1000, { fromMe: true, text: 'Anota la cita' }),
-      msg('emily', T0 + 2000, { participant: '34611111111@c.us', text: 'El martes' }),
+      msg('contact', T0 + 2000, { participant: '34611111111@c.us', text: 'El martes' }),
       msg('bot', T0 + 3000, { fromMe: true, text: '🤖 Cita anotada' }),
     ];
     await w.poll();
@@ -352,7 +352,7 @@ describe('WhatsApp watches', () => {
     const w = make();
     await w.watch('s2', { account: 'default', chat: GROUP });
     jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
-    chats[GROUP] = [msg('emily', T0 + 1000)];
+    chats[GROUP] = [msg('contact', T0 + 1000)];
     await w.poll();
     expect(delivered.map((d) => d.session)).toEqual(['s1']);
     expect(w.watching('s2', 'default', GROUP)).toBe(false);
@@ -379,7 +379,7 @@ describe('WhatsApp watches', () => {
   it('retries a busy group instruction without repeating an earlier participant’s message', async () => {
     jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
     const w = make();
-    chats[GROUP] = [msg('emily', T0 + 1000), msg('owner', T0 + 2000, { fromMe: true })];
+    chats[GROUP] = [msg('contact', T0 + 1000), msg('owner', T0 + 2000, { fromMe: true })];
     // A refusal is synchronous, like instructSession during a server drain.
     const accept = instruct;
     instruct = () => {
@@ -387,7 +387,7 @@ describe('WhatsApp watches', () => {
     };
     await w.poll();
     expect(delivered).toHaveLength(1);
-    expect(stored[0].seen).toEqual(['emily']);
+    expect(stored[0].seen).toEqual(['contact']);
     instruct = accept;
     await w.poll();
     expect(delivered).toHaveLength(1);
@@ -398,7 +398,7 @@ describe('WhatsApp watches', () => {
   it('still reads the owner when an earlier participant’s message is waiting at the automatic-turn cap', async () => {
     jobs.s1.webhook = { armed: true, whatsappGroup: GROUP, whatsappSince: sec(T0) };
     const w = make();
-    chats[GROUP] = [msg('emily', T0 + 1000), msg('owner', T0 + 2000, { fromMe: true })];
+    chats[GROUP] = [msg('contact', T0 + 1000), msg('owner', T0 + 2000, { fromMe: true })];
     const accept = deliver;
     deliver = () => {
       throw Object.assign(new Error('10 automatic turns ran'), { status: 429 });

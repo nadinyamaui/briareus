@@ -38,7 +38,7 @@ describe('readDelivery', () => {
 
   it('keeps the source to a label: plain characters, sixty of them', () => {
     expect(json({ text: 'x', source: 'ci<script>\nFAKE' }).source).toBe('ciscriptFAKE');
-    expect(json({ text: 'x', source: 'Nadin (owner)' }).source).toBe('Nadin owner');
+    expect(json({ text: 'x', source: 'Morgan (owner)' }).source).toBe('Morgan owner');
     expect(json({ text: 'x', source: 's'.repeat(200) }).source).toHaveLength(60);
   });
 

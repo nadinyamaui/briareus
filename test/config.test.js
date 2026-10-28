@@ -428,8 +428,8 @@ describe('finding the claude binary', () => {
   it('never runs a binary on a mounted Windows drive', async () => {
     // WSL inherits the Windows PATH, whose npm shim points at JS under a drive
     // letter no Linux node can load.
-    disk.whichOutput = '/mnt/c/Users/nadin/AppData/npm/claude\n/usr/bin/claude\n';
-    disk.files.add('/mnt/c/Users/nadin/AppData/npm/claude');
+    disk.whichOutput = '/mnt/c/Users/example/AppData/npm/claude\n/usr/bin/claude\n';
+    disk.files.add('/mnt/c/Users/example/AppData/npm/claude');
     disk.files.add('/usr/bin/claude');
     const { getConfig } = await loadConfig(complete());
 

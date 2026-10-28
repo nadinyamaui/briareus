@@ -337,7 +337,7 @@ describe('actionSessionSpec', () => {
   it('leaves the local checkout alone for a gh-only errand, still filed under the PR branch', async () => {
     const spec = await actionSessionSpec(getAction('delete-self-comments'), {
       ...context,
-      project: { reviewAuthor: 'nadin' },
+      project: { reviewAuthor: 'morgan' },
     });
     expect(spec).toMatchObject({ branch: undefined, local: true, prBranch: 'feature/x', autoClose: true });
   });

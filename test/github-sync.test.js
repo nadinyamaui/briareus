@@ -141,6 +141,19 @@ describe('durable GitHub synchronization', () => {
     expect(collections.checks.map((c) => c.id)).toEqual([1, 3]);
   });
 
+  it.each(['cancelled', 'stale', 'startup_failure', 'new_state', null])(
+    'mirrors terminal check conclusion %s as failure',
+    async (conclusion) => {
+      const h = harness({ initial: [issue(1, { pull_request: {} })] });
+      h.routes.set('/repos/acme/shop/pulls/1', pull(1));
+      h.routes.set(`/repos/acme/shop/commits/${'a'.repeat(40)}/check-runs`, {
+        check_runs: [{ id: 1, name: 'CI', status: 'completed', conclusion }],
+      });
+      await h.service.tick();
+      expect(h.store.saveItem.mock.calls[0][1].checks).toBe('failure');
+    },
+  );
+
   it('does not replace any collection or advance the cursor when a later page fails', async () => {
     const h = harness({ initial: [issue(1, { pull_request: {} })], cursor: 1000 });
     h.routes.set('/repos/acme/shop/pulls/1', pull(1));

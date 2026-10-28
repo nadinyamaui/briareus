@@ -911,6 +911,7 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 
 const workerRoutes = orchestratorRoutes({
   agentSession,
+  spawnWorkerSession,
   workerSessionsFor,
   setQaLoop,
   workerSummary,
@@ -924,30 +925,7 @@ api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
 api.get('/api/agent/sessions/:id/question', workerRoutes.readQuestion);
 api.post('/api/agent/sessions/:id/question', workerRoutes.answerQuestion);
 
-api.post('/api/agent/sessions', (req, res) => {
-  const orchestrator = orchestratorSession(req, res);
-  if (!orchestrator) return;
-  try {
-    // `reviewLoop` reviews every push the worker settles with and returns findings as a fix
-    // session (lib/jobs.js); `qaLoop` queues the test run behind it. `tooling` (fix_tooling)
-    // targets the dashboard's own project with the review loop armed regardless.
-    const { title, prompt, providerId, model, effort, branch, reviewLoop, qaLoop, tooling } = req.body || {};
-    const session = spawnWorkerSession(orchestrator, {
-      title,
-      prompt,
-      providerId,
-      model,
-      effort,
-      branch,
-      reviewLoop: reviewLoop === true,
-      qaLoop: qaLoop === true,
-      tooling: tooling === true,
-    });
-    res.status(201).json({ session: workerSummary(session) });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
+api.post('/api/agent/sessions', workerRoutes.spawn);
 
 api.get('/api/agent/sessions', (req, res) => {
   const orchestrator = orchestratorSession(req, res);
