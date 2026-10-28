@@ -16613,9 +16613,9 @@ describe('the shared browser', () => {
     expect(note).not.toContain('http://127.0.0.1:41234');
   });
 
-  it('points claude and codex at the MCP tools, and the rest at connectOverCDP', () => {
+  it('points claude, codex and qwen at the MCP tools, and the rest at connectOverCDP', () => {
     browserState.endpoint = 'http://127.0.0.1:41234';
-    for (const binary of ['claude', 'codex']) {
+    for (const binary of ['claude', 'codex', 'qwen']) {
       const note = sharedBrowserNote({ id: 'b1', browser: true }, binary);
       expect(note).toContain('`browser` MCP tools');
       expect(note).toContain('http://127.0.0.1:41234');
@@ -16681,15 +16681,16 @@ describe('the shared browser in a session', () => {
     getProviderForJob.mockReturnValue({ ...state.provider, binary });
     captureProviderAuth.mockResolvedValue(undefined);
     const bin = vi.spyOn(BINARIES[binary], 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
-    const seen = { spawned: false, args: null, mcp: null, prompt: null };
+    const seen = { spawned: false, args: null, mcp: null, prompt: null, env: null };
     const realSpawn = spawn.getMockImplementation();
     spawn.mockImplementation((cmd, ...rest) => {
       if (cmd !== '/mock/agent') return realSpawn(cmd, ...rest);
-      const [args] = rest;
+      const [args, opts] = rest;
       seen.spawned = true;
       seen.args = args;
+      seen.env = opts?.env || null;
       // The file goes with the turn, so it is read while the turn is alive.
-      if (binary === 'claude')
+      if (binary === 'claude' || binary === 'qwen')
         seen.mcp = JSON.parse(fs.readFileSync(args[args.indexOf('--mcp-config') + 1], 'utf8')).mcpServers;
       if (binary === 'grok') seen.prompt = fs.readFileSync(args[args.indexOf('--prompt-file') + 1], 'utf8');
       const child = new EventEmitter();
@@ -16809,6 +16810,38 @@ describe('the shared browser in a session', () => {
     expect(
       job.events.some((e) => e.text === 'Shared browser could not start: No Chromium on this server'),
     ).toBe(true);
+  });
+
+  it("mounts a qwen turn's MCP servers from a file, on the entry's endpoint at the turn's effort", async () => {
+    const job = getJob('br-turn');
+    const { chats, effort } = job;
+    job.browser = true;
+    job.chats = {};
+    job.effort = 'low';
+    browserState.endpoint = ENDPOINT;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-qwen-turn-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    try {
+      const { seen, settled } = await turn(job, 'Open the shop', { binary: 'qwen' });
+      await settled;
+      expect(seen.args).toEqual(expect.arrayContaining(['--mcp-config', '--session-id']));
+      expect(seen.mcp.browser.args).toContain(ENDPOINT);
+      expect(seen.mcp).toHaveProperty('reviewer_memory');
+      // No system-prompt file: the briefing rides in the first message.
+      expect(seen.prompt).toContain('<workspace-context>');
+      expect(seen.prompt).toContain('`browser` MCP tools');
+      expect(seen.env).toMatchObject({
+        QWEN_HOME: path.join(home, `.qwen-provider-${state.provider.id}`),
+        BRIAREUS_QWEN_EFFORT: 'low',
+        OPENAI_BASE_URL: expect.any(String),
+      });
+    } finally {
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      job.chats = chats;
+      job.effort = effort;
+      job.browser = false;
+    }
   });
 
   it.each(['grok', 'opencode'])(

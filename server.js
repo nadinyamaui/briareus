@@ -164,6 +164,7 @@ import {
   grokHomeDir,
   ensureGrokHome,
   opencodeHomeDir,
+  qwenHomeDir,
   refreshCodexModelCache,
   claudeLoginStart,
   claudeLoginFinish,
@@ -1324,7 +1325,7 @@ api.post('/api/workspaces/:slot/clean', (req, res) => {
 
 // ---- provider settings ----
 //
-// Each row binds a label to one of the hardcoded binaries (claude / codex / grok / opencode) with
+// Each row binds a label to one of the hardcoded binaries (claude / codex / grok / opencode / qwen) with
 // its own login dir, endpoint and key, and model/effort overrides.
 
 // The stored login (auth_data) never leaves the server; clients only see whether one exists.
@@ -1341,7 +1342,9 @@ function publicProvider(p) {
           ? codexHomeDir(p)
           : p.binary === 'opencode'
             ? opencodeHomeDir(p)
-            : grokHomeDir(p),
+            : p.binary === 'qwen'
+              ? qwenHomeDir(p)
+              : grokHomeDir(p),
   };
 }
 
@@ -1497,7 +1500,7 @@ function watchLogin(providerId) {
 // Codex and grok log in by device flow in the entry's home dir, avoiding Codex's localhost
 // callback, which would sit inside the app container rather than the user's browser host. The
 // watcher mirrors the resulting auth.json into the row. One login per binary at a time; opencode
-// has no login flow (its entries use an API key).
+// and qwen have no login flow (their entries use an API key or endpoint).
 const cliLogins = new Map(); // binary -> the in-flight login child process
 
 api.post('/api/providers/:id/login', async (req, res) => {
