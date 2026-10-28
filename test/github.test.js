@@ -579,6 +579,17 @@ describe('removePullRequestLabel', () => {
   });
 });
 
+describe('accepted label writes with unreadable bodies', () => {
+  it.each(['addPullRequestLabel', 'removePullRequestLabel'])(
+    '%s accepts truncated HTTP-200 JSON',
+    async (helper) => {
+      const github = await freshGithub();
+      stubFetch(new Response('[{"name":', { status: 200 }));
+      await expect(github[helper](cfg, 'o/r', 3, 'code-approved')).resolves.toEqual([]);
+    },
+  );
+});
+
 describe('listRepoBranches', () => {
   // The branch cache is keyed by repo, so every test uses its own name.
   let n = 0;
