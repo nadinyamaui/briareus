@@ -91,6 +91,11 @@ permanently delete messages.
 See [Slack setup](../README.md#slack), [mailbox setup](../README.md#mail),
 [session email access](email-mcp.md), and [WhatsApp setup](whatsapp.md).
 
+Projects with `printToolsEnabled` (off by default) also give their interactive
+sessions print tools: list the core machine's CUPS printers, print a session
+file with copies, pages, sides, color and paper size, and follow or cancel the
+jobs the session sent. See [printing from a session](printing.md).
+
 ## Operations, integrations and memory
 
 The attention API reports unanswered questions, held findings, failed work
@@ -166,6 +171,8 @@ These additions are present in the server revision documented here:
   storage is enabled for accounts created by the core. Replies in a chat a
   session watches wake it, with voice notes transcribed by the core first.
   `WAHA_ACCOUNTS` limits a shared WAHA to the accounts the core may use.
+- Opt-in projects can print session files on the core machine's CUPS
+  printers through the internal print MCP.
 - Open sessions recover automatically after server restarts, retaining
   queued instructions and workflow stages. Workspace cleanup preserves
   checkouts for inspection and recovery instead of deleting them.

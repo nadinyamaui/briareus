@@ -77,6 +77,12 @@ email through the internal mail MCP in projects with `mailToolsEnabled: true`
 you reconnect them with management permissions. See [Email from a session](docs/email-mcp.md)
 for setup and access details.
 
+## Printing in agent sessions
+
+Ask the agent to print a file it made or one you attached, on the core
+machine's CUPS printers, through the internal print MCP in projects with
+`printToolsEnabled: true` (off by default). See [Printing from a session](docs/printing.md).
+
 ## How a session runs
 
 1. **Claim resources.** The session takes an idle workspace clone from the

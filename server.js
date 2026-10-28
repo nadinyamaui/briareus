@@ -31,6 +31,9 @@ import { shareRoutes } from './lib/share-routes.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
+import { readSessionFile } from './lib/ssh-upload.js';
+import { createPrintService } from './lib/print.js';
+import { printAgentRoutes } from './lib/print-agent.js';
 import { projectEnvRoutes } from './lib/project-env.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
 import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
@@ -734,6 +737,15 @@ api.use(
   }),
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
+api.use(
+  printAgentRoutes({
+    service: createPrintService(),
+    agentSession,
+    getProject,
+    readFile: readSessionFile,
+    sessions: bus,
+  }),
+);
 // Project settings are admin-only on /api/v1, so a session may edit its project's .env
 // template only for an enabled admin, or as the operator's when nobody started it.
 const projectEnvOwner = (job) => {
