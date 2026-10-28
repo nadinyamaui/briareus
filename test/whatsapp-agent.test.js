@@ -1,11 +1,13 @@
 import express from 'express';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
-import { whatsappAgentRoutes, whatsappSessionAllowed } from '../lib/whatsapp-agent.js';
+import { whatsappAgentRoutes, whatsappMediaPath, whatsappSessionAllowed } from '../lib/whatsapp-agent.js';
 import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
+import { createWhatsAppService } from '../lib/whatsapp.js';
 
 const CHAT = '34600000000@c.us';
 const OTHER = '34611111111@c.us';
@@ -17,6 +19,7 @@ const ROUTES = [
   [`/accounts/default/conversations/${CHAT}/messages`, 'POST'],
   [`/accounts/default/conversations/${CHAT}/read`, 'POST'],
   [`/accounts/default/conversations/${CHAT}/voice`, 'POST'],
+  [`/accounts/default/conversations/${CHAT}/media`, 'POST'],
   [`/accounts/default/conversations/${CHAT}/messages/m1/media`, 'GET'],
   [`/accounts/default/conversations/${CHAT}/messages/m1/transcript`, 'GET'],
 ];
@@ -35,6 +38,7 @@ beforeEach(async () => {
     messages: vi.fn(async () => ({ messages: [{ id: 'm1', text: 'Untrusted' }], nextOffset: 50 })),
     send: vi.fn(async (_id, _chat, input) => ({ message: { id: 'sent', text: input.text } })),
     sendVoice: vi.fn(async () => ({ message: { id: 'voice-sent', hasMedia: true } })),
+    sendMedia: vi.fn(async () => ({ message: { id: 'media-sent', hasMedia: true } })),
     markRead: vi.fn(async () => ({ ok: true })),
     start: vi.fn(),
     qr: vi.fn(),
@@ -59,7 +63,9 @@ beforeEach(async () => {
     log: () => {},
   });
   const app = express();
-  app.use(express.json());
+  // As server.js does: media sends skip the app-wide 1 MB parser.
+  const json = express.json({ limit: '1mb' });
+  app.use((req, res, next) => (whatsappMediaPath(req.path) ? next() : json(req, res, next)));
   app.use(
     whatsappAgentRoutes({
       service,
@@ -335,6 +341,7 @@ describe('session WhatsApp watches', () => {
       [`/accounts/default/conversations/${OTHER}/messages`, 'GET'],
       [`/accounts/default/conversations/${OTHER}/messages`, 'POST', { text: 'x' }],
       [`/accounts/default/conversations/${OTHER}/voice`, 'POST', { text: 'x' }],
+      [`/accounts/default/conversations/${OTHER}/media`, 'POST', { data: 'eA==' }],
       [`/accounts/default/conversations/${OTHER}/messages/m1/media`, 'GET'],
       [`/accounts/default/conversations/${OTHER}/messages/m1/transcript`, 'GET'],
       [`/accounts/default/conversations/${OTHER}/read`, 'POST'],
@@ -390,6 +397,7 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
       'whatsapp_media',
       'whatsapp_send',
       'whatsapp_send_voice',
+      'whatsapp_send_media',
       'whatsapp_create_group',
       'whatsapp_add_participants',
       'whatsapp_watches',
@@ -435,6 +443,152 @@ it('drives the actual stdio MCP through authenticated HTTP for every tool', asyn
       expect.any(AbortSignal),
     );
     expect(service.sendVoice).toHaveBeenCalledWith('default', CHAT, AUDIO, 'm1');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsapp-send-test-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'Floor.JPG'), PNG);
+      const media = await tool('whatsapp_send_media', {
+        account: 'default',
+        chat: CHAT,
+        path: path.join(dir, 'Floor.JPG'),
+        caption: 'Piso',
+        replyTo: 'm1',
+      });
+      expect(JSON.parse(media.result.content[0].text).message.id).toBe('media-sent');
+      expect(service.sendMedia).toHaveBeenCalledWith('default', CHAT, {
+        data: PNG,
+        mimetype: 'image/jpeg',
+        filename: 'Floor.JPG',
+        caption: 'Piso',
+        replyTo: 'm1',
+      });
+      const relative = await tool('whatsapp_send_media', { account: 'default', chat: CHAT, path: 'a.jpg' });
+      expect(relative.result.isError).toBe(true);
+      expect(service.sendMedia).toHaveBeenCalledTimes(1);
+      for (const extension of ['unknown', 'constructor', '__proto__']) {
+        const filename = `file.${extension}`;
+        fs.writeFileSync(path.join(dir, filename), PNG);
+        const sent = await tool('whatsapp_send_media', {
+          account: 'default',
+          chat: CHAT,
+          path: path.join(dir, filename),
+        });
+        expect(sent.result.isError).not.toBe(true);
+        expect(service.sendMedia).toHaveBeenLastCalledWith('default', CHAT, {
+          data: PNG,
+          mimetype: 'application/octet-stream',
+          filename,
+        });
+      }
+      const waha = vi.fn(async () => Response.json({ id: 'media-sent', hasMedia: true }));
+      service.sendMedia.mockImplementation(
+        createWhatsAppService({
+          config: () => ({ url: 'http://waha.test', apiKey: 'test-key' }),
+          fetcher: waha,
+        }).sendMedia,
+      );
+      for (const extension of ['jpg', 'jpeg', 'jpe', 'jfif', 'JFIF']) {
+        const filename = `photo.${extension}`;
+        fs.writeFileSync(path.join(dir, filename), PNG);
+        for (const asDocument of [undefined, true]) {
+          const sent = await tool('whatsapp_send_media', {
+            account: 'default',
+            chat: CHAT,
+            path: path.join(dir, filename),
+            asDocument,
+            watch: false,
+          });
+          expect(sent.result.isError).not.toBe(true);
+          expect(waha.mock.lastCall[0]).toBe(`http://waha.test/api/send${asDocument ? 'File' : 'Image'}`);
+          expect(JSON.parse(waha.mock.lastCall[1].body).file).toEqual({
+            mimetype: 'image/jpeg',
+            filename,
+            data: PNG.toString('base64'),
+          });
+        }
+      }
+      for (const [extension, mimetype] of [
+        ['mpeg', 'video/mpeg'],
+        ['mpg', 'video/mpeg'],
+        ['vob', 'video/mpeg'],
+        ['VOB', 'video/mpeg'],
+        ['ogv', 'video/ogg'],
+        ['wmv', 'video/x-ms-wmv'],
+        ['asf', 'video/x-ms-asf'],
+        ['ASF', 'video/x-ms-asf'],
+        ['flv', 'video/x-flv'],
+        ['m2ts', 'video/mp2t'],
+        ['3g2', 'video/3gpp2'],
+      ]) {
+        const filename = `video.${extension}`;
+        fs.writeFileSync(path.join(dir, filename), PNG);
+        const sent = await tool('whatsapp_send_media', {
+          account: 'default',
+          chat: CHAT,
+          path: path.join(dir, filename),
+          watch: false,
+        });
+        expect(sent.result.isError).not.toBe(true);
+        expect(waha.mock.lastCall[0]).toBe('http://waha.test/api/sendVideo');
+        expect(JSON.parse(waha.mock.lastCall[1].body)).toMatchObject({
+          convert: true,
+          file: { mimetype, filename, data: PNG.toString('base64') },
+        });
+      }
+      for (const [mimetype, extension] of [
+        ['video/mp4', 'mp4'],
+        ['video/quicktime', 'mov'],
+        ['video/QuickTime', 'mov'],
+        ['video/x-m4v', 'm4v'],
+        ['video/webm', 'webm'],
+        ['video/3gpp', '3gp'],
+        ['video/3gpp2', '3g2'],
+        ['video/x-matroska', 'mkv'],
+        ['video/x-msvideo', 'avi'],
+        ['video/mpeg', 'mpeg'],
+        ['video/ogg', 'ogv'],
+        ['video/x-ms-wmv', 'wmv'],
+        ['video/x-ms-asf', 'asf'],
+        ['video/x-flv', 'flv'],
+        ['video/mp2t', 'm2ts'],
+        ['audio/ogg', 'ogg'],
+      ]) {
+        service.media.mockImplementationOnce(
+          async () => new Response(PNG, { headers: { 'Content-Type': mimetype } }),
+        );
+        const downloaded = JSON.parse(
+          (await tool('whatsapp_media', { account: 'default', chat: CHAT, message: 'm1' })).result.content[0]
+            .text,
+        );
+        try {
+          expect(path.basename(downloaded.path)).toBe(`media.${extension}`);
+          expect(downloaded.mimetype).toBe(mimetype);
+          const forwarded = await tool('whatsapp_send_media', {
+            account: 'default',
+            chat: CHAT,
+            path: downloaded.path,
+          });
+          expect(forwarded.result.isError).not.toBe(true);
+          expect(service.sendMedia).toHaveBeenLastCalledWith('default', CHAT, {
+            data: PNG,
+            mimetype: mimetype.toLowerCase(),
+            filename: `media.${extension}`,
+          });
+          const video = mimetype.startsWith('video/');
+          expect(waha.mock.lastCall[0]).toBe(`http://waha.test/api/send${video ? 'Video' : 'File'}`);
+          const body = JSON.parse(waha.mock.lastCall[1].body);
+          expect(body.file).toEqual({
+            mimetype: mimetype.toLowerCase(),
+            filename: `media.${extension}`,
+            data: PNG.toString('base64'),
+          });
+          expect(body.convert).toBe(video ? true : undefined);
+        } finally {
+          fs.rmSync(path.dirname(downloaded.path), { recursive: true });
+        }
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
     const group = JSON.parse(
       (await tool('whatsapp_create_group', { account: 'default', name: 'Dudas', participants: [CHAT] }))
         .result.content[0].text,
@@ -516,6 +670,72 @@ describe('voice note sends', () => {
     expect((await request(endpoint, 'POST', { text: 'Hola' })).status).toBe(502);
     expect(service.sendVoice).toHaveBeenCalledTimes(1);
     expect(watcher.watching(job.id, 'default', CHAT)).toBe(false);
+  });
+});
+
+describe('media sends', () => {
+  const endpoint = `/accounts/default/conversations/${CHAT}/media`;
+  const file = { mimetype: 'video/mp4', filename: 'floor.mp4' };
+  it.each(['media', 'Media'])(
+    'takes a file larger than the app-wide JSON limit at /%s and watches the chat',
+    async (route) => {
+      const video = Buffer.alloc(3 * 1024 * 1024, 7);
+      const res = await request(endpoint.replace(/media$/, route), 'POST', {
+        ...file,
+        data: video.toString('base64'),
+      });
+      expect(res.status).toBe(201);
+      const [, , input] = service.sendMedia.mock.calls[0];
+      // Buffer.equals: a deep comparison of megabytes is too slow for the test.
+      expect(input.data.equals(video)).toBe(true);
+      expect({ ...input, data: null }).toEqual({ ...file, data: null });
+      expect(watcher.watching(job.id, 'default', CHAT)).toBe(true);
+    },
+  );
+  it('rejects bad data or watch before sending, and never retries an uncertain send', async () => {
+    for (const body of [
+      { ...file },
+      { ...file, data: 'not base64!' },
+      { ...file, data: 'eA==', watch: 'no' },
+    ])
+      expect((await request(endpoint, 'POST', body)).status).toBe(400);
+    expect(service.sendMedia).not.toHaveBeenCalled();
+    service.sendMedia.mockRejectedValueOnce(
+      Object.assign(new Error('WAHA did not confirm'), { status: 502 }),
+    );
+    expect((await request(endpoint, 'POST', { ...file, data: 'eA==' })).status).toBe(502);
+    expect(service.sendMedia).toHaveBeenCalledTimes(1);
+    expect(watcher.watching(job.id, 'default', CHAT)).toBe(false);
+  });
+  it.each(['', 'A', 'eAAxA', 'AAAAA==', 'eA=', 'eAA==', 'AAAA=', '=eA=', 'eA==='])(
+    'rejects malformed base64 %j without sending or watching',
+    async (data) => {
+      expect((await request(endpoint, 'POST', { ...file, data })).status).toBe(400);
+      expect(service.sendMedia).not.toHaveBeenCalled();
+      expect(watcher.watching(job.id, 'default', CHAT)).toBe(false);
+    },
+  );
+  it.each([
+    ['eA==', 'x'],
+    ['eA', 'x'],
+    ['eHk=', 'xy'],
+    ['eHk', 'xy'],
+    ['eHl6', 'xyz'],
+    ['+/8=', Buffer.from([0xfb, 0xff])],
+  ])('preserves valid padded or unpadded base64 %j', async (data, bytes) => {
+    const res = await request(endpoint, 'POST', { ...file, data, watch: false });
+    expect(res.status).toBe(201);
+    expect(service.sendMedia).toHaveBeenCalledExactlyOnceWith('default', CHAT, {
+      ...file,
+      data: Buffer.from(bytes),
+    });
+    expect(watcher.watching(job.id, 'default', CHAT)).toBe(false);
+  });
+  it('parses no body for a session that may not send', async () => {
+    project.whatsappToolsEnabled = false;
+    const res = await request(endpoint, 'POST', { ...file, data: 'eA==' });
+    expect(res.status).toBe(403);
+    expect(service.sendMedia).not.toHaveBeenCalled();
   });
 });
 
