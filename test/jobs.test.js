@@ -417,6 +417,7 @@ import {
   codexTurnResumes,
   acquireCloneDir,
   ensureClone,
+  trustWorkspace,
 } from '../lib/jobs.js';
 
 // Registry fixtures are restored many times in this file. Real recurring
@@ -770,6 +771,50 @@ describe('workspaceGitProbeOptions', () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+});
+
+describe('trustWorkspace', () => {
+  let root;
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'trust-'));
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const trusted = (configDir) =>
+    Object.entries(JSON.parse(fs.readFileSync(path.join(configDir, '.claude.json'), 'utf8')).projects)
+      .filter(([, v]) => v.hasTrustDialogAccepted === true)
+      .map(([k]) => k)
+      .sort();
+
+  it('trusts the physical path when the workspace parent is a symlink to another disk', () => {
+    const disk = path.join(root, 'disk');
+    fs.mkdirSync(path.join(disk, 'acme__shop'), { recursive: true });
+    fs.symlinkSync(disk, path.join(root, 'workspaces'));
+    const configDir = path.join(root, 'cfg');
+    fs.mkdirSync(configDir);
+    const job = { events: [] };
+
+    trustWorkspace(job, path.join(root, 'workspaces', 'acme__shop'), configDir);
+
+    expect(trusted(configDir)).toEqual(
+      [path.join(root, 'workspaces', 'acme__shop'), path.join(fs.realpathSync(disk), 'acme__shop')].sort(),
+    );
+  });
+
+  it('keeps other config and writes one key for a plain directory', () => {
+    const dir = path.join(root, 'acme__shop');
+    fs.mkdirSync(dir);
+    const configDir = path.join(root, 'cfg');
+    fs.mkdirSync(configDir);
+    fs.writeFileSync(path.join(configDir, '.claude.json'), JSON.stringify({ userID: 'u1', projects: {} }));
+
+    trustWorkspace({ events: [] }, fs.realpathSync(dir), configDir);
+
+    expect(trusted(configDir)).toEqual([fs.realpathSync(dir)]);
+    expect(JSON.parse(fs.readFileSync(path.join(configDir, '.claude.json'), 'utf8')).userID).toBe('u1');
   });
 });
 
