@@ -12,8 +12,10 @@ Collection uses the existing GitHub token and signed repository webhooks:
   checks for the affected commit, including checks without a PR; bursts of matrix
   job notifications are coalesced by commit.
 - The hourly GitHub sync also reads the default branch's current commit and
-  revisits up to 100 commits with pending checks per repository, oldest observation
-  first, to recover completions missed by webhooks.
+  revisits up to 100 commits with pending checks per repository in rotating SHA
+  order, to recover completions missed by webhooks. Failed webhook discoveries
+  remain queued in memory for hourly retry, up to 100 per repository per pass.
+  Restarting the core clears these discovery retries.
 
 The GitHub credential needs read access to checks and commit statuses on the
 repositories being tracked. Unreadable lists never delete stored observations.
@@ -47,7 +49,9 @@ are ordered oldest first and omit empty days; a dashboard may fill those gaps.
 `/ci/runs` returns individual executions with commit SHA, branch hint, GitHub App,
 status, conclusion, details URL and timestamps. Use `nextOffset` for pagination
 until null, keeping the same `since` and `until`. Concurrent collection can shift
-offset pages, so refresh the list when exact reconciliation is needed.
+offset pages, so refresh the list when exact reconciliation is needed. If more
+results exist beyond the supported offset range, `nextOffset` is null and
+`truncated` is true; narrow the time window or filters to retrieve those results.
 
 Shared optional filters are `repo`, `branch`, `name`, `kind`, `status`, `conclusion`,
 `since` and `until`. `since` is inclusive and `until` exclusive, both epoch

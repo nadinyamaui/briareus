@@ -1150,7 +1150,7 @@ List persisted CI/CD checks with status, commit, duration and details URL. Needs
 | `limit`      | `integer`           | Page size, 1–100; default 50                                           |
 | `offset`     | `integer`           | Offset, 0–100000; default 0                                            |
 
-**Returns** `{ since: integer, until: integer, kind: check_run|status, runs: CiRun[], nextOffset: integer? }`. Newest runAt first; use nextOffset until null and keep since/until fixed while paging. Results can change during collection. Legacy statuses keep the latest transition per SHA/context; individual retries cannot be inferred from that API.
+**Returns** `{ since: integer, until: integer, kind: check_run|status, runs: CiRun[], nextOffset: integer?, truncated: boolean }`. Newest runAt first; use nextOffset until null and keep since/until fixed while paging. When more results exist beyond offset 100000, nextOffset is null and truncated is true; narrow the window or filters to retrieve them. Results can change during collection. Legacy statuses keep the latest transition per SHA/context; individual retries cannot be inferred from that API.
 
 ### `GET /usage/all`
 

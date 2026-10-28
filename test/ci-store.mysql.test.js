@@ -140,6 +140,62 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
     });
   });
 
+  it('imports newest-first legacy history with the same earliest day and latest verdict as live observations', async () => {
+    const early = Date.parse('2026-10-27T23:59:00Z');
+    const late = Date.parse('2026-10-28T00:01:00Z');
+    const pending = {
+      id: 2000,
+      context: 'midnight',
+      sha: 'midnight',
+      state: 'pending',
+      created_at: new Date(early).toISOString(),
+    };
+    const success = { ...pending, id: 2001, state: 'success', created_at: new Date(late).toISOString() };
+    await save([success, pending], {}, 'acme/import');
+    await save([pending], { observedAt: start }, 'acme/live');
+    await save([success, pending], {}, 'acme/live');
+    const filters = { ...query, kind: 'status', name: 'midnight' };
+    const imported = await store.runs({ ...filters, repos: ['acme/import'] });
+    const live = await store.runs({ ...filters, repos: ['acme/live'] });
+    const expected = {
+      id: '2001',
+      status: 'completed',
+      conclusion: 'success',
+      runAt: early,
+      observedAt: start + 120000,
+    };
+    expect(imported.runs[0]).toMatchObject(expected);
+    expect(live.runs[0]).toMatchObject(expected);
+    expect((await store.stats({ ...filters, repos: ['acme/import'], until: late })).daily).toEqual([
+      expect.objectContaining({ day: '2026-10-27', total: 1, succeeded: 1 }),
+    ]);
+    await save([pending], { observedAt: start - 1000 }, 'acme/import');
+    expect((await store.runs({ ...filters, repos: ['acme/import'] })).runs[0]).toMatchObject(expected);
+  });
+
+  it('rotates pending recovery through 101 unchanged commits and wraps independently per repo', async () => {
+    const rows = Array.from({ length: 101 }, (_, i) =>
+      check({
+        head_sha: String(i).padStart(40, '0'),
+        status: 'queued',
+        conclusion: null,
+      }),
+    );
+    await save(rows, {}, 'acme/recovery');
+    const first = await store.pendingCommits('acme/recovery');
+    expect(first).toHaveLength(100);
+    expect(first[0].sha).toBe(rows[0].head_sha);
+    // Neither unreadable nor empty GitHub reads write observations back.
+    expect(await store.pendingCommits('ACME/RECOVERY')).toEqual([
+      { sha: rows[100].head_sha, branch: 'main' },
+    ]);
+    expect(await store.pendingCommits('acme/recovery')).toEqual(first);
+    expect(await store.pendingCommits('acme/other')).toEqual([]);
+    expect(await store.pendingCommits('acme/recovery')).toEqual([
+      { sha: rows[100].head_sha, branch: 'main' },
+    ]);
+  });
+
   it('rolls back a batch on a SQL error and binds literal filter values', async () => {
     await expect(
       save([check({ name: 'rolled-back' }), check({ name: 'invalid', status: null })]),

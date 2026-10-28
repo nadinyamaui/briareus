@@ -1,3 +1,4 @@
+import { createCiStore } from '../lib/ci-store.js';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
@@ -116,6 +117,35 @@ describe('CI dashboard API through the authenticated gateway', () => {
     expect((await get(`/ci/runs?${query}`)).status).toBe(400);
     expect(store.runs).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [99900, 100000, false],
+    [99950, null, true],
+    [100000, null, true],
+  ])(
+    'returns an accepted continuation or explicit truncation at offset %i',
+    async (offset, nextOffset, truncated) => {
+      const connection = {
+        query: vi.fn(async () => [
+          Array.from({ length: 101 }, (_, i) => ({
+            github_id: String(i),
+            run_at: now,
+            observed_at: now,
+          })),
+        ]),
+        release: vi.fn(),
+      };
+      const ledger = createCiStore({ connection: async () => connection });
+      store.runs.mockImplementation((...args) => ledger.runs(...args));
+      const response = await get(`/ci/runs?offset=${offset}&limit=100`);
+      expect(response.status).toBe(200);
+      const page = await response.json();
+      expect(page).toMatchObject({ nextOffset, truncated });
+      expect(page.runs).toHaveLength(100);
+      expect(connection.query.mock.calls[0][1].slice(-2)).toEqual([101, offset]);
+      if (nextOffset != null) expect((await get(`/ci/runs?offset=${nextOffset}&limit=100`)).status).toBe(200);
+    },
+  );
 
   it('passes explicit time boundaries unchanged and requires authentication', async () => {
     expect((await fetch(`${url}/stats/ci`)).status).toBe(401);
