@@ -58,6 +58,34 @@ describe('the common tokens', () => {
   });
 });
 
+describe('QA task requirements', () => {
+  it.each([testSheetPrompt, testRunPrompt])(
+    'preserves explicit curl instructions even with template overrides',
+    (compose) => {
+      const qaInstructions =
+        'Use curl, save bodies/headers/status, assert response values and publish evidence.';
+      const prompt = compose({
+        ...base,
+        qaInstructions,
+        project: { promptTemplates: { testSheet: 'CUSTOM SHEET', testRun: 'CUSTOM RUN' } },
+      });
+      expect(prompt).toContain(qaInstructions);
+      expect(prompt).toContain('CUSTOM');
+      expect(prompt).toContain('every row is ✅ with execution evidence');
+      expect(prompt).toContain('preserve intentionally manual/excluded procedures');
+    },
+  );
+
+  it('plans API scenarios as executable and runs them with saved assertions', () => {
+    expect(testSheetPrompt(base)).toContain('concrete curl requests and response assertions with status ⬜');
+    const prompt = testRunPrompt(base);
+    expect(prompt).toContain('save response bodies, headers and HTTP status');
+    expect(prompt).toContain('assert the expected status and response values');
+    expect(prompt).toContain('Publish sanitized evidence');
+    expect(prompt).not.toContain('Leave 🖐 rows alone');
+  });
+});
+
 describe('testSheetPrompt', () => {
   it('carries the anchor the run turn finds the sheet by', () => {
     expect(testSheetPrompt(base)).toContain(TEST_SHEET_ANCHOR);
@@ -75,13 +103,13 @@ describe('testSheetPrompt', () => {
 
   // The project's own closing steps go last, after the QA notes; they are what
   // happens once the sheet itself is on the pull request.
-  it("ends with the project's closing steps when it configured any", () => {
+  it("includes the project's closing steps when it configured any", () => {
     const prompt = testSheetPrompt({
       ...base,
       project: { qaNotes: 'login: admin / secret', testSheetInstructions: 'Move the PR to ready-for-qa.' },
     });
     expect(prompt).toContain('closing steps');
-    expect(prompt.endsWith('Move the PR to ready-for-qa.')).toBe(true);
+    expect(prompt).toContain('Move the PR to ready-for-qa.');
   });
 
   it('says nothing about closing steps when the project configured none', () => {
@@ -238,10 +266,13 @@ describe('testRunPrompt', () => {
     it('points the links at the bucket, one 128-bit token on both paths', () => {
       cfgState.r2 = { publicBaseUrl: 'https://videos.example.com' };
       const onVideoRun = vi.fn();
-      const prompt = testRunPrompt({ ...base, onVideoRun });
+      const qaInstructions = 'Use curl and assert JSON response values.';
+      const prompt = testRunPrompt({ ...base, onVideoRun, qaInstructions });
       const dir = prompt.match(/\/srv\/videos\/acme__shop\/pr-<pr-number>-([0-9a-f]{32})/);
       expect(dir).not.toBeNull();
       expect(onVideoRun).toHaveBeenCalledWith(`acme__shop/pr-<pr-number>-${dir[1]}`);
+      expect(prompt).toContain(qaInstructions);
+      expect(prompt).toContain('every row is ✅ with execution evidence');
       expect(prompt).toContain(`https://videos.example.com/acme__shop/pr-<pr-number>-${dir[1]}`);
       expect(prompt).not.toContain('reviewer.example.com/videos');
     });
@@ -320,13 +351,13 @@ describe('implementFeedbackPrompt', () => {
 
   // The project's own closing steps go last, after the errand's own final
   // paragraph; they are what happens once the feedback is implemented.
-  it("ends with the project's closing steps when it configured any", () => {
+  it("includes the project's closing steps when it configured any", () => {
     const prompt = implementFeedbackPrompt({
       ...base,
       project: { feedbackInstructions: 'Move the PR to ready-for-qa.' },
     });
     expect(prompt).toContain('closing steps');
-    expect(prompt.endsWith('Move the PR to ready-for-qa.')).toBe(true);
+    expect(prompt).toContain('Move the PR to ready-for-qa.');
   });
 
   it('says nothing about closing steps when the project configured none', () => {

@@ -257,6 +257,25 @@ describe('the worker tools', () => {
     expect(lines[1]).toContain('w2 [idle] Fix the login · tooling fix on acme/dashboard');
   });
 
+  it('list_workers distinguishes incomplete manual coverage from passed QA', async () => {
+    stubFetch(
+      reply({
+        body: {
+          sessions: [
+            worker({ qaLoop: { done: true, incomplete: true, failedScenarios: 0 } }),
+            worker({ id: 'passed', qaLoop: { done: true, incomplete: false, failedScenarios: 0 } }),
+          ],
+        },
+      }),
+    );
+    const s = await boot();
+    const [res] = await s.send(callTool('list_workers', {}));
+    const lines = res.result.content[0].text.split('\n');
+    expect(lines[0]).toContain('QA incomplete coverage');
+    expect(lines[0]).toContain('not passed');
+    expect(lines[1]).toContain('QA passed');
+  });
+
   it('list_workers says where the armed loops stand', async () => {
     stubFetch(
       reply({

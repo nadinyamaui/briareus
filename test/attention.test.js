@@ -22,6 +22,13 @@ describe('operator attention', () => {
       'e:qa-failed',
     ]);
   });
+  it('surfaces incomplete manual coverage without calling it failed', () => {
+    const items = attentionItems([
+      { id: 'manual', status: 'idle', qaLoop: { done: true, incomplete: true, failedScenarios: 0 } },
+    ]);
+    expect(items.map((i) => i.id)).toEqual(['manual:qa-incomplete']);
+    expect(items[0].summary).toContain('coverage is incomplete');
+  });
   it('keeps held findings of a closed review and nothing else of it', () => {
     const items = attentionItems([
       { id: 'r', status: 'closed', awaitingAnswer: true, reviewTriage: { standalone: true, heldAt: 'x' } },
