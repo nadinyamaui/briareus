@@ -479,6 +479,7 @@ describe('ensureRepoWebhook', () => {
     'check_suite',
     'check_run',
     'status',
+    'push',
     'label',
     'milestone',
     'sub_issues',
@@ -500,6 +501,19 @@ describe('ensureRepoWebhook', () => {
     expect(path).toBe('/repos/acme/shop/hooks');
     expect(body.events).toEqual(events);
     expect(body.config).toMatchObject({ url, secret: GITHUB_SECRET, content_type: 'json' });
+  });
+
+  it('adds push discovery to an existing hook without that subscription', async () => {
+    const rest = restServing([
+      { id: 5, active: true, events: events.filter((event) => event !== 'push'), config: { url } },
+    ]);
+    await expect(ensureRepoWebhook(cfg, 'acme/shop', rest)).resolves.toMatchObject({ action: 'updated' });
+    expect(rest.mock.calls[1]).toEqual([
+      cfg,
+      'PATCH',
+      '/repos/acme/shop/hooks/5',
+      expect.objectContaining({ events }),
+    ]);
   });
 
   it('leaves an up-to-date hook alone', async () => {
@@ -710,6 +724,7 @@ describe('ensureRepoWebhook when GitHub refuses the write', () => {
     'check_suite',
     'check_run',
     'status',
+    'push',
     'label',
     'milestone',
     'sub_issues',
@@ -757,7 +772,7 @@ describe('ensureRepoWebhook when GitHub refuses the write', () => {
   });
 
   it('rewrites our hook when it carries an event too many', async () => {
-    const rest = restServing([{ id: 5, active: true, events: [...events, 'push'], config: { url } }]);
+    const rest = restServing([{ id: 5, active: true, events: [...events, 'workflow_run'], config: { url } }]);
 
     await expect(ensureRepoWebhook(cfg, 'acme/shop', rest)).resolves.toMatchObject({ action: 'updated' });
   });
@@ -830,6 +845,7 @@ describe('installRepoWebhooks', () => {
       'check_suite',
       'check_run',
       'status',
+      'push',
       'label',
       'milestone',
       'sub_issues',

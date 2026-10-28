@@ -35,6 +35,11 @@ function harness({
     ['/repos/acme/shop/pulls', []],
   ]);
   const errors = [];
+  const ci = {
+    save: vi.fn(async () => {}),
+    pendingCommits: vi.fn(async () => []),
+    markPendingAttempt: vi.fn(),
+  };
   const store = {
     syncState: vi.fn(async () => ({ synced_at: cursor })),
     syncedItems: vi.fn(async () => synced),
@@ -52,6 +57,7 @@ function harness({
     if (route instanceof Error) throw route;
     if (typeof route === 'function') return route(url);
     if (route !== undefined) return { ok: true, json: async () => route };
+    if (url.pathname.endsWith('/check-runs')) return { ok: true, json: async () => ({ check_runs: [] }) };
     if (url.pathname.includes('/issues/') && !url.pathname.endsWith('/comments'))
       return { ok: true, json: async () => issue(Number(url.pathname.split('/').at(-1))) };
     return { ok: true, json: async () => [] };
@@ -72,6 +78,7 @@ function harness({
     },
   }));
   const service = createGithubSync({
+    ci,
     projects: () => projects,
     config: () => ({ githubToken: 'token' }),
     store,
@@ -84,7 +91,7 @@ function harness({
     log: (m) => errors.push(m),
   });
   services.push(service);
-  return { service, store, rest, graphql, routes, board, budget, invalidate, errors };
+  return { service, store, ci, rest, graphql, routes, board, budget, invalidate, errors };
 }
 
 afterEach(() => {
@@ -93,6 +100,70 @@ afterEach(() => {
 });
 
 describe('durable GitHub synchronization', () => {
+  it('checkpoints completed CI targets and retains newer deliveries across a quota retry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const h = harness({ now: () => Date.now() });
+    const deliver = (sha, id) =>
+      h.service.onWebhook('check_run', {
+        repository: { full_name: project.repo },
+        check_run: { head_sha: sha, id },
+      });
+    const check = (id, sha) => ({ id, head_sha: sha, name: 'deploy', status: 'completed' });
+    h.routes.set('/repos/acme/shop/commits/done/check-runs', { check_runs: [check(1, 'done')] });
+    h.routes.set('/repos/acme/shop/commits/retry/check-runs', () => {
+      deliver('retry', 3);
+      throw Object.assign(new Error('core exhausted'), { status: 429, resource: 'core', retryAt: 60000 });
+    });
+    deliver('done', 1);
+    deliver('retry', 2);
+    await h.service.flush(project.repo);
+    h.rest.mockClear();
+    h.ci.save.mockClear();
+    h.routes.set('/repos/acme/shop/commits/retry/check-runs', {
+      check_runs: [check(2, 'retry'), check(3, 'retry')],
+    });
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(h.rest.mock.calls.some((call) => call[2].includes('/commits/done/'))).toBe(false);
+    expect(h.ci.save).toHaveBeenCalledExactlyOnceWith(
+      project.repo,
+      [check(2, 'retry'), check(3, 'retry')],
+      expect.objectContaining({ sha: 'retry' }),
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retains discovery received during hourly recovery while its webhook batch is still pending', async () => {
+    const h = harness();
+    const sha = 'release';
+    const endpoint = `/repos/acme/shop/commits/${sha}/check-runs`;
+    const older = { id: 1, head_sha: sha, name: 'deploy', status: 'completed' };
+    const newer = { ...older, id: 2 };
+    const deliver = (id) =>
+      h.service.onWebhook('check_run', {
+        repository: { full_name: project.repo },
+        check_run: { head_sha: sha, id },
+      });
+    deliver(1);
+    h.routes.set(endpoint, { check_runs: [older] });
+    h.routes.set(`/repos/acme/shop/commits/${sha}/statuses`, () => {
+      deliver(2);
+      return { ok: true, json: async () => [] };
+    });
+    await h.service.tick();
+    h.routes.delete(`/repos/acme/shop/commits/${sha}/statuses`);
+    // Abort the pending batch before CI reads. Hourly recovery must still own
+    // the newer target even though the older collection completed successfully.
+    h.budget.mockImplementationOnce(() => {
+      throw Object.assign(new Error('core exhausted'), { status: 429, resource: 'core' });
+    });
+    await h.service.flush(project.repo);
+    h.ci.save.mockClear();
+    h.routes.set(endpoint, { check_runs: [older, newer] });
+    await h.service.tick();
+    expect(h.ci.save).toHaveBeenCalledWith(project.repo, [older, newer], expect.objectContaining({ sha }));
+  });
+
   it('uses conditional REST reads for repeated synchronization', async () => {
     const h = harness({ initial: [issue(1)] });
     await h.service.tick();
@@ -426,6 +497,590 @@ describe('durable GitHub synchronization', () => {
       expect.objectContaining({ reviewDecision: 'changes_requested' }),
       expect.anything(),
     );
+  });
+
+  it.each([403, 503, 429])(
+    'persists complete checks despite status pagination failing with %i and retains retry',
+    async (status) => {
+      const h = harness();
+      const sha = 'release';
+      const check = { id: 99, name: 'deploy', head_sha: sha, status: 'completed', conclusion: 'success' };
+      h.routes.set(`/repos/acme/shop/commits/${sha}/check-runs`, { check_runs: [check] });
+      const statuses = `/repos/acme/shop/commits/${sha}/statuses`;
+      h.routes.set(statuses, (url) =>
+        url.searchParams.get('page') === '1'
+          ? {
+              ok: true,
+              json: async () => Array.from({ length: 100 }, (_, id) => ({ id, context: 'partial' })),
+            }
+          : { ok: false, status },
+      );
+      h.service.onWebhook('check_run', { repository: { full_name: project.repo }, check_run: check });
+      await h.service.flush(project.repo);
+      expect(h.ci.save).toHaveBeenCalledExactlyOnceWith(
+        project.repo,
+        [check],
+        expect.objectContaining({ sha }),
+      );
+      expect(h.errors).toEqual([expect.stringContaining(String(status))]);
+      h.routes.set(statuses, [{ id: 101, context: 'deploy', state: 'success' }]);
+      h.rest.mockClear();
+      await h.service.tick();
+      expect(h.rest.mock.calls.some((call) => call[2].includes(`/commits/${sha}/`))).toBe(true);
+      expect(h.ci.save).toHaveBeenCalledWith(
+        project.repo,
+        [expect.objectContaining({ id: 101 })],
+        expect.objectContaining({ sha }),
+      );
+      h.rest.mockClear();
+      await h.service.tick();
+      expect(h.rest.mock.calls.some((call) => call[2].includes(`/commits/${sha}/`))).toBe(false);
+      h.service.stop();
+    },
+  );
+
+  it.each([403, 503])(
+    'persists statuses when check pagination fails with %i without publishing partial checks',
+    async (status) => {
+      const h = harness();
+      const sha = 'release';
+      const statuses = [{ id: 1, context: 'deploy', state: 'success' }];
+      h.routes.set(`/repos/acme/shop/commits/${sha}/check-runs`, (url) =>
+        url.searchParams.get('page') === '1'
+          ? {
+              ok: true,
+              json: async () => ({
+                check_runs: Array.from({ length: 100 }, (_, id) => ({ id, name: 'partial' })),
+              }),
+            }
+          : { ok: false, status },
+      );
+      h.routes.set(`/repos/acme/shop/commits/${sha}/statuses`, statuses);
+      h.service.onWebhook('status', { repository: { full_name: project.repo }, sha });
+      await h.service.flush(project.repo);
+      expect(h.ci.save).toHaveBeenCalledExactlyOnceWith(
+        project.repo,
+        statuses,
+        expect.objectContaining({ sha }),
+      );
+      expect(h.errors).toEqual([expect.stringContaining(String(status))]);
+      h.routes.set(`/repos/acme/shop/commits/${sha}/check-runs`, { check_runs: [] });
+      await h.service.tick();
+      expect(h.errors).toHaveLength(1);
+      h.service.stop();
+    },
+  );
+
+  it.each(['check_run', 'check_suite'])(
+    'fetches a delivered %s omitted from the commit list and retries failed fallback reads',
+    async (event) => {
+      const h = harness();
+      const sha = 'release';
+      const check = {
+        id: 99,
+        head_sha: sha,
+        name: 'old suite',
+        status: 'completed',
+        conclusion: 'success',
+        check_suite: { id: 88 },
+      };
+      const path =
+        event === 'check_run'
+          ? '/repos/acme/shop/check-runs/99'
+          : '/repos/acme/shop/check-suites/88/check-runs';
+      h.routes.set(path, () => ({ ok: false, status: 503 }));
+      h.service.onWebhook(event, {
+        repository: { full_name: project.repo },
+        [event]: { id: event === 'check_run' ? 99 : 88, head_sha: sha },
+      });
+      await h.service.flush(project.repo);
+      expect(h.errors).toEqual([expect.stringContaining('503')]);
+      h.routes.set(path, event === 'check_run' ? check : { check_runs: [check] });
+      await h.service.tick();
+      expect(h.ci.save).toHaveBeenCalledWith(project.repo, [check], expect.objectContaining({ sha }));
+      h.rest.mockClear();
+      await h.service.tick();
+      expect(h.rest.mock.calls.some((call) => call[2].includes(path))).toBe(false);
+      h.service.stop();
+    },
+  );
+
+  it('does not replace a webhook discovered during the default-head lookup', async () => {
+    const h = harness();
+    h.routes.set('/repos/acme/shop', { default_branch: 'main' });
+    const lookup = Promise.withResolvers();
+    const release = Promise.withResolvers();
+    h.routes.set('/repos/acme/shop/commits/main', () => {
+      lookup.resolve();
+      return release.promise;
+    });
+    const tick = h.service.tick();
+    await lookup.promise;
+    const sha = 'release';
+    const check = { id: 100, head_sha: sha, name: 'CI', status: 'completed', conclusion: 'success' };
+    h.service.onWebhook('check_run', { repository: { full_name: project.repo }, check_run: check });
+    h.service.onWebhook('label', { repository: { full_name: project.repo } });
+    h.routes.set(
+      '/repos/acme/shop/labels',
+      Object.assign(new Error('core exhausted'), { status: 429, resource: 'core' }),
+    );
+    const flush = h.service.flush(project.repo);
+    release.resolve({ ok: true, json: async () => ({ sha }) });
+    await Promise.all([tick, flush]);
+    expect(h.rest.mock.calls.some((call) => call[2].includes(`/commits/${sha}/`))).toBe(false);
+    h.routes.delete('/repos/acme/shop/labels');
+    h.routes.set('/repos/acme/shop/commits/main', { sha: 'new-default' });
+    h.routes.set('/repos/acme/shop/check-runs/100', check);
+    await h.service.tick();
+    expect(h.ci.save).toHaveBeenCalledWith(project.repo, [check], expect.objectContaining({ sha }));
+    h.service.stop();
+  });
+
+  it.each(['head', 'base', 'updated_at'])(
+    'validates PR %s after history pagination and retries the changed snapshot',
+    async (field) => {
+      const h = harness({ initial: [issue(1, { pull_request: {} })] });
+      const original = pull(1);
+      h.routes.set('/repos/acme/shop/pulls/1', original);
+      const check = { id: 1, name: 'CI', status: 'completed', conclusion: 'success' };
+      h.routes.set(`/repos/acme/shop/commits/${original.head.sha}/check-runs`, (url) => {
+        if (url.searchParams.get('filter') === 'all')
+          h.routes.set('/repos/acme/shop/pulls/1', {
+            ...original,
+            [field]: field === 'updated_at' ? '2026-10-28T00:00:00Z' : { ...original[field], sha: 'changed' },
+          });
+        return { ok: true, json: async () => ({ check_runs: [check] }) };
+      });
+      await h.service.tick();
+      expect(h.store.saveItem).not.toHaveBeenCalled();
+      expect(h.errors).toContain('acme/shop: Pull request #1 changed during synchronization; retry required');
+      h.routes.set(`/repos/acme/shop/commits/${original.head.sha}/check-runs`, { check_runs: [check] });
+      await h.service.tick();
+      expect(h.store.saveItem).toHaveBeenCalledTimes(1);
+      h.service.stop();
+    },
+  );
+
+  it('saves a validated PR when history pagination fails and retains the old head after it closes', async () => {
+    const item = issue(1, { pull_request: {}, state: 'closed' });
+    const h = harness({ initial: [item] });
+    const pr = pull(1, { state: 'closed' });
+    const check = { id: 1, head_sha: pr.head.sha, name: 'CI', status: 'completed', conclusion: 'success' };
+    h.routes.set('/repos/acme/shop/pulls/1', pr);
+    h.routes.set(`/repos/acme/shop/commits/${pr.head.sha}/check-runs`, (url) =>
+      url.searchParams.get('filter') === 'all'
+        ? { ok: false, status: 503 }
+        : { ok: true, json: async () => ({ check_runs: [check] }) },
+    );
+    await h.service.tick();
+    expect(h.store.saveItem).toHaveBeenCalledExactlyOnceWith(
+      project.repo,
+      expect.objectContaining({ headSha: pr.head.sha, checks: 'success' }),
+      expect.objectContaining({ checks: [check] }),
+    );
+    expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, expect.any(Number));
+    h.routes.set(`/repos/acme/shop/commits/${pr.head.sha}/check-runs`, { check_runs: [check] });
+    h.ci.save.mockClear();
+    await h.service.tick();
+    expect(h.store.saveItem).toHaveBeenCalledTimes(1);
+    expect(h.ci.save).toHaveBeenCalledWith(
+      project.repo,
+      [check],
+      expect.objectContaining({ sha: pr.head.sha }),
+    );
+    h.service.stop();
+  });
+
+  it('continues collecting the default branch after a pending commit becomes unreadable', async () => {
+    const h = harness();
+    h.ci.pendingCommits.mockResolvedValue([{ sha: 'gone', branch: 'old' }]);
+    h.routes.set('/repos/acme/shop/commits/gone/check-runs', () => ({ ok: false, status: 404 }));
+    h.routes.set('/repos/acme/shop', { default_branch: 'main' });
+    h.routes.set('/repos/acme/shop/commits/main', { sha: 'abc' });
+    h.routes.set('/repos/acme/shop/commits/abc/check-runs', {
+      check_runs: [{ id: 42, name: 'deploy', status: 'completed', conclusion: 'success' }],
+    });
+    await h.service.tick();
+    expect(h.ci.save).toHaveBeenCalledWith(
+      project.repo,
+      [expect.objectContaining({ id: 42 })],
+      expect.objectContaining({ sha: 'abc' }),
+    );
+    expect(h.board).toHaveBeenCalled();
+    expect(h.errors[0]).toContain('GitHub answered 404');
+    expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, expect.any(Number));
+    expect(h.store.finishSync).toHaveBeenCalledWith(
+      project.repo,
+      null,
+      expect.stringContaining('CI collection: GitHub answered 404'),
+    );
+  });
+
+  it.each(['GitHub', 'ledger', 'rate limit'])(
+    'retains a failed default head after a %s failure even when the branch advances',
+    async (failure) => {
+      const h = harness();
+      const check = { id: 42, name: 'deploy', head_sha: 'old', status: 'completed', conclusion: 'success' };
+      h.routes.set('/repos/acme/shop', { default_branch: 'main' });
+      h.routes.set('/repos/acme/shop/commits/main', { sha: 'old' });
+      h.routes.set('/repos/acme/shop/commits/old/check-runs', { check_runs: [check] });
+      const statuses = '/repos/acme/shop/commits/old/statuses';
+      if (failure === 'GitHub') h.routes.set(statuses, () => ({ ok: false, status: 503 }));
+      if (failure === 'ledger') h.ci.save.mockRejectedValueOnce(new Error('ledger unavailable'));
+      if (failure === 'rate limit')
+        h.routes.set(statuses, Object.assign(new Error('rate limited'), { status: 429, resource: 'core' }));
+      await h.service.tick();
+      expect(h.errors).toHaveLength(1);
+      h.routes.set(statuses, []);
+      h.routes.set('/repos/acme/shop/commits/main', { sha: 'new' });
+      h.ci.save.mockClear();
+      await h.service.tick();
+      expect(h.ci.save).toHaveBeenCalledWith(
+        project.repo,
+        [check],
+        expect.objectContaining({ sha: 'old', branch: 'main' }),
+      );
+      h.rest.mockClear();
+      await h.service.tick();
+      expect(h.rest.mock.calls.some((call) => call[2].includes('/commits/old/'))).toBe(false);
+    },
+  );
+
+  it.each(['pending', 'empty repository'])(
+    'advances the issue cursor despite unavailable %s CI',
+    async (source) => {
+      let cursor = Date.parse('2026-10-26T12:00:00Z');
+      let clock = Date.parse('2026-10-27T12:00:00Z');
+      const h = harness({ now: () => clock });
+      h.store.syncState.mockImplementation(async () => ({ synced_at: cursor }));
+      h.store.finishSync.mockImplementation(async (_repo, at, error) => {
+        if (!error) cursor = at;
+      });
+      if (source === 'pending') {
+        h.ci.pendingCommits.mockResolvedValue([{ sha: 'gone', branch: 'old' }]);
+        h.routes.set('/repos/acme/shop/commits/gone/check-runs', () => ({ ok: false, status: 404 }));
+      } else {
+        h.routes.set('/repos/acme/shop', { default_branch: 'main' });
+        h.routes.set('/repos/acme/shop/commits/main', () => ({ ok: false, status: 409 }));
+      }
+      await h.service.tick();
+      const firstCursor = cursor;
+      clock += GITHUB_SYNC_INTERVAL_MS;
+      await h.service.tick();
+      const downloads = h.rest.mock.calls.filter((call) => call[2].includes('/issues?'));
+      expect(downloads).toHaveLength(2);
+      expect(new URL(downloads[1][2], 'https://api.github.com').searchParams.get('since')).toBe(
+        new Date(firstCursor - 60000).toISOString(),
+      );
+      expect(cursor).toBe(clock);
+      expect(h.errors).toHaveLength(2);
+      expect(h.store.finishSync.mock.calls).toEqual([
+        [project.repo, firstCursor],
+        [project.repo, null, expect.stringMatching(/^CI collection:/)],
+        [project.repo, clock],
+        [project.repo, null, expect.stringMatching(/^CI collection:/)],
+      ]);
+    },
+  );
+
+  it.each(['GitHub', 'ledger', 'rate limit', 'metadata rate limit'])(
+    'retains a non-PR webhook discovery after a %s failure and retries it hourly',
+    async (failure) => {
+      const h = harness();
+      const sha = 'f'.repeat(40);
+      const endpoint = `/repos/acme/shop/commits/${sha}/check-runs`;
+      const check = { id: 99, head_sha: sha, name: 'deploy', status: 'completed', conclusion: 'success' };
+      h.routes.set(endpoint, { check_runs: [check] });
+      if (failure === 'GitHub') h.routes.set(endpoint, () => ({ ok: false, status: 503 }));
+      if (failure === 'ledger') h.ci.save.mockRejectedValueOnce(new Error('ledger unavailable'));
+      if (failure === 'rate limit')
+        h.routes.set(endpoint, Object.assign(new Error('rate limited'), { status: 429, resource: 'core' }));
+      if (failure === 'metadata rate limit') {
+        h.service.onWebhook('label', { repository: { full_name: project.repo } });
+        h.routes.set(
+          '/repos/acme/shop/labels',
+          Object.assign(new Error('rate limited'), { status: 429, resource: 'core' }),
+        );
+      }
+      h.service.onWebhook('check_run', {
+        repository: { full_name: project.repo },
+        check_run: { head_sha: sha, check_suite: { head_branch: 'release' } },
+      });
+      await h.service.flush(project.repo);
+      h.routes.set(endpoint, { check_runs: [check] });
+      h.routes.delete('/repos/acme/shop/labels');
+      h.ci.save.mockClear();
+      await h.service.tick();
+      expect(h.ci.save).toHaveBeenCalledWith(
+        project.repo,
+        [check],
+        expect.objectContaining({ sha, branch: 'release' }),
+      );
+      h.rest.mockClear();
+      await h.service.tick();
+      expect(h.rest.mock.calls.some((call) => call[2].includes(`/commits/${sha}/`))).toBe(false);
+    },
+  );
+
+  it.each([
+    { source: 'webhook', outcome: 'success' },
+    { source: 'hourly', outcome: 'success' },
+    { source: 'webhook', outcome: 'failure' },
+    { source: 'hourly', outcome: 'failure' },
+  ])(
+    'retains a newer discovery after older $source $outcome and a newer batch abort',
+    async ({ source, outcome }) => {
+      const h = harness();
+      const sha = 'f'.repeat(40);
+      const endpoint = `/repos/acme/shop/commits/${sha}/check-runs`;
+      const statuses = `/repos/acme/shop/commits/${sha}/statuses`;
+      const older = { id: 99, head_sha: sha, name: 'deploy', status: 'completed', conclusion: 'success' };
+      const newer = { ...older, id: 100 };
+      const discover = (branch) =>
+        h.service.onWebhook('check_run', {
+          repository: { full_name: project.repo },
+          check_run: { head_sha: sha, check_suite: { head_branch: branch } },
+        });
+      discover('old-release');
+      if (source === 'hourly') {
+        h.routes.set(endpoint, () => ({ ok: false, status: 503 }));
+        await h.service.flush(project.repo);
+      }
+      h.routes.set(endpoint, { check_runs: [older] });
+      const readingStatuses = Promise.withResolvers();
+      const releaseStatuses = Promise.withResolvers();
+      h.routes.set(statuses, () => {
+        readingStatuses.resolve();
+        return releaseStatuses.promise;
+      });
+      const first = source === 'hourly' ? h.service.tick() : h.service.flush(project.repo);
+      await readingStatuses.promise;
+
+      // Register the next discovery while the older authoritative read is in flight.
+      discover('release');
+      h.service.onWebhook('label', { repository: { full_name: project.repo } });
+      h.routes.set(
+        '/repos/acme/shop/labels',
+        Object.assign(new Error('rate limited'), { status: 429, resource: 'core' }),
+      );
+      const second = h.service.flush(project.repo);
+      releaseStatuses.resolve(
+        outcome === 'success' ? { ok: true, json: async () => [] } : { ok: false, status: 503 },
+      );
+      await Promise.all([first, second]);
+      // Healthy checks persist even if the independent statuses source fails.
+      expect(h.ci.save).toHaveBeenCalledWith(
+        project.repo,
+        [older],
+        expect.objectContaining({ sha, branch: 'old-release' }),
+      );
+      expect(h.errors).toContain('acme/shop: rate limited');
+
+      h.routes.delete('/repos/acme/shop/labels');
+      h.routes.set(statuses, []);
+      h.routes.set(endpoint, { check_runs: [older, newer] });
+      h.ci.save.mockClear();
+      await h.service.tick();
+      expect(h.ci.save).toHaveBeenCalledWith(
+        project.repo,
+        [older, newer],
+        expect.objectContaining({ sha, branch: 'release' }),
+      );
+      h.rest.mockClear();
+      await h.service.tick();
+      expect(h.rest.mock.calls.some((call) => call[2].includes(`/commits/${sha}/`))).toBe(false);
+    },
+  );
+
+  it('bounds hourly discovery retries and rotates failed targets past the first hundred', async () => {
+    const h = harness();
+    const shas = Array.from({ length: 101 }, (_, i) => i.toString(16).padStart(40, 'f'));
+    for (const sha of shas) {
+      h.routes.set(`/repos/acme/shop/commits/${sha}/check-runs`, () => ({ ok: false, status: 503 }));
+      h.service.onWebhook('status', { repository: { full_name: project.repo }, sha });
+    }
+    await h.service.flush(project.repo);
+    h.rest.mockClear();
+    await h.service.tick();
+    expect(h.rest.mock.calls.filter((call) => call[2].includes('/check-runs'))).toHaveLength(100);
+    expect(h.rest.mock.calls.some((call) => call[2].includes(shas[100]))).toBe(false);
+    h.rest.mockClear();
+    await h.service.tick();
+    expect(h.rest.mock.calls.filter((call) => call[2].includes('/check-runs'))).toHaveLength(100);
+    expect(h.rest.mock.calls.some((call) => call[2].includes(shas[100]))).toBe(true);
+  });
+
+  it.each([
+    [[{ name: 'staging', commit: { sha: 'abc' } }], 'staging'],
+    [[{ name: 'staging' }, { name: 'production' }], null],
+    [[], null],
+  ])('uses only unambiguous status branch hints: %j', async (branches, branch) => {
+    const h = harness();
+    const status = { id: 15, context: 'deploy', state: 'success' };
+    h.routes.set('/repos/acme/shop/commits/abc/statuses', [status]);
+    h.service.onWebhook('status', { repository: { full_name: project.repo }, sha: 'abc', branches });
+    await h.service.flush(project.repo);
+    expect(h.ci.save).toHaveBeenCalledWith(
+      project.repo,
+      [status],
+      expect.objectContaining({ sha: 'abc', branch }),
+    );
+  });
+
+  it('saves a validated closed PR and retries its failed ledger independently', async () => {
+    const h = harness({ initial: [issue(1, { pull_request: {}, state: 'closed' })] });
+    h.routes.set('/repos/acme/shop/pulls/1', pull(1, { state: 'closed' }));
+    h.routes.set(`/repos/acme/shop/commits/${'a'.repeat(40)}/check-runs`, {
+      check_runs: [{ id: 1, name: 'CI', status: 'completed', conclusion: 'success' }],
+    });
+    h.ci.save.mockRejectedValue(new Error('ledger unavailable'));
+    await h.service.tick();
+    expect(h.store.saveItem).toHaveBeenCalledExactlyOnceWith(
+      project.repo,
+      expect.objectContaining({ number: 1, state: 'closed', checks: 'success' }),
+      expect.objectContaining({ files: [], checks: [expect.objectContaining({ id: 1 })] }),
+    );
+    expect(h.errors).toContain('acme/shop: CI collection: ledger unavailable; ledger unavailable');
+    h.ci.save.mockResolvedValue();
+    await h.service.tick();
+    expect(h.ci.save).toHaveBeenCalledWith(
+      project.repo,
+      [expect.objectContaining({ id: 1 })],
+      expect.objectContaining({ sha: 'a'.repeat(40) }),
+    );
+    expect(h.store.saveItem).toHaveBeenCalledTimes(1);
+    expect(h.store.finishSync).toHaveBeenLastCalledWith(project.repo, expect.any(Number));
+  });
+
+  it('records retries separately without changing the latest PR verdict', async () => {
+    const h = harness({ initial: [issue(1, { pull_request: {} })] });
+    h.routes.set('/repos/acme/shop/pulls/1', pull(1));
+    const latest = { id: 12, name: 'CI', status: 'completed', conclusion: 'success' };
+    const old = { ...latest, id: 11, conclusion: 'failure' };
+    const endpoint = `/repos/acme/shop/commits/${'a'.repeat(40)}/check-runs`;
+    h.routes.set(endpoint, (url) => ({
+      ok: true,
+      json: async () => ({ check_runs: url.searchParams.get('filter') === 'all' ? [latest, old] : [latest] }),
+    }));
+    await h.service.tick();
+    expect(h.store.saveItem.mock.calls[0][1].checks).toBe('success');
+    const saved = h.ci.save.mock.calls.find((call) => call[1].length);
+    expect(saved[1]).toEqual(expect.arrayContaining([latest, old]));
+    expect(saved[2]).toMatchObject({ sha: 'a'.repeat(40), branch: 'fix' });
+  });
+
+  it('refetches checks from webhooks outside PRs rather than trusting an obsolete payload', async () => {
+    const h = harness();
+    const current = {
+      id: 10,
+      head_sha: 'c'.repeat(40),
+      name: 'deploy',
+      status: 'completed',
+      conclusion: 'success',
+    };
+    h.routes.set(`/repos/acme/shop/commits/${current.head_sha}/check-runs`, { check_runs: [current] });
+    h.service.onWebhook('check_run', {
+      repository: { full_name: project.repo },
+      check_run: {
+        id: 10,
+        head_sha: current.head_sha,
+        status: 'queued',
+        check_suite: { head_branch: 'production' },
+      },
+    });
+    await h.service.flush(project.repo);
+    expect(h.ci.save).toHaveBeenCalledWith(
+      project.repo,
+      [current],
+      expect.objectContaining({ branch: 'production' }),
+    );
+    expect(h.store.saveItem).not.toHaveBeenCalled();
+    expect(h.errors).toEqual([]);
+  });
+
+  it('coalesces a matrix-job webhook burst into one paginated CI collection per commit', async () => {
+    const h = harness();
+    const sha = 'c'.repeat(40);
+    const checks = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, head_sha: sha, name: 'CI' }));
+    h.routes.set(`/repos/acme/shop/commits/${sha}/check-runs`, (url) => ({
+      ok: true,
+      json: async () => ({ check_runs: url.searchParams.get('page') === '1' ? checks : [] }),
+    }));
+    for (let id = 1; id <= 100; id++)
+      h.service.onWebhook('check_run', {
+        repository: { full_name: project.repo },
+        check_run: { id, head_sha: sha },
+      });
+    await h.service.flush(project.repo);
+    expect(h.rest.mock.calls.filter((call) => call[2].includes('/check-runs'))).toHaveLength(2);
+    expect(h.rest.mock.calls.filter((call) => /\/check-runs\/\d+/.test(call[2]))).toHaveLength(0);
+    expect(h.ci.save).toHaveBeenCalledExactlyOnceWith(project.repo, checks, expect.objectContaining({ sha }));
+  });
+
+  it('recovers pending old heads and collects default-branch checks during periodic synchronization', async () => {
+    const h = harness();
+    const sha = 'd'.repeat(40);
+    h.ci.pendingCommits.mockResolvedValue([{ sha: 'c'.repeat(40), branch: 'old' }]);
+    h.routes.set('/repos/acme/shop', { default_branch: 'main' });
+    h.routes.set('/repos/acme/shop/commits/main', { sha });
+    h.routes.set(`/repos/acme/shop/commits/${sha}/check-runs`, {
+      check_runs: [{ id: 42, name: 'deploy', status: 'completed', conclusion: 'success' }],
+    });
+    await h.service.tick();
+    expect(h.ci.save).toHaveBeenCalledWith(
+      project.repo,
+      [],
+      expect.objectContaining({ sha: 'c'.repeat(40), branch: 'old' }),
+    );
+    expect(h.ci.save).toHaveBeenCalledWith(
+      project.repo,
+      [expect.objectContaining({ id: 42 })],
+      expect.objectContaining({ sha, branch: 'main' }),
+    );
+    expect(h.errors).toEqual([]);
+  });
+
+  it.each([
+    ['refs/heads/release/candidate', 'release/candidate'],
+    ['refs/tags/v1', null],
+    ['refs/pull/1/head', null],
+    [undefined, null],
+  ])('collects push checks using only branch refs as hints: %s', async (ref, branch) => {
+    const h = harness();
+    const sha = 'e'.repeat(40);
+    const check = { id: 1, name: 'deploy', status: 'completed', conclusion: 'success' };
+    h.routes.set(`/repos/acme/shop/commits/${sha}/check-runs`, { check_runs: [check] });
+    h.service.onWebhook('push', { repository: { full_name: project.repo }, ref, after: sha });
+    await h.service.flush(project.repo);
+    expect(h.ci.save).toHaveBeenCalledWith(project.repo, [check], expect.objectContaining({ sha, branch }));
+    expect(h.errors).toEqual([]);
+  });
+
+  it('records push checks without a PR and ignores deleted refs', async () => {
+    const h = harness();
+    const sha = 'e'.repeat(40);
+    const status = { id: 1, context: 'deploy', state: 'success' };
+    h.routes.set(`/repos/acme/shop/commits/${sha}/statuses`, [status]);
+    h.service.onWebhook('push', {
+      repository: { full_name: project.repo },
+      ref: 'refs/heads/production',
+      after: sha,
+    });
+    await h.service.flush(project.repo);
+    expect(h.ci.save).toHaveBeenCalledWith(
+      project.repo,
+      [status],
+      expect.objectContaining({ sha, branch: 'production' }),
+    );
+    h.ci.save.mockClear();
+    h.service.onWebhook('push', {
+      repository: { full_name: project.repo },
+      ref: 'refs/heads/production',
+      deleted: true,
+      after: '0'.repeat(40),
+    });
+    await h.service.flush(project.repo);
+    expect(h.ci.save).not.toHaveBeenCalled();
   });
 
   it('backfills every page including closed issues before advancing the watermark', async () => {
@@ -912,7 +1567,12 @@ describe('durable GitHub synchronization', () => {
     expect(row).not.toHaveProperty('checks');
     expect(collections).not.toHaveProperty('checks');
     expect(h.store.finishSync).toHaveBeenCalledWith(project.repo, expect.any(Number));
-    expect(h.errors).toEqual([]);
+    expect(h.errors).toEqual([expect.stringContaining('CI permission missing')]);
+    expect(h.ci.save).toHaveBeenCalledWith(
+      project.repo,
+      [expect.objectContaining({ context: 'deploy' })],
+      expect.objectContaining({ sha: 'a'.repeat(40) }),
+    );
   });
 
   it.each([429, 503])('does not suppress check-run failures with status %s', async (status) => {

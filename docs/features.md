@@ -130,6 +130,9 @@ See [session costs](../README.md#what-a-session-costs) and
 
 ## Resource stats
 
+CI/CD check history and dashboard metrics are also available through
+`GET /stats/ci` and `GET /ci/runs`; see [CI/CD statistics](ci-stats.md).
+
 The server samples every open session every ten seconds: the CPU, resident
 memory and process count of everything it spawned (the agent's turn or a setup
 step, the ▶ Run server, the shared browser), split by kind, plus the disk its

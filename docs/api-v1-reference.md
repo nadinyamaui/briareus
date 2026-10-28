@@ -1113,6 +1113,46 @@ Read the machine’s and the Briareus server’s CPU, memory and disks, with the
 
 **Returns** `ServerStats`. Machine-wide figures are the same for every token; the `sessions` totals count only this token’s projects.
 
+### `GET /stats/ci`
+
+Read durable CI/CD totals and trends across the token’s projects. Needs `read`.
+
+**Query**
+
+| Field        | Type                |                                                                        |
+| ------------ | ------------------- | ---------------------------------------------------------------------- |
+| `repo`       | `string`            | Optional repository; absent means all projects visible to the token    |
+| `since`      | `integer`           | Inclusive epoch milliseconds; defaults to 30 days before until         |
+| `until`      | `integer`           | Exclusive epoch milliseconds; defaults to now; maximum window 366 days |
+| `kind`       | `check_run\|status` | check_run by default; legacy statuses are reported separately          |
+| `branch`     | `string`            | Exact branch hint                                                      |
+| `name`       | `string`            | Exact check name or status context                                     |
+| `status`     | `string`            | Exact execution status                                                 |
+| `conclusion` | `string`            | Exact conclusion                                                       |
+
+**Returns** `{ since: integer, until: integer, kind: check_run|status, totals: CiMetrics, daily: CiDailyMetrics[], repositories: CiRepositoryMetrics[], checks: CiNamedMetrics[] }`. Observed checks only, collected by GitHub synchronization and signed webhooks; not a complete historical backfill. Daily buckets use UTC and omit empty days. Repeated observations do not increment totals. Durations exclude records without valid timestamps. All aggregates respect project access.
+
+### `GET /ci/runs`
+
+List persisted CI/CD checks with status, commit, duration and details URL. Needs `read`.
+
+**Query**
+
+| Field        | Type                |                                                                        |
+| ------------ | ------------------- | ---------------------------------------------------------------------- |
+| `repo`       | `string`            | Optional repository; absent means all projects visible to the token    |
+| `since`      | `integer`           | Inclusive epoch milliseconds; defaults to 30 days before until         |
+| `until`      | `integer`           | Exclusive epoch milliseconds; defaults to now; maximum window 366 days |
+| `kind`       | `check_run\|status` | check_run by default; legacy statuses are reported separately          |
+| `branch`     | `string`            | Exact branch hint                                                      |
+| `name`       | `string`            | Exact check name or status context                                     |
+| `status`     | `string`            | Exact execution status                                                 |
+| `conclusion` | `string`            | Exact conclusion                                                       |
+| `limit`      | `integer`           | Page size, 1–100; default 50                                           |
+| `offset`     | `integer`           | Offset, 0–100000; default 0                                            |
+
+**Returns** `{ since: integer, until: integer, kind: check_run|status, runs: CiRun[], nextOffset: integer?, truncated: boolean }`. Newest runAt first; use nextOffset until null and keep since/until fixed while paging. When more results exist beyond offset 100000, nextOffset is null and truncated is true; narrow the window or filters to retrieve them. Results can change during collection. Legacy statuses keep the latest transition per SHA/context; individual retries cannot be inferred from that API.
+
 ### `GET /usage/all`
 
 Read usage and costs across every project. Needs `admin`.
@@ -2272,6 +2312,112 @@ Remove a account. Needs `admin`.
 
 ## Objects
 
+### CiMetrics
+
+CI/CD metrics for observed GitHub checks.
+
+| Field             | Type       |                                                                     |
+| ----------------- | ---------- | ------------------------------------------------------------------- |
+| `total`           | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context) |
+| `pending`         | `integer`  | Queued, waiting or running checks                                   |
+| `succeeded`       | `integer`  | Completed successfully                                              |
+| `failed`          | `integer`  | Failure, error, timeout, startup failure or action required         |
+| `cancelled`       | `integer`  | Cancelled executions                                                |
+| `skipped`         | `integer`  | Skipped or neutral executions                                       |
+| `other`           | `integer`  | Other terminal conclusions, including a missing conclusion          |
+| `successRate`     | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results |
+| `timed`           | `integer`  | Executions with valid start and completion timestamps               |
+| `avgDurationMs`   | `number?`  | Mean duration of timed executions; null when none                   |
+| `maxDurationMs`   | `number?`  | Longest timed execution; null when none                             |
+| `totalDurationMs` | `number`   | Sum of timed execution durations, not wall time or billed minutes   |
+| `lastObservedAt`  | `integer?` | Most recent successful observation, epoch milliseconds              |
+
+### CiDailyMetrics
+
+One non-empty UTC day.
+
+| Field             | Type       |                                                                     |
+| ----------------- | ---------- | ------------------------------------------------------------------- |
+| `day`             | `string`   | UTC date, YYYY-MM-DD                                                |
+| `total`           | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context) |
+| `pending`         | `integer`  | Queued, waiting or running checks                                   |
+| `succeeded`       | `integer`  | Completed successfully                                              |
+| `failed`          | `integer`  | Failure, error, timeout, startup failure or action required         |
+| `cancelled`       | `integer`  | Cancelled executions                                                |
+| `skipped`         | `integer`  | Skipped or neutral executions                                       |
+| `other`           | `integer`  | Other terminal conclusions, including a missing conclusion          |
+| `successRate`     | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results |
+| `timed`           | `integer`  | Executions with valid start and completion timestamps               |
+| `avgDurationMs`   | `number?`  | Mean duration of timed executions; null when none                   |
+| `maxDurationMs`   | `number?`  | Longest timed execution; null when none                             |
+| `totalDurationMs` | `number`   | Sum of timed execution durations, not wall time or billed minutes   |
+| `lastObservedAt`  | `integer?` | Most recent successful observation, epoch milliseconds              |
+
+### CiRepositoryMetrics
+
+Metrics for one repository.
+
+| Field             | Type       |                                                                     |
+| ----------------- | ---------- | ------------------------------------------------------------------- |
+| `repo`            | `string`   | owner/name                                                          |
+| `total`           | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context) |
+| `pending`         | `integer`  | Queued, waiting or running checks                                   |
+| `succeeded`       | `integer`  | Completed successfully                                              |
+| `failed`          | `integer`  | Failure, error, timeout, startup failure or action required         |
+| `cancelled`       | `integer`  | Cancelled executions                                                |
+| `skipped`         | `integer`  | Skipped or neutral executions                                       |
+| `other`           | `integer`  | Other terminal conclusions, including a missing conclusion          |
+| `successRate`     | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results |
+| `timed`           | `integer`  | Executions with valid start and completion timestamps               |
+| `avgDurationMs`   | `number?`  | Mean duration of timed executions; null when none                   |
+| `maxDurationMs`   | `number?`  | Longest timed execution; null when none                             |
+| `totalDurationMs` | `number`   | Sum of timed execution durations, not wall time or billed minutes   |
+| `lastObservedAt`  | `integer?` | Most recent successful observation, epoch milliseconds              |
+
+### CiNamedMetrics
+
+Metrics for one check name and GitHub App.
+
+| Field             | Type       |                                                                     |
+| ----------------- | ---------- | ------------------------------------------------------------------- |
+| `name`            | `string`   | Check name or status context                                        |
+| `app`             | `string?`  | GitHub App slug, if available                                       |
+| `total`           | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context) |
+| `pending`         | `integer`  | Queued, waiting or running checks                                   |
+| `succeeded`       | `integer`  | Completed successfully                                              |
+| `failed`          | `integer`  | Failure, error, timeout, startup failure or action required         |
+| `cancelled`       | `integer`  | Cancelled executions                                                |
+| `skipped`         | `integer`  | Skipped or neutral executions                                       |
+| `other`           | `integer`  | Other terminal conclusions, including a missing conclusion          |
+| `successRate`     | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results |
+| `timed`           | `integer`  | Executions with valid start and completion timestamps               |
+| `avgDurationMs`   | `number?`  | Mean duration of timed executions; null when none                   |
+| `maxDurationMs`   | `number?`  | Longest timed execution; null when none                             |
+| `totalDurationMs` | `number`   | Sum of timed execution durations, not wall time or billed minutes   |
+| `lastObservedAt`  | `integer?` | Most recent successful observation, epoch milliseconds              |
+
+### CiRun
+
+A durable observed GitHub check, retained across PR head changes and core restarts.
+
+| Field         | Type                |                                                                      |
+| ------------- | ------------------- | -------------------------------------------------------------------- |
+| `repo`        | `string`            | owner/name                                                           |
+| `kind`        | `check_run\|status` | GitHub Checks or legacy commit status                                |
+| `id`          | `string`            | GitHub ID; for legacy statuses, the latest transition ID             |
+| `name`        | `string`            | Check name or status context                                         |
+| `app`         | `string?`           | GitHub App slug                                                      |
+| `headSha`     | `string`            | Commit SHA                                                           |
+| `branch`      | `string?`           | Branch hint when known; a SHA can belong to multiple branches        |
+| `status`      | `string`            | GitHub check status; legacy pending maps to in_progress              |
+| `conclusion`  | `string?`           | GitHub conclusion or legacy state                                    |
+| `url`         | `string?`           | Details URL                                                          |
+| `startedAt`   | `integer?`          | Start, epoch milliseconds                                            |
+| `completedAt` | `integer?`          | Completion, epoch milliseconds                                       |
+| `durationMs`  | `integer?`          | Completion minus start; unavailable for legacy statuses              |
+| `runAt`       | `integer`           | Start, legacy creation time or first observation, epoch milliseconds |
+| `observedAt`  | `integer`           | Last accepted observation, epoch milliseconds                        |
+
 ### HomeAssistantData
 
 A JSON object of Home Assistant service or event data. Field names and values depend on the selected service or event; entity_id may be a string or an array of entity IDs.
@@ -3404,6 +3550,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/dev/sessions/:id/stats`                                                | `GET /sessions/{id}/stats`                                                                                                        |
 | `GET /api/dev/stats/sessions`                                                    | `GET /stats/sessions`                                                                                                             |
 | `GET /api/dev/stats/server`                                                      | `GET /stats/server`                                                                                                               |
+| `GET /api/dev/stats/ci`                                                          | `GET /stats/ci`                                                                                                                   |
+| `GET /api/dev/ci/runs`                                                           | `GET /ci/runs`                                                                                                                    |
 | `POST /api/dev/sessions/:id/compact`                                             | `POST /sessions/{id}/compact`                                                                                                     |
 | `POST /api/dev/sessions/:id/btw`                                                 | `POST /sessions/{id}/btw`                                                                                                         |
 | `POST /api/dev/sessions/:id/clear`                                               | `POST /sessions/{id}/clear`                                                                                                       |
