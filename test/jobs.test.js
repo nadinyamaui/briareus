@@ -11510,12 +11510,16 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       worker('ci-loop', 203, { reviewLoop: { rounds: 2, done: false } }),
       // Converged on an empty block whose publishing policy withheld code-approved.
       worker('ci-withheld', 214, { reviewLoop: { rounds: 1, done: true, approvalWithheld: true } }),
-      ...['question', 'findings', 'completed', 'closed'].map((kind, index) => {
+      ...['question', 'findings', 'completed', 'closed', 'initial', 'publish'].map((kind, index) => {
         const number = 225 + index;
         return worker(`ci-review-${kind}`, number, {
           reviewBranch: `dev-ci-${number}`,
           orchestratorPrAction: 'review',
           awaitingAnswer: kind === 'question',
+          recoveryTurn: {
+            phase: kind === 'initial' ? 'initial' : 'publish',
+            completed: kind !== 'initial' && kind !== 'publish',
+          },
           reviewTriage:
             kind === 'findings' || kind === 'closed'
               ? { prNumber: number, findings: [{ title: 'A pending finding', severity: 'low' }] }
@@ -11853,15 +11857,18 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     ['findings', 226, 'Its review findings await user triage in the dashboard'],
     ['completed', 227, 'Nothing is pending on it'],
     ['closed', 228, null],
+    ['initial', 229, 'Its review has not finished yet'],
+    ['publish', 230, 'Its review has not finished yet'],
   ])('keeps standalone review state in a green CI rerun notice (%s)', async (kind, number, expected) => {
     const id = `ci-review-${kind}`;
     const job = getJob(id);
     const parent = getJob('ci-orch');
     if (kind === 'closed') job.status = 'closed';
+    if (kind === 'initial' || kind === 'publish') job.status = 'running';
     syncSessionsOn('acme/ci', null, number);
     await vi.waitFor(() => expect(notices(id)).toContain(`every check on PR #${number} passed`));
     if (expected) expect(notices(id)).toContain(expected);
-    if (kind === 'question' || kind === 'findings') {
+    if (expected && kind !== 'completed') {
       expect(notices(id)).not.toContain('Nothing is pending');
       expect(notices(id)).not.toContain('ready to merge');
     }
@@ -11873,9 +11880,16 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       const delivered = parent.events
         .slice(eventsBefore)
         .map((event) => event.text || '')
+        .join('\n')
+        .split('\n')
+        .filter((line) => line.startsWith(`Worker ${id} (`))
         .join('\n');
       if (expected) expect(delivered).toContain(expected);
       else expect(delivered).not.toContain(`PR #${number}`);
+      if (expected && kind !== 'completed') {
+        expect(delivered).not.toContain('Nothing is pending');
+        expect(delivered).not.toContain('ready to merge');
+      }
       expect(notices(id)).toBe('');
     } finally {
       parent.awaitingAnswer = true;
