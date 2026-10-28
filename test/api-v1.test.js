@@ -1207,6 +1207,7 @@ describe('the contract', () => {
     ).toEqual([
       'actions.list',
       'attention.list',
+      'ci.runs',
       'client.get',
       'events.stream',
       'homeAssistant.call',
@@ -1255,6 +1256,7 @@ describe('the contract', () => {
       'ssh.requests',
       'ssh.resources',
       'ssh.servers',
+      'stats.ci',
       'stats.server',
       'stats.sessions',
       'tasks.get',

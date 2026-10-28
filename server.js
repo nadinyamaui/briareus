@@ -51,6 +51,7 @@ import { sessionEditRoute } from './lib/session-edit-route.js';
 import { sessionBrowserRoutes } from './lib/browser-routes.js';
 import { createSessionStats } from './lib/session-stats.js';
 import { sessionStatsRoutes } from './lib/session-stats-routes.js';
+import { ciRoutes } from './lib/ci-routes.js';
 import {
   browserInput,
   browserPids,
@@ -2138,6 +2139,7 @@ const sessionStats = createSessionStats({
   ],
 });
 api.use(sessionStatsRoutes({ stats: sessionStats, getJob, isOpen: (job) => DEV_OPEN.includes(job.status) }));
+api.use(ciRoutes());
 
 // Mid-turn messages are injected into a claude turn or queued, and a released session reopens
 // first, so this fails only on a message the session cannot accept at all.

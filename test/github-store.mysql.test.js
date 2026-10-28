@@ -4,6 +4,8 @@ import { randomBytes } from 'node:crypto';
 import { getConfig } from '../lib/config.js';
 import { createGithubStore } from '../lib/github-store.js';
 import { createGithubSync } from '../lib/github-sync.js';
+import { createCiStore } from '../lib/ci-store.js';
+import { up as ciUp, down as ciDown } from '../migrations/2026_10_28_100000_add_ci_checks.js';
 import { up, down } from '../migrations/2026_10_27_120000_add_github_mirror.js';
 import {
   up as observationUp,
@@ -30,7 +32,7 @@ import {
 // Only the randomly named database created by this file is ever dropped.
 describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL', () => {
   const database = `briareus_github_test_${randomBytes(6).toString('hex')}`;
-  let bootstrap, pool, store;
+  let bootstrap, pool, store, ci;
   let sequence = 0;
   const repo = () => `acme/store-${++sequence}`;
   const issue = (overrides = {}) => ({
@@ -116,10 +118,13 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     await pool.query("DELETE FROM github_repositories WHERE repo LIKE 'migration/%'");
     await metadataNamesUp({ context: pool });
     await metadataNamesUp({ context: pool });
+    await ciUp({ context: pool });
+    ci = createCiStore({ connection: () => pool.getConnection() });
     store = createGithubStore({ connection: () => pool.getConnection() });
   });
   afterAll(async () => {
     if (pool) {
+      await ciDown({ context: pool });
       await metadataNamesDown({ context: pool });
       await metadataNamesDown({ context: pool });
       await membershipDown({ context: pool });
@@ -465,6 +470,7 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
       );
     };
     const service = createGithubSync({
+      ci,
       projects: () => [{ repo: r }],
       config: () => ({ githubToken: 'token' }),
       store,
@@ -577,6 +583,7 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     expect((await store.readBoard(r)).pulls[0].issues).toHaveLength(1);
     const errors = [];
     const service = createGithubSync({
+      ci,
       projects: () => [{ repo: r }],
       config: () => ({ githubToken: 'token' }),
       store,
@@ -628,6 +635,7 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     expect((await store.readBoard(r)).issues.find((i) => i.number === 2).parent).toEqual(parent);
     const errors = [];
     const service = createGithubSync({
+      ci,
       projects: () => [{ repo: r }],
       config: () => ({ githubToken: 'token' }),
       store,
@@ -839,6 +847,7 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
       webhook;
     const errors = [];
     const sync = createGithubSync({
+      ci,
       projects: () => [{ repo: r }],
       config: () => ({ githubToken: 'test' }),
       store,
@@ -1286,6 +1295,7 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
       let currentHead = pull().headSha;
       const errors = [];
       const service = createGithubSync({
+        ci,
         projects: () => [{ repo: r }],
         config: () => ({ githubToken: 'token' }),
         store,
@@ -1360,6 +1370,7 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     };
     const errors = [];
     const service = createGithubSync({
+      ci,
       projects: () => [{ repo: r }],
       config: () => ({ githubToken: 'token' }),
       store,
