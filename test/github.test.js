@@ -222,27 +222,30 @@ describe('rate limiting', () => {
     await expect(githubGraphql(cfg, 'query {}', {})).resolves.toEqual({ ok: true });
   });
 
-  it('backs off a GraphQL 200 whose error says RATE_LIMITED, until the reset the headers named', async () => {
-    const { githubGraphql } = await freshGithub();
-    const reset = Math.floor(Date.now() / 1000) + 600;
-    const fetchMock = stubFetch(
-      reply({
-        headers: {
-          'x-ratelimit-resource': 'graphql',
-          'x-ratelimit-remaining': '0',
-          'x-ratelimit-reset': String(reset),
-        },
-        body: { data: null, errors: [{ type: 'RATE_LIMITED', message: 'API rate limit exceeded' }] },
-      }),
-    );
+  it.each(['RATE_LIMIT', 'RATE_LIMITED', undefined])(
+    'backs off a GraphQL 200 with error type %s until reset',
+    async (type) => {
+      const { githubGraphql } = await freshGithub();
+      const reset = Math.floor(Date.now() / 1000) + 600;
+      const fetchMock = stubFetch(
+        reply({
+          headers: {
+            'x-ratelimit-resource': 'graphql',
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': String(reset),
+          },
+          body: { data: null, errors: [{ type, message: 'API rate limit exceeded' }] },
+        }),
+      );
 
-    const caught = await githubGraphql(cfg, 'query {}', {}).catch((e) => e);
-    expect(caught).toMatchObject({ rateLimited: true, status: 429, resource: 'graphql' });
-    expect(caught.retryAt).toBe(reset * 1000 + 5000);
-    // And the next call waits out the cooldown without reaching the network.
-    await expect(githubGraphql(cfg, 'query {}', {})).rejects.toMatchObject({ rateLimited: true });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
+      const caught = await githubGraphql(cfg, 'query {}', {}).catch((e) => e);
+      expect(caught).toMatchObject({ rateLimited: true, status: 429, resource: 'graphql' });
+      expect(caught.retryAt).toBe(reset * 1000 + 5000);
+      // And the next call waits out the cooldown without reaching the network.
+      await expect(githubGraphql(cfg, 'query {}', {})).rejects.toMatchObject({ rateLimited: true });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('believes the resource the response names over the one assumed', async () => {
     const { githubRest } = await freshGithub();
@@ -713,6 +716,60 @@ describe('listRepoBranches', () => {
   });
 });
 
+describe('background GitHub budgets', () => {
+  it.each(['core', 'graphql'])(
+    'reserves %s headroom without blocking foreground reads and resumes after reset',
+    async (resource) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1800000000000);
+      const gh = await freshGithub();
+      const reserve = resource === 'core' ? 1000 : 500;
+      const request = () =>
+        resource === 'core'
+          ? gh.githubRest(cfg, 'GET', '/repos/acme/shop', undefined, { reserve })
+          : gh.githubGraphql(cfg, 'query {}', {}, { reserve });
+      const fetch = stubFetch(
+        reply({
+          headers: {
+            'x-ratelimit-resource': resource,
+            'x-ratelimit-remaining': String(reserve),
+            'x-ratelimit-reset': '1800000600',
+          },
+          body: { data: {} },
+        }),
+        reply({ body: { data: {} } }),
+        reply({ body: { data: {} } }),
+      );
+      await request();
+      await expect(request()).rejects.toMatchObject({ status: 429, resource, retryAt: 1800000605000 });
+      expect(() => gh.checkGithubSyncBudget()).toThrow(/reserved/);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      if (resource === 'core') await gh.githubRest(cfg, 'GET', '/repos/acme/shop');
+      else await gh.githubGraphql(cfg, 'query {}', {});
+      expect(fetch).toHaveBeenCalledTimes(2);
+      vi.advanceTimersByTime(605000);
+      await request();
+      expect(fetch).toHaveBeenCalledTimes(3);
+    },
+  );
+
+  it('does not turn absent headers into an exhausted background allowance', async () => {
+    const gh = await freshGithub();
+    stubFetch(
+      reply({
+        headers: {
+          'x-ratelimit-remaining': '2000',
+          'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 600),
+        },
+      }),
+      reply(),
+    );
+    await gh.githubRest(cfg, 'GET', '/a');
+    await gh.githubRest(cfg, 'GET', '/b');
+    expect(() => gh.checkGithubSyncBudget()).not.toThrow();
+  });
+});
+
 describe('acting as a user', () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -754,6 +811,8 @@ describe('acting as a user', () => {
     [403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1800000600' }, {}],
     [200, { 'x-ratelimit-reset': '1800000600' }, { errors: [{ type: 'RATE_LIMITED' }] }],
     [200, {}, { errors: [{ type: 'RATE_LIMITED' }] }],
+    [200, { 'x-ratelimit-reset': '1800000600' }, { errors: [{ type: 'RATE_LIMIT' }] }],
+    [200, {}, { errors: [{ type: 'RATE_LIMIT' }] }],
   ])(
     'preserves a personal GraphQL limit (%s, %j) without cooling down the server',
     async (status, headers, body) => {

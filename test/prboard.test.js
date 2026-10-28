@@ -30,6 +30,7 @@ import {
   hasLabel,
   LABELS,
   projectPulls,
+  fetchProjectPulls,
   pullOverview,
   updateGithubItem,
 } from '../lib/prboard.js';
@@ -847,7 +848,7 @@ describe('projectPulls', () => {
     });
   });
 
-  it('paginates the complete open pull request list', async () => {
+  it.each([0, 500])('paginates the complete open pull request list with a reserve of %i', async (reserve) => {
     const first = prNode({ number: 1 });
     const second = prNode({ number: 51 });
     gh.graphql
@@ -864,9 +865,10 @@ describe('projectPulls', () => {
         },
       });
 
-    const { pulls } = await projectPulls(project());
+    const { pulls } = await fetchProjectPulls(project(), { reserve });
     expect(pulls.map((p) => p.number)).toEqual([1, 51]);
     expect(gh.graphql.mock.calls[1][2]).toMatchObject({ cursor: 'page-2' });
+    expect(gh.graphql.mock.calls.map((call) => call[3])).toEqual([{ reserve }, { reserve }]);
   });
 
   it('paginates every label used by filters and recommendations', async () => {

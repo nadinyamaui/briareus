@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createGithubSync, GITHUB_SYNC_INTERVAL_MS } from '../lib/github-sync.js';
+import { createGithubSync, GITHUB_SYNC_INTERVAL_MS, GITHUB_WEBHOOK_INTERVAL_MS } from '../lib/github-sync.js';
 
 const project = { repo: 'acme/shop', enabled: true };
 const issue = (number, extra = {}) => ({
@@ -20,6 +20,8 @@ const pull = (number, extra = {}) => ({
   base: { ref: 'main', sha: 'b'.repeat(40), repo: { id: 1 } },
   ...extra,
 });
+
+const services = [];
 
 function harness({
   initial = [],
@@ -56,6 +58,7 @@ function harness({
   });
   const board = vi.fn(async () => ({ issuesError: null, issuesTruncated: false }));
   const invalidate = vi.fn();
+  const budget = vi.fn();
   const graphql = vi.fn(async (_cfg, _query, { number }) => ({
     repository: {
       issueOrPullRequest: {
@@ -75,16 +78,132 @@ function harness({
     rest,
     graphql,
     board,
+    budget,
     invalidate,
     now,
     log: (m) => errors.push(m),
   });
-  return { service, store, rest, graphql, routes, board, invalidate, errors };
+  services.push(service);
+  return { service, store, rest, graphql, routes, board, budget, invalidate, errors };
 }
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  for (const service of services.splice(0)) service.stop();
+  vi.useRealTimers();
+});
 
 describe('durable GitHub synchronization', () => {
+  it('uses conditional REST reads for repeated synchronization', async () => {
+    const h = harness({ initial: [issue(1)] });
+    await h.service.tick();
+    expect(h.rest.mock.calls.length).toBeGreaterThan(0);
+    for (const call of h.rest.mock.calls)
+      expect(call.slice(3)).toEqual([undefined, { conditional: true, reserve: 1000 }]);
+  });
+
+  it('does no REST work for hourly or webhook updates while GraphQL background work is paused', async () => {
+    const h = harness();
+    h.budget.mockImplementation(() => {
+      throw Object.assign(new Error('reserved'), { status: 429, resource: 'graphql' });
+    });
+    await h.service.tick();
+    h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 1 } });
+    await h.service.flush(project.repo);
+    expect(h.rest).not.toHaveBeenCalled();
+    expect(h.graphql).not.toHaveBeenCalled();
+    expect(h.board).not.toHaveBeenCalled();
+    expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
+  });
+
+  it('retains and coalesces webhook deliveries until the shared budget resets', async () => {
+    vi.useFakeTimers();
+    const h = harness({ now: () => Date.now() });
+    const retryAt = Date.now() + 120000;
+    h.budget.mockImplementation(() => {
+      if (Date.now() < retryAt)
+        throw Object.assign(new Error('paused'), { status: 429, resource: 'graphql', retryAt });
+    });
+    h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 1 } });
+    await h.service.flush(project.repo);
+    h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number: 2 } });
+    await vi.advanceTimersByTimeAsync(119999);
+    expect(h.rest).not.toHaveBeenCalled();
+    expect(h.errors).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1, 2]);
+    expect(h.board).toHaveBeenCalledTimes(1);
+    expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
+  });
+
+  it('coalesces sustained webhook traffic and performs one trailing board refresh', async () => {
+    vi.useFakeTimers();
+    const h = harness({ now: () => Date.now() });
+    const deliver = (number) =>
+      h.service.onWebhook('issues', {
+        repository: { full_name: project.repo },
+        issue: { number },
+      });
+    deliver(1);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(h.store.saveItem).toHaveBeenCalledTimes(1);
+    expect(h.board).toHaveBeenCalledTimes(1);
+    deliver(2);
+    await vi.advanceTimersByTimeAsync(2000);
+    deliver(2);
+    deliver(3);
+    await vi.advanceTimersByTimeAsync(GITHUB_WEBHOOK_INTERVAL_MS - 2001);
+    expect(h.store.saveItem).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1, 2, 3]);
+    expect(h.board).toHaveBeenCalledTimes(1);
+    expect(h.invalidate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(60000 - GITHUB_WEBHOOK_INTERVAL_MS);
+    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(h.invalidate).toHaveBeenCalledTimes(3);
+    expect(h.store.finishSync).not.toHaveBeenCalled();
+  });
+
+  it('cancels a pending trailing board refresh on shutdown', async () => {
+    vi.useFakeTimers();
+    const h = harness({ now: () => Date.now() });
+    for (const number of [1, 2]) {
+      h.service.onWebhook('issues', { repository: { full_name: project.repo }, issue: { number } });
+      await h.service.flush(project.repo);
+    }
+    expect(h.board).toHaveBeenCalledTimes(1);
+    h.service.stop();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(h.board).toHaveBeenCalledTimes(1);
+  });
+
+  it('mirrors a changed review decision while the full board refresh is deferred', async () => {
+    const h = harness();
+    await h.service.tick();
+    h.routes.set('/repos/acme/shop/issues/1', issue(1, { pull_request: {} }));
+    h.routes.set('/repos/acme/shop/pulls/1', pull(1));
+    h.routes.set(`/repos/acme/shop/commits/${'a'.repeat(40)}/check-runs`, { check_runs: [] });
+    h.graphql.mockResolvedValue({
+      repository: {
+        issueOrPullRequest: {
+          __typename: 'PullRequest',
+          reviewDecision: 'CHANGES_REQUESTED',
+          closingIssuesReferences: { nodes: [], pageInfo: { hasNextPage: false } },
+        },
+      },
+    });
+    h.service.onWebhook('pull_request_review', {
+      repository: { full_name: project.repo },
+      pull_request: { number: 1 },
+    });
+    await h.service.flush(project.repo);
+    expect(h.board).toHaveBeenCalledTimes(1);
+    expect(h.store.saveItem).toHaveBeenCalledWith(
+      project.repo,
+      expect.objectContaining({ reviewDecision: 'changes_requested' }),
+      expect.anything(),
+    );
+  });
+
   it('backfills every page including closed issues before advancing the watermark', async () => {
     const h = harness();
     h.routes.set('/repos/acme/shop/issues', (url) => ({
@@ -285,7 +404,7 @@ describe('durable GitHub synchronization', () => {
     await h.service.tick();
     await h.service.tick();
     expect(h.store.saveItem.mock.calls.map(([, row]) => row.number)).toEqual([1, 2, 1, 2]);
-    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(h.board).toHaveBeenCalledTimes(1);
     expect(h.invalidate).toHaveBeenCalledTimes(2);
     expect(h.store.finishSync).not.toHaveBeenCalledWith(project.repo, expect.any(Number));
     expect(h.errors).toEqual([`${project.repo}: core exhausted`, `${project.repo}: core exhausted`]);
@@ -485,7 +604,7 @@ describe('durable GitHub synchronization', () => {
     release({});
     await Promise.all([first, second]);
     expect(h.store.saveItem.mock.calls.map((c) => c[1].number)).toEqual([1, 2]);
-    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(h.board).toHaveBeenCalledTimes(1);
   });
 
   it('hides a deleted or transferred issue without deleting its history', async () => {
@@ -552,7 +671,7 @@ describe('durable GitHub synchronization', () => {
     });
     await h.service.flush(project.repo);
     expect(h.store.saveItem).toHaveBeenCalledTimes(2);
-    expect(h.board).toHaveBeenCalledTimes(2);
+    expect(h.board).toHaveBeenCalledTimes(1);
   });
 
   it('preserves check collections when only Checks permission is absent', async () => {
