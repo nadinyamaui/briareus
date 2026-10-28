@@ -286,6 +286,20 @@ describe('testRunPrompt', () => {
 });
 
 describe('implementFeedbackPrompt', () => {
+  it('preserves the manually selected scope even when a custom template omits the findings token', () => {
+    const prompt = implementFeedbackPrompt({
+      ...base,
+      triaged: true,
+      by: 'the user',
+      findings: [{ title: 'Selected claim', sourceId: 'review:42', sourceBody: 'Original feedback' }],
+      project: { promptTemplates: { implementFeedback: 'CUSTOM FIX' } },
+    });
+    expect(prompt).toMatch(/^CUSTOM FIX/);
+    expect(prompt).toContain('Implement these and only these');
+    expect(prompt).toContain('Selected claim');
+    expect(prompt).toContain('Original feedback');
+  });
+
   it('rides the declared findings along when there are any', () => {
     const prompt = implementFeedbackPrompt({
       ...base,

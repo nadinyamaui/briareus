@@ -22,7 +22,7 @@ import { operationsRoutes } from './lib/operations-routes.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
 import { createUsers } from './lib/users.js';
 import { createShares } from './lib/shares.js';
-import { seesSession } from './lib/ownership.js';
+import { seesSession, managesSession } from './lib/ownership.js';
 import { createUserCredentials } from './lib/user-credentials.js';
 import { createWhatsAppOwners } from './lib/whatsapp-owners.js';
 import { meRoutes } from './lib/me-routes.js';
@@ -31,13 +31,19 @@ import { shareRoutes } from './lib/share-routes.js';
 import { apiV1Routes } from './lib/api-v1.js';
 import { createSshService } from './lib/ssh.js';
 import { sshRoutes } from './lib/ssh-routes.js';
+import { readSessionFile } from './lib/ssh-upload.js';
+import { createPrintService } from './lib/print.js';
+import { printAgentRoutes } from './lib/print-agent.js';
+import { projectEnvRoutes } from './lib/project-env.js';
+import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
+import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
 import { createSlackService } from './lib/slack.js';
 import { slackRoutes, slackEventsRouter } from './lib/slack-routes.js';
 import { createHomeAssistantService } from './lib/home-assistant.js';
 import { homeAssistantRoutes } from './lib/home-assistant-routes.js';
 import { createWhatsAppService, readMedia } from './lib/whatsapp.js';
 import { whatsappRoutes } from './lib/whatsapp-routes.js';
-import { whatsappAgentRoutes, whatsappWatchAllowed } from './lib/whatsapp-agent.js';
+import { whatsappAgentRoutes, whatsappMediaPath, whatsappWatchAllowed } from './lib/whatsapp-agent.js';
 import { createWhatsAppWatcher } from './lib/whatsapp-watch.js';
 import { createMcpService, MCP_OAUTH_CALLBACK_PATH } from './lib/mcp-servers.js';
 import { mcpRoutes, mcpProxyRouter, mcpOAuthCallbackRouter } from './lib/mcp-routes.js';
@@ -87,6 +93,8 @@ import {
   listDevSessions,
   devSessionRecords,
   createDevSession,
+  pendingFeedbackAssessment,
+  feedbackAssessmentReusable,
   sendDevMessage,
   askDevSessionBtw,
   cancelDevTurn,
@@ -100,6 +108,7 @@ import {
   renameDevSession,
   setDevSessionAutoCompact,
   setDevSessionCompactInstructions,
+  setDevSessionPinned,
   linkPrToSession,
   dropQueuedMessage,
   startDevServe,
@@ -111,6 +120,7 @@ import {
   openSessionBrowser,
   closeSessionBrowser,
   spawnWorkerSession,
+  startOrchestratorPrAction,
   workerSessionsFor,
   workerSummary,
   assertWorkerSlot,
@@ -136,6 +146,8 @@ import {
   webhookUnfit,
   setSlackAccess,
   setExternalMcp,
+  setProjectEnvOwner,
+  holdsWorkDir,
   setOwnerGithub,
   setInboxOwner,
   DEV_OPEN,
@@ -190,6 +202,7 @@ import {
   getProject,
   createProject,
   updateProject,
+  editProject,
   removeProject,
   reorderProjects,
   PROJECT_DEFAULTS,
@@ -246,6 +259,7 @@ import { previewAccess } from './lib/tunnel.js';
 import { projectUsage, overallUsage, jobUsageEstimates, estimateEventCosts } from './lib/usage.js';
 import { agentOnly, apiEnabled } from './lib/auth.js';
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
+import { githubSync } from './lib/github-sync.js';
 import { localUpdater } from './lib/local-update.js';
 import { createBabysitter } from './lib/babysitter.js';
 import { securityHeaders } from './lib/security.js';
@@ -370,6 +384,8 @@ app.use('/webhooks', webhookRouter());
 
 // The only client API: owner-issued tokens (`npm run create-token`) in front of the handlers below.
 const mobileAuth = createMobileAuth();
+// Dedicated per-host telemetry credentials; never operator or agent tokens.
+app.use((req, res, next) => sshTelemetry(req, res, next));
 app.use(
   apiV1Routes({
     auth: mobileAuth,
@@ -396,8 +412,11 @@ app.use(
   }),
 );
 const jsonBody = express.json({ limit: '1mb' });
-// Mail sends carry their attachments in the body; lib/mail-agent.js parses those after auth.
-app.use((req, res, next) => (mailActionPath(req.path) ? next() : jsonBody(req, res, next)));
+// Mail sends and WhatsApp media sends carry their files in the body; lib/mail-agent.js and
+// lib/whatsapp-agent.js parse those after auth.
+app.use((req, res, next) =>
+  mailActionPath(req.path) || whatsappMediaPath(req.path) ? next() : jsonBody(req, res, next),
+);
 
 // Of all the handlers added for the rest of this file, only an agent's own are
 // answered at their own path.
@@ -511,7 +530,12 @@ api.get('/api/projects', (req, res) => {
 
 api.post('/api/projects', async (req, res) => {
   try {
-    res.status(201).json({ project: await createProject(req.body || {}) });
+    const project = await createProject(req.body || {});
+    res.status(201).json({ project });
+    if (project.enabled)
+      installRepoWebhooks([project], getConfig(), githubRest).catch((e) =>
+        console.error('Could not install GitHub webhook:', e.message),
+      );
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
   }
@@ -528,7 +552,12 @@ api.put('/api/projects/order', async (req, res) => {
 
 api.put('/api/projects/:id', async (req, res) => {
   try {
-    res.json({ project: await updateProject(Number(req.params.id), req.body || {}) });
+    const project = await updateProject(Number(req.params.id), req.body || {});
+    res.json({ project });
+    if (project.enabled)
+      installRepoWebhooks([project], getConfig(), githubRest).catch((e) =>
+        console.error('Could not install GitHub webhook:', e.message),
+      );
   } catch (e) {
     res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
   }
@@ -693,6 +722,8 @@ const sshService = createSshService({
   getJob,
   mayUse: (job, server) => sessionMayUse(job, 'sshServer', server.id),
 });
+const sshResourceMonitor = createSshResourceMonitor({ ssh: sshService });
+const sshTelemetry = sshTelemetryRoutes({ ssh: sshService, monitor: sshResourceMonitor });
 api.use(sessionFileRoutes({ agentSession, getJob }));
 api.use(
   sshRoutes({
@@ -700,9 +731,44 @@ api.use(
     agentSession,
     getProject,
     mayDecide: sshRuledBy,
+    monitor: sshResourceMonitor,
+    monitorEndpoint: (id) =>
+      `${getConfig().publicBaseUrl.replace(/\/$/, '')}/api/v1/telemetry/ssh/${id}/samples`,
+    mayViewResources: (user, server) => shares.allows(user, 'sshServer', server.id),
   }),
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
+api.use(
+  printAgentRoutes({
+    service: createPrintService(),
+    agentSession,
+    getProject,
+    readFile: readSessionFile,
+    sessions: bus,
+  }),
+);
+// Project settings are admin-only on /api/v1, so a session may edit its project's .env
+// template only for an enabled admin, or as the operator's when nobody started it.
+const projectEnvOwner = (job) => {
+  if (job?.ownerId == null) return true;
+  try {
+    const owner = users.get(job.ownerId);
+    return !!owner && owner.disabledAt == null && owner.role === 'admin';
+  } catch {
+    return false;
+  }
+};
+setProjectEnvOwner(projectEnvOwner);
+api.use(
+  projectEnvRoutes({
+    agentSession,
+    getProject,
+    editProject,
+    ownerMayEdit: projectEnvOwner,
+    holdsCheckout: holdsWorkDir,
+    note: noteSession,
+  }),
+);
 // Each user's own Home Assistant (lib/me-routes.js). The one in .env was the operator's, so
 // it stands for the original operator until they connect one of their own.
 const homeAssistantOf = (user) => {
@@ -899,6 +965,7 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 // its own workers".
 
 const workerRoutes = orchestratorRoutes({
+  startOrchestratorPrAction,
   agentSession,
   spawnWorkerSession,
   workerSessionsFor,
@@ -910,6 +977,7 @@ const workerRoutes = orchestratorRoutes({
   sendDevMessage,
 });
 const { orchestratorSession, workerOf } = workerRoutes;
+api.post('/api/agent/sessions/pr-actions', workerRoutes.prAction);
 api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
 api.get('/api/agent/sessions/:id/question', workerRoutes.readQuestion);
 api.post('/api/agent/sessions/:id/question', workerRoutes.answerQuestion);
@@ -1814,6 +1882,11 @@ api.post('/api/dev/actions', async (req, res) => {
       .status(400)
       .json({ error: 'No GITHUB_TOKEN is configured, so the pull request cannot be looked up' });
   try {
+    if (actionId === 'implement-feedback') {
+      const pending = pendingFeedbackAssessment(project.repo, number);
+      if (pending && !pending.feedbackAssessment.completed && managesSession(res.locals.apiUser, pending))
+        return res.json({ session: publicJob(pending) });
+    }
     const lookup = await githubRest(cfg, 'GET', `/repos/${project.repo}/pulls/${number}`);
     if (lookup.status === 404)
       return res.status(404).json({ error: `${project.repo} has no pull request #${number}` });
@@ -1839,8 +1912,18 @@ api.post('/api/dev/actions', async (req, res) => {
     };
     // A prompt that refuses fails the request rather than starting an empty errand.
     const spec = await actionSessionSpec(action, context);
+    if ('feedbackAssessment' in spec) {
+      const pending = pendingFeedbackAssessment(project.repo, number);
+      if (
+        pending &&
+        managesSession(res.locals.apiUser, pending) &&
+        feedbackAssessmentReusable(pending, spec.feedbackAssessment)
+      )
+        return res.json({ session: publicJob(pending) });
+    }
+    const session = createDevSession({ provider, model, effort, ...spec, ownerId: requestOwner(res) });
     res.status(201).json({
-      session: createDevSession({ provider, model, effort, ...spec, ownerId: requestOwner(res) }),
+      session,
     });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -2132,6 +2215,7 @@ const editSession = sessionEditRoute({
   renameDevSession,
   setDevSessionAutoCompact,
   setDevSessionCompactInstructions,
+  setDevSessionPinned,
 });
 api.patch('/api/dev/sessions/:id', editSession);
 
@@ -2380,6 +2464,8 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     // Projects with `babysitPrs` get their pull requests' errands started every 15 minutes.
     createBabysitter().startTimer();
     databaseBackups.start();
+    sshResourceMonitor.start();
+    githubSync.start();
     // Recovered sessions must claim their slots before pruning unused clones.
     startWorkspacePruner();
     const projects = activeProjects();
@@ -2418,6 +2504,8 @@ let stopping = false;
 // On a crash, flush too (or a just-created session vanishes), then die so pm2 restarts clean.
 process.on('uncaughtException', (e) => {
   console.error('Uncaught exception:', e);
+  void sshResourceMonitor.stop();
+  githubSync.stop();
   stopAllDevServes();
   stopAllBrowsers();
   const giveUp = setTimeout(() => process.exit(1), 5000);
@@ -2434,6 +2522,8 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
     if (stopping) process.exit(1); // a second Ctrl-C means "now"
     stopping = true;
+    void sshResourceMonitor.stop();
+    githubSync.stop();
     stopAllDevServes();
     stopAllBrowsers();
     stopAllJobProcesses()

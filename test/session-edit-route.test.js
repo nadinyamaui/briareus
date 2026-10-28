@@ -19,6 +19,7 @@ beforeEach(async () => {
       if (typeof text !== 'string') throw new Error('compactInstructions must be text');
       return { id: 'abc123', compactInstructions: text };
     }),
+    setDevSessionPinned: found((pinned) => ({ id: 'abc123', pinned })),
   };
   const app = express();
   app.use(express.json());
@@ -61,10 +62,15 @@ it('sends each field to its own edit', async () => {
     id: 'abc123',
     compactInstructions: '',
   });
+  expect(await patch('abc123', { pinned: true })).toEqual({
+    status: 200,
+    body: { session: { id: 'abc123', pinned: true } },
+  });
   expect(called()).toEqual({
     renameDevSession: 1,
     setDevSessionAutoCompact: 1,
     setDevSessionCompactInstructions: 2,
+    setDevSessionPinned: 1,
   });
 });
 
@@ -77,10 +83,15 @@ it('refuses a body that mixes fields, and applies none of them', async () => {
     status: 400,
     body: { error: 'Send one of autoCompact, compactInstructions per request' },
   });
+  expect(await patch('abc123', { title: 'New name', pinned: true })).toEqual({
+    status: 400,
+    body: { error: 'Send one of title, pinned per request' },
+  });
   expect(called()).toEqual({
     renameDevSession: 0,
     setDevSessionAutoCompact: 0,
     setDevSessionCompactInstructions: 0,
+    setDevSessionPinned: 0,
   });
 });
 
