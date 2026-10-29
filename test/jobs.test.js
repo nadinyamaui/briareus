@@ -141,6 +141,8 @@ vi.mock('../lib/db.js', () => ({
   jobEventMaxSeqs: vi.fn(async () => new Map()),
   createCodeReview: vi.fn(async () => null),
   setCodeReviewHead: vi.fn(async () => {}),
+  completeCodeReview: vi.fn(async () => {}),
+  failCodeReview: vi.fn(async () => {}),
 }));
 
 vi.mock('../lib/github.js', async (importOriginal) => ({
@@ -248,8 +250,10 @@ vi.mock('../lib/usage.js', async (importOriginal) => ({
 }));
 
 import {
+  completeCodeReview,
   createCodeReview,
   deleteJob,
+  failCodeReview,
   jobEventMaxSeqs,
   loadJobs,
   loadJobEvents,
@@ -1526,6 +1530,8 @@ describe('native Codex code review', () => {
 
   it('reviews the actual stacked base and resumes the same runtime to verify and publish', async () => {
     setCodeReviewHead.mockClear();
+    completeCodeReview.mockClear();
+    failCodeReview.mockClear();
     sendDevMessage(id, '/review');
     await vi.waitFor(() => expect(invocations).toHaveLength(1));
     expect(setCodeReviewHead).toHaveBeenCalledWith(id, head);
@@ -1554,16 +1560,24 @@ describe('native Codex code review', () => {
     expect(publish.child.prompt).toContain(providerTools.CODE_REVIEW_SUMMARY_PROMPT);
     expect(publish.child.prompt).toContain(head);
     expect(publish.child.prompt).toContain('<workspace-context>');
+    expect(publish.child.prompt).toContain('review_finding_add');
+    // The findings tools ride on both turns of a review session.
+    for (const turn of [native, publish])
+      expect(turn.args.join(' ')).toContain('mcp_servers.reviewer_code_review.command');
     expect(job.recoveryTurn).toMatchObject({
       prompt: publish.child.prompt,
+      opts: { codeReviewPublish: true },
       completed: false,
       runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
     });
+    fs.writeFileSync(summaryPath, '# Code Review\n\nNo findings.');
     publish.child.complete({ input_tokens: 30, output_tokens: 8, cached_input_tokens: 0 });
     publish.child.emit('close', 0);
     await vi.waitFor(() => expect(job.status).toBe('idle'));
     expect(job.error).toBeNull();
     expect(job.recoveryTurn.completed).toBe(true);
+    expect(completeCodeReview).toHaveBeenCalledWith(id, '# Code Review\n\nNo findings.');
+    expect(failCodeReview).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(root, 'review-summary.md'))).toBe(false);
   });
 
@@ -1596,6 +1610,8 @@ describe('native Codex code review', () => {
   it.each(['failure', 'empty', 'missing', 'canceled'])(
     'does not publish when native review is %s',
     async (outcome) => {
+      completeCodeReview.mockClear();
+      failCodeReview.mockClear();
       fs.mkdirSync(path.dirname(summaryPath), { recursive: true });
       fs.writeFileSync(summaryPath, 'Old summary that must not be reused');
       sendDevMessage(id, '/review');
@@ -1607,8 +1623,37 @@ describe('native Codex code review', () => {
       await vi.waitFor(() => expect(job.status).toBe('idle'));
       expect(invocations).toHaveLength(1);
       if (outcome !== 'canceled') expect(job.error).toBeTruthy();
+      expect(failCodeReview).toHaveBeenCalledWith(id);
+      expect(completeCodeReview).not.toHaveBeenCalled();
     },
   );
+
+  it('completes the review when a restart resumes its publish turn', async () => {
+    completeCodeReview.mockClear();
+    failCodeReview.mockClear();
+    Object.assign(job, {
+      status: 'interrupted',
+      interruptedFrom: 'running',
+      restartPending: true,
+      workspacePrepared: true,
+      recoveryTurn: {
+        prompt: 'Publish the native Codex review',
+        opts: { codeReviewPublish: true },
+        phase: 'initial',
+        runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
+        completed: false,
+      },
+    });
+    claimSlot(root, id, { prepared: true });
+    fs.writeFileSync(summaryPath, 'Published summary');
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    const publish = invocations[0];
+    publish.child.complete({ input_tokens: 3, output_tokens: 1, cached_input_tokens: 0 });
+    publish.child.emit('close', 0);
+    await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id, 'Published summary'));
+    expect(failCodeReview).not.toHaveBeenCalled();
+  });
 
   it('refuses discovery when the checkout is behind the PR head', async () => {
     head = '1234567890123456789012345678901234567890';
@@ -12161,6 +12206,8 @@ describe('the shared browser in a session', () => {
         headers: { Authorization: expect.stringMatching(/^Bearer [0-9a-f]{48}$/) },
       });
       expect(seen.mcp.reviewer_memory).toHaveProperty('command');
+      // The findings tools are for code review sessions only.
+      expect(seen.mcp).not.toHaveProperty('reviewer_code_review');
     } finally {
       setExternalMcp(() => []);
       homeSpy.mockRestore();

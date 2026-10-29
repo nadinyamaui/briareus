@@ -35,6 +35,7 @@ import { readSessionFile } from './lib/ssh-upload.js';
 import { createPrintService } from './lib/print.js';
 import { printAgentRoutes } from './lib/print-agent.js';
 import { projectEnvRoutes } from './lib/project-env.js';
+import { codeReviewRoutes } from './lib/code-reviews.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
 import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
 import { createSlackService } from './lib/slack.js';
@@ -78,6 +79,11 @@ import {
   updateAppSetting,
   getProviderRow,
   getProjectRow,
+  getCodeReviewByJob,
+  listCodeReviewFindings,
+  getCodeReviewFinding,
+  addCodeReviewFinding,
+  updateCodeReviewFinding,
 } from './lib/db.js';
 import {
   initJobs,
@@ -731,6 +737,18 @@ api.use(
   }),
 );
 api.use(slackRoutes({ service: slackService, agentSession, getProject }));
+api.use(
+  codeReviewRoutes({
+    agentSession,
+    store: {
+      getCodeReviewByJob,
+      listCodeReviewFindings,
+      getCodeReviewFinding,
+      addCodeReviewFinding,
+      updateCodeReviewFinding,
+    },
+  }),
+);
 api.use(
   printAgentRoutes({
     service: createPrintService(),

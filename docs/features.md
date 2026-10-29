@@ -54,6 +54,16 @@ QA loops create and execute test sheets when a task settles on an open pull requ
 With `babysitPrs` enabled, conflict resolution and CI fixes run every 15 minutes,
 using the project's action runtime and respecting author filters and retry limits.
 
+Each code review session is recorded in the `code_reviews` table: its PR,
+branch, the reviewed head, its provider, model and effort, its tokens and cost
+(estimated for providers that report none) and whether it completed or failed,
+with the published summary. During its verify-and-publish turn the agent
+registers every finding it assessed in `code_review_findings` through MCP
+tools mounted only on review sessions (`review_finding_add`,
+`review_finding_update`, `review_findings_list`): severity, type, a
+`fix`/`optional`/`dismiss` verdict, verification, location and the reason for
+the verdict. The record outlives the session, which deletes itself when done.
+
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).
 
@@ -154,6 +164,8 @@ These additions are present in the server revision documented here:
 - Per-user attention feed and task history.
 - Sessions can edit their project's `.env` template through MCP (admins'
   interactive sessions only).
+- Code reviews and their findings are stored in the database; review sessions
+  register findings through their own MCP tools.
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.
