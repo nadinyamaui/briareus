@@ -140,6 +140,7 @@ import {
   setExternalMcp,
   setProjectEnvOwner,
   holdsWorkDir,
+  readmitLocalWaiters,
   setOwnerGithub,
   setInboxOwner,
   DEV_OPEN,
@@ -547,6 +548,8 @@ api.put('/api/projects/:id', async (req, res) => {
   try {
     const project = await updateProject(Number(req.params.id), req.body || {});
     res.json({ project });
+    // A raised local session limit lets sessions queued for the checkout in now.
+    readmitLocalWaiters();
     if (project.enabled)
       installRepoWebhooks([project], getConfig(), githubRest).catch((e) =>
         console.error('Could not install GitHub webhook:', e.message),
