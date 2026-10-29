@@ -1378,7 +1378,7 @@ describe('Claude code review', () => {
   // file); publication and verification are ordinary stream-json turns resuming it. A
   // discovery that hits the account's usage limit runs /code-review again on another one.
   it.each([0, 1, 'quota'])(
-    'runs /code-review, then publishes and verifies, when discovery exits %s',
+    'runs /code-review, then publishes, verifies and labels, when discovery exits %s',
     async (code) => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-review-'));
       spawnSync('git', ['init', '-b', 'feature', root]);
@@ -1538,8 +1538,8 @@ describe('Claude code review', () => {
           expect(failCodeReview).toHaveBeenCalledWith(id);
           return;
         }
-        // Publication and verification follow without anyone sending a message.
-        await vi.waitFor(() => expect(invocations).toHaveLength(first + 3));
+        // Publication, verification and labelling follow without anyone sending a message.
+        await vi.waitFor(() => expect(invocations).toHaveLength(first + 4));
         expect(fs.readFileSync(summaryPath, 'utf8')).toBe(summary);
         expect(job.events.some((e) => e.text === `[review-summary.md](${summaryPath})`)).toBe(true);
         // A finished discovery is never a completed checkpoint: a restart before the
@@ -1562,6 +1562,9 @@ describe('Claude code review', () => {
         expect(verify.prompt).toContain('Your goal is to try to REFUTE them');
         expect(verify.prompt).toContain('review_finding_update');
         expect(verify.prompt).toContain('resolveReviewThread');
+        const label = invocations[first + 3];
+        await vi.waitFor(() => expect(label.prompt).toBeTruthy());
+        expect(label.prompt).toContain('add the `feedback-given` label');
         await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
         expect(failCodeReview).not.toHaveBeenCalled();
         await vi.waitFor(() => expect(job.status).toBe('idle'));
@@ -1738,19 +1741,28 @@ describe('native Codex code review', () => {
     expect(verify.child.prompt).toContain('**Fix**, **Optional**, or **Dismissed**');
     expect(verify.child.prompt).toContain('resolveReviewThread');
     expect(verify.child.prompt).toContain('only replies to the review threads');
+    expect(verify.child.prompt).not.toContain('feedback-given');
+    expect(job.recoveryTurn).toMatchObject({ opts: { codeReviewStage: 'verify' }, completed: false });
+    finishTurn(verify);
+    // Labelling is the review's last step, once every finding has its verdict.
+    await vi.waitFor(() => expect(invocations).toHaveLength(4));
+    const label = invocations[3];
+    expect(label.child.rpc.find((r) => r.method === 'thread/resume').params).toMatchObject({
+      threadId: 'native-review-thread',
+    });
     // Feedback left labels the PR feedback-given; none labels it code-approved.
     // Either way feedback-implemented and requires-dev-review come off afterwards.
-    expect(verify.child.prompt).toContain('add the `feedback-given` label and remove `code-approved`');
-    expect(verify.child.prompt).toContain('add the `code-approved` label and remove `feedback-given`');
-    expect(verify.child.prompt).toContain(
+    expect(label.child.prompt).toContain('add the `feedback-given` label and remove `code-approved`');
+    expect(label.child.prompt).toContain('add the `code-approved` label and remove `feedback-given`');
+    expect(label.child.prompt).toContain(
       'once the new label is on, remove `feedback-implemented` and `requires-dev-review`',
     );
-    expect(job.recoveryTurn).toMatchObject({ opts: { codeReviewStage: 'verify' }, completed: false });
+    expect(job.recoveryTurn).toMatchObject({ opts: { codeReviewStage: 'label' }, completed: false });
     // The findings tools ride on every turn of a review session.
-    for (const turn of [native, publish, verify])
+    for (const turn of [native, publish, verify, label])
       expect(turn.args.join(' ')).toContain('mcp_servers.reviewer_code_review.command');
     expect(completeCodeReview).not.toHaveBeenCalled();
-    finishTurn(verify);
+    finishTurn(label);
     await vi.waitFor(() => expect(job.status).toBe('idle'));
     expect(job.error).toBeNull();
     expect(job.recoveryTurn.completed).toBe(true);
@@ -1775,7 +1787,7 @@ describe('native Codex code review', () => {
     expect(failCodeReview).toHaveBeenCalledWith(id);
   });
 
-  it('keeps the session through discovery, publication and verification, then deletes it and releases its database', async () => {
+  it('keeps the session through discovery, publication, verification and labelling, then deletes it and releases its database', async () => {
     Object.assign(job, {
       autoClose: true,
       status: 'interrupted',
@@ -1796,6 +1808,9 @@ describe('native Codex code review', () => {
     await vi.waitFor(() => expect(invocations).toHaveLength(3));
     expect(job.status).toBe('running');
     finishTurn(invocations[2]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(4));
+    expect(job.status).toBe('running');
+    finishTurn(invocations[3]);
     await vi.waitFor(() => expect(getJob(id)).toBeNull());
     expect(job.error).toBeNull();
     expect(dropSessionDatabase).toHaveBeenCalledWith(job, expect.any(Function));
@@ -1823,7 +1838,7 @@ describe('native Codex code review', () => {
     },
   );
 
-  it('completes the review when a restart resumes its publish step, after verifying', async () => {
+  it('completes the review when a restart resumes its publish step, after verifying and labelling', async () => {
     completeCodeReview.mockClear();
     failCodeReview.mockClear();
     // The project's own label rules replace the built-in ones.
@@ -1848,10 +1863,12 @@ describe('native Codex code review', () => {
     finishTurn(invocations[0]);
     await vi.waitFor(() => expect(invocations).toHaveLength(2));
     expect(invocations[1].child.prompt).toContain('Your goal is to try to REFUTE them');
-    expect(invocations[1].child.prompt).toContain('Finally, label the PR:\nPROJECT LABEL RULES');
-    expect(invocations[1].child.prompt).not.toContain('feedback-given');
-    expect(completeCodeReview).not.toHaveBeenCalled();
     finishTurn(invocations[1]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(3));
+    expect(invocations[2].child.prompt).toMatch(/accordingly, and post no comments:\nPROJECT LABEL RULES$/);
+    expect(invocations[2].child.prompt).not.toContain('feedback-given');
+    expect(completeCodeReview).not.toHaveBeenCalled();
+    finishTurn(invocations[2]);
     await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
     expect(failCodeReview).not.toHaveBeenCalled();
   });
@@ -1886,6 +1903,8 @@ describe('native Codex code review', () => {
     finishTurn(invocations[1]);
     await vi.waitFor(() => expect(invocations).toHaveLength(3));
     finishTurn(invocations[2]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(4));
+    finishTurn(invocations[3]);
     await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
   });
 
@@ -1901,15 +1920,17 @@ describe('native Codex code review', () => {
     finishTurn(invocations[1]);
     await vi.waitFor(() => expect(invocations).toHaveLength(3));
     finishTurn(invocations[2]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(4));
+    finishTurn(invocations[3]);
     await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
     await vi.waitFor(() => expect(job.status).toBe('idle'));
     sendDevMessage(id, '/code-review the auth module');
-    await vi.waitFor(() => expect(invocations).toHaveLength(4));
+    await vi.waitFor(() => expect(invocations).toHaveLength(5));
     expect(restartCodeReview).toHaveBeenCalledTimes(2);
     expect(restartCodeReview).toHaveBeenLastCalledWith(id, head);
-    finishReview(invocations[3], 1);
+    finishReview(invocations[4], 1);
     await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledWith(id));
-    expect(invocations).toHaveLength(4);
+    expect(invocations).toHaveLength(5);
   });
 
   it('fails the review when its verification step fails', async () => {
