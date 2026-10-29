@@ -355,6 +355,7 @@ import {
   sendDevMessage,
   sessionUsage,
   childSessionsOf,
+  sessionTreeIds,
   reopenDevSession,
   startPullRequestPreview,
   isReplaceablePreview,
@@ -6283,6 +6284,17 @@ describe('what an orchestration spent', () => {
     expect(childSessionsOf(getJob('bud-rev'))).toEqual([]);
   });
 
+  it('sessionTreeIds names the asked-for sessions and every descendant once, and nothing else', () => {
+    expect(sessionTreeIds([getJob('bud-w1'), getJob('bud-rev')]).sort()).toEqual([
+      'bud-fix',
+      'bud-qa',
+      'bud-rev',
+      'bud-w1',
+    ]);
+    expect(sessionTreeIds([getJob('bud-poor')]).sort()).toEqual(['bud-poor', 'bud-w2']);
+    expect(sessionTreeIds([])).toEqual([]);
+  });
+
   it('sessionUsage rolls tokens, time and cost up the whole tree, counting the sessions folded in', () => {
     expect(sessionUsage(getJob('bud-orch'))).toEqual({
       sessions: 4,
@@ -7424,6 +7436,37 @@ describe('attachPrForBranch', () => {
     const job = session();
     expect(await attachPrForBranch(job)).toBeNull();
     expect(job.prStatus).toBeNull();
+  });
+
+  it('a failed lookup cools down like an empty one, and at least until a rate limit lifts', async () => {
+    githubRest.mockRejectedValue(new Error('502'));
+    const failing = session();
+    await attachPrForBranch(failing);
+    const calls = githubRest.mock.calls.length;
+    expect(await attachPrForBranch(failing)).toBeNull();
+    expect(githubRest.mock.calls.length).toBe(calls);
+
+    const retryAt = Date.now() + 60 * 60000;
+    const limited = Object.assign(new Error('GitHub core rate limit exhausted'), {
+      rateLimited: true,
+      retryAt,
+    });
+    githubRest.mockRejectedValue(limited);
+    githubGraphql.mockRejectedValue(limited);
+    const throttled = session();
+    await attachPrForBranch(throttled);
+    const asked = githubRest.mock.calls.length + githubGraphql.mock.calls.length;
+    vi.useFakeTimers({ now: Date.now() + 10 * 60000, toFake: ['Date'] });
+    try {
+      // Past the usual cooldown, still inside the rate limit.
+      await attachPrForBranch(throttled);
+      expect(githubRest.mock.calls.length + githubGraphql.mock.calls.length).toBe(asked);
+      // A turn that just ended still asks.
+      await attachPrForBranch(throttled, { fresh: true });
+      expect(githubRest.mock.calls.length + githubGraphql.mock.calls.length).toBeGreaterThan(asked);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('discards fork heads before selecting a GraphQL fallback', async () => {

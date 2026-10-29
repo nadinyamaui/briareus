@@ -202,7 +202,7 @@ describe('workspace quarantine', () => {
       return path.dirname(quarantineWorkspace(dir));
     }
 
-    it('deletes checkouts with no local work and keeps every kind of work', () => {
+    it('deletes checkouts with no local work and keeps every kind of work', async () => {
       const root = fixture();
       const clean = quarantined(root, 'acme__clean');
       const modified = quarantined(root, 'acme__modified', (git, dir) =>
@@ -234,7 +234,7 @@ describe('workspace quarantine', () => {
         ),
       );
 
-      expect(expireQuarantine(root)).toEqual({ expired: [clean], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [clean], errors: [] });
       expect(fs.existsSync(clean)).toBe(false);
       for (const kept of [modified, untracked, unpushed, otherBranch, stashed, noGit])
         expect(fs.existsSync(path.join(kept, 'checkout')), kept).toBe(true);
@@ -242,7 +242,7 @@ describe('workspace quarantine', () => {
 
     it.each(['rebase-merge', 'rebase-apply', 'merge'])(
       'keeps private autostash contents held by an unfinished %s',
-      (operation) => {
+      async (operation) => {
         const root = fixture();
         let autostash;
         const container = quarantined(root, 'acme__autostash', (git, dir) => {
@@ -273,7 +273,7 @@ describe('workspace quarantine', () => {
           expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
           expect(git('show', `${autostash}:.gitignore`)).toBe('build/\nprivate saved work\n');
         });
-        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
         expect(
           execFileSync('git', ['-C', path.join(container, 'checkout'), 'show', `${autostash}:.gitignore`], {
             encoding: 'utf8',
@@ -282,7 +282,7 @@ describe('workspace quarantine', () => {
       },
     );
 
-    it('keeps the private detached starting commit of an unfinished bisect', () => {
+    it('keeps the private detached starting commit of an unfinished bisect', async () => {
       const root = fixture();
       let saved;
       const container = quarantined(root, 'acme__bisect', (git, dir) => {
@@ -306,7 +306,7 @@ describe('workspace quarantine', () => {
           git('--git-dir', path.join(root, 'acme__bisect.remote.git'), 'cat-file', '-e', saved),
         ).toThrow();
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       const checkout = path.join(container, 'checkout');
       execFileSync('git', ['-C', checkout, 'bisect', 'reset']);
       expect(execFileSync('git', ['-C', checkout, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()).toBe(
@@ -315,7 +315,7 @@ describe('workspace quarantine', () => {
       expect(fs.readFileSync(path.join(checkout, 'source'), 'utf8')).toBe('private bisect starting contents');
     });
 
-    it('keeps unpublished source commits held by an unfinished cherry-pick', () => {
+    it('keeps unpublished source commits held by an unfinished cherry-pick', async () => {
       const root = fixture();
       let saved;
       const container = quarantined(root, 'acme__cherry-pick', (git, dir) => {
@@ -340,7 +340,7 @@ describe('workspace quarantine', () => {
           git('--git-dir', path.join(root, 'acme__cherry-pick.remote.git'), 'cat-file', '-e', saved),
         ).toThrow();
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(
         execFileSync('git', ['-C', path.join(container, 'checkout'), 'show', 'CHERRY_PICK_HEAD:source'], {
           encoding: 'utf8',
@@ -351,7 +351,7 @@ describe('workspace quarantine', () => {
 
     it.each(['cherry-pick sequence', 'revert'])(
       'keeps unpublished source commits held by an unfinished %s',
-      (operation) => {
+      async (operation) => {
         const root = fixture();
         let saved;
         const container = quarantined(root, 'acme__operation', (git, dir) => {
@@ -387,7 +387,7 @@ describe('workspace quarantine', () => {
             git('--git-dir', path.join(root, 'acme__operation.remote.git'), 'cat-file', '-e', saved),
           ).toThrow();
         });
-        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
         const checkout = path.join(container, 'checkout');
         expect(execFileSync('git', ['-C', checkout, 'show', `${saved}:source`], { encoding: 'utf8' })).toBe(
           'private second source',
@@ -399,7 +399,7 @@ describe('workspace quarantine', () => {
       },
     );
 
-    it('keeps recoverable staged contents in an interrupted index write', () => {
+    it('keeps recoverable staged contents in an interrupted index write', async () => {
       const root = fixture();
       const container = quarantined(root, 'acme__pending', (git, dir) => {
         const index = path.join(dir, '.git', 'index');
@@ -414,7 +414,7 @@ describe('workspace quarantine', () => {
         expect(git('status', '--porcelain').trim()).toBe('');
         expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       const checkout = path.join(container, 'checkout');
       expect(
         execFileSync('git', ['-C', checkout, 'show', ':source'], {
@@ -427,7 +427,7 @@ describe('workspace quarantine', () => {
 
     it.each(['refs/heads/saved', 'refs/tags/deep/saved', 'HEAD', 'ORIG_HEAD', 'packed-refs'])(
       'keeps unpublished history in a pending %s update',
-      (ref) => {
+      async (ref) => {
         const root = fixture();
         let saved;
         const container = quarantined(root, 'acme__pending_ref', (git, dir) => {
@@ -451,7 +451,7 @@ describe('workspace quarantine', () => {
             git('--git-dir', path.join(root, 'acme__pending_ref.remote.git'), 'cat-file', '-e', saved),
           ).toThrow();
         });
-        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
         const checkout = path.join(container, 'checkout');
         expect(fs.readFileSync(path.join(checkout, '.git', `${ref}.lock`), 'utf8')).toContain(saved);
         expect(execFileSync('git', ['-C', checkout, 'show', `${saved}:source`], { encoding: 'utf8' })).toBe(
@@ -461,7 +461,7 @@ describe('workspace quarantine', () => {
       },
     );
 
-    it('keeps unpublished branch history hidden by local grafts', () => {
+    it('keeps unpublished branch history hidden by local grafts', async () => {
       const root = fixture();
       let privateHead;
       const container = quarantined(root, 'acme__grafted', (git, dir) => {
@@ -487,7 +487,7 @@ describe('workspace quarantine', () => {
           ]).status,
         ).not.toBe(0);
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(
         execFileSync('git', ['-C', path.join(container, 'checkout'), 'show', 'private:source'], {
           encoding: 'utf8',
@@ -495,12 +495,12 @@ describe('workspace quarantine', () => {
       ).toBe('private unpublished work');
     });
 
-    it('reports a nonzero Git inspection exit and retains the checkout', () => {
+    it('reports a nonzero Git inspection exit and retains the checkout', async () => {
       const root = fixture();
       const container = quarantined(root, 'acme__corrupt', (git, dir) => {
         fs.writeFileSync(path.join(dir, '.git', 'index'), 'corrupt');
       });
-      expect(expireQuarantine(root)).toEqual({
+      expect(await expireQuarantine(root)).toEqual({
         expired: [],
         errors: [{ path: container, error: expect.stringMatching(/Git ls-files.*128.*index/i) }],
       });
@@ -508,7 +508,7 @@ describe('workspace quarantine', () => {
       expect(fs.existsSync(path.join(container, 'checkout', '.git', 'HEAD'))).toBe(true);
     });
 
-    it('frees capacity at the retention bound', () => {
+    it('frees capacity at the retention bound', async () => {
       const root = fixture();
       const recovery = path.join(root, QUARANTINE_NAME);
       quarantined(root, 'acme__clean');
@@ -517,11 +517,11 @@ describe('workspace quarantine', () => {
       const dir = path.join(root, 'acme__app');
       fs.mkdirSync(dir);
       expect(() => quarantineWorkspace(dir)).toThrow(/Recovery limit/);
-      expect(expireQuarantine(root).expired).toHaveLength(1);
+      expect((await expireQuarantine(root)).expired).toHaveLength(1);
       expect(fs.existsSync(quarantineWorkspace(dir))).toBe(true);
     });
 
-    it('expires a clean checkout whose index output exceeds 1 MiB', () => {
+    it('expires a clean checkout whose index output exceeds 1 MiB', async () => {
       const root = fixture();
       const container = quarantined(root, 'acme__large', (git, dir) => {
         const files = path.join(dir, 'files');
@@ -532,13 +532,13 @@ describe('workspace quarantine', () => {
         git('commit', '-qm', 'Large index');
         git('push', '-q', 'origin', 'HEAD');
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
       expect(fs.existsSync(container)).toBe(false);
     });
 
     it.skipIf(process.platform === 'win32')(
       'reports an exceeded Git output bound and retains the checkout',
-      () => {
+      async () => {
         const root = fixture();
         const container = quarantined(root, 'acme__oversized');
         const bin = path.join(root, 'bin');
@@ -556,7 +556,7 @@ describe('workspace quarantine', () => {
             '-e',
             `
         import { expireQuarantine } from ${JSON.stringify(module)};
-        console.log(JSON.stringify(expireQuarantine(${JSON.stringify(root)})));
+        console.log(JSON.stringify(await expireQuarantine(${JSON.stringify(root)})));
       `,
           ],
           {
@@ -578,7 +578,7 @@ describe('workspace quarantine', () => {
 
     it.each(['source', 'deep/source', 'deep\twith\nspace/source'])(
       'keeps embedded repository history for tracked src/%s',
-      (source) => {
+      async (source) => {
         const root = fixture();
         const container = quarantined(root, 'acme__embedded', (git, dir) => {
           const file = path.join(dir, 'src', source);
@@ -596,7 +596,7 @@ describe('workspace quarantine', () => {
           expect(git('stash', 'list').trim()).toBe('');
           expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
         });
-        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
         expect(
           execFileSync('git', ['-C', path.join(container, 'checkout', 'src'), 'show', `HEAD:${source}`], {
             encoding: 'utf8',
@@ -606,7 +606,7 @@ describe('workspace quarantine', () => {
       },
     );
 
-    it.each(['src', 'src/deep'])('keeps bare repository history in tracked %s', (nested) => {
+    it.each(['src', 'src/deep'])('keeps bare repository history in tracked %s', async (nested) => {
       const root = fixture();
       let privateCommit;
       const container = quarantined(root, 'acme__bare', (git, dir) => {
@@ -637,7 +637,7 @@ describe('workspace quarantine', () => {
           ]).status,
         ).not.toBe(0);
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       const bare = path.join(container, 'checkout', nested);
       expect(
         execFileSync('git', ['--git-dir', bare, 'show', `${privateCommit}:source`], { encoding: 'utf8' }),
@@ -645,7 +645,7 @@ describe('workspace quarantine', () => {
       expect(fs.readFileSync(path.join(bare, 'source'), 'utf8')).toBe('pushed');
     });
 
-    it('expires tracked source directories with only some bare repository filenames', () => {
+    it('expires tracked source directories with only some bare repository filenames', async () => {
       const root = fixture();
       const container = quarantined(root, 'acme__ordinary', (git, dir) => {
         fs.mkdirSync(path.join(dir, 'src', 'objects'), { recursive: true });
@@ -655,13 +655,13 @@ describe('workspace quarantine', () => {
         git('commit', '-qm', 'Track ordinary source');
         git('push', '-q', 'origin', 'HEAD');
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
       expect(fs.existsSync(container)).toBe(false);
     });
 
     it.skipIf(process.platform !== 'linux').each([Buffer.from([0xff]), Buffer.from([0xe2, 0x82])])(
       'keeps embedded history under a tracked directory with invalid UTF-8 bytes %s',
-      (bytes) => {
+      async (bytes) => {
         const root = fixture();
         const dirname = Buffer.concat([Buffer.from('src-'), bytes]);
         const container = quarantined(root, 'acme__invalid', (git, dir) => {
@@ -681,7 +681,7 @@ describe('workspace quarantine', () => {
           expect(git('status', '--porcelain').trim()).toBe('');
           expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
         });
-        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
         const alias = path.join(root, 'retained');
         fs.symlinkSync(Buffer.concat([Buffer.from(`${container}/checkout/`), dirname]), alias);
         expect(execFileSync('git', ['-C', alias, 'show', 'HEAD:source'], { encoding: 'utf8' })).toBe(
@@ -691,7 +691,7 @@ describe('workspace quarantine', () => {
       },
     );
 
-    it('expires clean checkouts with valid UTF-8 replacement characters in tracked paths', () => {
+    it('expires clean checkouts with valid UTF-8 replacement characters in tracked paths', async () => {
       const root = fixture();
       const container = quarantined(root, 'acme__unicode', (git, dir) => {
         fs.mkdirSync(path.join(dir, 'src-\uFFFD'));
@@ -700,16 +700,16 @@ describe('workspace quarantine', () => {
         git('commit', '-qm', 'Track valid Unicode pathname');
         git('push', '-q', 'origin', 'HEAD');
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
       expect(fs.existsSync(container)).toBe(false);
     });
 
-    it('keeps private Git notes', () => {
+    it('keeps private Git notes', async () => {
       const root = fixture();
       const container = quarantined(root, 'acme__notes', (git) =>
         git('notes', 'add', '-m', 'private recovery notes'),
       );
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(
         execFileSync('git', ['-C', path.join(container, 'checkout'), 'notes', 'show'], {
           encoding: 'utf8',
@@ -717,7 +717,7 @@ describe('workspace quarantine', () => {
       ).toBe('private recovery notes');
     });
 
-    it('keeps unpublished commits in detached linked worktrees after relocation', () => {
+    it('keeps unpublished commits in detached linked worktrees after relocation', async () => {
       const root = fixture();
       const linked = path.join(root, 'linked');
       let saved;
@@ -726,7 +726,7 @@ describe('workspace quarantine', () => {
         git('-C', linked, 'commit', '-q', '--allow-empty', '-m', 'Linked work');
         saved = git('-C', linked, 'rev-parse', 'HEAD').trim();
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(
         execFileSync(
           'git',
@@ -738,7 +738,7 @@ describe('workspace quarantine', () => {
       ).toBe('commit');
     });
 
-    it('keeps linked-worktree indexes and staged-only contents after relocation', () => {
+    it('keeps linked-worktree indexes and staged-only contents after relocation', async () => {
       const root = fixture();
       const linked = path.join(root, 'linked');
       const container = quarantined(root, 'acme__staged', (git) => {
@@ -749,7 +749,7 @@ describe('workspace quarantine', () => {
         expect(git('status', '--porcelain').trim()).toBe('');
         expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(
         execFileSync(
           'git',
@@ -767,7 +767,7 @@ describe('workspace quarantine', () => {
       ['tree', 'lightweight'],
       ['tree', 'annotated'],
       ['tree', 'nested'],
-    ])('keeps private %s contents retained by a %s tag', (type, tag) => {
+    ])('keeps private %s contents retained by a %s tag', async (type, tag) => {
       const root = fixture();
       const container = quarantined(root, 'acme__tagged', (git, dir) => {
         fs.writeFileSync(path.join(dir, 'private'), 'private tagged work');
@@ -787,7 +787,7 @@ describe('workspace quarantine', () => {
         expect(git('status', '--porcelain').trim()).toBe('');
         expect(git('log', '--all', '--not', '--remotes', '--format=%H').trim()).toBe('');
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(
         execFileSync(
           'git',
@@ -802,7 +802,7 @@ describe('workspace quarantine', () => {
       ).toBe('private tagged work');
     });
 
-    it('inspects the physical checkout when core.worktree points elsewhere', () => {
+    it('inspects the physical checkout when core.worktree points elsewhere', async () => {
       const root = fixture();
       const outside = fixture();
       const container = quarantined(root, 'acme__external', (git, dir) => {
@@ -812,7 +812,7 @@ describe('workspace quarantine', () => {
         fs.writeFileSync(path.join(dir, 'source'), 'unsaved physical work');
         expect(git('status', '--porcelain').trim()).toBe('');
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(fs.readFileSync(path.join(container, 'checkout', 'source'), 'utf8')).toBe(
         'unsaved physical work',
       );
@@ -821,7 +821,7 @@ describe('workspace quarantine', () => {
 
     it.each(['detached HEAD', 'lightweight tag', 'annotated tag'])(
       'keeps unpublished commits reachable from %s',
-      (ref) => {
+      async (ref) => {
         const root = fixture();
         let saved;
         const container = quarantined(root, 'acme__saved', (git) => {
@@ -834,7 +834,7 @@ describe('workspace quarantine', () => {
             git('checkout', '-q', '-');
           }
         });
-        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
         expect(
           execFileSync('git', ['-C', path.join(container, 'checkout'), 'cat-file', '-t', saved], {
             encoding: 'utf8',
@@ -843,30 +843,30 @@ describe('workspace quarantine', () => {
       },
     );
 
-    it('still expires a published detached HEAD and tags', () => {
+    it('still expires a published detached HEAD and tags', async () => {
       const root = fixture();
       const container = quarantined(root, 'acme__published', (git) => {
         git('tag', '-a', 'published', '-m', 'Published');
         git('-c', 'advice.nestedTag=false', 'tag', '-a', 'nested', 'published', '-m', 'Nested');
         git('checkout', '-q', '--detach');
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
     });
 
-    it('keeps untracked files when status.showUntrackedFiles is no', () => {
+    it('keeps untracked files when status.showUntrackedFiles is no', async () => {
       const root = fixture();
       const container = quarantined(root, 'acme__hidden', (git, dir) => {
         git('config', 'status.showUntrackedFiles', 'no');
         fs.writeFileSync(path.join(dir, 'notes'), 'untracked work');
         expect(git('status', '--porcelain').trim()).toBe('');
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(fs.readFileSync(path.join(container, 'checkout', 'notes'), 'utf8')).toBe('untracked work');
     });
 
     it.skipIf(process.platform !== 'linux')(
       'keeps distinct untracked files hidden by core.ignoreCase',
-      () => {
+      async () => {
         const root = fixture();
         const container = quarantined(root, 'acme__case', (git, dir) => {
           git('config', 'core.ignoreCase', 'true');
@@ -877,7 +877,7 @@ describe('workspace quarantine', () => {
             git('-c', 'core.ignoreCase=false', 'status', '--porcelain', '--untracked-files=normal').trim(),
           ).toBe('?? SOURCE');
         });
-        expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
         expect(fs.readFileSync(path.join(container, 'checkout', 'SOURCE'), 'utf8')).toBe(
           'private untracked work',
         );
@@ -885,35 +885,38 @@ describe('workspace quarantine', () => {
       },
     );
 
-    it('still expires a clean checkout configured with core.ignoreCase', () => {
+    it('still expires a clean checkout configured with core.ignoreCase', async () => {
       const root = fixture();
       const container = quarantined(root, 'acme__case', (git) => git('config', 'core.ignoreCase', 'true'));
-      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
       expect(fs.existsSync(container)).toBe(false);
     });
 
-    it.skipIf(process.platform === 'win32')('keeps executable-bit edits hidden by core.fileMode', () => {
-      const root = fixture();
-      const container = quarantined(root, 'acme__mode', (git, dir) => {
-        fs.chmodSync(path.join(dir, 'source'), 0o644);
-        git('update-index', '--chmod=-x', 'source');
-        git('config', 'core.fileMode', 'false');
-        fs.chmodSync(path.join(dir, 'source'), 0o755);
-        expect(git('status', '--porcelain', '--untracked-files=normal').trim()).toBe('');
-        expect(
-          git('-c', 'core.fileMode=true', 'status', '--porcelain', '--untracked-files=normal').trim(),
-        ).toBe('M source');
-      });
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
-      const source = path.join(container, 'checkout', 'source');
-      expect(fs.statSync(source).mode & 0o777).toBe(0o755);
-      expect(fs.readFileSync(source, 'utf8')).toBe('pushed');
-    });
+    it.skipIf(process.platform === 'win32')(
+      'keeps executable-bit edits hidden by core.fileMode',
+      async () => {
+        const root = fixture();
+        const container = quarantined(root, 'acme__mode', (git, dir) => {
+          fs.chmodSync(path.join(dir, 'source'), 0o644);
+          git('update-index', '--chmod=-x', 'source');
+          git('config', 'core.fileMode', 'false');
+          fs.chmodSync(path.join(dir, 'source'), 0o755);
+          expect(git('status', '--porcelain', '--untracked-files=normal').trim()).toBe('');
+          expect(
+            git('-c', 'core.fileMode=true', 'status', '--porcelain', '--untracked-files=normal').trim(),
+          ).toBe('M source');
+        });
+        expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+        const source = path.join(container, 'checkout', 'source');
+        expect(fs.statSync(source).mode & 0o777).toBe(0o755);
+        expect(fs.readFileSync(source, 'utf8')).toBe('pushed');
+      },
+    );
 
-    it('still expires a clean checkout configured with core.fileMode=false', () => {
+    it('still expires a clean checkout configured with core.fileMode=false', async () => {
       const root = fixture();
       const container = quarantined(root, 'acme__mode', (git) => git('config', 'core.fileMode', 'false'));
-      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
       expect(fs.existsSync(container)).toBe(false);
     });
 
@@ -938,20 +941,20 @@ describe('workspace quarantine', () => {
       expect(
         execFileSync('git', ['-C', checkout, 'status', '--porcelain'], { encoding: 'utf8' }).trim(),
       ).toBe('');
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(fs.readFileSync(source, 'utf8')).toBe('secret');
     });
 
-    it('still expires a clean checkout configured with core.trustctime=false', () => {
+    it('still expires a clean checkout configured with core.trustctime=false', async () => {
       const root = fixture();
       const container = quarantined(root, 'acme__mtime', (git) => git('config', 'core.trustctime', 'false'));
-      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
       expect(fs.existsSync(container)).toBe(false);
     });
 
     it.skipIf(process.platform === 'win32').each([false, true])(
       'inspects symlink types with core.symlinks=false (replaced: %s)',
-      (replaced) => {
+      async (replaced) => {
         const root = fixture();
         const container = quarantined(root, 'acme__symlink', (git, dir) => {
           const link = path.join(dir, 'link');
@@ -966,7 +969,7 @@ describe('workspace quarantine', () => {
           }
           expect(git('status', '--porcelain', '--untracked-files=normal').trim()).toBe('');
         });
-        expect(expireQuarantine(root)).toEqual({ expired: replaced ? [] : [container], errors: [] });
+        expect(await expireQuarantine(root)).toEqual({ expired: replaced ? [] : [container], errors: [] });
         if (replaced) {
           const link = path.join(container, 'checkout', 'link');
           expect(fs.lstatSync(link).isFile()).toBe(true);
@@ -975,18 +978,18 @@ describe('workspace quarantine', () => {
       },
     );
 
-    it.each(['--assume-unchanged', '--skip-worktree'])('keeps tracked edits hidden by %s', (flag) => {
+    it.each(['--assume-unchanged', '--skip-worktree'])('keeps tracked edits hidden by %s', async (flag) => {
       const root = fixture();
       const container = quarantined(root, 'acme__hidden', (git, dir) => {
         git('update-index', flag, 'source');
         fs.writeFileSync(path.join(dir, 'source'), 'hidden work');
         expect(git('status', '--porcelain').trim()).toBe('');
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(fs.readFileSync(path.join(container, 'checkout', 'source'), 'utf8')).toBe('hidden work');
     });
 
-    it.each([false, true])('keeps a submodule stash (deinitialized: %s)', (deinitialized) => {
+    it.each([false, true])('keeps a submodule stash (deinitialized: %s)', async (deinitialized) => {
       const root = fixture();
       const container = quarantined(root, 'acme__submodule', (git, dir) => {
         git(
@@ -1005,7 +1008,7 @@ describe('workspace quarantine', () => {
         if (deinitialized) git('submodule', 'deinit', '-q', 'dependency');
         expect(git('status', '--porcelain').trim()).toBe('');
       });
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(
         execFileSync(
           'git',
@@ -1020,40 +1023,40 @@ describe('workspace quarantine', () => {
       ).toBe('submodule work');
     });
 
-    it.skipIf(process.platform === 'win32')('does not follow a symlinked checkout', () => {
+    it.skipIf(process.platform === 'win32')('does not follow a symlinked checkout', async () => {
       const root = fixture();
       const container = quarantined(root, 'acme__linked');
       const checkout = path.join(container, 'checkout');
       const outside = path.join(fixture(), 'external-checkout');
       fs.renameSync(checkout, outside);
       fs.symlinkSync(outside, checkout);
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(fs.readFileSync(path.join(outside, 'source'), 'utf8')).toBe('pushed');
       expect(fs.lstatSync(checkout).isSymbolicLink()).toBe(true);
     });
 
-    it('keeps unchecked files beside the checkout', () => {
+    it('keeps unchecked files beside the checkout', async () => {
       const root = fixture();
       const container = quarantined(root, 'acme__notes');
       fs.writeFileSync(path.join(container, 'recovery-notes'), 'operator work');
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(fs.readFileSync(path.join(container, 'recovery-notes'), 'utf8')).toBe('operator work');
       expect(fs.existsSync(path.join(container, 'checkout', '.git'))).toBe(true);
     });
 
-    it.skipIf(process.platform === 'win32')('does not run a configured fsmonitor hook', () => {
+    it.skipIf(process.platform === 'win32')('does not run a configured fsmonitor hook', async () => {
       const root = fixture();
       const marker = path.join(root, 'hook-ran');
       const hook = path.join(root, 'fsmonitor');
       fs.writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\nexec sleep 2\n`, { mode: 0o755 });
       const container = quarantined(root, 'acme__hook', (git) => git('config', 'core.fsmonitor', hook));
-      expect(expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [container], errors: [] });
       expect(fs.existsSync(marker)).toBe(false);
     });
 
     it.skipIf(process.platform === 'win32')(
       'bounds a stalled Git probe and keeps the checkout',
-      () => {
+      async () => {
         const root = fixture();
         const container = quarantined(root, 'acme__stalled');
         const bin = path.join(root, 'bin');
@@ -1074,7 +1077,7 @@ describe('workspace quarantine', () => {
               '-e',
               `
           import { expireQuarantine } from ${JSON.stringify(module)};
-          console.log(JSON.stringify(expireQuarantine(${JSON.stringify(root)})));
+          console.log(JSON.stringify(await expireQuarantine(${JSON.stringify(root)}, { gitTimeoutMs: 1000 })));
         `,
             ],
             {
@@ -1104,25 +1107,25 @@ describe('workspace quarantine', () => {
       10000,
     );
 
-    it('does nothing without a recovery directory or through a symlinked one', () => {
+    it('does nothing without a recovery directory or through a symlinked one', async () => {
       const root = fixture();
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       const outside = fixture();
       quarantined(outside, 'acme__clean');
       fs.symlinkSync(path.join(outside, QUARANTINE_NAME), path.join(root, QUARANTINE_NAME));
-      expect(expireQuarantine(root)).toEqual({ expired: [], errors: [] });
+      expect(await expireQuarantine(root)).toEqual({ expired: [], errors: [] });
       expect(fs.readdirSync(path.join(outside, QUARANTINE_NAME))).toHaveLength(1);
     });
 
     it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
       'reports a checkout whose build output refuses removal and keeps its history',
-      () => {
+      async () => {
         const root = fixture();
         const container = quarantined(root, 'acme__clean');
         const build = path.join(container, 'checkout', 'build');
         fs.chmodSync(build, 0o555);
         try {
-          const result = expireQuarantine(root);
+          const result = await expireQuarantine(root);
           expect(result.expired).toEqual([]);
           expect(result.errors).toEqual([{ path: container, error: expect.stringMatching(/EACCES|EPERM/) }]);
           expect(fs.existsSync(path.join(container, 'checkout', '.git', 'HEAD'))).toBe(true);
