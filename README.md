@@ -178,7 +178,9 @@ account, model and effort:
    classified Fix, Optional or Dismissed with evidence. The verdict goes into
    `review_finding_update`, and the agent replies on the finding’s own review
    thread, resolving the thread of a dismissed one. It posts no other comments. It then labels the PR `feedback-given` when any finding
-   is Fix, Optional or unverified, or `code-approved` when none is.
+   is Fix, Optional or unverified, or `code-approved` when none is, then removes
+   `feedback-implemented` and `requires-dev-review` if the PR has them. A project can
+   replace these label rules with its own Code review labels template.
 
 Failed or canceled discovery does not start publication; an interrupted step resumes
 itself and the steps after it without rerunning discovery.

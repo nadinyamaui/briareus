@@ -1739,8 +1739,12 @@ describe('native Codex code review', () => {
     expect(verify.child.prompt).toContain('resolveReviewThread');
     expect(verify.child.prompt).toContain('only replies to the review threads');
     // Feedback left labels the PR feedback-given; none labels it code-approved.
+    // Either way feedback-implemented and requires-dev-review come off afterwards.
     expect(verify.child.prompt).toContain('add the `feedback-given` label and remove `code-approved`');
     expect(verify.child.prompt).toContain('add the `code-approved` label and remove `feedback-given`');
+    expect(verify.child.prompt).toContain(
+      'once the new label is on, remove `feedback-implemented` and `requires-dev-review`',
+    );
     expect(job.recoveryTurn).toMatchObject({ opts: { codeReviewStage: 'verify' }, completed: false });
     // The findings tools ride on every turn of a review session.
     for (const turn of [native, publish, verify])
@@ -1822,6 +1826,8 @@ describe('native Codex code review', () => {
   it('completes the review when a restart resumes its publish step, after verifying', async () => {
     completeCodeReview.mockClear();
     failCodeReview.mockClear();
+    // The project's own label rules replace the built-in ones.
+    state.projects[0].promptTemplates = { reviewLabels: 'PROJECT LABEL RULES' };
     Object.assign(job, {
       status: 'interrupted',
       interruptedFrom: 'running',
@@ -1842,6 +1848,8 @@ describe('native Codex code review', () => {
     finishTurn(invocations[0]);
     await vi.waitFor(() => expect(invocations).toHaveLength(2));
     expect(invocations[1].child.prompt).toContain('Your goal is to try to REFUTE them');
+    expect(invocations[1].child.prompt).toContain('Finally, label the PR:\nPROJECT LABEL RULES');
+    expect(invocations[1].child.prompt).not.toContain('feedback-given');
     expect(completeCodeReview).not.toHaveBeenCalled();
     finishTurn(invocations[1]);
     await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
