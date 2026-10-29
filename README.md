@@ -167,6 +167,8 @@ with the selected provider’s `CLAUDE_CONFIG_DIR`, model and effort, and
 a change description, severity counts, collapsible findings grouped by severity,
 a “Not fixed” section and a checklist of acceptance criteria verified. The output
 is saved as `review-summary.md` outside the checkout and shown in the session.
+When the review finishes, its session is automatically deleted and its workspace
+and database are released; review comments remain on the pull request.
 
 With `babysitPrs` enabled, the server checks open PRs every 15 minutes and starts
 conflict resolution or CI fixes. Each action is deduplicated by head commit, with
