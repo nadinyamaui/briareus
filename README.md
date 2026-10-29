@@ -160,15 +160,20 @@ fix failing CI checks, and delete the configured account's comments. The project
 `actionEffort` select the runtime for PR actions. QA steps can override that runtime
 through `stepRuntimes.testSheet` and `stepRuntimes.testRun`.
 
-Code review currently supports Claude Code only. It prepares a workspace on the
-PR’s head branch and runs `claude -p "/code-review <effort> --comment"`
-with the selected provider’s `CLAUDE_CONFIG_DIR`, model and effort, and
-`--permission-mode bypassPermissions`; its empty `--allowedTools` value restricts nothing. An appended system prompt requests
-a top-level “Code Review” PR comment with a change description, severity counts,
-a verdict, collapsible findings grouped by severity, reviewed commit references,
-and validation results and limitations; a “Not fixed” section and acceptance-criteria
-checklist are included when applicable. The same Markdown output
-is saved as `review-summary.md` outside the checkout and shown in the session.
+Code review currently supports Codex. Select a Codex provider for the action in
+Settings or when starting it. It prepares a workspace on the PR’s head branch and
+runs the native `codex review` engine through `codex exec review --json --base <PR-base-ref>`,
+using the selected provider’s `CODEX_HOME`, model and effort. It fetches the actual
+PR base, including stacked branches, and refuses a checkout that differs from the
+current PR head. The native output is saved as `review-summary.md` outside the checkout.
+A second turn on the same Codex account, model and effort verifies the findings,
+assesses fix value, and publishes inline comments and a top-level “Code Review”
+PR summary with a change description, severity counts, a verdict, collapsible
+findings grouped by severity, reviewed commit references, and validation results
+and limitations. It includes “Not fixed” explanations and an acceptance-criteria
+checklist when applicable, and returns the published Markdown as its final output.
+Failed or canceled reviews do not start publication; interrupted publication resumes
+its own stage without rerunning discovery.
 When the review finishes, its session is automatically deleted and its workspace
 and database are released; review comments remain on the pull request.
 

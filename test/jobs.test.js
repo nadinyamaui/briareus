@@ -1120,16 +1120,21 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(() => createDevSession({ ...base, provider: 99 })).toThrow(/Unknown provider: 99/);
   });
 
-  it('only accepts Claude Code for code review, with a head branch', () => {
-    const review = { ...base, activity: 'review', prompt: '/code-review' };
-    expect(() => createDevSession(review)).toThrow(/requires the branch to check out/);
+  it('only accepts Codex for code review, with a head branch', () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex', source: 'test' });
     state.provider = { ...state.provider, binary: 'codex' };
+    const review = { ...base, activity: 'review', prompt: '/review' };
+    expect(() => createDevSession(review)).toThrow(/requires the branch to check out/);
+    state.provider = { ...state.provider, binary: 'claude' };
     expect(() => createDevSession({ ...review, prNumber: 3747, branch: 'feature' })).toThrow(
-      /requires a Claude Code provider/,
+      /requires a Codex provider/,
     );
+    bin.mockRestore();
   });
 
   it.each(['low', 'high', undefined])('uses the resolved review effort (%s) in the command', (effort) => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex', source: 'test' });
+    state.provider = { ...state.provider, binary: 'codex' };
     const session = createDevSession({
       ...base,
       effort,
@@ -1138,8 +1143,14 @@ describe('createDevSession: the validation gauntlet', () => {
       prNumber: 3747,
       branch: 'feature',
     });
-    expect(getJob(session.id).recoveryTurn.prompt).toBe(`/code-review ${effort || 'high'} --comment`);
-    expect(session).toMatchObject({ providerId: 1, local: false, startBranch: 'feature' });
+    expect(getJob(session.id).recoveryTurn.prompt).toBe('/review');
+    expect(session).toMatchObject({
+      providerId: 1,
+      effort: effort || 'high',
+      local: false,
+      startBranch: 'feature',
+    });
+    bin.mockRestore();
   });
 
   it('files a session under its starter, and a worker under its orchestrator’s owner', () => {
@@ -1368,6 +1379,208 @@ describe('Claude code review output', () => {
       fs.rmSync(root, { recursive: true, force: true });
       fs.rmSync(summaryPath, { force: true });
     }
+  });
+});
+
+describe('native Codex code review', () => {
+  let root, id, summaryPath, head, invocations, home, bin, realSpawn, job;
+  beforeEach(async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-review-'));
+    id = path.basename(root);
+    summaryPath = path.join(os.tmpdir(), 'reviewer-prompts', `${id}-review-summary.md`);
+    spawnSync('git', ['init', '-b', 'feature', root]);
+    spawnSync('git', [
+      '-C',
+      root,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'Fixture',
+    ]);
+    head = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    state.provider = { id: 1, label: 'Codex entry', binary: 'codex', active: true };
+    home = vi.spyOn(providerTools, 'ensureCodexHome').mockReturnValue(root);
+    bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/native-review', source: 'test' });
+    getProviderForJob.mockReturnValue(state.provider);
+    captureProviderAuth.mockResolvedValue(undefined);
+    githubRest.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        number: 77,
+        state: 'open',
+        head: { ref: 'feature', sha: head },
+        base: { ref: 'series/step-1' },
+        html_url: 'https://github.com/acme/shop/pull/77',
+      }),
+    });
+    realSpawn = spawn.getMockImplementation();
+    invocations = [];
+    spawn.mockImplementation((cmd, args, opts) => {
+      if (cmd !== '/mock/native-review' && !(cmd === 'git' && args.includes('fetch')))
+        return realSpawn(cmd, args, opts);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = vi.fn();
+      if (cmd === 'git') queueMicrotask(() => child.emit('close', 0));
+      else {
+        fakeCodexServer(child, args, 'native-review-thread');
+        invocations.push({ child, args, opts });
+      }
+      return child;
+    });
+    state.stored = [
+      {
+        id,
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/shop',
+        providerId: 1,
+        model: 'gpt-6.1-sol',
+        effort: 'low',
+        activity: 'review',
+        startedOnPr: 77,
+        turns: 0,
+        chatStarted: false,
+        workDir: root,
+        branch: 'feature',
+        baseBranch: 'main',
+        createdAt: '2026-10-29T00:00:00Z',
+      },
+    ];
+    await initJobs();
+    job = getJob(id);
+    job.status = 'idle';
+  });
+  afterEach(async () => {
+    await closeDevSession(id);
+    home.mockRestore();
+    bin.mockRestore();
+    spawn.mockImplementation(realSpawn);
+    getProviderForJob.mockReset();
+    captureProviderAuth.mockReset();
+    githubRest.mockReset();
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(summaryPath, { force: true });
+  });
+  const finishReview = (invocation, code = 0) => {
+    const { child } = invocation;
+    child.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'native-review-thread' }) + '\n');
+    child.stdout.write(
+      JSON.stringify({
+        type: 'turn.completed',
+        usage: { input_tokens: 20, output_tokens: 5, cached_input_tokens: 0 },
+      }) + '\n',
+    );
+    child.emit('close', code);
+  };
+
+  it('reviews the actual stacked base and resumes the same runtime to verify and publish', async () => {
+    sendDevMessage(id, '/review');
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    const native = invocations[0];
+    expect(native.args.slice(0, 5)).toEqual([
+      'exec',
+      'review',
+      '--json',
+      '--base',
+      'refs/remotes/origin/series/step-1',
+    ]);
+    expect(native.args).toContain('model_reasoning_effort="low"');
+    expect(native.opts.env.CODEX_HOME).toBe(root);
+    expect(native.args.slice(-2)).toEqual(['--output-last-message', summaryPath]);
+    fs.writeFileSync(summaryPath, 'A candidate finding');
+    finishReview(native);
+    await vi.waitFor(() => expect(invocations).toHaveLength(2));
+    const publish = invocations[1];
+    expect(publish.args[0]).toBe('app-server');
+    expect(publish.opts.env.CODEX_HOME).toBe(root);
+    const resume = publish.child.rpc.find((r) => r.method === 'thread/resume');
+    expect(resume.params).toMatchObject({ threadId: 'native-review-thread', model: 'gpt-6.1-sol' });
+    expect(publish.child.prompt).toContain('Verify every finding independently');
+    expect(publish.child.prompt).toContain('assess whether its fix is worth');
+    expect(publish.child.prompt).toContain('Not fixed');
+    expect(publish.child.prompt).toContain(providerTools.CODE_REVIEW_SUMMARY_PROMPT);
+    expect(publish.child.prompt).toContain(head);
+    expect(publish.child.prompt).toContain('<workspace-context>');
+    expect(job.recoveryTurn).toMatchObject({
+      prompt: publish.child.prompt,
+      completed: false,
+      runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
+    });
+    publish.child.complete({ input_tokens: 30, output_tokens: 8, cached_input_tokens: 0 });
+    publish.child.emit('close', 0);
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    expect(job.error).toBeNull();
+    expect(job.recoveryTurn.completed).toBe(true);
+    expect(fs.existsSync(path.join(root, 'review-summary.md'))).toBe(false);
+  });
+
+  it('keeps the session through discovery and publication, then deletes it and releases its database', async () => {
+    Object.assign(job, {
+      autoClose: true,
+      status: 'interrupted',
+      interruptedFrom: 'running',
+      restartPending: true,
+      workspacePrepared: true,
+      recoveryTurn: { prompt: '/review', phase: 'initial', completed: false },
+    });
+    claimSlot(root, id, { prepared: true });
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    fs.writeFileSync(summaryPath, 'No findings');
+    finishReview(invocations[0]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(2));
+    expect(getJob(id)).toBe(job);
+    expect(job.status).toBe('running');
+    const publish = invocations[1];
+    publish.child.complete({ input_tokens: 30, output_tokens: 8, cached_input_tokens: 0 });
+    publish.child.emit('close', 0);
+    await vi.waitFor(() => expect(getJob(id)).toBeNull());
+    expect(job.error).toBeNull();
+    expect(dropSessionDatabase).toHaveBeenCalledWith(job, expect.any(Function));
+    expect(deleteJob).toHaveBeenCalledWith(id, null);
+  });
+
+  it.each(['failure', 'empty', 'missing', 'canceled'])(
+    'does not publish when native review is %s',
+    async (outcome) => {
+      fs.mkdirSync(path.dirname(summaryPath), { recursive: true });
+      fs.writeFileSync(summaryPath, 'Old summary that must not be reused');
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(invocations).toHaveLength(1));
+      expect(fs.existsSync(summaryPath)).toBe(false);
+      if (outcome !== 'missing') fs.writeFileSync(summaryPath, outcome === 'empty' ? '' : 'Partial finding');
+      if (outcome === 'canceled') cancelDevTurn(id);
+      finishReview(invocations[0], outcome === 'failure' ? 1 : 0);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      expect(invocations).toHaveLength(1);
+      if (outcome !== 'canceled') expect(job.error).toBeTruthy();
+    },
+  );
+
+  it('refuses discovery when the checkout is behind the PR head', async () => {
+    head = '1234567890123456789012345678901234567890';
+    sendDevMessage(id, '/review');
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    expect(job.error).toMatch(/does not match the current PR head/);
+    expect(invocations).toHaveLength(0);
+  });
+
+  it('does not publish when the PR head moves during discovery', async () => {
+    sendDevMessage(id, '/review');
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    fs.writeFileSync(summaryPath, 'A finding on the old head');
+    head = '1234567890123456789012345678901234567890';
+    finishReview(invocations[0]);
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    expect(job.error).toMatch(/PR changed during review/);
+    expect(invocations).toHaveLength(1);
   });
 });
 
