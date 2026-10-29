@@ -188,6 +188,23 @@ controlling whether the opening sheet is followed by execution.
 
 Orchestrators can spawn workers in accessible projects, toggle worker QA, and use
 `start_pr_action` with `solve-conflicts` on an existing PR in their own project.
+They can close workers with `close_worker` to release resources while keeping
+readable history and the ability to reopen. Only an explicit user request to delete
+authorizes `delete_worker({ id: "<worker-id>" })`, which permanently erases a fully
+closed own worker's transcript and session history while preserving branches and PRs.
+The same operation is available as `DELETE /api/agent/sessions/<worker-id>` with
+the orchestrator's session bearer token (`REVIEWER_MEMORY_TOKEN`), for example:
+
+```sh
+curl --fail-with-body -sS -X DELETE "$REVIEWER_MEMORY_URL/api/agent/sessions/<worker-id>" \
+  -H "Authorization: Bearer $REVIEWER_MEMORY_TOKEN"
+```
+
+Success returns `{ "ok": true }`. Non-closed workers, active child/QA operations,
+and inconsistent live resource ownership return 409; unrelated workers and the
+orchestrator itself return 404. Companion workers retain the existing ownership
+scope. Deleted workers disappear from `GET /api/agent/sessions`; reads and repeated
+deletes return 404. Deletion does not implicitly close a worker or cancel its children.
 
 ### The shared browser
 

@@ -961,6 +961,7 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 // its own workers".
 
 const workerRoutes = orchestratorRoutes({
+  deleteJobById,
   startOrchestratorPrAction,
   agentSession,
   spawnWorkerSession,
@@ -971,6 +972,7 @@ const workerRoutes = orchestratorRoutes({
 const { orchestratorSession, workerOf } = workerRoutes;
 api.post('/api/agent/sessions/pr-actions', workerRoutes.prAction);
 api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
+api.delete('/api/agent/sessions/:id', workerRoutes.deleteWorker);
 
 api.post('/api/agent/sessions', workerRoutes.spawn);
 
