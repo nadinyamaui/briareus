@@ -25,6 +25,7 @@ import {
   deleteSelfCommentsPrompt,
   solveConflictsPrompt,
   fixFailingChecksPrompt,
+  implementFeedbackPrompt,
   prBodyPrompt,
 } from '../lib/prtasks.js';
 
@@ -281,6 +282,26 @@ describe('solveConflicts / fixFailingChecks', () => {
     expect(solveConflictsPrompt({ ...base, baseBranch: 'main' })).toContain('`main`');
     expect(solveConflictsPrompt(base)).toContain('the base branch');
     expect(fixFailingChecksPrompt({ ...base, baseBranch: 'develop' })).toContain('`develop`');
+  });
+});
+
+describe('implementFeedbackPrompt', () => {
+  it('works from the live review threads, including the code review verdicts', () => {
+    const prompt = implementFeedbackPrompt(base);
+    expect(prompt).toContain('pull request #12 in acme/shop');
+    expect(prompt).toContain('repos/acme/shop/pulls/12/comments');
+    expect(prompt).toContain('git push origin HEAD:feature/x');
+    expect(prompt).toContain('**Fix** is open, **Dismissed** is done');
+    expect(prompt).toContain('not fixed');
+  });
+
+  it('a project override replaces the built-in text', () => {
+    expect(
+      implementFeedbackPrompt({
+        ...base,
+        project: { promptTemplates: { implementFeedback: 'OURS {{PR_NUMBER}}' } },
+      }),
+    ).toBe('OURS 12');
   });
 });
 

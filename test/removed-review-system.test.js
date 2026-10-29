@@ -8,12 +8,18 @@ import { BINARIES } from '../lib/providers.js';
 describe('retired review system', () => {
   it('keeps retired feedback workflows removed alongside the code review action', () => {
     expect(getAction('review')).toMatchObject({ workspace: 'worktree' });
-    for (const id of ['implement-feedback', 'custom-feedback']) expect(getAction(id)).toBeNull();
+    // implement-feedback is back, but as a plain prompt with no assessment step.
+    expect(getAction('custom-feedback')).toBeNull();
     expect(ACTIONS.map((a) => a.id)).toEqual(
-      expect.arrayContaining(['test-sheet', 'test-run', 'solve-conflicts', 'fix-checks']),
+      expect.arrayContaining([
+        'test-sheet',
+        'test-run',
+        'solve-conflicts',
+        'fix-checks',
+        'implement-feedback',
+      ]),
     );
-    for (const id of ['assessFeedback', 'implementFeedback', 'customFeedback'])
-      expect(TEMPLATE_IDS).not.toContain(id);
+    for (const id of ['assessFeedback', 'customFeedback']) expect(TEMPLATE_IDS).not.toContain(id);
     for (const binary of Object.values(BINARIES)) {
       expect(binary).not.toHaveProperty('reviewPrompt');
       expect(binary).not.toHaveProperty('buildReviewArgs');
