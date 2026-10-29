@@ -32,7 +32,7 @@ describe('POST /api/providers/test on a gateway with no model list', () => {
     const g = express();
     g.use(express.json());
     g.get(['/models', '/v1/models'], (req, res) => res.status(404).send('Not Found'));
-    g.post(['/responses', '/v1/messages'], (req, res) => {
+    g.post(['/responses', '/v1/messages', '/chat/completions'], (req, res) => {
       chats.push({ path: req.path, model: req.body.model });
       res.json({ id: 'resp_1', object: 'response', type: 'message' });
     });
@@ -119,6 +119,11 @@ describe('POST /api/providers/test on a gateway with no model list', () => {
   it("probes a dsh form without models as dsh's own default", async () => {
     expect(await test({ binary: 'dsh', models: [], defaultModel: '' })).toBe('deepseek-flash');
     expect(chats[0].path).toBe('/v1/messages');
+  });
+
+  it("probes a qwen form with no models as the binary's default", async () => {
+    expect(await test({ binary: 'qwen', models: [], defaultModel: '' })).toBe('qwen3.8-max');
+    expect(chats[0].path).toBe('/chat/completions');
   });
 
   it("keeps a claude form's stored default", async () => {

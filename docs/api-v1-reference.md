@@ -1916,14 +1916,14 @@ Probe a provider endpoint and key as a form holds them, before saving. Needs `ad
 
 **Body**
 
-| Field          | Type                                 |                                                         |
-| -------------- | ------------------------------------ | ------------------------------------------------------- |
-| `binary`       | `claude\|codex\|grok\|opencode\|dsh` | Which CLI runs it                                       |
-| `baseUrl`      | `string`                             | A custom endpoint, or empty                             |
-| `apiKey`       | `string`                             | The key for that endpoint, or empty. Returned as stored |
-| `defaultModel` | `string`                             | The model to probe with when the endpoint lists none    |
-| `models`       | `string[]`                           | The models the form lists                               |
-| `id`           | `integer`                            | The saved row being edited, if any                      |
+| Field          | Type                                       |                                                         |
+| -------------- | ------------------------------------------ | ------------------------------------------------------- |
+| `binary`       | `claude\|codex\|grok\|opencode\|dsh\|qwen` | Which CLI runs it                                       |
+| `baseUrl`      | `string`                                   | A custom endpoint, or empty                             |
+| `apiKey`       | `string`                                   | The key for that endpoint, or empty. Returned as stored |
+| `defaultModel` | `string`                                   | The model to probe with when the endpoint lists none    |
+| `models`       | `string[]`                                 | The models the form lists                               |
+| `id`           | `integer`                                  | The saved row being edited, if any                      |
 
 **Returns** `{ models: string[], probedModel: string }`. `probedModel` is present only when the endpoint has no model list and was probed with a chat call instead.
 
@@ -3062,23 +3062,23 @@ A project’s full settings. A body may carry any of these; what it leaves out k
 
 A provider row: one login or endpoint of one CLI. A body may carry any of the first nine fields.
 
-| Field           | Type                                 |                                                                            |
-| --------------- | ------------------------------------ | -------------------------------------------------------------------------- |
-| `id`            | `integer`                            | Its id; set by the server                                                  |
-| `label`         | `string`                             | Its display name                                                           |
-| `binary`        | `claude\|codex\|grok\|opencode\|dsh` | Which CLI runs it                                                          |
-| `active`        | `boolean`                            | Whether sessions can start on it                                           |
-| `baseUrl`       | `string`                             | A custom endpoint, or empty                                                |
-| `apiKey`        | `string`                             | The key for that endpoint, or empty. Returned as stored                    |
-| `models`        | `string[]`                           | Models to offer; the CLI’s own list when empty                             |
-| `efforts`       | `string[]`                           | Efforts to offer; the CLI’s own when empty                                 |
-| `defaultModel`  | `string`                             |                                                                            |
-| `defaultEffort` | `string`                             |                                                                            |
-| `sortOrder`     | `integer`                            | Its place in the list                                                      |
-| `hasLogin`      | `boolean`                            | Whether a login is stored for it; the login itself never leaves the server |
-| `loginDir`      | `string`                             | Where its CLI keeps its login on the server                                |
-| `createdAt`     | `string`                             | ISO time                                                                   |
-| `updatedAt`     | `string`                             | ISO time                                                                   |
+| Field           | Type                                       |                                                                            |
+| --------------- | ------------------------------------------ | -------------------------------------------------------------------------- |
+| `id`            | `integer`                                  | Its id; set by the server                                                  |
+| `label`         | `string`                                   | Its display name                                                           |
+| `binary`        | `claude\|codex\|grok\|opencode\|dsh\|qwen` | Which CLI runs it                                                          |
+| `active`        | `boolean`                                  | Whether sessions can start on it                                           |
+| `baseUrl`       | `string`                                   | A custom endpoint, or empty                                                |
+| `apiKey`        | `string`                                   | The key for that endpoint, or empty. Returned as stored                    |
+| `models`        | `string[]`                                 | Models to offer; the CLI’s own list when empty                             |
+| `efforts`       | `string[]`                                 | Efforts to offer; the CLI’s own when empty                                 |
+| `defaultModel`  | `string`                                   |                                                                            |
+| `defaultEffort` | `string`                                   |                                                                            |
+| `sortOrder`     | `integer`                                  | Its place in the list                                                      |
+| `hasLogin`      | `boolean`                                  | Whether a login is stored for it; the login itself never leaves the server |
+| `loginDir`      | `string`                                   | Where its CLI keeps its login on the server                                |
+| `createdAt`     | `string`                                   | ISO time                                                                   |
+| `updatedAt`     | `string`                                   | ISO time                                                                   |
 
 ### DbServer
 

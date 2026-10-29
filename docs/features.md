@@ -30,7 +30,7 @@ second user needs WAHA Plus to link a phone). See
 
 ## Coding sessions
 
-Sessions run Claude Code, Codex, Grok, opencode, DeepSeek Harness or Z.AI in their own workspace
+Sessions run Claude Code, Codex, Grok, opencode, DeepSeek Harness, Qwen Code or Z.AI in their own workspace
 clones. Projects can reserve a database server per open session or use a
 local checkout. An admin's interactive session can edit its project's `.env`
 template, the file every checkout is seeded from, with MCP tools. Clients can

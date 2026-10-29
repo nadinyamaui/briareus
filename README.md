@@ -3,7 +3,7 @@
 The core of a system for running coding agents against a project: a server
 with no UI of its own, driven by clients through one API, [`/api/v1`](#client-api).
 Each session is a conversation with one agent, **Claude Code**, **Codex**,
-**Grok**, **opencode**, **DeepSeek Harness** or **Z.AI** (GLM through the codex CLI), inside a workspace clone of
+**Grok**, **opencode**, **DeepSeek Harness**, **Qwen Code** or **Z.AI** (GLM through the codex CLI), inside a workspace clone of
 its own, with a database server of its
 own, so parallel sessions never share a working tree or a database. You
 describe what to build; the agent edits, runs the app and its tests, and can
@@ -419,7 +419,7 @@ the errand that acts on them.
 
 A session can be given a Chromium of its own that its agent and its
 user drive together, on the same tabs. `POST /api/v1/sessions/{id}/browser`
-starts it; from the next turn the agent drives it (Claude, Codex and DeepSeek Harness through the
+starts it; from the next turn the agent drives it (Claude, Codex, DeepSeek Harness and Qwen Code through the
 Playwright MCP server mounted as `browser`, Grok and opencode through
 Playwright's `connectOverCDP`), and a client watches it as a stream of JPEG
 frames and clicks, types and navigates in it through the API. So a client can
@@ -445,7 +445,7 @@ describes the Xvfb service for running Chrome with a GUI through the same panel.
 
 Every finished turn is written to a project-owned `turn_usage` ledger (agent
 time, tokens in and out, and the provider's own cost figure when its CLI
-reports one: claude and opencode do, codex and dsh do not, and the ledger stores no
+reports one: claude and opencode do, codex, dsh and qwen do not, and the ledger stores no
 number nobody charged). The ledger is independent of the session record, so deleting a session
 removes its transcript but keeps its statistics. The session header shows the
 session's tokens and cost as a chip, each turn's footer in the transcript shows
@@ -535,8 +535,8 @@ written idempotently so a database from before then just gets its row in
 - The Claude Code CLI, with a provider login or API token configured as a
   provider entry. Each provider entry has an isolated login, so spawned sessions
   do not share the desktop app's login
-- Optionally the Codex, Grok, opencode and DeepSeek Harness CLIs (auto-discovered; `CODEX_BIN` /
-  `GROK_BIN` / `OPENCODE_BIN` / `DSH_BIN` to override). A Z.AI entry is configured
+- Optionally the Codex, Grok, opencode, DeepSeek Harness and Qwen Code CLIs (auto-discovered; `CODEX_BIN` /
+  `GROK_BIN` / `OPENCODE_BIN` / `DSH_BIN` / `QWEN_BIN` to override). A Z.AI entry is configured
   with the codex binary, its endpoint and API key; it runs GLM
   models in its own `CODEX_HOME`, so the codex login is untouched. An opencode
   entry authenticates with an API key and nothing else, since there is no login
@@ -550,7 +550,17 @@ written idempotently so a database from before then just gets its row in
   gateway; it runs `dsh headless` with `DSH_HOME` at `~/.dsh-provider-<id>`,
   takes the model, effort and MCP servers from a per-turn `--patch` overlay,
   and gets back through `BASH_ENV` the credential-named variables (`GH_TOKEN`,
-  the session database's password) that dsh strips from its agent's commands
+  the session database's password) that dsh strips from its agent's commands. A Qwen Code entry has
+  no login either: it speaks the OpenAI wire to Alibaba Cloud Model Studio with
+  the entry's API key, or to the entry's base URL (a local vLLM, OpenRouter...),
+  where the key is optional and the model ids are the endpoint's own. It runs with
+  `QWEN_HOME=~/.qwen-provider-<id>`, the effort becomes the request's
+  `reasoning_effort` (for the bundled models; an endpoint's own models get one
+  only when the entry lists its efforts, since a model without reasoning rejects
+  it), and Qwen Code's own memory extraction is switched off. The entry's
+  endpoint and key also win over a `modelProviders` entry for the same model in
+  the checkout's `.qwen/settings.json`; the project's other Qwen settings still
+  apply
 - A GitHub token in `.env` (`GITHUB_TOKEN`) for the sessions' `gh` CLI and the
   PR/CI sync. A classic `repo` PAT covers everything; a fine-grained token wants
   Pull requests: read/write and Contents: read, plus Issues: read for the
@@ -616,7 +626,7 @@ added by hand) are carried across each rewrite. Mounting your own file over
 `/app/.env` switches all of that off and uses the file as it is.
 
 **The volumes are the install.** `home` holds the provider CLIs' logins, so
-`claude`/`codex`/`grok`/`opencode` stay signed in across a rebuild (`dsh` keeps its sessions there); `state` holds the
+`claude`/`codex`/`grok`/`opencode`/`qwen` stay signed in across a rebuild (`dsh` keeps its sessions there); `state` holds the
 `.env`; `workspaces` the session clones; `dbdata` the session history. Removing
 them is what starting over means.
 
@@ -880,7 +890,7 @@ dir). Memories live in the database, one row per fact, scoped to the
 repository: a kebab-case name, a type (`user`, `feedback`, `project`,
 `reference`), a one-line description and a body. Every turn's briefing carries
 the project's memories (newest first, whole until a size budget, then by
-headline), and every turn can add to them: Claude, Codex and DeepSeek Harness get a `memory_save`
+headline), and every turn can add to them: Claude, Codex, DeepSeek Harness and Qwen Code get a `memory_save`
 / `memory_list` / `memory_read` / `memory_delete` tool (a tiny MCP server,
 `lib/memory-mcp.js`, mounted per turn), and Grok and opencode, which take no MCP
 server headless, are told the same thing over HTTP (`$REVIEWER_MEMORY_URL/api/agent/memories`

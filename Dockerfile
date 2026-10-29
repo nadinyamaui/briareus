@@ -28,7 +28,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN GROK_HOME=/app/node_modules/.grok npm ci --omit=dev --no-audit && npm cache clean --force
 
-# The Claude Code, codex, grok, opencode and DeepSeek Harness CLIs are dependencies of this app, so the
+# The Claude Code, codex, grok, opencode, DeepSeek Harness and qwen CLIs are dependencies of this app, so the
 # image already has them. Put them where the binary discovery in lib/config.js
 # and lib/providers.js looks (PATH, then /usr/local/bin) instead of installing
 # second copies.
@@ -37,6 +37,7 @@ RUN ln -sf /app/node_modules/.bin/claude /usr/local/bin/claude \
     && ln -sf /app/node_modules/.bin/grok /usr/local/bin/grok \
     && ln -sf /app/node_modules/.bin/opencode /usr/local/bin/opencode \
     && ln -sf /app/node_modules/.bin/dsh /usr/local/bin/dsh \
+    && ln -sf /app/node_modules/.bin/qwen /usr/local/bin/qwen \
     && grok --version
 
 COPY . .
