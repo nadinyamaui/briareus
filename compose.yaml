@@ -56,7 +56,7 @@ services:
       # .env, and the signing secret `npm run create-token` writes into it.
       - state:/app/state
       # The provider CLIs' logins (~/.claude-provider-*, ~/.codex-*, ~/.grok-*,
-      # ~/.opencode-provider-*). Losing these means logging every provider in again.
+      # ~/.opencode-provider-*, ~/.qwen-provider-*). Losing these means logging every provider in again.
       - home:/home/node
       # The session clones, and the videos a test run drops.
       - workspaces:/workspaces

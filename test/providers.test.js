@@ -33,14 +33,17 @@ import {
   probeProviderAuth,
   codexEndpointDefaultModel,
   verifyCustomEndpoint,
+  ensureQwenHome,
+  qwenEnv,
+  QWEN_DEFAULT_BASE_URL,
 } from '../lib/providers.js';
 
 // providers.js imports no project module, so nothing is mocked here: the
 // parsers, the arg builders and the report reader are exercised as they are.
 
 describe('getBinary / BINARIES', () => {
-  it('knows the four binaries and nothing else', () => {
-    expect(Object.keys(BINARIES)).toEqual(['claude', 'codex', 'grok', 'opencode']);
+  it('knows the five binaries and nothing else', () => {
+    expect(Object.keys(BINARIES)).toEqual(['claude', 'codex', 'grok', 'opencode', 'qwen']);
     expect(getBinary('claude').label).toBe('Claude Code');
     expect(getBinary('vim')).toBeNull();
   });
@@ -843,12 +846,43 @@ describe('buildArgs', () => {
     ]);
   });
 
+  it('qwen takes the UUID it was created with, then resumes it, with tools from a per-turn MCP file', () => {
+    const fresh = BINARIES.qwen.buildArgs({
+      model: 'qwen3.8-max',
+      effort: 'high',
+      resume: false,
+      sessionId: 'u-1',
+      mcpConfigFile: '/tmp/x-mcp.json',
+    });
+    expect(fresh.args).toEqual([
+      '--auth-type',
+      'openai',
+      '--model',
+      'qwen3.8-max',
+      '--output-format',
+      'stream-json',
+      '--approval-mode',
+      'yolo',
+      '--mcp-config',
+      '/tmp/x-mcp.json',
+      '--session-id',
+      'u-1',
+    ]);
+    expect(fresh).toMatchObject({ promptVia: 'stdin', briefingInPrompt: true, mcpViaFile: true });
+    const resumed = BINARIES.qwen.buildArgs({ model: 'm', effort: 'low', resume: true, sessionId: 'u-1' });
+    expect(resumed.args.slice(-2)).toEqual(['--resume', 'u-1']);
+    expect(resumed.args).not.toContain('--mcp-config');
+    // Any id resumes: qwen keeps the one it was given.
+    expect(canResume('qwen', 'u-1')).toBe(true);
+  });
+
   it('the review prompts carry the shared machine-readable findings contract', () => {
     for (const [id, opts] of [
       ['claude', { prNumber: 7, effort: 'high' }],
       ['codex', { prNumber: 7, branch: 'b', base: 'main' }],
       ['grok', { prNumber: 7 }],
       ['opencode', { prNumber: 7, branch: 'b', base: 'main' }],
+      ['qwen', { prNumber: 7, branch: 'b', base: 'main' }],
     ]) {
       expect(BINARIES[id].reviewPrompt(opts)).toContain('reviewer:findings');
       expect(BINARIES[id].reviewPrompt(opts)).toContain('<!-- reviewer:incomplete -->');
@@ -863,6 +897,7 @@ describe('buildArgs', () => {
       ['codex', { prNumber: 7, branch: 'b', base: 'main' }],
       ['grok', { prNumber: 7 }],
       ['opencode', { prNumber: 7, branch: 'b', base: 'main' }],
+      ['qwen', { prNumber: 7, branch: 'b', base: 'main' }],
     ]) {
       const prompt = BINARIES[id].reviewPrompt(opts);
       expect(prompt).not.toContain('rather than as a fresh finding');
@@ -888,6 +923,7 @@ describe('buildArgs', () => {
     expect(verifies(BINARIES.codex.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
     expect(verifies(BINARIES.grok.reviewPrompt({ prNumber: 7 }))).toBe(true);
     expect(verifies(BINARIES.opencode.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
+    expect(verifies(BINARIES.qwen.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
   });
 
   // A loop round that had read the earlier rounds reviewed only the newest
@@ -897,6 +933,7 @@ describe('buildArgs', () => {
       BINARIES.claude.reviewPrompt({ prNumber: 7, effort: 'high' }),
       BINARIES.codex.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
       BINARIES.opencode.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
+      BINARIES.qwen.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
     ]) {
       expect(prompt).toContain('fresh discovery sub-agent');
       expect(prompt).toContain('not the prior PR discussion');
@@ -917,7 +954,7 @@ describe('buildArgs', () => {
     }
     // grok's /review does its own discovery; it gets only the scope rule.
     expect(BINARIES.grok.reviewPrompt({ prNumber: 7 })).not.toContain('fresh discovery sub-agent');
-    for (const id of ['claude', 'codex', 'grok', 'opencode']) {
+    for (const id of ['claude', 'codex', 'grok', 'opencode', 'qwen']) {
       expect(BINARIES[id].reviewPrompt({ prNumber: 7, effort: 'high', branch: 'b', base: 'main' })).toContain(
         'every review covers the whole base-to-head diff, including code an earlier round already reviewed',
       );
@@ -964,6 +1001,12 @@ describe('parseContextReport', () => {
 describe('contextWindowFor', () => {
   it("grok's whole catalog ships 500k windows", () => {
     expect(contextWindowFor('grok', 'grok-4.6')).toBe(500000);
+  });
+
+  it("qwen states no window: its bundled models' 1M is known, an endpoint's own assumed 256k", () => {
+    for (const model of ['qwen3.8-max', 'qwen3.8-flash', 'qwen3.7-plus', 'qwen3-coder-plus'])
+      expect(contextWindowFor('qwen', model)).toBe(1000000);
+    expect(contextWindowFor('qwen', 'local-model')).toBe(262144);
   });
 
   it('claude states its window in the stream, so no fallback exists', () => {
@@ -1771,6 +1814,432 @@ describe('the grok parser', () => {
     parser.feed({ type: 'content_block_start', index: 2, content_block: { type: 'text' } });
     parser.feed({ type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: 'tail' } });
     expect(parser.flush()).toEqual([{ kind: 'text', text: 'tail' }]);
+  });
+});
+
+// Lines as Qwen Code 0.26.3 printed them against a stub OpenAI endpoint, trimmed.
+describe('the qwen parser', () => {
+  function fresh() {
+    const turn = newTurn();
+    return { turn, parser: parserFor('qwen', turn) };
+  }
+  const id = '6f1b2a3c-1111-4222-8333-444455556666';
+  const assistant = (content, usage = { input_tokens: 0, output_tokens: 0 }, extra = {}) => ({
+    type: 'assistant',
+    session_id: id,
+    parent_tool_use_id: null,
+    message: { role: 'assistant', model: 'qwen3.8-max', content, usage },
+    ...extra,
+  });
+
+  it('reads a turn: text, a shell call and its result, and the outcome', () => {
+    const { turn, parser } = fresh();
+    const events = [
+      {
+        type: 'system',
+        subtype: 'init',
+        session_id: id,
+        model: 'qwen3.8-max',
+        mcp_servers: [
+          { name: 'reviewer_memory', status: 'connected' },
+          { name: 'remote', status: 'disconnected' },
+        ],
+      },
+      { type: 'stream_event', session_id: id, event: { type: 'goal_state' } },
+      assistant([{ type: 'text', text: 'Let me look.' }]),
+      assistant(
+        [{ type: 'tool_use', id: 'call_1', name: 'run_shell_command', input: { command: 'echo hi' } }],
+        { input_tokens: 1000, output_tokens: 20, cache_read_input_tokens: 100, total_tokens: 1020 },
+      ),
+      {
+        type: 'user',
+        session_id: id,
+        parent_tool_use_id: null,
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'call_1', is_error: false, content: 'hi' }],
+        },
+      },
+      assistant([{ type: 'text', text: 'Done: hi' }], {
+        input_tokens: 1100,
+        output_tokens: 5,
+        total_tokens: 1105,
+      }),
+      // The session's totals, a resumed session's earlier turns included.
+      {
+        type: 'result',
+        subtype: 'success',
+        session_id: id,
+        is_error: false,
+        duration_ms: 388,
+        num_turns: 2,
+        result: 'Done: hi',
+        usage: { input_tokens: 9200, output_tokens: 90, cache_read_input_tokens: 100 },
+      },
+    ].flatMap((m) => parser.feed(m));
+    expect(events).toEqual([
+      { kind: 'info', text: 'Qwen Code session started: model qwen3.8-max' },
+      { kind: 'info', text: 'MCP servers not connected: remote' },
+      { kind: 'text', text: 'Let me look.' },
+      { kind: 'tool', name: 'Shell', summary: 'echo hi' },
+      { kind: 'text', text: 'Done: hi' },
+    ]);
+    // The outcome waits for the stream's end; no baseline, so the turn's own calls count.
+    expect(parser.flush()).toEqual([
+      {
+        kind: 'result',
+        subtype: 'success',
+        isError: false,
+        costUsd: null,
+        durationMs: 388,
+        numTurns: 2,
+        tokens: 1105,
+        inputTokens: 2100,
+        outputTokens: 25,
+        text: 'Done: hi',
+      },
+    ]);
+    expect(turn.sessionId).toBe(id);
+    expect(turn.cachedInputTokens).toBe(100);
+    expect(turn.qwenTotals).toEqual({ inputTokens: 9200, outputTokens: 90, cachedInputTokens: 100 });
+  });
+
+  it('keeps a reported zero cache read, which prices.js must not take for unknown', () => {
+    const { turn, parser } = fresh();
+    parser.feed(assistant([{ type: 'text', text: 'hi' }], { input_tokens: 100000, output_tokens: 1 }));
+    expect(turn.cachedInputTokens).toBeUndefined();
+    parser.feed(
+      assistant([{ type: 'text', text: 'again' }], {
+        input_tokens: 100000,
+        output_tokens: 1,
+        cache_read_input_tokens: 0,
+      }),
+    );
+    expect(turn.cachedInputTokens).toBe(0);
+  });
+
+  it("books a delegated sub-agent's calls from the session's totals less the baseline", () => {
+    const { turn, parser } = fresh();
+    turn.qwenBaseline = { inputTokens: 1000, outputTokens: 50, cachedInputTokens: 200 };
+    // The parent's two calls; the foreground child's 10000/2000 shows only in the totals.
+    parser.feed(
+      assistant([{ type: 'tool_use', id: 'call_a', name: 'agent', input: { description: 'Dig' } }], {
+        input_tokens: 100,
+        output_tokens: 5,
+        cache_read_input_tokens: 40,
+      }),
+    );
+    parser.feed(
+      assistant([{ type: 'text', text: 'Found it.' }], {
+        input_tokens: 100,
+        output_tokens: 5,
+        cache_read_input_tokens: 60,
+      }),
+    );
+    parser.feed({
+      type: 'result',
+      subtype: 'success',
+      session_id: id,
+      is_error: false,
+      result: 'Found it.',
+      usage: { input_tokens: 11200, output_tokens: 2060, cache_read_input_tokens: 300 },
+    });
+    expect(parser.flush()[0]).toMatchObject({ kind: 'result', inputTokens: 10200, outputTokens: 2010 });
+    expect(turn.cachedInputTokens).toBe(100);
+    expect(turn.qwenTotals).toEqual({ inputTokens: 11200, outputTokens: 2060, cachedInputTokens: 300 });
+  });
+
+  it('takes totals below the baseline as a count started over, never as a negative turn', () => {
+    const { turn, parser } = fresh();
+    turn.qwenBaseline = { inputTokens: 50000, outputTokens: 900, cachedInputTokens: 4000 };
+    parser.feed(assistant([{ type: 'text', text: 'x' }], { input_tokens: 300, output_tokens: 9 }));
+    parser.feed({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      usage: { input_tokens: 700, output_tokens: 20, cache_read_input_tokens: 0 },
+    });
+    expect(parser.flush()[0]).toMatchObject({ inputTokens: 700, outputTokens: 20 });
+    expect(turn.cachedInputTokens).toBe(0);
+  });
+
+  it("a failed sub-agent's result is not the turn's when the parent recovers", () => {
+    const { parser } = fresh();
+    expect(
+      parser.feed({
+        type: 'result',
+        subtype: 'error_during_execution',
+        session_id: id,
+        is_error: true,
+        error: { message: 'Subagent failed: model timeout' },
+      }),
+    ).toEqual([]);
+    // The parent carries on: the earlier result was the sub-agent's, shown as its error.
+    expect(parser.feed(assistant([{ type: 'text', text: 'Retrying myself.' }]))).toEqual([
+      { kind: 'tool_error', text: 'Subagent failed: model timeout' },
+      { kind: 'text', text: 'Retrying myself.' },
+    ]);
+    parser.feed({ type: 'result', subtype: 'success', session_id: id, is_error: false, result: 'Done' });
+    expect(parser.flush()).toEqual([
+      expect.objectContaining({ kind: 'result', isError: false, text: 'Done' }),
+    ]);
+  });
+
+  it("never takes a sub-agent's result for the session's totals when the turn stops on it", () => {
+    const { turn, parser } = fresh();
+    turn.qwenBaseline = { inputTokens: 1000, outputTokens: 50, cachedInputTokens: 0 };
+    parser.feed(
+      assistant([{ type: 'tool_use', id: 'call_a', name: 'agent', input: { description: 'Dig' } }], {
+        input_tokens: 0,
+        output_tokens: 0,
+      }),
+    );
+    // The child fails and the turn is stopped before the parent carries on.
+    parser.feed({
+      type: 'result',
+      subtype: 'error_during_execution',
+      session_id: id,
+      is_error: true,
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 },
+      error: { message: 'Subagent failed' },
+    });
+    parser.flush();
+    // The caller keeps the baseline plus this turn's calls instead.
+    expect(turn.qwenTotals).toBeUndefined();
+    // Once the agent call has its result, a later result is the turn's again.
+    const next = fresh();
+    next.parser.feed(
+      assistant([{ type: 'tool_use', id: 'call_b', name: 'agent', input: { description: 'Dig' } }]),
+    );
+    next.parser.feed({
+      type: 'user',
+      parent_tool_use_id: null,
+      message: { content: [{ type: 'tool_result', tool_use_id: 'call_b', content: 'found' }] },
+    });
+    next.parser.feed({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      result: 'Done',
+      usage: { input_tokens: 500, output_tokens: 9, cache_read_input_tokens: 0 },
+    });
+    next.parser.flush();
+    expect(next.turn.qwenTotals).toEqual({ inputTokens: 500, outputTokens: 9, cachedInputTokens: 0 });
+  });
+
+  it('a failed call is an error result carrying its message', () => {
+    const { parser } = fresh();
+    expect(
+      parser.feed({
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        duration_ms: 161,
+        num_turns: 1,
+        usage: { input_tokens: 0, output_tokens: 0 },
+        error: { message: '[API Error: 401 Incorrect API key provided]' },
+      }),
+    ).toEqual([]);
+    const [result] = parser.flush();
+    expect(result).toMatchObject({
+      kind: 'result',
+      isError: true,
+      subtype: 'error_during_execution',
+      text: '[API Error: 401 Incorrect API key provided]',
+    });
+  });
+
+  it("shows a sub-agent's life but not its inner steps, whose usage still counts", () => {
+    const { turn, parser } = fresh();
+    expect(
+      parser.feed(
+        assistant(
+          [
+            {
+              type: 'tool_use',
+              id: 'call_a',
+              name: 'agent',
+              input: { subagent_type: 'Explore', description: 'Find it' },
+            },
+          ],
+          { input_tokens: 500, output_tokens: 10 },
+        ),
+      ),
+    ).toEqual([
+      { kind: 'tool', name: 'Agent', summary: 'Find it' },
+      { kind: 'agent', state: 'start', id: 'call_a', name: 'Explore', summary: 'Find it' },
+    ]);
+    expect(
+      parser.feed(
+        assistant(
+          [{ type: 'text', text: 'inner' }],
+          { input_tokens: 300, output_tokens: 7 },
+          { parent_tool_use_id: 'call_a' },
+        ),
+      ),
+    ).toEqual([]);
+    expect(turn.contextTokens).toBe(510);
+    expect(turn.inputTokens).toBe(800);
+    expect(
+      parser.feed({
+        type: 'user',
+        parent_tool_use_id: null,
+        message: {
+          content: [{ type: 'tool_result', tool_use_id: 'call_a', is_error: true, content: 'boom' }],
+        },
+      }),
+    ).toEqual([
+      { kind: 'agent', state: 'end', id: 'call_a' },
+      { kind: 'tool_error', text: 'boom' },
+    ]);
+    expect(parser.flush()).toEqual([]);
+  });
+});
+
+describe('a qwen entry', () => {
+  let home;
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    if (home) fs.rmSync(home, { recursive: true, force: true });
+    home = null;
+  });
+  function useHome() {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-qwen-home-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(home);
+  }
+
+  it('gets a home of its own whose settings read the effort from the turn and keep memory off', () => {
+    useHome();
+    const env = qwenEnv({ id: 9, baseUrl: 'http://127.0.0.1:8000/v1', apiKey: '' }, 'low', 'qwen3.8-max');
+    expect(env.QWEN_HOME).toBe(path.join(home, '.qwen-provider-9'));
+    expect(env).toMatchObject({
+      OPENAI_BASE_URL: 'http://127.0.0.1:8000/v1',
+      // A local endpoint may take no key; the client still needs one.
+      OPENAI_API_KEY: 'none',
+      QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(env.QWEN_HOME, 'endpoint-effort-settings.json'),
+      BRIAREUS_QWEN_MODEL: 'qwen3.8-max',
+      BRIAREUS_QWEN_EFFORT: 'low',
+    });
+    const settings = JSON.parse(fs.readFileSync(path.join(env.QWEN_HOME, 'settings.json'), 'utf8'));
+    expect(settings.model).toBeUndefined();
+    expect(settings.memory).toEqual({ enableManagedAutoMemory: false, enableManagedAutoDream: false });
+    // Puts `openai` first among the merged providers.
+    expect(settings.modelProviders).toEqual({ openai: [] });
+    const layer = JSON.parse(fs.readFileSync(env.QWEN_CODE_SYSTEM_SETTINGS_PATH, 'utf8'));
+    expect(layer).toEqual({
+      modelProviders: {
+        openai: [
+          {
+            id: '${BRIAREUS_QWEN_MODEL}',
+            name: '${BRIAREUS_QWEN_MODEL}',
+            baseUrl: '${OPENAI_BASE_URL}',
+            envKey: 'OPENAI_API_KEY',
+            generationConfig: { samplingParams: { reasoning_effort: '${BRIAREUS_QWEN_EFFORT}' } },
+          },
+        ],
+      },
+    });
+    // The CLI may rewrite them; the next turn puts them back.
+    fs.writeFileSync(path.join(env.QWEN_HOME, 'settings.json'), '{}');
+    fs.writeFileSync(env.QWEN_CODE_SYSTEM_SETTINGS_PATH, '{}');
+    ensureQwenHome({ id: 9 });
+    expect(JSON.parse(fs.readFileSync(path.join(env.QWEN_HOME, 'settings.json'), 'utf8'))).toEqual(settings);
+    expect(JSON.parse(fs.readFileSync(env.QWEN_CODE_SYSTEM_SETTINGS_PATH, 'utf8'))).toEqual(layer);
+  });
+
+  it("sends an endpoint's own model no effort unless the entry lists its efforts", () => {
+    useHome();
+    const entry = { id: 9, baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-1', efforts: [] };
+    const plain = qwenEnv(entry, 'high', 'gpt-4.1');
+    expect(plain).not.toHaveProperty('BRIAREUS_QWEN_EFFORT');
+    // The entry's endpoint is pinned all the same, on the layer without an effort.
+    expect(plain).toMatchObject({
+      QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(home, '.qwen-provider-9', 'endpoint-settings.json'),
+      BRIAREUS_QWEN_MODEL: 'gpt-4.1',
+    });
+    const layer = JSON.parse(fs.readFileSync(plain.QWEN_CODE_SYSTEM_SETTINGS_PATH, 'utf8'));
+    expect(layer.modelProviders.openai).toEqual([
+      {
+        id: '${BRIAREUS_QWEN_MODEL}',
+        name: '${BRIAREUS_QWEN_MODEL}',
+        baseUrl: '${OPENAI_BASE_URL}',
+        envKey: 'OPENAI_API_KEY',
+      },
+    ]);
+    expect(qwenEnv({ ...entry, efforts: ['low', 'high'] }, 'high', 'o4-mini')).toMatchObject({
+      QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(home, '.qwen-provider-9', 'endpoint-effort-settings.json'),
+      BRIAREUS_QWEN_EFFORT: 'high',
+    });
+  });
+
+  it('runs on Model Studio with its key when it names no endpoint', () => {
+    useHome();
+    expect(qwenEnv({ id: 1, baseUrl: '', apiKey: 'sk-1' }, 'high')).toMatchObject({
+      OPENAI_BASE_URL: QWEN_DEFAULT_BASE_URL,
+      OPENAI_API_KEY: 'sk-1',
+    });
+  });
+
+  it('is signed in only once its endpoint answers', async () => {
+    expect(await probeProviderAuth({ binary: 'qwen', baseUrl: '', apiKey: '', models: [] })).toMatchObject({
+      loggedIn: false,
+    });
+    const calls = [];
+    vi.stubGlobal('fetch', async (url, opts) => {
+      calls.push({ url, opts });
+      return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'qwen3.8-max' }] }) };
+    });
+    const auth = await probeProviderAuth({
+      binary: 'qwen',
+      baseUrl: '',
+      apiKey: 'sk-qwen-probe',
+      models: [],
+    });
+    expect(auth).toMatchObject({ loggedIn: true });
+    expect(calls[0].url).toBe(`${QWEN_DEFAULT_BASE_URL}/models`);
+    expect(calls[0].opts.headers.Authorization).toBe('Bearer sk-qwen-probe');
+  });
+
+  it('falls back to a chat call on the OpenAI wire when the endpoint lists no models', async () => {
+    const calls = [];
+    vi.stubGlobal('fetch', async (url, opts) => {
+      calls.push({ url, opts });
+      if (url.endsWith('/models')) return { ok: false, status: 404, text: async () => 'Not Found' };
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ id: 'c1', object: 'chat.completion' }),
+      };
+    });
+    const auth = await probeProviderAuth({
+      binary: 'qwen',
+      baseUrl: 'http://127.0.0.1:8000/v1',
+      apiKey: '',
+      defaultModel: 'Qwen3.8-Flash-Next',
+      models: ['Qwen3.8-Flash-Next'],
+    });
+    expect(auth).toMatchObject({ loggedIn: true });
+    expect(calls[1].url).toBe('http://127.0.0.1:8000/v1/chat/completions');
+    expect(calls[1].opts.headers.Authorization).toBe('Bearer none');
+    expect(JSON.parse(calls[1].opts.body).model).toBe('Qwen3.8-Flash-Next');
+  });
+
+  it('probes the model a turn would run, not a saved default the entry no longer offers', async () => {
+    const bodies = [];
+    vi.stubGlobal('fetch', async (url, opts) => {
+      if (url.endsWith('/models')) return { ok: false, status: 404, text: async () => 'Not Found' };
+      bodies.push(JSON.parse(opts.body));
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ id: 'c1', object: 'chat.completion' }),
+      };
+    });
+    const entry = { binary: 'qwen', baseUrl: 'http://127.0.0.1:8000/v1', apiKey: '' };
+    await probeProviderAuth({ ...entry, defaultModel: 'removed-model', models: ['available-model'] });
+    await probeProviderAuth({ ...entry, defaultModel: '', models: [] });
+    expect(bodies.map((b) => b.model)).toEqual(['available-model', 'qwen3.8-max']);
   });
 });
 
