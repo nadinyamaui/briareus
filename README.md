@@ -182,8 +182,8 @@ account, model and effort:
 
 Failed or canceled discovery does not start publication; an interrupted step resumes
 itself and the steps after it without rerunning discovery.
-When the review finishes, its session closes and its workspace and database are
-released; the closed session keeps its transcript.
+When the review finishes, its session is automatically deleted and its workspace
+and database are released; the stored review and the PR comments remain.
 
 With `babysitPrs` enabled, the server checks open PRs every 15 minutes and starts
 conflict resolution or CI fixes. Each action is deduplicated by head commit, with

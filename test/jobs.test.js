@@ -1771,7 +1771,7 @@ describe('native Codex code review', () => {
     expect(failCodeReview).toHaveBeenCalledWith(id);
   });
 
-  it('keeps the session through discovery, publication and verification, then closes it, keeping its record', async () => {
+  it('keeps the session through discovery, publication and verification, then deletes it and releases its database', async () => {
     Object.assign(job, {
       autoClose: true,
       status: 'interrupted',
@@ -1792,11 +1792,10 @@ describe('native Codex code review', () => {
     await vi.waitFor(() => expect(invocations).toHaveLength(3));
     expect(job.status).toBe('running');
     finishTurn(invocations[2]);
-    await vi.waitFor(() => expect(job.status).toBe('closed'));
+    await vi.waitFor(() => expect(getJob(id)).toBeNull());
     expect(job.error).toBeNull();
     expect(dropSessionDatabase).toHaveBeenCalledWith(job, expect.any(Function));
-    expect(getJob(id)).toBe(job);
-    expect(deleteJob).not.toHaveBeenCalledWith(id, null);
+    expect(deleteJob).toHaveBeenCalledWith(id, null);
   });
 
   it.each(['failure', 'empty', 'missing', 'canceled'])(
