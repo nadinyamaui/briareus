@@ -71,7 +71,6 @@ vi.mock('../lib/config.js', () => ({
     githubToken: 'tok',
     workspaceDir: path.join(os.tmpdir(), 'briareus-devserve-test'),
     dev: { maxSessions: 3, timeoutMin: 60 },
-    reviewLoop: { maxRounds: 3, lowFindingsUntilRound: 1 },
   }),
   parseEnvFile: () => ({}),
 }));
@@ -132,7 +131,7 @@ vi.mock('../lib/projects.js', async () => {
     selfProject: () => null,
     render,
     stepRuntime: vi.fn(() => null),
-    reviewerRuntime: () => null,
+    actionRuntime: () => null,
   };
 });
 

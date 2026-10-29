@@ -167,7 +167,6 @@ it.each(['admin', 'member'])('keeps cross-project supervisor context for a %s', 
     status: 'failed',
     awaitingAnswer: true,
     noticeUnheard: false,
-    reviewLoop: { failure: { reason: 'quota' }, stalled: true },
     qaLoop: { failedScenarios: 1, verdictError: 'sheet 404' },
   };
   const { call, close } = await serve({ listSessions: () => [supervisor, worker] }, { id: 2, role }, [
@@ -176,14 +175,7 @@ it.each(['admin', 'member'])('keeps cross-project supervisor context for a %s', 
   try {
     expect((await (await call('/api/operations/attention')).json()).items).toEqual([]);
 
-    const workerItems = [
-      'worker:question',
-      'worker:recovery',
-      'worker:review-failed',
-      'worker:review-stalled',
-      'worker:qa-failed',
-      'worker:qa-verdict',
-    ];
+    const workerItems = ['worker:question', 'worker:recovery', 'worker:qa-failed', 'worker:qa-verdict'];
     worker.noticeUnheard = true;
     expect((await (await call('/api/operations/attention')).json()).items.map((item) => item.id)).toEqual(
       workerItems,

@@ -325,7 +325,7 @@ describe('actions', () => {
         chatStarted: true,
       },
       { id: 's2', status: 'failed', workDir: failed, branch: 'feat/y', chatStarted: true },
-      { id: 's3', status: 'failed', workDir: child, branch: 'feat/x', chatStarted: true, loopParentId: 's1' },
+      { id: 's3', status: 'failed', workDir: child, branch: 'feat/x', chatStarted: true, qaParentId: 's1' },
       { id: 's4', status: 'failed', workDir: unprepared, branch: null },
       // Failed in its first preparation: the branch was set, no agent ever ran.
       { id: 's5', status: 'failed', workDir: neverStarted, branch: 'feat/z', chatStarted: false },

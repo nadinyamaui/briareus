@@ -72,9 +72,9 @@ beforeEach(async () => {
   project = {
     repo,
     label: 'Project',
-    reviewProviderId: 2,
-    reviewModel: 'configured-model',
-    reviewEffort: 'high',
+    actionProviderId: 2,
+    actionModel: 'configured-model',
+    actionEffort: 'high',
   };
   // Stands in for every dashboard handler: it answers with what reached it.
   handler = vi.fn((req, res) =>
@@ -112,9 +112,9 @@ beforeEach(async () => {
       listSessions: () => sessions,
       bus,
       presentEvent: (job, event) => presentEvent(job, event),
-      reviewerRuntime: (p) =>
-        p.reviewProviderId
-          ? { providerId: p.reviewProviderId, model: p.reviewModel, effort: p.reviewEffort }
+      actionRuntime: (p) =>
+        p.actionProviderId
+          ? { providerId: p.actionProviderId, model: p.actionModel, effort: p.actionEffort }
           : null,
       stepRuntime: (p, step) => (p.stepRuntimes && p.stepRuntimes[step]) || null,
       transcribeAvailable: () => true,
@@ -745,7 +745,7 @@ describe('starting on the project’s configured runtime', () => {
 
   it('refuses a model with no provider, and a project with no runtime set up', async () => {
     expect(await start({ model: 'm' })).toEqual({ error: 'A model or effort needs its provider' });
-    project.reviewProviderId = null;
+    project.actionProviderId = null;
     expect((await start({})).error).toMatch(/Name a provider/);
     expect(handler).not.toHaveBeenCalled();
   });

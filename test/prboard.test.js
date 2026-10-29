@@ -41,12 +41,12 @@ describe('hasLabel', () => {
   });
 
   it('takes plain names too, case-insensitively', () => {
-    expect(hasLabel(['FEEDBACK-GIVEN'], LABELS.feedbackGiven)).toBe(true);
+    expect(hasLabel(['HAS-CONFLICTS'], LABELS.conflicts)).toBe(true);
   });
 
   it('answers false for no labels at all', () => {
-    expect(hasLabel(null, LABELS.approved)).toBe(false);
-    expect(hasLabel([], LABELS.approved)).toBe(false);
+    expect(hasLabel(null, LABELS.conflicts)).toBe(false);
+    expect(hasLabel([], LABELS.conflicts)).toBe(false);
   });
 });
 
@@ -93,7 +93,7 @@ function prNode({
 // The module caches per repo, so a unique repo per test keeps them isolated.
 let n = 0;
 function project(overrides = {}) {
-  return { repo: `acme/shop-${n++}`, label: 'Shop', reviewAuthor: '', ...overrides };
+  return { repo: `acme/shop-${n++}`, label: 'Shop', prAuthor: '', ...overrides };
 }
 
 // An open issue as the same query returns it, beside the pull requests.
@@ -488,7 +488,7 @@ describe('projectPulls', () => {
     const result = await projectPulls(p);
     expect(result).toMatchObject({
       repo: p.repo,
-      pulls: [{ title: 'Saved pull', recommended: 'review' }],
+      pulls: [{ title: 'Saved pull', recommended: null }],
       syncedAt: '2026-10-01T00:00:00Z',
     });
     expect(gh.graphql).not.toHaveBeenCalled();
@@ -871,34 +871,6 @@ describe('projectPulls', () => {
     expect(gh.graphql.mock.calls.map((call) => call[3])).toEqual([{ reserve }, { reserve }]);
   });
 
-  it('paginates every label used by filters and recommendations', async () => {
-    const node = prNode({ labels: ['first'] });
-    node.labels.pageInfo = { hasNextPage: true, endCursor: 'labels-2' };
-    gh.graphql
-      .mockResolvedValueOnce({
-        repository: {
-          defaultBranchRef: { name: 'main' },
-          stackRefs: { pageInfo: { hasNextPage: false }, nodes: [node] },
-          pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [node] },
-        },
-      })
-      .mockResolvedValueOnce({
-        repository: {
-          pullRequest: {
-            labels: {
-              pageInfo: { hasNextPage: false, endCursor: null },
-              nodes: [{ name: 'feedback-given', color: 'ededed' }],
-            },
-          },
-        },
-      });
-
-    const { pulls } = await projectPulls(project());
-    expect(pulls[0].labels.map((label) => label.name)).toEqual(['first', 'feedback-given']);
-    expect(pulls[0].recommended).toBe('implement-feedback');
-    expect(gh.graphql.mock.calls[1][2]).toMatchObject({ number: 1, cursor: 'labels-2' });
-  });
-
   it('maps a pull request row for the board', async () => {
     serve([
       prNode({
@@ -937,7 +909,7 @@ describe('projectPulls', () => {
       checks: 'success',
       headSha: 'c0ffee1',
       reviewDecision: 'review_required',
-      recommended: 'review',
+      recommended: null,
     });
     expect(pulls[0].issues[0]).toMatchObject({ number: 9, state: 'open', stateReason: 'reopened' });
   });
@@ -946,7 +918,7 @@ describe('projectPulls', () => {
     // The board narrows by author, not this function: it returns the whole open list plus the
     // configured author, so the picker can widen without a round trip to GitHub.
     serve([prNode({ number: 1, author: 'TheBot' }), prNode({ number: 2, author: 'someone-else' })]);
-    const { pulls, author } = await projectPulls(project({ reviewAuthor: 'thebot' }));
+    const { pulls, author } = await projectPulls(project({ prAuthor: 'thebot' }));
     expect(author).toBe('thebot');
     expect(pulls.map((p) => p.number)).toEqual([1, 2]);
     expect(pulls.map((p) => p.author)).toEqual(['TheBot', 'someone-else']);
@@ -1391,7 +1363,7 @@ describe('projectPulls', () => {
       const [a, b, c] = stacked();
       a.author = { login: 'someone-else' };
       serve([a, b, c]);
-      const { pulls } = await projectPulls(project({ reviewAuthor: 'dev' }));
+      const { pulls } = await projectPulls(project({ prAuthor: 'dev' }));
       const by = new Map(pulls.map((p) => [p.number, p.stack]));
       expect(by.get(2)).toMatchObject({ position: 2, total: 3 });
       expect(by.get(3)).toMatchObject({ position: 3, total: 3 });
@@ -1698,24 +1670,20 @@ describe('projectPulls', () => {
     });
 
     it('UNKNOWN mergeable is GitHub still computing, not a conflict', async () => {
-      expect(await recommendedFor(prNode({ mergeable: 'UNKNOWN' }))).toBe('review');
-    });
-
-    it('feedback-given asks for the feedback to be implemented', async () => {
-      expect(await recommendedFor(prNode({ labels: ['feedback-given'] }))).toBe('implement-feedback');
+      expect(await recommendedFor(prNode({ mergeable: 'UNKNOWN' }))).toBeNull();
     });
 
     it("approved code is QA's cue, even when a review label also sits there", async () => {
-      expect(await recommendedFor(prNode({ labels: ['code-approved', 'requires-dev-review'] }))).toBe('qa');
+      expect(await recommendedFor(prNode({ labels: ['code-approved', 'requires-dev-review'] }))).toBeNull();
     });
 
     it('either review label asks for a review', async () => {
-      expect(await recommendedFor(prNode({ labels: ['requires-dev-review'] }))).toBe('review');
-      expect(await recommendedFor(prNode({ labels: ['feedback-implemented'] }))).toBe('review');
+      expect(await recommendedFor(prNode({ labels: ['requires-dev-review'] }))).toBeNull();
+      expect(await recommendedFor(prNode({ labels: ['feedback-implemented'] }))).toBeNull();
     });
 
     it('a label-less pull request asks for a review', async () => {
-      expect(await recommendedFor(prNode())).toBe('review');
+      expect(await recommendedFor(prNode())).toBeNull();
     });
 
     it('labels outside the workflow recommend nothing', async () => {

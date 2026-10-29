@@ -166,45 +166,6 @@ describe('recovery', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
-  it('reserves only slots that hold work someone can recover', () => {
-    const s = {
-      status: 'interrupted',
-      interruptedFrom: 'running',
-      workDir: '/pool/x',
-      branch: 'x',
-      chatStarted: true,
-    };
-    expect(holdsRecoverableWork(s)).toBe(true);
-    // Idle at the restart: no unfinished turn, so it reopens like a closed one.
-    expect(holdsRecoverableWork({ ...s, interruptedFrom: 'idle' })).toBe(false);
-    // Interrupted before the field existed: held as the mid-turn it may be.
-    expect(holdsRecoverableWork({ ...s, interruptedFrom: undefined })).toBe(true);
-    expect(holdsRecoverableWork({ ...s, status: 'failed', interruptedFrom: undefined })).toBe(true);
-    // The branch is set before the first fetch and setup, so a first
-    // preparation that failed leaves one with no agent work behind it.
-    expect(holdsRecoverableWork({ ...s, chatStarted: false })).toBe(false);
-    expect(holdsRecoverableWork({ ...s, chatStarted: undefined, turns: 2 })).toBe(true);
-    expect(holdsRecoverableWork({ ...s, status: 'failed' })).toBe(true);
-    expect(holdsRecoverableWork({ ...s, status: 'closed' })).toBe(false);
-    expect(holdsRecoverableWork({ ...s, branch: null })).toBe(false);
-    expect(holdsRecoverableWork({ ...s, workDir: null })).toBe(false);
-    expect(holdsRecoverableWork({ ...s, loopParentId: 'p' })).toBe(false);
-    expect(holdsRecoverableWork({ ...s, loopFixParentId: 'p' })).toBe(false);
-    expect(holdsRecoverableWork({ ...s, qaParentId: 'p' })).toBe(false);
-    expect(holdsRecoverableWork({ ...s, loopParentId: 'p', failureUnreported: true })).toBe(true);
-  });
-  it('reserves idle and loop-child slots while automatic restart recovery is pending', () => {
-    const session = {
-      status: 'interrupted',
-      interruptedFrom: 'idle',
-      workDir: '/pool/x',
-      restartPending: true,
-    };
-    expect(holdsRecoverableWork(session)).toBe(true);
-    expect(holdsRecoverableWork({ ...session, loopParentId: 'parent' })).toBe(true);
-    expect(holdsRecoverableWork({ ...session, qaParentId: 'parent' })).toBe(true);
-    expect(holdsRecoverableWork({ ...session, restartPending: false })).toBe(false);
-  });
   it('lets a recovery hold lapse a while after the session ended', () => {
     const at = Date.parse('2026-09-27T12:00:00Z');
     const ago = (ms) => new Date(at - ms).toISOString();
@@ -291,17 +252,11 @@ describe('recovery', () => {
     setDraining(true);
     expect(assertAcceptingWork).toThrow('Maintenance');
     expect(maintenanceState([{ id: 's', status: 'running' }]).ready).toBe(false);
-    expect(maintenanceState([{ id: 's', status: 'idle', reviewLoop: { reviewing: true } }]).ready).toBe(
-      false,
-    );
+    expect(maintenanceState([{ id: 's', status: 'idle', qaLoop: { running: true } }]).ready).toBe(false);
     // A closed or failed parent is not reconciled after a restart, so its loop
     // flags can be stale; a child still running is counted on its own.
     for (const status of ['closed', 'failed', 'interrupted'])
-      expect(
-        maintenanceState([
-          { id: 's', status, reviewLoop: { reviewing: true, fixing: true }, qaLoop: { running: true } },
-        ]).ready,
-      ).toBe(true);
+      expect(maintenanceState([{ id: 's', status, qaLoop: { running: true } }]).ready).toBe(true);
     // publicJob's projection fields, restored stale onto a raw record by a
     // restart, say nothing about live work.
     expect(maintenanceState([{ id: 's', status: 'idle', compacting: true, queued: [{}] }]).ready).toBe(true);

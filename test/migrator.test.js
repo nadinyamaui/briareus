@@ -21,7 +21,13 @@ function fakePool() {
     // The advisory lock runs on a checked-out connection; it shares the
     // fake's query() so a test sees lock and DDL in one timeline.
     async getConnection() {
-      return { query: pool.query, release() {} };
+      return {
+        query: pool.query,
+        async beginTransaction() {},
+        async commit() {},
+        async rollback() {},
+        release() {},
+      };
     },
     async query(sql, params = []) {
       if (/GET_LOCK/.test(sql)) {
@@ -110,7 +116,9 @@ describe('migrator', () => {
     expect(await rollbackLastBatch(pool)).toEqual([]);
     await createMigrator(pool).umzug.up();
     // The latest data reconciliation is irreversible and refuses first.
-    await expect(rollbackLastBatch(pool)).rejects.toThrow(/Measured-cache pricing cannot be rolled back/);
+    await expect(rollbackLastBatch(pool)).rejects.toThrow(
+      /Code review removal deletes workflow data permanently/,
+    );
     const baseline = await import('../migrations/2026_08_27_000000_baseline.js');
     await expect(baseline.down()).rejects.toThrow(/baseline migration cannot be rolled back/);
   });

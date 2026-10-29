@@ -3,7 +3,7 @@ import { attentionItems } from '../lib/attention.js';
 describe('operator attention', () => {
   it('includes unresolved work without treating idle or completed QA as failures', () => {
     const items = attentionItems([
-      { id: 'a', status: 'idle', awaitingAnswer: true, reviewLoop: { triage: { round: 2 } } },
+      { id: 'a', status: 'idle', awaitingAnswer: true },
       { id: 'b', status: 'interrupted' },
       { id: 'c', status: 'idle', qaLoop: { done: true, failedScenarios: 0 } },
       { id: 'd', status: 'closed', awaitingAnswer: true },
@@ -11,16 +11,9 @@ describe('operator attention', () => {
         id: 'e',
         status: 'idle',
         qaLoop: { failedScenarios: 2 },
-        reviewLoop: { failure: { reason: 'quota' } },
       },
     ]);
-    expect(items.map((i) => i.id)).toEqual([
-      'a:question',
-      'a:findings',
-      'b:recovery',
-      'e:review-failed',
-      'e:qa-failed',
-    ]);
+    expect(items.map((i) => i.id)).toEqual(['a:question', 'b:recovery', 'e:qa-failed']);
   });
   it('surfaces incomplete manual coverage without calling it failed', () => {
     const items = attentionItems([
@@ -29,19 +22,13 @@ describe('operator attention', () => {
     expect(items.map((i) => i.id)).toEqual(['manual:qa-incomplete']);
     expect(items[0].summary).toContain('coverage is incomplete');
   });
-  it('keeps held findings of a closed review and nothing else of it', () => {
-    const items = attentionItems([
-      { id: 'r', status: 'closed', awaitingAnswer: true, reviewTriage: { standalone: true, heldAt: 'x' } },
-    ]);
-    expect(items.map((i) => i.id)).toEqual(['r:findings']);
-  });
   it('surfaces stalled loops and unreadable QA verdicts, but not a stall on a merged PR', () => {
     const items = attentionItems([
-      { id: 'a', status: 'idle', reviewLoop: { stalled: true }, qaLoop: { verdictError: 'sheet 404' } },
-      { id: 'b', status: 'idle', reviewLoop: { stalled: true }, prStatus: { state: 'merged' } },
+      { id: 'a', status: 'idle', qaLoop: { verdictError: 'sheet 404' } },
+      { id: 'b', status: 'idle', prStatus: { state: 'merged' } },
     ]);
-    expect(items.map((i) => i.id)).toEqual(['a:review-stalled', 'a:qa-verdict']);
-    expect(items[1].summary).toContain('sheet 404');
+    expect(items.map((i) => i.id)).toEqual(['a:qa-verdict']);
+    expect(items[0].summary).toContain('sheet 404');
   });
   it('lists a webhook that stopped taking deliveries, until the session is closed', () => {
     const paused = { kind: 'turns', reason: '10 automatic turns ran since your last message', at: 'x' };
@@ -53,15 +40,6 @@ describe('operator attention', () => {
     expect(items.map((i) => i.id)).toEqual(['a:webhook-paused']);
     expect(items[0]).toMatchObject({ summary: paused.reason, href: '/sessions/a', at: 'x' });
   });
-  it('reports a failed loop child only on its parent', () => {
-    const items = attentionItems([
-      { id: 'p', status: 'idle', reviewLoop: { failure: { reason: 'quota' } } },
-      { id: 'rev', status: 'failed', loopParentId: 'p' },
-      { id: 'qa', status: 'failed', qaParentId: 'p' },
-      { id: 'fix', status: 'interrupted', loopFixParentId: 'p' },
-    ]);
-    expect(items.map((i) => i.id)).toEqual(['p:review-failed']);
-  });
   it('dates each item by when it began to wait, not by session creation', () => {
     const items = attentionItems([
       { id: 'old', status: 'idle', createdAt: '2026-09-01', awaitingAnswer: true, askedAt: '2026-09-26' },
@@ -69,14 +47,9 @@ describe('operator attention', () => {
         id: 'new',
         status: 'idle',
         createdAt: '2026-09-20',
-        reviewLoop: { triage: { heldAt: '2026-09-25' }, failure: { reason: 'x', at: '2026-09-24' } },
       },
     ]);
-    expect(items.map((i) => [i.id, i.at])).toEqual([
-      ['old:question', '2026-09-26'],
-      ['new:findings', '2026-09-25'],
-      ['new:review-failed', '2026-09-24'],
-    ]);
+    expect(items.map((i) => [i.id, i.at])).toEqual([['old:question', '2026-09-26']]);
   });
   it('shows what was asked, and leaves a worker question to its open orchestrator', () => {
     const items = attentionItems([
@@ -98,19 +71,18 @@ describe('operator attention', () => {
     ]);
   });
   it('leaves a worker failure and its loop failure to an open orchestrator', () => {
-    const failure = { status: 'failed', error: 'boom', reviewLoop: { failure: { reason: 'quota' } } };
+    const failure = { status: 'failed', error: 'boom' };
     const items = attentionItems([
       { id: 'o', status: 'idle', orchestrator: true },
       { id: 'w', parentId: 'o', ...failure },
       { id: 'c', status: 'closed', orchestrator: true },
       { id: 'x', parentId: 'c', ...failure },
     ]);
-    expect(items.map((i) => i.id)).toEqual(['x:recovery', 'x:review-failed']);
+    expect(items.map((i) => i.id)).toEqual(['x:recovery']);
   });
   it('leaves a worker stall and its QA results to an open orchestrator', () => {
     const loops = {
       status: 'idle',
-      reviewLoop: { stalled: true },
       qaLoop: { failedScenarios: 2, verdictError: 'sheet 404' },
     };
     const items = attentionItems([
@@ -119,7 +91,7 @@ describe('operator attention', () => {
       { id: 'c', status: 'closed', orchestrator: true },
       { id: 'x', parentId: 'c', ...loops },
     ]);
-    expect(items.map((i) => i.id)).toEqual(['x:review-stalled', 'x:qa-failed', 'x:qa-verdict']);
+    expect(items.map((i) => i.id)).toEqual(['x:qa-failed', 'x:qa-verdict']);
   });
   it('lists a worker item its open orchestrator only got as a plain line', () => {
     const items = attentionItems([
@@ -137,18 +109,8 @@ describe('operator attention', () => {
     ]);
     expect(items.map((i) => i.id)).toEqual(['w:question', 'f:recovery']);
   });
-  it('lists a failed loop child whose parent no longer tracked it', () => {
-    const items = attentionItems([
-      { id: 'p', status: 'idle', reviewLoop: null },
-      { id: 'rev', status: 'failed', error: 'quota', loopParentId: 'p', failureUnreported: true },
-      { id: 'fix', status: 'interrupted', loopFixParentId: 'p', failureUnreported: true },
-      { id: 'qa', status: 'failed', qaParentId: 'p' },
-    ]);
-    expect(items.map((i) => i.id)).toEqual(['rev:recovery', 'fix:recovery']);
-  });
   it('drops loop failures and QA results once the pull request is merged or closed', () => {
     const loops = {
-      reviewLoop: { failure: { reason: 'quota' } },
       qaLoop: { failedScenarios: 2, verdictError: 'sheet 404' },
     };
     const items = attentionItems([
@@ -156,18 +118,17 @@ describe('operator attention', () => {
       { id: 'merged', status: 'idle', prStatus: { state: 'merged' }, ...loops },
       { id: 'closed', status: 'idle', prStatus: { state: 'closed' }, ...loops },
     ]);
-    expect(items.map((i) => i.id)).toEqual(['open:review-failed', 'open:qa-failed', 'open:qa-verdict']);
+    expect(items.map((i) => i.id)).toEqual(['open:qa-failed', 'open:qa-verdict']);
   });
   it('lists a loop failure beside the recovery of an interrupted parent, as QA is', () => {
     const items = attentionItems([
       {
         id: 'p',
         status: 'interrupted',
-        reviewLoop: { failure: { reason: 'restart' } },
         qaLoop: { failedScenarios: 1 },
       },
     ]);
-    expect(items.map((i) => i.id)).toEqual(['p:recovery', 'p:review-failed', 'p:qa-failed']);
+    expect(items.map((i) => i.id)).toEqual(['p:recovery', 'p:qa-failed']);
   });
   it('preserves the exact SSH approval and its destination', () => {
     const request = {
