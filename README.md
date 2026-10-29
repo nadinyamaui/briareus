@@ -39,8 +39,8 @@ which controls and screens it implements.
 | Area                     | Capabilities                                                                                                                                            |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Coding sessions          | Multiple agent providers, isolated workspaces and optional database servers, streamed conversations, queued messages, orchestrators and worker sessions |
-| GitHub                   | Pull requests, issues, Projects v2 boards, findings, branch updates, merges, repository files and archive downloads                                     |
-| Review and QA            | Independent finding verification, fix-value assessments, operator triage, review/fix loops, test sheets and QA runs                                     |
+| GitHub                   | Pull requests, issues, Projects v2 boards, branch updates, merges, repository files and archive downloads                                               |
+| QA                       | Test sheets, execution evidence, coverage verdicts and independent QA loops                                                                             |
 | Previews                 | Run profiles, branch and PR previews, a shared browser, screenshot feedback and recorded QA videos                                                      |
 | Business inboxes         | Slack, Gmail, Outlook and WhatsApp access for clients, plus controlled tools for interactive agent sessions                                             |
 | Operations               | Operator attention, restart recovery, maintenance draining, SSH approvals, deployment workflows, Laravel Forge and Envoyer                              |
@@ -112,15 +112,7 @@ machine's CUPS printers, through the internal print MCP in projects with
    branch, HEAD, dirty state, size, dependency trees and which open session
    holds it, with two actions for idle slots: _Reset setup_ forgets the
    install fingerprints, _Clean_ also removes `vendor/` and `node_modules/`.
-2. **Say it started** (code reviews only). As soon as the clone is claimed
-   (before the minutes the checkout takes) the session comments on the pull
-   request being reviewed: which agent is reviewing which branch, and that the
-   findings land there when it is done. It is one anchored comment per PR
-   (`<!-- reviewer:review-started -->`), so a project reviewing every push edits
-   the notice already there instead of stacking one per push. Best effort: no
-   token, no PR number or a GitHub that will not answer leaves a line in the
-   session's log and the review runs anyway.
-3. **Prepare the checkout.** The repo's default branch is fetched and checked
+2. **Prepare the checkout.** The repo's default branch is fetched and checked
    out onto a session branch (`dev-<id>`), the project's `.env` template is
    written in, and its setup commands (composer/yarn installs, builds) are run.
    `vendor/` and `node_modules/` survive between sessions, so only the first
@@ -130,7 +122,7 @@ machine's CUPS printers, through the internal print MCP in projects with
    that slot and what it installs is still on disk; the fingerprints live in
    the clone's `.git/reviewer-setup.json`. Builds and anything touching the
    database run every time.
-4. **Chat.** Each turn starts a provider process that resumes the
+3. **Chat.** Each turn starts a provider process that resumes the
    provider's own session state. Claude and interactive Codex turns accept
    more messages while they run when the session reports `liveInput: true`.
    Codex uses App Server's `turn/steer`; messages that arrive too late run next.
@@ -138,284 +130,48 @@ machine's CUPS printers, through the internal print MCP in projects with
    sub-agent, Monitor or background shell command) lists it in
    `backgroundTasks`, so clients can show it as waiting rather than thinking;
    messages sent meanwhile go straight in while `liveInput` is true.
-   Codex review and QA steps keep queued input. Output streams to the client live (SSE). The
+   QA steps keep queued input. Output streams to the client live (SSE). The
    session keeps its clone and database server between turns, for as long as
    it stays open. On a Claude session, a message starting with `/btw` (or
    `POST /api/v1/sessions/{id}/btw`) is a side question instead: it is
    answered from a fork of the conversation that is never saved, without
    tools, even while a turn runs, and neither it nor its answer reaches the
    agent. Both show in the transcript as `btw` / `btw_answer` lines.
-5. **▶ Run** serves the session's checkout with the project's run commands
+4. **▶ Run** serves the session's checkout with the project's run commands
    against the session's own database, on an app port of its own (one per
    pool entry: 8101, 8102, …).
-6. If the session's branch gets a PR on GitHub, its state and CI checks are
+5. If the session's branch gets a PR on GitHub, its state and CI checks are
    mirrored into the header and the right panel, synced at the end of every
    turn, every 20s while a turn is running, and once a minute otherwise. The
    panel redraws from a pushed session record, so it never waits for a poll.
    **🔗 Link PR** recovers one automatic discovery missed: enter its number or
    URL, and the server verifies that its repository and head branch match
    the session before attaching it.
-7. **Close** releases the clone slot and the database server; the conversation
+6. **Close** releases the clone slot and the database server; the conversation
    stays readable. **Delete** also trashes the record and its log.
-8. The **✎** beside a conversation's heading edits its title without sending a
+7. The **✎** beside a conversation's heading edits its title without sending a
    message to the agent.
 
-### Who the board is about
+### Pull request actions and QA
 
-⌕ Code review is always somebody pressing a button, on this app's board or in a
-session composer. Nothing on GitHub starts a session by itself: no push, no
-label and no webhook delivery ever opens one.
+PR actions can write a description or test sheet, run a test sheet, resolve conflicts,
+fix failing CI checks, and delete the configured account's comments. The project’s
+`prAuthor` filters its pull requests; `actionProviderId`, `actionModel`, and
+`actionEffort` select the runtime for PR actions. QA steps can override that runtime
+through `stepRuntimes.testSheet` and `stepRuntimes.testRun`.
 
-What a project configures (`/api/v1/settings/projects`) is who its board is about and
-what its errands run on: a **PR author** (a GitHub username, the filter the
-pull request board applies) plus the provider, model and effort a review opens
-on unless the composer picks another. A review session started from a pull
-request row closes itself once the findings are posted, so it hands its
-workspace clone and its database server straight back, and its record goes
-with them, rather than leaving one dead conversation per review in the sidebar.
-What the review found is on the pull request, which is where it gets read and
-answered. A review that stopped to ask something is the exception: it stays open
-until somebody answers it.
+With `babysitPrs` enabled, the server checks open PRs every 15 minutes and starts
+conflict resolution or CI fixes. Each action is deduplicated by head commit, with
+a cap on repeated pushes. It skips drafts, forks, blocked PRs, and occupied sessions.
 
-Clicking a project in the sidebar opens its own view, with three tabs: **📊
-Dashboard** (what it spent this month), **⇅ Pull requests** (the board) and **⊙
-Issues**, which lists the repository's open issues with who reported them, who
-holds them, their labels and the open pull requests that say they close them.
-The issues ride on the board's own query rather than a request of their own, and
-each row carries a **▶ Start** button: it opens a session that reads the issue,
-implements it on a branch of its own and opens a pull request closing it.
+A session’s `qaLoop` starts QA when the task settles on an open pull request. QA
+writes and executes a test sheet and reports passed, failed, or incomplete coverage.
+A new head invalidates the previous result. Disarming QA leaves any running QA
+session to finish independently. Standalone QA remains available, with `qaTestRun`
+controlling whether the opening sheet is followed by execution.
 
-A project can also name a GitHub Projects v2 board in its settings
-(`projectBoard`: the organization or user that owns it, the project's number, and
-optionally a view). Clients draw it as a tab after the issues, from
-`GET /api/v1/project-board`: the view's filter applied by GitHub, the cards in
-columns by the view's group-by field (Status by default), each column with its
-count and its Story Points (every number field) totalled. It needs Projects: read
-on the token (see below); with Projects: write a client can also move a card to
-another column (`POST /api/v1/project-board/move`).
-
-Epics are GitHub's own sub-issues, not a label or a title prefix: a sub-issue is
-drawn nested under its parent, an epic says how many of its children are done
-(counting the closed ones and any the tab never listed) and folds them away,
-and starting an epic starts one session on its open sub-issues rather than on
-the epic itself.
-
-Each fix commit ends with a `[reviewer-fix]` line so the server can tell a
-push it made from one a human made.
-
-### The review loop
-
-The composer's 🔁 chip arms a **review loop** on the next from-scratch session.
-🛠 Implement feedback first assesses the PR's existing review bodies, inline
-comments and discussion from anyone but the PR's author or a bot, on the
-project's configured review provider, model and effort. The author's own comments
-include, on their own PRs, Briareus's earlier reviews, already ruled on in their
-own triage; a PR with no other feedback starts nothing. Its findings wait for **Fix / Optional / Dismiss** decisions in Findings;
-only the selected fixes start an implementation session with the review loop armed.
-The assessment includes source links, verification evidence, fix-value advice and
-previous fixes or dismissals, including feedback listed only in a review summary.
-Completing this assessment without fixes does not approve the PR or change its labels.
-The clone and database are released while its Findings card waits.
-
-With **Babysit PRs** enabled and a **PR author** configured, incoming reviews from
-another developer on that author's PRs automatically enter the same assessment
-flow. Submitted and edited GitHub reviews trigger it through the webhook, with the
-15-minute babysitter poll as a fallback. Review bodies with a `COMMENTED` verdict
-count too; tracking uses the review identity and content, so edits and new reviews
-on the same commit are assessed without repeating already imported feedback.
-An existing session or pending Findings card defers intake, and a full pool retries
-on a later tick. Automatic intake always waits for manual decisions, even when
-autonomous review-loop fixing is enabled. Closed PRs, drafts, forks and bot reviews
-are excluded from automatic intake. Use Implement feedback to assess existing
-feedback manually without enabling Babysit PRs.
-Automatic attempts are limited to three per review revision and head commit,
-including across restarts. After repeated failures, use Implement feedback to
-retry explicitly; edited feedback or a new head receives a fresh attempt budget.
-
-Assessment wording is editable as **Assess incoming feedback** in project or
-shared prompt settings; **Implement feedback** remains the template used to
-execute the selected fixes. The required assessment output and manual decision
-gate still apply when templates are overridden. If the head or selected feedback
-changes before fixes are submitted, refresh with Implement feedback first.
-
-A review, a QA run, any other board errand or a
-local session is never a loop. An armed session works its task as usual; every
-time it settles idle with new commits on its open pull request, the app starts
-a review session for it (the same auto-closing kind the board starts, on the
-session's own provider, model and effort — a loop's sessions run where the
-session they work for runs, so a worker moved onto another provider takes its
-reviews with it), and when that review closes, whatever
-findings it declared wait on the **⚑ Findings** screen (the flag beside 📊 in
-the sidebar header, one card per round across every project) until you mark
-each one _fix_, _optional_ or _dismissed_ and send the round. What you marked
-fix is handed to a **fix session** of its own (the same auto-closing
-implement-feedback errand the board starts, on the session's branch and
-provider), whose pushes, once it closes, trigger the next review.
-The session itself is the durable half: it is the loop's anchor, it keeps its
-clone, its database server and its conversation, and you can keep chatting in
-it undisturbed while the reviews and the fix sessions come and go around it.
-
-Nothing a review found is fixed until you say so. Each card on ⚑ Findings
-shows the round's findings with the loop's own advice on each (what the rules
-below would have parked, and why); mark what the fix session should implement
-and press **Send**. Anything left unmarked stays on the pull request as
-_optional_. Sending records every verdict: what you marked fix goes on the
-pull request's **Required fixes** checklist and to the fix session, which
-ticks the ones it actually fixed, replies on the threads it addressed and
-resolves them; _dismissed_ and _optional_ are recorded like verdicts given by
-hand in the findings panel and said on the pull request with the reason, so
-no later round offers them again. A round with nothing marked fix converges
-the loop, adds the pull request's `code-approved` label and removes its
-`feedback-given` label. A standalone review sent with nothing marked fix makes
-the same label transition as it closes its findings card. The loop holds until
-you send (the session shows _findings waiting
-in ⚑ Findings_), across restarts too.
-
-A worker's loop stops there just the same: its orchestrator is told the round
-is waiting for you and that the task is not done, and it does not rule on the
-round itself unless you ask it to (`triage_findings` is there for that).
-
-A round that could not run at all — its provider exited non-zero or was out of
-quota, automatic recovery after a server restart failed, or its
-review closed having published nothing — is not a review that found nothing:
-the loop records the round as failed and approves nothing.
-Turning the 🔁 chip off and on again re-runs it, and an orchestrator retries its
-worker's round with `retry_review`, naming another provider or model when the
-one it ran on is the problem (the loop keeps that runtime for its later rounds).
-For an interrupted worker, that tool reopens the session and queues the review
-without spending a chat turn.
-That matters because the loop otherwise waits for the next push, which a worker
-whose work is finished has none left to make.
-
-The loop runs until it converges: it stops on its own when a review declares no
-findings, and the 🔁 chip stops it whenever you decide the rounds are no longer
-paying for themselves. Three gates keep it from reviewing the code its own fixes
-introduced, which is the runaway a stall gate cannot see (every round finds
-something genuine and something new, so it neither runs dry nor repeats itself):
-
-- **A round cap**, `REVIEW_LOOP_MAX_ROUNDS`, 10 by default. The last round still
-  reviews and still lists what it found; it just does not start the fix session
-  that would open the next round. `0` removes the cap.
-- **A severity floor that tightens by round.** From the round after
-  `REVIEW_LOOP_LOW_UNTIL_ROUND` (1 by default), a low is recorded rather than
-  implemented: a low found late is nearly always a note on the previous round's
-  fix rather than on the change under review. `0` never tightens.
-- **Findings about files the pull request does not change are parked.** A review
-  reading the whole repository occasionally reports something real about code
-  the branch never touched. This fails open when the diff cannot be listed:
-  withholding a real finding is the worse half of that trade.
-
-A finding held back by either of the last two is recorded as **optional**, so it
-stays in the findings panel and in the review's own comment on the pull request,
-stays off the required-fixes checklist, and is not offered again next round. A
-verdict you gave by hand wins over all of it: a dismissed finding never comes
-back, and one you marked _fix_ is kept however low it is or wherever it points.
-
-Then there is the **stall gate**. A
-round that hands back exactly the findings the round before it did means the
-fix session between them did not move the review, and implementing them again
-would push another commit, open the commit gate and start the same round over,
-so the loop stops there and says so instead of ping-ponging on a session
-nobody is watching. What it found stays on the pull request, and the next
-push you make yourself picks the loop back up.
-
-Between rounds a commit gate keeps a session with nothing new pushed from
-being reviewed again, so chatting never re-triggers a review, and a failed or
-stopped review pauses the loop until the next push instead of retrying itself
-in a circle. The button-press rule above still holds: nothing on GitHub starts
-any of it: the one trigger is the session's own turn ending, on a loop its
-user armed.
-
-The composer's 🎬 chip queues a **QA loop** behind an armed review loop. It is
-one run, not another series of rounds: when the review loop converges by
-declaring no findings, the app starts the same kind of auto-closing QA session
-the board's 🎬 button starts. That session's first turn writes the test sheet;
-as soon as that turn settles, its second turn executes the sheet and records
-the evidence. If every executed scenario passes, the QA loop stops. Failed
-scenarios are reported back to the task session as QA feedback, and the loop
-stops there too, since acting on that feedback stays a human decision for now.
-Turning the review loop off also cancels the QA run waiting behind it.
-An orchestrator can start companion work with
-`spawn_worker({ title, prompt, repo: "owner/companion", review_loop: true })`,
-or `POST /api/agent/sessions` with `{ "title": "…", "prompt": "…", "repo": "owner/companion", "reviewLoop": true }`
-using its session bearer token. `repo` is optional and defaults to the
-orchestrator's project. It must name an already registered, enabled project
-accessible to the session's inherited owner under current project sharing rules;
-unknown, disabled and unauthorized targets are refused without creating a project.
-The operator must register, enable and grant access to a companion before it can
-be used. This does not expose operator APIs to agent tokens.
-A different target uses its configured worker runtime, then the orchestrator's
-worker pick, then the orchestrator's own runtime; explicit runtime arguments
-still apply. Same-project workers keep the existing worker-pick precedence.
-Workspace, memories, setup, PR tracking, reviews and QA all use the target
-project; parent ownership, updates, spend and close controls stay with the
-orchestrator. `fix_tooling` still targets the dashboard with review armed and
-rejects a `repo` override in the HTTP body. Existing triage and approval gates
-continue to apply.
-
-An orchestrator can toggle QA on its own open task workers independently with
-`set_worker_qa_loop({ id, on })`, or `POST /api/agent/sessions/:id/qa-loop`
-with `{ "on": false }` using its session bearer token; `on` must be a boolean.
-This preserves reviews, findings, fixes and CI and follows the existing QA
-eligibility rules (arming requires an armed review loop).
-Disarming removes queued QA; an active QA session finishes on its own and
-reports nothing back. The response includes `session`, `qaStillRunning` and
-`qaSessionId` so an active run is not mistaken for a cancelled one.
-If the QA provider fails or its session is interrupted, the run is shown as
-failed/interrupted and **not running**, never as queued. For an orchestrated
-worker, `send_to_worker` with a follow-up retries QA after that worker turn
-settles; no QA result is approved until a replacement run reaches a verdict.
-
-Arming is not only a decision for the composer: the same 🔁 chip stays live
-over an open session and turns its loop on or off there and then, which is
-usually when you know you want it: the task turned out bigger than it looked,
-or the pull request is up and there is no reason to press ⌕ by hand every
-push. Arming mid-session reviews what is already pushed rather than waiting
-for the next push. Turning it off stops any further rounds; a review already
-running still finishes and publishes on the pull request, it just reports
-nothing back. Re-arming starts the round count over, except that a review
-still running from the arm you turned off is adopted as the new loop's first
-round, rather than a second review of the same pull request being started
-alongside it.
-
-A session finds its pull request by itself. Being handed a branch that already
-has one open is the normal way to continue somebody's work, and an agent
-typically reports back "pushed to `dev-x` (PR #51)": a number, never the URL
-the app watches the stream for. So a session on a branch of its own asks GitHub
-which pull request is open from exactly that branch: when its workspace is
-prepared, before any review round it would otherwise skip for want of one, and
-on the sync tick while it has none, the last of those on a few minutes'
-cooldown, since a session can work for an hour before it opens anything and the
-token is shared with the board and the webhooks.
-
-Nothing is guessed. The match is on the head ref, never on a local session or
-the repository's default branch (where a branch is nobody's in particular), and
-when a branch has several pull requests open at once (GitHub allows that when
-their bases differ), only the one that targets the branch the workspace was cut
-from is taken. Anything still ambiguous is left unattached, with a line in the
-session saying which pull requests it could not tell apart.
-
-A pull request found this way is a weaker claim than one somebody handed the
-session, in one place: merging it does not close the session. An errand pointed
-at a pull request (a review, a QA run) still ends the moment it merges, but a
-session opened to keep iterating on a branch is told and left alone rather than
-stopped mid-work by a teammate's merge.
-
-### QA, once the code is approved
-
-QA is not part of the review, and it is not started by the `code-approved`
-label either: the board shows a 🎬 QA button on an approved pull request and
-somebody presses it. It runs in a **session of its own**: a review session would
-otherwise have to sit on its clone and its database server for however long the
-sign-off took.
-
-Switch **Write a test sheet** on for a project and that session's first turn
-derives the manual test sheet from the diff and posts it as one editable
-comment; with **Execute the test sheet** on, a second turn serves the app
-against the session's own database, drives every ⬜ scenario with Playwright,
-records a video of each and writes the results back into the sheet. Nothing
-follows the run: the ❌ rows are there to be read, and ⚙ Implement feedback is
-the errand that acts on them.
+Orchestrators can spawn workers in accessible projects, toggle worker QA, and use
+`start_pr_action` with `solve-conflicts` on an existing PR in their own project.
 
 ### The shared browser
 
@@ -485,7 +241,7 @@ errors, authentication failures, and temporary API errors do not switch accounts
 ### Merged pull requests
 
 A merge ends every errand on a pull request. As soon as any session mirroring it
-sees `merged`, every open session working on that pull request (review, errand,
+sees `merged`, every open session working on that pull request (errand,
 QA) is closed: its turn is killed and its clone and database server go back to the
 pool. The conversations stay readable, as they do after any close.
 
@@ -497,7 +253,7 @@ checkout on this machine: the path configured as _Local checkout_ in the
 project's settings. Nothing is prepared: no clone, no branch juggling, no
 `.env` seeding, no setup steps, and no pooled database. The tree, whatever
 branch it has checked out, and its real local database are used as they stand.
-One local session at a time per checkout; the branch picker and ⌕ Code review
+One local session at a time per checkout; the branch picker
 only apply to worktree sessions.
 
 Session history and logs live in MySQL (`jobs` / `job_events`) and nowhere
@@ -734,7 +490,7 @@ platform relaying what a customer wrote, an alert, a CI) wakes one conversation 
 **It is off until you arm it.** Arming it (`PUT /api/v1/sessions/:id/webhook`, a client's **⚡ Webhook** dialog) shows the URL and the key, and sets
 the caps its turns run under. The key is derived from a master secret, the session id and an epoch, so it opens
 that one session and no other, and **Rotate key** ends it without touching any other session's. Only a session
-somebody talks to can be armed: not a worker, not a review, fix or QA session.
+somebody talks to can be armed: not a worker, not an automatic or QA session.
 
 **What arrives is information, never your word.** Whoever wrote a delivery is not the operator, so:
 
@@ -834,9 +590,7 @@ row, edited through **`/api/v1/settings/projects`**:
 - **Database**: whether the session claims a database server of its own from
   the pool, which database it points at there (created if missing), and the
   line logged when a server is claimed (`{host}`, `{port}`, `{database}`)
-- **Code review**: extra publish steps for the agent after a ⌕ Code review
-  (label moves, issue updates, whatever the team's workflow asks for), and
-  whether the session goes on to **fix** what it found
+
 - **Checkout .env**: written into the clone as `.env` before setup runs
   each time it is prepared, so an edit to a checkout's own `.env` does not last.
   An admin's interactive Claude or Codex session can change the template
@@ -844,7 +598,7 @@ row, edited through **`/api/v1/settings/projects`**:
   (`GET`/`POST /api/agent/project-env` for other CLIs): keys are set or
   removed in place, the same edit goes into that session's checkout (its
   session `DB_DATABASE` kept), and the transcript notes the key names, never
-  their values. Members' sessions, reviews, QA, workers, previews and
+  their values. Members' sessions, QA, workers, previews and
   unattended turns do not get the tools
 - **Prompts**: this repository's own wording for any of the prompts below;
   anything left empty uses the shared text
@@ -855,8 +609,8 @@ row, edited through **`/api/v1/settings/projects`**:
 
 What this app sends out is a setting, not a string in the source: the pull
 request description ✎ PR Body Summary writes, and the errand behind every other
-action and review step (test sheet, test run, fix findings, implement feedback,
-give feedback, solve conflicts, fix failing checks, fix test failures, delete
+action and QA step (test sheet, test run,
+solve conflicts, fix failing checks, delete
 own comments).
 
 Each resolves in three steps: **the built-in text** this app ships with, **the
@@ -873,7 +627,7 @@ a field with what is being sent today, so editing one line does not mean
 retyping the whole prompt.
 
 Three strings are deliberately _not_ editable: the test sheet's anchor, the
-required-fixes anchor and the `[reviewer-fix]` commit line (`lib/markers.js`).
+test-sheet anchor (`lib/markers.js`).
 They are a contract with pull requests that already exist, and changing one makes
 every PR written before the change unreadable.
 
@@ -912,7 +666,7 @@ commands, which run on every session against the claimed server.
 `/api/v1` is the server's one API, for clients that live outside this
 repository: Briareus Windows and Briareus iOS. It puts a bearer token in
 front of every handler, so it covers sessions, transcripts, pull requests
-(files, commits, checks, comments, reviews), findings, settings and two event
+(files, commits, checks, comments, reviews), settings and two event
 streams. `npm run create-token -- --label Desktop` issues the first token, an
 admin one; restart the server once if that run wrote `AUTH_SECRET`, and later
 tokens need no restart. The same command issues the rest (read or manage on
@@ -1050,7 +804,7 @@ clients reload history to recover missed updates. Sending from the inbox is a
 human action and takes effect immediately, without launching an agent or an approval.
 
 Separately, sessions whose project has a workspace receive the `slack_destinations`, `slack_find_people`,
-`slack_conversations`, `slack_history`, `slack_send` and `slack_result` MCP tools; reviews, QA, loop sessions and workers do not.
+`slack_conversations`, `slack_history`, `slack_send` and `slack_result` MCP tools; QA sessions and workers do not.
 A project may post only to the channels it lists, and to people only with `directMessages`.
 In **ask** mode (the default) each message waits in `GET /api/v1/slack/requests` and the
 attention inbox until approved (`POST /api/v1/slack/requests/:id/decision`), for a day at most;
@@ -1100,7 +854,7 @@ because they take no MCP configuration headless.
 ### Operator attention
 
 `GET /api/v1/attention` is the operator's inbox: unanswered agent
-questions, held findings, interrupted sessions, review/QA failures and pending
+questions, interrupted sessions, QA failures and pending
 SSH commands and Slack messages across projects. It is a live projection, read on every request,
 and does not dismiss unresolved work.
 
@@ -1122,12 +876,12 @@ one whose checkout is off the session's branch or unreadable, is never reset in
 its place: the first gets a different clone, the others fail the reopen until
 someone inspects them. The clone pool does not hand out, and the daily workspace
 cleanup does not delete, a slot a failed session, or one a restart interrupted
-mid-turn, left work in (except loop review, fix and QA children, which their
+mid-turn, left work in (except QA children, which their
 parent retries, and sessions whose agent never started).
 
 After a server restart, sessions that were open recover automatically once the
 API is listening. Active turns continue in their saved provider conversation,
-queued instructions are retained, and review, publishing and QA steps continue
+queued instructions are retained, and QA steps continue
 from their saved stage. Completed turns are skipped. Idle sessions reopen their
 workspaces without starting a turn, and standing questions still wait for the
 operator's answer. Recovery reserves workspace slots and reclaims each session's
@@ -1139,10 +893,9 @@ An explicit Stop stays stopped, including when the canceled process was still
 exiting at shutdown.
 
 `POST /api/v1/maintenance` drains work: new top-level sessions, messages that would start
-a turn on a settled session, reopening, compaction, arming the review or QA
-loop, review retries, triage that marks findings to fix, orchestrator worker
+a turn on a settled session, reopening, compaction, arming QA, orchestrator worker
 spawns and sends, and ▶ Run previews are refused, while answers to questions, messages to running
-turns and the loops' automatic reviews, fixes and QA runs still go through. The ready state
+turns and automatic QA runs still go through. The ready state
 also waits for running SSH commands. Resume accepting work cancels draining.
 This is an in-process gate, reset on restart; it does not deploy or restart the
 server. Wait for ready before the normal deployment procedure.
@@ -1170,9 +923,9 @@ Capture dimensions are image pixels, not an inferred CSS viewport.
 
 ### Task history
 
-A task's history (`GET /api/v1/tasks/:id`) is its implementation, review, fix and QA
+A task's history (`GET /api/v1/tasks/:id`) is its implementation and QA
 sessions together, including independent errands linked to the same PR. It
-shows their times/statuses, review rounds, QA outcome, PR evidence link and
+shows their times/statuses, QA outcome, PR evidence link and
 combined ledger cost (estimated and unpriced turns stay marked). Workers remain
 separate from sibling tasks under the same orchestrator.
 

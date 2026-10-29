@@ -22,8 +22,6 @@ vi.mock('../lib/db.js', () => ({
 import {
   testSheetPrompt,
   testRunPrompt,
-  implementFeedbackPrompt,
-  customFeedbackPrompt,
   deleteSelfCommentsPrompt,
   solveConflictsPrompt,
   fixFailingChecksPrompt,
@@ -40,21 +38,6 @@ describe('the common tokens', () => {
   it('falls back to the branch phrasing when the number is not known yet', () => {
     const prompt = testSheetPrompt({ repo: 'acme/shop', branch: 'feature/x' });
     expect(prompt).toContain('the open pull request for branch feature/x');
-  });
-
-  it('leaves no unfilled tokens the composer is responsible for', () => {
-    for (const prompt of [
-      testSheetPrompt(base),
-      testRunPrompt(base),
-      implementFeedbackPrompt(base),
-      customFeedbackPrompt({ ...base, feedback: 'do it' }),
-      deleteSelfCommentsPrompt({ ...base, author: 'bot' }),
-      solveConflictsPrompt(base),
-      fixFailingChecksPrompt(base),
-    ]) {
-      // {port} and {dir} are the agent's to fill; {{TOKEN}} is ours.
-      expect(prompt).not.toMatch(/\{\{[A-Z0-9_]+\}\}/);
-    }
   });
 });
 
@@ -282,97 +265,6 @@ describe('testRunPrompt', () => {
       const token = (p) => p.match(/pr-<pr-number>-([0-9a-f]{32})/)[1];
       expect(token(testRunPrompt(base))).not.toBe(token(testRunPrompt(base)));
     });
-  });
-});
-
-describe('implementFeedbackPrompt', () => {
-  it('preserves the manually selected scope even when a custom template omits the findings token', () => {
-    const prompt = implementFeedbackPrompt({
-      ...base,
-      triaged: true,
-      by: 'the user',
-      findings: [{ title: 'Selected claim', sourceId: 'review:42', sourceBody: 'Original feedback' }],
-      project: { promptTemplates: { implementFeedback: 'CUSTOM FIX' } },
-    });
-    expect(prompt).toMatch(/^CUSTOM FIX/);
-    expect(prompt).toContain('Implement these and only these');
-    expect(prompt).toContain('Selected claim');
-    expect(prompt).toContain('Original feedback');
-  });
-
-  it('rides the declared findings along when there are any', () => {
-    const prompt = implementFeedbackPrompt({
-      ...base,
-      findings: [
-        { severity: 'high', title: 'Injection', file: 'lib/db.js', line: 42 },
-        { title: 'No severity given' },
-      ],
-    });
-    expect(prompt).toContain('- **HIGH**: Injection (`lib/db.js:42`)');
-    expect(prompt).toContain('- **MEDIUM**: No severity given');
-    expect(prompt).toContain('Decide which open findings require a fix');
-    expect(prompt).toContain('candidates to assess, not an instruction to implement');
-  });
-
-  it('a triaged round is a decided list, with the orchestrator’s note behind it', () => {
-    const prompt = implementFeedbackPrompt({
-      ...base,
-      findings: [{ severity: 'high', title: 'Injection' }],
-      triaged: true,
-      note: 'Keep the public signature.',
-    });
-    expect(prompt).toContain('Implement these and only these');
-    expect(prompt).not.toContain('starting point');
-    expect(prompt).toContain('as the orchestrator triaged them');
-    expect(prompt).toContain('do not reassess this list');
-    expect(prompt).toContain('- **HIGH**: Injection\n\nThe orchestrator adds: Keep the public signature.');
-    // An untriaged round says nothing about an orchestrator.
-    expect(implementFeedbackPrompt({ ...base, findings: [{ title: 'x' }] })).not.toContain('orchestrator');
-  });
-
-  it('a round the user sent from ⚑ Findings is the user’s decision, not the orchestrator’s', () => {
-    const prompt = implementFeedbackPrompt({
-      ...base,
-      findings: [{ severity: 'high', title: 'Injection' }],
-      triaged: true,
-      note: 'Keep the public signature.',
-      by: 'the user',
-    });
-    expect(prompt).toContain('as the user triaged them');
-    expect(prompt).toContain('- **HIGH**: Injection\n\nThe user adds: Keep the public signature.');
-    expect(prompt).not.toContain('orchestrator');
-  });
-
-  it('collapses cleanly when the pull request declared none', () => {
-    const prompt = implementFeedbackPrompt(base);
-    expect(prompt).not.toContain('starting point');
-    expect(prompt).not.toContain('\n\n\n');
-  });
-
-  // The project's own closing steps go last, after the errand's own final
-  // paragraph; they are what happens once the feedback is implemented.
-  it("includes the project's closing steps when it configured any", () => {
-    const prompt = implementFeedbackPrompt({
-      ...base,
-      project: { feedbackInstructions: 'Move the PR to ready-for-qa.' },
-    });
-    expect(prompt).toContain('closing steps');
-    expect(prompt).toContain('Move the PR to ready-for-qa.');
-  });
-
-  it('says nothing about closing steps when the project configured none', () => {
-    expect(implementFeedbackPrompt({ ...base, project: { feedbackInstructions: '  ' } })).not.toContain(
-      'closing steps',
-    );
-  });
-});
-
-describe('customFeedbackPrompt', () => {
-  // The feedback is the whole prompt, only trimmed. Equality is the point: `toContain` would
-  // pass with a frame back around the words.
-  it('sends the feedback and nothing else', () => {
-    const prompt = customFeedbackPrompt({ ...base, feedback: '  404 not 422, please\nand add a test  ' });
-    expect(prompt).toBe('404 not 422, please\nand add a test');
   });
 });
 

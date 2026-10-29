@@ -38,31 +38,23 @@ stream transcripts, send or queue messages, cancel turns, compact context,
 pin sessions to the top of the list, close and reopen sessions, and attach files
 or transcribed voice notes. Claude `/btw` questions use a separate fork of
 the conversation. Orchestrators coordinate worker sessions and their
-review, fix and QA work.
+PR actions and QA work.
 
 See [how sessions run](../README.md#how-a-session-runs) and the
 [session API reference](api-v1-reference.md#sessions).
 
-## GitHub, reviews and QA
+## GitHub and QA
 
 The server reads pull requests, diffs, commits, checks, comments, issues,
 issue timelines, sub-issues and Projects v2 boards. Manage clients can update
 pull requests and issues, move board cards, update PR branches and merge.
 Repository routes expose trees, files and gzipped archives at a revision.
 
-Reviews require independent verification and an assessment of whether each
-finding is worth fixing. Findings normally wait for operator decisions. With
-`autonomousReviewLoop` enabled, active review loops automatically fix verified,
-worthwhile findings with complete assessments without an operator decision.
-With `babysitPrs` enabled, a project's open pull requests get their next
-errand started every 15 minutes: solve conflicts, fix failing checks, or a code
-review when one is recommended ([details](api-v1.md#babysitting-pull-requests)).
-Review loops run reviews and fixes on the session's branch; optional QA loops create and
-execute test sheets after review passes. Feedback left unfixed gets a visible
-PR note explaining the decision.
+QA loops create and execute test sheets when a task settles on an open pull request.
+With `babysitPrs` enabled, conflict resolution and CI fixes run every 15 minutes,
+using the project's action runtime and respecting author filters and retry limits.
 
-See [review loops](../README.md#the-review-loop),
-[QA](../README.md#qa-once-the-code-is-approved), and the
+See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).
 
 ## Previews and browser access
@@ -188,13 +180,8 @@ These additions are present in the server revision documented here:
   instructions stay active when browser startup fails.
 - Repository trees, files and tarball downloads are available through the
   client API. Configured MCP servers support OAuth sign-in at setup.
-- Reviews assess verification and fix value independently, leave notes for
-  feedback not fixed, and let orchestrators reach pending worker review/fix
-  questions. Worker QA can be controlled independently.
-- Orchestrators can start official Code review, Implement feedback and Solve
-  conflicts actions on existing PRs in their own project using `start_pr_action`
-  (or `POST /api/agent/sessions/pr-actions`), then observe them through worker
-  tools and updates; project runtimes and user triage gates still apply.
+- Orchestrators can resolve conflicts on existing PRs through `start_pr_action`
+  and control worker QA independently.
 - Pull request reads share cached work and return a retryable 429 when the
   GitHub allowance is exhausted.
 

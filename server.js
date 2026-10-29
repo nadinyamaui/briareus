@@ -22,7 +22,7 @@ import { operationsRoutes } from './lib/operations-routes.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
 import { createUsers } from './lib/users.js';
 import { createShares } from './lib/shares.js';
-import { seesSession, managesSession } from './lib/ownership.js';
+import { seesSession } from './lib/ownership.js';
 import { createUserCredentials } from './lib/user-credentials.js';
 import { createWhatsAppOwners } from './lib/whatsapp-owners.js';
 import { meRoutes } from './lib/me-routes.js';
@@ -94,8 +94,6 @@ import {
   listDevSessions,
   devSessionRecords,
   createDevSession,
-  pendingFeedbackAssessment,
-  feedbackAssessmentReusable,
   sendDevMessage,
   askDevSessionBtw,
   cancelDevTurn,
@@ -104,7 +102,6 @@ import {
   visibleEvents,
   closeDevSession,
   reopenDevSession,
-  setReviewLoop,
   setQaLoop,
   renameDevSession,
   setDevSessionAutoCompact,
@@ -129,12 +126,6 @@ import {
   setSessionWebhook,
   instructSessionDurably,
   rotateSessionWebhook,
-  triageLoopFindings,
-  triageReviewFindings,
-  saveReviewFindingsDrafts,
-  deleteReviewFinding,
-  replyToReviewFinding,
-  retryLoopRound,
   deliverToSession,
   sessionRegistryComplete,
   mailReceivedDurably,
@@ -209,7 +200,7 @@ import {
   removeProject,
   reorderProjects,
   PROJECT_DEFAULTS,
-  reviewerRuntime,
+  actionRuntime,
   stepRuntime,
 } from './lib/projects.js';
 import { projectRunProfiles } from './lib/runprofiles.js';
@@ -252,7 +243,6 @@ import {
 import { issueTimeline, issueView } from './lib/issueviewer.js';
 import { repoArchive, repoFile, repoTree } from './lib/repofiles.js';
 import { boardInScope, moveBoardItem, projectBoard } from './lib/projectboard.js';
-import { getFindings, decideFinding } from './lib/findings.js';
 import { listRepoBranches, githubRest } from './lib/github.js';
 import { storeUpload, getUpload } from './lib/uploads.js';
 import { uploadBody, uploadHandler } from './lib/upload-body.js';
@@ -407,7 +397,7 @@ app.use(
     getProject,
     listSessions: listDevSessions,
     bus,
-    reviewerRuntime,
+    actionRuntime,
     stepRuntime,
     transcribeAvailable,
     previewAccess,
@@ -974,16 +964,10 @@ const workerRoutes = orchestratorRoutes({
   workerSessionsFor,
   setQaLoop,
   workerSummary,
-  getJob,
-  workerTranscript,
-  jobEventsFor,
-  sendDevMessage,
 });
 const { orchestratorSession, workerOf } = workerRoutes;
 api.post('/api/agent/sessions/pr-actions', workerRoutes.prAction);
 api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
-api.get('/api/agent/sessions/:id/question', workerRoutes.readQuestion);
-api.post('/api/agent/sessions/:id/question', workerRoutes.answerQuestion);
 
 api.post('/api/agent/sessions', workerRoutes.spawn);
 
@@ -1017,39 +1001,6 @@ api.post('/api/agent/sessions/:id/message', (req, res) => {
   }
 });
 
-// The orchestrator's verdicts on a held review round (lib/jobs.js, holdForTriage): "fix" starts
-// the fix session, the rest is recorded on the PR. Spends no worker turn, so no slot gate.
-api.post('/api/agent/sessions/:id/triage', async (req, res) => {
-  const orchestrator = orchestratorSession(req, res);
-  if (!orchestrator) return;
-  const worker = workerOf(req, res, orchestrator);
-  if (!worker) return;
-  try {
-    const { verdicts, note } = req.body || {};
-    const outcome = await triageLoopFindings(worker.id, { verdicts, note });
-    res.json({ session: workerSummary(worker), ...outcome });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-// Re-runs a review round whose provider errored: the loop stays gated on that commit and a
-// finished worker has no push left to reopen it. An optional provider/model/effort moves off the
-// failing runtime. It never replaces a review, so it cannot approve a push; no slot gate.
-api.post('/api/agent/sessions/:id/retry-review', async (req, res) => {
-  const orchestrator = orchestratorSession(req, res);
-  if (!orchestrator) return;
-  const worker = workerOf(req, res, orchestrator);
-  if (!worker) return;
-  try {
-    const { providerId, model, effort } = req.body || {};
-    const outcome = await retryLoopRound(worker.id, { providerId, model, effort });
-    res.json({ session: workerSummary(worker), ...outcome });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
 api.post('/api/agent/sessions/:id/close', async (req, res) => {
   const orchestrator = orchestratorSession(req, res);
   if (!orchestrator) return;
@@ -1063,12 +1014,7 @@ api.post('/api/agent/sessions/:id/close', async (req, res) => {
   }
 });
 
-// ---- review findings ----
-//
-// Findings from a PR's review summaries joined with stored fix/optional/dismissed verdicts.
-// "fix" mirrors onto one anchored "Required fixes" checklist comment that later reviews tick.
-
-function findingsParams(body) {
+function pullRequestParams(body) {
   const project = getProject(String(body.repo || ''));
   if (!project) throw Object.assign(new Error(`Unknown project: ${body.repo || ''}`), { status: 404 });
   const prNumber = Number(body.pr);
@@ -1079,7 +1025,7 @@ function findingsParams(body) {
 
 api.get('/api/pr/view', async (req, res) => {
   try {
-    const { repo, prNumber } = findingsParams(req.query);
+    const { repo, prNumber } = pullRequestParams(req.query);
     res.json(await pullRequestView({ repo }, prNumber, pullRequestViewOptions(req.query)));
   } catch (e) {
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
@@ -1088,7 +1034,7 @@ api.get('/api/pr/view', async (req, res) => {
 
 api.post('/api/pr/update-branch', async (req, res) => {
   try {
-    const { repo, prNumber } = findingsParams(req.body || {});
+    const { repo, prNumber } = pullRequestParams(req.body || {});
     const { headSha, baseRef } = req.body || {};
     res.status(202).json(
       await updatePullRequestBranch({ repo }, prNumber, {
@@ -1118,7 +1064,7 @@ api.patch('/api/issues/update', githubUpdateHandler('issue'));
 
 api.post('/api/pr/merge', async (req, res) => {
   try {
-    const { repo, prNumber } = findingsParams(req.body || {});
+    const { repo, prNumber } = pullRequestParams(req.body || {});
     const { method, headSha, baseRef } = req.body || {};
     res.json(
       await mergePullRequest({ repo }, prNumber, {
@@ -1235,25 +1181,6 @@ api.get('/api/repo/archive', async (req, res) => {
   } catch (e) {
     if (res.destroyed) return;
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
-  }
-});
-
-api.get('/api/pr/findings', async (req, res) => {
-  try {
-    const { repo, prNumber } = findingsParams(req.query);
-    res.json(await getFindings(repo, prNumber));
-  } catch (e) {
-    res.status(e.status || (e.rateLimited ? 429 : 400)).json({ error: e.message });
-  }
-});
-
-api.post('/api/pr/findings/decision', async (req, res) => {
-  try {
-    const { repo, prNumber } = findingsParams(req.body || {});
-    const { key, decision } = req.body || {};
-    res.json(await decideFinding(repo, prNumber, key, decision || null));
-  } catch (e) {
-    res.status(e.status === 503 ? 503 : e.status || 400).json({ error: e.message });
   }
 });
 
@@ -1628,10 +1555,9 @@ api.get('/api/dev/projects', (req, res) => {
       repo: p.repo,
       label: p.label,
       hasLocal: !!p.localDir,
-      // The review runtime the dashboard starts its errands on, so it does not ask again.
-      reviewProviderId: p.reviewProviderId,
-      reviewModel: p.reviewModel || '',
-      reviewEffort: p.reviewEffort || '',
+      actionProviderId: p.actionProviderId,
+      actionModel: p.actionModel || '',
+      actionEffort: p.actionEffort || '',
       // The names ▶ Run's dropdown offers, the default first.
       runProfiles: projectRunProfiles(p).map((r) => r.name),
       // Whether it names a Projects v2 board, which is what offers the board tab.
@@ -1640,8 +1566,6 @@ api.get('/api/dev/projects', (req, res) => {
   });
 });
 
-// The project dashboard: open PRs with their review labels and pending errand, plus open issues,
-// so the board's tabs cost one call.
 api.get('/api/dev/pulls', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
@@ -1731,8 +1655,6 @@ api.get('/api/dev/usage/all', async (req, res) => {
   }
 });
 
-// One PR in the session panel's detail (state, commits, reviews, checks), for a board drilled
-// into a PR with no session to read it from.
 api.get('/api/dev/pull', async (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
@@ -1801,7 +1723,7 @@ api.get('/api/dev/providers', async (req, res) => {
 api.get('/api/dev/runtimes', (req, res) => {
   const project = getProject(req.query.repo || '');
   if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
-  res.json(runtimeCatalog(reviewerRuntime(project), getConfig(), (p) => cachedProviderAuth(p.id)));
+  res.json(runtimeCatalog(actionRuntime(project), getConfig(), (p) => cachedProviderAuth(p.id)));
 });
 
 // The default branch first, then the rest alphabetically.
@@ -1889,11 +1811,6 @@ api.post('/api/dev/actions', async (req, res) => {
       .status(400)
       .json({ error: 'No GITHUB_TOKEN is configured, so the pull request cannot be looked up' });
   try {
-    if (actionId === 'implement-feedback') {
-      const pending = pendingFeedbackAssessment(project.repo, number);
-      if (pending && !pending.feedbackAssessment.completed && managesSession(res.locals.apiUser, pending))
-        return res.json({ session: publicJob(pending) });
-    }
     const lookup = await githubRest(cfg, 'GET', `/repos/${project.repo}/pulls/${number}`);
     if (lookup.status === 404)
       return res.status(404).json({ error: `${project.repo} has no pull request #${number}` });
@@ -1919,15 +1836,6 @@ api.post('/api/dev/actions', async (req, res) => {
     };
     // A prompt that refuses fails the request rather than starting an empty errand.
     const spec = await actionSessionSpec(action, context);
-    if ('feedbackAssessment' in spec) {
-      const pending = pendingFeedbackAssessment(project.repo, number);
-      if (
-        pending &&
-        managesSession(res.locals.apiUser, pending) &&
-        feedbackAssessmentReusable(pending, spec.feedbackAssessment)
-      )
-        return res.json({ session: publicJob(pending) });
-    }
     const session = createDevSession({ provider, model, effort, ...spec, ownerId: requestOwner(res) });
     res.status(201).json({
       session,
@@ -2062,10 +1970,6 @@ api.get('/api/dev/sessions', async (req, res) => {
 const COMPOSER_ACTIVITIES = new Set(['issue']);
 
 api.post('/api/dev/sessions', (req, res) => {
-  // `prNumber` lets a review started from a PR row name it up front. `qa` is the 🎬 QA errand.
-  // `reviewLoop` reviews every settled push and feeds findings back as a capped fix turn
-  // (lib/jobs.js). `orchestrator` is a checkout-less supervisor that steers worker sessions,
-  // which default to `workerRuntime` when given.
   const {
     provider,
     model,
@@ -2073,14 +1977,12 @@ api.post('/api/dev/sessions', (req, res) => {
     prompt,
     repo,
     branch,
-    review,
     qa,
     local,
     orchestrator,
     workerRuntime,
     attachments,
     prNumber,
-    reviewLoop,
     qaLoop,
     activity,
   } = req.body || {};
@@ -2094,14 +1996,12 @@ api.post('/api/dev/sessions', (req, res) => {
         prompt,
         repo,
         branch,
-        review,
         qa,
         local,
         orchestrator: orchestrator === true,
         workerRuntime: workerRuntime && typeof workerRuntime === 'object' ? workerRuntime : null,
         attachments,
         prNumber: number,
-        reviewLoop: reviewLoop === true,
         qaLoop: qaLoop === true,
         activity: COMPOSER_ACTIVITIES.has(activity) ? activity : undefined,
         ownerId: requestOwner(res),
@@ -2247,69 +2147,6 @@ api.delete('/api/dev/sessions/:id/queue/:index', (req, res) => {
   }
 });
 
-// 🔁 Review loop: arm or disarm it on a running session.
-api.post('/api/dev/sessions/:id/loop', (req, res) => {
-  try {
-    const { on } = req.body || {};
-    res.json({ session: setReviewLoop(req.params.id, on === true) });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-// ⚑ Findings, Complete. On the user's own PR, "fix" verdicts start an Implement feedback session
-// and the rest are recorded on the PR. On somebody else's PR it rules nothing (the findings are
-// that author's) and only clears the card.
-api.post('/api/dev/sessions/:id/triage', async (req, res) => {
-  try {
-    const { verdicts, note } = req.body || {};
-    res.json(
-      await triageReviewFindings(req.params.id, { verdicts, note, by: res.locals.apiActor || 'the user' }),
-    );
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-// ⚑ Findings, Reply on somebody else's PR: posts on the finding's own thread and rules nothing.
-api.post('/api/dev/sessions/:id/findings/reply', async (req, res) => {
-  try {
-    const { key, text } = req.body || {};
-    res.json(await replyToReviewFinding(req.params.id, key, text, { by: res.locals.apiActor || 'the user' }));
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-// ⚑ Findings, Delete on a hand-started review: removes the finding's inline comment and its
-// entry in the review's findings block on GitHub, irreversibly.
-api.post('/api/dev/sessions/:id/findings/delete', async (req, res) => {
-  try {
-    const { key } = req.body || {};
-    res.json(await deleteReviewFinding(req.params.id, key, { by: res.locals.apiActor || 'the user' }));
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-// ⚑ Findings, Save comments: draft verdicts and note kept on the held round and posted as one PR
-// comment. Nothing is ruled; the round still waits for Complete.
-api.post('/api/dev/sessions/:id/triage/save', async (req, res) => {
-  try {
-    const { verdicts, note } = req.body || {};
-    res.json(
-      await saveReviewFindingsDrafts(req.params.id, {
-        verdicts,
-        note,
-        by: res.locals.apiActor || 'the user',
-      }),
-    );
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-// 🎬 QA loop: queued behind the review loop, armed separately since not every task needs QA.
 api.post('/api/dev/sessions/:id/qa-loop', (req, res) => {
   try {
     const { on } = req.body || {};
@@ -2457,10 +2294,6 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   // Every connected mailbox is brought up to date every MAIL_SYNC_MINUTES, so
   // a client reads its mail from the database rather than from the provider.
   mailService.start();
-  // Every project gets (or keeps) a hook pointing at this install's public
-  // hostname, so an open session's pull request panel keeps up with the reviews,
-  // comments and CI runs landing on its branch. Best effort: a repo whose hook
-  // cannot be installed just falls back to the twenty-second sync tick.
   await installRepoWebhooks(activeProjects(), cfg, githubRest).catch((e) =>
     console.error('Could not install GitHub webhooks:', e.message),
   );

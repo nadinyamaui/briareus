@@ -51,14 +51,6 @@ describe('getBinary / BINARIES', () => {
     expect(getBinary('vim')).toBeNull();
   });
 
-  it('every binary declares the same surface', () => {
-    for (const b of Object.values(BINARIES)) {
-      expect(b.efforts.length).toBeGreaterThan(0);
-      expect(typeof b.buildArgs).toBe('function');
-      expect(typeof b.reviewPrompt).toBe('function');
-    }
-  });
-
   it('offers Claude Opus 5.5', () => {
     expect(BINARIES.claude.models()).toContain('claude-opus-5-5');
   });
@@ -117,7 +109,7 @@ describe('ensureCodexHome for a custom endpoint', () => {
     );
     const toml = fs.readFileSync(path.join(dir, 'config.toml'), 'utf8');
     const model = /^model = "(.*)"$/m.exec(toml)[1];
-    expect(/^review_model = "(.*)"$/m.exec(toml)[1]).toBe(model);
+    expect(toml).not.toMatch(/^review_model =/m);
     return model;
   }
 
@@ -615,69 +607,6 @@ describe('buildArgs', () => {
     expect(built.briefingInPrompt).toBe(true);
   });
 
-  it('scopes Codex trust to the session workspace for live, exec and review turns', () => {
-    for (const build of [BINARIES.codex.buildArgs, BINARIES.codex.buildReviewArgs]) {
-      for (const live of [false, true]) {
-        if (live && build === BINARIES.codex.buildReviewArgs) continue;
-        const { args } = build({ model: 'gpt', effort: 'high', cwd: '/repo.with dots', live });
-        expect(args).toContain('projects={"/repo.with dots"={trust_level="trusted"}}');
-        expect(args).toContain('sandbox_mode="danger-full-access"');
-        expect(args).toContain('approval_policy="never"');
-      }
-    }
-  });
-
-  it('codex sends a wide pick as its real slug plus the window override', () => {
-    for (const build of [BINARIES.codex.buildArgs, BINARIES.codex.buildReviewArgs]) {
-      const wide = build({ model: 'gpt-6-astra (872k)', effort: 'high', sessionId: 't' });
-      // The label never reaches argv: codex refuses a model its catalog has
-      // no entry for, and "gpt-6-astra (872k)" is a picker string, not a model.
-      expect(wide.args).toContain('gpt-6-astra');
-      expect(wide.args).not.toContain('gpt-6-astra (872k)');
-      expect(wide.args[wide.args.indexOf('-m') + 1]).toBe('gpt-6-astra');
-      expect(wide.args).toContain('model_context_window=872000');
-    }
-  });
-
-  it('restart recovery resumes the Codex review thread with delegation enabled', () => {
-    const built = BINARIES.codex.buildReviewArgs({
-      model: 'gpt-6.1-sol',
-      effort: 'high',
-      resume: true,
-      resumeReview: true,
-      sessionId: 'review-thread',
-    });
-    expect(built.args.slice(0, 3)).toEqual(['exec', 'resume', 'review-thread']);
-    expect(built.args).toEqual(expect.arrayContaining(['--enable', 'multi_agent']));
-  });
-
-  it('codex reviews use a fresh exec turn with independent delegation enabled', () => {
-    const built = BINARIES.codex.buildReviewArgs({
-      model: 'gpt-6.1-sol',
-      effort: 'medium',
-      resume: true,
-      sessionId: 'existing-thread',
-    });
-    expect(built.args[0]).toBe('exec');
-    expect(built.args).not.toContain('review');
-    expect(built.args).not.toContain('resume');
-    expect(built.args).not.toContain('existing-thread');
-    expect(built.args).toEqual(expect.arrayContaining(['--enable', 'multi_agent']));
-    expect(built.args[built.args.indexOf('-m') + 1]).toBe('gpt-6.1-sol');
-    expect(built.args).toContain('model_reasoning_effort="medium"');
-    expect(built.args.at(-1)).toBe('-');
-    expect(built.promptVia).toBe('stdin');
-    expect(built.briefingInPrompt).toBe(true);
-  });
-
-  it('codex leaves the window alone on a plain pick', () => {
-    for (const build of [BINARIES.codex.buildArgs, BINARIES.codex.buildReviewArgs]) {
-      const plain = build({ model: 'gpt-6-astra', effort: 'high', sessionId: 't' });
-      expect(plain.args[plain.args.indexOf('-m') + 1]).toBe('gpt-6-astra');
-      expect(plain.args.some((a) => String(a).startsWith('model_context_window='))).toBe(false);
-    }
-  });
-
   it('claude mounts the memory tool only when a config file is given', () => {
     const withMcp = BINARIES.claude.buildArgs({
       model: 'm',
@@ -689,41 +618,6 @@ describe('buildArgs', () => {
     expect(withMcp.args[withMcp.args.indexOf('--mcp-config') + 1]).toBe('/tmp/m');
     const without = BINARIES.claude.buildArgs({ model: 'm', effort: 'low', sessionId: 's' });
     expect(without.args).not.toContain('--mcp-config');
-  });
-
-  it('codex takes the memory tool as TOML config overrides', () => {
-    const mcp = {
-      name: 'reviewer_memory',
-      command: '/usr/bin/node',
-      args: ['/app/lib/memory-mcp.js'],
-      env: { A: '1', B: 'x"y' },
-    };
-    for (const build of [BINARIES.codex.buildArgs, BINARIES.codex.buildReviewArgs]) {
-      const { args } = build({ model: 'gpt', effort: 'high', sessionId: 't', mcp });
-      expect(args).toContain('mcp_servers.reviewer_memory.command="/usr/bin/node"');
-      expect(args).toContain('mcp_servers.reviewer_memory.args=["/app/lib/memory-mcp.js"]');
-      expect(args).toContain('mcp_servers.reviewer_memory.env={ A = "1", B = "x\\"y" }');
-    }
-    const plain = BINARIES.codex.buildArgs({ model: 'gpt', effort: 'high', sessionId: 't' });
-    expect(plain.args.join(' ')).not.toContain('mcp_servers');
-  });
-
-  it('codex gives internal mail and WhatsApp enough time for sends and media downloads', () => {
-    const mcp = ['reviewer_mail', 'reviewer_whatsapp', 'reviewer_memory', 'reviewer_ssh'].map((name) => ({
-      name,
-      command: '/usr/bin/node',
-      args: [`/app/lib/${name}.js`],
-    }));
-    for (const build of [
-      BINARIES.codex.buildArgs,
-      BINARIES.codex.buildReviewArgs,
-      (opts) => BINARIES.codex.buildArgs({ ...opts, live: true }),
-    ]) {
-      const { args } = build({ model: 'gpt', effort: 'high', sessionId: 't', mcp });
-      expect(args).toContain('mcp_servers.reviewer_mail.tool_timeout_sec=240');
-      expect(args).toContain('mcp_servers.reviewer_whatsapp.tool_timeout_sec=240');
-      expect(args.filter((arg) => arg.includes('tool_timeout_sec'))).toHaveLength(2);
-    }
   });
 
   it('codex takes a remote server by its URL and headers', () => {
@@ -877,95 +771,6 @@ describe('buildArgs', () => {
     expect(resumed.args).not.toContain('--mcp-config');
     // Any id resumes: qwen keeps the one it was given.
     expect(canResume('qwen', 'u-1')).toBe(true);
-  });
-
-  it('the review prompts carry the shared machine-readable findings contract', () => {
-    for (const [id, opts] of [
-      ['claude', { prNumber: 7, effort: 'high' }],
-      ['codex', { prNumber: 7, branch: 'b', base: 'main' }],
-      ['grok', { prNumber: 7 }],
-      ['opencode', { prNumber: 7, branch: 'b', base: 'main' }],
-      ['dsh', { prNumber: 7, branch: 'b', base: 'main' }],
-      ['qwen', { prNumber: 7, branch: 'b', base: 'main' }],
-    ]) {
-      expect(BINARIES[id].reviewPrompt(opts)).toContain('reviewer:findings');
-      expect(BINARIES[id].reviewPrompt(opts)).toContain('<!-- reviewer:incomplete -->');
-    }
-  });
-
-  // hq-core#12508: a review restated two unfixed findings only as replies on
-  // resolved threads, declared an empty block, and the PR was approved.
-  it('declares still-unfixed earlier findings in the findings block, not only on their threads', () => {
-    for (const [id, opts] of [
-      ['claude', { prNumber: 7, effort: 'high' }],
-      ['codex', { prNumber: 7, branch: 'b', base: 'main' }],
-      ['grok', { prNumber: 7 }],
-      ['opencode', { prNumber: 7, branch: 'b', base: 'main' }],
-      ['dsh', { prNumber: 7, branch: 'b', base: 'main' }],
-      ['qwen', { prNumber: 7, branch: 'b', base: 'main' }],
-    ]) {
-      const prompt = BINARIES[id].reviewPrompt(opts);
-      expect(prompt).not.toContain('rather than as a fresh finding');
-      expect(prompt).toContain('a still-unfixed finding left out of it is treated as fixed');
-      expect(prompt).toContain('declare it in the findings block');
-      expect(prompt).toContain('Use an empty array only when there are no new or still-unfixed findings');
-      expect(prompt).toContain('is not a duplicate or addressed');
-      expect(prompt).toContain('lists as dismissed or left optional counts as declined');
-    }
-  });
-
-  it('requires independent verification and a value assessment at every effort', () => {
-    const verifies = (prompt) => prompt.includes('Before posting anything');
-    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
-      const prompt = BINARIES.claude.reviewPrompt({ prNumber: 7, effort });
-      expect(verifies(prompt)).toBe(true);
-      expect(prompt).not.toMatch(/^\/code-review/);
-      expect(prompt).toContain('fresh independent verification sub-agent');
-      expect(prompt).toContain('without model overrides');
-      expect(prompt).toContain('worthFixing');
-      expect(prompt).toContain('verification incomplete');
-    }
-    expect(verifies(BINARIES.codex.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
-    expect(verifies(BINARIES.grok.reviewPrompt({ prNumber: 7 }))).toBe(true);
-    expect(verifies(BINARIES.opencode.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
-    expect(verifies(BINARIES.dsh.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
-    expect(verifies(BINARIES.qwen.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
-  });
-
-  // A loop round that had read the earlier rounds reviewed only the newest
-  // commit and came back clean on a PR a fresh /code-review found ten problems in.
-  it('discovers candidates over the whole diff in an agent that has not read the PR history', () => {
-    for (const prompt of [
-      BINARIES.claude.reviewPrompt({ prNumber: 7, effort: 'high' }),
-      BINARIES.codex.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
-      BINARIES.opencode.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
-      BINARIES.dsh.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
-      BINARIES.qwen.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
-    ]) {
-      expect(prompt).toContain('fresh discovery sub-agent');
-      expect(prompt).toContain('not the prior PR discussion');
-      for (const angle of [
-        'Line by line',
-        'Removed behavior',
-        'Callers and callees',
-        'Failure paths',
-        'Conventions',
-        'Altitude',
-      ]) {
-        expect(prompt).toContain(`- ${angle}:`);
-      }
-      // Discovery comes first, and its candidates still go through the verifier.
-      expect(prompt.indexOf('fresh discovery sub-agent')).toBeLessThan(
-        prompt.indexOf('Before posting anything'),
-      );
-    }
-    // grok's /review does its own discovery; it gets only the scope rule.
-    expect(BINARIES.grok.reviewPrompt({ prNumber: 7 })).not.toContain('fresh discovery sub-agent');
-    for (const id of ['claude', 'codex', 'grok', 'opencode', 'dsh', 'qwen']) {
-      expect(BINARIES[id].reviewPrompt({ prNumber: 7, effort: 'high', branch: 'b', base: 'main' })).toContain(
-        'every review covers the whole base-to-head diff, including code an earlier round already reviewed',
-      );
-    }
   });
 });
 

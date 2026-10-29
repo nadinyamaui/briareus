@@ -9,7 +9,6 @@ it.each(['orchestrator', 'zeus'])(
         repo: 'a/b',
         activity,
         prNumber: 99,
-        reviewLoop: { rounds: 99 },
         qaLoop: { done: true },
       },
       { id: 'task', repo: 'a/b', parentId: 'orchestrator', prNumber: 8 },
@@ -34,7 +33,6 @@ it.each(['orchestrator', 'zeus'])(
     );
     expect(report.usage.costUsd).toBe(3);
     expect(report.prUrl).toBe('https://github.com/a/b/pull/8');
-    expect(report.root.reviewLoop).toBeUndefined();
     expect(report.root.qaLoop).toBeUndefined();
     expect(report.usage.unpricedTurns).toBe(1);
     expect(report.sessions[1].conversationAvailable).toBe(false);

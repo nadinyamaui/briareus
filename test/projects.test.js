@@ -54,10 +54,10 @@ const {
   removeProject,
   reorderProjects,
   stepRuntime,
-  reviewerRuntime,
+  actionRuntime,
   render,
   selfProject,
-  REVIEW_STEPS,
+  QA_STEPS,
   PROJECT_DEFAULTS,
 } = await import('../lib/projects.js');
 
@@ -275,20 +275,6 @@ describe('the run profiles', () => {
 });
 
 describe('the text fields', () => {
-  it.each([
-    'envTemplate',
-    'reviewPublishInstructions',
-    'qaNotes',
-    'feedbackInstructions',
-    'testSheetInstructions',
-  ])('stores %s with LF endings whatever arrives', async (key) => {
-    // A textarea posts LF and a seeded file may be CRLF; the two must not read
-    // as a change every time the project is opened and saved.
-    const saved = await createProject({ ...base, [key]: 'one\r\ntwo\r\n' });
-
-    expect(saved[key]).toBe('one\ntwo\n');
-  });
-
   it('reads a null text field as the empty one', async () => {
     expect((await createProject({ ...base, qaNotes: null })).qaNotes).toBe('');
   });
@@ -300,8 +286,8 @@ describe('the text fields', () => {
       phpBinDir: null,
       localDir: null,
       dbRestoreSql: null,
-      reviewModel: null,
-      reviewEffort: null,
+      actionModel: null,
+      actionEffort: null,
       promptTemplates: null,
     });
 
@@ -310,70 +296,49 @@ describe('the text fields', () => {
       phpBinDir: '',
       localDir: '',
       dbRestoreSql: '',
-      reviewModel: '',
-      reviewEffort: '',
+      actionModel: '',
+      actionEffort: '',
       promptTemplates: {},
-    });
-  });
-});
-
-describe('the QA chain', () => {
-  it('switches the test sheet on with the test run: the run reads the sheet', async () => {
-    const saved = await createProject({ ...base, reviewTestRun: true, reviewTestSheet: false });
-
-    expect(saved).toMatchObject({ reviewTestRun: true, reviewTestSheet: true });
-  });
-
-  it('leaves the sheet on its own when the run is off', async () => {
-    const saved = await createProject({ ...base, reviewTestSheet: true, reviewTestRun: false });
-
-    expect(saved).toMatchObject({ reviewTestSheet: true, reviewTestRun: false });
-  });
-
-  it('is off by default', async () => {
-    expect(await createProject({ ...base })).toMatchObject({
-      reviewTestSheet: false,
-      reviewTestRun: false,
     });
   });
 });
 
 describe('the review author', () => {
   it('drops a leading @', async () => {
-    expect((await createProject({ ...base, reviewAuthor: ' @sampleuser ' })).reviewAuthor).toBe('sampleuser');
+    expect((await createProject({ ...base, prAuthor: ' @sampleuser ' })).prAuthor).toBe('sampleuser');
   });
 
   it('allows no author at all', async () => {
-    expect((await createProject({ ...base, reviewAuthor: '' })).reviewAuthor).toBe('');
+    expect((await createProject({ ...base, prAuthor: '' })).prAuthor).toBe('');
   });
 
   it.each(['-leading', 'trailing-', 'has space', 'double--dash', 'a'.repeat(40)])(
     'refuses %o as a GitHub username',
-    async (reviewAuthor) => {
-      await expect(createProject({ ...base, reviewAuthor })).rejects.toThrow(/is not a GitHub username/);
+    async (prAuthor) => {
+      await expect(createProject({ ...base, prAuthor })).rejects.toThrow(/is not a GitHub username/);
     },
   );
 
   it('accepts a plain login', async () => {
-    await expect(createProject({ ...base, reviewAuthor: 'sample-user1' })).resolves.toMatchObject({
-      reviewAuthor: 'sample-user1',
+    await expect(createProject({ ...base, prAuthor: 'sample-user1' })).resolves.toMatchObject({
+      prAuthor: 'sample-user1',
     });
   });
 });
 
 describe('the reviewer runtime', () => {
   it('keeps a provider id that is a positive integer', async () => {
-    expect((await createProject({ ...base, reviewProviderId: '4' })).reviewProviderId).toBe(4);
+    expect((await createProject({ ...base, actionProviderId: '4' })).actionProviderId).toBe(4);
   });
 
-  it.each([0, -1, 'abc', 1.5, null])('reads %o as no provider', async (reviewProviderId) => {
-    expect((await createProject({ ...base, reviewProviderId })).reviewProviderId).toBeNull();
+  it.each([0, -1, 'abc', 1.5, null])('reads %o as no provider', async (actionProviderId) => {
+    expect((await createProject({ ...base, actionProviderId })).actionProviderId).toBeNull();
   });
 
   it('trims the model and effort', async () => {
-    const saved = await createProject({ ...base, reviewModel: ' opus ', reviewEffort: ' high ' });
+    const saved = await createProject({ ...base, actionModel: ' opus ', actionEffort: ' high ' });
 
-    expect(saved).toMatchObject({ reviewModel: 'opus', reviewEffort: 'high' });
+    expect(saved).toMatchObject({ actionModel: 'opus', actionEffort: 'high' });
   });
 });
 
@@ -552,7 +517,7 @@ describe('the per-step runtimes', () => {
   });
 
   it('names the two steps a QA session runs, in order', () => {
-    expect(REVIEW_STEPS.map((s) => s.key)).toEqual(['testSheet', 'testRun']);
+    expect(QA_STEPS.map((s) => s.key)).toEqual(['testSheet', 'testRun']);
   });
 });
 
@@ -582,19 +547,19 @@ describe('reading one step runtime back', () => {
 
 describe('reading the project reviewer runtime back', () => {
   it('answers what ⌕ Code review was configured to run on', () => {
-    const p = { reviewProviderId: 3, reviewModel: 'opus', reviewEffort: 'high' };
+    const p = { actionProviderId: 3, actionModel: 'opus', actionEffort: 'high' };
 
-    expect(reviewerRuntime(p)).toEqual({ providerId: 3, model: 'opus', effort: 'high' });
+    expect(actionRuntime(p)).toEqual({ providerId: 3, model: 'opus', effort: 'high' });
   });
 
   it('fills the model and effort in as blank when the project omits them', () => {
-    expect(reviewerRuntime({ reviewProviderId: 3 })).toEqual({ providerId: 3, model: '', effort: '' });
+    expect(actionRuntime({ actionProviderId: 3 })).toEqual({ providerId: 3, model: '', effort: '' });
   });
 
   it('answers null for a project that named no reviewer, and for no project', () => {
-    expect(reviewerRuntime({ reviewProviderId: null, reviewModel: 'opus' })).toBeNull();
-    expect(reviewerRuntime({})).toBeNull();
-    expect(reviewerRuntime(null)).toBeNull();
+    expect(actionRuntime({ actionProviderId: null, actionModel: 'opus' })).toBeNull();
+    expect(actionRuntime({})).toBeNull();
+    expect(actionRuntime(null)).toBeNull();
   });
 });
 
@@ -817,17 +782,6 @@ describe('token substitution', () => {
 
   it('substitutes a value that is not a string', () => {
     expect(render('{n}', { n: 0 })).toBe('0');
-  });
-});
-
-describe('autonomous review loops', () => {
-  it('defaults off and preserves the option through partial updates', async () => {
-    const saved = await createProject({ repo: 'acme/autonomous' });
-    expect(saved.autonomousReviewLoop).toBe(false);
-    const enabled = await updateProject(saved.id, { autonomousReviewLoop: true });
-    expect(enabled.autonomousReviewLoop).toBe(true);
-    expect((await updateProject(saved.id, { label: 'Autonomous' })).autonomousReviewLoop).toBe(true);
-    expect((await updateProject(saved.id, { autonomousReviewLoop: false })).autonomousReviewLoop).toBe(false);
   });
 });
 

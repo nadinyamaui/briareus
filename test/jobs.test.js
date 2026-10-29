@@ -18,9 +18,8 @@ import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
 import { createUsers } from '../lib/users.js';
 import { createSlackService } from '../lib/slack.js';
 import { createSshService } from '../lib/ssh.js';
-import { createIncomingFeedback } from '../lib/incoming-feedback.js';
-import { githubStore } from '../lib/github-store.js';
-import { invalidateBoard, projectPulls } from '../lib/prboard.js';
+import {} from '../lib/github-store.js';
+import {} from '../lib/prboard.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
   ...(await original()),
   transferClaudeSession: vi.fn(),
@@ -124,7 +123,6 @@ vi.mock('../lib/config.js', () => ({
     githubToken: 'tok',
     workspaceDir: state.workspaceDir,
     dev: { maxSessions: 3, timeoutMin: 60, autoCompactTokens: 250000 },
-    reviewLoop: { maxRounds: 3, lowFindingsUntilRound: 1 },
   }),
 }));
 
@@ -200,55 +198,25 @@ vi.mock('../lib/projects.js', () => ({
   selfProject: () => state.projects.find((p) => p.isSelf) || null,
   render: vi.fn((s) => s),
   stepRuntime: vi.fn(() => null),
-  reviewerRuntime: (project) =>
-    project && project.reviewProviderId
+  actionRuntime: (project) =>
+    project && project.actionProviderId
       ? {
-          providerId: project.reviewProviderId,
-          model: project.reviewModel || '',
-          effort: project.reviewEffort || '',
+          providerId: project.actionProviderId,
+          model: project.actionModel || '',
+          effort: project.actionEffort || '',
         }
       : null,
 }));
 
 vi.mock('../lib/prtasks.js', () => ({
-  feedbackAssessmentPrompt: vi.fn(() => 'ASSESS FEEDBACK'),
   testSheetPrompt: vi.fn(() => 'SHEET'),
   testRunPrompt: vi.fn(() => 'RUN'),
-  implementFeedbackPrompt: vi.fn(() => 'FEEDBACK'),
   solveConflictsPrompt: vi.fn(() => 'CONFLICTS'),
 }));
 
-vi.mock('../lib/findings.js', () => {
-  const latestReviewFindings = vi.fn(async () => []);
-  return {
-    latestReviewFindings,
-    // Delegates, so tests that script latestReviewFindings drive the loop's read too.
-    latestReviewDeclaration: vi.fn(async (...args) => ({
-      findings: await latestReviewFindings(...args),
-      clean: false,
-    })),
-    latestTestVerdict: vi.fn(async () => ({
-      failures: [],
-      total: 1,
-      passed: 1,
-      manual: 0,
-      incomplete: false,
-    })),
-    queueFindingsForFix: vi.fn(async (repo, prNumber, findings) => ({
-      kept: findings,
-      parked: [],
-      error: null,
-    })),
-    sortFindingsForFix: vi.fn(async (repo, prNumber, findings) => ({ kept: findings, parked: [] })),
-    recordTriage: vi.fn(async () => ({ error: null })),
-    deleteFindingFromReview: vi.fn(async () => ({ commentDeleted: true, undeclared: true, warning: null })),
-    replyOnFindingThread: vi.fn(async () => ({ url: 'https://gh/r/101#reply' })),
-    postTriageNotes: vi.fn(async () => 'https://github.com/acme/standalone/pull/31#issuecomment-9'),
-    findingKey: vi.fn((title) => `key:${title}`),
-    findingUrl: vi.fn((repo, prNumber, file, line) => `url:${repo}#${prNumber}:${file || ''}:${line || ''}`),
-    PARK_REASONS: { severity: 'below the floor', 'out-of-diff': 'outside the diff' },
-  };
-});
+vi.mock('../lib/qa-verdict.js', () => ({
+  latestTestVerdict: vi.fn(async () => ({ failures: [], total: 1, passed: 1, manual: 0, incomplete: false })),
+}));
 
 vi.mock('../lib/uploads.js', () => ({
   MAX_UPLOAD_BYTES: 25 * 1024 * 1024,
@@ -277,15 +245,7 @@ vi.mock('../lib/usage.js', async (importOriginal) => ({
   splitSubagentUsage: (await importOriginal()).splitSubagentUsage,
 }));
 
-import {
-  deleteJob,
-  jobEventMaxSeqs,
-  loadJobs,
-  loadJobEvents,
-  saveJob,
-  saveJobEvents,
-  saveAppSetting,
-} from '../lib/db.js';
+import { deleteJob, jobEventMaxSeqs, loadJobs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
 import {
   acquireInstance,
@@ -293,29 +253,11 @@ import {
   releaseInstance,
   dropSessionDatabase,
   assertInstanceAccess,
-  instanceEnv,
 } from '../lib/dbpool.js';
-import {
-  latestReviewFindings,
-  latestReviewDeclaration,
-  latestTestVerdict,
-  sortFindingsForFix,
-  recordTriage,
-  postTriageNotes,
-  deleteFindingFromReview,
-  replyOnFindingThread,
-} from '../lib/findings.js';
-import { implementFeedbackPrompt } from '../lib/prtasks.js';
-import { feedbackSnapshotCurrent } from '../lib/feedback-assessment.js';
+import { latestTestVerdict } from '../lib/qa-verdict.js';
+import {} from '../lib/prtasks.js';
 import { jobUsageEstimates } from '../lib/usage.js';
-import {
-  addPullRequestLabel,
-  removePullRequestLabel,
-  githubGraphql,
-  githubRest,
-  upsertPrComment,
-  viewerLogin,
-} from '../lib/github.js';
+import { removePullRequestLabel, githubGraphql, githubRest } from '../lib/github.js';
 import { resolveRuntime, getProviderForJob, captureProviderAuth } from '../lib/providerstore.js';
 import { stepRuntime } from '../lib/projects.js';
 import {
@@ -355,7 +297,6 @@ import {
   noteWebhookCurrent,
   repoHasWebhook,
   spottedPrIsThisSession,
-  setReviewLoop,
   setQaLoop,
   renameDevSession,
   setDevSessionAutoCompact,
@@ -398,24 +339,9 @@ import {
   sendDevMessage,
   sessionUsage,
   childSessionsOf,
-  triageLoopFindings,
-  holdStandaloneReviewFindings,
-  holdFeedbackAssessment,
-  pendingFeedbackAssessment,
-  feedbackAssessmentReusable,
-  completeStandaloneReview,
-  triageStandaloneReviewFindings,
-  triageReviewFindings,
-  deleteReviewFinding,
-  replyToReviewFinding,
-  saveReviewFindingsDrafts,
-  retryLoopRound,
   reopenDevSession,
   startPullRequestPreview,
   isReplaceablePreview,
-  workspaceStartBranch,
-  workspaceBranchPlan,
-  workspaceCheckoutPlan,
   workspaceGitProbeOptions,
   codexTurnResumes,
   acquireCloneDir,
@@ -553,14 +479,13 @@ describe('restart reconciliation for loop jobs', () => {
         status: 'idle',
         repo: 'acme/shop',
         turns: 1,
-        reviewLoop: { rounds: 1, reviewing: true, reviewSessionId: 'restart-review' },
       },
       {
         id: 'restart-review',
         kind: 'devchat',
         status: 'running',
         repo: 'acme/shop',
-        loopParentId: 'restart-review-parent',
+        qaParentId: 'restart-review-parent',
       },
       {
         id: 'restart-fix-parent',
@@ -568,14 +493,13 @@ describe('restart reconciliation for loop jobs', () => {
         status: 'idle',
         repo: 'acme/shop',
         turns: 1,
-        reviewLoop: { rounds: 2, fixing: true, fixSessionId: 'restart-fix' },
       },
       {
         id: 'restart-fix',
         kind: 'devchat',
         status: 'running',
         repo: 'acme/shop',
-        loopFixParentId: 'restart-fix-parent',
+        qaParentId: 'restart-fix-parent',
       },
       {
         id: 'restart-qa-parent',
@@ -583,7 +507,6 @@ describe('restart reconciliation for loop jobs', () => {
         status: 'idle',
         repo: 'acme/shop',
         turns: 1,
-        reviewLoop: { rounds: 1, done: true },
         qaLoop: { running: true, sessionId: 'restart-qa', done: false },
       },
       {
@@ -600,12 +523,11 @@ describe('restart reconciliation for loop jobs', () => {
         status: 'idle',
         repo: 'acme/shop',
         turns: 1,
-        reviewLoop: null,
         qaLoop: null,
       },
       ...[
-        ['restart-untracked-review', 'loopParentId'],
-        ['restart-untracked-fix', 'loopFixParentId'],
+        ['restart-untracked-review', 'qaParentId'],
+        ['restart-untracked-fix', 'qaParentId'],
         ['restart-untracked-qa', 'qaParentId'],
       ].map(([id, key]) => ({
         id,
@@ -620,48 +542,10 @@ describe('restart reconciliation for loop jobs', () => {
         kind: 'devchat',
         status: 'interrupted',
         repo: 'acme/shop',
-        loopParentId: 'restart-untracked-parent',
+        qaParentId: 'restart-untracked-parent',
       },
     ];
     await initJobs();
-  });
-
-  it('turns a restarted review into a failed, retryable round', () => {
-    const parent = getJob('restart-review-parent');
-
-    expect(parent.status).toBe('interrupted');
-    expect(parent.reviewLoop).toMatchObject({ reviewing: false });
-    expect(parent.reviewLoop.failure).toMatchObject({
-      round: 1,
-      reason: 'Server restarted while the job was active',
-    });
-    expect(workerSummary(parent).reviewLoop).toMatchObject({
-      reviewing: false,
-      failure: { round: 1, reason: 'Server restarted while the job was active' },
-    });
-  });
-
-  it('releases interrupted fix and QA sessions instead of leaving them in flight', () => {
-    const fixParent = getJob('restart-fix-parent');
-    const qaParent = getJob('restart-qa-parent');
-
-    expect(fixParent.reviewLoop).toMatchObject({ fixing: false, fixSessionId: null });
-    expect(fixParent.reviewLoop.failure).toMatchObject({
-      round: 2,
-      reason: 'Server restarted while the job was active',
-    });
-    expect(qaParent.qaLoop).toMatchObject({ running: false, done: false });
-    expect(qaParent.qaLoop.failure).toMatchObject({
-      kind: 'interrupted',
-      reason: 'Server restarted while the job was active',
-    });
-    expect(workerSummary(qaParent).qaLoop.failure).toEqual({
-      kind: 'interrupted',
-      reason: 'Server restarted while the job was active',
-    });
-    // Each parent took its child's failure, so the inbox lists it there only.
-    for (const id of ['restart-review', 'restart-fix', 'restart-qa'])
-      expect(getJob(id).failureUnreported).toBeUndefined();
   });
 
   it('marks interrupted loop children their parent no longer tracked, for the inbox to list', () => {
@@ -818,46 +702,6 @@ describe('trustWorkspace', () => {
 
     expect(trusted(configDir)).toEqual([fs.realpathSync(dir)]);
     expect(JSON.parse(fs.readFileSync(path.join(configDir, '.claude.json'), 'utf8')).userID).toBe('u1');
-  });
-});
-
-describe('workspaceStartBranch', () => {
-  it('restores a resumed worker branch instead of treating it as a fresh branch', () => {
-    const job = { id: '43e67d04', branch: 'dev-43e67d04', startBranch: null, reviewBranch: null };
-
-    expect(workspaceStartBranch(job)).toBe('dev-43e67d04');
-    expect(workspaceBranchPlan(job, 'main')).toEqual({
-      branch: 'dev-43e67d04',
-      startPoint: 'dev-43e67d04',
-    });
-  });
-
-  it('refreshes a resumed branch from its remote ref when it exists', () => {
-    const job = { id: 'j1', branch: 'worker', startBranch: null, reviewBranch: null };
-
-    expect(workspaceCheckoutPlan(job, 'main', { remoteWorkerRef: true, localBranch: true })).toEqual({
-      branch: 'worker',
-      startPoint: 'worker',
-      source: 'remote',
-      checkoutRef: 'refs/remotes/origin/worker',
-    });
-  });
-
-  it('keeps an existing local-only resumed branch when the remote ref is absent', () => {
-    const job = { id: 'j1', branch: 'worker', startBranch: null, reviewBranch: null };
-
-    expect(workspaceCheckoutPlan(job, 'main', { remoteWorkerRef: false, localBranch: true })).toEqual({
-      branch: 'worker',
-      startPoint: 'worker',
-      source: 'local',
-      checkoutRef: 'worker',
-    });
-  });
-
-  it('leaves a new session without a branch so it can start from the default branch', () => {
-    expect(
-      workspaceStartBranch({ id: 'new', branch: null, startBranch: null, reviewBranch: null }),
-    ).toBeNull();
   });
 });
 
@@ -1072,7 +916,6 @@ describe('loop children waiting for a database slot', () => {
       branch: 'task/slots',
       startedOnPr: 900 + index,
       prStatus: { number: 900 + index, state: 'open', headSha: 'slot-sha' },
-      reviewLoop: { rounds: 0 },
     }));
     await initJobs();
     for (const id of ids) {
@@ -1099,325 +942,17 @@ describe('loop children waiting for a database slot', () => {
     acquireInstance.mockReset();
   });
 
-  const queueReview = async (id) => {
-    await retryLoopRound(id);
+  const queueQa = async (id) => {
+    setQaLoop(id, true);
     const parent = getJob(id);
-    const child = getJob(parent.reviewLoop.reviewSessionId);
+    const child = getJob(parent.qaLoop.sessionId);
     children.push(child);
     return child;
   };
 
-  it.each([1, 2])(
-    'reports a retryable failure when %i waiting parents hold the whole pool',
-    async (count) => {
-      const unrelated = devSessionRecords().filter((j) => !ids.slice(0, count).includes(j.id));
-      const statuses = unrelated.map((j) => j.status);
-      for (const job of unrelated) job.status = 'closed';
-      state.capacity = count;
-      try {
-        if (count === 2) await queueReview(ids[0]);
-        const parent = getJob(ids[count - 1]);
-        await retryLoopRound(parent.id);
-        expect(parent.reviewLoop.reviewing).toBe(false);
-        expect(parent.reviewLoop.reviewSessionId).toBeFalsy();
-        expect(parent.reviewLoop.failure).toMatchObject({
-          reason: expect.stringMatching(/parents hold every database slot.*enable another database server/i),
-        });
-        expect(blocked).toEqual([]);
-        state.capacity += 1;
-        const child = await queueReview(parent.id);
-        expect(child).toBeTruthy();
-        expect(parent.reviewLoop.failure).toBeNull();
-      } finally {
-        unrelated.forEach((job, index) => {
-          job.status = statuses[index];
-        });
-      }
-    },
-  );
-
-  it('refuses a loop when its owner’s only eligible server is held by its waiting parent', async () => {
-    const parent = getJob(ids[0]);
-    parent.ownerId = 2;
-    state.eligibleServers = [{ id: 1 }];
-    state.dbHolders.set(1, parent.id);
-    // Global capacity has a free server, but it is not shared with this owner.
-    state.capacity += 1;
-    await retryLoopRound(parent.id);
-    expect(parent.reviewLoop.reviewing).toBe(false);
-    expect(parent.reviewLoop.reviewSessionId).toBeFalsy();
-    expect(parent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
-    expect(blocked).toEqual([]);
-    state.eligibleServers.push({ id: 2 });
-    const child = await queueReview(parent.id);
-    expect(child.ownerId).toBe(2);
-    expect(parent.reviewLoop.failure).toBeNull();
-    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([child.id]));
-  });
-
-  it('rechecks owner-eligible servers for a queued loop when global capacity frees', async () => {
-    const parent = getJob(ids[0]);
-    parent.ownerId = 2;
-    state.eligibleServers = [{ id: 1 }, { id: 2 }];
-    state.dbHolders.set(1, parent.id);
-    state.dbHolders.set(2, 'slot-holder');
-    const child = await queueReview(parent.id);
-    state.eligibleServers = [{ id: 1 }];
-    await closeDevSession('slot-holder');
-    expect(child.status).toBe('failed');
-    expect(child.databaseSlotQueuedAt).toBeNull();
-    expect(parent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
-    expect(blocked).toEqual([]);
-  });
-
-  it.each([2, 3])('counts a preparing review waiting on acquisition (second owner=%i)', async (ownerId) => {
-    const firstParent = getJob(ids[0]);
-    const secondParent = getJob(ids[1]);
-    Object.assign(firstParent, { ownerId: 2, dbServerId: 1 });
-    Object.assign(secondParent, { ownerId, dbServerId: 2 });
-    state.eligibleServers = [{ id: 1 }, { id: 2 }];
-    state.dbHolders.set(1, firstParent.id);
-    state.dbHolders.set(2, secondParent.id);
-    // Server 3 is free globally, but neither owner may use it.
-    getJob('slot-holder').status = 'closed';
-    const first = await queueReview(firstParent.id);
-    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([first.id]));
-    expect(first.status).toBe('preparing');
-    expect(first.databaseSlotQueuedAt).toBeNull();
-
-    await retryLoopRound(secondParent.id);
-    const second = getJob(secondParent.reviewLoop.reviewSessionId);
-    if (second) children.push(second);
-    expect(secondParent.reviewLoop.reviewing).toBe(false);
-    expect(secondParent.reviewLoop.reviewSessionId).toBeFalsy();
-    expect(secondParent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
-    expect(blocked.map((j) => j.id)).toEqual([first.id]);
-  });
-
-  it('rechecks progress after review announcement when another child has begun acquisition', async () => {
-    const firstParent = getJob(ids[0]);
-    const secondParent = getJob(ids[1]);
-    Object.assign(firstParent, { ownerId: 2, dbServerId: 1 });
-    Object.assign(secondParent, { ownerId: 3, dbServerId: 2 });
-    state.eligibleServers = [{ id: 1 }, { id: 2 }];
-    state.dbHolders.set(1, firstParent.id);
-    state.dbHolders.set(2, secondParent.id);
-    getJob('slot-holder').status = 'closed';
-    let finishAnnouncement;
-    upsertPrComment.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finishAnnouncement = resolve;
-        }),
-    );
-    try {
-      const first = await queueReview(firstParent.id);
-      expect(finishAnnouncement).toBeTypeOf('function');
-      expect(blocked).toEqual([]);
-      const second = await queueReview(secondParent.id);
-      await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([second.id]));
-      finishAnnouncement();
-      await vi.waitFor(() => expect(firstParent.reviewLoop.reviewing).toBe(false));
-      expect(first.status).toBe('failed');
-      expect(firstParent.reviewLoop.failure.reason).toMatch(/share it with the owner/);
-      expect(blocked.map((j) => j.id)).toEqual([second.id]);
-    } finally {
-      finishAnnouncement?.();
-    }
-  });
-
-  it.each(['review', 'fix', 'qa'])('fails a queued %s when every database share is revoked', async (kind) => {
-    const parent = getJob(ids[0]);
-    Object.assign(parent, { ownerId: 2, dbServerId: 1 });
-    state.eligibleServers = [{ id: 1 }, { id: 2 }];
-    state.dbHolders.set(1, parent.id);
-    state.dbHolders.set(2, 'slot-holder');
-    let child;
-    if (kind === 'review') child = await queueReview(parent.id);
-    else {
-      const extra = kind === 'fix' ? { loopFixParentId: parent.id } : { qaParentId: parent.id, qa: true };
-      child = getJob(
-        createDevSession({ provider: 1, repo: 'acme/slots', branch: 'task/slots', prompt: 'fix', ...extra })
-          .id,
-      );
-      children.push(child);
-      if (kind === 'fix') Object.assign(parent.reviewLoop, { fixing: true, fixSessionId: child.id });
-      else parent.qaLoop = { running: true, sessionId: child.id };
-    }
-    expect(child.status).toBe('queued');
-    state.eligibleServers = [];
-    // Drive waiter processing without releasing any global capacity.
-    expect(() => createDevSession({ provider: 1, repo: 'acme/slots', prompt: 'another' })).toThrow(
-      /holding a database server/,
-    );
-    expect(child.status).toBe('failed');
-    expect(child.databaseSlotQueuedAt).toBeNull();
-    const loop = kind === 'qa' ? parent.qaLoop : parent.reviewLoop;
-    expect(kind === 'fix' ? loop.fixing : kind === 'qa' ? loop.running : loop.reviewing).toBe(false);
-    expect(loop.failure.reason).toMatch(/none is shared/);
-    expect(blocked).toEqual([]);
-  });
-
-  it('ignores ordinary acquisition waiters when a loop has a free eligible server', async () => {
-    const parent = getJob(ids[0]);
-    Object.assign(parent, { ownerId: 2, dbServerId: 1 });
-    state.eligibleServers = [{ id: 1 }, { id: 2 }];
-    state.dbHolders.set(1, parent.id);
-    const ordinary = getJob('slot-holder');
-    Object.assign(ordinary, { ownerId: 3, status: 'preparing', qaParentId: null });
-    state.dbWaiters.add(ordinary.id);
-    state.capacity += 1;
-    const child = await queueReview(parent.id);
-    expect(child.status).toBe('preparing');
-    expect(parent.reviewLoop.failure).toBeNull();
-    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([child.id]));
-  });
-
-  it.each(['review', 'fix', 'qa'])(
-    'fails a polling %s child promptly when a grant change leaves only waiting parents',
-    async (kind) => {
-      const pool = await vi.importActual('../lib/dbpool.js');
-      const poolExports = await import('../lib/dbpool.js');
-      const servers = await import('../lib/dbservers.js');
-      const config = await import('../lib/config.js');
-      const cfg = config.getConfig();
-      const entries = [1, 2, 3].map((id) => ({ id, host: '127.0.0.1', port: 3306 + id }));
-      const spies = [
-        vi.spyOn(config, 'getConfig').mockReturnValue({
-          ...cfg,
-          dbPool: { enabled: true, waitTimeoutMin: 30, pollSeconds: 0.001 },
-        }),
-        vi.spyOn(servers, 'activeDbServers').mockReturnValue(entries),
-        vi.spyOn(poolExports, 'claimHolder').mockImplementation(pool.claimHolder),
-        vi.spyOn(poolExports, 'waitingForInstance').mockImplementation(pool.waitingForInstance),
-      ];
-      const parent = getJob(ids[0]);
-      const unrelated = getJob('slot-holder');
-      Object.assign(parent, { ownerId: 2, dbServerId: 1 });
-      unrelated.dbServerId = 2;
-      state.projects[0].dbPoolEnabled = true;
-      state.capacity += 1;
-      pool.reclaimInstance(parent, 1);
-      pool.reclaimInstance(unrelated, 2);
-      let shared = true;
-      const policy = vi.fn((job, server) => server.id === 1 || (server.id === 2 && shared));
-      pool.setDbServerFilter(policy);
-      poolExports.eligibleDbServers.mockImplementation(pool.eligibleDbServers);
-      acquireInstance.mockImplementation(pool.acquireInstance);
-      releaseInstance.mockImplementation(pool.releaseInstance);
-      let child;
-      try {
-        if (kind === 'review') child = await queueReview(parent.id);
-        else {
-          const extra = kind === 'fix' ? { loopFixParentId: parent.id } : { qaParentId: parent.id, qa: true };
-          child = getJob(
-            createDevSession({
-              provider: 1,
-              repo: 'acme/slots',
-              branch: 'task/slots',
-              prompt: kind,
-              ...extra,
-            }).id,
-          );
-          children.push(child);
-          if (kind === 'fix') Object.assign(parent.reviewLoop, { fixing: true, fixSessionId: child.id });
-          else parent.qaLoop = { running: true, sessionId: child.id };
-        }
-        await vi.waitFor(() => expect(pool.waitingForInstance(child.id)).toBe(true));
-        expect(child.status).toBe('preparing');
-        shared = false;
-        policy.mockClear();
-        // Prove acquisition actually polls the changed policy before checking its outcome.
-        await vi.waitFor(() =>
-          expect(policy.mock.calls.filter(([, s]) => s.id === 2).length).toBeGreaterThan(1),
-        );
-        await vi.waitFor(() => expect(child.status).toBe('failed'));
-        expect(child.error).toMatch(/parents hold every database slot.*share it with the owner/i);
-        const loop = kind === 'qa' ? parent.qaLoop : parent.reviewLoop;
-        expect(kind === 'fix' ? loop.fixing : kind === 'qa' ? loop.running : loop.reviewing).toBe(false);
-        expect(loop.failure.reason).toBe(child.error);
-        expect(loop.reviewerFailed).not.toBe(true);
-        expect(pool.waitingForInstance(child.id)).toBe(false);
-        expect(child.dbServerId).toBeFalsy();
-        expect(releaseInstance).toHaveBeenCalledWith(child);
-        expect(pool.claimHolder(1)).toBe(parent.id);
-        expect(pool.claimHolder(2)).toBe(unrelated.id);
-      } finally {
-        if (child) await closeDevSession(child.id);
-        await pool.releaseInstance(parent);
-        await pool.releaseInstance(unrelated);
-        pool.setDbServerFilter(() => true);
-        pool._resetForTests();
-        poolExports.eligibleDbServers.mockReset().mockImplementation(() => state.eligibleServers);
-        acquireInstance.mockReset();
-        releaseInstance.mockReset();
-        for (const spy of spies.reverse()) spy.mockRestore();
-      }
-    },
-  );
-
-  it('fails an accepted wait if pool reduction leaves only its parent holding capacity', async () => {
-    const unrelated = devSessionRecords().filter((j) => ![ids[0], 'slot-holder'].includes(j.id));
-    const statuses = unrelated.map((j) => j.status);
-    for (const job of unrelated) job.status = 'closed';
-    state.capacity = 2;
-    try {
-      const parent = getJob(ids[0]);
-      const child = await queueReview(parent.id);
-      state.capacity = 1;
-      await closeDevSession('slot-holder');
-      expect(blocked).toEqual([]);
-      expect(child.status).toBe('failed');
-      expect(child.databaseSlotQueuedAt).toBeNull();
-      expect(parent.reviewLoop.reviewing).toBe(false);
-      expect(parent.reviewLoop.failure).toMatchObject({
-        reason: expect.stringMatching(/parents hold every database slot.*enable another database server/i),
-      });
-      setDraining(true);
-      expect(maintenanceState(devSessionRecords()).ready).toBe(true);
-      setDraining(false);
-      state.capacity = 2;
-      const retry = await queueReview(parent.id);
-      expect(parent.reviewLoop.failure).toBeNull();
-      await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([retry.id]));
-    } finally {
-      unrelated.forEach((job, index) => {
-        job.status = statuses[index];
-      });
-    }
-  });
-
-  it.each(['fix', 'qa'])('reports a pool-reduction failure to the %s parent', async (kind) => {
-    const parent = getJob(ids[0]);
-    const extra = kind === 'fix' ? { loopFixParentId: parent.id } : { qaParentId: parent.id, qa: true };
-    const child = getJob(
-      createDevSession({ provider: 1, repo: 'acme/slots', branch: 'task/slots', prompt: 'fix', ...extra }).id,
-    );
-    children.push(child);
-    if (kind === 'fix') Object.assign(parent.reviewLoop, { fixing: true, fixSessionId: child.id });
-    else parent.qaLoop = { running: true, sessionId: child.id };
-    const unrelated = devSessionRecords().filter((j) => ![parent.id, child.id].includes(j.id));
-    const statuses = unrelated.map((j) => j.status);
-    state.capacity = 1;
-    try {
-      for (const job of unrelated) if (job.id !== 'slot-holder') job.status = 'closed';
-      await closeDevSession('slot-holder');
-      expect(child.status).toBe('failed');
-      expect(child.databaseSlotQueuedAt).toBeNull();
-      expect(blocked).toEqual([]);
-      const loop = kind === 'fix' ? parent.reviewLoop : parent.qaLoop;
-      expect(kind === 'fix' ? loop.fixing : loop.running).toBe(false);
-      expect(loop.failure.reason).toMatch(/parents hold every database slot/);
-    } finally {
-      unrelated.forEach((job, index) => {
-        job.status = statuses[index];
-      });
-    }
-  });
-
   it('services existing waiters before a new session can claim added capacity', async () => {
-    const first = await queueReview(ids[0]);
-    const second = await queueReview(ids[1]);
+    const first = await queueQa(ids[0]);
+    const second = await queueQa(ids[1]);
     state.capacity += 1;
     expect(() => createDevSession({ provider: 1, repo: 'acme/slots', prompt: 'new worker' })).toThrow(
       /holding a database server/,
@@ -1441,7 +976,7 @@ describe('loop children waiting for a database slot', () => {
       const holder = getJob('slot-holder');
       holder.status = 'closed';
       state.capacity -= 1;
-      const first = await queueReview(ids[0]);
+      const first = await queueQa(ids[0]);
       const reopen = () =>
         method === 'explicit' ? reopenDevSession(holder.id) : sendDevMessage(holder.id, 'continue');
 
@@ -1457,7 +992,7 @@ describe('loop children waiting for a database slot', () => {
   );
 
   it('starts accepted loop children during maintenance drain', async () => {
-    const child = await queueReview(ids[0]);
+    const child = await queueQa(ids[0]);
     setDraining(true);
     expect(maintenanceState(devSessionRecords()).ready).toBe(false);
     await closeDevSession('slot-holder');
@@ -1466,115 +1001,15 @@ describe('loop children waiting for a database slot', () => {
   });
 
   it('does not start queued loop children during shutdown', async () => {
-    const child = await queueReview(ids[0]);
+    const child = await queueQa(ids[0]);
     await stopAllJobProcesses();
     await closeDevSession('slot-holder');
     expect(blocked).toEqual([]);
     expect(child.status).toBe('queued');
   });
 
-  it('cancels superseded queued QA so the current review gets the next slot', async () => {
-    const parent = getJob(ids[0]);
-    const qa = createDevSession({
-      provider: 1,
-      repo: 'acme/slots',
-      branch: 'task/slots',
-      qaParentId: parent.id,
-      qa: true,
-    });
-    const child = getJob(qa.id);
-    children.push(child);
-    // The later-push transition in reopenLoopForPush keeps running QA tracked as stale.
-    parent.qaLoop = { running: true, sessionId: null, staleSessionId: child.id };
-    const review = await queueReview(parent.id);
-    expect(parent.qaLoop.staleSessionId).toBe(child.id);
-    await closeDevSession('slot-holder');
-    await vi.waitFor(() => expect(child.status).toBe('closed'));
-    expect(blocked.map((j) => j.id)).toEqual([review.id]);
-    expect(review.status).toBe('preparing');
-    expect(parent.qaLoop).toMatchObject({ running: false, staleSessionId: null });
-  });
-
-  it('queues rounds at capacity without failure, refuses duplicate retries, and starts them FIFO on close', async () => {
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
-    let first, second;
-    try {
-      first = await queueReview(ids[0]);
-      second = await queueReview(ids[1]);
-    } finally {
-      clock.mockRestore();
-    }
-    expect(second.databaseSlotQueuedAt).toBeGreaterThan(first.databaseSlotQueuedAt);
-    expect(first).toMatchObject({ status: 'queued', workDir: null, dbServerId: null });
-    expect(second.status).toBe('queued');
-    expect(blocked).toEqual([]);
-    expect(getJob(ids[0]).reviewLoop).toMatchObject({ rounds: 1, failure: null, reviewing: true });
-    expect(workerSummary(getJob(ids[0])).reviewLoop.waitingForDatabase).toBe(true);
-    await expect(retryLoopRound(ids[0], { providerId: 99 })).rejects.toThrow(
-      /Nothing to retry: the loop is waiting for a database slot and will start automatically/,
-    );
-    expect(getJob(ids[0]).reviewLoop.reviewSessionId).toBe(first.id);
-    expect(() => createDevSession({ provider: 1, repo: 'acme/slots', prompt: 'new worker' })).toThrow(
-      /holding a database server/,
-    );
-
-    await closeDevSession('slot-holder');
-    expect(blocked.map((j) => j.id)).toEqual([first.id]);
-    expect(first.status).toBe('preparing');
-    expect(second.status).toBe('queued');
-    expect(workerSummary(getJob(ids[0])).reviewLoop.waitingForDatabase).toBe(false);
-    await closeDevSession(first.id);
-    expect(blocked.map((j) => j.id)).toEqual([first.id, second.id]);
-    expect(second.status).toBe('preparing');
-  });
-
-  it('puts fix and QA children in the same FIFO and removes a closed waiter', async () => {
-    for (const extra of [
-      { loopFixParentId: ids[0], prompt: 'fix findings' },
-      { qaParentId: ids[1], qa: true },
-    ]) {
-      const child = createDevSession({ provider: 1, repo: 'acme/slots', branch: 'task/slots', ...extra });
-      children.push(getJob(child.id));
-      if (extra.loopFixParentId) {
-        getJob(ids[0]).reviewLoop.fixSessionId = child.id;
-        getJob(ids[0]).reviewLoop.fixing = true;
-      } else getJob(ids[1]).qaLoop = { running: true, sessionId: child.id };
-      expect(child.status).toBe('queued');
-      expect(child.databaseSlotQueuedAt).toBeTypeOf('number');
-    }
-    await closeDevSession(children[0].id);
-    expect(blocked).toEqual([]);
-    await closeDevSession('slot-holder');
-    expect(blocked.map((j) => j.id)).toEqual([children[1].id]);
-  });
-
-  it('keeps a persisted waiter queued through restart until capacity is released', async () => {
-    const child = await queueReview(ids[0]);
-    const storedChild = { ...child, events: [] };
-    const parent = getJob(ids[0]);
-    // Only the queued child was interrupted in this simulated boot; other owners
-    // are already running, as they are after resource recovery completes.
-    state.stored = [storedChild];
-    await initJobs({ deferPolling: true });
-    const restored = getJob(child.id);
-    children = [restored];
-    expect(restored).toMatchObject({ status: 'interrupted', restartPending: true });
-    const unrelated = devSessionRecords().filter((j) => j.id !== child.id && j.restartPending);
-    for (const job of unrelated) job.restartPending = false;
-    try {
-      resumeRestartedSessions();
-    } finally {
-      for (const job of unrelated) job.restartPending = true;
-    }
-    expect(restored.status).toBe('queued');
-    expect(parent.reviewLoop.failure).toBeNull();
-    expect(blocked).toEqual([]);
-    await closeDevSession('slot-holder');
-    expect(blocked.map((j) => j.id)).toEqual([child.id]);
-  });
-
   it('does not start queued work after its parent closes', async () => {
-    const child = await queueReview(ids[0]);
+    const child = await queueQa(ids[0]);
     await closeDevSession(ids[0]);
     await vi.waitFor(() => expect(child.status).toBe('closed'));
     expect(blocked).toEqual([]);
@@ -1708,30 +1143,6 @@ describe('createDevSession: the validation gauntlet', () => {
     ]);
   });
 
-  it('announces a background review with the server identity outside the request', async () => {
-    const gh = await vi.importActual('../lib/github.js');
-    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
-    upsertPrComment.mockImplementationOnce(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await gh.githubRest({ githubToken: 'server-token' }, 'POST', '/background-review');
-    });
-    try {
-      gh.asGithubUser('request-token', () =>
-        createDevSession({
-          ...base,
-          review: true,
-          branch: 'feature/request-context',
-          prNumber: 123,
-          ownerId: 2,
-        }),
-      );
-      await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
-      expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer server-token');
-    } finally {
-      fetch.mockRestore();
-    }
-  });
-
   it('refuses a provider whose whole group is inactive', () => {
     state.provider = { ...state.provider, active: false };
     state.group = [];
@@ -1752,23 +1163,6 @@ describe('createDevSession: the validation gauntlet', () => {
     }
   });
 
-  it('a session is a review or a QA run, never both, and neither runs local', () => {
-    expect(() => createDevSession({ ...base, review: true, qa: true, branch: 'f' })).toThrow(
-      /either a code review or a QA run/,
-    );
-    expect(() => createDevSession({ ...base, qa: true, local: true, branch: 'f' })).toThrow(
-      /workspace clone of its own/,
-    );
-    expect(() => createDevSession({ ...base, review: true, local: true, branch: 'f' })).toThrow(
-      /workspace clone of its own/,
-    );
-  });
-
-  it('review and QA both need the branch they act on', () => {
-    expect(() => createDevSession({ ...base, review: true })).toThrow(/needs the branch to review/);
-    expect(() => createDevSession({ ...base, qa: true })).toThrow(/needs the pull request branch/);
-  });
-
   it('a chat session with nothing to say does not start', () => {
     expect(() => createDevSession({ ...base, prompt: '   ' })).toThrow(/first message cannot be empty/);
   });
@@ -1777,7 +1171,7 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(() => createDevSession({ ...base, prompt: '', preview: true })).toThrow(
       /preview needs the branch to run/,
     );
-    expect(() => createDevSession({ ...base, preview: true, review: true, branch: 'feature' })).toThrow(
+    expect(() => createDevSession({ ...base, preview: true, qa: true, branch: 'feature' })).toThrow(
       /preview only prepares and serves its worktree/,
     );
   });
@@ -1794,33 +1188,11 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(() => createDevSession(base)).toThrow(/holding a database server; close one first/);
   });
 
-  it('the review loop only arms a durable task session, never a review, QA run, auto-closing errand or local one', () => {
-    for (const extra of [
-      { review: true, branch: 'f' },
-      { qa: true, branch: 'f' },
-      { local: true },
-      { autoClose: true },
-    ]) {
-      expect(() => createDevSession({ ...base, reviewLoop: true, ...extra })).toThrow(
-        /review loop only applies/,
-      );
-      expect(() => createDevSession({ ...base, reviewLoop: true, qaLoop: true, ...extra })).toThrow(
-        /loop only applies/,
-      );
-    }
-  });
-
-  it('the QA loop queues behind the review loop, never on its own', () => {
-    expect(() => createDevSession({ ...base, qaLoop: true })).toThrow(/arm the review loop too/);
-  });
-
   it('an orchestrator only chats: no review, QA, local mode, loops, autoClose or branch', () => {
     for (const extra of [
-      { review: true },
       { qa: true },
       { local: true },
       { autoClose: true },
-      { reviewLoop: true },
       { qaLoop: true },
       { branch: 'feature' },
     ]) {
@@ -1834,7 +1206,7 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(() => createDevSession({ ...base, readOnly: true })).toThrow(
       /worker session of some orchestrator/,
     );
-    for (const extra of [{ orchestrator: true }, { reviewLoop: true }, { autoClose: true }]) {
+    for (const extra of [{ orchestrator: true }, { qaLoop: true }, { autoClose: true }]) {
       expect(() => createDevSession({ ...base, readOnly: true, parentId: 'x', ...extra })).toThrow(
         /only reads and reports/,
       );
@@ -3232,482 +2604,6 @@ describe('spawnWorkerSession', () => {
     }
   });
 
-  it.each([
-    ...['review', 'fix'].flatMap((kind) =>
-      ['answered', 'disarmed', 'replaced', 'new-question', 'closing', 'fresh'].map((stale) => [
-        kind,
-        true,
-        stale,
-      ]),
-    ),
-    ['review', true],
-    ['fix', true],
-    ['review', false],
-    ['fix', false],
-    ['review', true, 'fresh', 'failed'],
-    ['fix', true, 'fresh', 'failed'],
-    ['review', true, undefined, 'closed'],
-    ['fix', true, undefined, 'closed'],
-  ])(
-    'forwards a follow-up %s question only from the current child (%s; stale=%s; worker=%s)',
-    async (kind, current, stale, workerStatus = 'idle') => {
-      const orchestrator = getJob('question-orch');
-      const worker = getJob('question-worker');
-      const job = getJob('question-child');
-      Object.assign(orchestrator, {
-        status: 'idle',
-        awaitingAnswer: true,
-        pendingWorkerNotices: [],
-        unattendedTurns: 0,
-      });
-      Object.assign(worker, {
-        status: workerStatus,
-        reviewLoop: {
-          rounds: 1,
-          reviewing: kind === 'review',
-          fixing: kind === 'fix',
-          [kind === 'review' ? 'reviewSessionId' : 'fixSessionId']: current ? job.id : 'replaced-child',
-        },
-      });
-      Object.assign(job, {
-        status: 'idle',
-        awaitingAnswer: true,
-        askText: 'Which DB?',
-        autoClose: true,
-        loopParentId: kind === 'review' ? worker.id : null,
-        loopFixParentId: kind === 'fix' ? worker.id : null,
-      });
-      const eventCount = worker.events.length;
-      const { children, settled, restore } = fakeClaude();
-      try {
-        const done = settled(job);
-        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
-        children[0].emitLines(
-          init,
-          replay('Postgres'),
-          said('<ask-user>\nSeed it too?\n</ask-user>'),
-          result('Asked.'),
-        );
-        await vi.waitFor(() => expect(children[0].ended).toBe(true));
-        children[0].emit('close', 0);
-        await done;
-        expect(job.status).toBe('idle');
-        expect(job.awaitingAnswer).toBe(true);
-        expect(job.askText).toBe('Seed it too?');
-        expect(worker.reviewLoop[kind === 'review' ? 'reviewing' : 'fixing']).toBe(true);
-        const events = worker.events.slice(eventCount).filter((e) => e.text?.includes('stopped to ask'));
-        expect(events).toHaveLength(current && workerStatus === 'idle' ? 1 : 0);
-        expect(orchestrator.pendingWorkerNotices).toHaveLength(current && workerStatus !== 'closed' ? 1 : 0);
-        if (current && workerStatus !== 'closed') {
-          expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
-            workerId: worker.id,
-            kind: 'child-question',
-            childId: job.id,
-            questionSeq: job.questionSeq,
-            text: expect.stringContaining(`the ${kind} is paused on a question`),
-          });
-          expect(orchestrator.pendingWorkerNotices[0].text).toContain(
-            `read_worker_question({id: '${worker.id}'})`,
-          );
-        }
-        if (stale) {
-          if (stale === 'answered') job.awaitingAnswer = false;
-          if (stale === 'disarmed') worker.reviewLoop = null;
-          if (stale === 'replaced')
-            worker.reviewLoop[kind === 'review' ? 'reviewSessionId' : 'fixSessionId'] = 'new-child';
-          if (stale === 'new-question') job.questionSeq++;
-          if (stale === 'closing') job.closing = true;
-          const before = orchestrator.events.length;
-          orchestrator.awaitingAnswer = false;
-          deliverWorkerNotices(orchestrator);
-          expect(orchestrator.pendingWorkerNotices).toHaveLength(0);
-          const fresh = stale === 'fresh';
-          expect(orchestrator.events.slice(before).filter((e) => e.kind === 'user')).toHaveLength(
-            fresh ? 1 : 0,
-          );
-          expect(orchestrator.unattendedTurns).toBe(fresh ? 1 : 0);
-          expect(children).toHaveLength(fresh ? 2 : 1);
-          if (fresh) {
-            const done = settled(orchestrator);
-            children[1].emitLines(init, result('Noted.'));
-            await vi.waitFor(() => expect(children[1].ended).toBe(true));
-            children[1].emit('close', 0);
-            await done;
-          }
-        }
-      } finally {
-        delete job.closing;
-        job.status = worker.status = orchestrator.status = 'closed';
-        restore();
-      }
-    },
-  );
-
-  it.each(
-    ['review', 'fix'].flatMap((kind) =>
-      [false, true].flatMap((asking) =>
-        [false, true].flatMap((current) =>
-          [false, true].flatMap((autoClose) =>
-            ['idle', 'failed', 'closed'].map((workerStatus) => [
-              kind,
-              asking,
-              current,
-              autoClose,
-              workerStatus,
-            ]),
-          ),
-        ),
-      ),
-    ),
-  )(
-    'recovers a failed %s answer (asking=%s; current=%s; autoClose=%s; workerStatus=%s)',
-    async (kind, asking, current, autoClose, workerStatus) => {
-      const orchestrator = getJob('question-orch');
-      const worker = getJob('question-worker');
-      const job = getJob('question-child');
-      const active = kind === 'review' ? 'reviewing' : 'fixing';
-      const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
-      Object.assign(orchestrator, {
-        status: 'idle',
-        awaitingAnswer: true,
-        pendingWorkerNotices: [],
-      });
-      Object.assign(worker, {
-        status: workerStatus,
-        reviewLoop: { rounds: 1, [active]: true, [childId]: current ? job.id : 'replacement' },
-      });
-      Object.assign(job, {
-        status: 'idle',
-        awaitingAnswer: true,
-        autoClose,
-        loopParentId: kind === 'review' ? worker.id : null,
-        loopFixParentId: kind === 'fix' ? worker.id : null,
-      });
-      const { children, restore } = fakeClaude();
-      try {
-        releaseInstance.mockClear();
-        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
-        children[0].emitLines(init, replay('Postgres'));
-        if (asking) children[0].emitLines(said('<ask-user>\nSeed it too?\n</ask-user>'));
-        children[0].emit('close', 1);
-        const released = current && !asking && autoClose;
-        await vi.waitFor(() => expect(job.status).toBe(released ? 'failed' : 'idle'));
-        await vi.waitFor(() => expect(worker.reviewLoop[active]).toBe(!current || asking));
-        if (released) expect(releaseInstance).toHaveBeenCalledWith(job);
-        else expect(releaseInstance).not.toHaveBeenCalled();
-        expect(getJob(job.id)).toBe(job); // Failed transcript/work remain recoverable.
-        expect(job.error).toBeTruthy();
-        expect(job.awaitingAnswer).toBe(asking);
-        expect(worker.reviewLoop[active]).toBe(!current || asking);
-        expect(orchestrator.pendingWorkerNotices).toHaveLength(current && workerStatus !== 'closed' ? 1 : 0);
-        if (current && asking) {
-          expect(worker.reviewLoop.failure).toBeUndefined();
-          expect(worker.reviewLoop[childId]).toBe(job.id);
-          if (workerStatus !== 'closed')
-            expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
-              kind: 'child-question',
-              childId: job.id,
-              questionSeq: job.questionSeq,
-            });
-        } else if (current && !asking) {
-          expect(worker.reviewLoop.failure).toMatchObject({ round: 1, reason: job.error });
-          if (workerStatus !== 'closed')
-            expect(orchestrator.pendingWorkerNotices[0]).toMatchObject({
-              workerId: worker.id,
-              kind: 'loop',
-              text: expect.stringContaining('retry_review'),
-            });
-          if (workerStatus === 'failed') {
-            const notice = orchestrator.pendingWorkerNotices[0].text;
-            expect(notice).toContain('send_to_worker');
-            expect(notice).toContain('before retrying');
-          }
-          worker.status = 'running'; // Leave the retry armed without starting another real round.
-          await expect(retryLoopRound(worker.id)).resolves.toMatchObject({ started: false });
-        } else if (!current) {
-          expect(worker.reviewLoop.failure).toBeUndefined();
-          expect(worker.reviewLoop[childId]).toBe('replacement');
-        }
-      } finally {
-        job.status = worker.status = orchestrator.status = 'closed';
-        restore();
-      }
-    },
-  );
-
-  it.each(['review', 'fix'].flatMap((kind) => [false, true].map((replace) => [kind, replace])))(
-    'releases failed %s resources before retry guidance (replacement=%s)',
-    async (kind, replace) => {
-      const orchestrator = getJob('question-orch');
-      const worker = getJob('question-worker');
-      const job = getJob('question-child');
-      const active = kind === 'review' ? 'reviewing' : 'fixing';
-      const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
-      Object.assign(orchestrator, { status: 'idle', awaitingAnswer: true, pendingWorkerNotices: [] });
-      Object.assign(worker, {
-        status: 'idle',
-        reviewLoop: { rounds: 1, [active]: true, [childId]: job.id },
-      });
-      Object.assign(job, {
-        status: 'idle',
-        awaitingAnswer: true,
-        autoClose: true,
-        loopParentId: kind === 'review' ? worker.id : null,
-        loopFixParentId: kind === 'fix' ? worker.id : null,
-      });
-      let finishRelease;
-      delete job.failureUnreported;
-      releaseInstance.mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishRelease = resolve;
-          }),
-      );
-      const { children, restore } = fakeClaude();
-      const capacity = state.capacity;
-      try {
-        state.claimsServer = true;
-        state.capacity = 1000;
-        state.capacity -= devSessionSlots(worker.repo); // Fill the pool with the existing sessions.
-        expect(devSessionSlots(worker.repo)).toBe(0);
-        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
-        children[0].emitLines(init, replay('Postgres'));
-        children[0].emit('close', 1);
-        await vi.waitFor(() => expect(finishRelease).toBeTypeOf('function'));
-        expect(worker.reviewLoop[active]).toBe(true);
-        expect(orchestrator.pendingWorkerNotices).toHaveLength(0);
-        if (replace) worker.reviewLoop[childId] = 'replacement';
-        finishRelease();
-        await vi.waitFor(() => {
-          if (replace) expect(job.failureUnreported).toBe(true);
-          else expect(orchestrator.pendingWorkerNotices).toHaveLength(1);
-        });
-        expect(devSessionSlots(worker.repo)).toBe(1);
-        expect(getJob(job.id)).toBe(job);
-        expect(job.events.some((e) => e.kind === 'stderr')).toBe(true);
-        expect(worker.reviewLoop[active]).toBe(replace);
-        expect(worker.reviewLoop.pendingResult).toBeUndefined();
-        if (replace) {
-          expect(worker.reviewLoop[childId]).toBe('replacement');
-          expect(worker.reviewLoop.failure).toBeUndefined();
-          expect(orchestrator.pendingWorkerNotices).toHaveLength(0);
-        } else {
-          expect(worker.reviewLoop.failure).toMatchObject({ round: 1, reason: job.error });
-        }
-      } finally {
-        finishRelease?.();
-        job.status = worker.status = orchestrator.status = 'closed';
-        state.claimsServer = false;
-        state.capacity = capacity;
-        restore();
-      }
-    },
-  );
-
-  it.each(['review', 'fix'])(
-    'blocks both recovery paths until failed %s cleanup and notification finish',
-    async (kind) => {
-      const orchestrator = getJob('question-orch');
-      const worker = getJob('question-worker');
-      const job = getJob('question-child');
-      const originalWorkDir = job.workDir;
-      const active = kind === 'review' ? 'reviewing' : 'fixing';
-      const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
-      Object.assign(orchestrator, { status: 'idle', awaitingAnswer: true, pendingWorkerNotices: [] });
-      Object.assign(worker, {
-        status: 'idle',
-        reviewLoop: { rounds: 1, [active]: true, [childId]: job.id },
-      });
-      Object.assign(job, {
-        status: 'idle',
-        awaitingAnswer: true,
-        autoClose: true,
-        loopParentId: kind === 'review' ? worker.id : null,
-        loopFixParentId: kind === 'fix' ? worker.id : null,
-      });
-      let finishRelease;
-      releaseInstance.mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishRelease = resolve;
-          }),
-      );
-      const { children, settled, restore } = fakeClaude();
-      try {
-        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
-        children[0].emitLines(init, replay('Postgres'));
-        children[0].emit('close', 1);
-        await vi.waitFor(() => expect(finishRelease).toBeTypeOf('function'));
-        const workDir = job.workDir;
-        const dbServerId = job.dbServerId;
-        const allocations = acquireInstance.mock.calls.length;
-        const events = job.events.length;
-        expect(job.status).toBe('failed');
-        expect(() => reopenDevSession(job.id)).toThrow(/finish.*cleanup/);
-        expect(() => sendDevMessage(job.id, 'Recover')).toThrow(/finish.*cleanup/);
-        expect(job.workDir).toBe(workDir);
-        expect(job.dbServerId).toBe(dbServerId);
-        expect(acquireInstance.mock.calls).toHaveLength(allocations);
-        expect(job.events).toHaveLength(events);
-        expect(children).toHaveLength(1);
-        expect(worker.reviewLoop[active]).toBe(true);
-        expect(orchestrator.pendingWorkerNotices).toHaveLength(0);
-        // An unrelated owner turn must not discard the child while cleanup waits.
-        const ownerDone = settled(worker);
-        sendDevMessage(worker.id, 'Report progress');
-        children[1].emitLines(
-          init,
-          replay('Report progress'),
-          said('<ask-user>\nContinue?\n</ask-user>'),
-          result('Asked.'),
-        );
-        await vi.waitFor(() => expect(children[1].ended).toBe(true));
-        children[1].emit('close', 0);
-        await ownerDone;
-        expect(worker.reviewLoop[active]).toBe(true);
-        expect(worker.reviewLoop[childId]).toBe(job.id);
-        orchestrator.pendingWorkerNotices = []; // Ignore the unrelated owner question.
-        finishRelease();
-        await vi.waitFor(() => expect(worker.reviewLoop[active]).toBe(false));
-        expect(worker.reviewLoop.failure).toMatchObject({ reason: job.error });
-        expect(orchestrator.pendingWorkerNotices).toHaveLength(1);
-        // Recovery after retirement may allocate; no old failure callback can
-        // clear that recovering lifecycle or release its newly acquired resources.
-        let finishAcquire;
-        acquireInstance.mockImplementationOnce(
-          () =>
-            new Promise((resolve, reject) => {
-              finishAcquire = reject;
-            }),
-        );
-        expect(() => reopenDevSession(job.id)).not.toThrow();
-        await vi.waitFor(() => expect(finishAcquire).toBeTypeOf('function'));
-        expect(job.status).toBe('preparing');
-        expect(acquireInstance.mock.calls).toHaveLength(allocations + 1);
-        const releases = releaseInstance.mock.calls.length;
-        // Stop before workspace preparation so this remains a process-free test.
-        finishAcquire(new Error('fixture: stop before workspace preparation'));
-        await vi.waitFor(() => expect(releaseInstance.mock.calls).toHaveLength(releases + 1));
-      } finally {
-        finishRelease?.();
-        job.status = worker.status = orchestrator.status = 'closed';
-        job.workDir = originalWorkDir;
-        restore();
-      }
-    },
-  );
-
-  it.each(['review', 'fix'])(
-    'rejects reopening a failed %s child when its close outlasts retirement',
-    async (kind) => {
-      const orchestrator = getJob('question-orch');
-      const worker = getJob('question-worker');
-      const job = getJob('question-child');
-      const originalWorkDir = job.workDir;
-      const active = kind === 'review' ? 'reviewing' : 'fixing';
-      const childId = kind === 'review' ? 'reviewSessionId' : 'fixSessionId';
-      Object.assign(orchestrator, { status: 'idle', awaitingAnswer: true, pendingWorkerNotices: [] });
-      Object.assign(worker, {
-        status: 'idle',
-        reviewLoop: { rounds: 1, [active]: true, [childId]: job.id },
-      });
-      Object.assign(job, {
-        status: 'idle',
-        awaitingAnswer: true,
-        autoClose: true,
-        loopParentId: kind === 'review' ? worker.id : null,
-        loopFixParentId: kind === 'fix' ? worker.id : null,
-      });
-      let finishRelease;
-      let finishDrop;
-      let closing;
-      releaseInstance.mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishRelease = resolve;
-          }),
-      );
-      dropSessionDatabase.mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishDrop = resolve;
-          }),
-      );
-      const { children, restore } = fakeClaude();
-      try {
-        sendDevMessage(job.id, 'Postgres', undefined, { instruction: true });
-        children[0].emitLines(init, replay('Postgres'));
-        children[0].emit('close', 1);
-        await vi.waitFor(() => expect(finishRelease).toBeTypeOf('function'));
-        expect(job.status).toBe('failed');
-        closing = closeDevSession(job.id);
-        await vi.waitFor(() => expect(finishDrop).toBeTypeOf('function'));
-        finishRelease();
-        await vi.waitFor(() => expect(orchestrator.pendingWorkerNotices).toHaveLength(1));
-        expect(worker.reviewLoop[active]).toBe(false);
-        expect(job.closing).toBe(true);
-        expect(job.status).toBe('failed');
-        const allocations = acquireInstance.mock.calls.length;
-        const workDir = job.workDir;
-        const dbServerId = job.dbServerId;
-        const events = job.events.length;
-        expect(() => reopenDevSession(job.id)).toThrow(/finish closing/);
-        expect(acquireInstance.mock.calls).toHaveLength(allocations);
-        expect(job.workDir).toBe(workDir);
-        expect(job.dbServerId).toBe(dbServerId);
-        expect(job.events).toHaveLength(events);
-        expect(job.status).toBe('failed');
-        expect(children).toHaveLength(1);
-      } finally {
-        finishRelease?.();
-        // Keep the shared fixture's record for the remaining question tests.
-        job.autoClose = false;
-        finishDrop?.();
-        await closing;
-        job.status = worker.status = orchestrator.status = 'closed';
-        job.workDir = originalWorkDir;
-        restore();
-      }
-      expect(job.closing).toBeUndefined();
-      expect(job.status).toBe('closed');
-    },
-  );
-
-  it('rejects answers while an idle asking session is releasing its database', async () => {
-    const job = getJob('question-child');
-    Object.assign(job, {
-      status: 'idle',
-      awaitingAnswer: true,
-      autoClose: false,
-      loopParentId: null,
-      loopFixParentId: null,
-    });
-    let finishDrop;
-    dropSessionDatabase.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finishDrop = resolve;
-        }),
-    );
-    const { children, restore } = fakeClaude();
-    const closing = closeDevSession(job.id);
-    try {
-      await vi.waitFor(() => expect(finishDrop).toBeTypeOf('function'));
-      expect(job.closing).toBe(true);
-      expect(job.status).toBe('idle');
-      expect(() => sendDevMessage(job.id, 'Use Postgres', undefined, { instruction: true })).toThrow(
-        /finish closing/,
-      );
-      expect(job.awaitingAnswer).toBe(true);
-      expect(children).toHaveLength(0);
-    } finally {
-      finishDrop();
-      await closing;
-      restore();
-    }
-    expect(job.status).toBe('closed');
-  });
-
   it('marks a cut in the questions the inbox shows rather than dropping the rest unseen', async () => {
     const job = getJob('bg-claude');
     job.status = 'idle';
@@ -4316,27 +3212,6 @@ describe('spawnWorkerSession', () => {
     expect(workerSessionsFor(getJob('orch-b'))).toEqual([]);
   });
 
-  // Last in this block: these create sessions, which would show up in the listing test above.
-  it('arms the loops on the worker only when the spawn asked for them', () => {
-    const looped = spawnWorkerSession(getJob('orch-a'), {
-      title: 'Loop',
-      prompt: 'x',
-      reviewLoop: true,
-      qaLoop: true,
-    });
-    expect(looped.reviewLoop).not.toBeNull();
-    expect(looped.qaLoop).not.toBeNull();
-    const plain = spawnWorkerSession(getJob('orch-a'), { title: 'No loop', prompt: 'x' });
-    expect(plain.reviewLoop).toBeNull();
-    expect(plain.qaLoop).toBeNull();
-  });
-
-  it('refuses a QA loop with no review loop to queue behind', () => {
-    expect(() =>
-      spawnWorkerSession(getJob('orch-a'), { title: 'QA only', prompt: 'x', qaLoop: true }),
-    ).toThrow(/arm the review loop too/);
-  });
-
   it('a spawn that names nothing runs on the runtime the orchestration was started with', () => {
     // No project worker runtime here (beforeEach), so 'low' can only be the pick.
     const picked = spawnWorkerSession(getJob('orch-c'), { title: 'Picked', prompt: 'x' });
@@ -4402,46 +3277,6 @@ describe('spawnWorkerSession: project targets and tooling fixes', () => {
   afterEach(() => {
     setSessionProjectFilter(() => true);
     getJob('tool-orch').ownerId = null;
-  });
-
-  it('targets a companion project while retaining ownership, notices, spend and close behavior', async () => {
-    const parent = getJob('tool-orch');
-    parent.ownerId = 2;
-    parent.workerRuntime = { providerId: 1, model: 'claude-fable-5-1', effort: 'high' };
-    state.projects[1] = { ...dashboard, id: 12, isSelf: false };
-    const allowed = vi.fn(() => true);
-    setSessionProjectFilter(allowed);
-    const started = spawnWorkerSession(parent, {
-      prompt: 'Implement the companion change',
-      repo: ' ACME/Dashboard ',
-      branch: 'companion-base',
-      reviewLoop: true,
-      qaLoop: true,
-    });
-    const worker = getJob(started.id);
-    expect(worker).toMatchObject({
-      repo: dashboard.repo,
-      projectId: 12,
-      parentId: parent.id,
-      ownerId: 2,
-      startBranch: 'companion-base',
-      effort: 'low',
-      toolingFor: null,
-    });
-    expect(allowed).toHaveBeenCalledWith({ ownerId: 2 }, state.projects[1]);
-    expect(worker.reviewLoop).not.toBeNull();
-    expect(worker.qaLoop).not.toBeNull();
-    expect(workerSessionsFor(parent)).toContain(worker);
-    expect(workerSessionsFor({ id: 'another-orchestrator' })).not.toContain(worker);
-    expect(workerSummary(worker).repo).toBe(dashboard.repo);
-    const before = sessionUsage(parent).costUsd || 0;
-    worker.costUsd = 0.25;
-    expect(sessionUsage(parent).costUsd).toBe(before + 0.25);
-    // Missing checkout settles without running a paid agent; failure still notifies its parent.
-    await settleWorkers([parent.id]);
-    await closeDevSession(worker.id);
-    expect(worker.status).toBe('closed');
-    expect(parent.events.at(-1).text).toContain(`Worker ${worker.id} (${worker.title}) closed.`);
   });
 
   it.each([undefined, 'ACME/Shop'])('keeps the same-project runtime precedence for repo %s', (repo) => {
@@ -4618,38 +3453,6 @@ describe('spawnWorkerSession: project targets and tooling fixes', () => {
       expect.anything(),
     );
     expect(w.effort).toBe('high');
-  });
-
-  it('sends the worker to the dashboard project, review loop armed, briefed as a tooling fix', () => {
-    const orch = getJob('tool-orch');
-    const w = spawnWorkerSession(orch, {
-      title: 'read_worker truncates',
-      prompt: 'read_worker cut the tail at 40 entries even when asked for 200.',
-      tooling: true,
-    });
-
-    expect(w.repo).toBe('acme/dashboard');
-    expect(w.parentId).toBe('tool-orch');
-    expect(w.toolingFor).toBe('acme/shop');
-    expect(w.reviewLoop).not.toBeNull();
-    expect(w.qaLoop).toBeNull();
-    const first = getJob(w.id).events.find((e) => e.kind === 'user').text;
-    expect(first).toMatch(/^This is a tooling fix/);
-    expect(first).toContain('orchestrator on acme/shop');
-    expect(first).toContain('# What the orchestrator reported\n\nread_worker cut the tail');
-    // The supervisor's tools and chat both say which repository it went to.
-    expect(workerSummary(w)).toMatchObject({ repo: 'acme/dashboard', toolingFor: 'acme/shop' });
-    const info = orch.events.filter((e) => e.kind === 'info').map((e) => e.text);
-    expect(info.at(-1)).toMatch(/^Started tooling-fix worker .* on acme\/dashboard, .*review loop armed\.$/);
-  });
-
-  it('a plain spawn is untouched: the orchestration’s own repository, nothing framed', () => {
-    const w = spawnWorkerSession(getJob('tool-orch'), { title: 'Plain', prompt: 'Do the thing.' });
-    expect(w.repo).toBe('acme/shop');
-    expect(w.toolingFor).toBeNull();
-    expect(w.reviewLoop).toBeNull();
-    expect(getJob(w.id).events.find((e) => e.kind === 'user').text).toBe('Do the thing.');
-    expect(workerSummary(w).toolingFor).toBeNull();
   });
 });
 
@@ -4902,7 +3705,7 @@ describe('webhook deliveries', () => {
       row('hk-failed', { status: 'failed', webhook: armed() }),
       row('hk-worker', { parentId: 'hk-orch' }),
       row('hk-review', { autoClose: true, reviewBranch: 'feature' }),
-      row('hk-loopfix', { loopFixParentId: 'hk-free' }),
+      row('hk-loopfix', { qaParentId: 'hk-free' }),
       row('hk-analyst', { readOnly: true }),
     ];
     const intervals = vi.spyOn(globalThis, 'setInterval');
@@ -5484,7 +4287,7 @@ describe('webhook deliveries', () => {
     for (const [id, why] of [
       ['hk-worker', /arm the orchestrator instead/],
       ['hk-review', /ends by itself/],
-      ['hk-loopfix', /review loop’s own session/],
+      ['hk-loopfix', /QA child session/],
       ['hk-analyst', /read-only analyst/],
     ]) {
       expect(() => setSessionWebhook(id, { armed: true })).toThrow(why);
@@ -6750,13 +5553,13 @@ describe('what an orchestration spent', () => {
       row('bud-w2', { parentId: 'bud-poor' }),
       // The worker's review-loop spend: the review of its push and the fix session.
       row('bud-rev', {
-        loopParentId: 'bud-w1',
+        qaParentId: 'bud-w1',
         costUsd: 1,
         inputTokens: 200,
         outputTokens: 20,
         durationMs: 10_000,
       }),
-      row('bud-fix', { loopFixParentId: 'bud-w1', costUsd: 0.5, inputTokens: 100, durationMs: 5_000 }),
+      row('bud-fix', { qaParentId: 'bud-w1', costUsd: 0.5, inputTokens: 100, durationMs: 5_000 }),
       // The worker's QA spend; a session with no reported cost (codex) must not zero the total.
       row('bud-qa', { qaParentId: 'bud-w1', costUsd: null, inputTokens: 50, outputTokens: 5 }),
     ];
@@ -6872,23 +5675,6 @@ describe('workerSummary', () => {
   it('a worker with no pull request answers pr: null', () => {
     expect(workerSummary({ id: 'w2', turns: 0 }).pr).toBeNull();
   });
-
-  it('projects transient PR discovery failures and retry state', () => {
-    const summary = workerSummary({
-      id: 'w2',
-      turns: 0,
-      reviewLoop: {
-        discoveryError: 'GitHub returned 503',
-        discoveryRetries: 1,
-      },
-    });
-
-    expect(summary.reviewLoop).toMatchObject({
-      discoveryError: 'GitHub returned 503',
-      discoveryRetries: 1,
-      discoveryRetryPending: false,
-    });
-  });
 });
 
 describe('the by-id operations on ids nothing created', () => {
@@ -6945,484 +5731,6 @@ describe('closeDevSession on an unattended session', () => {
   });
 });
 
-describe('standalone code-review findings', () => {
-  const finding = (key, title) => ({ key, severity: 'high', title, file: 'lib/x.js', line: 7 });
-  const queuedReview = (id, findings, mine = false) => ({
-    id,
-    kind: 'devchat',
-    status: 'closed',
-    repo: 'acme/standalone',
-    providerId: 1,
-    provider: 'Claude entry',
-    model: 'claude-fable-5-1',
-    effort: 'high',
-    turns: 1,
-    title: 'Code review: #31 task/review',
-    createdAt: '2026-09-07T10:00:00.000Z',
-    reviewBranch: 'task/review',
-    startBranch: 'task/review',
-    startedOnPr: 31,
-    autoClose: true,
-    prStatus: { number: 31, state: 'open' },
-    reviewTriage: {
-      prNumber: 31,
-      round: 1,
-      branch: 'task/review',
-      standalone: true,
-      author: mine ? 'sampleuser' : 'a-colleague',
-      mine,
-      heldAt: '2026-09-07T10:05:00.000Z',
-      findings,
-    },
-  });
-
-  // A review that has just published, before its findings are held.
-  const newReview = (id, prNumber) => ({
-    id,
-    kind: 'devchat',
-    status: 'idle',
-    repo: 'acme/standalone',
-    reviewBranch: `task/${id}`,
-    startedOnPr: prNumber,
-    createdAt: '2026-09-07T11:00:00.000Z',
-    events: [],
-    seq: 0,
-  });
-
-  beforeAll(async () => {
-    state.stored = [
-      queuedReview('stand-complete', [finding('k1', 'Remove the race')]),
-      queuedReview('stand-notes', [finding('k2', 'Validate the input')]),
-      queuedReview('stand-delete', [finding('k5', 'Guard the id list'), finding('k6', 'Log the skips')]),
-      { ...queuedReview('stand-close', [finding('k3', 'Keep the guard')]), status: 'closed' },
-      // The same review, of the user's own pull request: the card that rules.
-      queuedReview('mine-dismiss', [finding('m1', 'Remove the race')], true),
-      queuedReview('mine-fix', [finding('m2', 'Validate the input')], true),
-      queuedReview('mine-save', [finding('m3', 'Keep the type')], true),
-      queuedReview('stand-dispatch', [finding('k7', 'Rename the flag')]),
-      ...['reply', 'delete'].map((action) => ({
-        ...queuedReview(`stand-legacy-${action}`, [finding('legacy', 'Persisted finding')]),
-        ownerId: 2,
-      })),
-      ...['reply', 'delete'].flatMap((action) =>
-        ['disconnected', 'changed'].map((connection) => queuedReview(`stand-${action}-${connection}`, [])),
-      ),
-      // A review whose card is already gone (completed elsewhere, or its PR closed).
-      { ...queuedReview('stand-none', []), reviewTriage: null },
-      { ...queuedReview('stand-deferred', []), reviewTriage: null },
-    ];
-    await initJobs();
-    getJob('stand-close').status = 'idle';
-  });
-
-  it('holds only the findings declared by this standalone review', async () => {
-    const found = [finding('fresh', 'Fresh finding')];
-    latestReviewFindings.mockResolvedValueOnce(found);
-    sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
-    const job = {
-      id: 'stand-new',
-      kind: 'devchat',
-      status: 'idle',
-      repo: 'acme/standalone',
-      reviewBranch: 'task/new',
-      startedOnPr: 32,
-      createdAt: '2026-09-07T11:00:00.000Z',
-      events: [],
-      seq: 0,
-    };
-
-    expect(await holdStandaloneReviewFindings(job)).toBe(true);
-    expect(latestReviewFindings).toHaveBeenCalledWith('acme/standalone', 32, {
-      since: '2026-09-07T11:00:00.000Z',
-    });
-    expect(job.reviewTriage).toMatchObject({
-      prNumber: 32,
-      branch: 'task/new',
-      standalone: true,
-      findings: [{ key: 'fresh', title: 'Fresh finding', parked: null }],
-    });
-  });
-
-  it('keeps deferred publication lookups and earlier turn identities on the held card', async () => {
-    const found = [
-      {
-        ...finding('pending', 'Published finding'),
-        reviewPublication: { after: 1, before: 2, authors: ['alice', 'bob'] },
-      },
-    ];
-    latestReviewFindings.mockResolvedValueOnce(found);
-    sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
-    const job = getJob('stand-deferred');
-    job.status = 'idle';
-    job.reviewAuthorLogins = ['alice', 'bob'];
-
-    expect(await holdStandaloneReviewFindings(job)).toBe(true);
-    expect(latestReviewFindings.mock.lastCall.at(-1)).toEqual({
-      since: job.createdAt,
-      authorLogins: ['alice', 'bob'],
-    });
-    expect(JSON.parse(JSON.stringify(job.reviewTriage)).findings[0]).toMatchObject(found[0]);
-    await closeDevSession(job.id);
-    expect(getJob(job.id).reviewTriage.findings[0]).toMatchObject(found[0]);
-    expect(deleteJob).not.toHaveBeenCalledWith(job.id, null);
-  });
-
-  // Whose pull request it is (GitHub's author vs the account the app acts as) decides the
-  // card, so the hold works it out.
-  it('holds a review of somebody else’s pull request as not the user’s own', async () => {
-    const found = [finding('theirs', 'Their finding')];
-    latestReviewFindings.mockResolvedValueOnce(found);
-    sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
-    githubRest.mockResolvedValueOnce({ ok: true, json: async () => ({ user: { login: 'a-colleague' } }) });
-    viewerLogin.mockResolvedValueOnce('sampleuser');
-    const job = newReview('stand-theirs', 33);
-
-    expect(await holdStandaloneReviewFindings(job)).toBe(true);
-    expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'GET', '/repos/acme/standalone/pulls/33');
-    expect(job.reviewTriage).toMatchObject({ author: 'a-colleague', mine: false });
-  });
-
-  it('holds a review of the user’s own pull request as theirs to rule on', async () => {
-    const found = [finding('ours', 'Our finding')];
-    latestReviewFindings.mockResolvedValueOnce(found);
-    sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
-    githubRest.mockResolvedValueOnce({ ok: true, json: async () => ({ user: { login: 'Sampleuser' } }) });
-    viewerLogin.mockResolvedValueOnce('sampleuser'); // GitHub logins are case-insensitive
-    const job = newReview('stand-ours', 34);
-
-    expect(await holdStandaloneReviewFindings(job)).toBe(true);
-    expect(job.reviewTriage).toMatchObject({ author: 'Sampleuser', mine: true });
-  });
-
-  it('recognizes the session owner’s PR, with the project override and server fallback', async () => {
-    const found = [finding('owner', 'Owner finding')];
-    const identity = { token: 'ana-token', login: 'ana', id: 42 };
-    setOwnerGithub((job) => (job.ownerId === 2 ? identity : null));
-    try {
-      for (const [ownerId, reviewAuthor, author] of [
-        [2, '', 'Ana'],
-        [2, 'release-bot', 'release-bot'],
-        [3, '', 'server-bot'],
-        [null, '', 'server-bot'],
-      ]) {
-        state.projects = [{ repo: 'acme/standalone', reviewAuthor }];
-        latestReviewFindings.mockResolvedValueOnce(found);
-        sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
-        viewerLogin.mockResolvedValueOnce('server-bot');
-        const job = { ...newReview('stand-owner', 37), ownerId, prStatus: { number: 37, author } };
-        expect(await holdStandaloneReviewFindings(job)).toBe(true);
-        expect(latestReviewFindings.mock.lastCall.at(-1)).toEqual({
-          since: job.createdAt,
-          ...(ownerId != null ? { authorLogin: ownerId === 2 ? 'ana' : null } : {}),
-        });
-        expect(job.reviewTriage).toMatchObject({ author, mine: true });
-        viewerLogin.mockReset().mockResolvedValue(null);
-      }
-    } finally {
-      setOwnerGithub(() => null);
-    }
-  });
-
-  // The token's user is only the fallback: a project that posts as another account names it in
-  // its settings, and that account's pull requests are "mine".
-  it('reads the account the app acts as off the project when it names one', async () => {
-    const found = [finding('ours', 'Our finding')];
-    latestReviewFindings.mockResolvedValueOnce(found);
-    sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
-    state.projects = [{ repo: 'acme/standalone', label: 'Standalone', reviewAuthor: 'release-bot' }];
-    githubRest.mockResolvedValueOnce({ ok: true, json: async () => ({ user: { login: 'release-bot' } }) });
-    viewerLogin.mockResolvedValueOnce('somebody-else');
-    const job = newReview('stand-bot', 35);
-
-    expect(await holdStandaloneReviewFindings(job)).toBe(true);
-    expect(job.reviewTriage).toMatchObject({ author: 'release-bot', mine: true });
-  });
-
-  // An unreadable author counts as somebody else's: the card that rules and spends nothing is
-  // the safe one to be wrong with.
-  it('holds a review as not the user’s own when GitHub will not name the author', async () => {
-    const found = [finding('unknown', 'Unknown finding')];
-    latestReviewFindings.mockResolvedValueOnce(found);
-    sortFindingsForFix.mockResolvedValueOnce({ kept: found, parked: [] });
-    githubRest.mockResolvedValueOnce({ ok: false, status: 404 });
-    viewerLogin.mockResolvedValueOnce('sampleuser');
-    const job = newReview('stand-unknown', 36);
-
-    expect(await holdStandaloneReviewFindings(job)).toBe(true);
-    expect(job.reviewTriage).toMatchObject({ author: null, mine: false });
-  });
-
-  it('keeps an auto-closed review record while its findings are in the queue', async () => {
-    await closeDevSession('stand-close');
-    expect(getJob('stand-close')).toMatchObject({ status: 'closed', reviewTriage: { prNumber: 31 } });
-    expect(deleteJob).not.toHaveBeenCalledWith('stand-close', null);
-  });
-
-  // A review of the user's own work gets the loop card: verdicts, kept comments, and a
-  // Complete that sends what was marked fix.
-  it('Save comments keeps the drafts of a review of the user’s own pull request', async () => {
-    postTriageNotes.mockClear();
-
-    const result = await saveReviewFindingsDrafts('mine-save', {
-      verdicts: [{ key: 'm3', decision: '', reason: '  Checking the type with the caller  ' }],
-      note: 'Ship after the hotfix',
-    });
-
-    expect(result).toMatchObject({
-      url: 'https://github.com/acme/standalone/pull/31#issuecomment-9',
-      warning: null,
-      drafts: {
-        verdicts: { m3: { decision: null, reason: 'Checking the type with the caller' } },
-        note: 'Ship after the hotfix',
-      },
-    });
-    expect(getJob('mine-save').reviewTriage.drafts.savedAt).toEqual(expect.any(String));
-    expect(postTriageNotes).toHaveBeenCalledWith(
-      'acme/standalone',
-      31,
-      'mine-save',
-      [expect.objectContaining({ key: 'm3', decision: null, reason: 'Checking the type with the caller' })],
-      { note: 'Ship after the hotfix', round: 1, standalone: true, by: 'the user' },
-    );
-  });
-
-  it('has nothing to save: somebody else’s pull request is not triaged here', async () => {
-    await expect(
-      saveReviewFindingsDrafts('stand-complete', { verdicts: [{ key: 'k1', decision: 'fix' }] }),
-    ).rejects.toThrow(/no findings waiting for triage/);
-    await expect(saveReviewFindingsDrafts('stand-nope', {})).rejects.toThrow(/Session not found/);
-  });
-
-  it.each([null, 2])(
-    "replies on one finding's thread as owner %s and keeps it on the card",
-    async (ownerId) => {
-      replyOnFindingThread.mockClear();
-      const job = getJob('stand-delete');
-      job.ownerId = ownerId;
-      job.reviewTriage.findings[0].reviewAuthorLogin = ownerId == null ? null : 'ana';
-      setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
-      try {
-        const out = await replyToReviewFinding('stand-delete', 'k5', '  Fine for me  ');
-        expect(out).toEqual({ replied: 'k5', url: 'https://gh/r/101#reply' });
-        expect(replyOnFindingThread).toHaveBeenCalledWith(
-          'acme/standalone',
-          31,
-          expect.objectContaining({ key: 'k5' }),
-          '  Fine for me  ', // trimmed where it is written, so nothing is lost here
-          { since: '2026-09-07T10:00:00.000Z', authorLogin: ownerId == null ? null : 'ana' },
-        );
-        expect(job.reviewTriage.findings.map((f) => f.key)).toEqual(['k5', 'k6']);
-      } finally {
-        job.ownerId = null;
-        setOwnerGithub(() => null);
-      }
-    },
-  );
-
-  it('refuses a reply on a finding, or a session, that is not there', async () => {
-    await expect(replyToReviewFinding('stand-delete', 'nope', 'hi')).rejects.toThrow(
-      /no longer on this review/,
-    );
-    await expect(replyToReviewFinding('stand-none', 'k5', 'hi')).rejects.toThrow(/no findings waiting/);
-    await expect(replyToReviewFinding('stand-nope', 'k5', 'hi')).rejects.toThrow(/Session not found/);
-  });
-
-  it.each(['reply', 'delete'])(
-    'keeps the server fallback for %s on restored findings without publication metadata',
-    async (action) => {
-      const job = getJob(`stand-legacy-${action}`);
-      expect(job.reviewTriage.findings[0]).not.toHaveProperty('reviewAuthorLogin');
-      setOwnerGithub(() => ({ token: 'new-token', login: 'new-account', id: 43 }));
-      try {
-        await holdStandaloneReviewFindings(job);
-        const operation = action === 'reply' ? replyOnFindingThread : deleteFindingFromReview;
-        operation.mockClear();
-        if (action === 'reply') await replyToReviewFinding(job.id, 'legacy', 'Noted');
-        else await deleteReviewFinding(job.id, 'legacy');
-        expect(operation.mock.lastCall.at(-1)).toEqual({ since: job.createdAt, authorLogin: null });
-        expect(job.reviewTriage.findings).toHaveLength(action === 'reply' ? 1 : 0);
-      } finally {
-        setOwnerGithub(() => null);
-      }
-    },
-  );
-
-  it.each([
-    ['reply', 'disconnected'],
-    ['reply', 'changed'],
-    ['delete', 'disconnected'],
-    ['delete', 'changed'],
-  ])('uses the published author for %s after the owner connection is %s', async (action, connection) => {
-    const job = getJob(`stand-${action}-${connection}`);
-    job.reviewTriage = null;
-    job.ownerId = 2;
-    job.prStatus.author = 'a-colleague';
-    const published = { ...finding('published', 'Published finding'), reviewAuthorLogin: 'ana' };
-    latestReviewFindings.mockResolvedValueOnce([published]);
-    sortFindingsForFix.mockResolvedValueOnce({ kept: [published], parked: [] });
-    setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
-    try {
-      expect(await holdStandaloneReviewFindings(job)).toBe(true);
-      // The held result survives serialization without retaining a credential.
-      job.reviewTriage = JSON.parse(JSON.stringify(job.reviewTriage));
-      setOwnerGithub(() => (connection === 'changed' ? { token: 'bob-token', login: 'bob', id: 43 } : null));
-      const operation = action === 'reply' ? replyOnFindingThread : deleteFindingFromReview;
-      operation.mockClear();
-      if (action === 'reply') await replyToReviewFinding(job.id, 'published', 'Noted');
-      else await deleteReviewFinding(job.id, 'published');
-      const options = operation.mock.lastCall.at(-1);
-      expect(options).toEqual({ since: job.createdAt, authorLogin: 'ana' });
-      expect(job.reviewTriage.findings).toHaveLength(action === 'reply' ? 1 : 0);
-    } finally {
-      setOwnerGithub(() => null);
-    }
-  });
-
-  it('deletes one finding posted by the owner and leaves the rest on the card', async () => {
-    deleteFindingFromReview.mockClear();
-    const job = getJob('stand-delete');
-    job.ownerId = 2;
-    job.reviewTriage.findings[0].reviewAuthorLogin = 'ana';
-    setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
-    try {
-      const out = await deleteReviewFinding('stand-delete', 'k5');
-      expect(out).toMatchObject({ deleted: 'k5', remaining: 1, commentDeleted: true, undeclared: true });
-      expect(deleteFindingFromReview).toHaveBeenCalledWith(
-        'acme/standalone',
-        31,
-        expect.objectContaining({ key: 'k5', title: 'Guard the id list' }),
-        { since: '2026-09-07T10:00:00.000Z', authorLogin: 'ana' },
-      );
-      expect(job.reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
-    } finally {
-      job.ownerId = null;
-      setOwnerGithub(() => null);
-    }
-  });
-
-  it.each([
-    [403, "deleting the finding's review comment"],
-    [404, "deleting the finding's review comment"],
-    [403, "rewriting the review's findings block"],
-    [404, "rewriting the review's findings block"],
-  ])('keeps the finding on the card when GitHub answers %i %s', async (status, action) => {
-    deleteFindingFromReview.mockRejectedValueOnce(new Error(`GitHub answered ${status} ${action}`));
-
-    await expect(deleteReviewFinding('stand-delete', 'k6')).rejects.toThrow(`answered ${status}`);
-    expect(getJob('stand-delete').reviewTriage.findings.map((f) => f.key)).toEqual(['k6']);
-  });
-
-  it('refuses a finding that is not on the card, and a session with no card', async () => {
-    await expect(deleteReviewFinding('stand-delete', 'nope')).rejects.toThrow(/no longer on this review/);
-    await expect(deleteReviewFinding('stand-none', 'k5')).rejects.toThrow(/no findings waiting/);
-    await expect(deleteReviewFinding('stand-nope', 'k5')).rejects.toThrow(/Session not found/);
-  });
-
-  it('completes the review without ruling on anything, and deletes the queue holder', async () => {
-    recordTriage.mockClear();
-    postTriageNotes.mockClear();
-    addPullRequestLabel.mockClear();
-
-    const result = await completeStandaloneReview('stand-complete');
-
-    expect(result).toEqual({ completed: true, prNumber: 31, findings: 1 });
-    // The PR author answers these: no verdicts, comment, approval label or fix session.
-    expect(recordTriage).not.toHaveBeenCalled();
-    expect(postTriageNotes).not.toHaveBeenCalled();
-    expect(addPullRequestLabel).not.toHaveBeenCalled();
-    expect(getJob('stand-complete')).toBeNull();
-  });
-
-  it('takes off the notes comment a round held before Complete was the only control left', async () => {
-    postTriageNotes.mockClear();
-    getJob('stand-notes').reviewTriage.drafts = {
-      verdicts: {},
-      note: 'from an older save',
-      savedAt: '2026-09-07T10:10:00.000Z',
-    };
-
-    await completeStandaloneReview('stand-notes');
-
-    expect(postTriageNotes).toHaveBeenCalledWith('acme/standalone', 31, 'stand-notes', [], {});
-    expect(getJob('stand-notes')).toBeNull();
-  });
-
-  it('refuses a review whose card is already gone', async () => {
-    await expect(completeStandaloneReview('stand-none')).rejects.toThrow(/no findings waiting/);
-    await expect(completeStandaloneReview('stand-nope')).rejects.toThrow(/Session not found/);
-  });
-
-  it('records the verdicts and approves the user’s own pull request when nothing is marked fix', async () => {
-    recordTriage.mockClear();
-    recordTriage.mockResolvedValueOnce({ error: null });
-    postTriageNotes.mockClear();
-    // As a card saved once: the notes comment is on the PR for the completion to remove.
-    getJob('mine-dismiss').reviewTriage.drafts = {
-      verdicts: {},
-      note: 'Ship after the hotfix',
-      savedAt: '2026-09-07T10:10:00.000Z',
-    };
-
-    const result = await triageReviewFindings('mine-dismiss', {
-      verdicts: [{ key: 'm1', decision: 'dismissed', reason: 'Not part of this change' }],
-      note: 'Ship after the hotfix',
-    });
-
-    expect(result).toMatchObject({ fixing: false, dismissed: true, approved: true, session: null });
-    expect(recordTriage).toHaveBeenCalledWith(
-      'acme/standalone',
-      31,
-      [expect.objectContaining({ key: 'm1', decision: 'dismissed' })],
-      { by: 'the user', note: 'Ship after the hotfix' },
-    );
-    // Completing removes the "so far" notes comment; the verdicts are on Review triage now.
-    expect(postTriageNotes).toHaveBeenCalledWith('acme/standalone', 31, 'mine-dismiss', [], {});
-    expect(addPullRequestLabel).toHaveBeenLastCalledWith(
-      expect.objectContaining({ githubToken: 'tok' }),
-      'acme/standalone',
-      31,
-      'code-approved',
-    );
-    expect(getJob('mine-dismiss')).toBeNull();
-  });
-
-  it('keeps the card when the fix session for the user’s own findings cannot start', async () => {
-    recordTriage.mockResolvedValueOnce({ error: null });
-
-    await expect(
-      triageReviewFindings('mine-fix', { verdicts: [{ key: 'm2', decision: 'fix' }] }),
-    ).rejects.toThrow(/Unknown project: acme\/standalone/);
-    expect(getJob('mine-fix').reviewTriage).toMatchObject({ prNumber: 31, mine: true });
-  });
-
-  // Verdicts sent on somebody else's PR (an old tab, a script) rule and approve nothing.
-  it('ignores verdicts sent for a review of somebody else’s pull request', async () => {
-    recordTriage.mockClear();
-    addPullRequestLabel.mockClear();
-
-    const result = await triageReviewFindings('stand-dispatch', {
-      verdicts: [{ key: 'k7', decision: 'fix' }],
-    });
-
-    expect(result).toEqual({ completed: true, prNumber: 31, findings: 1 });
-    expect(recordTriage).not.toHaveBeenCalled();
-    expect(addPullRequestLabel).not.toHaveBeenCalled();
-    expect(getJob('stand-dispatch')).toBeNull();
-  });
-
-  it('refuses verdicts that are not one per finding on the user’s own review', async () => {
-    await expect(triageStandaloneReviewFindings('mine-save', { verdicts: [] })).rejects.toThrow(
-      /Give one verdict per finding/,
-    );
-    await expect(
-      triageStandaloneReviewFindings('mine-save', { verdicts: [{ key: 'nope', decision: 'fix' }] }),
-    ).rejects.toThrow(/No finding nope is waiting/);
-    await expect(
-      triageStandaloneReviewFindings('mine-save', { verdicts: [{ key: 'm3', decision: 'maybe' }] }),
-    ).rejects.toThrow(/"maybe" is not a verdict/);
-  });
-});
-
 describe('deleting a session that was never closed', () => {
   beforeAll(async () => {
     state.stored = [
@@ -7474,7 +5782,7 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
       row('cost-rev-1', {
         ownerId: 2,
         autoClose: true,
-        loopParentId: 'cost-par-1',
+        qaParentId: 'cost-par-1',
         costUsd: 0.5,
         inputTokens: 300,
         outputTokens: 30,
@@ -7483,15 +5791,15 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
       row('cost-par-2', {}),
       row('cost-qa-2', { autoClose: true, qaParentId: 'cost-par-2', costUsd: 0.75 }),
       row('cost-par-3', { costUsd: 2 }),
-      row('cost-rev-3', { autoClose: true, loopParentId: 'cost-par-3', costUsd: null }),
+      row('cost-rev-3', { autoClose: true, qaParentId: 'cost-par-3', costUsd: null }),
       row('cost-par-4', { costUsd: 1 }),
-      row('cost-rev-4', { autoClose: true, loopParentId: 'cost-par-4', costUsd: 0.5 }),
+      row('cost-rev-4', { autoClose: true, qaParentId: 'cost-par-4', costUsd: 0.5 }),
       row('cost-par-5', { costUsd: 3 }),
-      row('cost-rev-5', { autoClose: true, loopParentId: 'cost-par-5', costUsd: 0.5 }),
+      row('cost-rev-5', { autoClose: true, qaParentId: 'cost-par-5', costUsd: 0.5 }),
       row('cost-par-6', { costUsd: 1 }),
-      row('cost-fix-6', { autoClose: true, loopFixParentId: 'cost-par-6', costUsd: 0.5 }),
+      row('cost-fix-6', { autoClose: true, qaParentId: 'cost-par-6', costUsd: 0.5 }),
       row('cost-par-7', { costUsd: 1 }),
-      row('cost-rev-7', { autoClose: true, loopParentId: 'cost-par-7', costUsd: null }),
+      row('cost-rev-7', { autoClose: true, qaParentId: 'cost-par-7', costUsd: null }),
     ];
     await initJobs();
     for (const j of state.stored) getJob(j.id).status = 'idle';
@@ -7628,2194 +5936,6 @@ describe('closeDevSession folding a deleted loop session’s cost into its paren
   });
 });
 
-describe('the review loop: what a closing loop review reports back', () => {
-  // Own repo and PR number, so other describes' registry sweeps over acme/shop never match.
-  const parentRow = (id, reviewId, loop = {}) => ({
-    id,
-    kind: 'devchat',
-    status: 'closed', // flipped to idle after the restore, like the rows above
-    repo: 'acme/loop',
-    turns: 1,
-    // acme/loop is not in state.projects, so every spawn fails on "Unknown project" and leaves
-    // an info event: the attempt is what these tests observe.
-    providerId: 1,
-    branch: 'task/loop',
-    startedOnPr: 77,
-    prStatus: { number: 77, state: 'open' },
-    reviewLoop: { rounds: 1, reviewing: true, reviewSessionId: reviewId, lastSha: 'abc', ...loop },
-  });
-  const reviewRow = (id, parentId, done) => ({
-    id,
-    kind: 'devchat',
-    status: 'closed',
-    repo: 'acme/loop',
-    turns: 1,
-    createdAt: '2026-08-25T13:00:00.000Z',
-    loopParentId: parentId,
-    loopReviewDone: done,
-  });
-
-  beforeAll(async () => {
-    state.stored = [
-      parentRow('auto-par', 'auto-rev', { rounds: 2 }),
-      reviewRow('auto-rev', 'auto-par', true),
-      parentRow('auto-cap', 'auto-cap-rev', { rounds: 3 }),
-      reviewRow('auto-cap-rev', 'auto-cap', true),
-      parentRow('auto-clean', 'auto-clean-rev'),
-      reviewRow('auto-clean-rev', 'auto-clean', true),
-      parentRow('auto-unapproved', 'auto-unapproved-rev'),
-      reviewRow('auto-unapproved-rev', 'auto-unapproved', true),
-      { ...parentRow('auto-declared-clean', 'auto-declared-clean-rev'), qaLoop: { done: false } },
-      reviewRow('auto-declared-clean-rev', 'auto-declared-clean', true),
-      parentRow('auto-filtered', 'auto-filtered-rev'),
-      {
-        ...parentRow('official-filtered', 'official-filtered-rev'),
-        orchestratorPrAction: 'implement-feedback',
-      },
-      reviewRow('official-filtered-rev', 'official-filtered', true),
-      reviewRow('auto-filtered-rev', 'auto-filtered', true),
-      parentRow('auto-filtered-approved', 'auto-filtered-approved-rev'),
-      reviewRow('auto-filtered-approved-rev', 'auto-filtered-approved', true),
-      parentRow('auto-filtered-error', 'auto-filtered-error-rev'),
-      reviewRow('auto-filtered-error-rev', 'auto-filtered-error', true),
-      parentRow('auto-missing', 'auto-missing-rev'),
-      reviewRow('auto-missing-rev', 'auto-missing', true),
-      parentRow('auto-optional-refused', 'auto-optional-refused-rev'),
-      reviewRow('auto-optional-refused-rev', 'auto-optional-refused', true),
-      parentRow('auto-optional', 'auto-optional-rev'),
-      reviewRow('auto-optional-rev', 'auto-optional', true),
-      parentRow('auto-fail', 'auto-fail-rev'),
-      reviewRow('auto-fail-rev', 'auto-fail', true),
-      { ...parentRow('manual-action', 'manual-action-rev'), orchestratorPrAction: 'implement-feedback' },
-      reviewRow('manual-action-rev', 'manual-action', true),
-      parentRow('incomplete-par', 'incomplete-rev'),
-      reviewRow('incomplete-rev', 'incomplete-par', true),
-      parentRow('par-1', 'rev-1'),
-      reviewRow('rev-1', 'par-1', false),
-      parentRow('par-2', 'rev-2'),
-      reviewRow('rev-2', 'par-2', true),
-      parentRow('par-3', 'rev-3'),
-      reviewRow('rev-3', 'par-3', true),
-      parentRow('par-4', 'rev-4'),
-      reviewRow('rev-4', 'par-4', true),
-      parentRow('par-5', 'rev-5'),
-      reviewRow('rev-5', 'par-5', true),
-      parentRow('par-6', 'rev-6'),
-      reviewRow('rev-6', 'par-6', true),
-      parentRow('par-7', 'rev-7'),
-      reviewRow('rev-7', 'par-7', true),
-      // Two rounds deep, each with the round before it on record: par-8 is
-      // handed the same findings again, par-9 different ones.
-      parentRow('par-8', 'rev-8', { rounds: 2, lastFindings: 'k1' }),
-      reviewRow('rev-8', 'par-8', true),
-      parentRow('par-9', 'rev-9', { rounds: 2, lastFindings: 'k1' }),
-      reviewRow('rev-9', 'par-9', true),
-      // The cap's last round, after one that found something else: only the cap stops it.
-      parentRow('par-10', 'rev-10', { rounds: 3, lastFindings: 'k0' }),
-      reviewRow('rev-10', 'par-10', true),
-      // Past round one, which is where lows stop re-opening the loop.
-      parentRow('par-11', 'rev-11', { rounds: 2, lastFindings: 'k0' }),
-      reviewRow('rev-11', 'par-11', true),
-      // Two rounds whose findings GitHub does not hand over on the first ask:
-      // par-15's read comes back on a retry, par-16's never does.
-      parentRow('par-15', 'rev-15'),
-      reviewRow('rev-15', 'par-15', true),
-      {
-        ...parentRow('par-16', 'rev-16'),
-        parentId: 'loop-orch',
-        title: 'Delete the custom field',
-        createdAt: '2026-08-25T12:33:00.000Z',
-      },
-      reviewRow('rev-16', 'par-16', true),
-      // A third: its read fails the same way, and then its session is closed.
-      parentRow('par-17', 'rev-17'),
-      reviewRow('rev-17', 'par-17', true),
-      // On its last round, with only findings the loop's rules would park: the cap has nothing
-      // to stand ahead of.
-      parentRow('par-18', 'rev-18', { rounds: 3, lastFindings: 'k0' }),
-      reviewRow('rev-18', 'par-18', true),
-      // Its loop is turned off while the round's verdicts are being read.
-      parentRow('par-19', 'rev-19'),
-      reviewRow('rev-19', 'par-19', true),
-      // Two workers whose loop verdicts go to their orchestrator. It stands on its own
-      // question, so the updates stay in its buffer for the tests to read.
-      {
-        id: 'loop-orch',
-        kind: 'devchat',
-        status: 'closed',
-        repo: 'acme/loop',
-        providerId: 1,
-        turns: 1,
-        createdAt: '2026-08-25T12:00:00.000Z',
-        orchestrator: true,
-        awaitingAnswer: true,
-      },
-      {
-        ...parentRow('par-12', 'rev-12'),
-        parentId: 'loop-orch',
-        title: 'Add the export',
-        createdAt: '2026-08-25T12:30:00.000Z',
-      },
-      reviewRow('rev-12', 'par-12', true),
-      {
-        ...parentRow('qa-retry-par', 'qa-retry-rev', { done: true, reviewing: false, reviewSessionId: null }),
-        parentId: 'loop-orch',
-        qaLoop: { done: true, incomplete: true, failedScenarios: 0 },
-      },
-      reviewRow('qa-retry-rev', 'qa-retry-par', true),
-      {
-        ...parentRow('par-13', 'rev-13', { rounds: 2, lastFindings: 'k1' }),
-        parentId: 'loop-orch',
-        title: 'Fix the filter',
-        createdAt: '2026-08-25T12:31:00.000Z',
-      },
-      reviewRow('rev-13', 'par-13', true),
-      // A third on its last allowed round: the cap stands where the fix
-      // session would start, once the round is sent.
-      {
-        ...parentRow('par-14', 'rev-14', { rounds: 3, lastFindings: 'k0' }),
-        parentId: 'loop-orch',
-        title: 'Add the import',
-        createdAt: '2026-08-25T12:32:00.000Z',
-      },
-      reviewRow('rev-14', 'par-14', true),
-    ];
-    await initJobs();
-    for (const id of [
-      'auto-par',
-      'auto-rev',
-      'auto-cap',
-      'auto-cap-rev',
-      'auto-clean',
-      'auto-clean-rev',
-      'auto-unapproved',
-      'auto-unapproved-rev',
-      'auto-declared-clean',
-      'auto-declared-clean-rev',
-      'auto-filtered',
-      'auto-filtered-rev',
-      'auto-filtered-approved',
-      'auto-filtered-approved-rev',
-      'auto-filtered-error',
-      'auto-filtered-error-rev',
-      'auto-missing',
-      'auto-missing-rev',
-      'auto-optional-refused',
-      'auto-optional-refused-rev',
-      'auto-optional',
-      'auto-optional-rev',
-      'auto-fail',
-      'auto-fail-rev',
-      'loop-orch',
-      'qa-retry-par',
-      'qa-retry-rev',
-      'par-12',
-      'rev-12',
-      'par-13',
-      'rev-13',
-      'par-14',
-      'rev-14',
-      'incomplete-par',
-      'incomplete-rev',
-      'par-1',
-      'rev-1',
-      'par-2',
-      'rev-2',
-      'par-3',
-      'rev-3',
-      'par-4',
-      'rev-4',
-      'par-5',
-      'rev-5',
-      'par-6',
-      'rev-6',
-      'par-7',
-      'rev-7',
-      'par-8',
-      'rev-8',
-      'par-9',
-      'rev-9',
-      'par-10',
-      'rev-10',
-      'par-11',
-      'rev-11',
-      'par-15',
-      'rev-15',
-      'par-16',
-      'rev-16',
-      'par-17',
-      'rev-17',
-      'par-18',
-      'rev-18',
-      'par-19',
-      'rev-19',
-    ]) {
-      getJob(id).status = 'idle';
-    }
-  });
-
-  const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
-  // A closing review's report is fire-and-forget and retries a failed read inside it, so wait
-  // on state rather than a tick count.
-  const waitFor = async (cond) => {
-    for (let i = 0; i < 400; i++) {
-      if (cond()) return;
-      await new Promise((r) => setTimeout(r, 10));
-    }
-    throw new Error('the loop never reached the expected state');
-  };
-
-  it('keeps official orchestrator action findings manual even in an autonomous project', async () => {
-    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-    const parent = getJob('manual-action');
-    parent.status = 'idle';
-    getJob('manual-action-rev').status = 'idle';
-    const findings = [
-      {
-        key: 'manual',
-        severity: 'high',
-        title: 'Needs a fix',
-        assessment: { verified: true, evidence: 'Reproduced', worthFixing: true, reason: 'Worth fixing' },
-      },
-    ];
-    latestReviewFindings.mockResolvedValueOnce(findings);
-    sortFindingsForFix.mockResolvedValueOnce({ kept: findings, parked: [] });
-    const triages = recordTriage.mock.calls.length;
-    try {
-      await closeDevSession('manual-action-rev');
-      await waitFor(() => !!parent.reviewLoop.triage);
-      expect(recordTriage.mock.calls.length).toBe(triages);
-      expect(parent.reviewLoop.fixing).toBeFalsy();
-      expect(parent.reviewLoop.done).toBeFalsy();
-      expect(parent.reviewLoop.triage.findings).toHaveLength(1);
-    } finally {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-    }
-  });
-
-  it('automatically fixes confirmed worthwhile findings, including later-round lows', async () => {
-    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-    try {
-      // Refuse the child before it can spawn a real CLI in this state test.
-      getJob('auto-par').providerId = 999999;
-      const found = [
-        {
-          key: 'auto-high',
-          severity: 'high',
-          title: 'A bug',
-          assessment: {
-            verified: true,
-            evidence: 'Reproduced',
-            worthFixing: true,
-            reason: 'Prevents data loss',
-          },
-        },
-        {
-          key: 'auto-low',
-          severity: 'low',
-          title: 'A small bug',
-          assessment: {
-            verified: true,
-            evidence: 'Traced reachable failure',
-            worthFixing: true,
-            reason: 'Small safe fix',
-          },
-        },
-        {
-          key: 'auto-optional',
-          severity: 'low',
-          title: 'Minor cleanup',
-          assessment: {
-            verified: true,
-            evidence: 'Duplicate helper',
-            worthFixing: false,
-            reason: 'Not worth expanding this PR',
-          },
-        },
-        {
-          key: 'auto-outside',
-          severity: 'high',
-          title: 'Unrelated defect',
-          assessment: {
-            verified: true,
-            evidence: 'Reachable failure',
-            worthFixing: true,
-            reason: 'Fix separately',
-          },
-        },
-      ];
-      latestReviewFindings.mockResolvedValueOnce(found);
-      sortFindingsForFix.mockResolvedValueOnce({
-        kept: found.slice(0, 3),
-        parked: [{ ...found[3], reason: 'out-of-diff' }],
-      });
-      const sorts = sortFindingsForFix.mock.calls.length;
-      await closeDevSession('auto-rev');
-      const parent = getJob('auto-par');
-      await waitFor(() => infoTexts(parent).some((t) => t.includes('fix session did not start')));
-      expect(recordTriage).toHaveBeenCalledWith(
-        'acme/loop',
-        77,
-        found.map((f, i) => expect.objectContaining({ ...f, decision: i < 2 ? 'fix' : 'optional' })),
-        { round: 2, by: 'the autonomous review loop', note: undefined },
-      );
-      expect(sortFindingsForFix.mock.calls.length).toBe(sorts + 1);
-      expect(sortFindingsForFix).toHaveBeenLastCalledWith('acme/loop', 77, found, { severityFloor: 'low' });
-      expect(parent.reviewLoop.triage).toMatchObject({ prNumber: 77, round: 2 });
-      expect(parent.reviewLoop.triage.findings).toHaveLength(4);
-      expect(parent.reviewLoop.fixing).toBe(false);
-      expect(parent.reviewLoop.pendingResult).toBeNull();
-      expect(parent.reviewLoop.lastFindings).toBeUndefined();
-      expect(parent.reviewLoop.done).toBeFalsy();
-      // A manual retry attempts startup again, rather than stopping at the
-      // repeated-findings gate left behind by the refused dispatch.
-      const refusals = () => infoTexts(parent).filter((t) => t.includes('Unknown provider: 999999'));
-      expect(refusals()).toHaveLength(1);
-      const held = parent.reviewLoop.triage;
-      await triageLoopFindings(parent.id, {
-        verdicts: found.map((f) => ({ key: f.key, decision: 'fix' })),
-      });
-      expect(refusals()).toHaveLength(2);
-      expect(parent.reviewLoop.triage).toBe(held);
-      expect(parent.reviewLoop.stalled).toBeFalsy();
-    } finally {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-      recordTriage.mockClear();
-    }
-  });
-
-  it.each(['auto-filtered', 'official-filtered'])(
-    'requires approval when prior verdicts filter out every finding for %s',
-    async (id) => {
-      state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-      const parent = getJob(id);
-      parent.status = 'idle';
-      getJob(`${id}-rev`).status = 'idle';
-      const approvals = addPullRequestLabel.mock.calls.length;
-      const records = recordTriage.mock.calls.length;
-      const reads = githubRest.mock.calls.length;
-      latestReviewFindings.mockResolvedValue([{ key: 'prior', severity: 'high', title: 'Prior finding' }]);
-      sortFindingsForFix.mockResolvedValue({ kept: [], parked: [] });
-      githubRest.mockResolvedValue({
-        ok: true,
-        json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
-      });
-      try {
-        await closeDevSession(`${id}-rev`);
-        await waitFor(() => !!parent.reviewLoop.pendingResult?.error || !!parent.reviewLoop.done);
-        expect(parent.reviewLoop.done).toBeFalsy();
-        expect(parent.reviewLoop.pendingResult.error).toMatch(/has not applied the code-approved label/);
-        // On the read-failure backoff, so the deadline can end it.
-        expect(parent.reviewLoop.pendingResult).toMatchObject({ attempts: 1, approvalSaid: true });
-        expect(parent.reviewLoop.pendingResult.failingSince).toBeTruthy();
-        expect(githubRest.mock.calls.length).toBeGreaterThan(reads);
-        expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
-        expect(recordTriage.mock.calls.length).toBe(records);
-      } finally {
-        state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-        parent.reviewLoop.pendingResult = null;
-        latestReviewFindings.mockReset().mockResolvedValue([]);
-        sortFindingsForFix
-          .mockReset()
-          .mockImplementation(async (repo, prNumber, findings) => ({ kept: findings, parked: [] }));
-        githubRest.mockReset();
-      }
-    },
-  );
-
-  it.each([
-    ['approved', { ok: true, json: async () => ({ labels: [{ name: 'code-approved' }] }) }],
-    ['error', { ok: false, status: 503 }],
-  ])('checks approval for a filtered round when GitHub returns %s', async (outcome, response) => {
-    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-    const parent = getJob(`auto-filtered-${outcome}`);
-    latestReviewFindings.mockResolvedValueOnce([{ key: 'prior', severity: 'high', title: 'Prior finding' }]);
-    sortFindingsForFix.mockResolvedValueOnce({ kept: [], parked: [] });
-    githubRest.mockResolvedValueOnce(response);
-    try {
-      await closeDevSession(`auto-filtered-${outcome}-rev`);
-      await waitFor(() => !!parent.reviewLoop.pendingResult?.error || !!parent.reviewLoop.done);
-      if (outcome === 'approved') {
-        expect(parent.reviewLoop.done).toBe(true);
-        expect(parent.reviewLoop.pendingResult).toBeNull();
-      } else {
-        expect(parent.reviewLoop.done).toBeFalsy();
-        expect(parent.reviewLoop.pendingResult.error).toContain('GitHub answered 503');
-      }
-      expect(parent.reviewLoop.triage).toBeFalsy();
-    } finally {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-      parent.reviewLoop.pendingResult = null;
-      githubRest.mockReset();
-    }
-  });
-
-  it('holds unassessed findings without automatically fixing or approving them', async () => {
-    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-    try {
-      latestReviewFindings.mockResolvedValueOnce([
-        { key: 'legacy', severity: 'high', title: 'Unverified claim' },
-      ]);
-      const records = recordTriage.mock.calls.length;
-      const approvals = addPullRequestLabel.mock.calls.length;
-      await closeDevSession('auto-missing-rev');
-      const parent = getJob('auto-missing');
-      await waitFor(() => !!parent.reviewLoop.triage);
-      expect(parent.reviewLoop.triage.findings).toHaveLength(1);
-      expect(infoTexts(parent).join('\n')).toContain('fix-value assessment is missing');
-      expect(recordTriage.mock.calls.length).toBe(records);
-      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
-      expect(parent.reviewLoop.done).toBeFalsy();
-      expect(parent.reviewLoop.fixing).toBeFalsy();
-    } finally {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-      recordTriage.mockClear();
-    }
-  });
-
-  it('converges an autonomous round when verified findings are not worth fixing', async () => {
-    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-    try {
-      const assessment = {
-        verified: true,
-        evidence: 'Traced code',
-        worthFixing: false,
-        reason: 'Broad refactor for negligible benefit',
-      };
-      const finding = { key: 'optional', severity: 'low', title: 'Minor inefficiency', assessment };
-      latestReviewFindings.mockResolvedValueOnce([finding]);
-      githubRest.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ labels: [{ name: 'code-approved' }] }),
-      });
-      const approvals = addPullRequestLabel.mock.calls.length;
-      await closeDevSession('auto-optional-rev');
-      const parent = getJob('auto-optional');
-      await waitFor(() => !!parent.reviewLoop.done);
-      expect(recordTriage).toHaveBeenCalledWith(
-        'acme/loop',
-        77,
-        [expect.objectContaining({ decision: 'optional', reason: assessment.reason })],
-        expect.anything(),
-      );
-      expect(parent.reviewLoop.fixing).toBeFalsy();
-      expect(parent.reviewLoop.lastFindings).toBeUndefined();
-      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
-    } finally {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-      recordTriage.mockClear();
-    }
-  });
-
-  it('holds an optional-only round when the publishing policy has not approved it', async () => {
-    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-    try {
-      latestReviewFindings.mockResolvedValueOnce([
-        {
-          key: 'optional-refused',
-          severity: 'low',
-          title: 'Minor cleanup',
-          assessment: {
-            verified: true,
-            evidence: 'Traced code',
-            worthFixing: false,
-            reason: 'Marginal benefit',
-          },
-        },
-      ]);
-      githubRest.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
-      });
-      const approvals = addPullRequestLabel.mock.calls.length;
-      const records = recordTriage.mock.calls.length;
-      await closeDevSession('auto-optional-refused-rev');
-      const parent = getJob('auto-optional-refused');
-      await waitFor(() => infoTexts(parent).some((t) => t.includes('optional-only review has not applied')));
-      expect(parent.reviewLoop.triage.findings).toHaveLength(1);
-      expect(parent.reviewLoop.done).toBeFalsy();
-      expect(parent.reviewLoop.fixing).toBeFalsy();
-      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
-      expect(recordTriage.mock.calls.length).toBe(records);
-    } finally {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-      recordTriage.mockClear();
-    }
-  });
-
-  it('keeps the round cap for autonomous fixes without approving findings', async () => {
-    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-    try {
-      latestReviewFindings.mockResolvedValueOnce([
-        {
-          key: 'cap',
-          severity: 'low',
-          title: 'A bug',
-          assessment: { verified: true, evidence: 'Reproduced', worthFixing: true, reason: 'Worth fixing' },
-        },
-      ]);
-      const approvals = addPullRequestLabel.mock.calls.length;
-      await closeDevSession('auto-cap-rev');
-      await waitFor(() => !!getJob('auto-cap').reviewLoop.stalled);
-      expect(getJob('auto-cap').reviewLoop.triage).toBeNull();
-      expect(getJob('auto-cap').reviewLoop.done).toBeFalsy();
-      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
-    } finally {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-      recordTriage.mockClear();
-    }
-  });
-
-  it('ends an autonomous clean round only after confirming the approval label', async () => {
-    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-    try {
-      latestReviewFindings.mockResolvedValueOnce([]);
-      githubRest.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ labels: [{ name: 'code-approved' }] }),
-      });
-      await closeDevSession('auto-clean-rev');
-      await waitFor(() => !!getJob('auto-clean').reviewLoop.done);
-      expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'GET', '/repos/acme/loop/pulls/77');
-    } finally {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-      recordTriage.mockClear();
-    }
-  });
-
-  // An author exception (or a label call that failed) leaves the PR without code-approved,
-  // but an explicit `[]` findings block is the review's own clean verdict: the loop
-  // converges and the queued QA starts, without the dashboard applying the label itself,
-  // and says approval was withheld rather than that the PR is ready to merge.
-  it('converges an autonomous round that published an empty findings block without the label', async () => {
-    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-    const approvals = addPullRequestLabel.mock.calls.length;
-    const reads = githubRest.mock.calls.length;
-    latestReviewDeclaration.mockResolvedValueOnce({ findings: [], clean: true });
-    githubRest.mockResolvedValue({
-      ok: true,
-      json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
-    });
-    try {
-      await closeDevSession('auto-declared-clean-rev');
-      const parent = getJob('auto-declared-clean');
-      await waitFor(() => !!parent.reviewLoop.done || !!parent.reviewLoop.pendingResult?.error);
-      expect(parent.reviewLoop.done).toBe(true);
-      expect(parent.reviewLoop.pendingResult).toBeNull();
-      expect(parent.reviewLoop.stalled).toBeFalsy();
-      expect(infoTexts(parent).join('\n')).toContain('review round 1 declared no findings');
-      expect(githubRest.mock.calls.slice(reads)).toContainEqual([
-        expect.anything(),
-        'GET',
-        '/repos/acme/loop/pulls/77',
-      ]);
-      expect(parent.reviewLoop.approvalWithheld).toBe(true);
-      expect(infoTexts(parent).join('\n')).toContain(
-        'PR #77 does not carry code-approved: the publishing policy withheld approval',
-      );
-      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
-      expect(parent.qaLoop.running).toBe(true);
-      expect(infoTexts(parent).join('\n')).toContain(
-        'QA loop: the review loop converged, so QA started on PR #77',
-      );
-    } finally {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-      githubRest.mockReset();
-    }
-  });
-
-  it('keeps a clean autonomous round pending when the project has not approved it', async () => {
-    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-    const approvals = addPullRequestLabel.mock.calls.length;
-    latestReviewFindings.mockResolvedValue([]);
-    githubRest.mockResolvedValue({
-      ok: true,
-      json: async () => ({ labels: [{ name: 'requires-dev-review' }] }),
-    });
-    try {
-      await closeDevSession('auto-unapproved-rev');
-      await waitFor(() => !!getJob('auto-unapproved').reviewLoop.pendingResult?.error);
-      expect(getJob('auto-unapproved').reviewLoop.done).toBeFalsy();
-      expect(getJob('auto-unapproved').reviewLoop.pendingResult.error).toMatch(
-        /has not applied the code-approved label/,
-      );
-      expect(addPullRequestLabel.mock.calls.length).toBe(approvals);
-    } finally {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-      getJob('auto-unapproved').reviewLoop.pendingResult = null;
-      githubRest.mockReset();
-    }
-  });
-
-  it('retains the held round if automatic verdict recording fails', async () => {
-    state.projects.push({ repo: 'acme/loop', autonomousReviewLoop: true });
-    try {
-      latestReviewFindings.mockResolvedValueOnce([
-        {
-          key: 'failed',
-          severity: 'high',
-          title: 'A bug',
-          assessment: { verified: true, evidence: 'Reproduced', worthFixing: true, reason: 'Worth fixing' },
-        },
-      ]);
-      recordTriage.mockRejectedValueOnce(new Error('offline'));
-      await closeDevSession('auto-fail-rev');
-      await waitFor(() => infoTexts(getJob('auto-fail')).some((t) => t.includes('automatic triage failed')));
-      expect(getJob('auto-fail').reviewLoop.triage.findings).toHaveLength(1);
-      expect(getJob('auto-fail').reviewLoop.done).toBeFalsy();
-    } finally {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/loop');
-      recordTriage.mockClear();
-    }
-  });
-
-  it('a review stopped mid-way releases the loop without a fix turn', async () => {
-    await closeDevSession('rev-1');
-    await new Promise((r) => setTimeout(r, 0)); // the report is fire-and-forget
-    const parent = getJob('par-1');
-    expect(parent.reviewLoop.reviewing).toBe(false);
-    expect(infoTexts(parent).join('\n')).toMatch(/stopped before it finished/);
-    // A round that published nothing approved nothing: recorded as a round
-    // that could not run, which is what a retry (and list_workers) reads.
-    expect(parent.reviewLoop.failure).toMatchObject({
-      round: 1,
-      reason: 'the code review closed before it published anything',
-    });
-    expect(workerSummary(parent).reviewLoop).toMatchObject({
-      done: false,
-      failure: { round: 1, reason: 'the code review closed before it published anything' },
-    });
-  });
-
-  it('a finished review that declared no findings ends the round cleanly', async () => {
-    const parent = getJob('par-2');
-    parent.ownerId = 2;
-    getJob('rev-2').reviewAuthorLogins = ['earlier-owner', 'ana'];
-    setOwnerGithub(() => ({ token: 'ana-token', login: 'ana', id: 42 }));
-    try {
-      await closeDevSession('rev-2');
-      await new Promise((r) => setTimeout(r, 0));
-      expect(parent.reviewLoop.reviewing).toBe(false);
-      expect(infoTexts(parent).join('\n')).toMatch(/declared no findings/);
-      // The review window and owner identity constrain its inline publications.
-      expect(latestReviewFindings).toHaveBeenCalledWith('acme/loop', 77, {
-        since: '2026-08-25T13:00:00.000Z',
-        authorLogin: 'ana',
-        authorLogins: ['earlier-owner', 'ana'],
-      });
-    } finally {
-      parent.ownerId = null;
-      setOwnerGithub(() => null);
-    }
-  });
-
-  it('a round is held for triage even while the session stands on a question', async () => {
-    const parent = getJob('par-3');
-    parent.awaitingAnswer = true;
-    latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
-    await closeDevSession('rev-3');
-    await new Promise((r) => setTimeout(r, 0));
-    // Nothing is fixed until somebody rules: no fix session, no turn fired at the card.
-    expect(parent.reviewLoop.pendingFix).toBeFalsy();
-    expect(parent.reviewLoop.fixing).toBeFalsy();
-    expect(parent.reviewLoop.triage).toMatchObject({ prNumber: 77, round: 1 });
-    expect(parent.awaitingAnswer).toBe(true); // the question card is still the user's to answer
-    expect(parent.status).toBe('idle'); // no turn was started behind it
-    expect(infoTexts(parent).join('\n')).toMatch(/waiting in ⚑ Findings for you to decide/);
-  });
-
-  it("holds the round's findings with the loop's own advice on each", async () => {
-    const parent = getJob('par-4');
-    const found = [{ key: 'k1', severity: 'high', title: 'A thing' }];
-    latestReviewFindings.mockResolvedValueOnce(found);
-    await closeDevSession('rev-4');
-    await new Promise((r) => setTimeout(r, 0));
-    // Round one takes everything a review found; the floor only tightens later.
-    expect(sortFindingsForFix).toHaveBeenCalledWith('acme/loop', 77, found, { severityFloor: 'low' });
-    expect(parent.reviewLoop.triage).toEqual({
-      prNumber: 77,
-      round: 1,
-      findings: [
-        {
-          key: 'k1',
-          severity: 'high',
-          title: 'A thing',
-          url: 'url:acme/loop#77::',
-          parked: null,
-          parkedWhy: null,
-        },
-      ],
-      heldAt: expect.any(String),
-      sha: parent.reviewLoop.lastSha,
-      stale: false,
-    });
-    // Held, not decided: nothing is recorded until the verdicts come in.
-    expect(recordTriage).not.toHaveBeenCalledWith('acme/loop', 77, expect.anything(), expect.anything());
-  });
-
-  it('holds nothing when every finding was already dismissed by hand', async () => {
-    const parent = getJob('par-5');
-    latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
-    sortFindingsForFix.mockResolvedValueOnce({ kept: [], parked: [] });
-    await closeDevSession('rev-5');
-    await new Promise((r) => setTimeout(r, 0));
-    expect(parent.status).toBe('idle');
-    expect(parent.reviewLoop.triage).toBeFalsy();
-    expect(parent.reviewLoop.done).toBe(true);
-    expect(infoTexts(parent).join('\n')).toMatch(/none of them for this loop to implement/);
-  });
-
-  it('holds the whole round when even the stored verdicts cannot be read', async () => {
-    const parent = getJob('par-6');
-    latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
-    sortFindingsForFix.mockRejectedValueOnce(new Error('database is away'));
-    await closeDevSession('rev-6');
-    await new Promise((r) => setTimeout(r, 0));
-    const text = infoTexts(parent).join('\n');
-    expect(text).toMatch(/could not read this pull request's finding verdicts/);
-    expect(parent.reviewLoop.triage.findings).toEqual([
-      {
-        key: 'k1',
-        severity: 'high',
-        title: 'A thing',
-        url: 'url:acme/loop#77::',
-        parked: null,
-        parkedWhy: null,
-      },
-    ]); // the round is not dropped
-  });
-
-  it('holds nothing for a pull request that closed while the verdicts were read', async () => {
-    const parent = getJob('par-7');
-    latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
-    sortFindingsForFix.mockImplementationOnce(async (repo, prNumber, findings) => {
-      parent.prStatus = { number: 77, state: 'closed' }; // merged while the read was out
-      return { kept: findings, parked: [] };
-    });
-    await closeDevSession('rev-7');
-    await new Promise((r) => setTimeout(r, 0));
-    expect(parent.status).toBe('idle');
-    expect(parent.reviewLoop.fixing).toBeFalsy();
-    expect(parent.reviewLoop.triage).toBeFalsy();
-    expect(infoTexts(parent).join('\n')).not.toMatch(/⚑ Findings/);
-  });
-
-  it('stops the loop when a sent round repeats the findings of the round before it', async () => {
-    const parent = getJob('par-8');
-    latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
-    await closeDevSession('rev-8');
-    await new Promise((r) => setTimeout(r, 0));
-    // The stall gate counts what is sent to fix, not what was found; a held round cost nothing.
-    expect(parent.reviewLoop.stalled).toBeFalsy();
-    expect(parent.reviewLoop.triage).toMatchObject({ round: 2 });
-    await triageLoopFindings('par-8', { verdicts: [{ key: 'k1', decision: 'fix' }] });
-    expect(parent.reviewLoop.stalled).toBe(true);
-    expect(parent.reviewLoop.fixing).toBeFalsy(); // no fix session to push another commit with
-    expect(parent.status).toBe('idle');
-    expect(infoTexts(parent).join('\n')).toMatch(/same 1 finding\(s\) as the round before it/);
-  });
-
-  it('a refused fix for new findings preserves the previous comparison and held round', async () => {
-    const parent = getJob('par-9');
-    latestReviewFindings.mockResolvedValueOnce([{ key: 'k2', severity: 'high', title: 'Another' }]);
-    await closeDevSession('rev-9');
-    await new Promise((r) => setTimeout(r, 0));
-    expect(parent.reviewLoop.lastFindings).toBe('k1'); // untouched while the round is on hold
-    await triageLoopFindings('par-9', { verdicts: [{ key: 'k2', decision: 'fix' }] });
-    expect(parent.reviewLoop.stalled).toBeFalsy(); // restored rows carry no flag until one is set
-    expect(parent.reviewLoop.lastFindings).toBe('k1');
-    expect(parent.reviewLoop.triage.findings).toEqual([
-      expect.objectContaining({ key: 'k2', severity: 'high', title: 'Another' }),
-    ]);
-    expect(infoTexts(parent).join('\n')).toMatch(/could not start the fix session/); // the spawn was attempted
-  });
-
-  // A loop reviewing its own fixes finds something new each round, so neither the stall nor
-  // the repeat check stops it.
-  it('stops at the round cap even when the round found something new', async () => {
-    const parent = getJob('par-10');
-    latestReviewFindings.mockResolvedValueOnce([{ key: 'k9', severity: 'high', title: 'Yet another' }]);
-    await closeDevSession('rev-10');
-    await new Promise((r) => setTimeout(r, 0));
-    // The final round is held and ruled on; the cap stands where the fix session would start.
-    expect(parent.reviewLoop.stalled).toBeFalsy();
-    expect(parent.reviewLoop.triage).toMatchObject({ round: 3 });
-    expect(infoTexts(parent).join('\n')).not.toMatch(/REVIEW_LOOP_MAX_ROUNDS/);
-    const result = await triageLoopFindings('par-10', { verdicts: [{ key: 'k9', decision: 'fix' }] });
-    expect(result).toEqual({ fixing: false, converged: false });
-    expect(parent.reviewLoop.stalled).toBe(true);
-    expect(parent.reviewLoop.fixing).toBeFalsy(); // no fix session, so no round 4
-    expect(parent.reviewLoop.lastFindings).toBe('k0'); // never reached the stall gate's comparison
-    expect(infoTexts(parent).join('\n')).toMatch(
-      /REVIEW_LOOP_MAX_ROUNDS=3\), so the 1 finding\(s\) marked fix are listed on PR #77 rather than implemented/,
-    );
-  });
-
-  it('holds a final round whose findings the loop would all have parked, instead of stalling', async () => {
-    const parent = getJob('par-18');
-    const found = [{ key: 'k1', severity: 'low', title: 'A nit' }];
-    latestReviewFindings.mockResolvedValueOnce(found);
-    sortFindingsForFix.mockResolvedValueOnce({ kept: [], parked: [{ ...found[0], reason: 'severity' }] });
-    await closeDevSession('rev-18');
-    await new Promise((r) => setTimeout(r, 0));
-    // The cap counts what the loop would fix, which is nothing here: the round reaches the
-    // screen, and a nothing-to-fix send converges it.
-    expect(parent.reviewLoop.stalled).toBeFalsy();
-    expect(parent.reviewLoop.triage).toMatchObject({
-      round: 3,
-      findings: [{ ...found[0], parked: 'severity' }],
-    });
-    expect(infoTexts(parent).join('\n')).not.toMatch(/REVIEW_LOOP_MAX_ROUNDS/);
-    await triageLoopFindings('par-18', { verdicts: [{ key: 'k1', decision: 'optional', reason: 'later' }] });
-    expect(parent.reviewLoop.done).toBe(true);
-    expect(parent.reviewLoop.stalled).toBeFalsy();
-  });
-
-  it('holds nothing for a loop turned off while the verdicts were read', async () => {
-    const parent = getJob('par-19');
-    latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
-    sortFindingsForFix.mockImplementationOnce(async (repo, prNumber, findings) => {
-      setReviewLoop('par-19', false); // 🔁 off, mid-read
-      return { kept: findings, parked: [] };
-    });
-    await closeDevSession('rev-19');
-    await new Promise((r) => setTimeout(r, 0));
-    // The hold would otherwise land on the detached loop object, shown to nobody.
-    expect(parent.reviewLoop).toBeNull();
-    expect(infoTexts(parent).join('\n')).not.toMatch(/⚑ Findings/);
-  });
-
-  it('marks lows as advice to park once the loop is past its first round', async () => {
-    const parent = getJob('par-11');
-    const found = [{ key: 'k1', severity: 'low', title: 'A nit' }];
-    latestReviewFindings.mockResolvedValueOnce(found);
-    sortFindingsForFix.mockResolvedValueOnce({
-      kept: [],
-      parked: [{ ...found[0], reason: 'severity' }],
-    });
-    await closeDevSession('rev-11');
-    await new Promise((r) => setTimeout(r, 0));
-    expect(sortFindingsForFix).toHaveBeenCalledWith('acme/loop', 77, found, {
-      severityFloor: 'medium',
-    });
-    // Still the person's call: the split goes along as advice, not a verdict.
-    expect(parent.reviewLoop.fixing).toBeFalsy();
-    // The advice carries its wording, so the screen and the orchestrator read the same sentence.
-    expect(parent.reviewLoop.triage.findings).toEqual([
-      {
-        ...found[0],
-        url: expect.stringContaining('url:acme/loop#77'),
-        parked: 'severity',
-        parkedWhy: 'below the floor',
-      },
-    ]);
-    expect(workerSummary(parent).reviewLoop.triage.findings[0].parked).toBe('below the floor');
-  });
-
-  it('an incomplete verification result fails the round without convergence or read retries', async () => {
-    const parent = getJob('incomplete-par');
-    const error = new Error('Independent review verification is incomplete');
-    error.name = 'ReviewIncompleteError';
-    latestReviewFindings.mockRejectedValueOnce(error);
-    const before = latestReviewFindings.mock.calls.length;
-    await closeDevSession('incomplete-rev');
-    await waitFor(() => !!parent.reviewLoop.failure);
-    expect(latestReviewFindings.mock.calls.length - before).toBe(1);
-    expect(parent.reviewLoop.done).toBeFalsy();
-    expect(parent.reviewLoop.pendingResult).toBeNull();
-    expect(parent.reviewLoop.reviewing).toBe(false);
-    expect(parent.reviewLoop.failure).toMatchObject({ round: 1, reason: error.message });
-    expect(parent.reviewLoop.triage).toBeUndefined();
-    expect(infoTexts(parent).join('\n')).toContain('verification incomplete, so it approved nothing');
-    expect(infoTexts(parent).join('\n')).not.toContain('declared no findings');
-  });
-
-  // Regression: one failing GitHub call after a published review dropped the round, leaving
-  // the loop "waiting for a push" with nobody told.
-  it('a round whose findings GitHub refuses once still converges', async () => {
-    const parent = getJob('par-15');
-    latestReviewFindings.mockRejectedValueOnce(new Error('GitHub answered 403 listing PR #77 comments'));
-    await closeDevSession('rev-15');
-    await waitFor(() => parent.reviewLoop.done);
-    expect(parent.reviewLoop.pendingResult).toBeNull(); // the round is settled, nothing left to retry
-    expect(infoTexts(parent).join('\n')).toMatch(/review round 1 declared no findings/);
-  });
-
-  it('a round GitHub keeps refusing stays the loop’s next step, and says so to the orchestrator', async () => {
-    const parent = getJob('par-16');
-    // Every attempt inside one resolve, so the round is left pending.
-    for (let i = 0; i < 3; i++) {
-      latestReviewFindings.mockRejectedValueOnce(new Error('GitHub answered 502 listing PR #77 comments'));
-    }
-    await closeDevSession('rev-16');
-    await waitFor(() => !!parent.reviewLoop.pendingResult && parent.reviewLoop.pendingResult.said);
-    // The round is on record: it happened, a new review does not reopen it, and the loop is
-    // not waiting for a push.
-    expect(parent.reviewLoop.pendingResult).toMatchObject({ prNumber: 77, round: 1 });
-    expect(parent.reviewLoop.done).toBeFalsy(); // restored rows carry no flag until one is set
-    expect(parent.reviewLoop.reviewing).toBe(false);
-    expect(parent.reviewLoop.rounds).toBe(1);
-    expect(infoTexts(parent).join('\n')).toMatch(/round 1's findings.*The round is not lost/s);
-    expect(workerSummary(parent).reviewLoop).toMatchObject({
-      rounds: 1,
-      awaitingResult: true,
-      done: false,
-    });
-    // And the next resolve waits: the sync tick fires every 20s, and without
-    // this the retry would be three GitHub requests per tick per session.
-    expect(parent.reviewLoop.pendingResult.attempts).toBe(1);
-    expect(Date.parse(parent.reviewLoop.pendingResult.nextRetryAt)).toBeGreaterThan(Date.now());
-    expect(parent.reviewLoop.pendingResult.failingSince).toBeTruthy();
-  });
-
-  it('closing the session drops the round nobody could read', async () => {
-    const parent = getJob('par-17');
-    for (let i = 0; i < 3; i++) {
-      latestReviewFindings.mockRejectedValueOnce(new Error('GitHub answered 502 listing PR #77 comments'));
-    }
-    await closeDevSession('rev-17');
-    await waitFor(() => !!parent.reviewLoop.pendingResult && parent.reviewLoop.pendingResult.said);
-    await closeDevSession('par-17');
-    // Nothing is owed to a closed session, and a reopen days later must not
-    // fire a fix session for a review that ran before the close.
-    expect(parent.reviewLoop.pendingResult).toBeNull();
-    expect(infoTexts(parent).join('\n')).toMatch(/dropped with this close/);
-  });
-
-  it('a plain session’s converged loop is nobody else’s business', async () => {
-    // par-2 converged above under no orchestrator, so nothing was queued anywhere.
-    expect(getJob('par-2').pendingWorkerNotices).toBeUndefined();
-  });
-
-  it('a worker’s converged loop reaches its orchestrator as a merge cue', async () => {
-    await closeDevSession('rev-12');
-    await new Promise((r) => setTimeout(r, 0));
-    const orch = getJob('loop-orch');
-    const notice = orch.pendingWorkerNotices.find((n) => n.workerId === 'par-12');
-    expect(notice.kind).toBe('loop');
-    expect(notice.text).toMatch(/^Worker par-12 \(Add the export\): the review loop converged on PR #77/);
-    expect(notice.text).toMatch(/declared no findings/);
-    expect(notice.text).toMatch(/ready to merge/);
-  });
-
-  it('keeps completed incomplete QA authoritative after a review retry converges', async () => {
-    const parent = getJob('qa-retry-par');
-    const qa = parent.qaLoop;
-    parent.awaitingAnswer = true; // Retry opens the gate; the review starts after the answer.
-    await retryLoopRound(parent.id);
-    expect(parent.reviewLoop.done).toBe(false);
-    expect(parent.qaLoop).toBe(qa);
-    parent.awaitingAnswer = false;
-    Object.assign(parent.reviewLoop, { reviewing: true, reviewSessionId: 'qa-retry-rev' });
-    await closeDevSession('qa-retry-rev');
-    await waitFor(() => parent.reviewLoop.done);
-    const notice = getJob('loop-orch').pendingWorkerNotices.find((n) => n.workerId === parent.id);
-    expect(notice.text).toContain('QA coverage is incomplete');
-    expect(notice.text).not.toContain('ready to merge');
-    expect(parent.qaLoop).toBe(qa);
-    expect(qa).toMatchObject({ done: true, incomplete: true, failedScenarios: 0 });
-    expect(qa.running).toBeFalsy();
-  });
-
-  it('a worker’s round is held for the user too, and its orchestrator is told to wait', async () => {
-    const findings = [{ key: 'new-key', severity: 'high', title: 'A new issue' }];
-    latestReviewFindings.mockResolvedValueOnce(findings);
-    const recorded = recordTriage.mock.calls.length;
-    await closeDevSession('rev-13');
-    await new Promise((r) => setTimeout(r, 0));
-    const parent = getJob('par-13');
-    expect(parent.reviewLoop.triage).toMatchObject({ prNumber: 77, round: 2 });
-    expect(parent.reviewLoop.lastFindings).toBe('k1'); // nothing was sent to be fixed
-    expect(recordTriage.mock.calls.length).toBe(recorded);
-    const notice = getJob('loop-orch').pendingWorkerNotices.find((n) => n.workerId === 'par-13');
-    expect(notice.kind).toBe('triage');
-    expect(notice.text).toMatch(
-      /^Worker par-13 \(Fix the filter\): review round 2 of PR #77 left 1 finding\(s\)/,
-    );
-    expect(notice.text).toMatch(/waiting for the user to decide in the dashboard's ⚑ Findings screen/);
-    expect(notice.text).toMatch(/do not triage the round yourself/);
-  });
-
-  it('the round cap stalls a sent final round, and the orchestrator hears it', async () => {
-    latestReviewFindings.mockResolvedValueOnce([{ key: 'k9', severity: 'high', title: 'Yet another' }]);
-    await closeDevSession('rev-14');
-    await new Promise((r) => setTimeout(r, 0));
-    const parent = getJob('par-14');
-    expect(parent.reviewLoop.stalled).toBeFalsy();
-    expect(parent.reviewLoop.triage).toMatchObject({ round: 3 }); // held, not stalled
-    await triageLoopFindings('par-14', { verdicts: [{ key: 'k9', decision: 'fix' }] });
-    expect(parent.reviewLoop.stalled).toBe(true);
-    expect(parent.reviewLoop.triage).toBeNull();
-    const orch = getJob('loop-orch');
-    // After the hold notice: the round waited on the screen first.
-    const notice = orch.pendingWorkerNotices.find((n) => n.workerId === 'par-14' && n.kind === 'loop');
-    expect(notice.text).toMatch(/^Worker par-14 \(Add the import\): the review loop stalled on PR #77/);
-    expect(notice.text).toMatch(/REVIEW_LOOP_MAX_ROUNDS=3/);
-    expect(notice.text).toMatch(/1 finding\(s\) listed on the pull request: Yet another\./);
-    expect(notice.text).toMatch(
-      /Findings are the user's to rule on; do not waive them or restart the loop on your own/,
-    );
-  });
-});
-
-// A rate-limited read recovers within the minute, but a rotated token, lost scope or deleted
-// PR never does; the round must not hold the loop for good.
-describe('the review loop: a pending round that is past giving up on', () => {
-  // Restored mid-outage: the round published but its findings have been unreadable since;
-  // `pending` says for how long and on which PR.
-  const workerRow = (id, prNumber, pending) => ({
-    id,
-    kind: 'devchat',
-    status: 'closed',
-    repo: 'acme/stuck',
-    providerId: 1,
-    turns: 1,
-    branch: `task/stuck-${prNumber}`,
-    startedOnPr: prNumber,
-    parentId: 'stuck-orch',
-    title: 'Wire the export',
-    createdAt: '2026-08-25T12:30:00.000Z',
-    reviewLoop: {
-      rounds: 1,
-      reviewing: false,
-      lastSha: `sha${prNumber}`,
-      pendingResult: {
-        prNumber,
-        round: 1,
-        since: null,
-        said: true,
-        attempts: 9,
-        error: 'GitHub answered 401 listing PR comments',
-        nextRetryAt: '2026-08-25T12:35:00.000Z',
-        ...pending,
-      },
-    },
-  });
-  // Failing since long before the deadline, and failing for less than it.
-  const ancient = '2026-08-25T12:31:00.000Z';
-  let recent;
-  const workerIds = ['stuck-1', 'stuck-2', 'stuck-3', 'stuck-4', 'stuck-5', 'stuck-6'];
-  // Explicit polling scenarios also inspect this shared registry. Keep each round
-  // parked until its own test nudges it, and retire the block's sessions afterward.
-  const PARKED = '2999-01-01T00:00:00.000Z';
-  const DUE = '2026-08-25T12:35:00.000Z';
-
-  beforeAll(async () => {
-    recent = new Date(Date.now() - 29 * 60_000).toISOString();
-    state.stored = [
-      {
-        id: 'stuck-orch',
-        kind: 'devchat',
-        status: 'closed',
-        repo: 'acme/stuck',
-        providerId: 1,
-        turns: 1,
-        createdAt: '2026-08-25T12:00:00.000Z',
-        orchestrator: true,
-        awaitingAnswer: true, // so the update lands in the buffer the test reads
-      },
-      workerRow('stuck-1', 79, { failingSince: ancient }),
-      workerRow('stuck-2', 80, { failingSince: ancient }),
-      workerRow('stuck-3', 81, { failingSince: ancient }),
-      workerRow('stuck-4', 82, { failingSince: recent }),
-      workerRow('stuck-5', 83, { failingSince: ancient }),
-      workerRow('stuck-6', 84, { failingSince: recent }),
-    ];
-    await initJobs();
-    for (const id of workerIds) getJob(id).reviewLoop.pendingResult.nextRetryAt = PARKED;
-    for (const id of ['stuck-orch', ...workerIds]) getJob(id).status = 'idle';
-    githubRest.mockImplementation(async (_cfg, _method, url) => {
-      const m = /^\/repos\/acme\/stuck\/pulls\/(\d+)$/.exec(url);
-      if (m) {
-        const number = Number(m[1]);
-        return {
-          ok: true,
-          json: async () => ({
-            number,
-            html_url: `https://github.com/acme/stuck/pull/${number}`,
-            // PR #81 was closed while nobody could read the round off it.
-            state: number === 81 ? 'closed' : 'open',
-            head: { ref: `task/stuck-${number}`, sha: `sha${number}` },
-            base: { ref: 'main' },
-          }),
-        };
-      }
-      return { ok: false, status: 404, json: async () => ({}) };
-    });
-  });
-
-  const waitFor = async (cond) => {
-    for (let i = 0; i < 400; i++) {
-      if (cond()) return;
-      await new Promise((r) => setTimeout(r, 10));
-    }
-    throw new Error('the loop never reached the expected state');
-  };
-
-  afterAll(() => {
-    for (const id of ['stuck-orch', ...workerIds]) getJob(id).status = 'closed';
-  });
-
-  // The sync tick's path: the branch event mirrors the PR, and the settle drains the round.
-  const nudge = (prNumber) => {
-    const pending = getJob(`stuck-${prNumber - 78}`).reviewLoop.pendingResult;
-    if (pending?.nextRetryAt === PARKED) pending.nextRetryAt = DUE;
-    return syncSessionsOn('acme/stuck', `task/stuck-${prNumber}`);
-  };
-  const refuse = (n, message = 'GitHub answered 401 listing PR comments') => {
-    for (let i = 0; i < n; i++) latestReviewFindings.mockRejectedValueOnce(new Error(message));
-  };
-
-  it('stalls the loop instead of holding the round for ever', async () => {
-    const parent = getJob('stuck-1');
-    refuse(3); // every attempt inside the one resolve
-    nudge(79);
-    await waitFor(() => parent.reviewLoop.stalled);
-    // A later push starts a fresh round instead of finding the loop wedged here.
-    expect(parent.reviewLoop.pendingResult).toBeNull();
-    const text = infoTexts(parent).join('\n');
-    expect(text).toMatch(/could not be read off PR #79 for 30 minutes/);
-    expect(text).toMatch(/GitHub answered 401/); // what the last attempt said
-    // And the orchestrator is told, the way every other stall tells it.
-    const notice = getJob('stuck-orch').pendingWorkerNotices.find((n) => n.workerId === 'stuck-1');
-    expect(notice.kind).toBe('loop');
-    expect(notice.text).toMatch(/the review loop stalled on PR #79/);
-    expect(notice.text).toMatch(/judge it by hand/);
-  });
-
-  // The deadline is judged on a read that just failed, not the clock alone: a round pending
-  // across a restart or failed turn had nothing retrying it meanwhile.
-  it('asks GitHub once more before it gives up on a round', async () => {
-    const parent = getJob('stuck-2');
-    nudge(80); // the default mock answers: no findings
-    await waitFor(() => parent.reviewLoop.done);
-    expect(latestReviewFindings).toHaveBeenCalledWith('acme/stuck', 80, { since: null });
-    expect(parent.reviewLoop.pendingResult).toBeNull();
-    expect(parent.reviewLoop.stalled).toBeFalsy();
-    expect(infoTexts(parent).join('\n')).toMatch(/review round 1 declared no findings/);
-    expect(
-      getJob('stuck-orch').pendingWorkerNotices.some(
-        (n) => n.workerId === 'stuck-2' && /stalled/.test(n.text),
-      ),
-    ).toBe(false);
-  });
-
-  it('drops the round quietly when the pull request is no longer open', async () => {
-    const parent = getJob('stuck-3');
-    refuse(3);
-    nudge(81);
-    await waitFor(() => parent.reviewLoop.pendingResult === null);
-    expect(parent.reviewLoop.stalled).toBeFalsy();
-    expect(infoTexts(parent).join('\n')).not.toMatch(/could not be read off PR #81 for 30 minutes/);
-    expect(getJob('stuck-orch').pendingWorkerNotices.some((n) => n.workerId === 'stuck-3')).toBe(false);
-  });
-
-  // GitHub's hourly rate-limit reset routinely outlasts the 30-minute deadline. Attempts blocked
-  // locally never reach the network, so they cost no attempt and no deadline time.
-  it('parks on the rate limit’s own reset without spending the deadline', async () => {
-    const parent = getJob('stuck-4');
-    const retryAt = Date.now() + 50 * 60_000; // past the deadline, as a core reset can be
-    const limited = new Error('GitHub core rate limit exhausted, backing off until 3:00:00 PM');
-    limited.rateLimited = true;
-    limited.retryAt = retryAt;
-    latestReviewFindings.mockRejectedValueOnce(limited);
-    const before = latestReviewFindings.mock.calls.length;
-    nudge(82);
-    await waitFor(() => parent.reviewLoop.pendingResult.nextRetryAt !== DUE);
-    const pending = parent.reviewLoop.pendingResult;
-    // The round is still the loop's next step, retried when the limit lifts.
-    expect(pending).toMatchObject({ prNumber: 82, round: 1 });
-    expect(parent.reviewLoop.stalled).toBeFalsy();
-    expect(pending.nextRetryAt).toBe(new Date(retryAt).toISOString());
-    // No attempt spent on the backoff, and the deadline pushed forward by the wait.
-    expect(pending.attempts).toBe(9);
-    expect(Date.parse(pending.failingSince) - Date.parse(recent)).toBeGreaterThan(45 * 60_000);
-    // And a local cooldown is not retried twice more inside the same resolve.
-    expect(latestReviewFindings.mock.calls.length - before).toBe(1);
-  });
-
-  // A reviewer that restates a finding the dashboard already left optional or dismissed
-  // withholds code-approved, and prior verdicts leave nothing to fix: the approval wait
-  // backs off and gives up like an unreadable round instead of re-arming every tick.
-  describe('when prior verdicts leave nothing open and the review never approves', () => {
-    const restated = [{ key: 'prior', severity: 'medium', title: 'Prior finding' }];
-    beforeEach(() => state.projects.push({ repo: 'acme/stuck', autonomousReviewLoop: true }));
-    afterEach(() => {
-      state.projects = state.projects.filter((p) => p.repo !== 'acme/stuck');
-    });
-
-    it('stalls the loop past the deadline and tells the orchestrator', async () => {
-      const parent = getJob('stuck-5');
-      latestReviewFindings.mockResolvedValueOnce(restated);
-      sortFindingsForFix.mockResolvedValueOnce({ kept: [], parked: [] });
-      nudge(83);
-      await waitFor(() => parent.reviewLoop.stalled);
-      expect(parent.reviewLoop.pendingResult).toBeNull();
-      expect(parent.reviewLoop.done).toBeFalsy();
-      expect(infoTexts(parent).join('\n')).toMatch(
-        /review round 1 declared only findings already dismissed or left optional, and for 30 minutes the pull request did not get the code-approved label/,
-      );
-      const notice = getJob('stuck-orch').pendingWorkerNotices.find((n) => n.workerId === 'stuck-5');
-      expect(notice.text).toMatch(/the review loop stalled on PR #83/);
-      expect(notice.text).toMatch(/Prior finding/);
-    });
-
-    it('backs off before the deadline and says so once', async () => {
-      const parent = getJob('stuck-6');
-      const pendingApproval = () => infoTexts(parent).filter((t) => t.includes('remains pending approval'));
-      for (let i = 0; i < 2; i++) {
-        latestReviewFindings.mockResolvedValueOnce(restated);
-        sortFindingsForFix.mockResolvedValueOnce({ kept: [], parked: [] });
-      }
-      nudge(84);
-      await waitFor(() => pendingApproval().length === 1);
-      const pending = parent.reviewLoop.pendingResult;
-      expect(pending).toMatchObject({ prNumber: 84, round: 1, attempts: 10, failingSince: recent });
-      expect(pending.error).toMatch(/has not applied the code-approved label/);
-      expect(Date.parse(pending.nextRetryAt) - Date.now()).toBeGreaterThan(100_000);
-      expect(parent.reviewLoop.stalled).toBeFalsy();
-      // Another due retry fails the same way, without a second event.
-      // (Unmirrored again, so the sync takes the look a freshly attached PR gets.)
-      pending.nextRetryAt = new Date(0).toISOString();
-      parent.prStatus = null;
-      nudge(84);
-      await waitFor(() => parent.reviewLoop.pendingResult?.attempts === 11);
-      expect(pendingApproval()).toHaveLength(1);
-    });
-  });
-
-  const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
-});
-
-// Regression: a restart mid-backoff leaves the session `interrupted`, not `idle`. The read
-// needs only the round persisted on the PR, so its retry must not need a live session.
-describe('the review loop: a pending round outlives the process that started its backoff', () => {
-  it('resumes a pending round on an interrupted (restarted) session, not just an idle one', async () => {
-    vi.useFakeTimers();
-    latestReviewFindings.mockClear();
-    state.stored = [
-      {
-        id: 'restart-par-1',
-        kind: 'devchat',
-        // idle, not closed: restoreFromDb only marks interrupted a session still holding its
-        // clone/database claim, the restart this must survive.
-        status: 'idle',
-        repo: 'acme/restart',
-        turns: 1,
-        branch: 'task/restart-1',
-        startedOnPr: 90,
-        prStatus: { number: 90, state: 'open' },
-        dbServerId: 9,
-        dbHost: 'db-host',
-        dbPort: 3306,
-        reviewLoop: {
-          rounds: 1,
-          reviewing: false,
-          pendingResult: {
-            prNumber: 90,
-            round: 1,
-            since: null,
-            said: true,
-            attempts: 1,
-            failingSince: '2026-08-25T12:31:00.000Z',
-            nextRetryAt: new Date(0).toISOString(),
-          },
-        },
-      },
-    ];
-    latestReviewFindings.mockResolvedValueOnce([]);
-    await initJobs();
-    const parent = getJob('restart-par-1');
-    // The real restart transition (restoreFromDb -> markInterrupted), not a hand-set status.
-    expect(parent.status).toBe('interrupted');
-    expect(parent.dbServerId).toBeNull();
-    expect(parent.error).toBeTruthy();
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(latestReviewFindings).toHaveBeenCalledWith('acme/restart', 90, { since: null });
-    expect(parent.reviewLoop.pendingResult).toBeNull();
-    expect(parent.reviewLoop.done).toBe(true);
-    vi.useRealTimers();
-  });
-
-  it('still drops the round once the session is actually closed, not merely interrupted', async () => {
-    vi.useFakeTimers();
-    latestReviewFindings.mockClear();
-    state.stored = [
-      {
-        id: 'restart-par-2',
-        kind: 'devchat',
-        status: 'closed',
-        repo: 'acme/restart',
-        turns: 1,
-        branch: 'task/restart-2',
-        startedOnPr: 91,
-        prStatus: { number: 91, state: 'open' },
-        reviewLoop: {
-          rounds: 1,
-          reviewing: false,
-          pendingResult: {
-            prNumber: 91,
-            round: 1,
-            since: null,
-            said: true,
-            attempts: 1,
-            failingSince: '2026-08-25T12:31:00.000Z',
-            nextRetryAt: new Date(0).toISOString(),
-          },
-        },
-      },
-    ];
-    await initJobs();
-    const parent = getJob('restart-par-2');
-    // Genuinely closed: nobody is owed this round, so the tick spends no GitHub call on it.
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(latestReviewFindings).not.toHaveBeenCalled();
-    expect(parent.reviewLoop.pendingResult).not.toBeNull();
-    vi.useRealTimers();
-  });
-});
-
-// Retrying reads across interrupted/failed means one can still be in flight when the session
-// is deleted; deleteJobById must win against a resurrecting save().
-describe('deleting a session with a round read in flight', () => {
-  it('does not let a pending round’s save resurrect a job deleted while the read was in flight', async () => {
-    vi.useFakeTimers();
-    try {
-      latestReviewFindings.mockClear();
-      saveJob.mockClear();
-      state.stored = [
-        {
-          id: 'race-par-1',
-          kind: 'devchat',
-          status: 'interrupted',
-          repo: 'acme/race',
-          turns: 1,
-          branch: 'task/race-1',
-          startedOnPr: 95,
-          prStatus: { number: 95, state: 'open' },
-          reviewLoop: {
-            rounds: 1,
-            reviewing: false,
-            pendingResult: {
-              prNumber: 95,
-              round: 1,
-              since: null,
-              said: true,
-              attempts: 1,
-              failingSince: '2026-08-25T12:31:00.000Z',
-              nextRetryAt: new Date(0).toISOString(),
-            },
-          },
-        },
-      ];
-      let resolveFindings;
-      latestReviewFindings.mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            resolveFindings = resolve;
-          }),
-      );
-      let resolveDrop;
-      dropSessionDatabase.mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            resolveDrop = resolve;
-          }),
-      );
-      await initJobs();
-
-      // The sync tick starts the round's read, left in flight (findings unresolved).
-      await vi.advanceTimersByTimeAsync(20_000);
-      expect(latestReviewFindings).toHaveBeenCalledWith('acme/race', 95, { since: null });
-
-      // Runs synchronously to its first await (dropSessionDatabase, held open above), so the
-      // job is still registered and the delete mid-flight when the read resolves.
-      const deleted = deleteJobById('race-par-1');
-
-      // No findings drives resolveLoopRound straight to save(parent) with no await between.
-      resolveFindings([]);
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-
-      // A flush tick while the delete is paused must not write the row back.
-      await vi.advanceTimersByTimeAsync(600);
-      expect(saveJob).not.toHaveBeenCalled();
-
-      // Let the delete finish.
-      resolveDrop();
-      await deleted;
-      expect(deleteJob).toHaveBeenCalledWith('race-par-1', null);
-      expect(getJob('race-par-1')).toBeNull();
-
-      // Nothing queued by the read's completion survives the delete either.
-      await vi.advanceTimersByTimeAsync(600);
-      expect(saveJob).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe('the review loop: the orchestrator’s triage of a held round', () => {
-  const held = () => ({
-    prNumber: 79,
-    round: 2,
-    findings: [
-      { key: 'k1', severity: 'high', title: 'A thing', parked: null },
-      { key: 'k2', severity: 'low', title: 'A nit', file: 'lib/x.js', line: 4, parked: 'severity' },
-    ],
-  });
-  const workerRow = (id, orch, loop = {}) => ({
-    id,
-    kind: 'devchat',
-    status: 'closed', // flipped to idle after the restore, like the rows above
-    repo: 'acme/triage', // not in state.projects: a fix session spawn fails and leaves its trace
-    providerId: 1,
-    turns: 1,
-    title: 'Add the export',
-    createdAt: '2026-08-26T12:30:00.000Z',
-    parentId: orch,
-    branch: 'task/triage',
-    startedOnPr: 79,
-    prStatus: { number: 79, state: 'open' },
-    reviewLoop: { rounds: 2, lastSha: 'abc', lastFindings: 'k0', triage: held(), ...loop },
-  });
-  const orchRow = (id, extra = {}) => ({
-    id,
-    kind: 'devchat',
-    status: 'closed',
-    repo: 'acme/triage',
-    providerId: 1,
-    turns: 1,
-    createdAt: '2026-08-26T12:00:00.000Z',
-    orchestrator: true,
-    awaitingAnswer: true, // so the updates stay in the buffer where the tests read them
-    ...extra,
-  });
-
-  beforeAll(async () => {
-    state.stored = [
-      orchRow('tri-orch'),
-      workerRow('tri-1', 'tri-orch'),
-      workerRow('tri-2', 'tri-orch'),
-      workerRow('tri-3', 'tri-orch', { lastFindings: 'k1' }),
-      workerRow('tri-4', 'tri-orch', { triage: null }),
-      // An orchestrator that was closed with a round on hold, and the fix
-      // session whose close is the worker's next settle.
-      orchRow('tri-gone'),
-      workerRow('tri-5', 'tri-gone', { fixing: true, fixSessionId: 'tri-5-fix' }),
-      {
-        id: 'tri-5-fix',
-        kind: 'devchat',
-        status: 'closed',
-        repo: 'acme/triage',
-        turns: 1,
-        loopFixParentId: 'tri-5',
-        loopFixDone: true,
-      },
-      // Two sends of the same round racing each other.
-      workerRow('tri-6', 'tri-orch'),
-      // Held at abc, and the branch has moved on to def since.
-      {
-        ...workerRow('tri-7', 'tri-orch', { triage: { ...held(), sha: 'abc', stale: false } }),
-        prStatus: { number: 79, state: 'open', headSha: 'def' },
-      },
-      {
-        ...workerRow('tri-8', 'tri-orch', {
-          fixing: true,
-          fixSessionId: 'tri-8-fix',
-          triage: { ...held(), sha: 'abc', stale: false },
-        }),
-        prStatus: { number: 79, state: 'open', headSha: 'def' },
-      },
-      {
-        id: 'tri-8-fix',
-        kind: 'devchat',
-        status: 'closed',
-        repo: 'acme/triage',
-        turns: 1,
-        loopFixParentId: 'tri-8',
-        loopFixDone: true,
-      },
-      // Held at abc with the branch at def, on a worker a restart left
-      // interrupted: the review the send owes cannot start until it settles.
-      {
-        ...workerRow('tri-11', 'tri-orch', { triage: { ...held(), sha: 'abc', stale: false } }),
-        prStatus: { number: 79, state: 'open', headSha: 'def' },
-      },
-      // Held with no sha recorded, and the branch at def: nothing to compare.
-      {
-        ...workerRow('tri-12', 'tri-orch', { lastSha: null, triage: { ...held(), sha: null, stale: false } }),
-        prStatus: { number: 79, state: 'open', headSha: 'def' },
-      },
-      // Its approval label write fails, so its round must remain retryable.
-      workerRow('tri-13', 'tri-orch'),
-      { ...workerRow('tri-labels-success', 'tri-orch'), repo: 'acme/triage-labels-success' },
-      { ...workerRow('tri-labels-partial', 'tri-orch'), repo: 'acme/triage-labels-partial' },
-      ...['truncated-add', 'truncated-remove'].map((outcome) => ({
-        ...workerRow(`tri-labels-${outcome}`, 'tri-orch'),
-        repo: `acme/triage-labels-${outcome}`,
-      })),
-      // Closed with its round still on the screen.
-      workerRow('tri-9', 'tri-orch'),
-      // Merged under the hold, before the sync dropped the round.
-      { ...workerRow('tri-10', 'tri-orch'), prStatus: { number: 79, state: 'merged' } },
-      // Save comments round-trips on these: one live, one closed for the retired-session guard.
-      workerRow('tri-save', 'tri-orch'),
-      workerRow('tri-save-closed', 'tri-orch'),
-      // A free orchestrator with a triage update for a worker no longer holding one.
-      orchRow('tri-free', {
-        awaitingAnswer: false,
-        pendingWorkerNotices: [{ workerId: 'tri-4', kind: 'triage', text: 'stale' }],
-      }),
-    ];
-    await initJobs();
-    for (const id of [
-      'tri-orch',
-      'tri-1',
-      'tri-2',
-      'tri-3',
-      'tri-4',
-      'tri-5',
-      'tri-5-fix',
-      'tri-6',
-      'tri-7',
-      'tri-8',
-      'tri-8-fix',
-      'tri-9',
-      'tri-10',
-      'tri-11',
-      'tri-12',
-      'tri-13',
-      'tri-labels-success',
-      'tri-labels-partial',
-      'tri-labels-truncated-add',
-      'tri-labels-truncated-remove',
-      'tri-save',
-      'tri-free',
-    ]) {
-      getJob(id).status = 'idle';
-    }
-    getJob('tri-11').status = 'interrupted';
-  });
-
-  const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
-
-  it('refuses a worker with no round on hold', async () => {
-    await expect(triageLoopFindings('tri-4', { verdicts: [{ key: 'k1', decision: 'fix' }] })).rejects.toThrow(
-      /no review round waiting/,
-    );
-    await expect(triageLoopFindings('nobody', { verdicts: [] })).rejects.toThrow(/Session not found/);
-  });
-
-  it('Save comments keeps the drafts on the round and says them on the pull request, ruling nothing', async () => {
-    postTriageNotes.mockClear();
-    const recorded = recordTriage.mock.calls.length;
-
-    const result = await saveReviewFindingsDrafts('tri-save', {
-      verdicts: [{ key: 'k1', decision: '', reason: '  Looks intentional, checking with the author  ' }],
-      note: 'Ship after the hotfix',
-    });
-
-    expect(result).toMatchObject({
-      warning: null,
-      drafts: {
-        verdicts: { k1: { decision: null, reason: 'Looks intentional, checking with the author' } },
-        note: 'Ship after the hotfix',
-      },
-    });
-    const held = getJob('tri-save').reviewLoop.triage;
-    expect(held.drafts.savedAt).toEqual(expect.any(String));
-    expect(postTriageNotes).toHaveBeenCalledWith(
-      'acme/triage',
-      79,
-      'tri-save',
-      [
-        expect.objectContaining({
-          key: 'k1',
-          decision: null,
-          reason: 'Looks intentional, checking with the author',
-        }),
-        expect.objectContaining({ key: 'k2', decision: null, reason: '' }),
-      ],
-      { note: 'Ship after the hotfix', round: 2, standalone: false, by: 'the user' },
-    );
-    expect(recordTriage.mock.calls.length).toBe(recorded); // nothing ruled
-  });
-
-  it('Save comments keeps the drafts and warns when the pull request refuses the comment', async () => {
-    postTriageNotes.mockRejectedValueOnce(new Error('GitHub answered 403 writing the triage notes comment'));
-
-    const result = await saveReviewFindingsDrafts('tri-save', {
-      verdicts: [{ key: 'k1', decision: 'dismiss', reason: 'Generated code' }],
-    });
-
-    expect(result.warning).toMatch(/Saved here, but not on PR #79: GitHub answered 403/);
-    expect(getJob('tri-save').reviewLoop.triage.drafts.verdicts).toEqual({
-      k1: { decision: 'dismissed', reason: 'Generated code' },
-    });
-  });
-
-  it('Save comments refuses a finding that is not on the round, a verdict that is not one, and a closed session', async () => {
-    await expect(
-      saveReviewFindingsDrafts('tri-save', { verdicts: [{ key: 'nope', reason: 'x' }] }),
-    ).rejects.toThrow(/No finding nope is waiting/);
-    await expect(
-      saveReviewFindingsDrafts('tri-save', { verdicts: [{ key: 'k1', decision: 'maybe' }] }),
-    ).rejects.toThrow(/"maybe" is not a verdict/);
-    await expect(saveReviewFindingsDrafts('tri-save-closed', {})).rejects.toThrow(/session is closed/);
-    await expect(saveReviewFindingsDrafts('tri-4', {})).rejects.toThrow(/no findings waiting for triage/);
-    await expect(saveReviewFindingsDrafts('nobody', {})).rejects.toThrow(/Session not found/);
-  });
-
-  it('wants a verdict on every finding, by key, in one of the three words', async () => {
-    const before = recordTriage.mock.calls.length;
-    await expect(triageLoopFindings('tri-1', { verdicts: [] })).rejects.toThrow(/one verdict per finding/);
-    await expect(triageLoopFindings('tri-1', { verdicts: [{ key: 'k1', decision: 'fix' }] })).rejects.toThrow(
-      /still unruled: k2/,
-    );
-    await expect(
-      triageLoopFindings('tri-1', {
-        verdicts: [
-          { key: 'k1', decision: 'fix' },
-          { key: 'k7', decision: 'fix' },
-        ],
-      }),
-    ).rejects.toThrow(/No finding k7/);
-    await expect(
-      triageLoopFindings('tri-1', {
-        verdicts: [
-          { key: 'k1', decision: 'maybe' },
-          { key: 'k2', decision: 'fix' },
-        ],
-      }),
-    ).rejects.toThrow(/"maybe" is not a verdict for k1/);
-    // Nothing was recorded and the round is still on hold.
-    expect(recordTriage.mock.calls.length).toBe(before);
-    expect(getJob('tri-1').reviewLoop.triage).not.toBeNull();
-  });
-
-  it('records the verdicts, then sends what was kept to a fix session with the note', async () => {
-    const held = getJob('tri-1').reviewLoop.triage;
-    const previousFindings = getJob('tri-1').reviewLoop.lastFindings;
-    const result = await triageLoopFindings('tri-1', {
-      verdicts: [
-        { key: 'k1', decision: 'fix' },
-        { key: 'k2', decision: 'dismiss', reason: 'the memo is keyed on purpose' },
-      ],
-      note: 'Keep the public signature.',
-    });
-    const worker = getJob('tri-1');
-    expect(worker.reviewLoop.triage).toBe(held);
-    // Every verdict goes on record, "dismiss" spelled the way the panel spells it.
-    expect(recordTriage).toHaveBeenLastCalledWith(
-      'acme/triage',
-      79,
-      [
-        { key: 'k1', severity: 'high', title: 'A thing', decision: 'fix', reason: null },
-        {
-          key: 'k2',
-          severity: 'low',
-          title: 'A nit',
-          file: 'lib/x.js',
-          line: 4,
-          decision: 'dismissed',
-          reason: 'the memo is keyed on purpose',
-        },
-      ],
-      { round: 2, by: 'the orchestrator', note: 'Keep the public signature.' },
-    );
-    // A refused startup preserves the comparison, while the attempted fix
-    // is still briefed with the decided list and note.
-    expect(worker.reviewLoop.lastFindings).toBe(previousFindings);
-    expect(implementFeedbackPrompt).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        prNumber: 79,
-        findings: [{ key: 'k1', severity: 'high', title: 'A thing' }],
-        triaged: true,
-        note: 'Keep the public signature.',
-        by: 'the orchestrator',
-      }),
-    );
-    const text = infoTexts(worker).join('\n');
-    expect(text).toMatch(
-      /triaged round 2: 1 finding\(s\) to fix, 1 left out \(A nit: dismissed, the memo is keyed on purpose\)/,
-    );
-    expect(text).toMatch(/could not start the fix session/); // the spawn was attempted
-    expect(result).toEqual({ fixing: false, converged: false });
-  });
-
-  it('a round with nothing kept converges, and says so to the orchestrator', async () => {
-    const result = await triageLoopFindings('tri-2', {
-      verdicts: [
-        { key: 'k1', decision: 'optional', reason: 'later' },
-        { key: 'k2', decision: 'dismissed' },
-      ],
-    });
-    const worker = getJob('tri-2');
-    expect(result).toEqual({ fixing: false, converged: true, approved: true });
-    expect(addPullRequestLabel).toHaveBeenLastCalledWith(
-      expect.objectContaining({ githubToken: 'tok' }),
-      'acme/triage',
-      79,
-      'code-approved',
-    );
-    expect(removePullRequestLabel).toHaveBeenLastCalledWith(
-      expect.objectContaining({ githubToken: 'tok' }),
-      'acme/triage',
-      79,
-      'feedback-given',
-    );
-    expect(worker.reviewLoop.done).toBe(true);
-    expect(worker.reviewLoop.triage).toBeNull();
-    expect(infoTexts(worker).join('\n')).toMatch(
-      /round 2 left nothing to implement after the orchestrator's triage\. The loop is done unless something new is pushed/,
-    );
-    const notice = getJob('tri-orch').pendingWorkerNotices.find((n) => n.workerId === 'tri-2');
-    expect(notice.kind).toBe('loop');
-    expect(notice.text).toMatch(
-      /converged on PR #79: round 2 left nothing to implement after the orchestrator's triage/,
-    );
-  });
-
-  it.each(['success', 'partial', 'truncated-add', 'truncated-remove'])(
-    'refreshes approval labels after each accepted write, including %s completion',
-    async (outcome) => {
-      const project = { repo: `acme/triage-labels-${outcome}` };
-      const stored = {
-        pulls: [{ number: 79, title: 'Reviewed pull', labels: [{ name: 'feedback-given' }] }],
-        issues: [],
-        syncedAt: new Date().toISOString(),
-      };
-      const read = vi.spyOn(githubStore, 'readBoard').mockResolvedValue(stored);
-      const save = vi.spyOn(githubStore, 'saveBoard').mockResolvedValue(undefined);
-      let labels = ['feedback-given'];
-      const realGithub = await vi.importActual('../lib/github.js');
-      const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
-        const adding = options.method === 'POST';
-        labels = adding ? [...labels, 'code-approved'] : ['code-approved'];
-        return (adding ? outcome === 'truncated-add' : outcome === 'truncated-remove')
-          ? new Response('[{"name":', { status: 200 })
-          : Response.json(labels.map((name) => ({ name })));
-      });
-      const graphql = githubGraphql.getMockImplementation();
-      githubGraphql.mockImplementation(async () => ({
-        repository: {
-          pullRequests: {
-            nodes: [{ number: 79, labels: { nodes: labels.map((name) => ({ name })) } }],
-          },
-          issues: { nodes: [] },
-        },
-      }));
-      invalidateBoard(project.repo, { refresh: false });
-      try {
-        expect((await projectPulls(project)).pulls[0].recommended).toBe('implement-feedback');
-        addPullRequestLabel.mockImplementationOnce(async (...args) => {
-          if (outcome.startsWith('truncated-')) return realGithub.addPullRequestLabel(...args);
-          labels.push('code-approved');
-          return [];
-        });
-        removePullRequestLabel.mockImplementationOnce(async (...args) => {
-          // Observe partial success before the second write completes.
-          expect((await projectPulls(project)).pulls[0].labels.map((l) => l.name)).toEqual(labels);
-          if (outcome === 'partial') throw new Error('GitHub answered 503 removing feedback-given');
-          if (outcome.startsWith('truncated-')) return realGithub.removePullRequestLabel(...args);
-          labels = ['code-approved'];
-          return [];
-        });
-        const approving = triageLoopFindings(`tri-labels-${outcome}`, {
-          verdicts: [
-            { key: 'k1', decision: 'optional' },
-            { key: 'k2', decision: 'dismissed' },
-          ],
-        });
-        if (outcome === 'partial') await expect(approving).rejects.toThrow(/503 removing feedback-given/);
-        else await expect(approving).resolves.toMatchObject({ approved: true });
-        const pull = (await projectPulls(project)).pulls[0];
-        expect(pull.labels.map((l) => l.name)).toEqual(labels);
-        expect(pull.recommended).toBe(outcome === 'partial' ? 'implement-feedback' : 'qa');
-        expect(save).toHaveBeenCalledTimes(outcome === 'partial' ? 1 : 2);
-      } finally {
-        fetch.mockRestore();
-        read.mockRestore();
-        save.mockRestore();
-        githubGraphql.mockImplementation(graphql);
-        invalidateBoard(project.repo, { refresh: false });
-      }
-    },
-  );
-
-  it('the stall gate runs on what the triage kept', async () => {
-    // tri-3's previous round already sent k1 alone to a fix session.
-    const result = await triageLoopFindings('tri-3', {
-      verdicts: [
-        { key: 'k1', decision: 'fix' },
-        { key: 'k2', decision: 'dismissed', reason: 'nit' },
-      ],
-    });
-    const worker = getJob('tri-3');
-    expect(result).toEqual({ fixing: false, converged: false });
-    expect(worker.reviewLoop.stalled).toBe(true);
-    expect(worker.reviewLoop.fixing).toBeFalsy();
-    const notice = getJob('tri-orch').pendingWorkerNotices.find((n) => n.workerId === 'tri-3');
-    expect(notice.text).toMatch(/stalled on PR #79.*same findings as the round before it/);
-  });
-
-  it('a persisted held round stays on hold across a restart and a settle', async () => {
-    const before = sortFindingsForFix.mock.calls.length;
-    await closeDevSession('tri-5-fix'); // the worker's next settle
-    await new Promise((r) => setTimeout(r, 0));
-    const worker = getJob('tri-5');
-    // The decision is a person's; nothing re-sorts or re-reviews a round already on screen.
-    expect(worker.reviewLoop.triage).toEqual(held());
-    expect(worker.reviewLoop.fixing).toBe(false);
-    expect(worker.reviewLoop.reviewing).toBeFalsy();
-    expect(sortFindingsForFix.mock.calls.length).toBe(before);
-    expect(infoTexts(worker).join('\n')).not.toMatch(/could not start the fix session|started a fix session/);
-  });
-
-  it('a second send of a round already being sent is refused before anything is written', async () => {
-    const before = recordTriage.mock.calls.length;
-    recordTriage.mockImplementationOnce(
-      () => new Promise((resolve) => setTimeout(() => resolve({ error: null }), 30)),
-    );
-    const verdicts = [
-      { key: 'k1', decision: 'optional' },
-      { key: 'k2', decision: 'optional' },
-    ];
-    const first = triageLoopFindings('tri-6', { verdicts });
-    await expect(triageLoopFindings('tri-6', { verdicts })).rejects.toThrow(/already being sent/);
-    expect(recordTriage.mock.calls.length).toBe(before + 1); // one record, one triage comment
-    await expect(first).resolves.toEqual({ fixing: false, converged: true, approved: true });
-    // Released once the first is through: a third call finds no round, not a send in flight.
-    await expect(triageLoopFindings('tri-6', { verdicts })).rejects.toThrow(/no review round waiting/);
-  });
-
-  it('nothing to fix on a round the branch moved past reviews the new commits instead of converging', async () => {
-    const worker = getJob('tri-7');
-    const labelsBefore = addPullRequestLabel.mock.calls.length;
-    const result = await triageLoopFindings('tri-7', {
-      verdicts: [
-        { key: 'k1', decision: 'dismissed', reason: 'fixed by hand' },
-        { key: 'k2', decision: 'optional' },
-      ],
-    });
-    // Not the failure shape: the round closed and a review was attempted on the new head. It
-    // failed to spawn (unknown repo), so `reviewing` is false, and nothing was deferred.
-    expect(result).toEqual({ fixing: false, converged: false, reviewing: false, deferred: false });
-    expect(worker.reviewLoop.triage).toBeNull();
-    expect(worker.reviewLoop.done).toBeFalsy();
-    expect(addPullRequestLabel.mock.calls.length).toBe(labelsBefore);
-    const text = infoTexts(worker).join('\n');
-    expect(text).toMatch(/branch moved while it was held, so the new commits are reviewed/);
-    expect(text).toMatch(/could not start the code review/);
-    expect(text).not.toMatch(/waits for this session to settle idle/);
-    const notice = (getJob('tri-orch').pendingWorkerNotices || []).find(
-      (n) => n.workerId === 'tri-7' && /converged/.test(n.text),
-    );
-    expect(notice).toBeUndefined();
-  });
-
-  it('a review the stale send owes but cannot start yet is said to be deferred, not failed', async () => {
-    const worker = getJob('tri-11');
-    const result = await triageLoopFindings('tri-11', {
-      verdicts: [
-        { key: 'k1', decision: 'dismissed', reason: 'fixed by hand' },
-        { key: 'k2', decision: 'optional' },
-      ],
-    });
-    expect(result).toEqual({ fixing: false, converged: false, reviewing: false, deferred: true });
-    expect(worker.reviewLoop.triage).toBeNull();
-    expect(worker.reviewLoop.done).toBeFalsy();
-    expect(worker.reviewLoop.rounds).toBe(2); // no round was attempted on an interrupted session
-    const text = infoTexts(worker).join('\n');
-    expect(text).toMatch(/waits for this session to settle idle \(it is interrupted\)/);
-    expect(text).not.toMatch(/could not start the code review/);
-  });
-
-  it('a hold that recorded no sha counts as not moved: it converges rather than re-reviewing', async () => {
-    const worker = getJob('tri-12');
-    const result = await triageLoopFindings('tri-12', {
-      verdicts: [
-        { key: 'k1', decision: 'optional' },
-        { key: 'k2', decision: 'optional' },
-      ],
-    });
-    expect(result).toEqual({ fixing: false, converged: true, approved: true });
-    expect(worker.reviewLoop.done).toBe(true);
-    expect(infoTexts(worker).join('\n')).not.toMatch(/branch moved/);
-  });
-
-  it('keeps the round open when GitHub refuses the approval label', async () => {
-    addPullRequestLabel.mockRejectedValueOnce(
-      new Error('GitHub answered 422 adding code-approved to acme/triage#79'),
-    );
-
-    await expect(
-      triageLoopFindings('tri-13', {
-        verdicts: [
-          { key: 'k1', decision: 'optional' },
-          { key: 'k2', decision: 'dismissed' },
-        ],
-      }),
-    ).rejects.toThrow(/answered 422 adding code-approved/);
-    expect(getJob('tri-13').reviewLoop.triage).toEqual(held());
-    expect(getJob('tri-13').reviewLoop.done).toBeFalsy();
-  });
-
-  it('keeps the round open when GitHub refuses to remove feedback-given', async () => {
-    removePullRequestLabel.mockRejectedValueOnce(
-      new Error('GitHub answered 500 removing feedback-given from acme/triage#79'),
-    );
-
-    await expect(
-      triageLoopFindings('tri-13', {
-        verdicts: [
-          { key: 'k1', decision: 'optional' },
-          { key: 'k2', decision: 'dismissed' },
-        ],
-      }),
-    ).rejects.toThrow(/answered 500 removing feedback-given/);
-    expect(getJob('tri-13').reviewLoop.triage).toEqual(held());
-    expect(getJob('tri-13').reviewLoop.done).toBeFalsy();
-  });
-
-  it('a push landing under a held round marks the card stale at the next settle', async () => {
-    await closeDevSession('tri-8-fix'); // the worker's next settle
-    await new Promise((r) => setTimeout(r, 0));
-    const worker = getJob('tri-8');
-    expect(worker.reviewLoop.triage).toMatchObject({ round: 2, sha: 'abc', stale: true });
-    expect(worker.reviewLoop.reviewing).toBeFalsy(); // one round on the screen at a time
-    expect(infoTexts(worker).join('\n')).toMatch(/branch moved after round 2 was reviewed/);
-    expect(workerSummary(worker).reviewLoop.triage.stale).toBe(true);
-  });
-
-  it('closing the worker drops the round it was holding', async () => {
-    const worker = getJob('tri-9');
-    await closeDevSession('tri-9');
-    expect(worker.reviewLoop.triage).toBeNull();
-    expect(infoTexts(worker).join('\n')).toMatch(/round waiting in ⚑ Findings is dropped with this close/);
-    await expect(triageLoopFindings('tri-9', { verdicts: [{ key: 'k1', decision: 'fix' }] })).rejects.toThrow(
-      /no review round waiting/,
-    );
-  });
-
-  it('a round whose pull request is no longer open is refused before anything is written', async () => {
-    const before = recordTriage.mock.calls.length;
-    const worker = getJob('tri-10');
-    await expect(
-      triageLoopFindings('tri-10', {
-        verdicts: [
-          { key: 'k1', decision: 'fix' },
-          { key: 'k2', decision: 'fix' },
-        ],
-      }),
-    ).rejects.toThrow(/PR #79 is merged; its round is no longer waiting/);
-    expect(recordTriage.mock.calls.length).toBe(before); // no verdicts, no triage comment on a merged PR
-    expect(worker.reviewLoop.triage).toEqual(held()); // the sync drops it, not this
-    worker.status = 'closed';
-    await expect(
-      triageLoopFindings('tri-10', {
-        verdicts: [
-          { key: 'k1', decision: 'fix' },
-          { key: 'k2', decision: 'fix' },
-        ],
-      }),
-    ).rejects.toThrow(/This session is closed/);
-    expect(recordTriage.mock.calls.length).toBe(before);
-  });
-
-  it('a triage update for a round no longer on hold is dropped at delivery', () => {
-    const orch = getJob('tri-free');
-    deliverWorkerNotices(orch);
-    expect(orch.pendingWorkerNotices).toEqual([]);
-    expect(orch.events.filter((e) => e.kind === 'user')).toEqual([]); // no turn was spent on it
-  });
-
-  it('workerSummary carries the held round, park advice spelled out', () => {
-    const summary = workerSummary(getJob('tri-4'));
-    expect(summary.reviewLoop.triage).toBeNull();
-    const holding = workerSummary({ ...getJob('tri-4'), reviewLoop: { rounds: 2, triage: held() } });
-    expect(holding.reviewLoop.triage).toEqual({
-      prNumber: 79,
-      round: 2,
-      stale: false,
-      findings: [
-        { key: 'k1', severity: 'high', title: 'A thing', file: null, line: null, parked: null },
-        { key: 'k2', severity: 'low', title: 'A nit', file: 'lib/x.js', line: 4, parked: 'below the floor' },
-      ],
-    });
-  });
-
-  it('turning the loop off drops the held round and says where its findings are', () => {
-    const worker = getJob('tri-4');
-    worker.reviewLoop.triage = held();
-    setReviewLoop('tri-4', false);
-    expect(worker.reviewLoop).toBeNull();
-    expect(infoTexts(worker).join('\n')).toMatch(/findings awaiting triage stay on the pull request/);
-  });
-});
-
-describe('the review loop: what a closing fix session reports back', () => {
-  const parentRow = (id, fixId) => ({
-    id,
-    kind: 'devchat',
-    status: 'closed', // flipped to idle after the restore, like the rows above
-    repo: 'acme/loopfix',
-    turns: 1,
-    branch: 'task/loopfix',
-    startedOnPr: 78,
-    prStatus: { number: 78, state: 'open' },
-    reviewLoop: { rounds: 1, reviewing: false, fixing: true, fixSessionId: fixId, lastSha: 'abc' },
-  });
-  const fixRow = (id, parentId, done) => ({
-    id,
-    kind: 'devchat',
-    status: 'closed',
-    repo: 'acme/loopfix',
-    turns: 1,
-    loopFixParentId: parentId,
-    loopFixDone: done,
-  });
-
-  beforeAll(async () => {
-    state.stored = [
-      parentRow('fixpar-1', 'fix-1'),
-      fixRow('fix-1', 'fixpar-1', true),
-      parentRow('fixpar-2', 'fix-2'),
-      fixRow('fix-2', 'fixpar-2', false),
-    ];
-    await initJobs();
-    for (const id of ['fixpar-1', 'fix-1', 'fixpar-2', 'fix-2']) getJob(id).status = 'idle';
-  });
-
-  const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
-
-  it('projects the current fix question without pretending the task worker itself asked', () => {
-    const parent = getJob('fixpar-1');
-    const fix = getJob('fix-1');
-    Object.assign(fix, { awaitingAnswer: true, questionSeq: 23 });
-    expect(workerSummary(parent)).toMatchObject({
-      awaitingAnswer: false,
-      pendingWorkerQuestion: { childId: fix.id, role: 'fix', questionSeq: 23, answerable: true },
-    });
-    fix.status = 'closed';
-    expect(workerSummary(parent).pendingWorkerQuestion).toBeNull();
-    fix.status = 'idle';
-    fix.awaitingAnswer = false;
-    expect(workerSummary(parent).pendingWorkerQuestion).toBeNull();
-  });
-
-  it('a finished fix session releases the loop and offers the next round', async () => {
-    await closeDevSession('fix-1');
-    await new Promise((r) => setTimeout(r, 0)); // the report is fire-and-forget
-    const parent = getJob('fixpar-1');
-    expect(parent.reviewLoop.fixing).toBe(false);
-    expect(parent.reviewLoop.fixSessionId).toBeNull();
-    expect(infoTexts(parent).join('\n')).toMatch(/fix session finished/);
-  });
-
-  it('a fix session stopped mid-way releases the loop without a next round', async () => {
-    await closeDevSession('fix-2');
-    await new Promise((r) => setTimeout(r, 0));
-    const parent = getJob('fixpar-2');
-    expect(parent.reviewLoop.fixing).toBe(false);
-    expect(infoTexts(parent).join('\n')).toMatch(/stopped before it finished/);
-  });
-});
-
-describe('the review loop: arming and disarming a session already underway', () => {
-  const row = (id, extra = {}) => ({
-    id,
-    kind: 'devchat',
-    status: 'closed', // flipped after the restore, like the rows above
-    repo: 'acme/arm',
-    turns: 1,
-    ...extra,
-  });
-
-  beforeAll(async () => {
-    state.stored = [
-      row('arm-1'),
-      row('arm-2', { reviewLoop: { rounds: 2, reviewing: true, pendingFix: 'FEEDBACK' } }),
-      row('arm-3', { reviewBranch: 'feature/x' }),
-      row('arm-4', { qaBranch: 'feature/x' }),
-      row('arm-5', { autoClose: true }),
-      row('arm-6', { loopParentId: 'arm-other' }),
-      row('arm-7', { local: true }),
-      row('arm-closed'),
-      // A session whose loop review is still running, and that review.
-      row('arm-8', {
-        reviewLoop: { rounds: 2, reviewing: true, reviewSessionId: 'arm-8-rev' },
-        prStatus: { number: 8, state: 'open', headSha: 'head8' },
-      }),
-      row('arm-8-rev', { loopParentId: 'arm-8' }),
-    ];
-    await initJobs();
-    for (const id of ['arm-1', 'arm-2', 'arm-3', 'arm-4', 'arm-5', 'arm-6', 'arm-7', 'arm-8', 'arm-8-rev']) {
-      getJob(id).status = 'idle';
-    }
-  });
-
-  const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
-
-  it('arms a session that was started without the loop', async () => {
-    const session = setReviewLoop('arm-1', true);
-    expect(session.reviewLoop).toMatchObject({
-      rounds: 0,
-      done: false,
-      reviewing: false,
-      lastSha: null,
-    });
-    await new Promise((r) => setTimeout(r, 0)); // the first round is offered off the call
-    expect(infoTexts(getJob('arm-1')).join('\n')).toMatch(/Review loop armed/);
-    // Nothing to review against yet, so the loop says what it waits for, starting no round.
-    expect(infoTexts(getJob('arm-1')).join('\n')).toMatch(/once this session has an open pull request/);
-  });
-
-  it('arming an already armed session changes nothing', () => {
-    getJob('arm-1').reviewLoop.rounds = 1;
-    expect(setReviewLoop('arm-1', true).reviewLoop.rounds).toBe(1);
-  });
-
-  it('disarming drops the loop, the review out and the findings it was holding', () => {
-    const session = setReviewLoop('arm-2', false);
-    expect(session.reviewLoop).toBeNull();
-    const text = infoTexts(getJob('arm-2')).join('\n');
-    expect(text).toMatch(/No further reviews start on their own/);
-    expect(text).toMatch(/reports nothing back/); // a review was out
-    expect(text).toMatch(/holding are on the pull request/); // and a fix turn was held
-  });
-
-  it('re-arming starts the round count over: a person asked for them', () => {
-    expect(setReviewLoop('arm-2', true).reviewLoop).toMatchObject({ rounds: 0, pendingFix: null });
-  });
-
-  it('re-arming adopts a review the disarmed loop left running instead of starting a second one', async () => {
-    setReviewLoop('arm-8', false);
-    const session = setReviewLoop('arm-8', true);
-    // Counted and pointed at, so its close reports here and no second review starts.
-    expect(session.reviewLoop).toMatchObject({ rounds: 1, reviewing: true, reviewSessionId: 'arm-8-rev' });
-    // Its head too, so the held round can be told stale and a nothing-to-fix send converges.
-    expect(getJob('arm-8').reviewLoop.lastSha).toBe('head8');
-    expect(infoTexts(getJob('arm-8')).join('\n')).toMatch(/already running is its first round/);
-    await new Promise((r) => setTimeout(r, 0));
-    expect(getJob('arm-8').reviewLoop.reviewSessionId).toBe('arm-8-rev');
-  });
-
-  it('refuses the sessions the loop never applies to', () => {
-    for (const id of ['arm-3', 'arm-4', 'arm-5', 'arm-6', 'arm-7']) {
-      expect(() => setReviewLoop(id, true)).toThrow(/only applies to a session started from scratch/);
-    }
-  });
-
-  it('refuses a session that is not open, and one that never existed', () => {
-    expect(() => setReviewLoop('arm-closed', true)).toThrow(/needs an open session/);
-    expect(() => setReviewLoop('nope', true)).toThrow(/Session not found/);
-  });
-});
-
 describe('the QA loop: reporting a finished QA run', () => {
   const parentRow = (id, qaId) => ({
     id,
@@ -9826,7 +5946,6 @@ describe('the QA loop: reporting a finished QA run', () => {
     branch: 'feature/x',
     startedOnPr: 88,
     prStatus: { number: 88, state: 'open' },
-    reviewLoop: { rounds: 1, done: true, reviewing: false },
     qaLoop: { running: true, sessionId: qaId, done: false, failedScenarios: null },
   });
   const qaRow = (id, parentId, done) => ({
@@ -9854,7 +5973,6 @@ describe('the QA loop: reporting a finished QA run', () => {
       // mark the new branch QA'd.
       {
         ...parentRow('qa-par-4', 'qa-run-4'),
-        reviewLoop: { rounds: 2, done: false, reviewing: true },
         qaLoop: { running: true, sessionId: null, staleSessionId: 'qa-run-4', done: false },
       },
       qaRow('qa-run-4', 'qa-par-4', true),
@@ -10036,7 +6154,7 @@ describe('the QA loop: reporting a finished QA run', () => {
     const notice = getJob('qa-orch').pendingWorkerNotices.find((n) => n.workerId === 'qa-par-5');
     expect(notice.kind).toBe('loop');
     expect(notice.text).toMatch(/QA on PR #88 passed/);
-    expect(notice.text).toMatch(/ready to merge/);
+    expect(notice.text).toMatch(/Check CI/);
   });
 
   it('retries a rate-limited verdict at the primary reset without rerunning QA', async () => {
@@ -10286,47 +6404,20 @@ describe('the QA loop: arming and disarming', () => {
         status: 'closed',
         repo: 'acme/shop',
         turns: 1,
-        reviewLoop: { rounds: 1, done: false, reviewing: false },
       },
     ];
     await initJobs();
     getJob('qa-arm-1').status = 'idle';
   });
 
-  it('arms behind a review loop', () => {
-    expect(setQaLoop('qa-arm-1', true).qaLoop).toMatchObject({
-      running: false,
-      done: false,
-      sessionId: null,
-    });
+  it('arms and disarms QA without a review dependency', () => {
+    const job = getJob('qa-arm-1');
+    expect(job.qaLoop).toBeFalsy();
+    setQaLoop(job.id, true);
+    expect(job.qaLoop).toMatchObject({ running: false, done: false });
+    setQaLoop(job.id, false);
+    expect(job.qaLoop).toBeNull();
   });
-
-  it.each([false, true])(
-    'disarms QA (running: %s) without changing reviews, findings, fixes or CI',
-    (running) => {
-      const job = getJob('qa-arm-1');
-      job.reviewLoop = {
-        rounds: 2,
-        done: false,
-        reviewing: true,
-        fixing: true,
-        triage: { findings: [{ key: 'keep' }] },
-        pendingFix: { keys: ['keep'] },
-      };
-      job.prStatus = { number: 88, checks: { passed: 1, pending: 2 } };
-      job.qaLoop = { running, sessionId: running ? 'active-qa' : null };
-      const review = structuredClone(job.reviewLoop);
-      const ci = structuredClone(job.prStatus);
-      setQaLoop(job.id, false);
-      expect(job.qaLoop).toBeNull();
-      expect(job.reviewLoop).toEqual(review);
-      expect(job.prStatus).toEqual(ci);
-      expect(jobEventsSince(job, 0).at(-1).text).toContain('QA loop turned off');
-      if (running) expect(jobEventsSince(job, 0).at(-1).text).toContain('already running finishes');
-      setQaLoop(job.id, false);
-      expect(job.reviewLoop).toEqual(review);
-    },
-  );
 
   it('keeps an already armed QA loop when armed again', () => {
     const job = getJob('qa-arm-1');
@@ -10345,16 +6436,6 @@ describe('the QA loop: arming and disarming', () => {
     expect(() => setQaLoop(job.id, false)).toThrow(/started from scratch/);
     job.qaBranch = null;
   });
-
-  it('turning the review loop off cancels the QA run queued behind it', () => {
-    setReviewLoop('qa-arm-1', false);
-    expect(getJob('qa-arm-1').reviewLoop).toBeNull();
-    expect(getJob('qa-arm-1').qaLoop).toBeNull();
-  });
-
-  it('cannot be armed without the review loop', () => {
-    expect(() => setQaLoop('qa-arm-1', true)).toThrow(/turn the review loop on first/);
-  });
 });
 
 describe('the QA loop: the runtime its sheet starts on', () => {
@@ -10372,7 +6453,6 @@ describe('the QA loop: the runtime its sheet starts on', () => {
         branch: 'task/qa',
         startedOnPr: 91,
         prStatus: { number: 91, state: 'open' },
-        reviewLoop: { rounds: 1, done: true, reviewing: false },
       },
     ];
     await initJobs();
@@ -10472,19 +6552,6 @@ describe('attachPrForBranch', () => {
     // Asked by exact head ref, so it cannot latch onto an unrelated pull request.
     expect(githubRest.mock.calls[0][2]).toContain('head=acme:dev-95c1bae2');
     expect(githubRest.mock.calls[0][2]).toContain('state=open');
-  });
-
-  it('an errand that found its pull request this way is still an errand on it', async () => {
-    github([{ number: 51, base: { ref: 'main' } }], {
-      number: 51,
-      state: 'open',
-      head: { ref: 'dev-95c1bae2', sha: 'sha51' },
-      base: { ref: 'main' },
-    });
-    // A review holds a clone and a database server the merge makes pointless, so it still ends.
-    const job = session({ reviewBranch: 'dev-95c1bae2', prAttachedByBranch: false });
-    expect(await attachPrForBranch(job)).toBe(51);
-    expect(job.prAttachedByBranch).toBe(false);
   });
 
   it('between two pull requests on one branch it takes the one on the session base', async () => {
@@ -10613,186 +6680,6 @@ describe('attachPrForBranch', () => {
     expect(query).toContain('baseRefName');
     expect(query).not.toContain('base { ref }');
   });
-
-  it('keeps its short backoff when the GraphQL fallback also fails', async () => {
-    vi.useFakeTimers();
-    try {
-      state.stored = [];
-      const intervals = vi.spyOn(globalThis, 'setInterval');
-      let pollPrs;
-      try {
-        await initJobs();
-        pollPrs = intervals.mock.calls.find(([fn]) => fn.name === 'syncDevPrs')[0];
-      } finally {
-        intervals.mockRestore();
-      }
-      githubRest.mockRejectedValue(
-        Object.assign(new Error('GitHub core rate limit exhausted'), { rateLimited: true }),
-      );
-      githubGraphql.mockRejectedValue(new Error('GitHub GraphQL answered 503'));
-      const job = session({
-        status: 'idle',
-        reviewLoop: { discoveryError: null, discoveryErrorSaid: false, discoveryRetries: 0 },
-      });
-
-      expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
-      expect(job.reviewLoop.discoveryError).toBe('GitHub GraphQL answered 503');
-      expect(job.reviewLoop.discoveryRetries).toBe(1);
-      expect(githubGraphql).toHaveBeenCalledTimes(1);
-
-      // A real poll tick used to discover PRs for idle fixtures left by prior blocks.
-      pollPrs();
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(githubGraphql).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('does not duplicate an in-flight fallback attachment or an already-running review', async () => {
-    state.stored = [
-      { id: 'fallback-live-review', kind: 'devchat', status: 'closed', repo: 'acme/shop', turns: 1 },
-    ];
-    await initJobs();
-    getJob('fallback-live-review').status = 'idle';
-    let resolveGraphql;
-    const waiting = new Promise((resolve) => {
-      resolveGraphql = resolve;
-    });
-    const job = session({
-      status: 'idle',
-      reviewLoop: {
-        rounds: 1,
-        reviewing: true,
-        reviewSessionId: 'fallback-live-review',
-        discoveryError: null,
-        discoveryErrorSaid: false,
-      },
-    });
-    const pr = {
-      number: 53,
-      state: 'open',
-      head: { ref: 'dev-95c1bae2', sha: 'sha53' },
-      base: { ref: 'main' },
-    };
-    githubRest.mockRejectedValueOnce(
-      Object.assign(new Error('GitHub core rate limit exhausted'), { rateLimited: true }),
-    );
-    githubRest.mockImplementation(async (_cfg, _method, url) => {
-      if (/\/pulls\/53$/.test(url)) return { ok: true, json: async () => pr };
-      return { ok: false, status: 404, json: async () => ({}) };
-    });
-    githubGraphql.mockReturnValueOnce(waiting);
-
-    const first = attachPrForBranch(job, { fresh: true });
-    expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
-    resolveGraphql({
-      repository: {
-        pullRequests: {
-          nodes: [{ number: 53, baseRefName: 'main', headRepository: { nameWithOwner: 'acme/shop' } }],
-        },
-      },
-    });
-
-    expect(await first).toBe(53);
-    expect(githubGraphql.mock.calls.filter(([, query]) => query.includes('headRefName: $head'))).toHaveLength(
-      1,
-    );
-    expect(job.reviewLoop).toMatchObject({ rounds: 1, reviewing: true });
-  });
-
-  it('starts legacy loop rows with no discovery retry counter at zero', async () => {
-    githubRest.mockResolvedValue({ ok: false, status: 503, json: async () => ({}) });
-    githubGraphql.mockRejectedValue(new Error('GitHub GraphQL answered 503'));
-    const job = session({ reviewLoop: { discoveryError: null, discoveryErrorSaid: false } });
-    expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
-    expect(job.reviewLoop.discoveryRetries).toBe(1);
-  });
-
-  it('clears discovery state when a successful lookup finds no pull request', async () => {
-    github([]);
-    const job = session({
-      reviewLoop: { discoveryError: 'GitHub returned 403', discoveryErrorSaid: true, discoveryRetries: 3 },
-    });
-    expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
-    expect(job.reviewLoop).toMatchObject({
-      discoveryError: null,
-      discoveryErrorSaid: false,
-      discoveryRetries: 0,
-    });
-  });
-
-  it('retries a transient discovery failure on a later idle transition and clears its status', async () => {
-    const pr = {
-      number: 52,
-      state: 'open',
-      head: { ref: 'dev-95c1bae2', sha: 'sha52' },
-      base: { ref: 'main' },
-    };
-    const job = session({
-      reviewLoop: { discoveryError: null, discoveryErrorSaid: false },
-    });
-    githubRest.mockResolvedValueOnce({ ok: false, status: 403, json: async () => ({}) });
-    githubRest.mockImplementation(async (_cfg, _method, url) => {
-      if (url.startsWith('/repos/acme/shop/pulls?')) return { ok: true, json: async () => [pr] };
-      if (/\/pulls\/\d+$/.test(url)) return { ok: true, json: async () => pr };
-      return { ok: false, status: 404, json: async () => ({}) };
-    });
-
-    expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
-    expect(job.reviewLoop.discoveryError).toBe('GitHub returned 403');
-    expect(await attachPrForBranch(job, { fresh: true })).toBe(52);
-    expect(job.reviewLoop.discoveryError).toBeNull();
-    // A second idle check attaches the existing PR without another association or push.
-    expect(await attachPrForBranch(job, { fresh: true })).toBe(52);
-    expect(
-      githubRest.mock.calls.filter((call) => call[2].startsWith('/repos/acme/shop/pulls?')),
-    ).toHaveLength(2);
-  });
-
-  it("keeps an armed worker's PR discovery retry armed when GraphQL cannot use the spare budget", async () => {
-    vi.useFakeTimers();
-    try {
-      const pr = {
-        number: 1598,
-        html_url: 'https://github.com/acme/shop/pull/1598',
-        state: 'open',
-        head: { ref: 'dev-95c1bae2', sha: 'sha1598' },
-        base: { ref: 'main' },
-      };
-      const retryAt = Date.now() + 60_000;
-      const rateLimit = Object.assign(new Error('GitHub core rate limit exhausted'), {
-        rateLimited: true,
-        retryAt,
-      });
-      const job = session({
-        status: 'idle',
-        reviewLoop: {
-          discoveryError: null,
-          discoveryErrorSaid: false,
-          discoveryRetries: 0,
-          lastSha: 'sha1598',
-        },
-      });
-      githubRest.mockRejectedValueOnce(rateLimit);
-      githubGraphql.mockRejectedValueOnce(new Error('GitHub GraphQL answered 503'));
-      githubRest.mockImplementation(async (_cfg, _method, url) => {
-        if (url.startsWith('/repos/acme/shop/pulls?')) return { ok: true, json: async () => [pr] };
-        if (/\/pulls\/\d+$/.test(url)) return { ok: true, json: async () => pr };
-        return { ok: false, status: 404, json: async () => ({}) };
-      });
-
-      expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
-      expect(job.reviewLoop.discoveryRetries).toBe(0);
-
-      await vi.advanceTimersByTimeAsync(60_000);
-
-      expect(job.prStatus).toMatchObject({ number: 1598, state: 'open', headSha: 'sha1598' });
-      expect(job.reviewLoop.discoveryError).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
 });
 
 describe('a worker that leaves the branch it was spawned on for one of its own', () => {
@@ -10810,10 +6697,6 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     ...extra,
   });
   const prOne = { number: 1, state: 'open', headRef: 'dev-a', headSha: 'sha-a' };
-  // Explicit polling scenarios can resolve due pending rounds and discover PRs
-  // across this shared registry. Keep these rounds parked and PR-less sessions
-  // closed except inside their own test.
-  const PARKED = '2999-01-01T00:00:00.000Z';
 
   beforeAll(async () => {
     state.stored = [
@@ -10826,7 +6709,6 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         startBranch: 'dev-a',
         prStatus: prOne,
         prAttachedByBranch: true,
-        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-a' },
       }),
       // Spawned on dev-a as well, and has not cut its own branch yet.
       row('stk-sibling', { branch: 'dev-a', startBranch: 'dev-a' }),
@@ -10835,19 +6717,12 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         branch: 'dev-a',
         prStatus: prOne,
         prAttachedByBranch: true,
-        reviewLoop: {
-          rounds: 2,
-          reviewing: true,
-          reviewSessionId: 'stk-inflight-rev',
-          reviewPr: 1,
-          lastSha: 'sha-a',
-        },
       }),
       {
         ...row('stk-inflight-rev'),
         branch: 'dev-a',
         createdAt: '2026-10-22T10:00:00.000Z',
-        loopParentId: 'stk-inflight',
+        qaParentId: 'stk-inflight',
         loopReviewDone: true,
       },
       // Moves off dev-a with a finished round on #1 not yet read.
@@ -10855,18 +6730,12 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         branch: 'dev-a',
         prStatus: prOne,
         prAttachedByBranch: true,
-        reviewLoop: {
-          rounds: 1,
-          lastSha: 'sha-a',
-          pendingResult: { prNumber: 1, round: 1, since: null, nextRetryAt: PARKED },
-        },
       }),
       // Handed #1 (startedOnPr), not found from its branch.
       row('stk-handed', {
         branch: 'dev-a',
         startedOnPr: 1,
         prStatus: prOne,
-        reviewLoop: { rounds: 1, done: true },
       }),
       // Found #1 from dev-a; its turn may end on the base branch.
       row('stk-base', { branch: 'dev-a', prStatus: prOne, prAttachedByBranch: true }),
@@ -10877,7 +6746,6 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         branch: 'dev-b',
         prStatus: { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'dev-a', headSha: 'sha-b' },
         prAttachedByBranch: true,
-        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-b', reviewPr: 2 },
       }),
       // Owns the lower #1 (dev-a); its turn may end on the upper branch dev-b.
       // Another repo, so it does not claim acme/shop#1 from the tests above.
@@ -10886,7 +6754,6 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         branch: 'dev-a',
         prStatus: { ...prOne, baseRef: 'main' },
         prAttachedByBranch: true,
-        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-a', reviewPr: 1 },
       }),
       // Owns the upper stacked #2 (dev-b, base dev-a) that stk-lower takes on the way.
       row('stk-upper', {
@@ -10923,19 +6790,12 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       row('stk-unmirrored', {
         repo: 'acme/unmirror',
         branch: 'dev-u',
-        reviewLoop: {
-          rounds: 1,
-          reviewing: true,
-          reviewSessionId: 'stk-unmirrored-rev',
-          reviewPr: 77,
-          lastSha: 'sha-u',
-        },
       }),
       {
         ...row('stk-unmirrored-rev', { repo: 'acme/unmirror' }),
         branch: 'dev-u',
         createdAt: '2026-10-22T10:00:00.000Z',
-        loopParentId: 'stk-unmirrored',
+        qaParentId: 'stk-unmirrored',
         loopReviewDone: true,
       },
       // Its round on #1 finished; the turn ends on dev-b while the findings are read.
@@ -10945,19 +6805,12 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         branch: 'dev-a',
         prStatus: prOne,
         prAttachedByBranch: true,
-        reviewLoop: {
-          rounds: 1,
-          reviewing: true,
-          reviewSessionId: 'stk-readout-rev',
-          reviewPr: 1,
-          lastSha: 'sha-a',
-        },
       }),
       {
         ...row('stk-readout-rev', { repo: 'acme/readout' }),
         branch: 'dev-a',
         createdAt: '2026-10-22T10:00:00.000Z',
-        loopParentId: 'stk-readout',
+        qaParentId: 'stk-readout',
         loopReviewDone: true,
       },
       // Spotted #1 itself; attaches #2 by branch on dev-b, then comes back to dev-a.
@@ -10979,7 +6832,6 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         branch: 'dev-a',
         prStatus: { ...prOne, baseRef: 'main' },
         prAttachedByBranch: true,
-        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-a', reviewPr: 1 },
       }),
       // Found #1 from dev-a; a sync of it is in flight as it moves off.
       row('stk-sync', { branch: 'dev-a', prStatus: prOne, prAttachedByBranch: true }),
@@ -10993,7 +6845,6 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         branch: 'dev-a',
         prStatus: prOne,
         prAttachedByBranch: true,
-        reviewLoop: { rounds: 1, done: true, lastSha: 'sha-a', reviewPr: 1 },
         qaLoop: { running: true, sessionId: 'stk-qa-run', done: false, failedScenarios: null },
       }),
       {
@@ -11011,12 +6862,6 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
         repo: 'acme/side',
         branch: 'dev-a',
         prStatus: prOne,
-        reviewLoop: {
-          rounds: 1,
-          lastSha: 'sha-a',
-          reviewPr: 1,
-          pendingResult: { prNumber: 1, round: 1, since: null, nextRetryAt: PARKED },
-        },
       }),
     ];
     await initJobs();
@@ -11064,63 +6909,6 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
   });
 
   const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
-
-  it('tracks the pull request of the branch it moved to, and its loop reviews that one', async () => {
-    const job = getJob('stk-worker');
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk-worker-'));
-    const git = (...args) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
-    spawnSync('git', ['init', '-q', '-b', 'dev-b', dir]);
-    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'stacked');
-    const sha = git('rev-parse', 'HEAD').stdout.trim();
-    git('update-ref', 'refs/remotes/origin/dev-b', sha); // pushed
-    githubRest.mockImplementation(async (_cfg, _method, url) => {
-      if (url.startsWith('/repos/acme/shop/pulls?')) {
-        return {
-          ok: true,
-          json: async () => (url.includes('head=acme:dev-b') ? [{ number: 2, base: { ref: 'dev-a' } }] : []),
-        };
-      }
-      if (/\/pulls\/2$/.test(url)) {
-        return {
-          ok: true,
-          json: async () => ({
-            number: 2,
-            state: 'open',
-            head: { ref: 'dev-b', sha },
-            base: { ref: 'dev-a' },
-          }),
-        };
-      }
-      return { ok: false, status: 404, json: async () => ({}) };
-    });
-    job.workDir = dir;
-    try {
-      // The turn that cut dev-b and opened #2 off it ends: HEAD is re-read.
-      refreshJobBranch(job);
-      expect(job.branch).toBe('dev-b');
-      expect(job.prStatus).toBeNull();
-      expect(job.startedOnPr).toBeNull();
-      // The reset waits for the round on a different PR.
-      expect(job.reviewLoop).toMatchObject({ rounds: 1, done: true, lastSha: 'sha-a', releasedPr: 1 });
-      expect(infoTexts(job).join('\n')).toMatch(
-        /PR #1 is open from dev-a, not dev-b, so this session no longer tracks it\. The review loop starts over once a different pull request is open from this branch\.$/m,
-      );
-
-      expect(await attachPrForBranch(job, { fresh: true })).toBe(2);
-      expect(job.prStatus).toMatchObject({ number: 2, headRef: 'dev-b' });
-      // The attach offers the armed loop its first round, on #2 and not on #1.
-      await vi.waitFor(() => expect(job.reviewLoop.reviewSessionId).toBeTruthy());
-      expect(infoTexts(job).join('\n')).toMatch(/started code review round 1 of PR #2/);
-      expect(job.reviewLoop).toMatchObject({ rounds: 1, reviewPr: 2, releasedPr: null, done: false });
-      expect(getJob(job.reviewLoop.reviewSessionId).startedOnPr).toBe(2);
-      // The owner of #1 is untouched.
-      expect(getJob('stk-owner').prStatus.number).toBe(1);
-      closeDevSession(job.reviewLoop.reviewSessionId);
-    } finally {
-      job.workDir = null;
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
 
   it('keeps a pull request still open from its branch', () => {
     const job = getJob('stk-owner');
@@ -11198,56 +6986,6 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     }
   });
 
-  it('drops a round still out on the released pull request instead of reading it off the new one', async () => {
-    const job = getJob('stk-inflight');
-    latestReviewDeclaration.mockClear();
-    await onBranch(job, 'dev-b', async () => {
-      refreshJobBranch(job);
-    });
-    expect(job.prStatus).toBeNull();
-    expect(infoTexts(job).join('\n')).toMatch(
-      /the review round still running for #1 finishes, but nothing it reports is applied here/,
-    );
-    // #2 attaches before the #1 review closes.
-    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', headSha: 'sha-b' };
-    await closeDevSession('stk-inflight-rev');
-    await vi.waitFor(() =>
-      expect(infoTexts(job).join('\n')).toMatch(
-        /review round 2 finished for PR #1, which this session no longer tracks/,
-      ),
-    );
-    expect(latestReviewDeclaration).not.toHaveBeenCalled();
-    expect(job.reviewLoop.done).toBeFalsy();
-    expect(job.reviewLoop.pendingResult).toBeFalsy();
-    expect(infoTexts(job).join('\n')).not.toMatch(/declared no findings/);
-    // #2 found the loop busy when it attached; dropping the round starts #2's first.
-    await vi.waitFor(() => expect(job.reviewLoop.reviewPr).toBe(2));
-    expect(job.reviewLoop.reviewing).toBe(true);
-    expect(job.reviewLoop.rounds).toBe(1);
-    expect(job.reviewLoop.lastSha).toBe('sha-b');
-  });
-
-  it('drops a finished round not yet read off the released pull request', async () => {
-    const job = getJob('stk-pending');
-    await onBranch(job, 'dev-b', async () => {
-      refreshJobBranch(job);
-    });
-    expect(job.reviewLoop.pendingResult).toBeNull();
-    expect(job.reviewLoop.releasedPr).toBe(1);
-    expect(infoTexts(job).join('\n')).toMatch(/waiting for its findings to be read off PR #1 is dropped/);
-  });
-
-  it('keeps a handed pull request and its loop across a branch move', async () => {
-    const job = getJob('stk-handed');
-    await onBranch(job, 'dev-elsewhere', async () => {
-      refreshJobBranch(job);
-    });
-    expect(job.branch).toBe('dev-elsewhere');
-    expect(job.startedOnPr).toBe(1);
-    expect(job.prStatus.number).toBe(1);
-    expect(job.reviewLoop).toMatchObject({ rounds: 1, done: true });
-  });
-
   it('keeps the pull request across a checkout of the base branch', async () => {
     const job = getJob('stk-base');
     await onBranch(job, 'main', async () => {
@@ -11256,18 +6994,6 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     expect(job.branch).toBe('main');
     expect(job.prStatus.number).toBe(1);
     expect(job.prAttachedByBranch).toBe(true);
-  });
-
-  it("keeps a stacked pull request across a checkout of its base, the sibling's branch", async () => {
-    const job = getJob('stk-stacked');
-    await onBranch(job, 'dev-a', async () => {
-      refreshJobBranch(job);
-    });
-    expect(job.branch).toBe('dev-a');
-    expect(job.prStatus.number).toBe(2);
-    expect(job.prAttachedByBranch).toBe(true);
-    expect(job.reviewLoop).toMatchObject({ rounds: 1, done: true, lastSha: 'sha-b' });
-    expect(job.reviewLoop.releasedPr).toBeFalsy();
   });
 
   it("lets go of the sibling's stacked pull request it took when it comes back to its own branch", async () => {
@@ -11326,62 +7052,6 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     expect(job.releasedPrAttach).toMatchObject({ number: 2, headRef: 'dev-b' });
   });
 
-  it('reads a round off a pull request found but not mirrored yet, rather than dropping it as released', async () => {
-    const job = getJob('stk-unmirrored');
-    const review = getJob('stk-unmirrored-rev');
-    latestReviewDeclaration.mockClear();
-    latestReviewDeclaration.mockResolvedValueOnce({ findings: [], clean: true });
-    githubRest.mockResolvedValue({ ok: false, status: 403, json: async () => ({}) });
-    job.status = 'idle';
-    review.status = 'idle';
-    try {
-      await closeDevSession('stk-unmirrored-rev');
-      await vi.waitFor(() => expect(latestReviewDeclaration).toHaveBeenCalled());
-      expect(latestReviewDeclaration.mock.calls[0].slice(0, 2)).toEqual(['acme/unmirror', 77]);
-      expect(infoTexts(job).join('\n')).not.toMatch(/no longer tracks/);
-      // No second round on the same commit.
-      expect(job.reviewLoop.rounds).toBe(1);
-      expect(job.reviewLoop.lastSha).toBe('sha-u');
-    } finally {
-      job.status = 'closed';
-    }
-  });
-
-  it("drops a round's findings read across a release and a round on the new pull request", async () => {
-    const job = getJob('stk-readout');
-    const review = getJob('stk-readout-rev');
-    let answer;
-    latestReviewDeclaration.mockClear();
-    latestReviewDeclaration.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
-    job.status = 'idle';
-    review.status = 'idle';
-    try {
-      await closeDevSession('stk-readout-rev');
-      await vi.waitFor(() => expect(latestReviewDeclaration).toHaveBeenCalled());
-      await onBranch(job, 'dev-b', async () => {
-        refreshJobBranch(job);
-      });
-      expect(job.reviewLoop.releasedPr).toBe(1);
-      // #2 attaches and its first round starts (applyLoopRelease) before #1's read returns.
-      job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', headSha: 'sha-b' };
-      job.reviewLoop.releasedPr = null;
-      job.reviewLoop.reviewPr = 2;
-      answer({
-        findings: [{ key: 'k1', severity: 'medium', title: 'A bug on #1', file: 'a.js', line: 1 }],
-        clean: false,
-      });
-      await vi.waitFor(() =>
-        expect(infoTexts(job).join('\n')).toMatch(
-          /review round 1's findings came back for PR #1, which this session no longer tracks/,
-        ),
-      );
-      expect(job.reviewLoop.triage).toBeFalsy();
-      expect(job.reviewLoop.pendingResult).toBeFalsy();
-    } finally {
-      job.status = 'closed';
-    }
-  });
-
   it('keeps a spotted pull request closing on merge after another one was attached and released on the way', async () => {
     const job = getJob('stk-spot');
     await onBranch(job, 'dev-b', async () => {
@@ -11419,24 +7089,6 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       job.status = 'idle';
     }
     expect(job.prAttachedByBranch).toBe(false);
-  });
-
-  it('keeps the first released pull request across a second release before any round', async () => {
-    const job = getJob('stk-twice');
-    await onBranch(job, 'dev-b', async () => {
-      refreshJobBranch(job);
-    });
-    expect(job.reviewLoop.releasedPr).toBe(1);
-    // #2 attaches, and the session moves on before the loop reviews it.
-    job.prStatus = { number: 2, state: 'open', headRef: 'dev-b', baseRef: 'main', headSha: 'sha-b' };
-    job.prAttachedByBranch = true;
-    await onBranch(job, 'dev-c', async () => {
-      refreshJobBranch(job);
-    });
-    expect(job.prStatus).toBeNull();
-    // The loop still holds #1's converged state, so going back to #1 must not reset it.
-    expect(job.reviewLoop.releasedPr).toBe(1);
-    expect(job.reviewLoop).toMatchObject({ rounds: 1, done: true, lastSha: 'sha-a' });
   });
 
   it('does not let a sync in flight write the released pull request back', async () => {
@@ -11547,46 +7199,6 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     expect(job.qaLoop.done).toBe(false);
     expect(job.qaLoop.pendingVerdict).toBeFalsy();
     expect(infoTexts(job).join('\n')).not.toMatch(/no QA actions are required/);
-  });
-
-  it('reviews the same commit again after a detour that dropped its round, and keeps a spotted pull request closing on merge', async () => {
-    const job = getJob('stk-detour');
-    await onBranch(job, 'dev-tmp', async () => {
-      refreshJobBranch(job);
-    });
-    expect(job.prStatus).toBeNull();
-    expect(job.reviewLoop.pendingResult).toBeNull();
-    expect(job.reviewLoop.lastSha).toBeNull();
-    githubRest.mockImplementation(async (_cfg, _method, url) => {
-      if (url.startsWith('/repos/acme/side/pulls?'))
-        return {
-          ok: true,
-          json: async () => (url.includes('head=acme:dev-a') ? [{ number: 1, base: { ref: 'main' } }] : []),
-        };
-      if (/\/pulls\/1$/.test(url))
-        return {
-          ok: true,
-          json: async () => ({
-            number: 1,
-            state: 'open',
-            head: { ref: 'dev-a', sha: 'sha-a' },
-            base: { ref: 'main' },
-          }),
-        };
-      return { ok: false, status: 404, json: async () => ({}) };
-    });
-    // Back on dev-a: no other session is busy on #1, so the branch finds it again.
-    job.status = 'running';
-    try {
-      await onBranch(job, 'dev-a', async () => {
-        refreshJobBranch(job);
-        expect(await attachPrForBranch(job, { fresh: true })).toBe(1);
-      });
-    } finally {
-      job.status = 'idle';
-    }
-    expect(job.prAttachedByBranch).toBe(false);
-    expect(job.reviewLoop.lastSha).toBeNull();
   });
 });
 
@@ -11761,12 +7373,6 @@ describe('a merge closing the sessions on a pull request', () => {
       row('handed-1', false),
       {
         ...row('branch-1', true),
-        // A round on the ⚑ Findings screen when the merge lands.
-        reviewLoop: {
-          rounds: 1,
-          lastSha: 'sha89',
-          triage: { prNumber: 90, round: 1, findings: [{ key: 'k1', severity: 'high', title: 'A thing' }] },
-        },
       },
     ];
     await initJobs();
@@ -11805,79 +7411,6 @@ describe('a merge closing the sessions on a pull request', () => {
         .join('\n'),
     ).toMatch(/stays open: its pull request was found from its branch/);
   });
-
-  it('drops the round that was held for the merged pull request', async () => {
-    await vi.waitFor(() => expect(getJob('branch-1').prStatus.state).toBe('merged'));
-    const job = getJob('branch-1');
-    expect(job.reviewLoop.triage).toBeNull();
-    expect(
-      job.events
-        .filter((e) => e.kind === 'info')
-        .map((e) => e.text)
-        .join('\n'),
-    ).toMatch(/PR #90 is merged, so the round waiting in ⚑ Findings is dropped/);
-  });
-});
-
-describe('a push by hand landing under a held round', () => {
-  // Own repo and PR number, so the sync here matches nothing the others restored.
-  beforeAll(async () => {
-    state.stored = [
-      {
-        id: 'hand-1',
-        kind: 'devchat',
-        status: 'closed', // flipped to idle after the restore, like the rows above
-        repo: 'acme/hand',
-        turns: 1,
-        branch: 'dev-hand',
-        workDir: '/tmp/nowhere/acme-hand', // no clone there: the fetch fails, the probe falls back to the mirror
-        prAttachedByBranch: true,
-        prStatus: { number: 91, state: 'open', headSha: 'sha91', syncedAt: '2026-08-25T13:00:00.000Z' },
-        reviewLoop: {
-          rounds: 1,
-          lastSha: 'sha91',
-          triage: {
-            prNumber: 91,
-            round: 1,
-            findings: [{ key: 'k1', severity: 'high', title: 'A thing' }],
-            sha: 'sha91',
-            stale: false,
-          },
-        },
-      },
-    ];
-    await initJobs();
-    getJob('hand-1').status = 'idle';
-    spawn.mockClear();
-    githubRest.mockImplementation(async (_cfg, _method, url) => {
-      if (url === '/repos/acme/hand/pulls/91') {
-        return {
-          ok: true,
-          json: async () => ({
-            number: 91,
-            html_url: 'https://github.com/acme/hand/pull/91',
-            state: 'open',
-            merged_at: null,
-            head: { ref: 'dev-hand', sha: 'sha92' },
-            base: { ref: 'main' },
-          }),
-        };
-      }
-      return { ok: false, status: 404, json: async () => ({}) };
-    });
-    syncSessionsOn('acme/hand', null, 91);
-  });
-
-  it('fetches the branch into the clone before deciding whether the round is stale', async () => {
-    await vi.waitFor(() => expect(getJob('hand-1').reviewLoop.triage.stale).toBe(true));
-    // The stale check reads the clone's remote-tracking ref, which an outside push never
-    // moves, so the sync must fetch first.
-    const fetch = spawn.mock.calls.find(
-      ([cmd, args]) => cmd === 'git' && args.join(' ') === '-C /tmp/nowhere/acme-hand fetch origin dev-hand',
-    );
-    expect(fetch).toBeTruthy();
-    expect(getJob('hand-1').reviewLoop.triage).toMatchObject({ sha: 'sha91', stale: true });
-  });
 });
 
 describe('the CI verdict a worker hands its orchestrator', () => {
@@ -11902,7 +7435,7 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     prStatus: {
       number,
       state: 'open',
-      headSha: 'sha-old',
+      headSha: over.qaLoop ? `sha${number}` : 'sha-old',
       checks: { total: 2, passed: 0, failed: 0, pending: 2, runs: [] },
       syncedAt: '2026-08-25T13:00:00.000Z',
     },
@@ -11967,18 +7500,17 @@ describe('the CI verdict a worker hands its orchestrator', () => {
         ],
         ['ci-qa-passed', 223, { done: true, failedScenarios: 0 }],
         ['ci-qa-verdict', 224, { done: true, failedScenarios: 0, pendingVerdict: { prNumber: 224 } }],
-      ].map(([id, number, qaLoop]) => worker(id, number, { reviewLoop: { done: true, rounds: 1 }, qaLoop })),
+      ].map(([id, number, qaLoop]) => worker(id, number, { qaLoop })),
       worker('ci-qa-incomplete', 231, {
-        reviewLoop: { done: true },
         qaLoop: { done: true, incomplete: true, failedScenarios: 0 },
       }),
       worker('ci-qa-incomplete-no-review', 232, {
         qaLoop: { done: true, incomplete: true, failedScenarios: 0 },
       }),
       worker('ci-red', 202),
-      worker('ci-loop', 203, { reviewLoop: { rounds: 2, done: false } }),
+      worker('ci-loop', 203, {}),
       // Converged on an empty block whose publishing policy withheld code-approved.
-      worker('ci-withheld', 214, { reviewLoop: { rounds: 1, done: true, approvalWithheld: true } }),
+      worker('ci-withheld', 214, {}),
       ...['question', 'findings', 'completed', 'closed', 'initial', 'publish'].map((kind, index) => {
         const number = 225 + index;
         return worker(`ci-review-${kind}`, number, {
@@ -12240,13 +7772,6 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     expect(workerSummary(getJob('ci-neutral')).pr.checks).toBe('✓1 ✗0 ●0; neutral: 1, skipped: 1');
   });
 
-  it('waits for QA even without a review loop', async () => {
-    syncSessionsOn('acme/ci', null, 217);
-    await vi.waitFor(() => expect(notices('ci-qa')).toContain('Its QA run has not reported yet'));
-    expect(notices('ci-qa')).not.toContain('ready to merge');
-    expect(getJob('ci-qa').qaLoop.done).toBe(false);
-  });
-
   it.each([
     ['ci-qa-failed', 220, 'QA failed 1 scenario(s)'],
     ['ci-qa-error', 221, 'the QA verdict could not be read: could not read sheet'],
@@ -12315,66 +7840,6 @@ describe('the CI verdict a worker hands its orchestrator', () => {
     await vi.waitFor(() => expect(notices('ci-red')).toContain('PR #202'));
     expect(notices('ci-red')).toContain('1 of 2 failing (Tests)');
     expect(notices('ci-red')).toContain('Do not merge');
-  });
-
-  it('green with the review loop still out is not a merge yet', async () => {
-    syncSessionsOn('acme/ci', null, 203);
-    await vi.waitFor(() => expect(notices('ci-loop')).toContain('PR #203'));
-    expect(notices('ci-loop')).toContain('Its review loop is still running (round 2)');
-  });
-
-  it('green after a convergence that withheld approval is not a merge yet', async () => {
-    syncSessionsOn('acme/ci', null, 214);
-    await vi.waitFor(() => expect(notices('ci-withheld')).toContain('PR #214'));
-    expect(notices('ci-withheld')).toContain(
-      'The publishing policy withheld code-approved, so wait for that before merging.',
-    );
-    expect(notices('ci-withheld')).not.toContain('ready to merge');
-  });
-
-  it.each([
-    ['question', 225, 'Its review is waiting for an answer'],
-    ['findings', 226, 'Its review findings await user triage in the dashboard'],
-    ['completed', 227, 'Nothing is pending on it'],
-    ['closed', 228, null],
-    ['initial', 229, 'Its review has not finished yet'],
-    ['publish', 230, 'Its review has not finished yet'],
-  ])('keeps standalone review state in a green CI rerun notice (%s)', async (kind, number, expected) => {
-    const id = `ci-review-${kind}`;
-    const job = getJob(id);
-    const parent = getJob('ci-orch');
-    if (kind === 'closed') job.status = 'closed';
-    if (kind === 'initial' || kind === 'publish') job.status = 'running';
-    syncSessionsOn('acme/ci', null, number);
-    await vi.waitFor(() => expect(notices(id)).toContain(`every check on PR #${number} passed`));
-    if (expected) expect(notices(id)).toContain(expected);
-    if (expected && kind !== 'completed') {
-      expect(notices(id)).not.toContain('Nothing is pending');
-      expect(notices(id)).not.toContain('ready to merge');
-    }
-    const eventsBefore = parent.events.length;
-    parent.awaitingAnswer = false;
-    parent.unattendedTurns = 10;
-    try {
-      deliverWorkerNotices(parent);
-      const delivered = parent.events
-        .slice(eventsBefore)
-        .map((event) => event.text || '')
-        .join('\n')
-        .split('\n')
-        .filter((line) => line.startsWith(`Worker ${id} (`))
-        .join('\n');
-      if (expected) expect(delivered).toContain(expected);
-      else expect(delivered).not.toContain(`PR #${number}`);
-      if (expected && kind !== 'completed') {
-        expect(delivered).not.toContain('Nothing is pending');
-        expect(delivered).not.toContain('ready to merge');
-      }
-      expect(notices(id)).toBe('');
-    } finally {
-      parent.awaitingAnswer = true;
-      parent.unattendedTurns = 0;
-    }
   });
 
   it('hands over the verdict of a run that registered after the push was first read', async () => {
@@ -13206,7 +8671,6 @@ describe('syncSessionsOn', () => {
       branch: 'dev-reconcile-open',
       baseBranch: 'main',
       prStatus: null,
-      reviewLoop: null,
     },
     {
       id: 'reconcile-later',
@@ -13217,7 +8681,6 @@ describe('syncSessionsOn', () => {
       branch: 'dev-reconcile-later',
       baseBranch: 'main',
       prStatus: null,
-      reviewLoop: null,
     },
     {
       id: 'reconcile-race',
@@ -13228,7 +8691,6 @@ describe('syncSessionsOn', () => {
       branch: 'dev-reconcile-race',
       baseBranch: 'main',
       prStatus: null,
-      reviewLoop: null,
     },
   ];
 
@@ -13321,872 +8783,6 @@ describe('syncSessionsOn', () => {
     release();
     await vi.waitFor(() => expect(getJob('reconcile-race').prStatus).toMatchObject({ number: 303 }));
     expect(lists).toBe(2);
-  });
-});
-
-// Reviews run on the project's configured reviewer; fix sessions and QA continue the worker's
-// work, so they run where it runs. Every round here fails to start on purpose (unknown provider,
-// empty family, unclaimed repo); tests read the attempt off the loop's info line.
-describe('the review loop: what a round runs on, and re-running one that could not', () => {
-  const rows = [
-    {
-      id: 'rt-own',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt',
-      // A deleted provider row, so the attempt names its runtime instead of spawning.
-      providerId: 99,
-      model: 'claude-fable-5-1',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 55,
-      prStatus: { number: 55, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: { rounds: 1, lastSha: 'sha-rt', failure: { round: 1, reason: 'boom', at: '2026-09-03' } },
-    },
-    {
-      id: 'rt-override',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-none',
-      providerId: 99,
-      model: 'claude-fable-5-1',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 56,
-      prStatus: { number: 56, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
-    },
-    {
-      id: 'rt-busy',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-none',
-      providerId: 1,
-      branch: 'task/rt',
-      startedOnPr: 57,
-      prStatus: { number: 57, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: { rounds: 1, reviewing: true, reviewSessionId: 'rt-rev' },
-    },
-    {
-      // Needs no clone to reopen, keeping this on retry_review's recovery guard.
-      id: 'rt-interrupted',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt',
-      orchestrator: true,
-      providerId: 99,
-      model: 'claude-fable-5-1',
-      effort: 'high',
-      turns: 1,
-      startedOnPr: 58,
-      prStatus: { number: 58, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: {
-        rounds: 1,
-        lastSha: 'sha-rt',
-        failure: { round: 1, reason: 'Server restarted while the job was active', at: '2026-09-05' },
-      },
-    },
-    {
-      // On the project with a reviewer of its own, and a provider row unlike it.
-      id: 'rt-project',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-rev',
-      providerId: 99,
-      model: 'claude-fable-5-1',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 59,
-      prStatus: { number: 59, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
-    },
-    {
-      // Same project, a retry having moved the loop: two answers to "what reviews this".
-      id: 'rt-both',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-rev',
-      providerId: 99,
-      model: 'claude-fable-5-1',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 60,
-      prStatus: { number: 60, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: {
-        rounds: 1,
-        lastSha: 'sha-rt',
-        runtime: { providerId: 1, model: 'claude-fable-5-1', effort: 'high' },
-      },
-    },
-    {
-      // Same project, retried with only a model, as the out-of-quota notice invites.
-      id: 'rt-model-only',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-rev',
-      providerId: 99,
-      provider: 'Session provider',
-      model: 'session-model',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 62,
-      prStatus: { number: 62, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
-    },
-    {
-      // The project's reviewer resolves but its CLI is not installed; the session's own
-      // provider can run, so the round can fall back.
-      id: 'rt-uninstalled',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-cli',
-      providerId: 1,
-      provider: 'Claude entry',
-      model: 'claude-fable-5-1',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 63,
-      prStatus: { number: 63, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
-    },
-    {
-      // Stands on its own question, so loop notices stay in its buffer for the test to read.
-      id: 'rt-orch',
-      kind: 'devchat',
-      // Not closed when the records are restored: the round is failed there,
-      // and a closed session is owed nothing (queueWorkerNotice).
-      status: 'interrupted',
-      repo: 'acme/rt-rev',
-      providerId: 1,
-      turns: 1,
-      orchestrator: true,
-      awaitingAnswer: true,
-    },
-    {
-      // Riding the project's reviewer when the process died: reconcileRestartedLoopJobs fails
-      // the round, which is not the reviewer's failure.
-      id: 'rt-restarted',
-      kind: 'devchat',
-      status: 'interrupted',
-      repo: 'acme/rt-rev',
-      parentId: 'rt-orch',
-      title: 'Add the export',
-      providerId: 1,
-      provider: 'Claude entry',
-      branch: 'task/rt',
-      startedOnPr: 64,
-      prStatus: { number: 64, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: {
-        rounds: 1,
-        lastSha: 'sha-rt',
-        reviewing: true,
-        reviewSessionId: 'rt-restarted-review',
-        reviewerRound: true,
-      },
-    },
-    {
-      id: 'rt-restarted-review',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-rev',
-      providerId: 2,
-      branch: 'task/rt',
-      loopParentId: 'rt-restarted',
-    },
-    {
-      // A partial retry moved this loop onto the project's reviewer without naming it, on a
-      // project whose reviewer CLI is not installed.
-      id: 'rt-override-reviewer',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-cli',
-      providerId: 1,
-      provider: 'Claude entry',
-      model: 'claude-fable-5-1',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 65,
-      prStatus: { number: 65, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: {
-        rounds: 1,
-        lastSha: 'sha-rt',
-        reviewRuntime: { providerId: 3, model: 'claude-fable-5-1', effort: 'high' },
-      },
-    },
-    {
-      // Same project, but a retry named that reviewer outright, so the loop-wide override fix
-      // and QA read (loopSessionRuntime) points at the missing CLI too.
-      id: 'rt-pinned',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-cli',
-      providerId: 1,
-      provider: 'Claude entry',
-      model: 'claude-fable-5-1',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 68,
-      prStatus: { number: 68, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: {
-        rounds: 1,
-        lastSha: 'sha-rt',
-        runtime: { providerId: 3, model: 'claude-fable-5-1', effort: 'high' },
-      },
-    },
-    {
-      // Same shape on a project whose reviewer is fine, as a model-only retry leaves it, with
-      // a finished review to close so its fix session can be watched.
-      id: 'rt-fix',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-rev',
-      // Deleted since, so each spawn attempt fails naming it, showing the fix session runtime.
-      providerId: 99,
-      provider: 'Session provider',
-      model: 'session-model',
-      effort: 'high',
-      turns: 1,
-      branch: 'task/rt',
-      startedOnPr: 66,
-      prStatus: { number: 66, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: {
-        rounds: 1,
-        reviewing: true,
-        reviewSessionId: 'rt-fix-review',
-        lastSha: 'sha-rt',
-        reviewRuntime: { providerId: 2, model: 'claude-fable-5-1', effort: 'low' },
-      },
-    },
-    {
-      id: 'rt-fix-review',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-rev',
-      turns: 1,
-      createdAt: '2026-08-25T13:00:00.000Z',
-      loopParentId: 'rt-fix',
-      loopReviewDone: true,
-    },
-    {
-      // A loop that gave the project's reviewer up, whose operator has since
-      // repaired it and says so by naming it in a retry.
-      id: 'rt-repaired',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-rev',
-      providerId: 1,
-      provider: 'Claude entry',
-      model: 'claude-fable-5-1',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 67,
-      prStatus: { number: 67, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: { rounds: 1, lastSha: 'sha-rt', reviewerFailed: true },
-    },
-    {
-      // A partial retry froze the project's then-reviewer into the review override; nobody
-      // named it, the fill-in did (retryLoopRound).
-      id: 'rt-repointed',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-rev',
-      providerId: 99,
-      provider: 'Session provider',
-      model: 'session-model',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 69,
-      prStatus: { number: 69, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: {
-        rounds: 1,
-        lastSha: 'sha-rt',
-        reviewRuntime: { providerId: 2, model: 'claude-fable-5-1', effort: 'low' },
-        reviewRuntimeFromProject: true,
-      },
-    },
-    {
-      // The same shape, kept apart for a second partial retry, as the re-run notice invites.
-      id: 'rt-refrozen',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-rev',
-      providerId: 99,
-      provider: 'Session provider',
-      model: 'session-model',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 70,
-      prStatus: { number: 70, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: {
-        rounds: 1,
-        lastSha: 'sha-rt',
-        reviewRuntime: { providerId: 2, model: 'claude-fable-5-1', effort: 'low' },
-        reviewRuntimeFromProject: true,
-      },
-    },
-    {
-      // Again, for the retry line: loopReviewChoice skips this override once Settings moves.
-      id: 'rt-passed-over',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-rev',
-      providerId: 99,
-      provider: 'Session provider',
-      model: 'session-model',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 71,
-      prStatus: { number: 71, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: {
-        rounds: 1,
-        lastSha: 'sha-rt',
-        reviewRuntime: { providerId: 2, model: 'claude-fable-5-1', effort: 'low' },
-        reviewRuntimeFromProject: true,
-      },
-    },
-    {
-      // Own reviewer, and a session runtime unlike it: what a provider-naming retry must keep
-      // for the fix sessions and QA run.
-      id: 'rt-moved',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-rev',
-      providerId: 1,
-      provider: 'Claude entry',
-      model: 'session-model',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 72,
-      prStatus: { number: 72, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
-    },
-    {
-      // Same project, with a reviewer this loop gave up and that has since been repaired: what
-      // a retry naming it must leave the reviews on.
-      id: 'rt-back',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-rev',
-      providerId: 1,
-      provider: 'Claude entry',
-      model: 'session-model',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 73,
-      prStatus: { number: 73, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: { rounds: 1, lastSha: 'sha-rt', reviewerFailed: true },
-    },
-    {
-      // Already moved once onto another family's provider, which the next retry must not carry
-      // forward. No project reviewer, so only the two overrides are in play.
-      id: 'rt-again',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt',
-      providerId: 1,
-      provider: 'Claude entry',
-      model: 'session-model',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 74,
-      prStatus: { number: 74, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: {
-        rounds: 1,
-        lastSha: 'sha-rt',
-        runtime: { providerId: 3, model: 'codex-model', effort: 'low' },
-      },
-    },
-    {
-      // A project whose reviewer row was deleted in Settings since.
-      id: 'rt-gone',
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/rt-gone',
-      providerId: 99,
-      model: 'claude-fable-5-1',
-      effort: 'high',
-      branch: 'task/rt',
-      startedOnPr: 61,
-      prStatus: { number: 61, state: 'open', headSha: 'sha-rt' },
-      reviewLoop: { rounds: 1, lastSha: 'sha-rt' },
-    },
-  ];
-
-  beforeAll(async () => {
-    state.stored = rows;
-    await initJobs();
-    for (const row of rows) getJob(row.id).status = 'idle';
-  });
-
-  beforeEach(() => {
-    state.projects = [
-      // No reviewer of their own: a round on these follows the session.
-      { repo: 'acme/shop', label: 'Shop', localDir: '' },
-      { repo: 'acme/rt', label: 'RT', localDir: '' },
-      // What ⌕ Code review was set up to run on, and so what a round runs on.
-      {
-        repo: 'acme/rt-rev',
-        label: 'RT reviewer',
-        localDir: '',
-        reviewProviderId: 2,
-        reviewModel: 'claude-fable-5-1',
-        reviewEffort: 'low',
-      },
-      // The same setting, naming a provider row that has been deleted since.
-      { repo: 'acme/rt-gone', label: 'RT gone', localDir: '', reviewProviderId: 97 },
-      // A row that is there and active, but whose CLI is not on this machine.
-      { repo: 'acme/rt-cli', label: 'RT cli', localDir: '', reviewProviderId: 3 },
-    ];
-    state.otherProviders = [
-      { id: 2, label: 'Project reviewer', binary: 'claude', active: true },
-      { id: 3, label: 'Uninstalled reviewer', binary: 'codex', active: true },
-    ];
-  });
-
-  const infoTexts = (job) => job.events.filter((e) => e.kind === 'info').map((e) => e.text);
-
-  it('a round runs on the project’s reviewer, not on the session it reviews for', async () => {
-    const job = getJob('rt-project');
-    // The reviewer resolves; the round stops one step later on a family with no member left.
-    state.group = [];
-
-    const outcome = await retryLoopRound('rt-project');
-
-    // The attempt named the project's reviewer by label. Had it followed the
-    // session it reviews for, the line would carry provider 99 instead.
-    expect(infoTexts(job).join('\n')).toMatch(
-      /could not start the code review: Project reviewer: this provider is inactive/,
-    );
-    expect(infoTexts(job).join('\n')).not.toMatch(/Unknown provider: 99/);
-    expect(outcome).toEqual({ started: false, round: 1 });
-  });
-
-  it('falls back to the session when the project configured no reviewer', async () => {
-    const job = getJob('rt-own');
-
-    const outcome = await retryLoopRound('rt-own');
-
-    // acme/rt names no reviewer, so the round is the session's own provider 99.
-    expect(infoTexts(job).join('\n')).toMatch(/could not start the code review: Unknown provider: 99/);
-    // A failed start gives its round number back, so the next is still round 2.
-    expect(outcome).toEqual({ started: false, round: 1 });
-  });
-
-  it('falls back to the session when the project’s reviewer row is gone, and says so once', async () => {
-    const job = getJob('rt-gone');
-
-    await retryLoopRound('rt-gone');
-
-    expect(infoTexts(job).join('\n')).toMatch(/the reviewer this project was set up with is gone/);
-    expect(infoTexts(job).join('\n')).toMatch(/could not start the code review: Unknown provider: 99/);
-
-    // The row stays deleted, so later rounds take the same fallback; the notice is said once,
-    // not per push.
-    await retryLoopRound('rt-gone');
-    expect(infoTexts(job).filter((t) => /is gone, so the review runs on/.test(t))).toHaveLength(1);
-  });
-
-  it('falls back to the session when the project’s reviewer cannot run at all', async () => {
-    const job = getJob('rt-uninstalled');
-    // This row is active but its CLI is not installed, which only createDevSession finds out;
-    // the round must not die on that.
-    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue(null);
-    // With a QA loop queued behind this one, the way out this notice points at
-    // costs it: turning the 🔁 chip off drops the QA loop too (setReviewLoop).
-    job.qaLoop = { running: false, done: false };
-    try {
-      await retryLoopRound('rt-uninstalled');
-      expect(infoTexts(job).join('\n')).toMatch(
-        /turn the 🔁 chip off and on to ask the project again, and arm the 🎬 chip again/,
-      );
-    } finally {
-      job.qaLoop = null;
-      bin.mockRestore();
-    }
-
-    expect(infoTexts(job).join('\n')).toMatch(
-      /the reviewer this project was set up with cannot run \(Uninstalled reviewer: the Codex CLI was not found on this machine\), so this round and the ones after it run on Claude entry instead/,
-    );
-    // The round ran on the session's provider, and the reviewer is given up for good.
-    expect(infoTexts(job).join('\n')).toMatch(/started code review round 2 of PR #63/);
-    expect(job.reviewLoop).toMatchObject({ reviewing: true, reviewerFailed: true, reviewerRound: false });
-    expect(getJob(job.reviewLoop.reviewSessionId).providerId).toBe(1);
-    closeDevSession(job.reviewLoop.reviewSessionId);
-  });
-
-  it('a round a server restart interrupted keeps the project’s reviewer', async () => {
-    const job = getJob('rt-restarted');
-    // The round was failed during restore. A restart says nothing about the reviewer, so it is
-    // not given up.
-    expect(job.reviewLoop.reviewerFailed).toBeFalsy();
-    expect(job.reviewLoop.reviewerRound).toBe(false);
-    expect(infoTexts(job).join('\n')).not.toMatch(/The reviewer this project was set up with is what failed/);
-
-    state.group = [];
-    await retryLoopRound('rt-restarted');
-
-    // So the retried round is still the project's reviewer, not the session's.
-    expect(infoTexts(job).join('\n')).toMatch(
-      /could not start the code review: Project reviewer: this provider is inactive/,
-    );
-  });
-
-  it('an override that is the project’s reviewer falls back and is given up like one', async () => {
-    const job = getJob('rt-override-reviewer');
-    // A model-only retry filled the provider in from the reviewer, so this override is still the
-    // project's reviewer: its CLI is missing, so the round must fall back, not fail for good.
-    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue(null);
-    try {
-      await retryLoopRound('rt-override-reviewer');
-
-      expect(infoTexts(job).join('\n')).toMatch(
-        /the reviewer this project was set up with cannot run \(Uninstalled reviewer: the Codex CLI was not found on this machine\), so this round and the ones after it run on Claude entry instead/,
-      );
-      expect(infoTexts(job).join('\n')).toMatch(/started code review round 2 of PR #65/);
-      expect(job.reviewLoop).toMatchObject({ reviewerFailed: true, reviewerRound: false });
-      expect(getJob(job.reviewLoop.reviewSessionId).providerId).toBe(1);
-      closeDevSession(job.reviewLoop.reviewSessionId);
-
-      // Nor does the override bring the given-up reviewer back next round; it is dropped with
-      // the setting it came from.
-      state.group = [];
-      job.reviewLoop.reviewing = false;
-      await retryLoopRound('rt-override-reviewer');
-      expect(infoTexts(job).join('\n')).toMatch(
-        /could not start the code review: Claude entry: this provider is inactive/,
-      );
-      expect(infoTexts(job).join('\n')).not.toMatch(/Unknown provider: 3/);
-    } finally {
-      bin.mockRestore();
-    }
-  });
-
-  it('giving the reviewer up drops the retry that pinned the whole loop to it', async () => {
-    const job = getJob('rt-pinned');
-    // A retry named this provider outright, so it is the loop-wide override fix and QA read
-    // (loopSessionRuntime). Falling back for the review only would publish findings nothing
-    // could implement.
-    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue(null);
-    try {
-      await retryLoopRound('rt-pinned');
-
-      expect(job.reviewLoop.reviewerFailed).toBe(true);
-      expect(job.reviewLoop.runtime).toBeNull();
-      // Dropping it undoes a move somebody made, and the session's own provider may be the
-      // account that retry escaped, so the give-up says so.
-      expect(infoTexts(job).join('\n')).toMatch(
-        /The retry that had moved this loop onto Uninstalled reviewer goes with it, so its fix sessions and its QA run are back on Claude entry/,
-      );
-      expect(infoTexts(job).join('\n')).toMatch(/started code review round 2 of PR #68/);
-      expect(getJob(job.reviewLoop.reviewSessionId).providerId).toBe(1);
-      closeDevSession(job.reviewLoop.reviewSessionId);
-
-      // And nothing brings that provider back on the next round.
-      const said = infoTexts(job).length;
-      state.group = [];
-      job.reviewLoop.reviewing = false;
-      await retryLoopRound('rt-pinned');
-      expect(infoTexts(job).slice(said).join('\n')).toMatch(
-        /could not start the code review: Claude entry: this provider is inactive/,
-      );
-      expect(infoTexts(job).slice(said).join('\n')).not.toMatch(/Uninstalled reviewer/);
-    } finally {
-      bin.mockRestore();
-    }
-  });
-
-  it('refuses a retry whose model the provider it names does not run', async () => {
-    // resolveRuntime swaps an unsupported model for the provider's default, leaving the retry on
-    // the model it was moved off; the mock passes anything through, so the swap is staged here.
-    const real = resolveRuntime.getMockImplementation();
-    resolveRuntime.mockImplementation((runtime) => {
-      const out = real(runtime);
-      return out && out.model === 'not-a-model' ? { ...out, model: 'claude-fable-5-1' } : out;
-    });
-    try {
-      await expect(retryLoopRound('rt-model-only', { model: 'not-a-model' })).rejects.toThrow(
-        /does not run not-a-model \(it runs claude-fable-5-1\)/,
-      );
-    } finally {
-      resolveRuntime.mockImplementation(real);
-    }
-  });
-
-  it('a retry that names only a model keeps the loop on the project’s reviewer', async () => {
-    const job = getJob('rt-model-only');
-    state.group = [];
-
-    await retryLoopRound('rt-model-only', { model: 'claude-fable-5-1' });
-
-    // Filled in from the reviews' runtime: the model belongs to the reviewer, and defaulting
-    // to the session's provider would pin every later round to 99.
-    expect(job.reviewLoop.reviewRuntime).toEqual({
-      providerId: 2,
-      model: 'claude-fable-5-1',
-      effort: 'low',
-    });
-    // Reviews only: the retry named nothing for the work, so the loop-wide override
-    // (loopSessionRuntime) is untouched.
-    expect(job.reviewLoop.runtime).toBeFalsy();
-    expect(infoTexts(job).join('\n')).toMatch(
-      /could not start the code review: Project reviewer: this provider is inactive/,
-    );
-  });
-
-  it('a retry that names only a model leaves the fix session on the session’s own provider', async () => {
-    const job = getJob('rt-fix');
-    latestReviewFindings.mockResolvedValueOnce([{ key: 'k1', severity: 'high', title: 'A thing' }]);
-
-    await closeDevSession('rt-fix-review');
-    for (let i = 0; i < 400 && !job.reviewLoop.triage; i++) {
-      await new Promise((r) => setTimeout(r, 10));
-    }
-    await triageLoopFindings('rt-fix', { verdicts: [{ key: 'k1', decision: 'fix' }] });
-
-    // Reviews ride the project's reviewer (provider 2), but the fix session is the session's
-    // own work, attempted on 99.
-    expect(infoTexts(job).join('\n')).toMatch(/could not start the fix session: Unknown provider: 99/);
-    expect(infoTexts(job).join('\n')).not.toMatch(/Project reviewer/);
-  });
-
-  it('a retry naming the reviewer this loop gave up puts the round back on it', async () => {
-    const job = getJob('rt-repaired');
-    state.group = [];
-
-    // Naming the given-up reviewer outright says it is repaired, so the round rides it again.
-    await retryLoopRound('rt-repaired', { providerId: 2 });
-
-    expect(job.reviewLoop.reviewerFailed).toBe(false);
-    expect(infoTexts(job).join('\n')).toMatch(
-      /could not start the code review: Project reviewer: this provider is inactive/,
-    );
-    expect(infoTexts(job).join('\n')).not.toMatch(/Claude entry: this provider is inactive/);
-  });
-
-  it('a partial retry’s frozen reviewer follows the project when Settings repoints it', async () => {
-    const job = getJob('rt-repointed');
-    // The override froze provider 2 from ⌕ Code review at retry time; the operator has since
-    // repointed the setting, as the give-up messages ask.
-    state.projects = state.projects.map((p) =>
-      p.repo === 'acme/rt-rev' ? { ...p, reviewProviderId: 3, reviewModel: null, reviewEffort: null } : p,
-    );
-    state.group = [];
-
-    await retryLoopRound('rt-repointed');
-
-    // So the round follows the setting. Left frozen, it would ride a row nothing names, with
-    // the give-up and start-refusal fallback disabled for being an override.
-    expect(infoTexts(job).join('\n')).toMatch(
-      /could not start the code review: Uninstalled reviewer: this provider is inactive/,
-    );
-    expect(infoTexts(job).join('\n')).not.toMatch(/Project reviewer/);
-  });
-
-  it('a second partial retry keeps the frozen reviewer following the project', async () => {
-    const job = getJob('rt-refrozen');
-    state.group = [];
-
-    // The re-run round failed again, inviting another partial retry. Nobody has named a
-    // provider yet, so the row stays marked as the setting's answer.
-    await retryLoopRound('rt-refrozen', { effort: 'high' });
-
-    expect(job.reviewLoop.reviewRuntime).toEqual({
-      providerId: 2,
-      model: 'claude-fable-5-1',
-      effort: 'high',
-    });
-    expect(job.reviewLoop.reviewRuntimeFromProject).toBe(true);
-
-    // So repointing the setting still moves the reviews. Unmarked, provider 2 would stick as
-    // an override with the give-up and the fallback disabled.
-    state.projects = state.projects.map((p) =>
-      p.repo === 'acme/rt-rev' ? { ...p, reviewProviderId: 3 } : p,
-    );
-    const said = infoTexts(job).length;
-    await retryLoopRound('rt-refrozen');
-
-    expect(infoTexts(job).slice(said).join('\n')).toMatch(
-      /could not start the code review: Uninstalled reviewer: this provider is inactive/,
-    );
-    // The retry line names the prior failed round; only the attempt shows this one's provider.
-    expect(infoTexts(job).slice(said).join('\n')).not.toMatch(
-      /could not start the code review: Project reviewer/,
-    );
-  });
-
-  it('the retry line names the model the round opens on, not the pin passed over', async () => {
-    const job = getJob('rt-passed-over');
-    // Settings names another reviewer now, so loopReviewChoice passes the frozen override
-    // over; this line is the operator's only word on the runtime.
-    state.projects = state.projects.map((p) =>
-      p.repo === 'acme/rt-rev' ? { ...p, reviewProviderId: 3, reviewModel: 'codex-model' } : p,
-    );
-    state.group = [];
-
-    await retryLoopRound('rt-passed-over');
-
-    expect(infoTexts(job).join('\n')).toMatch(/retrying the review on codex-model/);
-    expect(infoTexts(job).join('\n')).not.toMatch(/retrying the review on claude-fable-5-1/);
-  });
-
-  it('a retry that names a provider keeps the session’s model on the work it moves', async () => {
-    const job = getJob('rt-moved');
-    state.group = [];
-
-    // A named provider moves the whole loop, so it settles what fix sessions and QA open on.
-    // Filling gaps from the reviews would give them the reviewer's model and effort
-    // (claude-fable-5-1 / low), which nobody named for code-writing turns.
-    await retryLoopRound('rt-moved', { providerId: 2 });
-
-    expect(job.reviewLoop.runtime).toEqual({
-      providerId: 2,
-      model: 'session-model',
-      effort: 'high',
-    });
-  });
-
-  it('a retry back onto the reviewer keeps the reviews on the project’s model', async () => {
-    const job = getJob('rt-back');
-    state.group = [];
-
-    // Naming the given-up reviewer says it is repaired. Its gaps come from the setting, not
-    // the session; otherwise reviews would run on the code-writing model (session-model /
-    // high) and outrank ⌕ Code review for the rest of the loop.
-    await retryLoopRound('rt-back', { providerId: 2 });
-
-    expect(job.reviewLoop.reviewerFailed).toBe(false);
-    expect(job.reviewLoop.reviewRuntime).toEqual({
-      providerId: 2,
-      model: 'claude-fable-5-1',
-      effort: 'low',
-    });
-    // Fix sessions and QA keep the session's own model and effort.
-    expect(job.reviewLoop.runtime).toEqual({
-      providerId: 2,
-      model: 'session-model',
-      effort: 'high',
-    });
-    expect(infoTexts(job).join('\n')).toMatch(/retrying the review on claude-fable-5-1/);
-    expect(infoTexts(job).join('\n')).not.toMatch(/retrying the review on session-model/);
-  });
-
-  it('a second retry onto another provider restores the session’s own model', async () => {
-    const job = getJob('rt-again');
-    state.group = [];
-
-    // The first retry moved the loop to provider 3 (another model family); this one names the
-    // session's row again. Filling gaps from the replaced override would give provider 1 a
-    // model it does not run, which resolveRuntime would swap for a default nobody named.
-    await retryLoopRound('rt-again', { providerId: 1 });
-
-    expect(job.reviewLoop.runtime).toEqual({
-      providerId: 1,
-      model: 'session-model',
-      effort: 'high',
-    });
-  });
-
-  it('a round nothing but a restart ended is not a provider to move off', async () => {
-    // rt-restarted's round was failed on restore. Telling the orchestrator to retry_review
-    // elsewhere would move reviews, fix and QA off the project's reviewer for good, so it must
-    // not hear that for a round the provider never refused.
-    const notice = getJob('rt-orch').pendingWorkerNotices.find((n) => n.workerId === 'rt-restarted');
-    expect(notice.kind).toBe('loop');
-    expect(notice.text).toMatch(/interrupted rather than turned away by the provider/);
-    expect(notice.text).toMatch(/naming no provider_id or model/);
-    expect(notice.text).not.toMatch(/This is the provider failing/);
-  });
-
-  it('a retry’s override outranks the project’s reviewer', async () => {
-    const job = getJob('rt-both');
-    state.group = [];
-
-    await retryLoopRound('rt-both');
-
-    // The retry moved the loop onto provider 1 to escape a failing one; the project's reviewer
-    // does not undo that next round.
-    expect(infoTexts(job).join('\n')).toMatch(
-      /could not start the code review: Claude entry: this provider is inactive/,
-    );
-    expect(infoTexts(job).join('\n')).not.toMatch(/Project reviewer/);
-  });
-
-  it('a retry moves the loop onto the runtime it names, and keeps it for later rounds', async () => {
-    const job = getJob('rt-override');
-
-    await retryLoopRound('rt-override', { providerId: 1, model: 'claude-fable-5-1', effort: 'high' });
-
-    expect(job.reviewLoop.runtime).toEqual({
-      providerId: 1,
-      model: 'claude-fable-5-1',
-      effort: 'high',
-    });
-    // Past the session's own stuck provider, failing only on the repo no project claims.
-    expect(infoTexts(job).join('\n')).toMatch(
-      /could not start the code review: Unknown project: acme\/rt-none/,
-    );
-    expect(infoTexts(job).join('\n')).not.toMatch(/Unknown provider/);
-  });
-
-  it('refuses a runtime whose provider row does not exist', async () => {
-    await expect(retryLoopRound('rt-override', { providerId: 42 })).rejects.toThrow(/Unknown provider: 42/);
-  });
-
-  it('keeps a failed round visible when its replacement reviewer cannot start', async () => {
-    const job = getJob('rt-own');
-    job.reviewLoop.failure = { round: 3, reason: 'Claude HD exited with code 1', at: '2026-09-03' };
-    job.reviewLoop.stalled = true;
-    job.reviewLoop.done = true;
-    job.reviewLoop.lastSha = 'sha-rt';
-
-    await retryLoopRound('rt-own');
-
-    expect(job.reviewLoop.failure).toMatchObject({ round: 1, reason: 'Unknown provider: 99' });
-    expect(job.reviewLoop.stalled).toBe(false);
-    expect(job.reviewLoop.done).toBe(false);
-    expect(infoTexts(job).join('\n')).toMatch(/retrying the review after round 3 failed/);
-  });
-
-  it('refuses to retry a round that is actually running', async () => {
-    await expect(retryLoopRound('rt-busy')).rejects.toThrow(/Nothing to retry: a code review is running/);
-    await expect(retryLoopRound('rt-busy', { providerId: 1 })).rejects.toThrow(/Nothing to retry/);
-    // Refused, so nothing about the live round moved.
-    expect(getJob('rt-busy').reviewLoop.reviewing).toBe(true);
-    expect(getJob('rt-busy').reviewLoop.runtime).toBeFalsy();
-  });
-
-  it('keeps a reopened interrupted round retryable when reviewer creation fails', async () => {
-    const job = getJob('rt-interrupted');
-    job.status = 'interrupted';
-
-    await expect(retryLoopRound('rt-interrupted')).resolves.toEqual({ started: false, round: 1 });
-
-    // reopenDevSession runs async and attempts the queued retry; a refused reviewer must leave
-    // the failed round visible, not silently clear the restart failure.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(job.status).toBe('idle');
-    expect(job.reviewLoop).toMatchObject({
-      retryPending: true,
-      failure: { round: 1, reason: 'Unknown provider: 99' },
-    });
-    expect(workerSummary(job).reviewLoop.failure).toEqual({
-      round: 1,
-      reason: 'Unknown provider: 99',
-    });
-    expect(job.turns).toBe(1);
-    expect(infoTexts(job).join('\n')).toMatch(/reopening this session and retrying/);
-
-    // The failed state makes the same no-chat retry available again; another
-    // refused reviewer never turns it into a false success.
-    await expect(retryLoopRound('rt-interrupted')).resolves.toEqual({ started: false, round: 1 });
-    expect(job.reviewLoop.failure).toMatchObject({
-      round: 1,
-      reason: 'Unknown provider: 99',
-    });
-  });
-
-  it('a session with no loop has no round to retry', async () => {
-    await expect(retryLoopRound('rt-missing')).rejects.toThrow(/Session not found/);
   });
 });
 
@@ -15184,29 +9780,6 @@ describe('Codex turn usage', () => {
   };
   const walks = (spy) => spy.mock.calls.filter(([dir]) => String(dir).includes('.codex-provider-2')).length;
 
-  it('persists the GitHub accounts actually used by successive review turns', async () => {
-    const job = getJob('codex-usage');
-    job.ownerId = 2;
-    job.reviewBranch = 'feature';
-    let login = 'alice';
-    setOwnerGithub(() => ({ token: `${login}-token`, login, id: 42 }));
-    try {
-      const usage = { input_tokens: 500100, cached_input_tokens: 450050, output_tokens: 20010 };
-      await turn(job, 'Review the change', usage);
-      login = 'bob';
-      await turn(job, 'Publish the review', usage);
-      await turn(job, 'Finish publishing', usage);
-      expect(job.reviewAuthorLogins).toEqual(['alice', 'bob']);
-      await flushJobs();
-      const saved = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
-      expect(JSON.parse(JSON.stringify(saved)).reviewAuthorLogins).toEqual(['alice', 'bob']);
-      const calls = spawn.mock.calls.filter(([cmd]) => cmd === '/mock/agent');
-      expect(calls.map(([, , opts]) => opts.env.GH_TOKEN)).toEqual(['alice-token', 'bob-token', 'bob-token']);
-    } finally {
-      setOwnerGithub(() => null);
-    }
-  });
-
   it('prices a running turn and updates the same checkpoint at close', async () => {
     vi.useFakeTimers();
     try {
@@ -15712,66 +10285,6 @@ describe('Codex turn usage', () => {
     },
   );
 
-  it.each(['loopParentId', 'qaParentId', 'loopFixParentId'])(
-    'preserves closing state after canceled follow-up accounting (%s)',
-    async (parentField) => {
-      const job = getJob('codex-usage');
-      job[parentField] = 'missing-parent';
-      job.autoClose = true;
-      let finishAccounting;
-      recordTurnUsage.mockImplementationOnce(() => new Promise((resolve) => (finishAccounting = resolve)));
-      let finishDrop;
-      dropSessionDatabase.mockClear();
-      dropSessionDatabase.mockImplementationOnce(() => new Promise((resolve) => (finishDrop = resolve)));
-      releaseInstance.mockClear();
-      deleteJob.mockClear();
-      try {
-        sendDevMessage(job.id, 'Answer the question');
-        const closing = closeDevSession(job.id);
-        children.at(-1).emit('close', 0);
-        await vi.waitFor(() => expect(finishAccounting).toBeTypeOf('function'));
-        finishAccounting();
-        await vi.waitFor(() => expect(finishDrop).toBeTypeOf('function'));
-        await new Promise((resolve) => setImmediate(resolve));
-        expect(job.closing).toBe(true);
-        expect(job.status).toBe('running');
-        expect(job.loopReviewDone).toBeFalsy();
-        expect(job.qaLoopDone).toBeFalsy();
-        expect(job.loopFixDone).toBeFalsy();
-        expect(deleteJob).not.toHaveBeenCalled();
-        finishDrop();
-        await closing;
-        expect(releaseInstance).toHaveBeenCalledOnce();
-        expect(deleteJob).toHaveBeenCalledOnce();
-        expect(
-          job.events.filter((event) => event.kind === 'status' && event.status === 'closed'),
-        ).toHaveLength(1);
-      } finally {
-        finishDrop?.();
-      }
-    },
-  );
-
-  it.each(['loopParentId', 'qaParentId', 'loopFixParentId'])(
-    'does not complete a stopped follow-up turn (%s)',
-    async (parentField) => {
-      const job = getJob('codex-usage');
-      job[parentField] = 'missing-parent';
-      job.autoClose = true;
-      deleteJob.mockClear();
-      sendDevMessage(job.id, 'Answer the question');
-      cancelDevTurn(job.id);
-      children.at(-1).emit('close', 0);
-      await vi.waitFor(() => expect(job.status).toBe('idle'));
-      expect(job.turnCanceled).toBe(true);
-      expect(job.loopReviewDone).toBeFalsy();
-      expect(job.qaLoopDone).toBeFalsy();
-      expect(job.loopFixDone).toBeFalsy();
-      expect(deleteJob).not.toHaveBeenCalled();
-      await closeDevSession(job.id);
-    },
-  );
-
   it('drains accepted corrections after Stop cancels a follow-up turn', async () => {
     const job = getJob('codex-usage');
     sendDevMessage(job.id, 'Start the next change');
@@ -15817,75 +10330,6 @@ describe('Codex turn usage', () => {
     await vi.waitFor(() => expect(job.status).toBe('idle'));
     await closeDevSession(job.id);
   });
-
-  it.each(['loopParentId', 'qaParentId', 'loopFixParentId'])(
-    'does not complete a canceled first turn (%s) or close it twice',
-    async (parentField) => {
-      const local = fs.mkdtempSync(path.join(home, 'first-turn-'));
-      fs.mkdirSync(path.join(local, '.git'));
-      state.projects[0].localDir = local;
-      // Local preparation avoids external Git and setup work; the first-turn
-      // continuation and loop-close callbacks are the real production paths.
-      const session = createDevSession({
-        provider: 2,
-        repo: 'acme/shop',
-        local: true,
-        prompt: 'Review this change',
-      });
-      const job = getJob(session.id);
-      await vi.waitFor(() => expect(job.proc).toBeTruthy());
-      job[parentField] = 'missing-parent';
-      job.reviewBranch = 'feature';
-      job.autoClose = true;
-      let finishAccounting;
-      recordTurnUsage.mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishAccounting = resolve;
-          }),
-      );
-      let finishRelease;
-      releaseInstance.mockClear();
-      releaseInstance.mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishRelease = resolve;
-          }),
-      );
-      dropSessionDatabase.mockClear();
-      deleteJob.mockClear();
-      const closedEvents = [];
-      const onJob = (event) => {
-        if (event.id === job.id && event.status === 'closed') closedEvents.push(event);
-      };
-      bus.on('job', onJob);
-      try {
-        const closing = closeDevSession(job.id);
-        children.at(-1).emit('close', 0);
-        await vi.waitFor(() => expect(finishAccounting).toBeTypeOf('function'));
-        finishAccounting();
-        await vi.waitFor(() => expect(finishRelease).toBeTypeOf('function'));
-        await new Promise((resolve) => setImmediate(resolve));
-        expect(job.closing).toBe(true);
-        expect(job.status).toBe('running');
-        expect(job.loopReviewDone).toBeFalsy();
-        expect(job.qaLoopDone).toBeFalsy();
-        expect(job.loopFixDone).toBeFalsy();
-        expect(children).toHaveLength(1); // no publish turn
-        const duplicate = closeDevSession(job.id);
-        finishRelease();
-        await Promise.all([closing, duplicate]);
-        expect(releaseInstance).toHaveBeenCalledOnce();
-        // Close drops with logging; deletion makes its existing final cleanup call.
-        expect(dropSessionDatabase.mock.calls).toEqual([[job, expect.any(Function)], [job]]);
-        expect(deleteJob).toHaveBeenCalledOnce();
-        expect(closedEvents).toHaveLength(1);
-      } finally {
-        finishRelease?.();
-        bus.off('job', onJob);
-      }
-    },
-  );
 
   it('books a resumed turn as what it added to the thread, reading the rollout once', async () => {
     const job = getJob('codex-usage');
@@ -16042,11 +10486,10 @@ describe('Codex turn usage', () => {
     ).toMatchObject({ inputTokens: 800000, cachedInputTokens: 700000, outputTokens: 30000 });
   });
 
-  it('takes no baseline for a native review, which opens a thread of its own', () => {
-    expect(codexTurnResumes('codex', { resume: true, native: false, sessionId: 't' })).toBe(true);
-    expect(codexTurnResumes('codex', { resume: true, native: true, sessionId: 't' })).toBe(false);
-    expect(codexTurnResumes('codex', { resume: false, native: false, sessionId: 't' })).toBe(false);
-    expect(codexTurnResumes('claude', { resume: true, native: false, sessionId: 't' })).toBe(false);
+  it('only resumes an existing Codex conversation', () => {
+    expect(codexTurnResumes('codex', { resume: true, sessionId: 't' })).toBe(true);
+    expect(codexTurnResumes('codex', { resume: false, sessionId: 't' })).toBe(false);
+    expect(codexTurnResumes('claude', { resume: true, sessionId: 't' })).toBe(false);
   });
   it('keeps the usage baseline when restart recovery resumes a review thread', () => {
     expect(
@@ -16368,94 +10811,6 @@ describe('auto-compaction while the context probe is out', () => {
     }
   });
 
-  it.each(['block', 'tool'])(
-    'persists a held %s question before the successful shutdown checkpoint',
-    async (kind) => {
-      let land;
-      recordTurnUsage.mockImplementationOnce(() => new Promise((resolve) => (land = resolve)));
-      const published = [];
-      const onEvent = (id, event) => {
-        if (id === job.id) published.push(event);
-      };
-      bus.on('event', onEvent);
-      let snapshot;
-      try {
-        job.orchestrator = true;
-        sendDevMessage(job.id, 'Go');
-        job.reviewBranch = 'feature';
-        job.recoveryTurn.phase = 'initial';
-        const result = {
-          type: 'result',
-          subtype: 'success',
-          is_error: false,
-          result: 'Done',
-          total_cost_usd: 0.1,
-        };
-        children[0].stdout.write(JSON.stringify(result) + '\n');
-        await vi.waitFor(() => expect(land).toBeTypeOf('function'));
-        children[0].stdout.write(
-          JSON.stringify({
-            type: 'assistant',
-            message: {
-              content: [
-                kind === 'block'
-                  ? { type: 'text', text: '<ask-user>Which plan?\n- A\n- B\n</ask-user>' }
-                  : {
-                      type: 'tool_use',
-                      name: 'AskUserQuestion',
-                      input: {
-                        questions: [{ question: 'Which plan?', options: [{ label: 'A' }, { label: 'B' }] }],
-                      },
-                    },
-              ],
-            },
-          }) + '\n',
-        );
-        children[0].stdout.write(JSON.stringify({ ...result, total_cost_usd: 0.2 }) + '\n');
-        children[0].emit('close', 0);
-        await stopAllJobProcesses();
-        let flushed = false;
-        const flushing = flushJobs().then(() => (flushed = true));
-        await new Promise((resolve) => setImmediate(resolve));
-        expect(flushed).toBe(false);
-        expect(job.recoveryTurn.completed).toBe(false);
-        expect(published.some((e) => e.kind === 'result' || e.kind === 'ask')).toBe(false);
-        land(true);
-        await vi.waitFor(() => expect(children).toHaveLength(2));
-        answer(children[1], report('30k'));
-        await flushing;
-        snapshot = structuredClone(saveJob.mock.calls.findLast(([saved]) => saved.id === job.id)[0]);
-        expect(snapshot).toMatchObject({
-          awaitingAnswer: true,
-          askText: 'Which plan?\nOptions: A | B',
-          recoveryTurn: { prompt: 'Go', phase: 'initial', completed: true },
-        });
-        expect(snapshot.questionSeq).toBeGreaterThan(0);
-        expect(published.filter((e) => e.kind === 'result' || e.kind === 'ask').map((e) => e.kind)).toEqual([
-          'result',
-          'ask',
-          'result',
-        ]);
-        expect(
-          saveJobEvents.mock.calls.flatMap(([id, events]) => (id === job.id ? events : [])),
-        ).toContainEqual(
-          expect.objectContaining({ kind: 'ask', question: 'Which plan?', seq: snapshot.questionSeq }),
-        );
-      } finally {
-        land?.(true);
-        bus.off('event', onEvent);
-        setDraining(false);
-      }
-      for (const session of devSessionRecords()) session.restartPending = false;
-      state.stored = [snapshot];
-      await initJobs();
-      resumeRestartedSessions();
-      await vi.waitFor(() => expect(getJob(job.id).status).toBe('idle'));
-      expect(getJob(job.id).awaitingAnswer).toBe(true);
-      expect(children).toHaveLength(2); // No repeated request or review publication without the answer.
-    },
-  );
-
   it('does not spawn automatic compaction after shutdown while a context probe is pending', async () => {
     sendDevMessage(job.id, 'Go');
     await endTurn();
@@ -16495,7 +10850,6 @@ describe('maintenance drain at the operator entry points', () => {
         repo: 'acme/shop',
         providerId: 1,
         turns: 1,
-        reviewLoop: { rounds: 1, done: true },
       },
       {
         id: 'drain-interrupted',
@@ -16505,11 +10859,6 @@ describe('maintenance drain at the operator entry points', () => {
         orchestrator: true,
         providerId: 99,
         turns: 1,
-        reviewLoop: {
-          rounds: 1,
-          lastSha: 'sha-drain',
-          failure: { round: 1, reason: 'boom', at: '2026-09-05' },
-        },
       },
       {
         id: 'drain-preview',
@@ -16545,10 +10894,6 @@ describe('maintenance drain at the operator entry points', () => {
         providerId: 1,
         turns: 1,
         branch: 'feat/held',
-        reviewLoop: {
-          rounds: 1,
-          triage: { round: 1, prNumber: 77, findings: [{ key: 'k1', severity: 'high', title: 'A thing' }] },
-        },
       },
       {
         id: 'drain-review',
@@ -16578,23 +10923,6 @@ describe('maintenance drain at the operator entry points', () => {
   });
   afterAll(() => setDraining(false));
 
-  it('refuses arming the loops and compaction, but lets a loop be switched off', async () => {
-    expect(() => setReviewLoop('drain-idle', true)).toThrow(/Maintenance/);
-    expect(() => setQaLoop('drain-idle', true)).toThrow(/Maintenance/);
-    await expect(compactDevSession('drain-idle')).rejects.toThrow(/Maintenance/);
-    expect(setReviewLoop('drain-idle', false).reviewLoop).toBeFalsy();
-  });
-
-  it('refuses a retry before it touches the loop or the transcript', async () => {
-    const job = getJob('drain-interrupted');
-    const events = job.events.length;
-    await expect(retryLoopRound('drain-interrupted')).rejects.toThrow(/Maintenance/);
-    expect(job.reviewLoop).toMatchObject({ lastSha: 'sha-drain', failure: { round: 1 } });
-    expect(job.reviewLoop.retryPending).toBeFalsy();
-    expect(job.events).toHaveLength(events);
-    expect(job.status).toBe('interrupted');
-  });
-
   it('reopens an open session as the no-op it is, and refuses a settled one', () => {
     expect(reopenDevSession('drain-idle').id).toBe('drain-idle');
     expect(() => reopenDevSession('drain-interrupted')).toThrow(/Maintenance/);
@@ -16610,24 +10938,6 @@ describe('maintenance drain at the operator entry points', () => {
     expect(() => spawnWorkerSession(getJob('drain-orch'), { title: 'W', prompt: 'x' })).toThrow(
       /Maintenance/,
     );
-  });
-
-  it('refuses a triage that starts a fix before it records any verdict', async () => {
-    recordTriage.mockClear();
-    await expect(
-      triageLoopFindings('drain-held', { verdicts: [{ key: 'k1', decision: 'fix' }] }),
-    ).rejects.toThrow(/Maintenance/);
-    expect(recordTriage).not.toHaveBeenCalled();
-    expect(getJob('drain-held').reviewLoop.triage).toMatchObject({ round: 1 });
-  });
-
-  it('refuses a standalone review triage that starts a fix before it posts the verdicts', async () => {
-    recordTriage.mockClear();
-    await expect(
-      triageStandaloneReviewFindings('drain-review', { verdicts: [{ key: 'r1', decision: 'fix' }] }),
-    ).rejects.toThrow(/Maintenance/);
-    expect(recordTriage).not.toHaveBeenCalled();
-    expect(getJob('drain-review').reviewTriage).toMatchObject({ prNumber: 78, mine: true });
   });
 
   it('refuses a message that would start a turn on a settled session, whoever sends it', () => {
@@ -17923,64 +12233,6 @@ describe('/btw side questions', () => {
     }
   });
 
-  it('persists serialized feedback intake while an unrelated side answer is pending', async () => {
-    saveJob.mockClear();
-    let finishAnswer;
-    askClaudeSideQuestion.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finishAnswer = resolve;
-        }),
-    );
-    const asked = askDevSessionBtw('btw-session', 'What changed?');
-    const project = {
-      repo: 'acme/shop',
-      enabled: true,
-      babysitPrs: true,
-      reviewAuthor: 'owner',
-      reviewProviderId: 1,
-    };
-    const snapshot = {
-      repo: project.repo,
-      prNumber: 7,
-      author: 'owner',
-      sha: 'same-sha',
-      branch: 'feature',
-      sources: [
-        { id: 'review:42', author: 'reviewer', body: 'Missing guard', reviewId: 42, state: 'COMMENTED' },
-      ],
-      history: [],
-    };
-    const start = vi.fn(() => ({}));
-    const intake = createIncomingFeedback({
-      projects: () => [project],
-      read: async (_repo, prNumber) => ({ ...snapshot, prNumber }),
-      pending: () => false,
-      busy: () => false,
-      slots: () => 2,
-      start,
-    });
-    let completed = false;
-    const operations = Promise.all([
-      intake.assess(project, { number: 7, author: 'owner' }),
-      intake.assess(project, { number: 8, author: 'owner' }),
-      intake.remember({ ...snapshot, completed: true }),
-    ]).then(() => {
-      completed = true;
-    });
-    try {
-      await vi.waitFor(() => expect(completed).toBe(true));
-      expect(start).toHaveBeenCalledTimes(2);
-      expect(state.appSettings['incoming-feedback']['acme/shop#7'].reviews['review:42']).toBeTruthy();
-      expect(publicJob(getJob('btw-session')).sideQuestionsPending).toBe(1);
-      expect(saveJob.mock.calls.some(([j]) => j.id === 'btw-session')).toBe(true);
-    } finally {
-      finishAnswer({ text: 'Done', costUsd: 0.01 });
-      await asked.answer;
-      await operations;
-    }
-  });
-
   it('settles failed side answers and ledger failures before flushing', async () => {
     const job = getJob('btw-session');
     let failAnswer;
@@ -18291,63 +12543,6 @@ describe('/btw side questions', () => {
 });
 
 describe('invalid clone pool slots', () => {
-  it('automatic review children skip invalid slots and reserve separate checkouts before preparation', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'review-clone-pool-'));
-    state.workspaceDir = root;
-    const children = [];
-    const invalid = path.join(root, 'acme__shop__5');
-    try {
-      for (let i = 1; i <= 5; i++) {
-        fs.mkdirSync(path.join(root, i === 1 ? 'acme__shop' : `acme__shop__${i}`));
-      }
-      fs.mkdirSync(path.join(invalid, 'build-find'));
-      fs.writeFileSync(path.join(invalid, 'build-find', 'artifact'), 'preserved output');
-      fs.chmodSync(path.join(invalid, 'build-find'), 0o555);
-      fs.mkdirSync(path.join(invalid, 'res', 'third_party'), { recursive: true });
-      fs.writeFileSync(path.join(invalid, 'res', 'third_party', 'local-work'), 'preserved source');
-      const backup = `${invalid}.recovery-backup-fixture`;
-      fs.mkdirSync(backup);
-      fs.writeFileSync(path.join(backup, 'work'), 'preserved backup');
-      // Stop after allocation, before Git, database or provider work; the
-      // automatic loop uses this exact review/autoClose/loopParentId spec.
-      vi.mocked(acquireInstance).mockRejectedValueOnce(new Error('fixture: allocation observed'));
-      vi.mocked(acquireInstance).mockRejectedValueOnce(new Error('fixture: allocation observed'));
-      const spec = {
-        provider: 1,
-        repo: 'acme/shop',
-        branch: 'worker-branch',
-        review: true,
-        autoClose: true,
-        loopParentId: 'fixture-review-parent',
-      };
-      children.push(createDevSession(spec), createDevSession(spec));
-      expect(children.map((child) => child.workDir)).toEqual([
-        path.join(root, 'acme__shop__6'),
-        path.join(root, 'acme__shop__7'),
-      ]);
-      await vi.waitFor(() => {
-        for (const child of children) {
-          expect(getJob(child.id).status).toBe('failed');
-          expect(getJob(child.id).error).toBe('fixture: allocation observed');
-        }
-      });
-      expect(fs.readFileSync(path.join(invalid, 'build-find', 'artifact'), 'utf8')).toBe('preserved output');
-      expect(fs.readFileSync(path.join(invalid, 'res', 'third_party', 'local-work'), 'utf8')).toBe(
-        'preserved source',
-      );
-      expect(fs.readFileSync(path.join(backup, 'work'), 'utf8')).toBe('preserved backup');
-      expect(fs.readdirSync(invalid).sort()).toEqual(['build-find', 'res']);
-      expect(fs.statSync(path.join(invalid, 'build-find')).mode & 0o777).toBe(0o555);
-    } finally {
-      await vi.waitFor(() => {
-        for (const child of children) expect(getJob(child.id).status).toBe('failed');
-      });
-      state.workspaceDir = '/tmp/nowhere';
-      fs.chmodSync(path.join(invalid, 'build-find'), 0o755);
-      fs.rmSync(root, { recursive: true, force: true });
-    }
-  });
-
   it('skips missing .git without touching files and reserves concurrent fresh allocations', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-pool-'));
     state.workspaceDir = root;
@@ -18505,7 +12700,7 @@ describe('automatic recovery after a server restart', () => {
         id: 1,
         repo: 'acme/restart',
         reviewPublishInstructions: 'PUBLISH THE REVIEW',
-        reviewTestRun: true,
+        qaTestRun: true,
         promptTemplates: { testRun: 'RUN' },
       },
     ];
@@ -18594,239 +12789,6 @@ describe('automatic recovery after a server restart', () => {
     expect(testRunPrompt).toHaveBeenLastCalledWith(expect.objectContaining({ qaInstructions: taskBrief }));
     finish(children[0]);
     await vi.waitFor(() => expect(child.status).toBe('idle'));
-  });
-
-  it.each(['review', 'fix', 'qa', 'stale qa'])(
-    'restores an official action after its active %s child and continues unrelated recovery',
-    async (kind) => {
-      const parent = row({
-        status: 'idle',
-        orchestrator: false,
-        orchestratorPrAction: 'implement-feedback',
-        branch: 'feature',
-        startedOnPr: 77,
-        recoveryTurn: null,
-      });
-      const child = row({
-        orchestrator: false,
-        branch: 'feature',
-        startedOnPr: 77,
-        ...(kind === 'review'
-          ? { loopParentId: parent.id }
-          : kind === 'fix'
-            ? { loopFixParentId: parent.id }
-            : { qaParentId: parent.id }),
-      });
-      parent.reviewLoop = {
-        rounds: 1,
-        ...(kind === 'review'
-          ? { reviewing: true, reviewSessionId: child.id }
-          : kind === 'fix'
-            ? { fixing: true, fixSessionId: child.id }
-            : { done: kind === 'qa' }),
-      };
-      if (kind === 'qa' || kind === 'stale qa')
-        parent.qaLoop = {
-          running: true,
-          [kind === 'qa' ? 'sessionId' : 'staleSessionId']: child.id,
-        };
-      for (const [index, saved] of [child, parent].entries()) {
-        const checkout = path.join(root, index ? 'acme__restart__2' : 'acme__restart');
-        fs.mkdirSync(checkout);
-        const git = (...args) => {
-          const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
-          expect(result.status, result.stderr).toBe(0);
-        };
-        git('init', '-b', 'feature');
-        fs.writeFileSync(path.join(checkout, 'work'), 'original');
-        git('add', '.');
-        git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture');
-        const remote = path.join(root, `remote-${index}.git`);
-        expect(spawnSync('git', ['clone', '--bare', checkout, remote]).status).toBe(0);
-        git('remote', 'add', 'origin', remote);
-        Object.assign(saved, { workDir: checkout, workspacePrepared: true });
-        claimSlot(checkout, saved.id, { prepared: true });
-      }
-      const unrelated = row({ status: 'idle', recoveryTurn: null });
-      // Database restoration orders the newer child before its idle action parent.
-      state.stored = [child, parent, unrelated];
-      await initJobs({ deferPolling: true });
-      expect(resumeRestartedSessions()).toBe(3);
-      await vi.waitFor(() => {
-        expect(child.status, child.error).toBe('running');
-        expect(parent.status, parent.error).toBe('idle');
-        expect(unrelated.status, unrelated.error).toBe('idle');
-      });
-      expect(children).toHaveLength(1);
-      if (parent.qaLoop) expect(parent.qaLoop.sessionId || parent.qaLoop.staleSessionId).toBe(child.id);
-      else expect(parent.reviewLoop[kind === 'review' ? 'reviewSessionId' : 'fixSessionId']).toBe(child.id);
-      expect(() => sendDevMessage(parent.id, 'Start another parent turn')).toThrow(
-        /already has an open session/,
-      );
-      finish(children[0]);
-      await vi.waitFor(() => expect(child.status).toBe('idle'));
-    },
-  );
-
-  it.each(['idle', 'running'])(
-    'isolates PR admission refusal after restoring a newer %s ordinary worker',
-    async (status) => {
-      const parent = row({
-        status: 'idle',
-        recoveryTurn: null,
-        awaitingAnswer: status === 'running',
-      });
-      const ordinary = row({
-        status,
-        orchestrator: false,
-        branch: 'feature',
-        startedOnPr: 77,
-        ...(status === 'idle' ? { recoveryTurn: null } : {}),
-      });
-      const action = row({
-        status: 'idle',
-        orchestrator: false,
-        orchestratorPrAction: 'implement-feedback',
-        parentId: parent.id,
-        branch: 'feature',
-        startedOnPr: 77,
-        dbServerId: 7,
-        recoveryTurn: null,
-      });
-      for (const [index, saved] of [ordinary, action].entries()) {
-        const checkout = path.join(root, index ? 'acme__restart__2' : 'acme__restart');
-        fs.mkdirSync(checkout);
-        const git = (...args) => {
-          const result = spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8' });
-          expect(result.status, result.stderr).toBe(0);
-        };
-        git('init', '-b', 'feature');
-        fs.writeFileSync(path.join(checkout, 'work'), 'original');
-        git('add', '.');
-        git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture');
-        const remote = path.join(root, `remote-${index}.git`);
-        expect(spawnSync('git', ['clone', '--bare', checkout, remote]).status).toBe(0);
-        git('remote', 'add', 'origin', remote);
-        Object.assign(saved, { workDir: checkout, workspacePrepared: true });
-        claimSlot(checkout, saved.id, { prepared: true });
-      }
-      const unrelated = row({ status: 'idle', recoveryTurn: null });
-      state.stored = [ordinary, action, unrelated, parent];
-      releaseInstance.mockClear();
-      await initJobs({ deferPolling: true });
-      expect(resumeRestartedSessions()).toBe(4);
-      await vi.waitFor(() => {
-        expect(ordinary.status, ordinary.error).toBe(status);
-        expect(action).toMatchObject({
-          status: 'failed',
-          error: 'This pull request already has an open session',
-          restartPending: false,
-          restartDbServerId: null,
-          endedAt: expect.any(String),
-        });
-        expect(unrelated.status, unrelated.error).toBe('idle');
-      });
-      expect(reclaimInstance).toHaveBeenCalledWith(action, 7);
-      expect(releaseInstance).toHaveBeenCalledWith(action);
-      const notice = {
-        workerId: action.id,
-        kind: 'failed',
-        text: expect.stringContaining(`Worker ${action.id} (untitled) failed: ${action.error}`),
-      };
-      if (parent.awaitingAnswer) {
-        await vi.waitFor(() => expect(parent.pendingWorkerNotices).toEqual([notice]));
-        expect(children).toHaveLength(1);
-        parent.awaitingAnswer = false;
-        deliverWorkerNotices(parent);
-      }
-      await vi.waitFor(() => expect(children).toHaveLength(status === 'running' ? 2 : 1));
-      const parentTurn = children.find((child) => child.cwd === parent.workDir);
-      expect(parentTurn.prompt).toContain(`Worker ${action.id} (untitled) failed: ${action.error}`);
-      expect(parent.inFlightWorkerNotices).toEqual([notice]);
-      expect(parent.pendingWorkerNotices).toEqual([]);
-      expect(resumeRestartedSessions()).toBe(0);
-      expect(() => reopenDevSession(action.id)).toThrow(/already has an open session/);
-      expect(() => sendDevMessage(action.id, 'Retry')).toThrow(/already has an open session/);
-      expect(fs.readFileSync(path.join(action.workDir, 'work'), 'utf8')).toBe('original');
-      await vi.waitFor(() =>
-        expect(saveJob.mock.calls.findLast(([j]) => j.id === action.id)?.[0]).toMatchObject({
-          status: 'failed',
-          restartPending: false,
-          restartDbServerId: null,
-        }),
-      );
-      if (status === 'running') {
-        finish(children.find((child) => child.cwd === ordinary.workDir));
-        await vi.waitFor(() => expect(ordinary.status).toBe('idle'));
-      }
-      finish(parentTurn);
-      await vi.waitFor(() => expect(parent.status).toBe('idle'));
-    },
-  );
-
-  it('uses server GitHub identity for automatic triage after reopening a failed queued session', async () => {
-    const gh = await vi.importActual('../lib/github.js');
-    Object.assign(state.projects[0], { autonomousReviewLoop: true, envTemplate: '', setupCommands: [] });
-    const originalSpawn = spawn.getMockImplementation();
-    spawn.mockImplementation((cmd, args, opts) => {
-      if (cmd !== 'git') return originalSpawn(cmd, args, opts);
-      const child = new EventEmitter();
-      child.stdin = new PassThrough();
-      child.stdout = new PassThrough();
-      child.stderr = new PassThrough();
-      if (args[0] === 'clone') fs.mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
-      setImmediate(() => child.emit('close', 0));
-      return child;
-    });
-    const gitProbe = vi
-      .spyOn(await import('child_process'), 'spawnSync')
-      .mockReturnValue({ status: 0, stdout: '', stderr: '' });
-    const saved = row({
-      status: 'failed',
-      orchestrator: false,
-      branch: 'feature',
-      startedOnPr: 77,
-      prStatus: { number: 77, state: 'open' },
-      recoveryTurn: null,
-      recoveryQueue: [{ prompt: 'Queued instruction', shown: 'Queued instruction', files: [] }],
-      reviewLoop: { rounds: 1, reviewing: false, lastSha: 'a', pendingResult: { prNumber: 77, round: 1 } },
-    });
-    state.stored = [saved];
-    await initJobs({ deferPolling: true });
-    latestReviewFindings.mockResolvedValueOnce([
-      {
-        key: 'optional',
-        title: 'Small issue',
-        severity: 'low',
-        assessment: { verified: true, evidence: 'Reproduced', worthFixing: false, reason: 'Optional' },
-      },
-    ]);
-    githubRest.mockImplementation(
-      async () =>
-        new Response(JSON.stringify({ number: 77, state: 'open', labels: [{ name: 'code-approved' }] })),
-    );
-    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
-    recordTriage.mockImplementationOnce(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await gh.githubRest({ githubToken: 'server-token' }, 'POST', '/automatic-triage');
-      return { error: null };
-    });
-    try {
-      gh.asGithubUser('request-token', () => reopenDevSession(saved.id));
-      await vi.waitFor(() => expect(children).toHaveLength(1));
-      expect(children[0].prompt).toContain('Queued instruction');
-      finish(children[0]);
-      await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
-      expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer server-token');
-      await vi.waitFor(() => expect(saved.reviewLoop.done).toBe(true));
-    } finally {
-      gitProbe.mockRestore();
-      spawn.mockImplementation(originalSpawn);
-      fetch.mockRestore();
-      githubRest.mockReset();
-      recordTriage.mockReset();
-      recordTriage.mockResolvedValue({ error: null });
-    }
   });
 
   it.each([
@@ -19006,118 +12968,6 @@ describe('automatic recovery after a server restart', () => {
     expect(oldInterrupted.status).toBe('interrupted');
   });
 
-  it.each(['review', 'qa'])(
-    'continues the suspended %s sequence only after the question is answered',
-    async (kind) => {
-      const parent = row({ status: 'idle', recoveryTurn: null });
-      const child = row({
-        awaitingAnswer: true,
-        autoClose: true,
-        ...(kind === 'review'
-          ? { reviewBranch: 'feature', loopParentId: parent.id }
-          : { qaBranch: 'feature', qaParentId: parent.id }),
-        recoveryTurn: {
-          prompt: 'Initial request',
-          opts: { review: kind === 'review' },
-          phase: 'initial',
-          completed: false,
-        },
-      });
-      if (kind === 'review') parent.reviewLoop = { rounds: 1, reviewing: true, reviewSessionId: child.id };
-      else parent.qaLoop = { running: true, sessionId: child.id };
-      state.stored = [parent, child];
-      await initJobs();
-      resumeRestartedSessions();
-      await vi.waitFor(() => expect(child.status).toBe('idle'));
-      expect(children).toHaveLength(0);
-      expect(child.awaitingAnswer).toBe(true);
-      expect(child.recoveryTurn.phase).toBe('initial');
-      sendDevMessage(child.id, 'The operator answer');
-      await vi.waitFor(() => expect(children).toHaveLength(1));
-      expect(children[0].prompt).toContain('The operator answer');
-      expect(child.recoveryTurn.phase).toBe('initial');
-      finish(children[0]);
-      await vi.waitFor(() => expect(children).toHaveLength(2));
-      expect(child.status).toBe('running');
-      expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
-      if (kind === 'review') expect(children[1].prompt).toContain('PUBLISH THE REVIEW');
-      else expect(stepRuntime).toHaveBeenCalledWith(state.projects[0], 'testRun');
-      finish(children[1]);
-      await vi.waitFor(() => expect(child.status).toBe('closed'));
-      expect(children).toHaveLength(2);
-    },
-  );
-
-  it.each(['review', 'qa', 'fix'])('settles the %s child after a recovered queued answer', async (kind) => {
-    const parent = row({ status: 'idle', recoveryTurn: null });
-    const child = row({
-      awaitingAnswer: true,
-      autoClose: true,
-      recoveryQueue: [{ prompt: 'Queued operator answer', shown: 'Queued operator answer', files: [] }],
-      recoveryTurn: { prompt: 'Initial request', opts: { review: kind === 'review' }, phase: 'initial' },
-      ...(kind === 'review'
-        ? { reviewBranch: 'feature', loopParentId: parent.id }
-        : kind === 'qa'
-          ? { qaBranch: 'feature', qaParentId: parent.id }
-          : { loopFixParentId: parent.id }),
-    });
-    if (kind === 'review') parent.reviewLoop = { rounds: 1, reviewing: true, reviewSessionId: child.id };
-    else if (kind === 'fix') parent.reviewLoop = { rounds: 1, fixing: true, fixSessionId: child.id };
-    else parent.qaLoop = { running: true, sessionId: child.id };
-    state.stored = [parent, child];
-    await initJobs();
-    resumeRestartedSessions();
-    await vi.waitFor(() => expect(children).toHaveLength(1));
-    expect(children[0].prompt).toBe('Queued operator answer');
-    finish(children[0]);
-    if (kind !== 'fix') {
-      await vi.waitFor(() => expect(children).toHaveLength(2));
-      expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
-      finish(children[1]);
-    }
-    await vi.waitFor(() => expect(child.status).toBe('closed'));
-    expect(child[kind === 'review' ? 'loopReviewDone' : kind === 'fix' ? 'loopFixDone' : 'qaLoopDone']).toBe(
-      true,
-    );
-    expect(
-      (kind === 'qa' ? parent.qaLoop : parent.reviewLoop)[
-        kind === 'review' ? 'reviewing' : kind === 'fix' ? 'fixing' : 'running'
-      ],
-    ).toBe(false);
-  });
-
-  it.each(['review', 'qa', 'fix'])(
-    'finishes interrupted auto-close for a completed %s child without queued work',
-    async (kind) => {
-      const parent = row({ status: 'idle', recoveryTurn: null });
-      const child = row({
-        status: 'idle',
-        autoClose: true,
-        recoveryQueue: [],
-        recoveryTurn: { prompt: 'Completed workflow', phase: 'followup', completed: true },
-        ...(kind === 'review'
-          ? { reviewBranch: 'feature', loopParentId: parent.id, loopReviewDone: true }
-          : kind === 'qa'
-            ? { qaBranch: 'feature', qaParentId: parent.id, qaLoopDone: true }
-            : { loopFixParentId: parent.id, loopFixDone: true }),
-      });
-      if (kind === 'review') parent.reviewLoop = { reviewing: true, reviewSessionId: child.id };
-      else if (kind === 'fix') parent.reviewLoop = { fixing: true, fixSessionId: child.id };
-      else parent.qaLoop = { running: true, sessionId: child.id };
-      state.stored = [parent, child];
-      await initJobs();
-      resumeRestartedSessions();
-      await vi.waitFor(() => expect(child.status).toBe('closed'));
-      expect(children).toHaveLength(0);
-      expect(
-        (kind === 'qa' ? parent.qaLoop : parent.reviewLoop)[
-          kind === 'review' ? 'reviewing' : kind === 'fix' ? 'fixing' : 'running'
-        ],
-      ).toBe(false);
-      expect(dropSessionDatabase).toHaveBeenCalledWith(child, expect.any(Function));
-    },
-  );
-
   it('delivers saved work after interrupted compaction without repeating the completed request', async () => {
     const saved = row({
       recoveryTurn: { prompt: 'Finished request', phase: 'followup', completed: true },
@@ -19169,91 +13019,6 @@ describe('automatic recovery after a server restart', () => {
     await vi.waitFor(() => expect(getJob(saved.id).status).toBe('idle'));
     expect(children).toHaveLength(1);
   });
-
-  it.each(['missing', 'invalid', 'changed', 'asking'])(
-    'releases an assessment after its answered turn fails completion (%s)',
-    async (outcome) => {
-      const checkout = path.join(root, 'assessment');
-      fs.mkdirSync(checkout);
-      spawnSync('git', ['init', '-q', checkout]);
-      spawnSync('git', [
-        '-C',
-        checkout,
-        '-c',
-        'user.name=Test',
-        '-c',
-        'user.email=test@example.com',
-        'commit',
-        '-q',
-        '--allow-empty',
-        '-m',
-        'fixture',
-      ]);
-      const sha = spawnSync('git', ['-C', checkout, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-      const assessment = {
-        repo: 'acme/restart',
-        prNumber: 77,
-        branch: 'feature',
-        sha,
-        resultFile: '.briareus-feedback-test.json',
-        completed: false,
-        sources: [],
-        history: [],
-      };
-      if (outcome !== 'missing')
-        fs.writeFileSync(
-          path.join(checkout, assessment.resultFile),
-          outcome === 'invalid'
-            ? '{}'
-            : JSON.stringify({ sha, complete: true, sourcesReviewed: [], findings: [] }),
-        );
-      const child = row({
-        status: 'closed',
-        orchestrator: false,
-        workDir: checkout,
-        startedOnPr: 77,
-        awaitingAnswer: true,
-        autoClose: true,
-        feedbackAssessment: assessment,
-      });
-      state.stored = [child];
-      await initJobs();
-      child.status = 'idle';
-      githubRest.mockImplementation(
-        async () =>
-          new Response(
-            JSON.stringify({
-              state: 'open',
-              user: { login: 'nadin' },
-              head: { sha: 'changed-sha', ref: 'feature', repo: { full_name: child.repo } },
-            }),
-          ),
-      );
-      const releases = releaseInstance.mock.calls.length;
-      try {
-        sendDevMessage(child.id, 'The operator answer');
-        await vi.waitFor(() => expect(children).toHaveLength(1));
-        if (outcome === 'asking')
-          children[0].notify('item/completed', {
-            item: { type: 'agentMessage', text: '<ask-user>More detail?</ask-user>' },
-          });
-        finish(children[0]);
-        await vi.waitFor(() => expect(child.status).toBe(outcome === 'asking' ? 'idle' : 'failed'));
-        if (outcome === 'asking') {
-          expect(child.awaitingAnswer).toBe(true);
-          expect(pendingFeedbackAssessment(child.repo, 77)).toBe(child);
-          expect(releaseInstance.mock.calls).toHaveLength(releases);
-        } else {
-          await vi.waitFor(() => expect(releaseInstance.mock.calls.slice(releases)).toEqual([[child]]));
-          expect(child.feedbackAssessment.completed).toBe(false);
-          expect(child.reviewTriage).toBeFalsy();
-          expect(pendingFeedbackAssessment(child.repo, 77)).toBeNull();
-        }
-      } finally {
-        githubRest.mockReset();
-      }
-    },
-  );
 
   it.each(['current', 'stale', 'replaced', 'asking'])(
     'handles failed deferred QA execution after an answer (%s child)',
@@ -19332,58 +13097,6 @@ describe('automatic recovery after a server restart', () => {
     },
   );
 
-  it.each([true, false])('settles a published standalone review (findings: %s)', async (hasFindings) => {
-    const saved = row({
-      status: 'idle',
-      reviewBranch: 'feature',
-      startedOnPr: 132,
-      autoClose: true,
-      recoveryTurn: { prompt: 'Published review', phase: 'publish', completed: true },
-    });
-    const findings = hasFindings ? [{ key: 'fresh', severity: 'medium', title: 'Fresh finding' }] : [];
-    latestReviewFindings.mockResolvedValueOnce(findings);
-    state.stored = [saved];
-    await initJobs();
-    const readsBefore = latestReviewFindings.mock.calls.length;
-    resumeRestartedSessions();
-    await vi.waitFor(() => expect(saved.status).toBe('closed'));
-    expect(latestReviewFindings.mock.calls.slice(readsBefore)).toEqual([
-      ['acme/restart', 132, { since: saved.createdAt }],
-    ]);
-    expect(children).toHaveLength(0);
-    expect(dropSessionDatabase).toHaveBeenCalledWith(saved, expect.any(Function));
-    if (hasFindings) {
-      expect(getJob(saved.id).reviewTriage).toMatchObject({
-        standalone: true,
-        findings: [{ key: 'fresh' }],
-      });
-    } else expect(getJob(saved.id)).toBeNull();
-  });
-
-  it.each(['asking', 'unfinished'])(
-    'leaves a standalone review open when publication is %s',
-    async (stateOfReview) => {
-      const saved = row({
-        status: 'idle',
-        reviewBranch: 'feature',
-        autoClose: true,
-        awaitingAnswer: stateOfReview === 'asking',
-        recoveryTurn: {
-          prompt: 'Publication',
-          phase: 'publish',
-          completed: stateOfReview !== 'unfinished',
-        },
-      });
-      state.stored = [saved];
-      await initJobs();
-      const readsBefore = latestReviewFindings.mock.calls.length;
-      resumeRestartedSessions();
-      await vi.waitFor(() => expect(saved.status).toBe('idle'));
-      expect(children).toHaveLength(0);
-      expect(latestReviewFindings.mock.calls).toHaveLength(readsBefore);
-    },
-  );
-
   it.each([
     ['preparing', 'release'],
     ['running', 'drop'],
@@ -19435,30 +13148,6 @@ describe('automatic recovery after a server restart', () => {
     expect(publicJob(snapshot).queued).toBeUndefined();
   });
 
-  it.each(['review', 'qa'])('keeps legacy %s discovery active through operator answers', async (kind) => {
-    const child = row({
-      recoveryTurn: undefined,
-      ...(kind === 'review'
-        ? { reviewBranch: 'feature', reviewPrompt: 'Original review' }
-        : { qaBranch: 'feature' }),
-    });
-    loadJobEvents.mockResolvedValue([
-      { kind: 'user', text: 'Original review', seq: 1 },
-      { kind: 'user', text: 'Operator answer', seq: 2 },
-    ]);
-    state.stored = [child];
-    await initJobs();
-    expect(child.recoveryTurn.phase).toBe('initial');
-    resumeRestartedSessions();
-    await vi.waitFor(() => expect(children).toHaveLength(1));
-    expect(children[0].prompt).toContain('Operator answer');
-    finish(children[0]);
-    await vi.waitFor(() => expect(children).toHaveLength(2));
-    expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
-    finish(children[1]);
-    await vi.waitFor(() => expect(child.status).toBe('idle'));
-  });
-
   it.each([7, null])('finishes Close after a second restart (remaining database: %s)', async (dbServerId) => {
     const saved = row({
       status: 'interrupted',
@@ -19475,52 +13164,6 @@ describe('automatic recovery after a server restart', () => {
     expect(reclaimInstance).toHaveBeenCalledWith(saved, dbServerId);
     expect(children).toHaveLength(0);
     expect(saved.closePending).toBe(false);
-  });
-
-  it.each(['review', 'qa'])('preserves the legacy %s stage for an idle standing question', async (kind) => {
-    const child = row({
-      status: 'idle',
-      awaitingAnswer: true,
-      recoveryTurn: undefined,
-      ...(kind === 'review' ? { reviewBranch: 'feature' } : { qaBranch: 'feature' }),
-    });
-    loadJobEvents.mockResolvedValue([{ kind: 'user', text: 'Initial request', seq: 1 }]);
-    state.stored = [child];
-    await initJobs();
-    resumeRestartedSessions();
-    await vi.waitFor(() => expect(child.status).toBe('idle'));
-    expect(children).toHaveLength(0);
-    expect(child.recoveryTurn.phase).toBe('initial');
-    sendDevMessage(child.id, 'Operator answer');
-    await vi.waitFor(() => expect(children).toHaveLength(1));
-    finish(children[0]);
-    await vi.waitFor(() => expect(children).toHaveLength(2));
-    expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
-    finish(children[1]);
-    await vi.waitFor(() => expect(child.status).toBe('idle'));
-  });
-
-  it.each(['review', 'qa'])('recognizes a legacy %s stage prompt before an answer', async (kind) => {
-    const child = row({
-      recoveryTurn: undefined,
-      ...(kind === 'review' ? { reviewBranch: 'feature' } : { qaBranch: 'feature' }),
-    });
-    const publication =
-      "Apply the project's publishing instructions below using the independently verified findings and their fix-value assessments: only confirmed findings with worthFixing: true count as blocking feedback or requested changes; confirmed optional findings do not block approval. If verification was incomplete, do not approve, add code-approved, move to QA, or describe the review as clean. Preserve all author-specific restrictions on approval and board moves.\n\nPUBLISH THE REVIEW";
-    loadJobEvents.mockResolvedValue([
-      { kind: 'user', text: 'Original review', seq: 1 },
-      { kind: 'user', text: kind === 'review' ? publication : 'RUN', seq: 2 },
-      { kind: 'ask', question: 'How should I continue?', seq: 3 },
-      { kind: 'user', text: 'Operator answer', seq: 4 },
-    ]);
-    state.stored = [child];
-    await initJobs();
-    expect(child.recoveryTurn.phase).toBe(kind === 'review' ? 'publish' : 'testRun');
-    resumeRestartedSessions();
-    await vi.waitFor(() => expect(children).toHaveLength(1));
-    finish(children[0]);
-    await vi.waitFor(() => expect(child.status).toBe('idle'));
-    expect(children).toHaveLength(1);
   });
 
   it('recognizes a legacy QA run despite changed port and recording paths', async () => {
@@ -19965,57 +13608,6 @@ describe('automatic recovery after a server restart', () => {
     },
   );
 
-  it.each(['review', 'fix', 'qa'])(
-    'notifies the %s parent after automatic reopen resource cleanup fails',
-    async (kind) => {
-      const parent = row({ status: 'idle', recoveryTurn: null });
-      const child = row({
-        status: 'idle',
-        awaitingAnswer: true,
-        [kind === 'review' ? 'loopParentId' : kind === 'fix' ? 'loopFixParentId' : 'qaParentId']: parent.id,
-      });
-      if (kind === 'review')
-        parent.reviewLoop = { rounds: 1, reviewing: true, reviewerRound: true, reviewSessionId: child.id };
-      else if (kind === 'fix') parent.reviewLoop = { rounds: 1, fixing: true, fixSessionId: child.id };
-      else parent.qaLoop = { running: true, sessionId: child.id };
-      const originalAcquire = acquireInstance.getMockImplementation();
-      const originalRelease = releaseInstance.getMockImplementation();
-      let allowRelease;
-      const cleanup = new Promise((resolve) => {
-        allowRelease = resolve;
-      });
-      acquireInstance.mockImplementation(async (job) => {
-        if (job.id === child.id) throw new Error('Database recovery failed');
-        return originalAcquire?.(job);
-      });
-      releaseInstance.mockImplementation(async (job) => {
-        if (job.id === child.id) await cleanup;
-        return originalRelease?.(job);
-      });
-      // Exercise the pooled path rather than the orchestrator's scratch directory.
-      child.orchestrator = false;
-      state.stored = [parent, child];
-      try {
-        await initJobs();
-        resumeRestartedSessions();
-        await vi.waitFor(() => expect(child.status).toBe('failed'));
-        const loop = kind === 'qa' ? parent.qaLoop : parent.reviewLoop;
-        expect(loop[kind === 'review' ? 'reviewing' : kind === 'fix' ? 'fixing' : 'running']).toBe(true);
-        allowRelease();
-        await vi.waitFor(() =>
-          expect(loop[kind === 'review' ? 'reviewing' : kind === 'fix' ? 'fixing' : 'running']).toBe(false),
-        );
-        expect(loop.failure.reason).toBe('Database recovery failed');
-        if (kind === 'review') expect(loop.reviewerFailed).not.toBe(true);
-        expect(children).toHaveLength(0);
-      } finally {
-        allowRelease();
-        acquireInstance.mockImplementation(originalAcquire);
-        releaseInstance.mockImplementation(originalRelease);
-      }
-    },
-  );
-
   it('restarts preparation with the original first prompt when the conversation never started', async () => {
     const saved = row({
       status: 'preparing',
@@ -20041,27 +13633,6 @@ describe('automatic recovery after a server restart', () => {
     );
     finish(children[0]);
     await vi.waitFor(() => expect(saved.status).toBe('idle'));
-  });
-
-  it('keeps a review round in flight and resumes publishing without repeating the review', async () => {
-    const parent = row({ status: 'idle', recoveryTurn: null });
-    const review = row({
-      reviewBranch: 'feature',
-      autoClose: true,
-      loopParentId: parent.id,
-      recoveryTurn: { prompt: 'Publish existing findings', opts: {}, phase: 'publish', completed: false },
-    });
-    parent.reviewLoop = { rounds: 1, reviewing: true, reviewSessionId: review.id };
-    state.stored = [parent, review];
-    await initJobs();
-    expect(parent.reviewLoop.reviewing).toBe(true);
-    expect(parent.reviewLoop.failure).toBeUndefined();
-    resumeRestartedSessions();
-    await vi.waitFor(() => expect(children).toHaveLength(1));
-    expect(children[0].prompt).toContain('Publish existing findings');
-    finish(children[0]);
-    await vi.waitFor(() => expect(review.status).toBe('closed'));
-    expect(children).toHaveLength(1);
   });
 
   it.each(['success', 'question', 'canceled'])(
@@ -20098,335 +13669,6 @@ describe('automatic recovery after a server restart', () => {
       }
     },
   );
-
-  it.each(['initial', 'publish'])(
-    'retries a failed official review in its unfinished %s stage',
-    async (phase) => {
-      const review = row({
-        reviewBranch: 'feature',
-        autoClose: true,
-        orchestratorPrAction: 'review',
-        recoveryTurn: {
-          prompt: phase === 'initial' ? 'Review the PR' : 'PUBLISH THE REVIEW',
-          opts: phase === 'initial' ? { review: true } : {},
-          phase,
-          completed: false,
-        },
-      });
-      state.stored = [review];
-      await initJobs();
-      resumeRestartedSessions();
-      await vi.waitFor(() => expect(children).toHaveLength(1));
-      if (children[0].complete) children[0].complete(null, 'failed');
-      children[0].emit('close', 1);
-      await vi.waitFor(() => expect(review.status).toBe('failed'));
-      expect(review.awaitingAnswer).toBeFalsy();
-      expect(review.recoveryTurn).toMatchObject({ phase, completed: false });
-      sendDevMessage(review.id, 'Retry the failed stage');
-      await vi.waitFor(() => expect(children).toHaveLength(2));
-      expect(review.recoveryTurn.phase).toBe(phase);
-      if (phase === 'initial') {
-        expect(children[1].args[0]).toBe('exec');
-        expect(children[1].args.join(' ')).toContain('multi_agent');
-        expect(review.recoveryTurn.opts.review).toBe(true);
-      } else expect(children[1].args[0]).toBe('app-server');
-      finish(children[1]);
-      if (phase === 'initial') {
-        await vi.waitFor(() => expect(children).toHaveLength(3));
-        expect(children[2].prompt).toContain('PUBLISH THE REVIEW');
-        finish(children[2]);
-      }
-      await vi.waitFor(() => expect(review.status).toBe('closed'));
-      expect(children).toHaveLength(phase === 'initial' ? 3 : 2);
-    },
-  );
-
-  it.each(['initial', 'publish'])(
-    'retains the unfinished %s request when retrying without a conversation',
-    async (phase) => {
-      const original =
-        phase === 'initial' ? 'Review the full diff and verify findings' : 'Publish verified findings';
-      const review = row({
-        status: 'failed',
-        reviewBranch: 'feature',
-        autoClose: true,
-        orchestratorPrAction: 'review',
-        chatStarted: false,
-        chats: {},
-        turns: 0,
-        recoveryTurn: {
-          prompt: original,
-          opts: phase === 'initial' ? { review: true } : {},
-          phase,
-          completed: false,
-        },
-      });
-      state.stored = [review];
-      await initJobs();
-      sendDevMessage(review.id, 'Retry the failed stage');
-      expect(review.recoveryTurn.prompt).toContain(original);
-      expect(review.recoveryTurn.prompt).toContain('Retry the failed stage');
-      await vi.waitFor(() => expect(children).toHaveLength(1));
-      expect(children[0].args).not.toContain('resume');
-      expect(children[0].rpc?.some((m) => m.method === 'thread/resume')).not.toBe(true);
-      expect(children[0].prompt).toContain(original);
-      expect(children[0].prompt).toContain('Retry the failed stage');
-      expect(review.recoveryTurn).toMatchObject({ phase, completed: false });
-      finish(children[0]);
-      if (phase === 'initial') {
-        await vi.waitFor(() => expect(children).toHaveLength(2));
-        expect(children[1].prompt).toContain('PUBLISH THE REVIEW');
-        finish(children[1]);
-      }
-      await vi.waitFor(() => expect(review.status).toBe('closed'));
-      expect(children).toHaveLength(phase === 'initial' ? 2 : 1);
-    },
-  );
-
-  it.each(['initial', 'publish'])(
-    'retains the unfinished %s request when a queued instruction precedes the retry',
-    async (phase) => {
-      const original =
-        phase === 'initial' ? 'Review the full diff and verify findings' : 'Publish verified findings';
-      const review = row({
-        status: 'failed',
-        reviewBranch: 'feature',
-        autoClose: true,
-        orchestratorPrAction: 'review',
-        chatStarted: false,
-        chats: {},
-        turns: 0,
-        recoveryTurn: {
-          prompt: original,
-          opts: phase === 'initial' ? { review: true } : {},
-          phase,
-          completed: false,
-        },
-        recoveryQueue: [
-          {
-            prompt: 'Check the queue handling',
-            shown: 'Check the queue handling',
-            instruction: true,
-            files: [],
-          },
-        ],
-      });
-      state.stored = [review];
-      await initJobs();
-      sendDevMessage(review.id, 'Retry the failed stage');
-      await vi.waitFor(() => expect(children).toHaveLength(1));
-      expect(children[0].prompt).toContain(original);
-      expect(children[0].prompt).toContain('Check the queue handling');
-      expect(review.recoveryTurn).toMatchObject({ phase, completed: false });
-      expect(review.recoveryTurn.prompt).toContain(original);
-      if (phase === 'initial') {
-        expect(children[0].args[0]).toBe('exec');
-        finish(children[0]);
-        await vi.waitFor(() => expect(children).toHaveLength(2));
-        expect(children[1].prompt).toContain('PUBLISH THE REVIEW');
-      }
-      const live = children.at(-1);
-      await vi.waitFor(() => expect(live.rpc.some((m) => m.method === 'turn/steer')).toBe(true));
-      const steer = live.rpc.find((m) => m.method === 'turn/steer');
-      expect(steer.params.input).toEqual([{ type: 'text', text: 'Retry the failed stage' }]);
-      finish(live);
-      await vi.waitFor(() => expect(review.status).toBe('closed'));
-      expect(children).toHaveLength(phase === 'initial' ? 2 : 1);
-    },
-  );
-
-  it('waits for answered-review findings before waking its idle orchestrator', async () => {
-    const parent = row({ status: 'idle', recoveryTurn: null });
-    const review = row({
-      status: 'idle',
-      parentId: parent.id,
-      reviewBranch: 'answered-review',
-      startedOnPr: 13201,
-      autoClose: true,
-      orchestratorPrAction: 'review',
-      awaitingAnswer: true,
-      recoveryTurn: { prompt: 'Publish review', opts: {}, phase: 'publish', completed: true },
-    });
-    state.stored = [parent, review];
-    await initJobs();
-    resumeRestartedSessions();
-    await vi.waitFor(() => expect([parent.status, review.status]).toEqual(['idle', 'idle']));
-    let release;
-    const delayed = new Promise((resolve) => {
-      release = resolve;
-    });
-    latestReviewFindings.mockImplementationOnce(() => delayed);
-    try {
-      sendDevMessage(review.id, 'Use the current head');
-      await vi.waitFor(() => expect(children).toHaveLength(1));
-      const reads = latestReviewFindings.mock.calls.length;
-      finish(children[0]);
-      await vi.waitFor(() => expect(latestReviewFindings.mock.calls.length).toBe(reads + 1));
-      expect(review.reviewTriage).toBeFalsy();
-      expect(children).toHaveLength(1);
-      expect(parent.events.some((e) => e.text?.includes('finished its turn'))).toBe(false);
-      release([{ key: 'fresh', severity: 'medium', title: 'Fresh finding' }]);
-      await vi.waitFor(() => expect(children).toHaveLength(2));
-      expect(workerSummary(review).reviewTriage).toBeTruthy();
-      expect(children[1].prompt).toContain('finished its turn');
-      finish(children[1]);
-      await vi.waitFor(() => expect([parent.status, review.status]).toEqual(['idle', 'closed']));
-    } finally {
-      release([]);
-    }
-  });
-
-  it('keeps a completed official review follow-up out of the review sequence', async () => {
-    const review = row({
-      status: 'idle',
-      reviewBranch: 'feature',
-      orchestratorPrAction: 'review',
-      recoveryTurn: { prompt: 'Published', opts: {}, phase: 'publish', completed: true },
-    });
-    state.stored = [review];
-    await initJobs();
-    resumeRestartedSessions();
-    await vi.waitFor(() => expect(review.status).toBe('idle'));
-    sendDevMessage(review.id, 'Explain the findings');
-    await vi.waitFor(() => expect(children).toHaveLength(1));
-    expect(children[0].args[0]).toBe('app-server');
-    expect(review.recoveryTurn.phase).toBe('followup');
-    finish(children[0]);
-    await vi.waitFor(() => expect(review.status).toBe('idle'));
-    expect(children).toHaveLength(1);
-  });
-
-  it.each([
-    ['project', false],
-    ['database', false],
-    ['project', true],
-    ['database', true],
-    ['database during browser startup', false],
-    ['database during browser startup', true],
-  ])('keeps the reviewer after %s access denies publishing (answer: %s)', async (access, answering) => {
-    state.projects[0].reviewProviderId = 2;
-    const runtime = { providerId: 2, model: 'gpt-6.1-sol', effort: 'high' };
-    const parent = row({
-      status: 'closed',
-      recoveryTurn: null,
-      providerId: 1,
-      provider: 'Claude entry',
-      ownerId: 2,
-      branch: 'feature',
-      startedOnPr: 77,
-      prStatus: { number: 77, state: 'open', headSha: 'review-sha', syncedAt: new Date().toISOString() },
-    });
-    const review = row({
-      status: answering ? 'idle' : 'running',
-      awaitingAnswer: answering,
-      ownerId: 2,
-      reviewBranch: 'feature',
-      autoClose: true,
-      loopParentId: parent.id,
-      recoveryTurn: {
-        prompt: 'Review the change',
-        opts: { review: true },
-        phase: 'initial',
-        completed: false,
-      },
-    });
-    parent.reviewLoop = {
-      rounds: 1,
-      reviewing: true,
-      reviewerRound: true,
-      reviewSessionId: review.id,
-      lastSha: 'review-sha',
-      runtime: { ...runtime },
-      reviewRuntime: { ...runtime },
-    };
-    state.stored = [parent, review];
-    await initJobs({ deferPolling: true });
-    resumeRestartedSessions();
-    if (answering) {
-      await vi.waitFor(() => expect(review.status).toBe('idle'));
-      sendDevMessage(review.id, 'Continue the review');
-    }
-    await vi.waitFor(() => expect(children).toHaveLength(1));
-    const denial = access === 'project' ? 'Project unavailable' : 'Database server no longer shared';
-    let pool;
-    let serverSpy;
-    let launched;
-    let shared = true;
-    const browserStart = startBrowser.getMockImplementation();
-    if (access === 'project') setSessionProjectFilter(() => false);
-    else if (access === 'database')
-      assertInstanceAccess.mockImplementation(() => {
-        throw new Error(denial);
-      });
-    else {
-      pool = await vi.importActual('../lib/dbpool.js');
-      const servers = await import('../lib/dbservers.js');
-      serverSpy = vi.spyOn(servers, 'getDbServer').mockReturnValue({ id: 7 });
-      pool.setDbServerFilter(() => shared);
-      assertInstanceAccess.mockImplementation(pool.assertInstanceAccess);
-      instanceEnv.mockImplementation(pool.instanceEnv);
-      review.dbServerId = 7;
-      review.browser = true;
-      browserState.endpoint = null;
-      launched = Promise.withResolvers();
-      startBrowser.mockReturnValueOnce(launched.promise);
-    }
-    try {
-      finish(children[0]);
-      if (launched) {
-        await vi.waitFor(() => expect(startBrowser).toHaveBeenCalledWith(review.id));
-        shared = false;
-        launched.resolve();
-      }
-      await vi.waitFor(() => expect(parent.reviewLoop.reviewing).toBe(false));
-      expect(review.error).toContain(launched ? 'Database server is no longer shared' : denial);
-      expect(review.recoveryTurn.phase).toBe('publish');
-      expect(children).toHaveLength(1);
-      expect(parent.reviewLoop.reviewerFailed).not.toBe(true);
-      expect(parent.reviewLoop.runtime).toEqual(runtime);
-      expect(parent.reviewLoop.reviewRuntime).toEqual(runtime);
-      setSessionProjectFilter(() => true);
-      assertInstanceAccess.mockReset();
-      shared = true;
-      // Observe retry's selected runtime, stopping before real checkout/provider work.
-      parent.status = 'idle';
-      acquireInstance.mockRejectedValueOnce(new Error('fixture: retry admitted'));
-      await retryLoopRound(parent.id);
-      const retried = getJob(parent.reviewLoop.reviewSessionId);
-      expect(retried.providerId).toBe(2);
-      await vi.waitFor(() => expect(retried.status).toBe('failed'));
-      expect(retried.error).toBe('fixture: retry admitted');
-    } finally {
-      launched?.resolve();
-      pool?.setDbServerFilter(() => true);
-      serverSpy?.mockRestore();
-      instanceEnv.mockReset().mockReturnValue({});
-      startBrowser.mockReset().mockImplementation(browserStart);
-      setSessionProjectFilter(() => true);
-      assertInstanceAccess.mockReset();
-    }
-  });
-
-  it('continues after a completed discovery turn without running discovery again', async () => {
-    const saved = row({
-      reviewBranch: 'feature',
-      autoClose: true,
-      recoveryTurn: {
-        prompt: 'Already completed discovery',
-        opts: { review: true },
-        phase: 'initial',
-        completed: true,
-      },
-    });
-    state.stored = [saved];
-    await initJobs();
-    resumeRestartedSessions();
-    await vi.waitFor(() => expect(children).toHaveLength(1));
-    expect(children[0].prompt).toContain('PUBLISH THE REVIEW');
-    expect(children[0].prompt).not.toContain('Already completed discovery');
-    finish(children[0]);
-    await vi.waitFor(() => expect(saved.status).toBe('closed'));
-  });
 
   it('resumes QA on the configured step provider and thread without starting the sheet again', async () => {
     const saved = row({
@@ -20658,70 +13900,6 @@ describe('automatic recovery after a server restart', () => {
     expect(children).toHaveLength(1);
   });
 
-  it.each([
-    ['initial', 'queued'],
-    ['publish', 'queued'],
-    ['initial', 'direct'],
-    ['publish', 'direct'],
-  ])('does not restore a canceled review %s stage for a %s replacement', async (phase, delivery) => {
-    const checkout = path.join(root, 'canceled-review');
-    fs.mkdirSync(checkout);
-    const git = (...args) => {
-      const result = spawnSync('git', args, { encoding: 'utf8' });
-      expect(result.status, result.stderr).toBe(0);
-    };
-    git('-C', checkout, 'init', '-b', 'feature');
-    git(
-      '-C',
-      checkout,
-      '-c',
-      'user.name=Test',
-      '-c',
-      'user.email=test@example.com',
-      'commit',
-      '--allow-empty',
-      '-m',
-      'fixture',
-    );
-    git('-C', checkout, 'remote', 'add', 'origin', checkout);
-    const review = row({
-      status: delivery === 'queued' ? 'running' : 'idle',
-      orchestrator: false,
-      local: false,
-      workDir: checkout,
-      workspacePrepared: true,
-      branch: 'feature',
-      reviewBranch: 'feature',
-      startedOnPr: 77,
-      autoClose: true,
-      orchestratorPrAction: 'review',
-      recoveryTurn: {
-        prompt: 'Canceled review contract',
-        opts: phase === 'initial' ? { review: true } : {},
-        phase,
-        canceled: true,
-        completed: false,
-      },
-      recoveryQueue:
-        delivery === 'queued' ? [{ prompt: 'Do this instead', shown: 'Do this instead', files: [] }] : [],
-    });
-    state.stored = [review];
-    await initJobs();
-    expect(resumeRestartedSessions()).toBe(1);
-    if (delivery === 'direct') {
-      await vi.waitFor(() => expect(review.restartPending).toBe(false));
-      sendDevMessage(review.id, 'Do this instead');
-    }
-    await vi.waitFor(() => expect(children, review.error).toHaveLength(1));
-    expect(children[0].prompt).toBe('Do this instead');
-    expect(children[0].args[0]).toBe('app-server');
-    expect(review.recoveryTurn).toMatchObject({ phase: 'followup', opts: {}, completed: false });
-    expect(review.recoveryTurn.canceled).toBeUndefined();
-    finish(children[0]);
-    await vi.waitFor(() => expect(review.status).toBe('closed'));
-    expect(children, review.error).toHaveLength(1);
-  });
-
   it.each([false, true])(
     'kills a detached provider group and preserves its checkpoint (leader exited: %s)',
     async (leaderExits) => {
@@ -20839,9 +14017,9 @@ describe('official orchestrator PR actions', () => {
         repo: 'acme/shop',
         label: 'Shop',
         localDir: '',
-        reviewProviderId: 2,
-        reviewModel: 'claude-fable-5-1',
-        reviewEffort: 'low',
+        actionProviderId: 2,
+        actionModel: 'claude-fable-5-1',
+        actionEffort: 'low',
       },
     ];
     githubRest.mockReset();
@@ -20858,52 +14036,12 @@ describe('official orchestrator PR actions', () => {
     setSessionProjectFilter(() => true);
     await settleWorkers([parent.id]);
   });
-  it.each(['review', 'implement-feedback', 'solve-conflicts'])(
-    'starts official %s and exposes it to its parent',
-    async (action) => {
-      const session = await startOrchestratorPrAction(parent, { action, prNumber: 12 });
-      expect(session.parentId).toBe(parent.id);
-      expect(session.startedOnPr).toBe(12);
-      expect(session.startBranch).toBe('feature');
-      expect(session.effort).toBe('low');
-      expect(session.providerId).toBe(2);
-      expect(workerSessionsFor(parent)).toContain(session);
-      expect(workerSummary(session)).toMatchObject({ id: session.id, effort: 'low' });
-      if (action === 'review') {
-        expect(session.reviewBranch).toBe('feature');
-        expect(session.reviewPrompt).toBeTruthy();
-      } else {
-        expect(session.reviewBranch).toBeNull();
-        expect(session.activity).toBe(action === 'implement-feedback' ? 'assess-feedback' : action);
-        expect(session.reviewLoop).toBeFalsy();
-        if (action === 'implement-feedback') {
-          expect(session.feedbackAssessment).toMatchObject({ sha: 'feedback-head', completed: false });
-          expect(session.recoveryTurn.prompt).toContain('ASSESS FEEDBACK');
-          expect(session.recoveryTurn.prompt).toContain('does not delegate review triage');
-        } else {
-          expect(session.recoveryTurn.prompt).toContain('CONFLICTS');
-        }
-      }
-    },
-  );
-  it.each(['review', 'implement-feedback', 'solve-conflicts'])(
-    'accepts equivalent repository casing for %s scope',
-    async (action) => {
-      const session = await startOrchestratorPrAction(parent, {
-        action,
-        prNumber: 12,
-        repo: 'Acme/Shop',
-      });
-      expect(session.repo).toBe('acme/shop');
-      expect(session.parentId).toBe(parent.id);
-      expect(session.startedOnPr).toBe(12);
-      expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'GET', '/repos/acme/shop/pulls/12');
-    },
-  );
   it.each([0, -1, 1.2, '12', null, Number.MAX_SAFE_INTEGER + 1])(
     'rejects invalid PR %s',
     async (prNumber) => {
-      await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber })).rejects.toMatchObject({
+      await expect(
+        startOrchestratorPrAction(parent, { action: 'solve-conflicts', prNumber }),
+      ).rejects.toMatchObject({
         status: 400,
       });
       expect(githubRest).not.toHaveBeenCalled();
@@ -20911,7 +14049,7 @@ describe('official orchestrator PR actions', () => {
   );
   it('rejects another project and arbitrary actions before GitHub', async () => {
     await expect(
-      startOrchestratorPrAction(parent, { action: 'review', prNumber: 12, repo: 'other/repo' }),
+      startOrchestratorPrAction(parent, { action: 'solve-conflicts', prNumber: 12, repo: 'other/repo' }),
     ).rejects.toMatchObject({ status: 403 });
     await expect(
       startOrchestratorPrAction(parent, { action: 'custom-feedback', prNumber: 12 }),
@@ -20921,9 +14059,9 @@ describe('official orchestrator PR actions', () => {
   it('checks current owner access before reading the PR', async () => {
     parent.ownerId = 2;
     setSessionProjectFilter(() => false);
-    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toThrow(
-      /Project unavailable/,
-    );
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'solve-conflicts', prNumber: 12 }),
+    ).rejects.toThrow(/Project unavailable/);
     expect(githubRest).not.toHaveBeenCalled();
   });
   it.each([
@@ -20932,180 +14070,50 @@ describe('official orchestrator PR actions', () => {
     [pull({ head: null }), 400],
   ])('rejects closed or foreign PR heads', async (pr, status) => {
     githubRest.mockResolvedValueOnce({ ok: true, json: async () => pr });
-    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toMatchObject(
-      { status },
-    );
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'solve-conflicts', prNumber: 12 }),
+    ).rejects.toMatchObject({ status });
   });
   it.each([404, 403, 500])('surfaces GitHub failure %s', async (status) => {
     githubRest.mockResolvedValueOnce({ ok: false, status });
-    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toMatchObject(
-      { status: status === 404 ? 404 : 502 },
-    );
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'solve-conflicts', prNumber: 12 }),
+    ).rejects.toMatchObject({ status: status === 404 ? 404 : 502 });
   });
   it('refuses a missing configured reviewer instead of changing provider', async () => {
-    state.projects[0].reviewProviderId = 999;
-    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toMatchObject(
-      { status: 409 },
-    );
+    state.projects[0].actionProviderId = 999;
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'solve-conflicts', prNumber: 12 }),
+    ).rejects.toMatchObject({ status: 409 });
   });
   it('keeps an auto-closing review result readable after releasing its resources', async () => {
-    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+    const session = await startOrchestratorPrAction(parent, { action: 'solve-conflicts', prNumber: 12 });
     expect(session.autoClose).toBe(true);
-    expect(session.orchestratorPrAction).toBe('review');
+    expect(session.orchestratorPrAction).toBe('solve-conflicts');
     await settleWorkers([parent.id]);
     await closeDevSession(session.id);
     expect(getJob(session.id)?.status).toBe('closed');
     expect(workerSessionsFor(parent).map((j) => j.id)).toContain(session.id);
   });
 
-  it('keeps the user-triaged fix under the orchestrator with manual triage and updates', async () => {
-    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
-    await settleWorkers([parent.id]);
-    // The operator's Findings decision uses the official standalone review flow.
-    session.reviewTriage = {
-      mine: true,
-      prNumber: 12,
-      branch: 'feature',
-      findings: [{ key: 'fix-me', title: 'A confirmed defect', severity: 'high' }],
-    };
-    const result = await triageStandaloneReviewFindings(session.id, {
-      verdicts: [{ key: 'fix-me', decision: 'fix' }],
-    });
-    const fix = getJob(result.session.id);
-    expect(fix.parentId).toBe(parent.id);
-    expect(fix.orchestratorPrAction).toBe('implement-feedback');
-    expect(fix.reviewLoop).toBeTruthy();
-    expect(workerSessionsFor(parent)).toContain(fix);
-  });
-
-  const hold = (session) => {
-    session.status = 'closed';
-    session.reviewTriage = {
-      mine: true,
-      prNumber: 12,
-      branch: 'feature',
-      findings: [{ key: 'fix-me', title: 'A confirmed defect', severity: 'high' }],
-    };
-  };
-  const fixVerdicts = { verdicts: [{ key: 'fix-me', decision: 'fix' }] };
-
-  it.each(['open worker', 'standalone findings', 'loop findings'])(
-    'blocks %s from a differently cased repository name',
-    async (kind) => {
-      const worker = getJob('pr-cap-0');
-      worker.repo = 'Acme/Shop';
-      worker.startedOnPr = 12;
-      if (kind === 'open worker') worker.status = 'idle';
-      else if (kind === 'standalone findings') hold(worker);
-      else worker.reviewLoop = { triage: { prNumber: 12, findings: [] } };
-      try {
-        await expect(
-          startOrchestratorPrAction(parent, { action: 'implement-feedback', prNumber: 12 }),
-        ).rejects.toThrow(kind === 'open worker' ? /already has an open session/ : /awaiting user triage/);
-      } finally {
-        worker.repo = 'acme/shop';
-        worker.status = 'closed';
-        worker.startedOnPr = null;
-        worker.reviewTriage = null;
-        worker.reviewLoop = null;
-      }
-    },
-  );
-
-  it.each([false, true])(
-    'delivers another author review completion after source deletion (buffered: %s)',
-    async (buffered) => {
-      const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
-      await settleWorkers([parent.id]);
-      hold(session);
-      session.reviewTriage.mine = false;
-      parent.status = 'idle';
-      parent.awaitingAnswer = buffered;
-      parent.unattendedTurns = 10;
-      try {
-        const result = await triageReviewFindings(session.id, { by: 'the operator' });
-        expect(result).toEqual({ completed: true, prNumber: 12, findings: 1 });
-        expect(getJob(session.id)).toBeNull();
-        if (buffered) {
-          expect(parent.pendingWorkerNotices).toContainEqual(
-            expect.objectContaining({
-              workerId: session.id,
-              kind: 'action-completed',
-              text: expect.stringContaining('completed by the operator'),
-            }),
-          );
-          parent.awaitingAnswer = false;
-          deliverWorkerNotices(parent);
-        }
-        expect(
-          parent.events.some(
-            (e) =>
-              e.text?.includes(`Review session ${session.id} on PR #12 was completed by the operator`) &&
-              e.text.includes('findings remain on the pull request for its author'),
-          ),
-        ).toBe(true);
-      } finally {
-        parent.awaitingAnswer = false;
-        parent.unattendedTurns = 0;
-      }
-    },
-  );
-
   it.each(['startBranch', 'branch', 'prBranch'])('blocks a branch-only worker using %s', async (field) => {
     const worker = getJob('pr-cap-0');
     worker.status = 'idle';
     worker[field] = 'feature';
     try {
-      await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toThrow(
-        /already has an open session/,
-      );
+      await expect(
+        startOrchestratorPrAction(parent, { action: 'solve-conflicts', prNumber: 12 }),
+      ).rejects.toThrow(/already has an open session/);
     } finally {
       worker.status = 'closed';
       delete worker[field];
     }
   });
 
-  it.each(['review', 'implement-feedback', 'solve-conflicts'])(
-    'admits %s on a released launch branch while protecting current ownership',
-    async (action) => {
-      const worker = getJob('pr-cap-0');
-      Object.assign(worker, {
-        status: 'idle',
-        startBranch: 'feature',
-        branch: 'stacked-feature',
-        startedOnPr: 13,
-        prStatus: { number: 13, headRef: 'stacked-feature' },
-        releasedPrAttach: { number: 12, headRef: 'feature' },
-      });
-      try {
-        githubRest.mockResolvedValue({
-          ok: true,
-          json: async () => pull({ head: { ref: 'stacked-feature', repo: { full_name: 'acme/shop' } } }),
-        });
-        await expect(startOrchestratorPrAction(parent, { action, prNumber: 13 })).rejects.toThrow(
-          /already has an open session/,
-        );
-        // Returning to the released head must protect it again.
-        githubRest.mockImplementation(respondPull);
-        worker.branch = 'feature';
-        await expect(startOrchestratorPrAction(parent, { action, prNumber: 12 })).rejects.toThrow(
-          /already has an open session/,
-        );
-        worker.branch = 'stacked-feature';
-        const session = await startOrchestratorPrAction(parent, { action, prNumber: 12 });
-        expect(session.startedOnPr).toBe(12);
-      } finally {
-        worker.status = 'closed';
-        for (const key of ['startBranch', 'branch', 'startedOnPr', 'prStatus', 'releasedPrAttach'])
-          delete worker[key];
-      }
-    },
-  );
-
   it.each(['failed', 'closed', 'idle'])(
     'refuses to reactivate a %s official action while its replacement is open',
     async (status) => {
-      const original = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+      const original = await startOrchestratorPrAction(parent, { action: 'solve-conflicts', prNumber: 12 });
       await settleWorkers([parent.id]);
       const replacement = await startOrchestratorPrAction(parent, {
         action: 'solve-conflicts',
@@ -21127,601 +14135,4 @@ describe('official orchestrator PR actions', () => {
       expect(DEV_OPEN).toContain(replacement.status);
     },
   );
-
-  it.each(['review', 'fix', 'qa', 'stale qa'])(
-    'requires both active loop links when recovering an official action with a %s child',
-    async (kind) => {
-      const original = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
-      await settleWorkers([parent.id]);
-      original.status = 'failed';
-      const other = getJob('pr-cap-0');
-      const qa = kind === 'qa' || kind === 'stale qa';
-      const parentKey = qa ? 'qaParentId' : kind === 'review' ? 'loopParentId' : 'loopFixParentId';
-      const sessionKey = qa
-        ? kind === 'qa'
-          ? 'sessionId'
-          : 'staleSessionId'
-        : kind === 'review'
-          ? 'reviewSessionId'
-          : 'fixSessionId';
-      const activeKey = qa ? 'running' : kind === 'review' ? 'reviewing' : 'fixing';
-      other.status = 'idle';
-      other.startedOnPr = 12;
-      const loop = { [activeKey]: true, [sessionKey]: other.id };
-      original[qa ? 'qaLoop' : 'reviewLoop'] = loop;
-      try {
-        other[parentKey] = 'another-action';
-        expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
-          /already has an open session/,
-        );
-        other[parentKey] = original.id;
-        loop[sessionKey] = 'another-child';
-        expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
-          /already has an open session/,
-        );
-        loop[sessionKey] = other.id;
-        loop[activeKey] = false;
-        expect(() => reopenDevSession(original.id, { recovering: true })).toThrow(
-          /already has an open session/,
-        );
-      } finally {
-        other.status = 'closed';
-        other.startedOnPr = null;
-        delete other[parentKey];
-        original.reviewLoop = null;
-        original.qaLoop = null;
-      }
-    },
-  );
-
-  it.each(['startBranch', 'standalone findings', 'loop findings'])(
-    'checks %s before retrying an official action',
-    async (kind) => {
-      const original = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
-      await settleWorkers([parent.id]);
-      original.status = 'failed';
-      const other = getJob('pr-cap-0');
-      other.repo = 'Acme/Shop';
-      if (kind === 'startBranch') {
-        other.startBranch = 'feature';
-        other.status = 'idle';
-      } else {
-        other.startedOnPr = 12;
-        if (kind === 'standalone findings') hold(other);
-        else other.reviewLoop = { triage: { prNumber: 12, findings: [] } };
-      }
-      try {
-        expect(() => sendDevMessage(original.id, 'Retry')).toThrow(
-          kind === 'startBranch' ? /already has an open session/ : /awaiting user triage/,
-        );
-        expect(original.status).toBe('failed');
-      } finally {
-        other.repo = 'acme/shop';
-        other.status = 'closed';
-        other.startedOnPr = null;
-        delete other.startBranch;
-        other.reviewTriage = null;
-        other.reviewLoop = null;
-      }
-    },
-  );
-
-  it.each([false, true])(
-    'enforces capacity before dispatch (filled during GitHub: %s)',
-    async (duringRead) => {
-      const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
-      await settleWorkers([parent.id]);
-      hold(session);
-      const fill = () => {
-        for (let i = 0; i < 8; i++) getJob(`pr-cap-${i}`).status = 'idle';
-      };
-      recordTriage.mockClear();
-      if (duringRead)
-        recordTriage.mockImplementationOnce(async () => {
-          fill();
-          return {};
-        });
-      else fill();
-      try {
-        await expect(triageStandaloneReviewFindings(session.id, fixVerdicts)).rejects.toThrow(
-          /Already 8 open workers/,
-        );
-        expect(recordTriage).toHaveBeenCalledTimes(duringRead ? 1 : 0);
-        expect(session.reviewTriage).toBeTruthy();
-        expect(
-          workerSessionsFor(parent).filter(
-            (w) => w.activity === 'implement-feedback' && w.status !== 'closed',
-          ),
-        ).toHaveLength(0);
-      } finally {
-        for (let i = 0; i < 8; i++) getJob(`pr-cap-${i}`).status = 'closed';
-      }
-    },
-  );
-
-  it('dispatches an orphaned review fix with its owner and manual triage policy', async () => {
-    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
-    await settleWorkers([parent.id]);
-    hold(session);
-    session.parentId = 'orphan-pr-orch';
-    session.ownerId = 2;
-    await deleteJobById('orphan-pr-orch');
-    const result = await triageStandaloneReviewFindings(session.id, fixVerdicts);
-    const fix = getJob(result.session.id);
-    expect(fix.parentId).toBeFalsy();
-    expect(fix.ownerId).toBe(2);
-    expect(fix.orchestratorPrAction).toBe('implement-feedback');
-    expect(fix.reviewLoop).toBeTruthy();
-    await closeDevSession(fix.id);
-  });
-
-  it('delivers triage completion with the fix ID after deleting the source review', async () => {
-    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
-    await settleWorkers([parent.id]);
-    hold(session);
-    parent.awaitingAnswer = true;
-    try {
-      const result = await triageStandaloneReviewFindings(session.id, fixVerdicts);
-      expect(getJob(session.id)).toBeNull();
-      expect(parent.pendingWorkerNotices).toContainEqual(
-        expect.objectContaining({
-          kind: 'action-completed',
-          text: expect.stringContaining(result.session.id),
-        }),
-      );
-      parent.unattendedTurns = 10;
-      parent.awaitingAnswer = false;
-      parent.status = 'idle';
-      deliverWorkerNotices(parent);
-      expect(
-        parent.events.some((e) => e.text?.includes(`follow Implement feedback session ${result.session.id}`)),
-      ).toBe(true);
-    } finally {
-      parent.awaitingAnswer = false;
-      parent.unattendedTurns = 0;
-    }
-  });
-
-  it('inherits the owner and refuses duplicate actions, then preserves standalone triage after closure', async () => {
-    parent.ownerId = 2;
-    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
-    expect(session.ownerId).toBe(2);
-    await expect(
-      startOrchestratorPrAction(parent, { action: 'implement-feedback', prNumber: 12 }),
-    ).rejects.toMatchObject({ status: 409 });
-    await settleWorkers([parent.id]);
-    session.status = 'closed';
-    session.reviewTriage = { findings: [{ title: 'Pending' }], prNumber: 12 };
-    expect(workerSummary(session).reviewTriage.findings).toHaveLength(1);
-    await expect(
-      startOrchestratorPrAction(parent, { action: 'implement-feedback', prNumber: 12 }),
-    ).rejects.toThrow(/awaiting user triage/);
-  });
-});
-
-describe('incoming feedback assessment gate', () => {
-  let workDir;
-  let snapshot;
-  let job;
-  const finding = {
-    source: 'review:42',
-    title: 'Already handled redirect',
-    recommendation: 'dismissed',
-    severity: 'low',
-    assessment: {
-      verified: true,
-      worthFixing: false,
-      evidence: 'Checked current controller and prior triage',
-      reason: 'This was fixed in the previous commit',
-    },
-  };
-  beforeEach(async () => {
-    state.appSettings = {};
-    workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'feedback-gate-'));
-    spawnSync('git', ['init', '-q', workDir]);
-    spawnSync('git', [
-      '-C',
-      workDir,
-      '-c',
-      'user.name=Test',
-      '-c',
-      'user.email=test@example.com',
-      'commit',
-      '-q',
-      '--allow-empty',
-      '-m',
-      'fixture',
-    ]);
-    const sha = spawnSync('git', ['-C', workDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-    snapshot = {
-      repo: 'acme/feedback',
-      prNumber: 31,
-      sha,
-      branch: 'feature',
-      author: 'nadin',
-      resultFile: '.briareus-feedback-fixture.json',
-      completed: false,
-      sources: [
-        {
-          id: 'review:42',
-          author: 'sergio',
-          bot: false,
-          body: 'The redirect is wrong',
-          url: 'https://github.com/acme/feedback/pull/31#pullrequestreview-42',
-          file: null,
-          line: null,
-          commitSha: sha,
-          reviewId: 42,
-          replyTo: null,
-          state: 'COMMENTED',
-          updatedAt: null,
-        },
-      ],
-      history: [],
-    };
-    fs.writeFileSync(
-      path.join(workDir, snapshot.resultFile),
-      JSON.stringify({ sha, complete: true, sourcesReviewed: ['review:42'], findings: [finding] }),
-    );
-    state.projects = [{ repo: 'acme/feedback', reviewAuthor: 'nadin', autonomousReviewLoop: true }];
-    state.stored = [
-      {
-        id: 'feedback-gate',
-        repo: 'acme/feedback',
-        kind: 'devchat',
-        status: 'closed',
-        ownerId: null,
-        providerId: 1,
-        provider: 'Claude entry',
-        model: 'claude-fable-5-1',
-        effort: 'low',
-        createdAt: new Date().toISOString(),
-        startedOnPr: 31,
-        startBranch: 'feature',
-        workDir,
-        autoClose: true,
-        feedbackAssessment: snapshot,
-        prStatus: { number: 31, state: 'open', author: 'nadin' },
-        events: [],
-        seq: 0,
-      },
-    ];
-    await initJobs();
-    job = getJob('feedback-gate');
-    job.status = 'idle';
-    vi.mocked(githubRest)
-      .mockReset()
-      .mockImplementation(async (_cfg, _method, route) => ({
-        ok: true,
-        json: async () => {
-          if (route.includes('/reviews?'))
-            return [
-              {
-                id: 42,
-                user: { login: 'sergio' },
-                body: 'The redirect is wrong',
-                state: 'COMMENTED',
-                commit_id: sha,
-                html_url: snapshot.sources[0].url,
-              },
-            ];
-          if (route.includes('/comments?')) return [];
-          return {
-            state: 'open',
-            user: { login: 'nadin' },
-            head: { sha: snapshot.sha, ref: 'feature', repo: { full_name: 'acme/feedback' } },
-          };
-        },
-      }));
-    vi.mocked(recordTriage).mockClear().mockResolvedValue({ error: null });
-    vi.mocked(addPullRequestLabel).mockClear();
-  });
-  afterEach(async () => {
-    if (getJob('feedback-gate')) await closeDevSession('feedback-gate');
-    if (getJob('feedback-gate')) await deleteJobById('feedback-gate');
-    fs.rmSync(workDir, { recursive: true, force: true });
-    vi.mocked(githubRest).mockReset();
-    state.projects = [];
-  });
-
-  it('holds optional and dismissed findings without automatically fixing or approving, retaining the card after resource cleanup', async () => {
-    expect(await holdFeedbackAssessment(job)).toBe(true);
-    expect(job.reviewLoop).toBeFalsy();
-    expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
-    expect(job.reviewTriage).toMatchObject({
-      externalFeedback: true,
-      mine: true,
-      sha: snapshot.sha,
-      findings: [
-        expect.objectContaining({ sourceBody: 'The redirect is wrong', recommendation: 'dismissed' }),
-      ],
-    });
-    expect(recordTriage).not.toHaveBeenCalled();
-    expect(addPullRequestLabel).not.toHaveBeenCalled();
-    expect(pendingFeedbackAssessment(job.repo, 31)).toBe(job);
-    await closeDevSession(job.id);
-    expect(getJob(job.id)).toMatchObject({ status: 'closed', reviewTriage: { externalFeedback: true } });
-    expect(pendingFeedbackAssessment(job.repo, 31)).toBe(job);
-  });
-  it('records the user’s optional decision and its rationale without approving the pull request', async () => {
-    await holdFeedbackAssessment(job);
-    const key = job.reviewTriage.findings[0].key;
-    const result = await triageStandaloneReviewFindings(job.id, {
-      verdicts: [{ key, decision: 'optional' }],
-    });
-    expect(result).toMatchObject({ fixing: false, approved: false, session: null });
-    expect(recordTriage).toHaveBeenCalledWith(
-      job.repo,
-      31,
-      [expect.objectContaining({ decision: 'optional', reason: finding.assessment.reason })],
-      { by: 'the user', note: undefined },
-    );
-    expect(addPullRequestLabel).not.toHaveBeenCalled();
-  });
-  it('does not consume feedback when its completed assessment cannot be saved', async () => {
-    const original = saveJob.getMockImplementation();
-    saveJob.mockImplementation(async (row) => {
-      if (row.id === job.id && row.feedbackAssessment?.completed) throw new Error('Database unavailable');
-      return original(row);
-    });
-    try {
-      await expect(holdFeedbackAssessment(job)).rejects.toThrow(/persist/);
-      expect(state.appSettings['incoming-feedback']).toBeUndefined();
-      expect(job.feedbackAssessment.consumed).toBeFalsy();
-    } finally {
-      saveJob.mockImplementation(original);
-    }
-    // Retrying persistence uses the validated in-memory result, even if the file is gone.
-    fs.unlinkSync(path.join(workDir, snapshot.resultFile));
-    await holdFeedbackAssessment(job);
-    expect(job.feedbackAssessment.consumed).toBe(true);
-    expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
-  });
-  it.each([false, true])(
-    'retries consumption after a settings failure across restart (empty: %s)',
-    async (empty) => {
-      if (empty) {
-        const file = path.join(workDir, snapshot.resultFile);
-        const result = JSON.parse(fs.readFileSync(file, 'utf8'));
-        result.findings = [];
-        fs.writeFileSync(file, JSON.stringify(result));
-      }
-      const originalSave = saveAppSetting.getMockImplementation();
-      saveAppSetting.mockRejectedValue(new Error('Settings unavailable'));
-      try {
-        await expect(holdFeedbackAssessment(job)).rejects.toThrow('Settings unavailable');
-        expect(job.feedbackAssessment.completed).toBe(true);
-        expect(job.feedbackAssessment.consumed).toBeFalsy();
-        expect(state.appSettings['incoming-feedback']).toBeUndefined();
-        await closeDevSession(job.id);
-        expect(getJob(job.id)).toBe(job);
-        expect(pendingFeedbackAssessment(job.repo, 31)).toBe(job);
-        // The shutdown flush also waits for unrelated lifecycle fixtures' probes.
-        // Only this closed assessment's persisted row is needed for restart.
-        let stored;
-        await vi.waitFor(() => {
-          stored = saveJob.mock.calls.findLast(([row]) => row.id === job.id)[0];
-          expect(stored.status).toBe('closed');
-          expect(stored.feedbackAssessment.consumed).toBeFalsy();
-        });
-        state.stored = [structuredClone(stored)];
-        fs.unlinkSync(path.join(workDir, snapshot.resultFile));
-        const intervals = vi.spyOn(globalThis, 'setInterval');
-        let poll;
-        try {
-          await initJobs();
-          poll = intervals.mock.calls.find(([fn]) => fn.name === 'syncDevPrs')[0];
-        } finally {
-          intervals.mockRestore();
-        }
-        job = getJob('feedback-gate');
-        await expect(holdFeedbackAssessment(job)).rejects.toThrow('Settings unavailable');
-        saveAppSetting.mockImplementation(originalSave);
-        poll();
-        await vi.waitFor(() => expect(job.feedbackAssessment.consumed).toBe(true));
-        await holdFeedbackAssessment(job);
-        expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
-        if (empty) await vi.waitFor(() => expect(getJob(job.id)).toBeNull());
-        else expect(job.reviewTriage.findings).toHaveLength(1);
-      } finally {
-        saveAppSetting.mockImplementation(originalSave);
-      }
-    },
-  );
-  it('retries consumption before completing and deleting a held card', async () => {
-    saveAppSetting.mockRejectedValueOnce(new Error('Settings unavailable'));
-    await expect(holdFeedbackAssessment(job)).rejects.toThrow('Settings unavailable');
-    const key = job.reviewTriage.findings[0].key;
-    await triageStandaloneReviewFindings(job.id, { verdicts: [{ key, decision: 'optional' }] });
-    expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
-    expect(getJob(job.id)).toBeNull();
-  });
-  it('starts no fixes if the PR moved after assessment, keeping the card available for a refresh', async () => {
-    await holdFeedbackAssessment(job);
-    const key = job.reviewTriage.findings[0].key;
-    job.feedbackAssessment = { ...snapshot };
-    snapshot.sha = 'new-head';
-    await expect(
-      triageStandaloneReviewFindings(job.id, { verdicts: [{ key, decision: 'fix' }] }),
-    ).rejects.toThrow(/changed/);
-    expect(job.reviewTriage.stale).toBe(true);
-    expect(recordTriage).not.toHaveBeenCalled();
-    expect(pendingFeedbackAssessment(job.repo, 31)).toBeNull();
-  });
-  it.each(['known stale', 'moved head', 'edited source'])(
-    'discards an obsolete card without overwriting newer Fix decisions (%s)',
-    async (change) => {
-      await holdFeedbackAssessment(job);
-      const key = job.reviewTriage.findings[0].key;
-      if (change === 'known stale') job.reviewTriage.stale = true;
-      else if (change === 'moved head') {
-        job.feedbackAssessment = structuredClone(snapshot);
-        snapshot.sha = 'replacement-head';
-      } else job.feedbackAssessment.sources[0].body = 'Old evidence';
-      // The actual durable decision/checklist writer must never be called on
-      // this path: a replacement assessment may already have selected Fix.
-      recordTriage.mockClear();
-      implementFeedbackPrompt.mockClear();
-      const result = await triageStandaloneReviewFindings(job.id, {
-        verdicts: [{ key, decision: 'dismissed' }],
-      });
-      expect(result).toMatchObject({ dismissed: true, fixing: false, approved: false });
-      expect(recordTriage).not.toHaveBeenCalled();
-      expect(implementFeedbackPrompt).not.toHaveBeenCalled();
-      expect(addPullRequestLabel).not.toHaveBeenCalled();
-      expect(getJob(job.id)).toBeNull();
-    },
-  );
-  it('passes only selected findings and the original source to the implementation prompt after a manual decision', async () => {
-    await holdFeedbackAssessment(job);
-    const key = job.reviewTriage.findings[0].key;
-    state.projects = [{ repo: 'acme/other' }]; // refuse the paid fix session, after inspecting its composed prompt
-    vi.mocked(implementFeedbackPrompt).mockClear();
-    await expect(
-      triageStandaloneReviewFindings(job.id, { verdicts: [{ key, decision: 'fix' }] }),
-    ).rejects.toThrow(/Unknown project/);
-    expect(implementFeedbackPrompt).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        triaged: true,
-        by: 'the user',
-        findings: [expect.objectContaining({ sourceId: 'review:42', sourceBody: 'The redirect is wrong' })],
-      }),
-    );
-    expect(job.reviewTriage).toBeTruthy();
-  });
-  it.each([
-    ['standalone', triageStandaloneReviewFindings],
-    ['dashboard', triageReviewFindings],
-  ])(
-    'allows an explicit Fix on a colleague’s feedback assessment through %s triage',
-    async (_name, triage) => {
-      state.projects[0].reviewAuthor = 'colleague';
-      await holdFeedbackAssessment(job);
-      expect(job.reviewTriage.mine).toBe(false);
-      const key = job.reviewTriage.findings[0].key;
-      await saveReviewFindingsDrafts(job.id, { verdicts: [{ key, decision: 'fix' }] });
-      expect(job.reviewTriage.drafts.verdicts[key].decision).toBe('fix');
-      state.projects = [{ repo: 'acme/other' }]; // Inspect dispatch without starting a paid implementation session.
-      vi.mocked(implementFeedbackPrompt).mockClear();
-      await expect(triage(job.id, { verdicts: [{ key, decision: 'fix' }] })).rejects.toThrow(
-        /Unknown project/,
-      );
-      expect(recordTriage).toHaveBeenCalled();
-      expect(implementFeedbackPrompt).toHaveBeenCalledWith(
-        expect.objectContaining({
-          triaged: true,
-          findings: [expect.objectContaining({ sourceId: 'review:42' })],
-        }),
-      );
-      expect(getJob(job.id).reviewTriage).toBeTruthy();
-    },
-  );
-  it('reuses running assessments and unchanged completed cards', async () => {
-    expect(feedbackAssessmentReusable(job, { ...snapshot, sources: [] })).toBe(true);
-    await holdFeedbackAssessment(job);
-    await closeDevSession(job.id);
-    expect(feedbackAssessmentReusable(job, structuredClone(snapshot))).toBe(true);
-    expect(pendingFeedbackAssessment(job.repo, 31)).toBe(job);
-    expect(job.reviewTriage.stale).toBeUndefined();
-  });
-  it('retains the external assessment card if selected findings cannot be persisted', async () => {
-    await holdFeedbackAssessment(job);
-    const held = job.reviewTriage;
-    recordTriage.mockRejectedValueOnce(new Error('Could not save selected feedback findings'));
-    implementFeedbackPrompt.mockClear();
-    await expect(
-      triageStandaloneReviewFindings(job.id, {
-        verdicts: [{ key: held.findings[0].key, decision: 'fix' }],
-      }),
-    ).rejects.toThrow('Could not save selected feedback findings');
-    expect(job.reviewTriage).toBe(held);
-    expect(getJob(job.id)).toBe(job);
-    expect(implementFeedbackPrompt).not.toHaveBeenCalled();
-  });
-  it.each(['edited', 'deleted', 'added'])(
-    'makes a completed card refreshable when a source is %s without a push',
-    async (change) => {
-      await holdFeedbackAssessment(job);
-      await closeDevSession(job.id);
-      const current = structuredClone(snapshot);
-      if (change === 'edited') current.sources[0].body = 'Corrected feedback';
-      else if (change === 'deleted') current.sources = [];
-      else current.sources.push({ ...current.sources[0], id: 'review:43', reviewId: 43 });
-      expect(feedbackAssessmentReusable(job, current)).toBe(false);
-      expect(job.reviewTriage.stale).toBe(true);
-      expect(pendingFeedbackAssessment(job.repo, 31)).toBeNull();
-      expect(recordTriage).not.toHaveBeenCalled();
-    },
-  );
-  it('keeps selected-source validation valid when unrelated feedback is added', async () => {
-    await holdFeedbackAssessment(job);
-    const current = structuredClone(snapshot);
-    current.sources.push({ ...current.sources[0], id: 'review:43', reviewId: 43 });
-    expect(feedbackSnapshotCurrent(job.feedbackAssessment, current)).toBe(true);
-  });
-  it('remembers successful empty assessments as well as held cards', async () => {
-    fs.writeFileSync(
-      path.join(workDir, snapshot.resultFile),
-      JSON.stringify({
-        sha: snapshot.sha,
-        complete: true,
-        sourcesReviewed: ['review:42'],
-        findings: [],
-      }),
-    );
-    expect(await holdFeedbackAssessment(job)).toBe(false);
-    expect(job.feedbackAssessment.completed).toBe(true);
-    expect(job.reviewTriage).toBeFalsy();
-    expect(state.appSettings['incoming-feedback']['acme/feedback#31'].reviews['review:42']).toBeTruthy();
-  });
-  it('refuses to delete somebody else’s feedback or guess a reply thread for summary-only findings', async () => {
-    await holdFeedbackAssessment(job);
-    const key = job.reviewTriage.findings[0].key;
-    await expect(deleteReviewFinding(job.id, key)).rejects.toThrow(/belongs to its reviewer/);
-    await expect(replyToReviewFinding(job.id, key, 'Discuss')).rejects.toThrow(/review summary/);
-  });
-  it('keeps missing or partial output from becoming an empty clean result', async () => {
-    fs.writeFileSync(path.join(workDir, snapshot.resultFile), '{}');
-    await expect(holdFeedbackAssessment(job)).rejects.toThrow(/incomplete/);
-    expect(job.reviewTriage).toBeFalsy();
-    expect(job.feedbackAssessment.completed).toBe(false);
-    expect(state.appSettings['incoming-feedback']).toBeUndefined();
-    expect(addPullRequestLabel).not.toHaveBeenCalled();
-  });
-  it('rejects a FIFO assessment result without blocking the event loop', () => {
-    const resultPath = path.join(workDir, snapshot.resultFile);
-    fs.unlinkSync(resultPath);
-    expect(spawnSync('mkfifo', [resultPath]).status).toBe(0);
-    // Isolate the actual handler so a regression times out instead of hanging Vitest.
-    const source = fs.readFileSync(new URL('../lib/jobs.js', import.meta.url), 'utf8');
-    const handler = source
-      .slice(
-        source.indexOf('export async function holdFeedbackAssessment('),
-        source.indexOf('\nconst feedbackConsumption ='),
-      )
-      .replace(/^export /, '');
-    const child = spawnSync(
-      process.execPath,
-      [
-        '--input-type=module',
-        '-e',
-        `
-      import fs from 'node:fs';
-      import path from 'node:path';
-      ${handler}
-      try {
-        await holdFeedbackAssessment(${JSON.stringify({ workDir, feedbackAssessment: { resultFile: snapshot.resultFile } })});
-        process.exitCode = 1;
-      } catch (error) {
-        if (error.message !== 'Invalid feedback assessment result file') throw error;
-        setTimeout(() => process.stdout.write('event loop responsive'), 0);
-      }
-    `,
-      ],
-      { encoding: 'utf8', timeout: 2000 },
-    );
-    expect(child.error).toBeUndefined();
-    expect(child.status).toBe(0);
-    expect(child.stdout).toBe('event loop responsive');
-  });
 });
