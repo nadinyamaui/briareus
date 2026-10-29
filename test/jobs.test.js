@@ -140,7 +140,7 @@ vi.mock('../lib/db.js', () => ({
   deleteJob: vi.fn(async () => true),
   jobEventMaxSeqs: vi.fn(async () => new Map()),
   createCodeReview: vi.fn(async () => null),
-  setCodeReviewHead: vi.fn(async () => {}),
+  restartCodeReview: vi.fn(async () => {}),
   completeCodeReview: vi.fn(async () => {}),
   failCodeReview: vi.fn(async () => {}),
 }));
@@ -259,7 +259,7 @@ import {
   loadJobEvents,
   saveJob,
   saveJobEvents,
-  setCodeReviewHead,
+  restartCodeReview,
 } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
 import {
@@ -1361,8 +1361,9 @@ describe('createDevSession: the validation gauntlet', () => {
 
 describe('Claude code review', () => {
   // Discovery is Claude's /code-review in text mode (its report captured to the summary
-  // file); publication and verification are ordinary stream-json turns resuming it.
-  it.each([0, 1])(
+  // file); publication and verification are ordinary stream-json turns resuming it. A
+  // discovery that hits the account's usage limit runs /code-review again on another one.
+  it.each([0, 1, 'quota'])(
     'runs /code-review, then publishes and verifies, when discovery exits %s',
     async (code) => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-review-'));
@@ -1431,16 +1432,31 @@ describe('Claude code review', () => {
         return child;
       });
       getProviderForJob.mockReturnValue(state.provider);
+      if (code === 'quota') {
+        state.otherProviders = [{ ...state.provider, id: 2, label: 'Claude 2' }];
+        state.group = [state.provider, ...state.otherProviders];
+        await providerUsage(state.otherProviders[0], {
+          read: async () => ({ windows: [{ short: '5h', usedPct: 20 }] }),
+        });
+        getProviderForJob.mockImplementation((j) => state.group.find((p) => p.id === j.providerId));
+      }
       captureProviderAuth.mockResolvedValue(undefined);
-      githubRest.mockResolvedValue({
-        ok: true,
-        json: async () => ({
-          number: 3747,
-          state: 'open',
-          head: { ref: 'feature', sha: head },
-          base: { ref: 'main' },
-          html_url: 'https://github.com/acme/shop/pull/3747',
-        }),
+      // What recovery would find at each PR sync, the one between discovery and the
+      // publish checkpoint included.
+      const checkpoints = [];
+      githubRest.mockImplementation(async () => {
+        const turn = getJob(`claude-review-${code}`)?.recoveryTurn;
+        if (turn) checkpoints.push({ prompt: turn.prompt, completed: turn.completed });
+        return {
+          ok: true,
+          json: async () => ({
+            number: 3747,
+            state: 'open',
+            head: { ref: 'feature', sha: head },
+            base: { ref: 'main' },
+            html_url: 'https://github.com/acme/shop/pull/3747',
+          }),
+        };
       });
       completeCodeReview.mockClear();
       failCodeReview.mockClear();
@@ -1471,13 +1487,26 @@ describe('Claude code review', () => {
         job.status = 'idle';
         sendDevMessage(id, '/code-review');
         await vi.waitFor(() => expect(invocations).toHaveLength(1));
-        const discovery = invocations[0];
-        expect(discovery.args.slice(0, 4)).toEqual([
-          '-p',
-          '/code-review high 3747',
-          '--model',
-          'claude-fable-5-1',
-        ]);
+        // The second account runs the review again, rewriting the report that held the
+        // first one's usage-limit error.
+        const first = code === 'quota' ? 1 : 0;
+        if (code === 'quota') {
+          invocations[0].child.writeReview("You've hit your limit");
+          invocations[0].child.emit('close', 1);
+          await vi.waitFor(() => expect(invocations).toHaveLength(2));
+          expect(job.providerId).toBe(2);
+          expect(invocations[1].args[1]).toBe('/code-review high 3747');
+          expect(invocations[1].opts.env.CLAUDE_CONFIG_DIR).toBe(configDir);
+          expect(fs.readFileSync(summaryPath, 'utf8')).toBe('');
+        }
+        const discovery = invocations[first];
+        if (code !== 'quota')
+          expect(discovery.args.slice(0, 4)).toEqual([
+            '-p',
+            '/code-review high 3747',
+            '--model',
+            'claude-fable-5-1',
+          ]);
         expect(discovery.opts).toMatchObject({ cwd: root, env: { CLAUDE_CONFIG_DIR: configDir } });
         expect(discovery.opts.stdio).toEqual(['pipe', expect.any(Number), 'pipe']);
         expect(discovery.args).not.toContain('--mcp-config');
@@ -1487,8 +1516,8 @@ describe('Claude code review', () => {
         const split = bytes.indexOf(Buffer.from('é')) + 1;
         discovery.child.writeReview(bytes.subarray(0, split));
         discovery.child.writeReview(bytes.subarray(split));
-        discovery.child.emit('close', code);
-        if (code !== 0) {
+        discovery.child.emit('close', code === 'quota' ? 0 : code);
+        if (code === 1) {
           await vi.waitFor(() => expect(job.status).toBe('idle'));
           expect(job.error).toBe('Claude entry exited with code 1');
           expect(invocations).toHaveLength(1);
@@ -1496,10 +1525,14 @@ describe('Claude code review', () => {
           return;
         }
         // Publication and verification follow without anyone sending a message.
-        await vi.waitFor(() => expect(invocations).toHaveLength(3));
+        await vi.waitFor(() => expect(invocations).toHaveLength(first + 3));
         expect(fs.readFileSync(summaryPath, 'utf8')).toBe(summary);
         expect(job.events.some((e) => e.text === `[review-summary.md](${summaryPath})`)).toBe(true);
-        const publish = invocations[1];
+        // A finished discovery is never a completed checkpoint: a restart before the
+        // publish step is saved runs the review again instead of skipping the rest.
+        expect(checkpoints.length).toBeGreaterThan(0);
+        expect(checkpoints.filter((c) => /^\/(code-)?review/.test(c.prompt) && c.completed)).toEqual([]);
+        const publish = invocations[first + 1];
         expect(publish.args).toEqual(expect.arrayContaining(['--resume']));
         await vi.waitFor(() => expect(publish.prompt).toBeTruthy());
         expect(publish.prompt).toContain('Create a single comment in the PR with this format');
@@ -1510,7 +1543,7 @@ describe('Claude code review', () => {
         // Claude has the briefing as its system prompt, not in the message.
         expect(publish.prompt).not.toContain('<workspace-context>');
         expect(publish.mcp).toHaveProperty('reviewer_code_review');
-        const verify = invocations[2];
+        const verify = invocations[first + 2];
         await vi.waitFor(() => expect(verify.prompt).toBeTruthy());
         expect(verify.prompt).toContain('Your goal is to try to REFUTE them');
         expect(verify.prompt).toContain('review_finding_update');
@@ -1639,12 +1672,12 @@ describe('native Codex code review', () => {
   };
 
   it('reviews the actual stacked base, then publishes and verifies on the same runtime', async () => {
-    setCodeReviewHead.mockClear();
+    restartCodeReview.mockClear();
     completeCodeReview.mockClear();
     failCodeReview.mockClear();
     sendDevMessage(id, '/review');
     await vi.waitFor(() => expect(invocations).toHaveLength(1));
-    expect(setCodeReviewHead).toHaveBeenCalledWith(id, head);
+    expect(restartCodeReview).toHaveBeenCalledWith(id, head);
     const native = invocations[0];
     expect(native.args.slice(0, 5)).toEqual([
       'exec',
@@ -1799,6 +1832,62 @@ describe('native Codex code review', () => {
     finishTurn(invocations[1]);
     await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
     expect(failCodeReview).not.toHaveBeenCalled();
+  });
+
+  it('runs the review again when a restart cuts off a discovery that had started its thread', async () => {
+    completeCodeReview.mockClear();
+    Object.assign(job, {
+      status: 'interrupted',
+      interruptedFrom: 'running',
+      restartPending: true,
+      workspacePrepared: true,
+      chatStarted: true,
+      providerSessionId: 'native-review-thread',
+      chats: { 1: { sessionId: 'native-review-thread', started: true } },
+      recoveryTurn: {
+        prompt: '/review',
+        opts: {},
+        phase: 'initial',
+        runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
+        completed: false,
+      },
+    });
+    claimSlot(root, id, { prepared: true });
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    // The review command itself, not a chat turn told to continue it.
+    expect(invocations[0].args.slice(0, 2)).toEqual(['exec', 'review']);
+    fs.writeFileSync(summaryPath, 'A finding');
+    finishReview(invocations[0]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(2));
+    expect(invocations[1].child.prompt).toContain('Create a single comment in the PR with this format');
+    finishTurn(invocations[1]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(3));
+    finishTurn(invocations[2]);
+    await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+  });
+
+  it('starts the review record over when /review is sent again, failing it if the rerun fails', async () => {
+    restartCodeReview.mockClear();
+    completeCodeReview.mockClear();
+    failCodeReview.mockClear();
+    sendDevMessage(id, '/review');
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    fs.writeFileSync(summaryPath, 'A finding');
+    finishReview(invocations[0]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(2));
+    finishTurn(invocations[1]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(3));
+    finishTurn(invocations[2]);
+    await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    sendDevMessage(id, '/code-review the auth module');
+    await vi.waitFor(() => expect(invocations).toHaveLength(4));
+    expect(restartCodeReview).toHaveBeenCalledTimes(2);
+    expect(restartCodeReview).toHaveBeenLastCalledWith(id, head);
+    finishReview(invocations[3], 1);
+    await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledWith(id));
+    expect(invocations).toHaveLength(4);
   });
 
   it('fails the review when its verification step fails', async () => {
