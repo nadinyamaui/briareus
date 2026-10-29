@@ -1188,6 +1188,7 @@ describe('createDevSession: the validation gauntlet', () => {
       branch: 'feature',
       userId: 2,
       providerId: 1,
+      provider: session.provider,
       model: session.model,
       effort: 'high',
     });
