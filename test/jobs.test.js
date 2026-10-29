@@ -1714,6 +1714,7 @@ describe('native Codex code review', () => {
     expect(publish.child.prompt).toContain('Create a single comment in the PR with this format');
     expect(publish.child.prompt).toContain('Include only findings that are not dismissed');
     expect(publish.child.prompt).toContain('add each finding as an inline review comment');
+    expect(publish.child.prompt).toContain('Do not submit a pull request review to hold them');
     expect(publish.child.prompt).toContain(JSON.stringify(summaryPath));
     expect(publish.child.prompt).toContain(head);
     // Codex takes the workspace briefing in the prompt.
