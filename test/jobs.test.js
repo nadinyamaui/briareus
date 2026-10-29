@@ -15869,6 +15869,35 @@ describe('Codex turn usage', () => {
     }
   });
 
+  it('lets any number of sessions into the local checkout with a limit of 0, behind a waiting update', async () => {
+    const local = localCheckout('unlimited-local-');
+    state.projects[0].localSessionLimit = 0;
+    try {
+      const sessions = ['One', 'Two', 'Three'].map((p) => startLocal(p));
+      await vi.waitFor(() => expect(children).toHaveLength(3));
+      for (const job of sessions) expect(job.workDir).toBe(local);
+      // A waiting update still gets the checkout before sessions that arrive after it.
+      let updated = false;
+      const update = claimLocalCheckout(local).then(() => (updated = true));
+      const late = startLocal('Four');
+      await vi.waitFor(() =>
+        expect(late.events.some((e) => /update is waiting for the local checkout/.test(e.text || ''))).toBe(
+          true,
+        ),
+      );
+      for (const [i, job] of sessions.entries()) await finishAndClose(job, children[i]);
+      await update;
+      expect(updated).toBe(true);
+      expect(children).toHaveLength(3);
+      releaseLocalCheckout(local);
+      await vi.waitFor(() => expect(children).toHaveLength(4));
+      await finishAndClose(late, children[3]);
+      expect(localCheckoutBusy(local)).toBe(false);
+    } finally {
+      delete state.projects[0].localSessionLimit;
+    }
+  });
+
   it('keeps the local checkout to one session by default', async () => {
     const local = localCheckout('single-local-');
     const first = startLocal('One');

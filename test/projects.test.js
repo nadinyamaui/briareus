@@ -394,12 +394,13 @@ describe('the worker runtime', () => {
 });
 
 describe('the local session limit', () => {
-  it('defaults to one and takes a whole number from 1 to 10', async () => {
+  it('defaults to one and takes a whole number up to 10, or 0 for no limit', async () => {
     expect((await createProject({ ...base })).localSessionLimit).toBe(1);
     expect((await createProject({ repo: 'acme/two', localSessionLimit: '3' })).localSessionLimit).toBe(3);
-    for (const bad of [0, 11, 2.5, 'many', null])
+    expect((await createProject({ repo: 'acme/any', localSessionLimit: 0 })).localSessionLimit).toBe(0);
+    for (const bad of [-1, 11, 2.5, 'many', null])
       await expect(createProject({ repo: 'acme/bad', localSessionLimit: bad })).rejects.toThrow(
-        /localSessionLimit must be a whole number from 1 to 10/,
+        /localSessionLimit must be a whole number from 0 \(no limit\) to 10/,
       );
   });
 });
