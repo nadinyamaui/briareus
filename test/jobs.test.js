@@ -16739,7 +16739,7 @@ describe('the shared browser in a session', () => {
         }
         child.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' }) + '\n');
       });
-      child.stdin.on('finish', () => setImmediate(() => child.emit('close', 0)));
+      if (!hold) child.stdin.on('finish', () => setImmediate(() => child.emit('close', 0)));
       if (binary === 'grok') setImmediate(() => child.emit('close', 0));
       seen.child = child;
       return child;
@@ -17305,6 +17305,79 @@ describe('the shared browser in a session', () => {
     bus.off('job', onJob);
     expect(records).toHaveLength(1);
     expect(records[0].browser).toEqual({ running: false });
+  });
+
+  // Last here: shutdown leaves the registry stopping until the next initJobs.
+  it("books a DeepSeek Harness turn's measured usage when shutdown kills it during a tool", async () => {
+    const job = getJob('br-turn');
+    const { chats, model, inputTokens, outputTokens } = job;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-home-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    job.chats = {};
+    job.model = 'deepseek-flash';
+    job.inputTokens = 0;
+    job.outputTokens = 0;
+    recordTurnUsage.mockClear();
+    // turn() restores its spy only once the turn settles, which a shutdown never lets it do.
+    const bin = vi.spyOn(BINARIES.dsh, 'bin');
+    const run = await turn(job, 'Run the suite', {
+      binary: 'dsh',
+      provider: { apiKey: 'sk-entry' },
+      hold: true,
+    });
+    await vi.waitFor(() => expect(run.seen.child).toBeDefined());
+    const child = run.seen.child;
+    child.pid = 123456789;
+    for (const line of [
+      { type: 'session', sessionId: 'session-dsh-stop', cwd: job.workDir },
+      { type: 'status', phase: 'step_end', turn: 1, step: 1, usage: { inputTokens: 10, outputTokens: 2 } },
+      {
+        type: 'subagent_usage',
+        sessionId: 'c',
+        parentSessionId: 's',
+        model: 'deepseek-v4-pro',
+        usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 0 },
+      },
+      // The second step's request was billed; shutdown comes during its tool, before its step_end.
+      { type: 'pending_root_usage', usage: { inputTokens: 5, outputTokens: 1 } },
+      { type: 'tool_call', tool: 'bash', input: { command: 'npm test -- --shard=stop' } },
+    ])
+      child.stdout.write(JSON.stringify(line) + '\n');
+    const kill = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      if (pid === -child.pid && signal === 'SIGKILL') child.emit('close', null, signal);
+      return true;
+    });
+    try {
+      // The stream is read up to the tool call, so its usage lines are in.
+      await vi.waitFor(() =>
+        expect(job.events.some((e) => JSON.stringify(e).includes('--shard=stop'))).toBe(true),
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      await stopAllJobProcesses();
+      await vi.waitFor(() => expect(recordTurnUsage).toHaveBeenCalledTimes(2));
+      const rows = recordTurnUsage.mock.calls.map(([, part, , m]) => [
+        m,
+        part.inputTokens,
+        part.outputTokens,
+      ]);
+      expect(rows).toEqual([
+        ['deepseek-flash', 15, 3],
+        ['deepseek-v4-pro', 1000, 200],
+      ]);
+      const [own, other] = recordTurnUsage.mock.calls.map(([, part]) => part);
+      expect(other).toMatchObject({ turnKey: own.turnKey, at: own.at });
+      expect(job).toMatchObject({ inputTokens: 1015, outputTokens: 203 });
+    } finally {
+      kill.mockRestore();
+      setDraining(false);
+      bin.mockRestore();
+      spawn.mockReset();
+      getProviderForJob.mockReset();
+      captureProviderAuth.mockReset();
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      Object.assign(job, { chats, model, inputTokens, outputTokens });
+    }
   });
 });
 

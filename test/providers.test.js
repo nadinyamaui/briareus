@@ -2491,8 +2491,8 @@ describe('the DeepSeek Harness binary', () => {
     expect(dshEndpointUrl('https://gw.test/v1', 'models')).toBe('https://gw.test/v1/models');
   });
 
-  it('declares the context window of its catalog models and the adapter fallback for others', () => {
-    expect(contextWindowFor('dsh', 'deepseek-flash')).toBe(1048576);
+  it('declares the adapter context window for its catalog models and any other id', () => {
+    expect(contextWindowFor('dsh', 'deepseek-flash')).toBe(1000000);
     expect(contextWindowFor('dsh', 'deepseek-v4.1-flash')).toBe(1000000);
   });
 });
