@@ -27,12 +27,17 @@ export async function up({ context: p }) {
     code_review_id INT UNSIGNED NOT NULL,
     -- critical | high | medium | low
     severity VARCHAR(16) NOT NULL,
-    category VARCHAR(40) NOT NULL DEFAULT '',
+    -- What kind of defect: correctness, security, efficiency, …
+    type VARCHAR(40) NOT NULL DEFAULT '',
+    -- The verdict on whether the PR must change before it merges.
+    should_fix ENUM('fix', 'optional', 'dismiss') NOT NULL,
     title TEXT NOT NULL,
     body LONGTEXT NULL,
     file_path TEXT NULL,
     start_line INT UNSIGNED NULL,
     end_line INT UNSIGNED NULL,
+    -- Why the verdict is what it is, e.g. the reason a finding is not worth fixing.
+    comments TEXT NULL,
     created_at BIGINT UNSIGNED NOT NULL,
     updated_at BIGINT UNSIGNED NOT NULL,
     KEY code_review_findings_review (code_review_id),
