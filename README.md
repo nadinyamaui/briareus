@@ -167,15 +167,11 @@ using the selected provider’s `CODEX_HOME`, model and effort. It fetches the a
 PR base, including stacked branches, and refuses a checkout that differs from the
 current PR head. The native output is saved as `review-summary.md` outside the checkout.
 A second turn on the same Codex account, model and effort verifies the findings,
-assesses fix value, and publishes inline comments and a top-level “Code Review”
-PR summary with a change description, severity counts, a verdict, collapsible
-findings grouped by severity, reviewed commit references, and validation results
-and limitations. It includes “Not fixed” explanations and an acceptance-criteria
-checklist when applicable, and returns the published Markdown as its final output.
+assesses fix value, and publishes the verified findings as inline comments, with
+“Not fixed” notes for rejected or optional ones, following the project’s publishing
+instructions. It returns a Markdown summary with links to the published review.
 Failed or canceled reviews do not start publication; interrupted publication resumes
 its own stage without rerunning discovery.
-When the review finishes, its session is automatically deleted and its workspace
-and database are released; review comments remain on the pull request.
 
 With `babysitPrs` enabled, the server checks open PRs every 15 minutes and starts
 conflict resolution or CI fixes. Each action is deduplicated by head commit, with
