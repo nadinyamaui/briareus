@@ -1165,6 +1165,7 @@ describe('createDevSession: the validation gauntlet', () => {
       branch: 'feature',
     });
     expect(getJob(session.id).recoveryTurn.prompt).toBe('/review');
+    expect(getJob(session.id).events.find((e) => e.kind === 'user').text).toBe('/review');
     expect(session).toMatchObject({
       providerId: 1,
       effort: effort || 'high',
@@ -1172,6 +1173,19 @@ describe('createDevSession: the validation gauntlet', () => {
       startBranch: 'feature',
     });
     bin.mockRestore();
+  });
+
+  it('shows the Claude review command with its level and PR', () => {
+    const session = createDevSession({
+      ...base,
+      effort: 'low',
+      activity: 'review',
+      prompt: '/review',
+      prNumber: 3747,
+      branch: 'feature',
+    });
+    expect(getJob(session.id).events.find((e) => e.kind === 'user').text).toBe('/code-review low 3747');
+    expect(getJob(session.id).recoveryTurn.prompt).toBe('/review');
   });
 
   it('records a code review for the session, and none for other sessions', () => {
