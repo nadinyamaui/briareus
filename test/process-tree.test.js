@@ -1,7 +1,7 @@
 import { it, expect, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { killTree } from '../lib/process-tree.js';
+import { killTree, treeEnv } from '../lib/process-tree.js';
 
 const alive = (pid) => {
   try {
@@ -46,6 +46,39 @@ it.runIf(process.platform === 'linux')(
       });
     } finally {
       for (const pid of [tool, sleeper]) if (alive(pid)) process.kill(pid, 'SIGKILL');
+    }
+  },
+);
+
+// A tool shell, in a group of its own, that backgrounds work and exits: that work is reparented away
+// from the child, outside every group the child leads, so only its spawn environment ties it back.
+it.runIf(process.platform === 'linux')(
+  'kills work a finished tool left behind, and nothing spawned under another tree value',
+  async () => {
+    const script = `
+      const { spawn } = require('node:child_process');
+      const tool = spawn('sh', ['-c', 'sleep 30 >/dev/null 2>&1 & echo $!'], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+      tool.stdout.once('data', (d) => tool.once('close', () => console.log(String(d).trim())));
+      setInterval(() => {}, 1000);
+    `;
+    const child = spawn(process.execPath, ['-e', script], {
+      detached: true,
+      env: treeEnv(process.env),
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const other = spawn('sleep', ['30'], { detached: true, env: treeEnv(process.env), stdio: 'ignore' });
+    const orphan = await new Promise((resolve) =>
+      createInterface({ input: child.stdout }).once('line', (line) => resolve(Number(line))),
+    );
+    const closed = new Promise((r) => child.once('close', r));
+    try {
+      expect(alive(orphan)).toBe(true);
+      killTree(child);
+      await closed;
+      await vi.waitFor(() => expect(alive(orphan)).toBe(false), { timeout: 2000 });
+      expect(alive(other.pid)).toBe(true);
+    } finally {
+      for (const pid of [orphan, other.pid]) if (alive(pid)) process.kill(pid, 'SIGKILL');
     }
   },
 );

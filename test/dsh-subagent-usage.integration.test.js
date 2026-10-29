@@ -6,11 +6,12 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { BINARIES, newTurn, parserFor } from '../lib/providers.js';
-import { killTree } from '../lib/process-tree.js';
+import { killTree, treeEnv } from '../lib/process-tree.js';
 
 // Runs one turn of the installed dsh, with the patch Briareus mounts, against the given stub and
 // returns the parser's turn once dsh has exited cleanly; or, given `stopAt`, once the first line it
-// matches has been followed by a Stop, which SIGKILLs the process group (or runs `stop`).
+// matches has been followed by a Stop, which SIGKILLs the process group (or runs `stop`). Like
+// lib/jobs.js, it spawns dsh with treeEnv.
 async function runTurn(root, server, { stopAt, stop = (child) => process.kill(-child.pid, 'SIGKILL') } = {}) {
   const cwd = join(root, 'work');
   mkdirSync(cwd);
@@ -27,13 +28,13 @@ async function runTurn(root, server, { stopAt, stop = (child) => process.kill(-c
   const child = spawn(resolve('node_modules/.bin/dsh'), args, {
     cwd,
     detached: true,
-    env: {
+    env: treeEnv({
       ...process.env,
       DSH_HOME: join(root, 'home'),
       DEEPSEEK_API_KEY: 'sk-test',
       DEEPSEEK_BASE_URL: `http://127.0.0.1:${server.address().port}`,
       DSH_PERMISSION_MODE: 'danger-full-access',
-    },
+    }),
   });
   const turn = newTurn();
   const parser = parserFor('dsh', turn);
@@ -423,6 +424,24 @@ it('stops the tool a Stop interrupted along with dsh', async () => {
     await runTurn(root, server, { stopAt: (msg) => msg.type === 'tool_call', stop: killTree });
     expect(seen.root).toBe(1);
     await new Promise((r) => setTimeout(r, 3000));
+    expect(existsSync(join(root, 'work', 'too-late'))).toBe(false);
+  } finally {
+    server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60000);
+
+// A tool that backgrounds work and finishes leaves that work reparented away from dsh, out of its
+// tree, yet Stop during the next request still has to end it.
+it('stops work a finished tool left running in the background', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh.stop-bg-'));
+  const seen = { root: 0 };
+  const server = toolCallServer("sh -c 'sleep 3; touch too-late' >/dev/null 2>&1 &", seen);
+  try {
+    // The second request means the first tool returned, its shell gone.
+    await runTurn(root, server, { stopAt: () => seen.root >= 2, stop: killTree });
+    expect(seen.root).toBeGreaterThanOrEqual(2);
+    await new Promise((r) => setTimeout(r, 4000));
     expect(existsSync(join(root, 'work', 'too-late'))).toBe(false);
   } finally {
     server.close();

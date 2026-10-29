@@ -2777,7 +2777,18 @@ describe('the DeepSeek Harness parser', () => {
     first.parser.feed({ type: 'session', sessionId: 's' });
     first.parser.feed(pending({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
     first.parser.feed({ type: 'tool_call', callId: 'c1', tool: 'bash', input: { command: 'sleep 20' } });
-    expect(first.parser.flush({ canceled: true, code: null })).toEqual([]);
+    // Its result carries the footer's usage, as a Stop during a later step's does.
+    expect(first.parser.flush({ canceled: true, code: null })).toEqual([
+      expect.objectContaining({
+        kind: 'result',
+        subtype: 'error',
+        isError: true,
+        numTurns: 1,
+        inputTokens: 1000,
+        outputTokens: 20,
+        tokens: 1020,
+      }),
+    ]);
     expect(first.turn).toMatchObject({
       inputTokens: 1000,
       outputTokens: 20,
