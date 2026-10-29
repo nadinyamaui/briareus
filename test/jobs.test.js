@@ -1745,6 +1745,9 @@ describe('native Codex code review', () => {
     expect(verify.child.prompt).toContain(
       'once the new label is on, remove `feedback-implemented` and `requires-dev-review`',
     );
+    expect(verify.child.prompt).toContain(
+      "project's own settings or instructions give different label rules",
+    );
     expect(job.recoveryTurn).toMatchObject({ opts: { codeReviewStage: 'verify' }, completed: false });
     // The findings tools ride on every turn of a review session.
     for (const turn of [native, publish, verify])
