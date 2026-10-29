@@ -742,6 +742,11 @@ describe('starting on the project’s configured runtime', () => {
     const seen = await json('/actions', { method: 'POST', body: { repo, action: 'test-run', prNumber: 3 } });
     expect(seen.body).toMatchObject({ provider: 5, model: 'qa-model' });
   });
+  it('uses the code-review step runtime and requires manage access to start', async () => {
+    project.stepRuntimes = { codeReview: { providerId: 6, model: 'review-model', effort: 'low' } };
+    const seen = await json('/code-reviews', { method: 'POST', body: { repo, prNumber: 42 } });
+    expect(seen.body).toMatchObject({ provider: 6, model: 'review-model', effort: 'low' });
+  });
 
   it('refuses a model with no provider, and a project with no runtime set up', async () => {
     expect(await start({ model: 'm' })).toEqual({ error: 'A model or effort needs its provider' });
@@ -1210,6 +1215,7 @@ describe('the contract', () => {
       'ci.runs',
       'client.get',
       'codeReviews.get',
+      'codeReviews.retryPublication',
       'events.stream',
       'homeAssistant.call',
       'homeAssistant.entities',

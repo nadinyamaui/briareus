@@ -16,6 +16,7 @@ import { mailRoutes, mailCallbackRoutes } from './lib/mail-routes.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
 import { codeReviewRoutes } from './lib/code-review-routes.js';
 import { createCodeReviewStore } from './lib/code-review-store.js';
+import { createCodeReviewService } from './lib/code-review-service.js';
 import { estimateCosts } from './lib/prices.js';
 import { previewFeedbackRoutes } from './lib/preview-feedback.js';
 import { initMemorySelection } from './lib/memory-selection.js';
@@ -168,6 +169,7 @@ import {
   initProviders,
   listProviders,
   getProvider,
+  resolveRuntime,
   createProvider,
   updateProvider,
   removeProvider,
@@ -835,7 +837,40 @@ api.use(
 
 api.use(memoryMaintenanceRoutes({ listMemories, updateMemory }));
 const codeReviewStore = createCodeReviewStore();
-api.use(codeReviewRoutes({ store: codeReviewStore }));
+const codeReviewService = createCodeReviewService({
+  store: codeReviewStore,
+  runtime: ({ repo, provider, model, effort }) =>
+    resolveRuntime(
+      provider != null
+        ? { providerId: provider, model, effort }
+        : stepRuntime(getProject(repo), 'codeReview') || actionRuntime(getProject(repo)),
+      getConfig(),
+    ),
+  request: async (review, method, path, body) => {
+    const cfg = getConfig();
+    const token = githubOf(review.ownerId)?.token || cfg.githubToken;
+    const response = await asGithubUser(token, () =>
+      githubRest({ ...cfg, githubToken: token }, method, path, body),
+    );
+    if (!response.ok)
+      throw Object.assign(new Error(`GitHub answered ${response.status} during code review`), {
+        status: 502,
+      });
+    return response.json();
+  },
+  createSession: createDevSession,
+  getJob,
+  listJobs: devSessionRecords,
+  eventsFor: jobEventsFor,
+  sendMessage: sendDevMessage,
+  closeSession: closeDevSession,
+  ready: sessionRegistryComplete,
+  allowed: (review) => {
+    const project = getProject(review.repo);
+    return !!project?.enabled && sessionMayUse(review, 'project', project.id);
+  },
+});
+api.use(codeReviewRoutes({ store: codeReviewStore, service: codeReviewService }));
 api.use(previewFeedbackRoutes({ getJob, getUpload, sendMessage: sendDevMessage }));
 api.use(
   taskHistoryRoutes({
@@ -2311,6 +2346,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     databaseBackups.start();
     sshResourceMonitor.start();
     githubSync.start();
+    codeReviewService.startTimer();
     // Recovered sessions must claim their slots before pruning unused clones.
     startWorkspacePruner();
     const projects = activeProjects();
@@ -2351,6 +2387,7 @@ process.on('uncaughtException', (e) => {
   console.error('Uncaught exception:', e);
   void sshResourceMonitor.stop();
   githubSync.stop();
+  codeReviewService.stop();
   stopAllDevServes();
   stopAllBrowsers();
   const giveUp = setTimeout(() => process.exit(1), 5000);
@@ -2369,6 +2406,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     stopping = true;
     void sshResourceMonitor.stop();
     githubSync.stop();
+    codeReviewService.stop();
     stopAllDevServes();
     stopAllBrowsers();
     stopAllJobProcesses()

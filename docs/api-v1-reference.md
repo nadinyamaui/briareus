@@ -505,6 +505,28 @@ Download a project’s repository at a commit as a gzipped tarball. Needs `read`
 
 ## Code reviews
 
+### `POST /code-reviews`
+
+Run /code-review on a PR, store the result and publish a summary before inline findings. Needs `manage`, held to `repo`.
+
+**Body**
+
+| Field                   | Type      |                                                                                  |
+| ----------------------- | --------- | -------------------------------------------------------------------------------- |
+| `repo` **required**     | `string`  | A project, as `owner/name`                                                       |
+| `prNumber` **required** | `integer` | The pull request the work is about                                               |
+| `provider`              | `integer` | A provider id from `GET /runtimes`; the project’s configured runtime when absent |
+| `model`                 | `string`  | A model of that provider; its default when absent                                |
+| `effort`                | `string`  | An effort that model offers; its default when absent                             |
+
+**Returns** 201 `{ review: CodeReview }`. Starts a paid Claude Code session. Uses stepRuntimes.codeReview, then the action runtime; a non-Claude provider is refused. The core posts comments as the review owner and does not implement fixes. A changed PR is marked stale.
+
+### `POST /code-reviews/{id}/retry-publication`
+
+Retry failed publication of stored findings without rerunning discovery. Needs `manage`.
+
+**Returns** `{ review: CodeReview }`. Owner or admin only. Requires unchanged head/base commits; checks existing comment markers before writing.
+
 ### `GET /code-reviews`
 
 List code reviews for a project or pull request. Needs `read`, held to `repo` (an admin token may leave it out).
@@ -3472,6 +3494,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/dev/usage`                                                             | `GET /usage`                                                                                                                      |
 | `GET /api/dev/actions`                                                           | `GET /actions`                                                                                                                    |
 | `POST /api/dev/actions`                                                          | `POST /actions`                                                                                                                   |
+| `POST /api/code-reviews`                                                         | `POST /code-reviews`                                                                                                              |
+| `POST /api/code-reviews/:id/retry-publication`                                   | `POST /code-reviews/{id}/retry-publication`                                                                                       |
 | `GET /api/code-reviews`                                                          | `GET /code-reviews`                                                                                                               |
 | `GET /api/code-reviews/:id`                                                      | `GET /code-reviews/{id}`                                                                                                          |
 | `GET /api/dev/pulls`                                                             | `GET /pulls`                                                                                                                      |

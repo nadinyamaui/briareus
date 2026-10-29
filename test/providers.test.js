@@ -844,6 +844,29 @@ describe('parserFor', () => {
 });
 
 describe('the claude parser', () => {
+  it('keeps the native review payload but excludes subagent candidate reports', () => {
+    const parser = parserFor('claude', newTurn());
+    const report = {
+      findings: [
+        {
+          file: 'src/items.js',
+          summary: 'Repeated check',
+          category: 'reuse',
+          failure_scenario: 'Two paths diverge.',
+        },
+      ],
+    };
+    const message = {
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', name: 'ReportFindings', input: report }] },
+    };
+    expect(parser.feed(message)).toContainEqual({ kind: 'code-review-result', report });
+    expect(
+      parser
+        .feed({ ...message, parent_tool_use_id: 'worker-1' })
+        .some((e) => e.kind === 'code-review-result'),
+    ).toBe(false);
+  });
   function feedAll(messages) {
     const turn = newTurn();
     const parser = parserFor('claude', turn);

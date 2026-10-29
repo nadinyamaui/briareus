@@ -9,6 +9,24 @@ page) and `GET /api/v1/code-reviews/:id` for the original output and findings.
 The same project and owner restrictions as sessions apply. This is a core API;
 client applications may add a reviews table using these endpoints.
 
+`POST /api/v1/code-reviews` with `{ repo, prNumber }` starts discovery using
+`stepRuntimes.codeReview`, falling back to the project's action runtime. The
+request may select `provider`, `model`, and `effort` explicitly. This workflow
+requires a Claude Code provider and invokes `/code-review <effort> <PR URL>`.
+It does not substitute another provider when Claude is unavailable.
+
+The core captures Claude's native `ReportFindings` payload when present. For CLI
+versions that report only text, one follow-up turn serializes the existing result
+without performing another review. Malformed or failed output stays failed.
+
+The core publishes a summary comment first, followed by inline finding comments
+on the reviewed commit, using the owner's GitHub identity. A finding with a file
+but no exact line becomes a file comment; a finding without a file is included in
+the summary. Changed base/head commits stop publication and mark the review
+stale. Comment markers let restarts resume publication without duplicates.
+`POST /api/v1/code-reviews/:id/retry-publication` retries a failed publication after
+checking those markers and the commits, without paying for another discovery run.
+
 Each finding retains severity, details, a code location, proof, comments and the
 reviewer's original `reviewerShouldFix` recommendation. Independent verification
 has separate status, evidence, commit and session fields. Its `shouldFix` decision

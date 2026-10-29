@@ -519,6 +519,13 @@ describe('the per-step runtimes', () => {
   it('names the two steps a QA session runs, in order', () => {
     expect(QA_STEPS.map((s) => s.key)).toEqual(['testSheet', 'testRun']);
   });
+  it('retains the configured code-review step without changing QA settings', async () => {
+    const saved = await createProject({
+      ...base,
+      stepRuntimes: { codeReview: { providerId: 7, model: 'chosen', effort: 'high' } },
+    });
+    expect(stepRuntime(saved, 'codeReview')).toEqual({ providerId: 7, model: 'chosen', effort: 'high' });
+  });
 });
 
 describe('reading one step runtime back', () => {
