@@ -6,8 +6,8 @@ import { TEMPLATE_IDS } from '../lib/templates.js';
 import { BINARIES } from '../lib/providers.js';
 
 describe('retired review system', () => {
-  it('keeps retired feedback workflows removed alongside the simple Claude review action', () => {
-    expect(getAction('review')).toMatchObject({ binary: 'claude', workspace: 'worktree' });
+  it('keeps retired feedback workflows removed alongside the native Codex review action', () => {
+    expect(getAction('review')).toMatchObject({ binary: 'codex', workspace: 'worktree' });
     for (const id of ['implement-feedback', 'custom-feedback']) expect(getAction(id)).toBeNull();
     expect(ACTIONS.map((a) => a.id)).toEqual(
       expect.arrayContaining(['test-sheet', 'test-run', 'solve-conflicts', 'fix-checks']),

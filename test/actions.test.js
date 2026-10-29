@@ -170,13 +170,13 @@ describe('actionSessionSpec', () => {
     input: '',
   };
 
-  it('starts a Claude review in an isolated workspace on the PR head branch', async () => {
-    expect(listActions().find((a) => a.id === 'review')).toMatchObject({ binary: 'claude' });
+  it('starts a Codex review in an isolated workspace on the PR head branch', async () => {
+    expect(listActions().find((a) => a.id === 'review')).toMatchObject({ binary: 'codex' });
     expect(await actionSessionSpec(getAction('review'), context)).toEqual({
       repo: 'a/b',
       branch: 'feature/x',
       local: false,
-      prompt: '/code-review',
+      prompt: '/review',
       prNumber: 4,
       prBranch: 'feature/x',
       autoClose: false,

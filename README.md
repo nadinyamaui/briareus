@@ -160,13 +160,17 @@ fix failing CI checks, and delete the configured account's comments. The project
 `actionEffort` select the runtime for PR actions. QA steps can override that runtime
 through `stepRuntimes.testSheet` and `stepRuntimes.testRun`.
 
-Code review currently supports Claude Code only. It prepares a workspace on the
-PR’s head branch and runs `claude -p "/code-review <effort> --comment"`
-with the selected provider’s `CLAUDE_CONFIG_DIR`, model and effort, and
-`--permission-mode bypassPermissions`; its empty `--allowedTools` value restricts nothing. An appended system prompt requests
-a change description, severity counts, collapsible findings grouped by severity,
-a “Not fixed” section and a checklist of acceptance criteria verified. The output
-is saved as `review-summary.md` outside the checkout and shown in the session.
+Code review currently supports Codex. Select a Codex provider for the action in
+Settings or when starting it. It prepares a workspace on the PR’s head branch and
+runs the native `codex review` engine through `codex exec review --json --base <PR-base-ref>`,
+using the selected provider’s `CODEX_HOME`, model and effort. It fetches the actual
+PR base, including stacked branches, and refuses a checkout that differs from the
+current PR head. The native output is saved as `review-summary.md` outside the checkout.
+A second turn on the same Codex account, model and effort verifies the findings,
+assesses fix value, and publishes inline comments and a markdown PR summary with
+severity counts, collapsible findings, “Not fixed” explanations and an acceptance
+criteria verification checklist. Failed or canceled reviews do not start publication;
+interrupted publication resumes its own stage without rerunning discovery.
 
 With `babysitPrs` enabled, the server checks open PRs every 15 minutes and starts
 conflict resolution or CI fixes. Each action is deduplicated by head commit, with

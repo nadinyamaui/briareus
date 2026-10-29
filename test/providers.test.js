@@ -570,6 +570,35 @@ describe('Codex model reasoning efforts', () => {
 });
 
 describe('buildArgs', () => {
+  it('uses native Codex review with the selected runtime and base, including wide models', () => {
+    const built = BINARIES.codex.buildArgs({
+      model: 'gpt-6.1-sol (872k)',
+      effort: 'low',
+      commandPrompt: '/review',
+      base: 'refs/remotes/origin/series/step-1',
+      summaryPath: '/tmp/review-output/summary.md',
+      live: true,
+      resume: true,
+      sessionId: 'old-thread',
+    });
+    expect(built.args.slice(0, 5)).toEqual([
+      'exec',
+      'review',
+      '--json',
+      '--base',
+      'refs/remotes/origin/series/step-1',
+    ]);
+    expect(built.args).toContain('gpt-6.1-sol');
+    expect(built.args).toContain('review_model="gpt-6.1-sol"');
+    expect(built.args).toContain('model_reasoning_effort="low"');
+    expect(built.args).toContain('model_context_window=872000');
+    expect(built.args.slice(-2)).toEqual(['--output-last-message', '/tmp/review-output/summary.md']);
+    expect(built.args).not.toContain('resume');
+    expect(built.args).not.toContain('app-server');
+    expect(built.args).not.toContain('-');
+    expect(built).toMatchObject({ promptVia: 'argument', briefingInPrompt: false });
+  });
+
   it('runs the review command in text mode with unrestricted tools and the requested summary format', () => {
     const built = BINARIES.claude.buildArgs({
       model: 'claude-opus-5-5',
