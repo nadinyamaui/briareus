@@ -41,6 +41,7 @@ const {
   estimateEventCosts,
   recordTurnUsage,
   resetUsageCalibration,
+  splitSubagentUsage,
 } = await import('../lib/usage.js');
 const { loadTurnUsage, loadAllTurnUsage, loadJobTurnUsage, loadTurnUsageCalibration, saveTurnUsage } =
   await import('../lib/db.js');
@@ -48,6 +49,13 @@ const { estimateCosts } = await import('../lib/prices.js');
 
 describe('turnUsageRecord', () => {
   const job = { id: 'j1', projectId: 7, repo: 'o/r' };
+  it('carries the key a turn booked under several models shares', () => {
+    const turn = { inputTokens: 1, outputTokens: 1, turnKey: 'k', at: 9 };
+    expect(turnUsageRecord(job, turn, { binary: 'dsh' }, 'm', 123)).toMatchObject({ turnKey: 'k', at: 9 });
+    expect(turnUsageRecord(job, { inputTokens: 1 }, { binary: 'dsh' }, 'm', 123)).not.toHaveProperty(
+      'turnKey',
+    );
+  });
   it('captures what the provider reported, with a null cost when it priced nothing', () => {
     const turn = { inputTokens: 100, outputTokens: 20, costUsd: null, durationMs: 2500 };
     expect(turnUsageRecord(job, turn, { binary: 'codex' }, 'gpt-5', 123)).toEqual({
@@ -157,6 +165,55 @@ describe('aggregateUsage', () => {
     expect(t.estimatedTurns).toBe(1);
     expect(t.unpricedTurns).toBe(1);
   });
+  it('counts the rows one turn booked under several models as one turn', () => {
+    const t = aggregateUsage([
+      {
+        jobId: 'a',
+        turnKey: 'k',
+        model: 'pro',
+        inputTokens: 300,
+        outputTokens: 6,
+        costUsd: 0.3,
+        costEstimated: true,
+      },
+      {
+        jobId: 'a',
+        turnKey: 'k',
+        model: 'flash',
+        inputTokens: 100,
+        outputTokens: 2,
+        costUsd: 0.1,
+        costEstimated: true,
+      },
+      {
+        jobId: 'a',
+        turnKey: 'u',
+        model: 'pro',
+        inputTokens: 1,
+        outputTokens: 1,
+        costUsd: 0.2,
+        costEstimated: true,
+      },
+      { jobId: 'a', turnKey: 'u', model: 'other', inputTokens: 1, outputTokens: 1, costUsd: null },
+      { jobId: 'b', inputTokens: 1, outputTokens: 1, costUsd: 1 },
+    ]);
+    expect(t).toMatchObject({
+      turns: 3,
+      inputTokens: 403,
+      costUsd: 1.6,
+      estimatedTurns: 1,
+      unpricedTurns: 1,
+    });
+    expect(
+      usageInsights([
+        { jobId: 'a', turnKey: 'k', costUsd: 1 },
+        { jobId: 'a', turnKey: 'k', costUsd: 1 },
+      ]),
+    ).toMatchObject({
+      costPerTurn: 2,
+      reportedTurns: 1,
+    });
+  });
   it('is all zeros for an empty month', () => {
     expect(aggregateUsage([])).toEqual({
       turns: 0,
@@ -174,6 +231,24 @@ describe('aggregateUsage', () => {
 
 describe('dailyUsage', () => {
   const { from, to } = monthWindow(new Date(2026, 7, 15).getTime());
+  it("counts a turn's rows under several models once, in the day and the month", () => {
+    const at = new Date(2026, 7, 3, 9, 30).getTime();
+    const rows = [
+      { at, turnKey: 'k', inputTokens: 100, outputTokens: 10, costUsd: 0.5, costEstimated: true },
+      { at, turnKey: 'k', inputTokens: 50, outputTokens: 5, costUsd: 0.25, costEstimated: true },
+    ];
+    expect(dailyUsage(rows, from, to)[2]).toEqual({
+      date: '2026-08-03',
+      turns: 1,
+      totalTokens: 165,
+      costUsd: 0.75,
+      unpricedTurns: 0,
+      estimatedTurns: 1,
+    });
+    expect(monthlyUsage(rows)).toEqual([
+      { date: '2026-08', turns: 1, totalTokens: 165, costUsd: 0.75, unpricedTurns: 0, estimatedTurns: 1 },
+    ]);
+  });
   it('buckets turns by local calendar day and keeps the quiet days at zero', () => {
     const rows = [
       { at: new Date(2026, 7, 3, 9, 30).getTime(), inputTokens: 100, outputTokens: 10, costUsd: 0.5 },
@@ -851,6 +926,92 @@ describe('recordTurnUsage', () => {
   });
 });
 
+describe('splitSubagentUsage', () => {
+  const part = {
+    inputTokens: 101600,
+    outputTokens: 2060,
+    cachedInputTokens: 1200,
+    costUsd: null,
+    durationMs: 9000,
+  };
+  const children = {
+    'deepseek-flash': { inputTokens: 100000, outputTokens: 2000, cachedInputTokens: 1000 },
+    'deepseek-v4-pro': { inputTokens: 600, outputTokens: 40, cachedInputTokens: 200 },
+  };
+
+  it("books a sub-agent on another model under that model, out of the turn's own row", () => {
+    const { part: own, rows } = splitSubagentUsage(part, children, 'deepseek-flash');
+    expect(own).toEqual({
+      inputTokens: 101000,
+      outputTokens: 2020,
+      cachedInputTokens: 1000,
+      costUsd: null,
+      durationMs: 9000,
+    });
+    expect(rows).toEqual([
+      {
+        model: 'deepseek-v4-pro',
+        usage: {
+          inputTokens: 600,
+          outputTokens: 40,
+          cachedInputTokens: 200,
+          costUsd: null,
+          durationMs: null,
+        },
+      },
+    ]);
+    // Nothing is lost or counted twice.
+    expect(own.inputTokens + rows[0].usage.inputTokens).toBe(part.inputTokens);
+  });
+
+  it('leaves the turn whole without children, a part or a model to compare with, and keeps an unmeasured cache unmeasured', () => {
+    expect(splitSubagentUsage(part, undefined, 'deepseek-flash')).toEqual({ part, rows: [] });
+    expect(splitSubagentUsage(null, children, 'deepseek-flash')).toEqual({ part: null, rows: [] });
+    expect(splitSubagentUsage(part, children, '')).toEqual({ part, rows: [] });
+    const { part: own } = splitSubagentUsage(
+      { ...part, cachedInputTokens: null },
+      children,
+      'deepseek-v4-pro',
+    );
+    expect(own).toMatchObject({ inputTokens: 1600, outputTokens: 60, cachedInputTokens: null });
+  });
+});
+
+describe('splitSubagentUsage with an unmeasured child', () => {
+  it("keeps the turn's row measured from the root when only a child on another model left its cache reads out", () => {
+    const part = {
+      inputTokens: 301000,
+      outputTokens: 80,
+      cachedInputTokens: null,
+      costUsd: null,
+      durationMs: 1,
+    };
+    const children = { 'deepseek-flash': { inputTokens: 1000, outputTokens: 20, cachedInputTokens: null } };
+    const { part: own, rows } = splitSubagentUsage(part, children, 'deepseek-v4-pro', 0);
+    expect(own).toMatchObject({ inputTokens: 300000, outputTokens: 60, cachedInputTokens: 0 });
+    expect(rows[0].usage).toMatchObject({ inputTokens: 1000, cachedInputTokens: null });
+  });
+
+  it("adds the turn's own model's calls to the root's reads, and stays unmeasured when one of them is", () => {
+    const part = {
+      inputTokens: 1600,
+      outputTokens: 60,
+      cachedInputTokens: null,
+      costUsd: null,
+      durationMs: 1,
+    };
+    const measured = {
+      'deepseek-v4-pro': { inputTokens: 300, outputTokens: 10, cachedInputTokens: 100 },
+      '': { inputTokens: 200, outputTokens: 10, cachedInputTokens: 50 },
+      'deepseek-flash': { inputTokens: 100, outputTokens: 20, cachedInputTokens: null },
+    };
+    expect(splitSubagentUsage(part, measured, 'deepseek-v4-pro', 400).part.cachedInputTokens).toBe(550);
+    expect(splitSubagentUsage(part, measured, 'deepseek-v4-pro', null).part.cachedInputTokens).toBeNull();
+    const unmeasured = { ...measured, '': { ...measured[''], cachedInputTokens: null } };
+    expect(splitSubagentUsage(part, unmeasured, 'deepseek-v4-pro', 400).part.cachedInputTokens).toBeNull();
+  });
+});
+
 describe('session cost estimates', () => {
   it('caches a compact lifetime calibration while loading only requested sessions', async () => {
     resetUsageCalibration();
@@ -876,6 +1037,19 @@ describe('session cost estimates', () => {
     expect(estimates.get('b')).toMatchObject({ estimatedCostUsd: 1, estimatedTurns: 1, unpricedTurns: 0 });
     await jobUsageEstimates(['a'], 124);
     expect(loadTurnUsageCalibration).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts a session's turn booked under several models once", async () => {
+    resetUsageCalibration();
+    db.jobs = [
+      { jobId: 'c', turnKey: 'k', costUsd: 0.00102, costEstimated: true, inputTokens: 1000, at: 5 },
+      { jobId: 'c', turnKey: 'k', costUsd: 0.204, costEstimated: true, inputTokens: 200000, at: 5 },
+    ];
+    expect((await jobUsageEstimates(['c'], 125)).get('c')).toMatchObject({
+      estimatedCostUsd: expect.closeTo(0.20502, 10),
+      estimatedTurns: 1,
+      unpricedTurns: 0,
+    });
   });
 
   it('does no ledger work when there are no restored sessions', async () => {
@@ -986,6 +1160,24 @@ describe('session cost estimates', () => {
     const compaction = { at: 1005, provider: 'codex', inputTokens: null, outputTokens: null, costUsd: null };
     expect(estimateEventCosts([event], [priced])).toEqual([{ ...event, costUsd: 0.1, costEstimated: true }]);
     expect(estimateEventCosts([event], [compaction])).toEqual([event]);
+  });
+
+  it("shows one footer the sum of a turn's rows under several models, and leaves the next turn its own", () => {
+    const events = [1000, 5000].map((at) => ({
+      kind: 'result',
+      t: new Date(at).toISOString(),
+      inputTokens: 100,
+      outputTokens: 20,
+    }));
+    const rows = [
+      { at: 1005, turnKey: 'k', model: 'pro', costUsd: 0.00102, costEstimated: true },
+      { at: 1005, turnKey: 'k', model: 'flash', costUsd: 0.204, costEstimated: true },
+      { at: 5005, costUsd: 0.5, costEstimated: true },
+    ];
+    expect(estimateEventCosts(events, rows).map((event) => event.costUsd)).toEqual([0.00102 + 0.204, 0.5]);
+    // A turn with a row the catalog could not price shows no partial estimate.
+    const partial = [rows[0], { ...rows[1], costUsd: null, costEstimated: false }];
+    expect(estimateEventCosts([events[0]], partial)).toEqual([events[0]]);
   });
 
   it('does not use a later turn ledger row for a ledger-less failure', () => {

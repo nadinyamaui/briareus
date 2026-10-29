@@ -23,6 +23,9 @@ import {
   opencodeServiceId,
   opencodeAuthContent,
   opencodeConfigContent,
+  dshPatchContent,
+  dshShellEnvContent,
+  dshEndpointUrl,
   refreshCodexModelCache,
   splitCodexModel,
   codexWideVariants,
@@ -42,8 +45,8 @@ import {
 // parsers, the arg builders and the report reader are exercised as they are.
 
 describe('getBinary / BINARIES', () => {
-  it('knows the five binaries and nothing else', () => {
-    expect(Object.keys(BINARIES)).toEqual(['claude', 'codex', 'grok', 'opencode', 'qwen']);
+  it('knows the six binaries and nothing else', () => {
+    expect(Object.keys(BINARIES)).toEqual(['claude', 'codex', 'grok', 'opencode', 'dsh', 'qwen']);
     expect(getBinary('claude').label).toBe('Claude Code');
     expect(getBinary('vim')).toBeNull();
   });
@@ -882,6 +885,7 @@ describe('buildArgs', () => {
       ['codex', { prNumber: 7, branch: 'b', base: 'main' }],
       ['grok', { prNumber: 7 }],
       ['opencode', { prNumber: 7, branch: 'b', base: 'main' }],
+      ['dsh', { prNumber: 7, branch: 'b', base: 'main' }],
       ['qwen', { prNumber: 7, branch: 'b', base: 'main' }],
     ]) {
       expect(BINARIES[id].reviewPrompt(opts)).toContain('reviewer:findings');
@@ -897,6 +901,7 @@ describe('buildArgs', () => {
       ['codex', { prNumber: 7, branch: 'b', base: 'main' }],
       ['grok', { prNumber: 7 }],
       ['opencode', { prNumber: 7, branch: 'b', base: 'main' }],
+      ['dsh', { prNumber: 7, branch: 'b', base: 'main' }],
       ['qwen', { prNumber: 7, branch: 'b', base: 'main' }],
     ]) {
       const prompt = BINARIES[id].reviewPrompt(opts);
@@ -923,6 +928,7 @@ describe('buildArgs', () => {
     expect(verifies(BINARIES.codex.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
     expect(verifies(BINARIES.grok.reviewPrompt({ prNumber: 7 }))).toBe(true);
     expect(verifies(BINARIES.opencode.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
+    expect(verifies(BINARIES.dsh.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
     expect(verifies(BINARIES.qwen.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }))).toBe(true);
   });
 
@@ -933,6 +939,7 @@ describe('buildArgs', () => {
       BINARIES.claude.reviewPrompt({ prNumber: 7, effort: 'high' }),
       BINARIES.codex.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
       BINARIES.opencode.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
+      BINARIES.dsh.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
       BINARIES.qwen.reviewPrompt({ prNumber: 7, branch: 'b', base: 'main' }),
     ]) {
       expect(prompt).toContain('fresh discovery sub-agent');
@@ -954,7 +961,7 @@ describe('buildArgs', () => {
     }
     // grok's /review does its own discovery; it gets only the scope rule.
     expect(BINARIES.grok.reviewPrompt({ prNumber: 7 })).not.toContain('fresh discovery sub-agent');
-    for (const id of ['claude', 'codex', 'grok', 'opencode', 'qwen']) {
+    for (const id of ['claude', 'codex', 'grok', 'opencode', 'dsh', 'qwen']) {
       expect(BINARIES[id].reviewPrompt({ prNumber: 7, effort: 'high', branch: 'b', base: 'main' })).toContain(
         'every review covers the whole base-to-head diff, including code an earlier round already reviewed',
       );
@@ -2783,5 +2790,605 @@ describe('an opencode endpoint under Test', () => {
     expect(calls[0].url).toBe('https://x.test/v1/chat/completions');
     expect(calls[0].opts.headers.Authorization).toBe('Bearer k');
     expect(JSON.parse(calls[0].opts.body).model).toBe('anthropic/claude-sonnet-4-5');
+  });
+});
+
+describe('the DeepSeek Harness binary', () => {
+  it('runs headless with JSON events and the prompt on stdin, resuming only an id dsh issued', () => {
+    const fresh = BINARIES.dsh.buildArgs({
+      model: 'deepseek-flash',
+      effort: 'high',
+      resume: false,
+      sessionId: 'session-1',
+      patchFile: '/tmp/p.json',
+    });
+    expect(fresh.args).toEqual(['headless', '--patch', '/tmp/p.json', '--json', '-']);
+    expect(fresh.promptVia).toBe('stdin');
+    expect(fresh.briefingInPrompt).toBe(true);
+
+    const resumed = BINARIES.dsh.buildArgs({
+      model: 'deepseek-flash',
+      effort: 'high',
+      resume: true,
+      sessionId: 'session-1',
+      patchFile: '/tmp/p.json',
+    });
+    expect(resumed.args).toEqual([
+      'headless',
+      '--patch',
+      '/tmp/p.json',
+      '--json',
+      '--session-id',
+      'session-1',
+      '-',
+    ]);
+    // dsh fails an id it never issued instead of starting fresh, so the creation UUID is never sent.
+    const uuid = BINARIES.dsh.buildArgs({
+      model: 'm',
+      effort: 'low',
+      resume: true,
+      sessionId: '0f9d1e7a-9f3a-4a41-8f5f-0c4b8c9a1d22',
+    });
+    expect(uuid.args).toEqual(['headless', '--json', '-']);
+    expect(canResume('dsh', 'session-abc')).toBe(true);
+    expect(canResume('dsh', '0f9d1e7a-9f3a-4a41-8f5f-0c4b8c9a1d22')).toBe(false);
+  });
+
+  it("hands the turn's model and effort to the runner through the patch", () => {
+    const { patch } = BINARIES.dsh.buildArgs({ model: 'deepseek-v4-pro', effort: 'max', resume: false });
+    expect(JSON.parse(patch)).toEqual([
+      {
+        id: 'agent-default-model',
+        config: { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' },
+      },
+      // headless --json drops sub-agents' usage; this plugin reports it.
+      {
+        insert: [
+          {
+            id: 'briareus-subagent-usage',
+            name: new URL('../lib/dsh-subagent-usage.js', import.meta.url).href,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("names a server past dsh's 32-character namespace by its head and a hash, the same every turn", () => {
+    const long = 'a'.repeat(64);
+    const sibling = `${'a'.repeat(63)}b`;
+    const names = (mcp) =>
+      JSON.parse(dshPatchContent({ model: 'm', effort: 'high', mcp }))[1]
+        .insert.slice(1)
+        .map((row) => [row.id, row.config.serverName]);
+    const [[id, serverName], [, other], [, short]] = names([
+      { name: long, url: 'https://b.test/mcp' },
+      { name: sibling, command: '/node', args: [] },
+      { name: 'a'.repeat(32), command: '/node', args: [] },
+    ]);
+    // dsh-mcp-client's own SERVER_NAME_PATTERN.
+    for (const n of [serverName, other, short]) expect(n).toMatch(/^[A-Za-z0-9_-]{1,32}$/);
+    expect(serverName.startsWith('a'.repeat(23))).toBe(true);
+    expect(id).toBe(`mcp-${serverName}`);
+    expect(other).not.toBe(serverName);
+    expect(short).toBe('a'.repeat(32));
+    expect(names([{ name: long, url: 'https://b.test/mcp' }])[0][1]).toBe(serverName);
+  });
+
+  it('mounts each MCP server as a client row, local or remote, with the env and headers it was given', () => {
+    const rows = JSON.parse(
+      dshPatchContent({
+        model: 'm',
+        effort: 'high',
+        mcp: [
+          {
+            name: 'reviewer_memory',
+            command: '/node',
+            args: ['memory-mcp.js'],
+            env: { REVIEWER_MEMORY_TOKEN: 't' },
+          },
+          { name: 'reviewer_mail', command: '/node', args: ['mail-mcp.js'], env: {} },
+          { name: 'sentry', url: 'https://b.test/api/agent/mcp/1', headers: { Authorization: 'Bearer t' } },
+        ],
+      }),
+    );
+    expect(rows[1].insert.slice(1)).toEqual([
+      {
+        id: 'mcp-reviewer_memory',
+        name: '@deepseek-ai/dsh-mcp-client',
+        config: {
+          serverName: 'reviewer_memory',
+          transport: 'stdio',
+          command: '/node',
+          args: ['memory-mcp.js'],
+          env: { REVIEWER_MEMORY_TOKEN: 't' },
+        },
+      },
+      {
+        id: 'mcp-reviewer_mail',
+        name: '@deepseek-ai/dsh-mcp-client',
+        // Sends outlast dsh's 60s default, as on codex.
+        config: {
+          serverName: 'reviewer_mail',
+          transport: 'stdio',
+          command: '/node',
+          args: ['mail-mcp.js'],
+          env: {},
+          toolCallTimeoutMs: 240000,
+        },
+      },
+      {
+        id: 'mcp-sentry',
+        name: '@deepseek-ai/dsh-mcp-client',
+        config: {
+          serverName: 'sentry',
+          transport: 'streamable-http',
+          url: 'https://b.test/api/agent/mcp/1',
+          headers: { Authorization: 'Bearer t' },
+        },
+      },
+    ]);
+  });
+
+  it('hands back exactly the variables dsh would scrub from its agent, quoted for bash', () => {
+    const content = dshShellEnvContent({
+      PATH: '/usr/bin',
+      GH_TOKEN: 'gh',
+      DB_PASSWORD: "it's",
+      REVIEWER_MEMORY_TOKEN: 'mem',
+      // The entry's own key and dsh's facts are not the agent's.
+      DEEPSEEK_API_KEY: 'sk',
+      DSH_HOME: '/h',
+      GIT_AUTHOR_NAME: 'bob',
+    });
+    expect(content).toBe(
+      [
+        "export GH_TOKEN='gh'",
+        "export DB_PASSWORD='it'\\''s'",
+        "export REVIEWER_MEMORY_TOKEN='mem'",
+        '',
+      ].join('\n'),
+    );
+    expect(dshShellEnvContent({ PATH: '/usr/bin' })).toBeNull();
+    // A BASH_ENV of the server's own still runs after them.
+    expect(dshShellEnvContent({ BASH_ENV: '/etc/env.sh' })).toBe("[ -f '/etc/env.sh' ] && . '/etc/env.sh'\n");
+  });
+
+  it("finds the Messages routes the way dsh's adapter does", () => {
+    expect(dshEndpointUrl('', 'messages')).toBe('https://api.deepseek.com/anthropic/v1/messages');
+    expect(dshEndpointUrl('https://gw.test/', 'messages')).toBe('https://gw.test/v1/messages');
+    // An exact final /v1 is reused, not doubled.
+    expect(dshEndpointUrl('https://gw.test/v1', 'models')).toBe('https://gw.test/v1/models');
+  });
+
+  it('declares the adapter context window for its catalog models and any other id', () => {
+    expect(contextWindowFor('dsh', 'deepseek-flash')).toBe(1000000);
+    expect(contextWindowFor('dsh', 'deepseek-v4.1-flash')).toBe(1000000);
+  });
+});
+
+describe('a DeepSeek Harness endpoint under Test', () => {
+  function stubFetch(body, status = 200) {
+    const calls = [];
+    vi.stubGlobal('fetch', async (url, opts) => {
+      calls.push({ url, opts });
+      return { ok: status < 400, status, text: async () => JSON.stringify(body) };
+    });
+    return calls;
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("lists DeepSeek's own models without a base URL, and a gateway's on its Messages root", async () => {
+    let calls = stubFetch({ object: 'list', data: [{ id: 'deepseek-flash' }] });
+    expect(await testProviderEndpoint({ binary: 'dsh', baseUrl: '', apiKey: 'k' })).toEqual([
+      'deepseek-flash',
+    ]);
+    expect(calls[0].url).toBe('https://api.deepseek.com/models');
+    expect(calls[0].opts.headers['x-api-key']).toBe('k');
+    expect(calls[0].opts.headers.Authorization).toBe('Bearer k');
+
+    calls = stubFetch({ data: [{ id: 'deepseek-v4.1-flash' }] });
+    await testProviderEndpoint({ binary: 'dsh', baseUrl: 'https://gw.test', apiKey: 'k' });
+    expect(calls[0].url).toBe('https://gw.test/v1/models');
+    // dsh sends a gateway x-api-key alone, so a gateway that wants a Bearer token must fail Test.
+    expect(calls[0].opts.headers['x-api-key']).toBe('k');
+    expect(calls[0].opts.headers).not.toHaveProperty('Authorization');
+  });
+
+  it('probes chat over Messages with the key header dsh sends', async () => {
+    let calls = stubFetch({ id: 'msg_1', type: 'message' });
+    await probeChatEndpoint({ binary: 'dsh', baseUrl: '', apiKey: 'k', model: 'deepseek-flash' });
+    expect(calls[0].url).toBe('https://api.deepseek.com/anthropic/v1/messages');
+    expect(calls[0].opts.headers['x-api-key']).toBe('k');
+    expect(calls[0].opts.headers).not.toHaveProperty('Authorization');
+    expect(JSON.parse(calls[0].opts.body).model).toBe('deepseek-flash');
+
+    calls = stubFetch({ id: 'msg_1', type: 'message' });
+    await probeChatEndpoint({
+      binary: 'dsh',
+      baseUrl: 'https://gw.test',
+      apiKey: 'k',
+      model: 'deepseek-flash',
+    });
+    expect(calls[0].url).toBe('https://gw.test/v1/messages');
+    expect(calls[0].opts.headers['x-api-key']).toBe('k');
+    expect(calls[0].opts.headers).not.toHaveProperty('Authorization');
+  });
+
+  it('an entry without a key is not connected, and one with a key is checked live', async () => {
+    expect(await probeProviderAuth({ id: 9, binary: 'dsh', apiKey: '', baseUrl: '', models: [] })).toEqual({
+      loggedIn: false,
+      detail: 'no API key yet: add one on the settings page',
+    });
+    stubFetch({ error: { message: 'Authentication Fails' } }, 401);
+    const auth = await probeProviderAuth({
+      id: 9,
+      binary: 'dsh',
+      apiKey: 'bad-key-for-this-test',
+      baseUrl: '',
+      models: [],
+    });
+    expect(auth.loggedIn).toBe(false);
+    expect(auth.detail).toMatch(/401: Authentication Fails/);
+  });
+});
+
+describe('the DeepSeek Harness parser', () => {
+  function fresh() {
+    const turn = newTurn();
+    const parser = parserFor('dsh', turn);
+    return { turn, parser };
+  }
+  const stepEnd = (usage) => ({ type: 'status', phase: 'step_end', turn: 1, step: 1, usage });
+
+  it('takes the session id from the opening event and announces it once', () => {
+    const { turn, parser } = fresh();
+    expect(parser.feed({ type: 'session', sessionId: 'session-1', cwd: '/w' })).toEqual([
+      { kind: 'info', text: 'DeepSeek Harness session started: session-1' },
+    ]);
+    expect(turn.sessionId).toBe('session-1');
+    // A resumed turn reports the id it was given.
+    expect(parser.feed({ type: 'session', sessionId: 'session-1', cwd: '/w' })).toEqual([]);
+  });
+
+  it('logs text and tool calls under the names the dashboard uses, and failed results as errors', () => {
+    const { parser } = fresh();
+    expect(parser.feed({ type: 'text', text: 'Running the tests.' })).toEqual([
+      { kind: 'text', text: 'Running the tests.' },
+    ]);
+    expect(parser.feed({ type: 'thinking', text: 'hmm' })).toEqual([]);
+    expect(
+      parser.feed({
+        type: 'tool_call',
+        callId: 'c1',
+        tool: 'bash',
+        input: { description: 'Run', command: 'npm test' },
+      }),
+    ).toEqual([{ kind: 'tool', name: 'Shell', summary: 'npm test' }]);
+    expect(
+      parser.feed({ type: 'tool_call', callId: 'c2', tool: 'edit', input: { file_path: '/a.js' } }),
+    ).toEqual([{ kind: 'tool', name: 'Edit', summary: '/a.js' }]);
+    expect(
+      parser.feed({
+        type: 'tool_call',
+        callId: 'c3',
+        tool: 'mcp__reviewer_memory__memory_save',
+        input: {},
+      })[0].name,
+    ).toBe('mcp__reviewer_memory__memory_save');
+    expect(parser.feed({ type: 'tool_result', callId: 'c1', status: 'completed', result: 'ok' })).toEqual([]);
+    expect(
+      parser.feed({
+        type: 'tool_result',
+        callId: 'c2',
+        status: 'error',
+        result: 'Error: file has not been read',
+      }),
+    ).toEqual([{ kind: 'tool_error', text: 'Error: file has not been read' }]);
+  });
+
+  it('counts cache reads as input across the steps, and the newest step as the live context', () => {
+    const { turn, parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 900 }));
+    parser.feed(stepEnd({ inputTokens: 50, outputTokens: 10, cacheReadTokens: 1000, cacheWriteTokens: 5 }));
+    // A step whose usage dsh could not total carries none.
+    parser.feed({ type: 'status', phase: 'step_end', turn: 1, step: 3 });
+    expect(turn.inputTokens).toBe(2055);
+    expect(turn.outputTokens).toBe(30);
+    expect(turn.contextTokens).toBe(1065);
+    // The reads are kept as measured, so cost estimates need not assume a cache share.
+    expect(turn.cachedInputTokens).toBe(1900);
+  });
+
+  it('keeps a measured zero of cache reads, and none once a step leaves them out', () => {
+    const cold = fresh();
+    cold.parser.feed(stepEnd({ inputTokens: 100000, outputTokens: 20, cacheReadTokens: 0 }));
+    expect(cold.turn.cachedInputTokens).toBe(0);
+
+    const { turn, parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 900 }));
+    parser.feed(stepEnd({ inputTokens: 50, outputTokens: 10 }));
+    parser.feed(stepEnd({ inputTokens: 50, outputTokens: 10, cacheReadTokens: 900 }));
+    expect(turn.inputTokens).toBe(2000);
+    expect(turn.cachedInputTokens).toBeNull();
+  });
+
+  it("adds a sub-agent's usage to the turn, by model, without taking it for the session's context", () => {
+    const { turn, parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    const child = (model, usage) => ({
+      type: 'subagent_usage',
+      sessionId: 'c',
+      parentSessionId: 's',
+      model,
+      usage,
+    });
+    expect(
+      parser.feed(child('deepseek-flash', { inputTokens: 99000, outputTokens: 2000, cacheReadTokens: 1000 })),
+    ).toEqual([]);
+    parser.feed(child('deepseek-v4-pro', { inputTokens: 300, outputTokens: 30, cacheReadTokens: 200 }));
+    parser.feed(child('deepseek-v4-pro', { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0 }));
+    expect(turn).toMatchObject({ inputTokens: 101600, outputTokens: 2060, cachedInputTokens: 1200 });
+    expect(turn.contextTokens).toBe(1020);
+    expect(turn.subagentUsage).toEqual({
+      'deepseek-flash': { inputTokens: 100000, outputTokens: 2000, cachedInputTokens: 1000 },
+      'deepseek-v4-pro': { inputTokens: 600, outputTokens: 40, cachedInputTokens: 200 },
+    });
+    parser.feed({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
+    expect(parser.flush().at(-1)).toMatchObject({ inputTokens: 101600, outputTokens: 2060, tokens: 1020 });
+
+    // A child step that leaves its cache reads out leaves the turn's unmeasured, as a root one does.
+    parser.feed(child('deepseek-flash', { inputTokens: 5, outputTokens: 1 }));
+    expect(turn.cachedInputTokens).toBeNull();
+    expect(turn.subagentUsage['deepseek-flash']).toEqual({
+      inputTokens: 100005,
+      outputTokens: 2001,
+      cachedInputTokens: null,
+    });
+  });
+
+  it("adds a compaction call to the turn, by model, without taking it for the session's context", () => {
+    const { turn, parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    expect(
+      parser.feed({
+        type: 'compaction_usage',
+        sessionId: 's',
+        model: 'deepseek-flash',
+        usage: { inputTokens: 700000, outputTokens: 20, cacheReadTokens: 0 },
+      }),
+    ).toEqual([]);
+    expect(turn).toMatchObject({
+      inputTokens: 701000,
+      outputTokens: 40,
+      cachedInputTokens: 0,
+      contextTokens: 1020,
+    });
+    expect({ ...turn.subagentUsage }).toEqual({
+      'deepseek-flash': { inputTokens: 700000, outputTokens: 20, cachedInputTokens: 0 },
+    });
+  });
+
+  it("keeps the root's own cache reads apart from a child's that left them out", () => {
+    const { turn, parser } = fresh();
+    for (let i = 0; i < 3; i++)
+      parser.feed(stepEnd({ inputTokens: 100000, outputTokens: 20, cacheReadTokens: 0 }));
+    parser.feed({
+      type: 'subagent_usage',
+      model: 'deepseek-flash',
+      usage: { inputTokens: 1000, outputTokens: 20 },
+    });
+    expect(turn.cachedInputTokens).toBeNull();
+    expect(turn.rootCachedInputTokens).toBe(0);
+    // A root step without them leaves the root's unmeasured too.
+    parser.feed(stepEnd({ inputTokens: 1, outputTokens: 1 }));
+    expect(turn.rootCachedInputTokens).toBeNull();
+  });
+
+  it("adds a partial step's measured usage as a floor, leaving its cache reads and the context alone", () => {
+    const { turn, parser } = fresh();
+    for (let i = 0; i < 3; i++)
+      parser.feed(stepEnd({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    // A child's step whose first attempt got an HTTP 429 before its retry succeeded.
+    parser.feed({
+      type: 'subagent_usage',
+      sessionId: 'c',
+      parentSessionId: 's',
+      model: 'deepseek-flash',
+      usage: { inputTokens: 100000, outputTokens: 2000, cacheReadTokens: 0 },
+      partial: true,
+    });
+    expect(turn).toMatchObject({ inputTokens: 103000, outputTokens: 2060, cachedInputTokens: null });
+    expect(turn.rootCachedInputTokens).toBe(0);
+    expect(turn.subagentUsage['deepseek-flash']).toEqual({
+      inputTokens: 100000,
+      outputTokens: 2000,
+      cachedInputTokens: null,
+    });
+
+    // A root step the projection left without usage after a context-overflow retry.
+    parser.feed({ type: 'status', phase: 'step_end', turn: 1, step: 4 });
+    expect(
+      parser.feed({
+        type: 'root_usage',
+        sessionId: 's',
+        model: 'deepseek-flash',
+        usage: { inputTokens: 800000, outputTokens: 2000, cacheReadTokens: 0 },
+        partial: true,
+      }),
+    ).toEqual([]);
+    expect(turn).toMatchObject({ inputTokens: 903000, outputTokens: 4060, contextTokens: 1020 });
+    expect(turn.rootCachedInputTokens).toBeNull();
+    expect(Object.keys(turn.subagentUsage)).toEqual(['deepseek-flash']);
+    parser.feed({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
+    expect(parser.flush().at(-1)).toMatchObject({ inputTokens: 903000, outputTokens: 4060, tokens: 1020 });
+  });
+
+  it("books a root step whose message committed when a Stop kills dsh before the step's end", () => {
+    const pending = (usage) => ({
+      type: 'pending_root_usage',
+      sessionId: 's',
+      model: 'deepseek-flash',
+      usage,
+    });
+    // A step that reached its end is the projection's: the pending line is not counted again.
+    const done = fresh();
+    expect(done.parser.feed(pending({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }))).toEqual(
+      [],
+    );
+    expect(done.turn.inputTokens).toBeNull();
+    done.parser.feed(stepEnd({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    done.parser.feed({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
+    expect(done.parser.flush().at(-1)).toMatchObject({ inputTokens: 1000, outputTokens: 20 });
+
+    // Killed during the first step's tool: no step_end, yet the request was billed.
+    const first = fresh();
+    first.parser.feed({ type: 'session', sessionId: 's' });
+    first.parser.feed(pending({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    first.parser.feed({ type: 'tool_call', callId: 'c1', tool: 'bash', input: { command: 'sleep 20' } });
+    // Its result carries the footer's usage, as a Stop during a later step's does.
+    expect(first.parser.flush({ canceled: true, code: null })).toEqual([
+      expect.objectContaining({
+        kind: 'result',
+        subtype: 'error',
+        isError: true,
+        numTurns: 1,
+        inputTokens: 1000,
+        outputTokens: 20,
+        tokens: 1020,
+      }),
+    ]);
+    expect(first.turn).toMatchObject({
+      inputTokens: 1000,
+      outputTokens: 20,
+      cachedInputTokens: 0,
+      rootCachedInputTokens: 0,
+      contextTokens: 1020,
+    });
+    expect(first.turn.durationMs).toEqual(expect.any(Number));
+
+    // Killed during a later step's tool: the finished steps and the pending one, once.
+    const later = fresh();
+    later.parser.feed(pending({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    later.parser.feed(stepEnd({ inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 }));
+    later.parser.feed(pending({ inputTokens: 2000, outputTokens: 30, cacheReadTokens: 500 }));
+    expect(later.parser.flush({ canceled: true, code: null }).at(-1)).toMatchObject({
+      isError: true,
+      inputTokens: 3500,
+      outputTokens: 50,
+      tokens: 2530,
+    });
+    expect(later.turn.cachedInputTokens).toBe(500);
+    // A second flush books nothing more.
+    later.parser.flush({ canceled: true, code: null });
+    expect(later.turn.inputTokens).toBe(3500);
+  });
+
+  it('books a model id named like an Object property under its own key', () => {
+    const { turn, parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 300000, outputTokens: 60, cacheReadTokens: 0 }));
+    for (const model of ['constructor', '__proto__', 'toString'])
+      parser.feed({
+        type: 'subagent_usage',
+        model,
+        usage: { inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0 },
+      });
+    expect(Object.entries(turn.subagentUsage)).toEqual(
+      ['constructor', '__proto__', 'toString'].map((model) => [
+        model,
+        { inputTokens: 1000, outputTokens: 20, cachedInputTokens: 0 },
+      ]),
+    );
+    expect(Object.prototype.constructor).toBe(Object);
+  });
+
+  it('logs the end of an answer the text event cut, once', () => {
+    const { parser } = fresh();
+    const answer = `${'x'.repeat(10000)}TAIL`;
+    const capped = answer.slice(0, 8192);
+    expect(parser.feed({ type: 'text', text: capped, truncated: true })).toEqual([
+      { kind: 'text', text: capped },
+    ]);
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 2 }));
+    parser.feed({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
+    const events = parser.feed({ type: 'final', text: answer });
+    expect(events).toEqual([{ kind: 'text', text: answer.slice(8192) }]);
+    expect(capped + events[0].text).toBe(answer);
+  });
+
+  it('logs nothing more when the streamed text was the whole answer', () => {
+    const { parser } = fresh();
+    parser.feed({ type: 'text', text: 'Looking.' });
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 2 }));
+    parser.feed({ type: 'text', text: 'All ' });
+    parser.feed({ type: 'text', text: 'green.' });
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 2 }));
+    parser.feed({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
+    expect(parser.feed({ type: 'final', text: 'All green.' })).toEqual([]);
+  });
+
+  it('logs the whole answer when the streamed blocks were each cut', () => {
+    const { parser } = fresh();
+    parser.feed({ type: 'text', text: 'aaa', truncated: true });
+    parser.feed({ type: 'text', text: 'bbb', truncated: true });
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 2 }));
+    expect(parser.feed({ type: 'final', text: 'aaaaabbbbb' })).toEqual([
+      { kind: 'text', text: 'aaaaabbbbb' },
+    ]);
+  });
+
+  it('closes a completed turn as a success, with the final answer', () => {
+    const { parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 2 }));
+    parser.feed({ type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } });
+    parser.feed({ type: 'final', text: 'All green.' });
+    const [result] = parser.flush({ canceled: false, code: 0 });
+    expect(result).toMatchObject({
+      kind: 'result',
+      subtype: 'success',
+      isError: false,
+      costUsd: null,
+      numTurns: 1,
+      tokens: 12,
+      inputTokens: 10,
+      outputTokens: 2,
+      text: 'All green.',
+    });
+  });
+
+  it("fails a turn that ended in error, with the provider's reason as the line to read", () => {
+    const { parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 0 }));
+    parser.feed({
+      type: 'final',
+      sessionId: 'session-1',
+      reason: { kind: 'error', error: { code: 'AUTH', message: 'invalid API key' } },
+      text: '',
+    });
+    const events = parser.flush({ canceled: false, code: 1 });
+    expect(events[0]).toEqual({ kind: 'tool_error', text: 'AUTH: invalid API key' });
+    expect(events[1]).toMatchObject({ kind: 'result', subtype: 'error', isError: true });
+  });
+
+  it('fails a turn whose stream stopped before it ended, even on a clean exit', () => {
+    const { parser } = fresh();
+    parser.feed(stepEnd({ inputTokens: 10, outputTokens: 0 }));
+    expect(parser.flush({ canceled: false, code: 0 })[0]).toMatchObject({ kind: 'result', isError: true });
+  });
+
+  it('surfaces a runner failure outside any turn as an error', () => {
+    const { parser } = fresh();
+    expect(parser.feed({ type: 'error', message: 'session "session-9" does not exist' })).toEqual([
+      { kind: 'tool_error', text: 'session "session-9" does not exist' },
+    ]);
+    expect(parser.flush({ canceled: false, code: 1 })).toEqual([
+      expect.objectContaining({ kind: 'result', subtype: 'error', isError: true }),
+    ]);
+  });
+
+  it('leaves a turn that said nothing to its exit code', () => {
+    const { parser } = fresh();
+    parser.feed({ type: 'session', sessionId: 'session-1', cwd: '/w' });
+    expect(parser.flush({ canceled: false, code: 1 })).toEqual([]);
   });
 });

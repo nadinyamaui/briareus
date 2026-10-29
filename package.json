@@ -4,7 +4,7 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "The Briareus core: chat sessions with coding agents (claude / codex / grok / opencode / qwen), each in its own workspace clone with its own MySQL instance, served to clients over one API (/api/v1).",
+  "description": "The Briareus core: chat sessions with coding agents (claude / codex / grok / opencode / dsh / qwen), each in its own workspace clone with its own MySQL instance, served to clients over one API (/api/v1).",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nadinyamaui/briareus.git"
@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "^2.1.311",
+    "@deepseek-ai/dsh": "^0.2.1-rc.2",
     "@iarna/toml": "^3.0.0",
     "@openai/codex": "^0.163.0",
     "@qwen-code/qwen-code": "^0.26.3",

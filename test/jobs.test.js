@@ -120,6 +120,7 @@ vi.mock('../lib/config.js', () => ({
     codexBin: '',
     grokBin: '',
     opencodeBin: '',
+    dshBin: '',
     githubToken: 'tok',
     workspaceDir: state.workspaceDir,
     dev: { maxSessions: 3, timeoutMin: 60, autoCompactTokens: 250000 },
@@ -269,9 +270,11 @@ vi.mock('../lib/browser.js', async (original) => ({
   },
 }));
 
-vi.mock('../lib/usage.js', () => ({
+vi.mock('../lib/usage.js', async (importOriginal) => ({
   jobUsageEstimates: vi.fn(async () => new Map()),
   recordTurnUsage: vi.fn(),
+  // Arithmetic only, so the real one.
+  splitSubagentUsage: (await importOriginal()).splitSubagentUsage,
 }));
 
 import {
@@ -16658,9 +16661,9 @@ describe('the shared browser', () => {
     expect(note).not.toContain('http://127.0.0.1:41234');
   });
 
-  it('points claude, codex and qwen at the MCP tools, and the rest at connectOverCDP', () => {
+  it('points claude, codex, dsh and qwen at the MCP tools, and the rest at connectOverCDP', () => {
     browserState.endpoint = 'http://127.0.0.1:41234';
-    for (const binary of ['claude', 'codex', 'qwen']) {
+    for (const binary of ['claude', 'codex', 'dsh', 'qwen']) {
       const note = sharedBrowserNote({ id: 'b1', browser: true }, binary);
       expect(note).toContain('`browser` MCP tools');
       expect(note).toContain('http://127.0.0.1:41234');
@@ -16727,11 +16730,13 @@ describe('the shared browser in a session', () => {
       binary = 'claude',
       workerNotice = false,
       unattended = false,
+      provider = {},
+      dshLines = [],
       result = { type: 'result', subtype: 'success', result: 'ok' },
     } = {},
   ) {
     job.status = 'idle';
-    getProviderForJob.mockReturnValue({ ...state.provider, binary });
+    getProviderForJob.mockReturnValue({ ...state.provider, binary, ...provider });
     captureProviderAuth.mockResolvedValue(undefined);
     const bin = vi.spyOn(BINARIES[binary], 'bin').mockReturnValue({ bin: '/mock/agent', source: 'test' });
     const seen = { spawned: false, args: null, mcp: null, prompt: null, env: null };
@@ -16746,6 +16751,16 @@ describe('the shared browser in a session', () => {
       if (binary === 'claude' || binary === 'qwen')
         seen.mcp = JSON.parse(fs.readFileSync(args[args.indexOf('--mcp-config') + 1], 'utf8')).mcpServers;
       if (binary === 'grok') seen.prompt = fs.readFileSync(args[args.indexOf('--prompt-file') + 1], 'utf8');
+      if (binary === 'dsh') {
+        seen.patchFile = args[args.indexOf('--patch') + 1];
+        const patch = JSON.parse(fs.readFileSync(seen.patchFile, 'utf8'));
+        seen.model = patch[0].config;
+        seen.mcp = Object.fromEntries(
+          (patch[1]?.insert || []).filter((r) => r.config).map((r) => [r.config.serverName, r.config]),
+        );
+        seen.plugins = (patch[1]?.insert || []).map((r) => r.id);
+        seen.shellEnv = opts.env.BASH_ENV ? fs.readFileSync(opts.env.BASH_ENV, 'utf8') : null;
+      }
       const child = new EventEmitter();
       child.stdin = new PassThrough();
       child.stdout = new PassThrough();
@@ -16753,9 +16768,26 @@ describe('the shared browser in a session', () => {
       child.stdin.on('data', (chunk) => {
         seen.prompt ??= binary === 'claude' ? JSON.parse(chunk.toString()).message.content : chunk.toString();
         if (hold) return;
+        if (binary === 'dsh') {
+          for (const line of [
+            { type: 'session', sessionId: 'session-dsh-1', cwd: job.workDir },
+            {
+              type: 'status',
+              phase: 'step_end',
+              turn: 1,
+              step: 1,
+              usage: { inputTokens: 10, outputTokens: 2 },
+            },
+            ...dshLines,
+            { type: 'status', phase: 'turn_end', turn: 1, reason: { kind: 'completed' } },
+            { type: 'final', text: 'ok' },
+          ])
+            child.stdout.write(JSON.stringify(line) + '\n');
+          return;
+        }
         child.stdout.write(JSON.stringify(result) + '\n');
       });
-      if (!keepOpen) child.stdin.on('finish', () => setImmediate(() => child.emit('close', 0)));
+      if (!hold && !keepOpen) child.stdin.on('finish', () => setImmediate(() => child.emit('close', 0)));
       if (binary === 'grok') setImmediate(() => child.emit('close', 0));
       seen.child = child;
       return child;
@@ -17065,6 +17097,139 @@ describe('the shared browser in a session', () => {
       }
     },
   );
+
+  it('runs a DeepSeek Harness turn on its own home and key, with its tools and scrubbed variables handed back', async () => {
+    const job = getJob('br-turn');
+    const chats = job.chats;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-home-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    job.browser = true;
+    browserState.endpoint = ENDPOINT;
+    job.chats = {};
+    try {
+      const first = await turn(job, 'Fix the cart', {
+        binary: 'dsh',
+        provider: { apiKey: 'sk-entry', baseUrl: 'https://gw.test', defaultModel: 'deepseek-v4-pro' },
+      });
+      await first.settled;
+      expect(first.seen.args.slice(0, 3)).toEqual(['headless', '--patch', first.seen.patchFile]);
+      expect(first.seen.args).not.toContain('--session-id');
+      expect(first.seen.env.DSH_HOME).toBe(path.join(home, `.dsh-provider-${state.provider.id}`));
+      expect(first.seen.env.DSH_PERMISSION_MODE).toBe('danger-full-access');
+      expect(first.seen.env.DEEPSEEK_API_KEY).toBe('sk-entry');
+      expect(first.seen.env.DEEPSEEK_BASE_URL).toBe('https://gw.test');
+      expect(first.seen.model).toMatchObject({ provider: 'deepseek-official' });
+      // The Briareus tools and the shared browser ride in the patch, as MCP clients.
+      expect(first.seen.mcp.reviewer_memory.transport).toBe('stdio');
+      expect(first.seen.mcp.browser.args).toContain(ENDPOINT);
+      expect(first.seen.prompt).toContain('`browser` MCP tools');
+      // What dsh scrubs from its agent's shell comes back through BASH_ENV, never the entry's key.
+      expect(first.seen.shellEnv).toMatch(/^export GH_TOKEN=/m);
+      expect(first.seen.shellEnv).toMatch(/^export REVIEWER_MEMORY_TOKEN=/m);
+      expect(first.seen.shellEnv).not.toContain('sk-entry');
+      // Both files carry tokens and go with the turn.
+      expect(fs.existsSync(first.seen.patchFile)).toBe(false);
+      expect(fs.existsSync(first.seen.env.BASH_ENV)).toBe(false);
+      // The id dsh issued is the one the next turn resumes.
+      expect(job.chats[state.provider.id]).toMatchObject({ started: true, sessionId: 'session-dsh-1' });
+
+      job.browser = false;
+      const second = await turn(job, 'And the checkout', { binary: 'dsh', provider: { apiKey: 'sk-entry' } });
+      await second.settled;
+      expect(second.seen.args.slice(-3)).toEqual(['--session-id', 'session-dsh-1', '-']);
+    } finally {
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      job.chats = chats;
+      job.browser = false;
+    }
+  });
+
+  it("books a DeepSeek Harness turn's sub-agents with it, each under the model it ran on", async () => {
+    const job = getJob('br-turn');
+    const { chats, model, inputTokens, outputTokens } = job;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-home-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    job.chats = {};
+    job.model = 'deepseek-flash';
+    job.inputTokens = 0;
+    job.outputTokens = 0;
+    const child = (model, usage) => ({
+      type: 'subagent_usage',
+      sessionId: 'c',
+      parentSessionId: 's',
+      model,
+      usage,
+    });
+    recordTurnUsage.mockClear();
+    try {
+      const run = await turn(job, 'Fan it out', {
+        binary: 'dsh',
+        provider: { apiKey: 'sk-entry' },
+        dshLines: [
+          child('deepseek-flash', { inputTokens: 100, outputTokens: 20, cacheReadTokens: 0 }),
+          child('deepseek-v4-pro', { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 0 }),
+        ],
+      });
+      await run.settled;
+      // The patch mounts the plugin that reports them.
+      expect(run.seen.plugins[0]).toBe('briareus-subagent-usage');
+      // The session's totals carry every agent's spend.
+      expect(job).toMatchObject({ inputTokens: 1110, outputTokens: 222 });
+      await vi.waitFor(() => expect(recordTurnUsage).toHaveBeenCalledTimes(2));
+      const rows = recordTurnUsage.mock.calls.map(([, part, , m]) => [
+        m,
+        part.inputTokens,
+        part.outputTokens,
+      ]);
+      expect(rows).toEqual([
+        ['deepseek-flash', 110, 22],
+        ['deepseek-v4-pro', 1000, 200],
+      ]);
+      // Still one turn: the rows share a key and a time, so the footer and the counts join them.
+      const [own, other] = recordTurnUsage.mock.calls.map(([, part]) => part);
+      expect(own.turnKey).toEqual(expect.any(String));
+      expect(other).toMatchObject({ turnKey: own.turnKey, at: own.at });
+    } finally {
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      Object.assign(job, { chats, model, inputTokens, outputTokens });
+    }
+  });
+
+  it('starts a fresh DeepSeek Harness conversation, briefed, once the session moved to another clone', async () => {
+    const job = getJob('br-turn');
+    const { chats, workDir } = job;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-home-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    job.chats = {};
+    job.workDir = path.join(home, 'acme__shop');
+    try {
+      const first = await turn(job, 'Fix the cart', { binary: 'dsh', provider: { apiKey: 'sk-entry' } });
+      await first.settled;
+      expect(job.chats[state.provider.id]).toMatchObject({
+        sessionId: 'session-dsh-1',
+        cwd: path.join(home, 'acme__shop'),
+      });
+
+      // dsh refuses a session recorded in another directory, so a reopen elsewhere starts afresh.
+      job.workDir = path.join(home, 'acme__shop-2');
+      const moved = await turn(job, 'And the checkout', { binary: 'dsh', provider: { apiKey: 'sk-entry' } });
+      await moved.settled;
+      expect(moved.seen.args).not.toContain('--session-id');
+      expect(moved.seen.prompt).toContain('<workspace-context>');
+      expect(job.chats[state.provider.id].cwd).toBe(path.join(home, 'acme__shop-2'));
+
+      const after = await turn(job, 'And the totals', { binary: 'dsh', provider: { apiKey: 'sk-entry' } });
+      await after.settled;
+      expect(after.seen.args.slice(-3)).toEqual(['--session-id', 'session-dsh-1', '-']);
+      expect(after.seen.prompt).not.toContain('<workspace-context>');
+    } finally {
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      Object.assign(job, { chats, workDir });
+    }
+  });
 
   it('refuses mail tools during automatic worker-notice turns and restores them for the user', async () => {
     const job = getJob('br-turn');
@@ -17385,8 +17550,83 @@ describe('the shared browser in a session', () => {
     expect(records[0].browser).toEqual({ running: false });
   });
 
-  // Last here: shutdown holds every later turn until the next describe's initJobs.
+  // Shutdown tests leave the registry stopping until the next initJobs.
+  it("books a DeepSeek Harness turn's measured usage when shutdown kills it during a tool", async () => {
+    const job = getJob('br-turn');
+    const { chats, model, inputTokens, outputTokens } = job;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-home-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    job.chats = {};
+    job.model = 'deepseek-flash';
+    job.inputTokens = 0;
+    job.outputTokens = 0;
+    recordTurnUsage.mockClear();
+    // turn() restores its spy only once the turn settles, which a shutdown never lets it do.
+    const bin = vi.spyOn(BINARIES.dsh, 'bin');
+    const run = await turn(job, 'Run the suite', {
+      binary: 'dsh',
+      provider: { apiKey: 'sk-entry' },
+      hold: true,
+    });
+    await vi.waitFor(() => expect(run.seen.child).toBeDefined());
+    const child = run.seen.child;
+    child.pid = 123456789;
+    for (const line of [
+      { type: 'session', sessionId: 'session-dsh-stop', cwd: job.workDir },
+      { type: 'status', phase: 'step_end', turn: 1, step: 1, usage: { inputTokens: 10, outputTokens: 2 } },
+      {
+        type: 'subagent_usage',
+        sessionId: 'c',
+        parentSessionId: 's',
+        model: 'deepseek-v4-pro',
+        usage: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 0 },
+      },
+      // The second step's request was billed; shutdown comes during its tool, before its step_end.
+      { type: 'pending_root_usage', usage: { inputTokens: 5, outputTokens: 1 } },
+      { type: 'tool_call', tool: 'bash', input: { command: 'npm test -- --shard=stop' } },
+    ])
+      child.stdout.write(JSON.stringify(line) + '\n');
+    const kill = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      if (pid === -child.pid && signal === 'SIGKILL') child.emit('close', null, signal);
+      return true;
+    });
+    try {
+      // The stream is read up to the tool call, so its usage lines are in.
+      await vi.waitFor(() =>
+        expect(job.events.some((e) => JSON.stringify(e).includes('--shard=stop'))).toBe(true),
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      await stopAllJobProcesses();
+      await vi.waitFor(() => expect(recordTurnUsage).toHaveBeenCalledTimes(2));
+      const rows = recordTurnUsage.mock.calls.map(([, part, , m]) => [
+        m,
+        part.inputTokens,
+        part.outputTokens,
+      ]);
+      expect(rows).toEqual([
+        ['deepseek-flash', 15, 3],
+        ['deepseek-v4-pro', 1000, 200],
+      ]);
+      const [own, other] = recordTurnUsage.mock.calls.map(([, part]) => part);
+      expect(other).toMatchObject({ turnKey: own.turnKey, at: own.at });
+      expect(job).toMatchObject({ inputTokens: 1015, outputTokens: 203 });
+    } finally {
+      kill.mockRestore();
+      setDraining(false);
+      bin.mockRestore();
+      spawn.mockReset();
+      getProviderForJob.mockReset();
+      captureProviderAuth.mockReset();
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
+      Object.assign(job, { chats, model, inputTokens, outputTokens });
+    }
+  });
+
+  // Each subsequent shutdown test reinitializes the registry before starting a turn.
   it("books a qwen turn's calls at shutdown and checkpoints its session on them, a first turn too", async () => {
+    // The preceding dsh shutdown test leaves the registry stopping.
+    await initJobs();
     const job = getJob('br-turn');
     const { chats, inputTokens, outputTokens } = job;
     const sessionId = '8b3d4c5e-3333-4444-8555-666677778888';
