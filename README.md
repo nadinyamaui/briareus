@@ -196,7 +196,7 @@ session to finish independently. Standalone QA remains available, with `qaTestRu
 controlling whether the opening sheet is followed by execution.
 
 Orchestrators can spawn workers in accessible projects, toggle worker QA, and use
-`start_pr_action` with `solve-conflicts` on an existing PR in their own project.
+`start_pr_action` with `review` or `solve-conflicts` on an existing PR in their own project.
 They can close workers with `close_worker` to release resources while keeping
 readable history and the ability to reopen. Only an explicit user request to delete
 authorizes `delete_worker({ id: "<worker-id>" })`, which permanently erases a fully

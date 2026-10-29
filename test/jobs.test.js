@@ -15280,6 +15280,29 @@ describe('official orchestrator PR actions', () => {
     expect(getJob(session.id)?.status).toBe('closed');
     expect(workerSessionsFor(parent).map((j) => j.id)).toContain(session.id);
   });
+  it('starts the board’s code review on the project action runtime', async () => {
+    createCodeReview.mockClear();
+    const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+    expect(session).toMatchObject({
+      activity: 'review',
+      orchestratorPrAction: 'review',
+      parentId: parent.id,
+      providerId: 2,
+      model: 'claude-fable-5-1',
+      effort: 'low',
+      autoClose: true,
+    });
+    expect(createCodeReview).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: session.id, prNumber: 12, branch: 'feature' }),
+    );
+    await settleWorkers([parent.id]);
+  });
+  it('refuses a code review on a runtime that has no review command', async () => {
+    state.otherProviders = [{ id: 2, label: 'Project reviewer', binary: 'gemini', active: true }];
+    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toThrow(
+      /Code review requires a Claude or Codex provider/,
+    );
+  });
 
   it.each(['startBranch', 'branch', 'prBranch'])('blocks a branch-only worker using %s', async (field) => {
     const worker = getJob('pr-cap-0');
