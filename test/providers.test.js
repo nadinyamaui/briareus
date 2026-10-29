@@ -570,6 +570,34 @@ describe('Codex model reasoning efforts', () => {
 });
 
 describe('buildArgs', () => {
+  it('runs the review command in text mode with unrestricted tools and the requested summary format', () => {
+    const built = BINARIES.claude.buildArgs({
+      model: 'claude-opus-5-5',
+      effort: 'high',
+      sessionId: 'review-session',
+      commandPrompt: '/code-review high --comment',
+      sysPromptFile: '/unused/system',
+      mcpConfigFile: '/unused/mcp',
+    });
+    expect(built.args).toEqual([
+      '-p',
+      '/code-review high --comment',
+      '--model',
+      'claude-opus-5-5',
+      '--allowedTools',
+      '',
+      '--permission-mode',
+      'bypassPermissions',
+      '--append-system-prompt',
+      "After posting the inline comments, end with a markdown summary for the PR: a one-paragraph description of what the change does, a count line (N critical, N high, N medium, N low findings), each finding in a collapsible <details> section grouped by severity, a 'Not fixed' section, and a checklist of what was verified against the issue's acceptance criteria.",
+      '--output-format',
+      'text',
+      '--session-id',
+      'review-session',
+    ]);
+    expect(built).toMatchObject({ promptVia: 'argument', textOutput: true });
+  });
+
   it('claude resumes with --resume and starts with --session-id', () => {
     const resumed = BINARIES.claude.buildArgs({
       model: 'm',
