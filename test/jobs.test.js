@@ -275,6 +275,7 @@ import {
   clearDevTranscript,
   visibleEvents,
   deleteJobById,
+  holdsWorkDir,
   jobEventsSince,
   publicJob,
   sharedBrowserNote,
@@ -6063,6 +6064,101 @@ describe('closeDevSession on an unattended session', () => {
       expect.objectContaining({ id: 'hand-1' }),
       expect.any(Function),
     );
+  });
+});
+
+describe('closed-only worker deletion', () => {
+  let worker;
+  let counter = 0;
+  beforeEach(async () => {
+    worker = {
+      id: `closed-delete-${++counter}`,
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/shop',
+      branch: 'keep-this-branch',
+      prStatus: { number: 42, headRef: 'keep-this-branch' },
+      meta: {},
+    };
+    state.stored = [worker];
+    await initJobs();
+  });
+
+  it.each(['idle', 'running', 'preparing', 'failed', 'interrupted'])(
+    'refuses %s without cleanup',
+    async (status) => {
+      worker.status = status;
+      const before = deleteJob.mock.calls.length;
+      const drops = dropSessionDatabase.mock.calls.length;
+      await expect(deleteJobById(worker.id, { closedOnly: true })).rejects.toMatchObject({ status: 409 });
+      expect(deleteJob.mock.calls).toHaveLength(before);
+      expect(dropSessionDatabase.mock.calls).toHaveLength(drops);
+      expect(getJob(worker.id)).toBe(worker);
+      worker.status = 'closed';
+    },
+  );
+
+  it.each([
+    { closing: true },
+    { closePending: true },
+    { restartPending: true },
+    { dbServerId: 1 },
+    { proc: {} },
+    { serveProc: {} },
+    { qaLoop: { running: true } },
+    { qaLoop: { pendingVerdict: { prNumber: 42 } } },
+    { videoPublicationPending: true },
+  ])('rejects inconsistent closed state or active operations: %j', async (fields) => {
+    Object.assign(worker, fields);
+    await expect(deleteJobById(worker.id, { closedOnly: true })).rejects.toMatchObject({ status: 409 });
+    for (const key of Object.keys(fields)) delete worker[key];
+  });
+
+  it.each(['parentId', 'qaParentId'])(
+    'refuses an active child linked through %s even without QA pointers',
+    async (link) => {
+      const child = {
+        id: `${worker.id}-child`,
+        kind: 'devchat',
+        repo: worker.repo,
+        status: 'closed',
+        [link]: worker.id,
+        meta: {},
+      };
+      state.stored = [child];
+      await initJobs();
+      child.status = 'idle';
+      await expect(deleteJobById(worker.id, { closedOnly: true })).rejects.toMatchObject({ status: 409 });
+      child.status = 'closed';
+    },
+  );
+
+  it('locks reopen, message, descendant reopen and repeated deletion across awaits, then allows retry on failure', async () => {
+    const child = {
+      id: `${worker.id}-child`,
+      kind: 'devchat',
+      repo: worker.repo,
+      status: 'closed',
+      qaParentId: worker.id,
+      meta: {},
+    };
+    state.stored = [child];
+    await initJobs();
+    const { promise, reject } = Promise.withResolvers();
+    dropSessionDatabase.mockReturnValueOnce(promise);
+    const deleting = deleteJobById(worker.id, { closedOnly: true });
+    expect(() => reopenDevSession(worker.id)).toThrow('deletion');
+    expect(() => sendDevMessage(worker.id, 'reopen')).toThrow('deletion');
+    expect(() => reopenDevSession(child.id)).toThrow('deletion');
+    await expect(deleteJobById(worker.id, { closedOnly: true })).rejects.toMatchObject({ status: 409 });
+    reject(new Error('fixture deletion failed'));
+    await expect(deleting).rejects.toThrow('fixture deletion failed');
+    expect(getJob(worker.id)).toBe(worker);
+    await deleteJobById(worker.id, { closedOnly: true });
+    expect(getJob(worker.id)).toBeNull();
+    await expect(deleteJobById(worker.id, { closedOnly: true })).rejects.toMatchObject({ status: 404 });
+    expect(worker.branch).toBe('keep-this-branch');
+    expect(worker.prStatus.number).toBe(42);
   });
 });
 
@@ -13446,6 +13542,46 @@ describe('automatic recovery after a server restart', () => {
     expect(git('-C', first.workDir, 'branch', '--show-current')).toBe('first');
     expect(fs.readFileSync(path.join(checkout, 'unfinished'), 'utf8')).toBe('first worker work');
     expect(children).toHaveLength(0);
+
+    // A stale closed row still points at the first worker's physical checkout
+    // through a different spelling. Record deletion cannot release its slot.
+    const stale = row({ status: 'closed', workDir: checkout, orchestrator: false });
+    state.stored = [stale];
+    await initJobs();
+    const releases = releaseInstance.mock.calls.length;
+    await deleteJobById(stale.id, { closedOnly: true });
+    expect(getJob(stale.id)).toBeNull();
+    expect(holdsWorkDir(first, checkout)).toBe(true);
+    expect(releaseInstance.mock.calls).toHaveLength(releases);
+    expect(fs.readFileSync(path.join(checkout, 'unfinished'), 'utf8')).toBe('first worker work');
+    expect(git('-C', checkout, 'branch', '--show-current')).toBe('first');
+    // A corrupted status must not turn a live workspace holder into a
+    // deletable record, even though the status check alone would pass.
+    first.status = 'closed';
+    await expect(deleteJobById(first.id, { closedOnly: true })).rejects.toMatchObject({ status: 409 });
+    first.status = 'idle';
+  });
+
+  it('refuses deletion when a local reopen wins before checkout admission completes', async () => {
+    const checkout = path.join(root, 'local-reopen');
+    fs.mkdirSync(checkout);
+    expect(spawnSync('git', ['init', '-q', '-b', 'feature', checkout]).status).toBe(0);
+    state.projects[0].localDir = checkout;
+    state.projects[0].setupCommands = [];
+    const saved = row({
+      status: 'closed',
+      orchestrator: false,
+      local: true,
+      workDir: checkout,
+      branch: 'feature',
+    });
+    state.stored = [saved];
+    await initJobs();
+    reopenDevSession(saved.id);
+    await expect(deleteJobById(saved.id, { closedOnly: true })).rejects.toMatchObject({ status: 409 });
+    await vi.waitFor(() => expect(saved.status, saved.error).toBe('idle'));
+    expect(getJob(saved.id)).toBe(saved);
+    expect(holdsWorkDir(saved, checkout)).toBe(true);
   });
 
   it('carries the original worker curl brief into QA sheet generation and execution', async () => {

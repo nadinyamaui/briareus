@@ -412,6 +412,39 @@ describe('the worker tools', () => {
     expect(res.result.content[0].text).toMatch(/^Closed worker w1 \[closed\]/);
   });
 
+  it('advertises deletion as permanent and requiring an explicit user request', async () => {
+    const s = await boot();
+    const [res] = await s.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+    const tool = res.result.tools.find((t) => t.name === 'delete_worker');
+    expect(tool.inputSchema.required).toEqual(['id']);
+    expect(tool.description).toContain('ONLY when the user explicitly');
+    expect(tool.description).toContain('close a worker does not authorize deletion');
+    expect(tool.description).toContain('transcript and session history');
+  });
+
+  it('delete_worker issues one encoded DELETE with the session token', async () => {
+    const fetched = stubFetch(reply({ body: { ok: true } }));
+    const s = await boot();
+    const [res] = await s.send(callTool('delete_worker', { id: 'worker/id' }));
+    expect(fetched).toHaveBeenCalledExactlyOnceWith(`${URL_BASE}/api/agent/sessions/worker%2Fid`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+      body: undefined,
+    });
+    expect(res.result.content[0].text).toContain('Permanently deleted worker worker/id');
+  });
+
+  it('refuses deletion without an id and surfaces a closed-state refusal', async () => {
+    const fetched = stubFetch(reply({ status: 409, body: { error: 'Only closed sessions can be deleted' } }));
+    const s = await boot();
+    expect((await s.send(callTool('delete_worker', {})))[0].result.isError).toBe(true);
+    expect(fetched).not.toHaveBeenCalled();
+    const [res] = await s.send(callTool('delete_worker', { id: 'w1' }));
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toContain('Only closed sessions can be deleted');
+    expect(fetched).toHaveBeenCalledTimes(1);
+  });
+
   it('surfaces the route’s refusal as a tool error, not a crash', async () => {
     stubFetch(reply({ status: 403, body: { error: 'Only an orchestrator session can manage workers' } }));
     const s = await boot();
