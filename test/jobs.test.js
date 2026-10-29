@@ -149,10 +149,7 @@ vi.mock('../lib/github.js', async (importOriginal) => ({
   asGithubUser: (await importOriginal()).asGithubUser,
   githubRest: vi.fn(),
   githubGraphql: vi.fn(),
-  upsertPrComment: vi.fn(),
-  addPullRequestLabel: vi.fn(async () => []),
   removePullRequestLabel: vi.fn(async () => []),
-  viewerLogin: vi.fn(async () => null),
 }));
 
 vi.mock('../lib/dbpool.js', () => ({

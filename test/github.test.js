@@ -95,29 +95,6 @@ describe('githubRest', () => {
   });
 });
 
-describe('viewerLogin', () => {
-  it.each([500, 403, 'network', 'cooldown'])('retries an unknown identity after %s', async (failure) => {
-    const { viewerLogin, githubRest } = await freshGithub();
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-09-08T11:00:00Z'));
-    if (failure === 'network') {
-      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network unavailable')));
-    } else if (failure === 'cooldown') {
-      stubFetch(reply({ status: 429, headers: { 'retry-after': '60' } }));
-      await expect(githubRest(cfg, 'GET', '/repos/a/b')).rejects.toMatchObject({ rateLimited: true });
-    } else {
-      stubFetch(reply({ status: failure }));
-    }
-    expect(await viewerLogin(cfg)).toBeNull();
-
-    vi.setSystemTime(new Date('2026-09-08T11:02:00Z'));
-    const request = stubFetch(reply({ body: { login: 'server-account' } }));
-    expect(await viewerLogin(cfg)).toBe('server-account');
-    expect(await viewerLogin(cfg)).toBe('server-account');
-    expect(request).toHaveBeenCalledTimes(1);
-  });
-});
-
 describe('rate limiting', () => {
   it('lets a plain 403 through: a missing scope is not a rate limit', async () => {
     const { githubRest } = await freshGithub();
@@ -446,137 +423,6 @@ describe('githubGraphql', () => {
   });
 });
 
-describe('upsertPrComment', () => {
-  it('posts a new comment when no anchor is given', async () => {
-    const { upsertPrComment } = await freshGithub();
-    const fetchMock = stubFetch(reply({ body: { id: 5 } }));
-
-    await upsertPrComment(cfg, 'o/r', 3, null, 'hello');
-
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe('https://api.github.com/repos/o/r/issues/3/comments');
-    expect(init.method).toBe('POST');
-  });
-
-  it('posts a new comment when the anchor is nowhere on the PR', async () => {
-    const { upsertPrComment } = await freshGithub();
-    const fetchMock = stubFetch(reply({ body: [{ id: 1, body: 'unrelated' }] }), reply({ body: { id: 5 } }));
-
-    await upsertPrComment(cfg, 'o/r', 3, '<!-- anchor -->', 'hello');
-
-    expect(fetchMock.mock.calls[1][1].method).toBe('POST');
-  });
-
-  it('edits the existing comment when the anchor is already there', async () => {
-    // The app reviews every push; one live comment beats one comment per push.
-    const { upsertPrComment } = await freshGithub();
-    const fetchMock = stubFetch(
-      reply({ body: [{ id: 11, body: 'old <!-- anchor -->' }] }),
-      reply({ body: { id: 11 } }),
-    );
-
-    await upsertPrComment(cfg, 'o/r', 3, '<!-- anchor -->', 'new');
-
-    const [url, init] = fetchMock.mock.calls[1];
-    expect(url).toBe('https://api.github.com/repos/o/r/issues/comments/11');
-    expect(init.method).toBe('PATCH');
-    expect(JSON.parse(init.body)).toEqual({ body: 'new' });
-  });
-
-  it('edits the last anchored comment when the anchor appears more than once', async () => {
-    const { upsertPrComment } = await freshGithub();
-    const fetchMock = stubFetch(
-      reply({
-        body: [
-          { id: 11, body: 'a <!-- anchor -->' },
-          { id: 12, body: 'b <!-- anchor -->' },
-        ],
-      }),
-      reply({ body: { id: 12 } }),
-    );
-
-    await upsertPrComment(cfg, 'o/r', 3, '<!-- anchor -->', 'new');
-
-    expect(fetchMock.mock.calls[1][0]).toContain('/comments/12');
-  });
-
-  it('skips a comment with no body when looking for the anchor', async () => {
-    const { upsertPrComment } = await freshGithub();
-    const fetchMock = stubFetch(
-      // The search runs newest-first, so the body-less comment is the one
-      // examined before the anchored one is reached.
-      reply({
-        body: [
-          { id: 1, body: '<!-- anchor -->' },
-          { id: 2, body: null },
-        ],
-      }),
-      reply({ body: { id: 1 } }),
-    );
-
-    await upsertPrComment(cfg, 'o/r', 3, '<!-- anchor -->', 'new');
-
-    expect(fetchMock.mock.calls[1][0]).toContain('/comments/1');
-  });
-
-  it('pages through the conversation and stops at three pages', async () => {
-    const { upsertPrComment } = await freshGithub();
-    const full = Array.from({ length: 100 }, (_, i) => ({ id: i, body: 'x' }));
-    const fetchMock = stubFetch(
-      reply({ body: full }),
-      reply({ body: full }),
-      reply({ body: full }),
-      reply({ body: { id: 5 } }),
-    );
-
-    await upsertPrComment(cfg, 'o/r', 3, '<!-- anchor -->', 'hello');
-
-    expect(fetchMock.mock.calls[2][0]).toContain('page=3');
-    expect(fetchMock.mock.calls[3][1].method).toBe('POST');
-  });
-
-  it('throws when the conversation cannot be listed', async () => {
-    const { upsertPrComment } = await freshGithub();
-    stubFetch(reply({ status: 404 }));
-
-    await expect(upsertPrComment(cfg, 'o/r', 3, '<!-- a -->', 'x')).rejects.toThrow(
-      /answered 404 listing o\/r#3 comments/,
-    );
-  });
-
-  it('throws when the comment cannot be written', async () => {
-    const { upsertPrComment } = await freshGithub();
-    stubFetch(reply({ status: 422 }));
-
-    await expect(upsertPrComment(cfg, 'o/r', 3, null, 'x')).rejects.toThrow(
-      /answered 422 commenting on o\/r#3/,
-    );
-  });
-});
-
-describe('addPullRequestLabel', () => {
-  it('adds one label without replacing the pull request labels', async () => {
-    const { addPullRequestLabel } = await freshGithub();
-    const fetchMock = stubFetch(reply({ body: [{ name: 'code-approved' }] }));
-
-    await addPullRequestLabel(cfg, 'o/r', 3, 'code-approved');
-
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe('https://api.github.com/repos/o/r/issues/3/labels');
-    expect(init.method).toBe('POST');
-    expect(JSON.parse(init.body)).toEqual({ labels: ['code-approved'] });
-  });
-
-  it('reports a label GitHub refuses', async () => {
-    const { addPullRequestLabel } = await freshGithub();
-    stubFetch(reply({ status: 422 }));
-
-    await expect(addPullRequestLabel(cfg, 'o/r', 3, 'code-approved')).rejects.toThrow(
-      /answered 422 adding code-approved to o\/r#3/,
-    );
-  });
-});
-
 describe('removePullRequestLabel', () => {
   it('removes one encoded label without replacing the pull request labels', async () => {
     const { removePullRequestLabel } = await freshGithub();
@@ -607,14 +453,11 @@ describe('removePullRequestLabel', () => {
 });
 
 describe('accepted label writes with unreadable bodies', () => {
-  it.each(['addPullRequestLabel', 'removePullRequestLabel'])(
-    '%s accepts truncated HTTP-200 JSON',
-    async (helper) => {
-      const github = await freshGithub();
-      stubFetch(new Response('[{"name":', { status: 200 }));
-      await expect(github[helper](cfg, 'o/r', 3, 'code-approved')).resolves.toEqual([]);
-    },
-  );
+  it('removePullRequestLabel accepts truncated HTTP-200 JSON', async () => {
+    const { removePullRequestLabel } = await freshGithub();
+    stubFetch(new Response('[{"name":', { status: 200 }));
+    await expect(removePullRequestLabel(cfg, 'o/r', 3, 'code-approved')).resolves.toEqual([]);
+  });
 });
 
 describe('listRepoBranches', () => {
