@@ -170,8 +170,9 @@ describe('actionSessionSpec', () => {
     input: '',
   };
 
-  it('starts a Codex review on the PR head branch and closes its session when done', async () => {
-    expect(listActions().find((a) => a.id === 'review')).toMatchObject({ binary: 'codex' });
+  it('starts a review on the PR head branch and closes its session when done', async () => {
+    // Claude and Codex both review, so the errand pins no single CLI.
+    expect(listActions().find((a) => a.id === 'review')).not.toHaveProperty('binary');
     expect(await actionSessionSpec(getAction('review'), context)).toEqual({
       repo: 'a/b',
       branch: 'feature/x',

@@ -62,9 +62,11 @@ it('advertises the findings tools', async () => {
   expect(tools.map((t) => t.name)).toEqual([
     'review_finding_add',
     'review_finding_update',
+    'review_summary_set',
     'review_findings_list',
   ]);
-  expect(tools[0].inputSchema.required).toEqual(['severity', 'shouldFix', 'title']);
+  // The verdict comes from the verification step, not when the finding is registered.
+  expect(tools[0].inputSchema.required).toEqual(['severity', 'title']);
   expect(tools[0].inputSchema.properties.shouldFix.enum).toEqual(['fix', 'optional', 'dismiss']);
 });
 
@@ -90,6 +92,22 @@ it('adds, updates and lists findings with the session token', async () => {
       token: 'Bearer test-token',
     },
     { path: '/api/agent/code-review', method: 'GET', body: undefined, token: 'Bearer test-token' },
+  ]);
+});
+
+it('stores the posted summary comment', async () => {
+  const stored = await rpc('tools/call', {
+    name: 'review_summary_set',
+    arguments: { summary: '# Code Review' },
+  });
+  expect(stored.result.content[0].text).toBe('Stored the review summary.');
+  expect(calls).toEqual([
+    {
+      path: '/api/agent/code-review/summary',
+      method: 'PUT',
+      body: { summary: '# Code Review' },
+      token: 'Bearer test-token',
+    },
   ]);
 });
 

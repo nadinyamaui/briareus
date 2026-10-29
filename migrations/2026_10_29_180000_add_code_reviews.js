@@ -29,7 +29,7 @@ export async function up({ context: p }) {
     unpriced_turns INT UNSIGNED NOT NULL DEFAULT 0,
     -- Tells a clean review apart from one that died before registering anything.
     status ENUM('running', 'completed', 'failed') NOT NULL DEFAULT 'running',
-    -- The review's overall verdict, as published on the PR.
+    -- The summary comment the review posted on the PR.
     summary LONGTEXT NULL,
     completed_at BIGINT UNSIGNED NULL,
     created_at BIGINT UNSIGNED NOT NULL,
@@ -44,8 +44,9 @@ export async function up({ context: p }) {
     severity VARCHAR(16) NOT NULL,
     -- What kind of defect: correctness, security, efficiency, …
     type VARCHAR(40) NOT NULL DEFAULT '',
-    -- The verdict on whether the PR must change before it merges.
-    should_fix ENUM('fix', 'optional', 'dismiss') NOT NULL,
+    -- The verdict on whether the PR must change before it merges; NULL until the
+    -- review's verification step has ruled on the finding.
+    should_fix ENUM('fix', 'optional', 'dismiss') NULL,
     -- Whether an independent check reproduced the finding or it is only likely.
     verification ENUM('confirmed', 'plausible') NULL,
     title TEXT NOT NULL,

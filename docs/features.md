@@ -59,12 +59,14 @@ branch, the reviewed head, its provider, model and effort, its tokens and cost
 (estimated for providers that report none, with a count of turns no price
 covered) and whether it completed or failed, with the published summary. A
 review whose session fails to start, or is closed or deleted before its review
-turn ends, is marked failed. During its verify-and-publish turn the agent
-registers every finding it assessed in `code_review_findings` through MCP
-tools mounted only on review sessions (`review_finding_add`,
-`review_finding_update`, `review_findings_list`): severity, type, a
-`fix`/`optional`/`dismiss` verdict, verification, location and the reason for
-the verdict. Review sessions close when done and retain their history. Review
+turn ends, is marked failed; it completes when its verification step ends.
+A review runs on Claude (`/code-review`) or Codex (`codex exec review`), then
+publishes and verifies in the same conversation. Through MCP tools mounted
+only on review sessions (`review_finding_add`, `review_finding_update`,
+`review_summary_set`, `review_findings_list`), the publish step registers each
+finding in `code_review_findings` (severity, type, location) and stores the
+summary comment; the verify step records each `fix`/`optional`/`dismiss`
+verdict, its verification and the evidence. Review sessions close when done and retain their history. Review
 records and findings also survive explicit session deletion.
 
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the

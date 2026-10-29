@@ -84,6 +84,7 @@ import {
   getCodeReviewFinding,
   addCodeReviewFinding,
   updateCodeReviewFinding,
+  setCodeReviewSummary,
 } from './lib/db.js';
 import {
   initJobs,
@@ -749,6 +750,7 @@ api.use(
       getCodeReviewFinding,
       addCodeReviewFinding,
       updateCodeReviewFinding,
+      setCodeReviewSummary,
     },
   }),
 );

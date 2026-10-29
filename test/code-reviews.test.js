@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MAX_FINDINGS, codeReviewRoutes, findingFields } from '../lib/code-reviews.js';
 
 describe('findingFields', () => {
-  it('requires severity, verdict and title on a new finding, normalising case', () => {
+  it('requires severity and title on a new finding, normalising case', () => {
     expect(findingFields({ severity: 'HIGH', shouldFix: 'Fix', title: '  Off by one  ' })).toEqual({
       severity: 'high',
       shouldFix: 'fix',
@@ -14,6 +14,11 @@ describe('findingFields', () => {
     expect(() => findingFields({ severity: 'low', shouldFix: 'fix', title: '  ' })).toThrow(
       /title is required/,
     );
+    // The verdict waits for the verification step.
+    expect(findingFields({ severity: 'low', title: 't' })).toEqual({ severity: 'low', title: 't' });
+    expect(findingFields({ severity: 'low', title: 't', shouldFix: null })).toMatchObject({
+      shouldFix: null,
+    });
   });
 
   it('checks the optional fields it is given', () => {
@@ -38,7 +43,7 @@ describe('findingFields', () => {
 });
 
 describe('codeReviewRoutes', () => {
-  let server, base, sessions, reviews, findings;
+  let server, base, sessions, reviews, findings, summaries;
   const call = (token, method, path, body) =>
     fetch(`${base}/api/agent/code-review${path}`, {
       method,
@@ -55,6 +60,7 @@ describe('codeReviewRoutes', () => {
     };
     reviews = { rev: { id: 1, jobId: 'rev' }, other: { id: 2, jobId: 'other' } };
     findings = [];
+    summaries = {};
     let nextId = 0;
     const store = {
       getCodeReviewByJob: async (jobId) => reviews[jobId] || null,
@@ -65,6 +71,9 @@ describe('codeReviewRoutes', () => {
         const finding = { id: ++nextId, codeReviewId: reviewId, ...fields };
         findings.push(finding);
         return finding;
+      },
+      setCodeReviewSummary: async (jobId, summary) => {
+        summaries[jobId] = summary;
       },
       updateCodeReviewFinding: async (reviewId, id, changes) => {
         const finding = findings.find((f) => f.codeReviewId === reviewId && f.id === id);
@@ -123,6 +132,15 @@ describe('codeReviewRoutes', () => {
     expect((await call('rev', 'PATCH', '/findings/1', { endLine: 2 })).status).toBe(400);
     const listed = await call('rev', 'GET', '');
     expect(listed.json).toMatchObject({ review: { id: 1 }, findings: [{ id: 1 }] });
+  });
+
+  it('registers a finding without a verdict and stores the summary', async () => {
+    const added = await call('rev', 'POST', '/findings', { severity: 'medium', title: 'Unverified' });
+    expect(added.status).toBe(201);
+    expect(added.json.finding).not.toHaveProperty('shouldFix');
+    expect((await call('rev', 'PUT', '/summary', { summary: '# Code Review' })).status).toBe(200);
+    expect(summaries).toEqual({ rev: '# Code Review' });
+    expect((await call('rev', 'PUT', '/summary', { summary: ' ' })).status).toBe(400);
   });
 
   it('never reaches another review’s finding', async () => {
