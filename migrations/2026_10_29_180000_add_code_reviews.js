@@ -17,6 +17,11 @@ export async function up({ context: p }) {
     provider_id INT UNSIGNED NULL,
     model VARCHAR(128) NOT NULL DEFAULT '',
     effort VARCHAR(32) NOT NULL DEFAULT '',
+    -- Tells a clean review apart from one that died before registering anything.
+    status ENUM('running', 'completed', 'failed') NOT NULL DEFAULT 'running',
+    -- The review's overall verdict, as published on the PR.
+    summary LONGTEXT NULL,
+    completed_at BIGINT UNSIGNED NULL,
     created_at BIGINT UNSIGNED NOT NULL,
     updated_at BIGINT UNSIGNED NOT NULL,
     UNIQUE KEY code_reviews_job (job_id),
@@ -31,6 +36,8 @@ export async function up({ context: p }) {
     type VARCHAR(40) NOT NULL DEFAULT '',
     -- The verdict on whether the PR must change before it merges.
     should_fix ENUM('fix', 'optional', 'dismiss') NOT NULL,
+    -- Whether an independent check reproduced the finding or it is only likely.
+    verification ENUM('confirmed', 'plausible') NULL,
     title TEXT NOT NULL,
     body LONGTEXT NULL,
     file_path TEXT NULL,
