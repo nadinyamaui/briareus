@@ -345,6 +345,9 @@ import {
   workspaceGitProbeOptions,
   codexTurnResumes,
   acquireCloneDir,
+  claimLocalCheckout,
+  releaseLocalCheckout,
+  localCheckoutBusy,
   ensureClone,
   trustWorkspace,
 } from '../lib/jobs.js';
@@ -13085,6 +13088,155 @@ describe('automatic recovery after a server restart', () => {
       );
     child.emit('close', 0);
   };
+
+  it('serializes local checkout claims through aliases, including before a clone exists', async () => {
+    const alias = path.join(root, 'alias');
+    fs.symlinkSync(root, alias, 'dir');
+    const dir = path.join(root, 'not-cloned');
+    const other = path.join(alias, 'not-cloned');
+    await claimLocalCheckout(dir);
+    let acquired = false;
+    const waiting = claimLocalCheckout(other).then(() => {
+      acquired = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(localCheckoutBusy(other)).toBe(true);
+    expect(acquired).toBe(false);
+    releaseLocalCheckout(other);
+    await waiting;
+    expect(localCheckoutBusy(dir)).toBe(true);
+    releaseLocalCheckout(dir);
+    expect(localCheckoutBusy(other)).toBe(false);
+  });
+
+  it.each([false, true])(
+    'does not adopt another worker’s branch from a reused alias (marker: %s)',
+    async (marker) => {
+      const checkout = path.join(root, 'acme__restart');
+      const alias = path.join(root, 'legacy');
+      fs.mkdirSync(checkout);
+      fs.symlinkSync(root, alias, 'dir');
+      expect(spawnSync('git', ['init', '-q', '-b', 'second', checkout]).status).toBe(0);
+      const first = row({
+        status: 'closed',
+        orchestrator: false,
+        workDir: path.join(alias, 'acme__restart'),
+        branch: 'first',
+        prStatus: { number: 101, headRef: 'first', baseRef: 'main' },
+      });
+      const second = row({
+        status: 'closed',
+        orchestrator: false,
+        workDir: checkout,
+        branch: 'second',
+        endedAt: '2026-10-09T00:00:00Z',
+      });
+      if (marker) claimSlot(checkout, second.id, { prepared: true });
+      state.stored = [first, second];
+      await initJobs();
+      refreshJobBranch(first);
+      expect(first.branch).toBe('first');
+      expect(first.prStatus.number).toBe(101);
+      expect(first.releasedPrAttach).toBeUndefined();
+    },
+  );
+
+  it('reserves recoverable work across pool aliases before boot reopening starts', async () => {
+    const checkout = path.join(root, 'acme__restart');
+    const alias = path.join(root, 'legacy');
+    fs.mkdirSync(checkout);
+    fs.symlinkSync(root, alias, 'dir');
+    expect(spawnSync('git', ['init', '-q', '-b', 'first', checkout]).status).toBe(0);
+    const saved = row({
+      status: 'idle',
+      orchestrator: false,
+      workDir: path.join(alias, 'acme__restart'),
+      branch: 'first',
+    });
+    claimSlot(checkout, saved.id, { prepared: true });
+    state.stored = [saved];
+    await initJobs();
+    const allocated = acquireCloneDir('acme/restart');
+    try {
+      expect(allocated).toBe(path.join(root, 'acme__restart__2'));
+    } finally {
+      releaseLocalCheckout(allocated);
+      saved.restartPending = false;
+    }
+  });
+
+  it('keeps two restarted workers isolated when the pool is reached through a home alias', async () => {
+    const pool = path.join(root, 'pool');
+    const legacy = path.join(root, 'legacy');
+    fs.mkdirSync(pool);
+    fs.symlinkSync(pool, legacy, 'dir');
+    state.workspaceDir = pool;
+    const checkout = path.join(pool, 'acme__restart');
+    fs.mkdirSync(checkout);
+    const git = (...args) => {
+      const result = spawnSync('git', args, { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    git('-C', checkout, 'init', '-b', 'first');
+    git(
+      '-C',
+      checkout,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'fixture',
+    );
+    git('-C', checkout, 'branch', 'second');
+    const remote = path.join(root, 'remote.git');
+    git('clone', '--bare', checkout, remote);
+    git('-C', checkout, 'remote', 'add', 'origin', remote);
+    fs.writeFileSync(path.join(checkout, 'unfinished'), 'first worker work');
+    const first = row({
+      status: 'idle',
+      orchestrator: false,
+      workDir: path.join(legacy, 'acme__restart'),
+      branch: 'first',
+      workspacePrepared: true,
+      prStatus: { number: 101, headRef: 'first', baseRef: 'main' },
+    });
+    const second = row({
+      status: 'idle',
+      orchestrator: false,
+      branch: 'second',
+      prStatus: { number: 102, headRef: 'second', baseRef: 'main' },
+    });
+    claimSlot(checkout, first.id, { prepared: true });
+    // Let the second worker prepare a local fixture instead of accessing GitHub.
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, args, opts) => {
+      if (cmd === 'git' && args[0] === 'clone')
+        args = args.map((arg) => (arg === 'https://github.com/acme/restart.git' ? remote : arg));
+      return realSpawn(cmd, args, opts);
+    });
+    state.projects[0].envTemplate = '';
+    state.projects[0].setupCommands = [];
+    state.stored = [first, second];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(2);
+    await vi.waitFor(() => {
+      expect(first.status, first.error).toBe('idle');
+      expect(second.status, second.error).toBe('idle');
+    });
+    expect(fs.realpathSync(first.workDir)).not.toBe(fs.realpathSync(second.workDir));
+    refreshJobBranch(first);
+    expect(first.branch).toBe('first');
+    expect(first.prStatus.number).toBe(101);
+    expect(second.branch).toBe('second');
+    expect(second.prStatus.number).toBe(102);
+    expect(git('-C', first.workDir, 'branch', '--show-current')).toBe('first');
+    expect(fs.readFileSync(path.join(checkout, 'unfinished'), 'utf8')).toBe('first worker work');
+    expect(children).toHaveLength(0);
+  });
 
   it('carries the original worker curl brief into QA sheet generation and execution', async () => {
     const taskBrief = 'Use curl and save bodies, headers and statuses; assert JSON response values.';
