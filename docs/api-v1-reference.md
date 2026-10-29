@@ -2275,31 +2275,35 @@ A durable review of one PR revision; independent of the lifetime of its session.
 
 One claim and its independent verification; reviewerShouldFix is the original recommendation, shouldFix remains null until assessed.
 
-| Field                   | Type                                                         |                                                        |
-| ----------------------- | ------------------------------------------------------------ | ------------------------------------------------------ |
-| `id`                    | `string`                                                     | Finding id                                             |
-| `reviewId`              | `string`                                                     | Parent review                                          |
-| `position`              | `integer`                                                    | Zero-based command order                               |
-| `title`                 | `string`                                                     | Finding title                                          |
-| `severity`              | `critical\|high\|medium\|low\|info`                          | Reviewer severity                                      |
-| `details`               | `string`                                                     | Original explanation                                   |
-| `proof`                 | `string`                                                     | Original evidence                                      |
-| `comments`              | `string`                                                     | Original additional comments                           |
-| `path`                  | `string?`                                                    | Repository-relative location                           |
-| `startLine`             | `integer?`                                                   | First line                                             |
-| `endLine`               | `integer?`                                                   | Last line                                              |
-| `side`                  | `LEFT\|RIGHT?`                                               | Diff side                                              |
-| `reviewerShouldFix`     | `boolean?`                                                   | Original reviewer recommendation                       |
-| `shouldFix`             | `boolean?`                                                   | Independent fix-value assessment; null means undecided |
-| `fixReason`             | `string?`                                                    | Reason for the assessment                              |
-| `verificationStatus`    | `pending\|running\|confirmed\|rejected\|inconclusive\|stale` | Independent confirmation state                         |
-| `verificationProof`     | `string?`                                                    | Independent evidence                                   |
-| `verificationSha`       | `string?`                                                    | Commit verified                                        |
-| `verificationSessionId` | `string?`                                                    | Independent session                                    |
-| `verificationOutput`    | `string?`                                                    | Original verification output                           |
-| `verificationError`     | `string?`                                                    | Verification failure                                   |
-| `inlineCommentId`       | `integer?`                                                   | GitHub inline comment id                               |
-| `inlineCommentUrl`      | `string?`                                                    | GitHub inline comment URL                              |
+| Field                   | Type                                                         |                                                                                                                          |
+| ----------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `id`                    | `string`                                                     | Finding id                                                                                                               |
+| `reviewId`              | `string`                                                     | Parent review                                                                                                            |
+| `position`              | `integer`                                                    | Zero-based command order                                                                                                 |
+| `title`                 | `string`                                                     | Finding title                                                                                                            |
+| `shortSummary`          | `string`                                                     | Compact label for a finding row                                                                                          |
+| `category`              | `string`                                                     | Category slug such as correctness, efficiency, altitude, simplification, reuse or test-coverage; independent of severity |
+| `failureScenario`       | `string`                                                     | Concrete failure scenario or cleanup impact from the reviewer                                                            |
+| `reviewerVerdict`       | `CONFIRMED\|PLAUSIBLE?`                                      | Original command verdict; does not establish independent confirmation                                                    |
+| `severity`              | `critical\|high\|medium\|low\|info\|unknown`                 | Reviewer severity; unknown when the command did not provide one                                                          |
+| `details`               | `string`                                                     | Original explanation                                                                                                     |
+| `proof`                 | `string`                                                     | Original evidence                                                                                                        |
+| `comments`              | `string`                                                     | Original additional comments                                                                                             |
+| `path`                  | `string?`                                                    | Repository-relative location                                                                                             |
+| `startLine`             | `integer?`                                                   | First line                                                                                                               |
+| `endLine`               | `integer?`                                                   | Last line                                                                                                                |
+| `side`                  | `LEFT\|RIGHT?`                                               | Diff side                                                                                                                |
+| `reviewerShouldFix`     | `boolean?`                                                   | Original reviewer recommendation                                                                                         |
+| `shouldFix`             | `boolean?`                                                   | Independent fix-value assessment; null means undecided                                                                   |
+| `fixReason`             | `string?`                                                    | Reason for the assessment                                                                                                |
+| `verificationStatus`    | `pending\|running\|confirmed\|rejected\|inconclusive\|stale` | Independent confirmation state                                                                                           |
+| `verificationProof`     | `string?`                                                    | Independent evidence                                                                                                     |
+| `verificationSha`       | `string?`                                                    | Commit verified                                                                                                          |
+| `verificationSessionId` | `string?`                                                    | Independent session                                                                                                      |
+| `verificationOutput`    | `string?`                                                    | Original verification output                                                                                             |
+| `verificationError`     | `string?`                                                    | Verification failure                                                                                                     |
+| `inlineCommentId`       | `integer?`                                                   | GitHub inline comment id                                                                                                 |
+| `inlineCommentUrl`      | `string?`                                                    | GitHub inline comment URL                                                                                                |
 
 ### CiMetrics
 

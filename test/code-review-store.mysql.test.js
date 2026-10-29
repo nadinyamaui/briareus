@@ -86,8 +86,8 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review storage on M
     // A prior row simulates an inconsistent partial write; the transaction must
     // preserve both the original review state and that row on unique-key failure.
     await pool.query(
-      'INSERT INTO code_review_findings (id, review_id, position, title, severity, details, proof, comments) VALUES (?, ?, 1, ?, ?, ?, ?, ?)',
-      ['f'.repeat(32), review.id, 'original', 'high', '', '', ''],
+      'INSERT INTO code_review_findings (id, review_id, position, title, severity, details, proof, comments, failure_scenario) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)',
+      ['f'.repeat(32), review.id, 'original', 'high', '', '', '', ''],
     );
     await expect(
       store.importOutput(review.id, 'partial', {

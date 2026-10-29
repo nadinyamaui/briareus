@@ -15,6 +15,13 @@ has separate status, evidence, commit and session fields. Its `shouldFix` decisi
 is nullable: an unassessed finding is not a rejected finding, and the reviewer's
 recommendation does not establish that a bug exists or is worth fixing.
 
+Category is independent of severity: correctness, efficiency, altitude,
+simplification, reuse and test coverage can all be findings. Clients can group
+them by `path` and show `category` plus `shortSummary` in each row. The full
+`failureScenario` retains the concrete defect or cleanup impact. An original
+`reviewerVerdict` from Claude remains separate from independent verification, and
+severity stays `unknown` when the command did not assign one.
+
 Output ingestion is atomic. Malformed output fails instead of becoming a clean
 review; an explicit empty findings array represents a completed discovery with no
 findings. No feedback implementation or automatic code changes are included.

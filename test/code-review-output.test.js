@@ -11,6 +11,27 @@ const finding = {
   shouldFix: true,
 };
 describe('review output', () => {
+  it('preserves category and compact labels without inventing severity or independent confirmation', () => {
+    const result = reviewOutput({
+      summary: 'Cleanup opportunities',
+      findings: [
+        {
+          title: 'Repeated permission check',
+          shortSummary: 'Repeated permission check',
+          category: 'altitude',
+          details: 'The same policy is checked in two layers.',
+          failureScenario: 'A policy change must update both callers.',
+          reviewerVerdict: 'CONFIRMED',
+        },
+      ],
+    });
+    expect(result.findings[0]).toMatchObject({
+      category: 'altitude',
+      severity: 'unknown',
+      reviewerVerdict: 'CONFIRMED',
+    });
+    expect(result.findings[0]).not.toHaveProperty('verificationStatus');
+  });
   it('keeps the original recommendation distinct from independent assessment', () => {
     const result = reviewOutput({ summary: 'One bug', findings: [finding] });
     expect(result.findings[0]).toMatchObject({
