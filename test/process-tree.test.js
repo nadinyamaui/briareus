@@ -116,6 +116,27 @@ it.runIf(process.platform === 'linux')(
   },
 );
 
+// Run inside a session's tool shell, this process carries the session's tree value, and so does a
+// child spawned without treeEnv: following it would kill the session's CLI, here `sibling`.
+it.runIf(process.platform === 'linux')(
+  'does not follow a tree value the child only inherited from this process',
+  async () => {
+    const inherited = treeEnv(process.env).BRIAREUS_PROCESS_TREE;
+    vi.stubEnv('BRIAREUS_PROCESS_TREE', inherited);
+    const sibling = spawn('sleep', ['30'], { detached: true, env: { ...process.env }, stdio: 'ignore' });
+    const child = spawn('sleep', ['30'], { detached: true, env: { ...process.env }, stdio: 'ignore' });
+    const closed = new Promise((r) => child.once('close', r));
+    try {
+      killTree(child);
+      await closed;
+      expect(alive(sibling.pid)).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+      if (alive(sibling.pid)) process.kill(sibling.pid, 'SIGKILL');
+    }
+  },
+);
+
 it('signals only the process group of a pid that is not its own child', () => {
   const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
   try {
