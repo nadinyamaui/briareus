@@ -12,7 +12,9 @@ const state = vi.hoisted(() => ({
   psqlCalls: [],
   psqlResults: [], // per call: {code, stdout, stderr}
   mysqlQueries: [],
+  mysqlConnects: 0,
   mysqlConnectError: null,
+  mysqlConnectErrors: [], // one per connect attempt, ahead of mysqlConnectError
   mysqlFailOn: null, // a query matching this regex rejects
   mysqlHold: null, // { on: regex, until: promise }: a matching query waits for it
   mysqlVersion: '8.0.36',
@@ -40,15 +42,18 @@ vi.mock('../lib/dbservers.js', () => ({
 vi.mock('mysql2/promise', () => ({
   default: {
     createConnection: async (opts) => {
+      state.mysqlConnects++;
+      if (state.mysqlConnectErrors.length) throw state.mysqlConnectErrors.shift();
       if (state.mysqlConnectError) throw state.mysqlConnectError;
       return {
-        query: async (query) => {
+        query: async (query, values) => {
           const sql = typeof query === 'string' ? query : query.sql;
           if (state.mysqlHold && state.mysqlHold.on.test(sql)) await state.mysqlHold.until;
           state.mysqlQueries.push({
             opts,
             sql,
             ...(typeof query === 'object' ? { timeout: query.timeout } : {}),
+            ...(values ? { values } : {}),
           });
           if (state.mysqlFailOn && state.mysqlFailOn.test(sql)) throw new Error('ER_DB_DROP_EXISTS');
           if (/VERSION\(\)/.test(sql)) return [[{ version: state.mysqlVersion }]];
@@ -181,6 +186,8 @@ beforeEach(() => {
   state.psqlCalls = [];
   state.psqlResults = [];
   state.mysqlQueries = [];
+  state.mysqlConnects = 0;
+  state.mysqlConnectErrors = [];
   state.mysqlConnectError = null;
   state.mysqlFailOn = null;
   state.mysqlHold = null;
@@ -847,6 +854,51 @@ describe('ensureSessionDatabase', () => {
 
     expect(await ensureSessionDatabase(job(), 'exampleco/sample-app', () => {})).toBeNull();
   });
+
+  describe('on a server at max_connections', () => {
+    const tooMany = () => Object.assign(new Error('Too many connections'), { errno: 1040 });
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('waits for a connection instead of failing the session', async () => {
+      state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+      state.mysqlConnectErrors = [tooMany(), tooMany()];
+      const j = job();
+
+      const ensuring = ensureSessionDatabase(j, 'exampleco/sample-app', () => {});
+      await vi.advanceTimersByTimeAsync(7000);
+
+      expect(await ensuring).toBe('sample_abc123');
+      expect(state.mysqlConnects).toBe(3);
+      expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
+        'CREATE DATABASE IF NOT EXISTS `sample_abc123` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci',
+      ]);
+    });
+
+    it('gives up after about a minute', async () => {
+      state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+      state.mysqlConnectError = tooMany();
+
+      const ensuring = ensureSessionDatabase(job(), 'exampleco/sample-app', () => {});
+      const outcome = expect(ensuring).rejects.toThrow(
+        /sample_abc123 on 127.0.0.1:3306: Too many connections/,
+      );
+      await vi.advanceTimersByTimeAsync(67000);
+
+      await outcome;
+      expect(state.mysqlConnects).toBe(6);
+    });
+
+    it('does not retry other connection errors', async () => {
+      state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+      state.mysqlConnectError = Object.assign(new Error('Access denied'), { errno: 1045 });
+
+      await expect(ensureSessionDatabase(job(), 'exampleco/sample-app', () => {})).rejects.toThrow(
+        /Access denied/,
+      );
+      expect(state.mysqlConnects).toBe(1);
+    });
+  });
 });
 
 describe('dropSessionDatabase', () => {
@@ -857,9 +909,11 @@ describe('dropSessionDatabase', () => {
 
     expect(await dropSessionDatabase(j, (t) => events.push(t))).toBe(true);
 
-    expect(state.mysqlQueries).toHaveLength(1);
-    expect(state.mysqlQueries[0].sql).toBe('DROP DATABASE IF EXISTS `sample_abc123`');
-    expect(state.mysqlQueries[0].opts.port).toBe(3306);
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
+      'SHOW DATABASES LIKE ?',
+      'DROP DATABASE IF EXISTS `sample_abc123`',
+    ]);
+    expect(state.mysqlQueries[1].opts.port).toBe(3306);
     expect(j.sessionDb).toBeNull();
     expect(events[0]).toContain('sample_abc123');
   });
@@ -871,8 +925,10 @@ describe('dropSessionDatabase', () => {
     expect(await dropSessionDatabase(j, () => {})).toBe(true);
 
     expect(state.mysqlQueries).toHaveLength(0);
-    expect(state.psqlCalls).toHaveLength(1);
-    expect(state.psqlCalls[0].args.at(-1)).toBe('DROP DATABASE IF EXISTS "sample_abc123" WITH (FORCE)');
+    expect(state.psqlCalls.map((c) => c.args.at(-1))).toEqual([
+      "SELECT datname FROM pg_database WHERE datname LIKE 'sample\\_abc123\\_%'",
+      'DROP DATABASE IF EXISTS "sample_abc123" WITH (FORCE)',
+    ]);
   });
 
   it('does nothing for a session that never had a database of its own', async () => {
@@ -910,7 +966,7 @@ describe('dropSessionDatabase', () => {
     // The name stays: the database is still out there, and nothing should be
     // able to read this record as "there was never one".
     expect(j.sessionDb).toBe('sample_abc123');
-    expect(events[0]).toMatch(/Could not drop this session's database sample_abc123 .*ECONNREFUSED/);
+    expect(events.at(-1)).toMatch(/Could not drop this session's database sample_abc123 .*ECONNREFUSED/);
   });
 });
 
@@ -1064,6 +1120,7 @@ describe('dropping the run profiles databases with the session', () => {
     expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
       'DROP DATABASE IF EXISTS `sample_abc123_projects`',
       'DROP DATABASE IF EXISTS `sample_abc123_commerce`',
+      'SHOW DATABASES LIKE ?',
       'DROP DATABASE IF EXISTS `sample_abc123`',
     ]);
     expect(j.profileDbs).toEqual([]);
@@ -1081,7 +1138,10 @@ describe('dropping the run profiles databases with the session', () => {
 
     expect(await dropSessionDatabase(j, () => {})).toBe(true);
 
-    expect(state.mysqlQueries.map((q) => q.sql)).toEqual(['DROP DATABASE IF EXISTS `sample_abc123`']);
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
+      'SHOW DATABASES LIKE ?',
+      'DROP DATABASE IF EXISTS `sample_abc123`',
+    ]);
   });
 
   it('keeps the session database name while a profile database will not drop, so the next close retries it', async () => {
@@ -1096,6 +1156,7 @@ describe('dropping the run profiles databases with the session', () => {
     // NOT EXISTS must start from scratch, not land on the old one.
     expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
       'DROP DATABASE IF EXISTS `sample_abc123_projects`',
+      'SHOW DATABASES LIKE ?',
       'DROP DATABASE IF EXISTS `sample_abc123`',
     ]);
     expect(j.sessionDb).toBe('sample_abc123');
@@ -1108,6 +1169,7 @@ describe('dropping the run profiles databases with the session', () => {
     expect(await dropSessionDatabase(j, () => {})).toBe(true);
     expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
       'DROP DATABASE IF EXISTS `sample_abc123_projects`',
+      'SHOW DATABASES LIKE ?',
       'DROP DATABASE IF EXISTS `sample_abc123`',
     ]);
     expect(j.sessionDb).toBeNull();
@@ -1130,10 +1192,50 @@ describe('dropping the run profiles databases with the session', () => {
     expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
       expect.stringMatching(/^CREATE DATABASE IF NOT EXISTS `sample_abc123_projects`/),
       'DROP DATABASE IF EXISTS `sample_abc123_projects`',
+      'SHOW DATABASES LIKE ?',
       'DROP DATABASE IF EXISTS `sample_abc123`',
     ]);
     expect(j.profileDbs).toEqual([]);
     expect(j.sessionDb).toBeNull();
+  });
+
+  it("drops the databases the app built off the session's name, such as its tenants", async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    const column = 'Database (sample\\_abc123\\_%)';
+    state.mysqlDatabases = [
+      { [column]: 'sample_abc123_tenant_4ada3fbe-9864-4075-93ac-4d3dd777048a' },
+      { [column]: 'sample_abc123_tenant_okanet' },
+      // LIKE is the server's filter; a name outside the prefix is never dropped.
+      { [column]: 'sample_abc1234_tenant_okanet' },
+    ];
+    const events = [];
+    const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123' };
+
+    expect(await dropSessionDatabase(j, (t) => events.push(t))).toBe(true);
+
+    expect(state.mysqlQueries[0].values).toEqual(['sample\\_abc123\\_%']);
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
+      'SHOW DATABASES LIKE ?',
+      'DROP DATABASE IF EXISTS `sample_abc123_tenant_4ada3fbe-9864-4075-93ac-4d3dd777048a`',
+      'DROP DATABASE IF EXISTS `sample_abc123_tenant_okanet`',
+      'DROP DATABASE IF EXISTS `sample_abc123`',
+    ]);
+    expect(j.sessionDb).toBeNull();
+    expect(events.filter((e) => e.startsWith("Dropped the app's database"))).toHaveLength(2);
+  });
+
+  it("refuses an app database name that cannot be quoted, keeping the session's name for a retry", async () => {
+    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.mysqlDatabases = [{ Database: 'sample_abc123_x`; DROP DATABASE y' }];
+    const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123' };
+
+    expect(await dropSessionDatabase(j, () => {})).toBe(true);
+
+    expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
+      'SHOW DATABASES LIKE ?',
+      'DROP DATABASE IF EXISTS `sample_abc123`',
+    ]);
+    expect(j.sessionDb).toBe('sample_abc123');
   });
 
   it('leaves the list in place when the server cannot be reached', async () => {
