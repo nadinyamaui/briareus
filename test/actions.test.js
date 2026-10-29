@@ -170,7 +170,7 @@ describe('actionSessionSpec', () => {
     input: '',
   };
 
-  it('starts a Codex review on the PR head branch and keeps its session', async () => {
+  it('starts a Codex review on the PR head branch and closes its session when done', async () => {
     expect(listActions().find((a) => a.id === 'review')).toMatchObject({ binary: 'codex' });
     expect(await actionSessionSpec(getAction('review'), context)).toEqual({
       repo: 'a/b',
@@ -179,7 +179,7 @@ describe('actionSessionSpec', () => {
       prompt: '/review',
       prNumber: 4,
       prBranch: 'feature/x',
-      autoClose: false,
+      autoClose: true,
       title: 'Code review: #4',
       activity: 'review',
     });

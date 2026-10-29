@@ -169,9 +169,12 @@ current PR head. The native output is saved as `review-summary.md` outside the c
 A second turn on the same Codex account, model and effort verifies the findings,
 assesses fix value, and publishes the verified findings as inline comments, with
 “Not fixed” notes for rejected or optional ones, following the project’s publishing
-instructions. It returns a Markdown summary with links to the published review.
+instructions, or a short note when nothing is worth posting. It returns a Markdown
+summary with links to the published review.
 Failed or canceled reviews do not start publication; interrupted publication resumes
 its own stage without rerunning discovery.
+When the review finishes, its session closes and its workspace and database are
+released; the closed session keeps its transcript.
 
 With `babysitPrs` enabled, the server checks open PRs every 15 minutes and starts
 conflict resolution or CI fixes. Each action is deduplicated by head commit, with
