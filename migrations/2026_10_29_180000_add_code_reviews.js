@@ -20,11 +20,13 @@ export async function up({ context: p }) {
     model VARCHAR(128) NOT NULL DEFAULT '',
     effort VARCHAR(32) NOT NULL DEFAULT '',
     -- The session's spend, summed from turn_usage after each turn. Codex reports
-    -- no cost, so cost_estimated marks a total that includes catalog estimates.
+    -- no cost, so cost_estimated marks a total that includes catalog estimates,
+    -- and unpriced_turns counts turns no price covered, left out of cost_usd.
     input_tokens BIGINT UNSIGNED NULL,
     output_tokens BIGINT UNSIGNED NULL,
     cost_usd DECIMAL(12,6) NULL,
     cost_estimated TINYINT(1) NOT NULL DEFAULT 0,
+    unpriced_turns INT UNSIGNED NOT NULL DEFAULT 0,
     -- Tells a clean review apart from one that died before registering anything.
     status ENUM('running', 'completed', 'failed') NOT NULL DEFAULT 'running',
     -- The review's overall verdict, as published on the PR.

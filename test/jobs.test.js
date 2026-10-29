@@ -1201,6 +1201,25 @@ describe('createDevSession: the validation gauntlet', () => {
     bin.mockRestore();
   });
 
+  it('fails the code review when its session cannot start', async () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex', source: 'test' });
+    state.provider = { ...state.provider, binary: 'codex' };
+    failCodeReview.mockClear();
+    acquireInstance.mockRejectedValueOnce(new Error('fixture: no database server'));
+    const session = createDevSession({
+      ...base,
+      activity: 'review',
+      prompt: '/review',
+      prNumber: 3747,
+      branch: 'feature',
+    });
+    const job = getJob(session.id);
+    await vi.waitFor(() => expect(job.status).toBe('failed'));
+    expect(job.error).toMatch(/no database server/);
+    expect(failCodeReview).toHaveBeenCalledWith(session.id);
+    bin.mockRestore();
+  });
+
   it('files a session under its starter, and a worker under its orchestrator’s owner', () => {
     const orchestrator = createDevSession({ ...base, orchestrator: true, ownerId: 2 });
     expect(orchestrator.ownerId).toBe(2);
@@ -1579,6 +1598,22 @@ describe('native Codex code review', () => {
     expect(completeCodeReview).toHaveBeenCalledWith(id, '# Code Review\n\nNo findings.');
     expect(failCodeReview).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(root, 'review-summary.md'))).toBe(false);
+    // Closing a settled review leaves its status alone.
+    await closeDevSession(id);
+    expect(failCodeReview).not.toHaveBeenCalled();
+  });
+
+  it('fails a review closed before any review turn settled it', async () => {
+    failCodeReview.mockClear();
+    await closeDevSession(id);
+    expect(failCodeReview).toHaveBeenCalledWith(id);
+  });
+
+  it('fails a review deleted without being closed', async () => {
+    failCodeReview.mockClear();
+    job.status = 'failed';
+    await deleteJobById(id);
+    expect(failCodeReview).toHaveBeenCalledWith(id);
   });
 
   it('keeps the session through discovery and publication, then deletes it and releases its database', async () => {

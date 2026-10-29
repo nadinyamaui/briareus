@@ -940,7 +940,7 @@ describe('code review usage', () => {
     resetUsageCalibration();
     loadTurnUsageCalibration.mockClear();
   });
-  it('sums the ledger into the review, marking estimated cost', async () => {
+  it('sums the ledger into the review, marking estimated cost and counting unpriced turns', async () => {
     resetUsageCalibration();
     setCodeReviewUsage.mockClear();
     db.jobs = [
@@ -953,6 +953,7 @@ describe('code review usage', () => {
       outputTokens: 10,
       costUsd: 0.25,
       costEstimated: true,
+      unpricedTurns: 1,
     });
   });
 
@@ -965,6 +966,7 @@ describe('code review usage', () => {
       outputTokens: null,
       costUsd: null,
       costEstimated: false,
+      unpricedTurns: 0,
     });
   });
 

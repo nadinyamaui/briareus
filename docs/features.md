@@ -56,8 +56,10 @@ using the project's action runtime and respecting author filters and retry limit
 
 Each code review session is recorded in the `code_reviews` table: its PR,
 branch, the reviewed head, its provider, model and effort, its tokens and cost
-(estimated for providers that report none) and whether it completed or failed,
-with the published summary. During its verify-and-publish turn the agent
+(estimated for providers that report none, with a count of turns no price
+covered) and whether it completed or failed, with the published summary. A
+review whose session fails to start, or is closed or deleted before its review
+turn ends, is marked failed. During its verify-and-publish turn the agent
 registers every finding it assessed in `code_review_findings` through MCP
 tools mounted only on review sessions (`review_finding_add`,
 `review_finding_update`, `review_findings_list`): severity, type, a
