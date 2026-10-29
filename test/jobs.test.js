@@ -1690,6 +1690,9 @@ describe('native Codex code review', () => {
     expect(verify.child.prompt).toContain('**Fix**, **Optional**, or **Dismissed**');
     expect(verify.child.prompt).toContain('resolveReviewThread');
     expect(verify.child.prompt).toContain('only replies to the review threads');
+    // Feedback left labels the PR feedback-given; none labels it code-approved.
+    expect(verify.child.prompt).toContain('add the `feedback-given` label and remove `code-approved`');
+    expect(verify.child.prompt).toContain('add the `code-approved` label and remove `feedback-given`');
     expect(job.recoveryTurn).toMatchObject({ opts: { codeReviewStage: 'verify' }, completed: false });
     // The findings tools ride on every turn of a review session.
     for (const turn of [native, publish, verify])

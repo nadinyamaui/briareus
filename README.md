@@ -177,7 +177,8 @@ account, model and effort:
 3. **Verify**: each finding is checked against the code, trying to refute it, and
    classified Fix, Optional or Dismissed with evidence. The verdict goes into
    `review_finding_update`, and the agent replies on the finding’s own review
-   thread, resolving the thread of a dismissed one. It posts no other comments.
+   thread, resolving the thread of a dismissed one. It posts no other comments. It then labels the PR `feedback-given` when any finding
+   is Fix, Optional or unverified, or `code-approved` when none is.
 
 Failed or canceled discovery does not start publication; an interrupted step resumes
 itself and the steps after it without rerunning discovery.
