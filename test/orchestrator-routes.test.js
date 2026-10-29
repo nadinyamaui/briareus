@@ -12,6 +12,7 @@ let server,
   jobEventsFor,
   startOrchestratorPrAction,
   spawnWorkerSession;
+let deleteJobById;
 beforeEach(async () => {
   worker = {
     id: 'w1',
@@ -40,7 +41,12 @@ beforeEach(async () => {
   const sessions = { o1: { id: 'o1', orchestrator: true }, o2: { id: 'o2', orchestrator: true }, w1: worker };
   startOrchestratorPrAction = vi.fn(async () => worker);
   spawnWorkerSession = vi.fn((parent, opts) => ({ ...worker, ...opts, parentId: parent.id }));
+  deleteJobById = vi.fn(async () => {
+    worker.parentId = null;
+    return true;
+  });
   const routes = orchestratorRoutes({
+    deleteJobById,
     startOrchestratorPrAction,
     spawnWorkerSession,
     agentSession(req, res) {
@@ -61,6 +67,17 @@ beforeEach(async () => {
   app.post('/api/agent/sessions/pr-actions', routes.prAction);
   app.post('/api/agent/sessions', routes.spawn);
   app.post('/api/agent/sessions/:id/qa-loop', routes.qaLoop);
+  app.delete('/api/agent/sessions/:id', routes.deleteWorker);
+  app.get('/api/agent/sessions', (req, res) => {
+    const parent = routes.orchestratorSession(req, res);
+    if (parent) res.json({ sessions: worker.parentId === parent.id ? [worker] : [] });
+  });
+  app.get('/api/agent/sessions/:id', (req, res) => {
+    const parent = routes.orchestratorSession(req, res);
+    if (!parent) return;
+    const found = routes.workerOf(req, res, parent);
+    if (found) res.json({ session: found });
+  });
   server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   base = `http://127.0.0.1:${server.address().port}/api/agent/sessions`;
@@ -82,6 +99,42 @@ const spawnWorker = (body, token = 'o1') =>
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+
+describe('scoped worker deletion', () => {
+  const remove = (token = 'o1', id = 'w1') =>
+    fetch(`${base}/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+  it.each([
+    ['invalid', 'w1', 401],
+    ['w1', 'w1', 403],
+    ['o2', 'w1', 404],
+    ['o1', 'o1', 404],
+    ['o1', 'missing', 404],
+  ])('refuses %s deleting %s', async (token, id, status) => {
+    expect((await remove(token, id)).status).toBe(status);
+    expect(deleteJobById).not.toHaveBeenCalled();
+  });
+  it.each(['own/repo', 'authorized/companion'])(
+    'deletes an owned worker on %s through the lifecycle',
+    async (repo) => {
+      worker.repo = repo;
+      worker.status = 'closed';
+      expect(await (await remove()).json()).toEqual({ ok: true });
+      expect(deleteJobById).toHaveBeenCalledExactlyOnceWith('w1', { closedOnly: true });
+      const headers = { Authorization: 'Bearer o1' };
+      expect((await fetch(`${base}/w1`, { headers })).status).toBe(404);
+      expect(await (await fetch(base, { headers })).json()).toEqual({ sessions: [] });
+      expect((await remove()).status).toBe(404);
+      expect(deleteJobById).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each([409, 503, 502])('returns lifecycle refusal %s without retrying', async (status) => {
+    deleteJobById.mockRejectedValue(Object.assign(new Error('refused'), { status }));
+    const res = await remove();
+    expect(res.status).toBe(status);
+    expect(await res.json()).toEqual({ error: 'refused' });
+    expect(deleteJobById).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('scoped worker spawning', () => {
   it.each([

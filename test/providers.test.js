@@ -599,7 +599,7 @@ describe('buildArgs', () => {
     expect(built).toMatchObject({ promptVia: 'argument', briefingInPrompt: false });
   });
 
-  it('runs the review command in text mode with unrestricted tools and the requested summary format', () => {
+  it('runs the review command in text mode with unrestricted tools', () => {
     const built = BINARIES.claude.buildArgs({
       model: 'claude-opus-5-5',
       effort: 'high',
@@ -619,21 +619,11 @@ describe('buildArgs', () => {
       '',
       '--permission-mode',
       'bypassPermissions',
-      '--append-system-prompt',
-      expect.stringContaining('Post one top-level summary comment on the pull request'),
       '--output-format',
       'text',
       '--session-id',
       'review-session',
     ]);
-    const summaryPrompt = built.args[built.args.indexOf('--append-system-prompt') + 1];
-    expect(summaryPrompt).toContain('# Code Review\n\n---');
-    expect(summaryPrompt).toContain('N critical, N high, N medium, N low findings.');
-    expect(summaryPrompt).toContain('<summary>🔵 Low findings</summary>');
-    expect(summaryPrompt).toContain('Reviewed head `<head SHA>` against base branch `<base branch>`');
-    expect(summaryPrompt).toContain('Validation: summarize the checks actually run');
-    expect(summaryPrompt).toContain('returning the summary only in stdout is insufficient');
-    expect(summaryPrompt).toContain('When existing feedback is rejected');
     expect(built).toMatchObject({ promptVia: 'argument', textOutput: true });
   });
 

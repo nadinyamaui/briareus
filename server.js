@@ -146,6 +146,7 @@ import {
   setExternalMcp,
   setProjectEnvOwner,
   holdsWorkDir,
+  readmitLocalWaiters,
   setOwnerGithub,
   setInboxOwner,
   DEV_OPEN,
@@ -553,6 +554,8 @@ api.put('/api/projects/:id', async (req, res) => {
   try {
     const project = await updateProject(Number(req.params.id), req.body || {});
     res.json({ project });
+    // A raised local session limit lets sessions queued for the checkout in now.
+    readmitLocalWaiters();
     if (project.enabled)
       installRepoWebhooks([project], getConfig(), githubRest).catch((e) =>
         console.error('Could not install GitHub webhook:', e.message),
@@ -976,6 +979,7 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 // its own workers".
 
 const workerRoutes = orchestratorRoutes({
+  deleteJobById,
   startOrchestratorPrAction,
   agentSession,
   spawnWorkerSession,
@@ -986,6 +990,7 @@ const workerRoutes = orchestratorRoutes({
 const { orchestratorSession, workerOf } = workerRoutes;
 api.post('/api/agent/sessions/pr-actions', workerRoutes.prAction);
 api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
+api.delete('/api/agent/sessions/:id', workerRoutes.deleteWorker);
 
 api.post('/api/agent/sessions', workerRoutes.spawn);
 

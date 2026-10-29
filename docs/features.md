@@ -64,7 +64,8 @@ registers every finding it assessed in `code_review_findings` through MCP
 tools mounted only on review sessions (`review_finding_add`,
 `review_finding_update`, `review_findings_list`): severity, type, a
 `fix`/`optional`/`dismiss` verdict, verification, location and the reason for
-the verdict. The record outlives the session, which deletes itself when done.
+the verdict. Review sessions close when done and retain their history. Review
+records and findings also survive explicit session deletion.
 
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).

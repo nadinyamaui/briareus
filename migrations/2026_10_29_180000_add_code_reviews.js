@@ -1,7 +1,7 @@
 // @ts-check
 // One row per code review a session runs, and the findings its agent registers.
-// A review session deletes itself when done (autoClose), so job_id carries no
-// foreign key: the review and its findings must outlive the session.
+// Review sessions close when done and retain their records. job_id carries no
+// foreign key so reviews and findings also survive an explicit session deletion.
 /** @param {{ context: import('mysql2/promise').Pool }} ctx */
 export async function up({ context: p }) {
   await p.query(`CREATE TABLE IF NOT EXISTS code_reviews (

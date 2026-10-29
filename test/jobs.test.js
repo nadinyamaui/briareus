@@ -290,6 +290,7 @@ import {
   clearDevTranscript,
   visibleEvents,
   deleteJobById,
+  holdsWorkDir,
   jobEventsSince,
   publicJob,
   sharedBrowserNote,
@@ -363,6 +364,7 @@ import {
   claimLocalCheckout,
   releaseLocalCheckout,
   localCheckoutBusy,
+  readmitLocalWaiters,
   ensureClone,
   trustWorkspace,
 } from '../lib/jobs.js';
@@ -1576,7 +1578,9 @@ describe('native Codex code review', () => {
     expect(publish.child.prompt).toContain('Verify every finding independently');
     expect(publish.child.prompt).toContain('assess whether its fix is worth');
     expect(publish.child.prompt).toContain('Not fixed');
-    expect(publish.child.prompt).toContain(providerTools.CODE_REVIEW_SUMMARY_PROMPT);
+    expect(publish.child.prompt).toContain('found nothing to report');
+    expect(publish.child.prompt).toContain('do not call the review clean');
+    expect(publish.child.prompt).toContain('Never claim checks or verification you did not perform');
     expect(publish.child.prompt).toContain(head);
     expect(publish.child.prompt).toContain('<workspace-context>');
     expect(publish.child.prompt).toContain('review_finding_add');
@@ -1616,7 +1620,7 @@ describe('native Codex code review', () => {
     expect(failCodeReview).toHaveBeenCalledWith(id);
   });
 
-  it('keeps the session through discovery and publication, then deletes it and releases its database', async () => {
+  it('keeps the session through discovery and publication, then closes it, keeping its record', async () => {
     Object.assign(job, {
       autoClose: true,
       status: 'interrupted',
@@ -1636,10 +1640,11 @@ describe('native Codex code review', () => {
     const publish = invocations[1];
     publish.child.complete({ input_tokens: 30, output_tokens: 8, cached_input_tokens: 0 });
     publish.child.emit('close', 0);
-    await vi.waitFor(() => expect(getJob(id)).toBeNull());
+    await vi.waitFor(() => expect(job.status).toBe('closed'));
     expect(job.error).toBeNull();
     expect(dropSessionDatabase).toHaveBeenCalledWith(job, expect.any(Function));
-    expect(deleteJob).toHaveBeenCalledWith(id, null);
+    expect(getJob(id)).toBe(job);
+    expect(deleteJob).not.toHaveBeenCalledWith(id, null);
   });
 
   it.each(['failure', 'empty', 'missing', 'canceled'])(
@@ -6182,6 +6187,101 @@ describe('closeDevSession on an unattended session', () => {
       expect.objectContaining({ id: 'hand-1' }),
       expect.any(Function),
     );
+  });
+});
+
+describe('closed-only worker deletion', () => {
+  let worker;
+  let counter = 0;
+  beforeEach(async () => {
+    worker = {
+      id: `closed-delete-${++counter}`,
+      kind: 'devchat',
+      status: 'closed',
+      repo: 'acme/shop',
+      branch: 'keep-this-branch',
+      prStatus: { number: 42, headRef: 'keep-this-branch' },
+      meta: {},
+    };
+    state.stored = [worker];
+    await initJobs();
+  });
+
+  it.each(['idle', 'running', 'preparing', 'failed', 'interrupted'])(
+    'refuses %s without cleanup',
+    async (status) => {
+      worker.status = status;
+      const before = deleteJob.mock.calls.length;
+      const drops = dropSessionDatabase.mock.calls.length;
+      await expect(deleteJobById(worker.id, { closedOnly: true })).rejects.toMatchObject({ status: 409 });
+      expect(deleteJob.mock.calls).toHaveLength(before);
+      expect(dropSessionDatabase.mock.calls).toHaveLength(drops);
+      expect(getJob(worker.id)).toBe(worker);
+      worker.status = 'closed';
+    },
+  );
+
+  it.each([
+    { closing: true },
+    { closePending: true },
+    { restartPending: true },
+    { dbServerId: 1 },
+    { proc: {} },
+    { serveProc: {} },
+    { qaLoop: { running: true } },
+    { qaLoop: { pendingVerdict: { prNumber: 42 } } },
+    { videoPublicationPending: true },
+  ])('rejects inconsistent closed state or active operations: %j', async (fields) => {
+    Object.assign(worker, fields);
+    await expect(deleteJobById(worker.id, { closedOnly: true })).rejects.toMatchObject({ status: 409 });
+    for (const key of Object.keys(fields)) delete worker[key];
+  });
+
+  it.each(['parentId', 'qaParentId'])(
+    'refuses an active child linked through %s even without QA pointers',
+    async (link) => {
+      const child = {
+        id: `${worker.id}-child`,
+        kind: 'devchat',
+        repo: worker.repo,
+        status: 'closed',
+        [link]: worker.id,
+        meta: {},
+      };
+      state.stored = [child];
+      await initJobs();
+      child.status = 'idle';
+      await expect(deleteJobById(worker.id, { closedOnly: true })).rejects.toMatchObject({ status: 409 });
+      child.status = 'closed';
+    },
+  );
+
+  it('locks reopen, message, descendant reopen and repeated deletion across awaits, then allows retry on failure', async () => {
+    const child = {
+      id: `${worker.id}-child`,
+      kind: 'devchat',
+      repo: worker.repo,
+      status: 'closed',
+      qaParentId: worker.id,
+      meta: {},
+    };
+    state.stored = [child];
+    await initJobs();
+    const { promise, reject } = Promise.withResolvers();
+    dropSessionDatabase.mockReturnValueOnce(promise);
+    const deleting = deleteJobById(worker.id, { closedOnly: true });
+    expect(() => reopenDevSession(worker.id)).toThrow('deletion');
+    expect(() => sendDevMessage(worker.id, 'reopen')).toThrow('deletion');
+    expect(() => reopenDevSession(child.id)).toThrow('deletion');
+    await expect(deleteJobById(worker.id, { closedOnly: true })).rejects.toMatchObject({ status: 409 });
+    reject(new Error('fixture deletion failed'));
+    await expect(deleting).rejects.toThrow('fixture deletion failed');
+    expect(getJob(worker.id)).toBe(worker);
+    await deleteJobById(worker.id, { closedOnly: true });
+    expect(getJob(worker.id)).toBeNull();
+    await expect(deleteJobById(worker.id, { closedOnly: true })).rejects.toMatchObject({ status: 404 });
+    expect(worker.branch).toBe('keep-this-branch');
+    expect(worker.prStatus.number).toBe(42);
   });
 });
 
@@ -10785,6 +10885,212 @@ describe('Codex turn usage', () => {
     await closeDevSession(job.id);
   });
 
+  // Ends a session's running turn, then closes it.
+  const finishAndClose = async (job, child) => {
+    if (!child.stdin.writableEnded) child.complete();
+    child.emit('close', 0);
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    await closeDevSession(job.id);
+  };
+  const startLocal = (prompt, extra = {}) =>
+    getJob(createDevSession({ provider: 2, repo: 'acme/shop', local: true, prompt, ...extra }).id);
+  const localCheckout = (name) => {
+    const dir = fs.mkdtempSync(path.join(home, name));
+    fs.mkdirSync(path.join(dir, '.git'));
+    state.projects[0].localDir = dir;
+    return dir;
+  };
+
+  it('shares the project session limit and update queue across checkout aliases', async () => {
+    const local = localCheckout('shared-local-');
+    const alias = `${local}-alias`;
+    fs.symlinkSync(local, alias, 'dir');
+    state.projects[0].localSessionLimit = 2;
+    try {
+      const first = startLocal('One');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      state.projects[0].localDir = alias;
+      const second = startLocal('Two');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(first.workDir).toBe(local);
+      expect(second.workDir).toBe(alias);
+      const third = startLocal('Three');
+      await vi.waitFor(() =>
+        expect(third.events.some((e) => /2 sessions are already working/.test(e.text || ''))).toBe(true),
+      );
+      expect(third.status).toBe('queued');
+      // The update queues behind the third session, so it needs every session gone.
+      let updated = false;
+      const update = claimLocalCheckout(local).then(() => (updated = true));
+      await finishAndClose(first, children[0]);
+      await vi.waitFor(() => expect(children).toHaveLength(3));
+      expect(third.workDir).toBe(alias);
+      await finishAndClose(second, children[1]);
+      expect(updated).toBe(false);
+      await finishAndClose(third, children[2]);
+      await update;
+      expect(updated).toBe(true);
+      releaseLocalCheckout(alias);
+      expect(localCheckoutBusy(local)).toBe(false);
+      expect(localCheckoutBusy(alias)).toBe(false);
+    } finally {
+      delete state.projects[0].localSessionLimit;
+    }
+  });
+
+  it('lets any number of sessions into the local checkout with a limit of 0, ahead of a waiting update', async () => {
+    const local = localCheckout('unlimited-local-');
+    state.projects[0].localSessionLimit = 0;
+    try {
+      const sessions = ['One', 'Two', 'Three'].map((p) => startLocal(p));
+      await vi.waitFor(() => expect(children).toHaveLength(3));
+      for (const job of sessions) expect(job.workDir).toBe(local);
+      // An update needs the checkout empty; sessions arriving meanwhile do not wait with it.
+      let updated = false;
+      const update = claimLocalCheckout(local).then(() => (updated = true));
+      const late = startLocal('Four');
+      await vi.waitFor(() => expect(children).toHaveLength(4));
+      expect(late.workDir).toBe(local);
+      for (const [i, job] of [...sessions, late].entries()) await finishAndClose(job, children[i]);
+      await update;
+      expect(updated).toBe(true);
+      // Sessions arriving during the update wait for it.
+      const after = startLocal('Five');
+      await vi.waitFor(() =>
+        expect(after.events.some((e) => /updating after a merge/.test(e.text || ''))).toBe(true),
+      );
+      expect(children).toHaveLength(4);
+      releaseLocalCheckout(local);
+      await vi.waitFor(() => expect(children).toHaveLength(5));
+      await finishAndClose(after, children[4]);
+      expect(localCheckoutBusy(local)).toBe(false);
+    } finally {
+      delete state.projects[0].localSessionLimit;
+    }
+  });
+
+  it('lets queued sessions in when the local session limit is raised', async () => {
+    const local = localCheckout('raised-local-');
+    try {
+      const first = startLocal('One');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      const second = startLocal('Two');
+      await vi.waitFor(() => expect(second.status).toBe('queued'));
+      state.projects[0].localSessionLimit = 2;
+      readmitLocalWaiters();
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(second.workDir).toBe(local);
+      // The shared tree's rules reach the agent, not the single-session ones.
+      expect(children[1].prompt).toContain('git push origin HEAD:refs/heads/<branch>');
+      expect(children[1].prompt).not.toContain('pushing a feature branch or opening a PR is fine');
+      // The queue message counts the sessions actually in the checkout.
+      const third = startLocal('Three');
+      await vi.waitFor(() =>
+        expect(
+          third.events.some((e) => /2 sessions are already working .* limit is 2/.test(e.text || '')),
+        ).toBe(true),
+      );
+      await finishAndClose(first, children[0]);
+      await vi.waitFor(() => expect(children).toHaveLength(3));
+      await finishAndClose(second, children[1]);
+      await finishAndClose(third, children[2]);
+      expect(localCheckoutBusy(local)).toBe(false);
+    } finally {
+      delete state.projects[0].localSessionLimit;
+    }
+  });
+
+  it('does not leak a place when a session closed while queued is reopened', async () => {
+    const local = localCheckout('reopen-local-');
+    const first = startLocal('One');
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('pushing a feature branch or opening a PR is fine');
+    const second = startLocal('Two');
+    await vi.waitFor(() => expect(second.status).toBe('queued'));
+    await closeDevSession(second.id);
+    expect(second.status).toBe('closed');
+    reopenDevSession(second.id);
+    await vi.waitFor(() => expect(second.status).toBe('queued'));
+    await finishAndClose(first, children[0]);
+    await vi.waitFor(() => expect(second.status).toBe('idle'));
+    expect(second.workDir).toBe(local);
+    await closeDevSession(second.id);
+    // One place was taken and given back; a leaked one would keep the checkout busy.
+    expect(localCheckoutBusy(local)).toBe(false);
+  });
+
+  it('keeps sessions out of the local checkout while one switches its branch', async () => {
+    const local = localCheckout('switching-local-');
+    state.projects[0].localSessionLimit = 2;
+    let fetch = null;
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, args, ...rest) => {
+      if (cmd !== 'git' || !args.includes('fetch')) return realSpawn(cmd, args, ...rest);
+      fetch = new EventEmitter();
+      fetch.stdout = new PassThrough();
+      fetch.stderr = new PassThrough();
+      return fetch;
+    });
+    try {
+      const switching = startLocal('One', { branch: 'feature' });
+      await vi.waitFor(() => expect(fetch).toBeTruthy());
+      const other = startLocal('Two');
+      await vi.waitFor(() =>
+        expect(other.events.some((e) => /switching the local checkout/.test(e.text || ''))).toBe(true),
+      );
+      expect(other.status).toBe('queued');
+      // The checkout of the fake tree fails, which still lets the waiting session in.
+      fetch.emit('close', 0);
+      await vi.waitFor(() => expect(switching.status).toBe('failed'));
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(other.workDir).toBe(local);
+      await finishAndClose(other, children[0]);
+      await closeDevSession(switching.id);
+      expect(localCheckoutBusy(local)).toBe(false);
+    } finally {
+      spawn.mockImplementation(realSpawn);
+      delete state.projects[0].localSessionLimit;
+    }
+  });
+
+  it('keeps the local checkout to one session by default', async () => {
+    const local = localCheckout('single-local-');
+    const first = startLocal('One');
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    const second = startLocal('Two');
+    await vi.waitFor(() =>
+      expect(second.events.some((e) => /Another session is working/.test(e.text || ''))).toBe(true),
+    );
+    expect(second.status).toBe('queued');
+    await finishAndClose(first, children[0]);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    await finishAndClose(second, children[1]);
+    expect(localCheckoutBusy(local)).toBe(false);
+  });
+
+  it('does not switch a shared local checkout to another branch', async () => {
+    const local = localCheckout('shared-branch-');
+    const alias = `${local}-alias`;
+    fs.symlinkSync(local, alias, 'dir');
+    state.projects[0].localSessionLimit = 2;
+    try {
+      const first = startLocal('One');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      state.projects[0].localDir = alias;
+      const second = startLocal('Two', { branch: 'feature' });
+      await vi.waitFor(() => expect(second.status).toBe('failed'));
+      expect(second.error).toMatch(
+        /Another session is working in the local checkout .* cannot switch to feature/,
+      );
+      expect(children).toHaveLength(1);
+      await finishAndClose(first, children[0]);
+      await closeDevSession(second.id);
+      expect(localCheckoutBusy(local)).toBe(false);
+    } finally {
+      delete state.projects[0].localSessionLimit;
+    }
+  });
+
   it('books a resumed turn as what it added to the thread, reading the rollout once', async () => {
     const job = getJob('codex-usage');
     // The last reading on the record is another chat's (a step's, say).
@@ -13361,6 +13667,46 @@ describe('automatic recovery after a server restart', () => {
     expect(git('-C', first.workDir, 'branch', '--show-current')).toBe('first');
     expect(fs.readFileSync(path.join(checkout, 'unfinished'), 'utf8')).toBe('first worker work');
     expect(children).toHaveLength(0);
+
+    // A stale closed row still points at the first worker's physical checkout
+    // through a different spelling. Record deletion cannot release its slot.
+    const stale = row({ status: 'closed', workDir: checkout, orchestrator: false });
+    state.stored = [stale];
+    await initJobs();
+    const releases = releaseInstance.mock.calls.length;
+    await deleteJobById(stale.id, { closedOnly: true });
+    expect(getJob(stale.id)).toBeNull();
+    expect(holdsWorkDir(first, checkout)).toBe(true);
+    expect(releaseInstance.mock.calls).toHaveLength(releases);
+    expect(fs.readFileSync(path.join(checkout, 'unfinished'), 'utf8')).toBe('first worker work');
+    expect(git('-C', checkout, 'branch', '--show-current')).toBe('first');
+    // A corrupted status must not turn a live workspace holder into a
+    // deletable record, even though the status check alone would pass.
+    first.status = 'closed';
+    await expect(deleteJobById(first.id, { closedOnly: true })).rejects.toMatchObject({ status: 409 });
+    first.status = 'idle';
+  });
+
+  it('refuses deletion when a local reopen wins before checkout admission completes', async () => {
+    const checkout = path.join(root, 'local-reopen');
+    fs.mkdirSync(checkout);
+    expect(spawnSync('git', ['init', '-q', '-b', 'feature', checkout]).status).toBe(0);
+    state.projects[0].localDir = checkout;
+    state.projects[0].setupCommands = [];
+    const saved = row({
+      status: 'closed',
+      orchestrator: false,
+      local: true,
+      workDir: checkout,
+      branch: 'feature',
+    });
+    state.stored = [saved];
+    await initJobs();
+    reopenDevSession(saved.id);
+    await expect(deleteJobById(saved.id, { closedOnly: true })).rejects.toMatchObject({ status: 409 });
+    await vi.waitFor(() => expect(saved.status, saved.error).toBe('idle'));
+    expect(getJob(saved.id)).toBe(saved);
+    expect(holdsWorkDir(saved, checkout)).toBe(true);
   });
 
   it('carries the original worker curl brief into QA sheet generation and execution', async () => {

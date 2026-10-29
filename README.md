@@ -167,15 +167,14 @@ using the selected provider’s `CODEX_HOME`, model and effort. It fetches the a
 PR base, including stacked branches, and refuses a checkout that differs from the
 current PR head. The native output is saved as `review-summary.md` outside the checkout.
 A second turn on the same Codex account, model and effort verifies the findings,
-assesses fix value, and publishes inline comments and a top-level “Code Review”
-PR summary with a change description, severity counts, a verdict, collapsible
-findings grouped by severity, reviewed commit references, and validation results
-and limitations. It includes “Not fixed” explanations and an acceptance-criteria
-checklist when applicable, and returns the published Markdown as its final output.
+assesses fix value, and publishes the verified findings as inline comments, with
+“Not fixed” notes for rejected or optional ones, following the project’s publishing
+instructions, or a short note when nothing is worth posting. It returns a Markdown
+summary with links to the published review.
 Failed or canceled reviews do not start publication; interrupted publication resumes
 its own stage without rerunning discovery.
-When the review finishes, its session is automatically deleted and its workspace
-and database are released; review comments remain on the pull request.
+When the review finishes, its session closes and its workspace and database are
+released; the closed session keeps its transcript.
 
 With `babysitPrs` enabled, the server checks open PRs every 15 minutes and starts
 conflict resolution or CI fixes. Each action is deduplicated by head commit, with
@@ -189,6 +188,23 @@ controlling whether the opening sheet is followed by execution.
 
 Orchestrators can spawn workers in accessible projects, toggle worker QA, and use
 `start_pr_action` with `solve-conflicts` on an existing PR in their own project.
+They can close workers with `close_worker` to release resources while keeping
+readable history and the ability to reopen. Only an explicit user request to delete
+authorizes `delete_worker({ id: "<worker-id>" })`, which permanently erases a fully
+closed own worker's transcript and session history while preserving branches and PRs.
+The same operation is available as `DELETE /api/agent/sessions/<worker-id>` with
+the orchestrator's session bearer token (`REVIEWER_MEMORY_TOKEN`), for example:
+
+```sh
+curl --fail-with-body -sS -X DELETE "$REVIEWER_MEMORY_URL/api/agent/sessions/<worker-id>" \
+  -H "Authorization: Bearer $REVIEWER_MEMORY_TOKEN"
+```
+
+Success returns `{ "ok": true }`. Non-closed workers, active child/QA operations,
+and inconsistent live resource ownership return 409; unrelated workers and the
+orchestrator itself return 404. Companion workers retain the existing ownership
+scope. Deleted workers disappear from `GET /api/agent/sessions`; reads and repeated
+deletes return 404. Deletion does not implicitly close a worker or cancel its children.
 
 ### The shared browser
 
