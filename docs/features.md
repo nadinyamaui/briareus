@@ -70,6 +70,12 @@ verdict, its verification and the evidence. Review sessions close when done and 
 records and findings also survive explicit session deletion.
 Clients read a pull request's latest stored reviews, with their findings and
 verdicts, through `GET /api/v1/pulls/{number}/code-reviews`.
+With a manage token they can update one through
+`PATCH /api/v1/pulls/{number}/code-reviews/{reviewId}/findings/{findingId}`,
+sending `repo` and the fields to change. For example,
+`{"repo":"acme/shop","shouldFix":"optional","comments":"Low impact; defer this change."}`
+records a decision not to fix a real issue; `dismiss` rejects a refuted finding,
+`fix` requires a fix, and `null` clears the verdict. Omitted fields stay unchanged.
 
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).

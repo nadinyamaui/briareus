@@ -83,6 +83,7 @@ import {
   listCodeReviewFindings,
   listPullCodeReviews,
   getCodeReviewFinding,
+  getPullCodeReview,
   addCodeReviewFinding,
   updateCodeReviewFinding,
   setCodeReviewSummary,
@@ -755,7 +756,17 @@ api.use(
     },
   }),
 );
-api.use(pullCodeReviewRoutes({ getProject, store: { listPullCodeReviews } }));
+api.use(
+  pullCodeReviewRoutes({
+    getProject,
+    store: {
+      listPullCodeReviews,
+      getPullCodeReview,
+      getCodeReviewFinding,
+      updateCodeReviewFinding,
+    },
+  }),
+);
 api.use(
   printAgentRoutes({
     service: createPrintService(),

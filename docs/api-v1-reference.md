@@ -319,6 +319,28 @@ Read the code reviews Briareus sessions ran on a pull request, with their findin
 
 **Returns** `{ codeReviews: CodeReview[] }`. Reads Briareus’s own records, not GitHub: the latest 20 reviews, newest first, each with every finding it registered and the verification step’s `shouldFix` verdict on it. A rerun of a review in the same session replaces that review’s findings. A pull request with none answers an empty list; an unreadable database is 503.
 
+### `PATCH /pulls/{number}/code-reviews/{reviewId}/findings/{findingId}`
+
+Update a stored code review finding, including its verdict and the reason for not fixing it. Needs `manage`, held to `repo`.
+
+**Body**
+
+| Field               | Type                          |                                                                                              |
+| ------------------- | ----------------------------- | -------------------------------------------------------------------------------------------- |
+| `repo` **required** | `string`                      | A project, as `owner/name`                                                                   |
+| `severity`          | `critical\|high\|medium\|low` | How bad it is                                                                                |
+| `type`              | `string`                      | What kind of defect: `correctness`, `security`, `efficiency`, …; may be empty                |
+| `shouldFix`         | `fix\|optional\|dismiss?`     | The verification step’s verdict on whether the pull request must change; null until it ruled |
+| `verification`      | `confirmed\|plausible?`       | Whether an independent check reproduced it or it is only likely                              |
+| `title`             | `string`                      | Its one-line statement                                                                       |
+| `body`              | `string?`                     | Its explanation, Markdown                                                                    |
+| `filePath`          | `string?`                     | The file it is in                                                                            |
+| `startLine`         | `integer?`                    | Its first line                                                                               |
+| `endLine`           | `integer?`                    | Its last line                                                                                |
+| `comments`          | `string?`                     | Why the verdict is what it is, e.g. why it is not worth fixing                               |
+
+**Returns** `{ finding: CodeReviewFinding }`. Use the review and finding ids from GET /pulls/{number}/code-reviews. Supply at least one finding field; omitted fields stay unchanged and unknown fields get 400. Set shouldFix to optional for a real issue you are choosing not to fix, or dismiss for a refuted finding, with comments explaining why; fix requires a fix and null clears the verdict. Nullable fields accept null to clear them. The review must belong to the named repository and pull request, and the finding to that review; a mismatch gets 404. Older reviews remain editable after their sessions are deleted. This updates the stored record without starting an agent or publishing to GitHub. Database failures get 503.
+
 ### `PATCH /pulls/{number}`
 
 Update a pull request on GitHub. Needs `manage`, held to `repo`.
@@ -3461,6 +3483,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/pr/view?section=reviews`                                               | `GET /pulls/{number}/reviews`                                                                                                     |
 | `GET /api/pr/view?section=review-comments`                                       | `GET /pulls/{number}/review-comments`                                                                                             |
 | `GET /api/pr/code-reviews`                                                       | `GET /pulls/{number}/code-reviews`                                                                                                |
+| `PATCH /api/pr/code-reviews/:reviewId/findings/:findingId`                       | `PATCH /pulls/{number}/code-reviews/{reviewId}/findings/{findingId}`                                                              |
 | `PATCH /api/pr/update`                                                           | `PATCH /pulls/{number}`                                                                                                           |
 | `PATCH /api/issues/update`                                                       | `PATCH /issues/{number}`                                                                                                          |
 | `POST /api/pr/update-branch`                                                     | `POST /pulls/{number}/update-branch`                                                                                              |
