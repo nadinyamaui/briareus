@@ -1,16 +1,17 @@
 import { it, expect } from 'vitest';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { BINARIES, newTurn, parserFor } from '../lib/providers.js';
+import { killTree } from '../lib/process-tree.js';
 
 // Runs one turn of the installed dsh, with the patch Briareus mounts, against the given stub and
 // returns the parser's turn once dsh has exited cleanly; or, given `stopAt`, once the first line it
-// matches has been followed by a Stop, which SIGKILLs the process group as lib/jobs.js does.
-async function runTurn(root, server, { stopAt } = {}) {
+// matches has been followed by a Stop, which SIGKILLs the process group (or runs `stop`).
+async function runTurn(root, server, { stopAt, stop = (child) => process.kill(-child.pid, 'SIGKILL') } = {}) {
   const cwd = join(root, 'work');
   mkdirSync(cwd);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -41,7 +42,7 @@ async function runTurn(root, server, { stopAt } = {}) {
   lines.on('line', (line) => {
     const msg = JSON.parse(line);
     parser.feed(msg);
-    if (stopAt?.(msg) && !stopping) stopping = setTimeout(() => process.kill(-child.pid, 'SIGKILL'), 300);
+    if (stopAt?.(msg) && !stopping) stopping = setTimeout(() => stop(child), 300);
   });
   let stderr = '';
   child.stderr.on('data', (c) => {
@@ -341,12 +342,9 @@ it('counts a sub-agent step retried after an unmeasured attempt, as what was mea
   }
 }, 60000);
 
-// The root's first request is answered with a long shell command, and Stop kills dsh while it runs:
-// the request was billed when its message committed, before the step's end that never comes.
-it('counts a step whose tool a Stop interrupted', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'dsh.stop-'));
-  const seen = { root: 0 };
-  const server = createServer(async (req, res) => {
+// A Messages stub whose every turn request is answered with one bash call running `command`.
+function toolCallServer(command, seen) {
+  return createServer(async (req, res) => {
     let body = '';
     for await (const chunk of req) body += chunk;
     if (req.method !== 'POST' || !req.url.endsWith('/messages')) {
@@ -384,7 +382,7 @@ it('counts a step whose tool a Stop interrupted', async () => {
       index: 0,
       delta: {
         type: 'input_json_delta',
-        partial_json: JSON.stringify({ description: 'Wait', command: 'sleep 20' }),
+        partial_json: JSON.stringify({ description: 'Wait', command }),
       },
     });
     event('content_block_stop', { index: 0 });
@@ -392,6 +390,14 @@ it('counts a step whose tool a Stop interrupted', async () => {
     event('message_stop', {});
     res.end();
   });
+}
+
+// The root's first request is answered with a long shell command, and Stop kills dsh while it runs:
+// the request was billed when its message committed, before the step's end that never comes.
+it('counts a step whose tool a Stop interrupted', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh.stop-'));
+  const seen = { root: 0 };
+  const server = toolCallServer('sleep 20', seen);
   try {
     const turn = await runTurn(root, server, { stopAt: (msg) => msg.type === 'tool_call' });
     expect(seen.root).toBe(1);
@@ -401,6 +407,23 @@ it('counts a step whose tool a Stop interrupted', async () => {
       cachedInputTokens: 0,
       contextTokens: 1020,
     });
+  } finally {
+    server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60000);
+
+// dsh runs its bash tool outside its own process group, so Stop has to reach it there too: a
+// command left running would go on changing the workspace after the session stopped.
+it('stops the tool a Stop interrupted along with dsh', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh.stop-tool-'));
+  const seen = { root: 0 };
+  const server = toolCallServer('sleep 2 && touch too-late', seen);
+  try {
+    await runTurn(root, server, { stopAt: (msg) => msg.type === 'tool_call', stop: killTree });
+    expect(seen.root).toBe(1);
+    await new Promise((r) => setTimeout(r, 3000));
+    expect(existsSync(join(root, 'work', 'too-late'))).toBe(false);
   } finally {
     server.close();
     rmSync(root, { recursive: true, force: true });
