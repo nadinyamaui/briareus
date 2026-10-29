@@ -45,6 +45,10 @@ See [how sessions run](../README.md#how-a-session-runs) and the
 
 ## GitHub and QA
 
+Code review records have a one-to-many relationship with findings, retaining the
+original output and separate verification evidence after execution sessions are
+removed; see [code reviews](code-reviews.md) for the read API and data model.
+
 The server reads pull requests, diffs, commits, checks, comments, issues,
 issue timelines, sub-issues and Projects v2 boards. Manage clients can update
 pull requests and issues, move board cards, update PR branches and merge.

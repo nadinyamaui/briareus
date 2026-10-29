@@ -503,6 +503,28 @@ Download a project’s repository at a commit as a gzipped tarball. Needs `read`
 
 **Returns** the file. Every file under one top folder, as GitHub builds it, for a client that indexes the code itself. Archives over 300 MiB (314,572,800 bytes) are refused: 413 before the download when GitHub declares the size; otherwise the connection is cut once the limit is exceeded, leaving a truncated archive after response headers have been sent.
 
+## Code reviews
+
+### `GET /code-reviews`
+
+List code reviews for a project or pull request. Needs `read`, held to `repo` (an admin token may leave it out).
+
+**Query**
+
+| Field      | Type      |                                             |
+| ---------- | --------- | ------------------------------------------- |
+| `repo`     | `string`  | A project, as `owner/name`                  |
+| `prNumber` | `integer` | The pull request the work is about          |
+| `page`     | `integer` | Which page of 100 rows, 1–30; 1 when absent |
+
+**Returns** `{ reviews: CodeReview[], nextPage: integer? }`. 100 per page. Members see their own and ownerless reviews in their allowed projects. Records survive deletion of the execution session.
+
+### `GET /code-reviews/{id}`
+
+Read a code review, its original output and its findings. Needs `read`.
+
+**Returns** `{ review: CodeReview }`. 404 for a review outside the caller’s project or session-owner scope.
+
 ## Sessions
 
 ### `GET /sessions`
@@ -2221,6 +2243,64 @@ Remove a account. Needs `admin`.
 
 ## Objects
 
+### CodeReview
+
+A durable review of one PR revision; independent of the lifetime of its session.
+
+| Field               | Type                                                                            |                                                    |
+| ------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `id`                | `string`                                                                        | Review id                                          |
+| `repo`              | `string`                                                                        | Project repository                                 |
+| `prNumber`          | `integer`                                                                       | Pull request number                                |
+| `branch`            | `string`                                                                        | Reviewed branch                                    |
+| `headSha`           | `string`                                                                        | Reviewed head commit                               |
+| `baseSha`           | `string`                                                                        | Reviewed base commit                               |
+| `ownerId`           | `integer?`                                                                      | User who started the review                        |
+| `providerId`        | `integer`                                                                       | Review provider                                    |
+| `model`             | `string`                                                                        | Review model                                       |
+| `effort`            | `string`                                                                        | Review effort                                      |
+| `sessionId`         | `string?`                                                                       | Review session                                     |
+| `status`            | `queued\|reviewing\|exporting\|publishing\|verifying\|completed\|failed\|stale` | Execution state, not an approval verdict           |
+| `summary`           | `string?`                                                                       | Original review summary                            |
+| `rawOutput`         | `string?`                                                                       | Original command output; included on detail only   |
+| `error`             | `string?`                                                                       | Execution or publication failure                   |
+| `summaryCommentId`  | `integer?`                                                                      | GitHub summary comment id                          |
+| `summaryCommentUrl` | `string?`                                                                       | GitHub summary comment URL                         |
+| `createdAt`         | `integer`                                                                       | Creation time, epoch milliseconds                  |
+| `updatedAt`         | `integer`                                                                       | Last update, epoch milliseconds                    |
+| `findingCount`      | `integer`                                                                       | Number of findings; included on list only          |
+| `findings`          | `CodeReviewFinding[]`                                                           | Findings in command order; included on detail only |
+
+### CodeReviewFinding
+
+One claim and its independent verification; reviewerShouldFix is the original recommendation, shouldFix remains null until assessed.
+
+| Field                   | Type                                                         |                                                        |
+| ----------------------- | ------------------------------------------------------------ | ------------------------------------------------------ |
+| `id`                    | `string`                                                     | Finding id                                             |
+| `reviewId`              | `string`                                                     | Parent review                                          |
+| `position`              | `integer`                                                    | Zero-based command order                               |
+| `title`                 | `string`                                                     | Finding title                                          |
+| `severity`              | `critical\|high\|medium\|low\|info`                          | Reviewer severity                                      |
+| `details`               | `string`                                                     | Original explanation                                   |
+| `proof`                 | `string`                                                     | Original evidence                                      |
+| `comments`              | `string`                                                     | Original additional comments                           |
+| `path`                  | `string?`                                                    | Repository-relative location                           |
+| `startLine`             | `integer?`                                                   | First line                                             |
+| `endLine`               | `integer?`                                                   | Last line                                              |
+| `side`                  | `LEFT\|RIGHT?`                                               | Diff side                                              |
+| `reviewerShouldFix`     | `boolean?`                                                   | Original reviewer recommendation                       |
+| `shouldFix`             | `boolean?`                                                   | Independent fix-value assessment; null means undecided |
+| `fixReason`             | `string?`                                                    | Reason for the assessment                              |
+| `verificationStatus`    | `pending\|running\|confirmed\|rejected\|inconclusive\|stale` | Independent confirmation state                         |
+| `verificationProof`     | `string?`                                                    | Independent evidence                                   |
+| `verificationSha`       | `string?`                                                    | Commit verified                                        |
+| `verificationSessionId` | `string?`                                                    | Independent session                                    |
+| `verificationOutput`    | `string?`                                                    | Original verification output                           |
+| `verificationError`     | `string?`                                                    | Verification failure                                   |
+| `inlineCommentId`       | `integer?`                                                   | GitHub inline comment id                               |
+| `inlineCommentUrl`      | `string?`                                                    | GitHub inline comment URL                              |
+
 ### CiMetrics
 
 CI/CD metrics for observed GitHub checks.
@@ -3388,6 +3468,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/dev/usage`                                                             | `GET /usage`                                                                                                                      |
 | `GET /api/dev/actions`                                                           | `GET /actions`                                                                                                                    |
 | `POST /api/dev/actions`                                                          | `POST /actions`                                                                                                                   |
+| `GET /api/code-reviews`                                                          | `GET /code-reviews`                                                                                                               |
+| `GET /api/code-reviews/:id`                                                      | `GET /code-reviews/{id}`                                                                                                          |
 | `GET /api/dev/pulls`                                                             | `GET /pulls`                                                                                                                      |
 | `GET /api/dev/pull`                                                              | `GET /pulls/{number}`                                                                                                             |
 | `GET /api/pr/view?section=description`                                           | `GET /pulls/{number}/description`                                                                                                 |

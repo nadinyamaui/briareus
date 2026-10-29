@@ -1209,6 +1209,7 @@ describe('the contract', () => {
       'attention.list',
       'ci.runs',
       'client.get',
+      'codeReviews.get',
       'events.stream',
       'homeAssistant.call',
       'homeAssistant.entities',

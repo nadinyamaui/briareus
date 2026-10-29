@@ -14,6 +14,8 @@ import { sessionMailWakeRoutes } from './lib/mail-wake.js';
 import { createMailService, MAIL_PUSH_PATH } from './lib/mail.js';
 import { mailRoutes, mailCallbackRoutes } from './lib/mail-routes.js';
 import { taskHistoryRoutes } from './lib/task-history-routes.js';
+import { codeReviewRoutes } from './lib/code-review-routes.js';
+import { createCodeReviewStore } from './lib/code-review-store.js';
 import { estimateCosts } from './lib/prices.js';
 import { previewFeedbackRoutes } from './lib/preview-feedback.js';
 import { initMemorySelection } from './lib/memory-selection.js';
@@ -832,6 +834,8 @@ api.use(
 );
 
 api.use(memoryMaintenanceRoutes({ listMemories, updateMemory }));
+const codeReviewStore = createCodeReviewStore();
+api.use(codeReviewRoutes({ store: codeReviewStore }));
 api.use(previewFeedbackRoutes({ getJob, getUpload, sendMessage: sendDevMessage }));
 api.use(
   taskHistoryRoutes({
