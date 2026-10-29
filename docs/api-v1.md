@@ -62,11 +62,11 @@ while the database is unavailable.
 
 ## Permissions
 
-| Permission | What it may do                                                                                       |
-| ---------- | ---------------------------------------------------------------------------------------------------- |
-| `read`     | Read the projects it was given: sessions, transcripts, pull requests, findings, usage                |
-| `manage`   | Also start paid agents, send messages, merge, decide findings and delete sessions, on those projects |
-| `admin`    | Everything, on every project: settings, provider keys, SSH approvals, deployments                    |
+| Permission | What it may do                                                                      |
+| ---------- | ----------------------------------------------------------------------------------- |
+| `read`     | Read the projects it was given: sessions, transcripts, pull requests, usage         |
+| `manage`   | Also start paid agents, send messages, merge and delete sessions, on those projects |
+| `admin`    | Everything, on every project: settings, provider keys, SSH approvals, deployments   |
 
 A `read` or `manage` token is held to its project list:
 
@@ -125,7 +125,7 @@ kind, resource or user.
 ### What waits on you
 
 `GET /attention` lists what waits on the caller: an admin sees every
-session's questions, findings and failures, a member their own and the
+session's questions and failures, a member their own and the
 ownerless ones of their projects. SSH commands appear for whoever rules on
 them, and Slack messages only for the owner of the workspace they would go out
 through. `GET /tasks/{id}`, a task's history kept after its sessions are
@@ -164,7 +164,7 @@ shows only the login, `DELETE /me/github` removes it). After that:
 - Their sessions run `gh`, commit and push as them (`GH_TOKEN`, the git
   credential, and the author and committer set to their login and GitHub
   no-reply address). The server's own clones, fetches and setup steps, and the
-  automatic review loop's labels and comments, stay on the server's account.
+  automatic PR actions, stay on the server's account.
 - A disabled user's token is no longer used.
 
 ### Your own mail
@@ -195,7 +195,7 @@ everyone with `GET /users`.
   their types, its answer, the permission it needs (`x-briareus-access`) and
   how it is held to a project (`x-briareus-scope`).
 - A start (`POST /sessions`, `POST /actions`, `POST /pulls/{number}/serve`,
-  `POST /branches/serve`) that names no `provider` runs on the project's configured review runtime, or
+  `POST /branches/serve`) that names no `provider` runs on the project's configured action runtime, or
   the errand's own step runtime. `GET /runtimes` lists what can be named.
 
 ## Routes
@@ -215,7 +215,7 @@ See the [feature overview](features.md) for server capabilities and recent addit
 | The token                | `/`, `/openapi.json`, `/token`, `/events`, `/me/github`, `/me/home-assistant`; `/users`                                                                                                              | read; admin               |
 | Projects                 | `/projects`, `/branches`, `/runtimes`, `/usage`, `/actions`                                                                                                                                          | read / manage             |
 | Pull requests and issues | `/pulls`, `/pulls/{number}` and its files, commits, checks, comments, reviews; `/commits`; `/repo/tree`, `/repo/file`, `/repo/archive`; `/issues/{number}` and its timeline, close; `/project-board` | read / manage             |
-| Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, findings, preview, loops; `/preview/access`                                                                                                  | read / manage             |
+| Sessions                 | `/sessions`, `/sessions/{id}` and its messages, events, preview, loops; `/preview/access`                                                                                                            | read / manage             |
 | Composer                 | `/prompts`, `/uploads`, `/transcribe`, `/providers`                                                                                                                                                  | read to admin             |
 | Memory                   | `/memories`, `/memories/health`                                                                                                                                                                      | read / admin              |
 | Slack inbox              | `/slack/workspaces`, `/slack/workspaces/{id}/conversations`, `people`, `direct-messages`, `events`; conversation history, threads, replies and read positions                                        | your own                  |
@@ -348,55 +348,11 @@ available through guarded tools in opted-in interactive sessions. These
 tools are internal session APIs, separate from the client mail routes.
 See [mailbox setup](../README.md#mail) and [email from a session](email-mcp.md).
 
-## Autonomous review loops
-
-Set `autonomousReviewLoop` to `true` with
-`PUT /api/v1/settings/projects/{id}` and the body
-`{ "autonomousReviewLoop": true }` to automatically fix independently verified
-findings whose benefit outweighs implementation effort and regression risk.
-Every review requires a fresh verifier before publication; its findings block
-includes `assessment: { verified: true, evidence, worthFixing, reason }`.
-Confirmed findings with `worthFixing: false` are optional and do not prolong the
-loop. Previously dismissed/optional findings and findings outside the PR scope
-are not automatically fixed. Missing or incomplete assessments hold the round
-in Findings for a manual decision. A worthwhile low-severity defect can still
-be fixed in later rounds. The fixes are pushed and reviewed
-again through the existing loop; a clean round completes only after the review's
-publishing policy has applied `code-approved`. Author-specific approval rules
-still apply, and a missing approval label keeps the round pending for the existing
-retry window before it stalls.
-
-The setting defaults to `false`. Sessions still need their review loop enabled;
-standalone reviews keep their manual findings workflow. The existing maximum
-round count and repeated-findings checks still stop a loop that cannot converge.
-If automatic triage fails, its held findings remain available for manual retry.
-
 ## Babysitting pull requests
 
-Set `babysitPrs` to `true` with `PUT /api/v1/settings/projects/{id}` and the
-body `{ "babysitPrs": true }` to have the server look after the project's open
-pull requests every 15 minutes. For each non-draft pull request without the
-`blocked` or `do-not-merge` label and without an open session on it, it starts
-at most one errand per round, the first of these that applies and has not run
-on the head commit yet:
-
-1. 🔀 Solve conflicts when the board recommends it (GitHub reports a conflict or
-   the PR carries `has-conflicts`).
-2. 🧪 Fix failing checks when the head commit's checks failed or errored.
-3. ⌕ Code review when the board would recommend one apart from a conflict
-   (`recommended: "review"` once `has-conflicts` is set aside).
-
-Each errand runs at most once per head commit; a new push makes all three
-eligible again. Pull requests opened from a fork are skipped, since their branch
-is not on the project's repository. After three conflict or checks fixes in a
-row that leave the checks failing or the conflict in place, the babysitter stops
-starting those two until the head is green (or has no checks) and mergeable
-again; reviews go on.
-The errands run on the project's review provider, model and effort, and nothing
-starts until one is set. When the project has a PR author
-(`reviewAuthor`), conflicts and checks are only fixed on that author's pull
-requests, while reviews cover every author. A full session pool defers the rest
-to the next round. The setting defaults to `false`.
+`babysitPrs` enables periodic conflict resolution and CI fixes on open pull requests.
+The project’s action runtime is required. Author filters, head-commit deduplication,
+capacity limits and the repeated-push cap still apply; no review or feedback agents run.
 
 ## Pull request data
 
@@ -426,7 +382,6 @@ instead of mixing two revisions.
 | `/pulls/{number}/comments`        | `{ pr, comments, nextPage }`; a comment is `id`, `author`, `body`, `createdAt`, `updatedAt`, `url`                                 |
 | `/pulls/{number}/reviews`         | `{ pr, reviews, nextPage }`; a review is `id`, `author`, `state`, `body`, `commitSha`, `submittedAt`, `url`                        |
 | `/pulls/{number}/review-comments` | `{ pr, reviewComments, nextPage }`; adds `path`, `line`, `originalLine`, `side`, `diffHunk`, `reviewId`, `inReplyTo`               |
-| `/pulls/{number}/findings`        | The findings Briareus's reviews declared, with their verdicts                                                                      |
 | `/commits/{sha}`                  | `{ commit, files, truncated }`: one commit and the files it changed, with patches                                                  |
 | `/issues/{number}`                | `{ issue }`: body, state, labels, type, parent, sub-issues, linked pull requests and Projects v2 fields                            |
 | `/issues/{number}/timeline`       | `{ issue, events, nextPage }`: comments and events, oldest first; see `TimelineEvent` for the kinds                                |

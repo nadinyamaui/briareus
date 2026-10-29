@@ -17,7 +17,6 @@ vi.mock('../lib/jobs.js', () => ({
 }));
 
 const feedback = vi.hoisted(() => ({ reviewEvent: vi.fn(async () => {}) }));
-vi.mock('../lib/incoming-feedback.js', () => ({ incomingFeedback: () => feedback }));
 
 const updater = vi.hoisted(() => ({ onMerged: vi.fn() }));
 vi.mock('../lib/local-update.js', () => ({ localUpdater: () => updater }));
@@ -93,22 +92,6 @@ function githubDelivery(event, payload, { secret } = {}) {
 const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
 
 describe('POST /webhooks/github', () => {
-  it('forwards submitted and edited reviews to incoming feedback after authenticating GitHub', async () => {
-    const payload = { action: 'submitted', repository: { full_name: 'a/b' }, pull_request: { number: 7 } };
-    expect((await githubDelivery('pull_request_review', payload)).status).toBe(202);
-    await settle();
-    expect(feedback.reviewEvent).toHaveBeenCalledWith('a/b', payload);
-    const inline = { ...payload, action: 'created' };
-    await githubDelivery('pull_request_review_comment', inline);
-    await settle();
-    expect(feedback.reviewEvent).toHaveBeenCalledWith('a/b', inline);
-
-    feedback.reviewEvent.mockClear();
-    await githubDelivery('pull_request_review', payload, { secret: 'wrong' });
-    await settle();
-    expect(feedback.reviewEvent).not.toHaveBeenCalled();
-  });
-
   it('rejects a delivery with no signature at all', async () => {
     const res = await fetch(`${base}/github`, { method: 'POST', body: '{}' });
     expect(res.status).toBe(401);

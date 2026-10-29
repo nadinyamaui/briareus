@@ -381,7 +381,7 @@ describe('projectEnvRoutes', () => {
 
   it.each([
     ['a member', () => (job.ownerId = 2)],
-    ['a review session', () => (job.reviewBranch = 'feature')],
+    ['a review session', () => (job.qaBranch = 'feature')],
     ['a worker', () => (job.parentId = 'orchestrator')],
     ['an unattended turn', () => (job.unattendedTurn = true)],
     ['a read-only analyst', () => (job.readOnly = true)],

@@ -92,11 +92,11 @@ describe('session print authorization', () => {
 
   it.each([
     'parentId',
-    'loopParentId',
     'qaParentId',
-    'loopFixParentId',
+    'qaParentId',
+    'qaParentId',
     'autoClose',
-    'reviewBranch',
+    'qaBranch',
     'qaBranch',
     'readOnly',
     'preview',

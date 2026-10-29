@@ -101,36 +101,6 @@ describe('the JSON-RPC frame', () => {
 
     expect(res.result.serverInfo).toEqual({ name: 'reviewer-workers', version: '1.0.0' });
   });
-
-  it('lists the worker tools, with the two spawns requiring title and prompt', async () => {
-    const s = await boot();
-
-    const [res] = await s.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
-
-    expect(res.result.tools.map((t) => t.name)).toEqual([
-      'start_pr_action',
-      'spawn_worker',
-      'fix_tooling',
-      'list_workers',
-      'read_worker',
-      'read_worker_question',
-      'answer_worker_question',
-      'send_to_worker',
-      'triage_findings',
-      'retry_review',
-      'set_worker_qa_loop',
-      'close_worker',
-    ]);
-    expect(res.result.tools.find((t) => t.name === 'spawn_worker').inputSchema.required).toEqual([
-      'title',
-      'prompt',
-    ]);
-    expect(res.result.tools[0].inputSchema.properties).not.toHaveProperty('role');
-    expect(res.result.tools.find((t) => t.name === 'fix_tooling').inputSchema.required).toEqual([
-      'title',
-      'prompt',
-    ]);
-  });
 });
 
 describe('the worker tools', () => {
@@ -159,7 +129,6 @@ describe('the worker tools', () => {
         model: 'claude-haiku-4-5',
         effort: 'low',
         branch: 'dev-x',
-        reviewLoop: false,
         qaLoop: false,
       }),
     });
@@ -184,27 +153,8 @@ describe('the worker tools', () => {
     );
     expect(JSON.parse(fetched.mock.lastCall[1].body)).toMatchObject({
       repo: 'acme/companion',
-      reviewLoop: true,
     });
     expect(res.result.content[0].text).toContain('repo acme/companion');
-  });
-
-  it('spawn_worker passes the loops the orchestrator asked for', async () => {
-    const fetched = stubFetch(reply({ status: 201, body: { session: worker() } }));
-    const s = await boot();
-
-    await s.send(
-      callTool('spawn_worker', {
-        title: 'Fix the login',
-        prompt: 'Do it',
-        review_loop: true,
-        qa_loop: true,
-      }),
-    );
-
-    const body = JSON.parse(fetched.mock.calls[0][1].body);
-    expect(body.reviewLoop).toBe(true);
-    expect(body.qaLoop).toBe(true);
   });
 
   it('fix_tooling posts the report flagged as tooling, and says where the fix lands', async () => {
@@ -282,23 +232,19 @@ describe('the worker tools', () => {
         body: {
           sessions: [
             worker({
-              reviewLoop: { rounds: 2, reviewing: true, fixing: false, done: false },
               qaLoop: { running: false, done: false, failedScenarios: 0 },
             }),
             worker({
               id: 'w2',
-              reviewLoop: { rounds: 3, reviewing: false, fixing: false, done: true },
               qaLoop: { running: false, done: true, failedScenarios: 2 },
             }),
             // A round whose review is over and whose findings are still being
             // read off the pull request: mid-round, not waiting for a push.
             worker({
               id: 'w3',
-              reviewLoop: { rounds: 1, reviewing: false, awaitingResult: true, done: false },
             }),
             worker({
               id: 'w4',
-              reviewLoop: { rounds: 1, done: true },
               qaLoop: {
                 running: false,
                 done: false,
@@ -309,7 +255,6 @@ describe('the worker tools', () => {
             // converged, this cannot truthfully be "queued behind" review.
             worker({
               id: 'w5',
-              reviewLoop: { rounds: 1, done: true },
               qaLoop: { running: false, done: false },
             }),
           ],
@@ -321,17 +266,14 @@ describe('the worker tools', () => {
     const [res] = await s.send(callTool('list_workers', {}));
 
     const lines = res.result.content[0].text.split('\n');
-    expect(lines[0]).toContain('review loop round 2: reviewing');
-    expect(lines[0]).toContain('QA queued behind the review loop');
-    expect(lines[1]).toContain('review loop round 3: converged');
+    expect(lines[0]).toContain('QA waiting for the worker to settle');
     expect(lines[1]).toContain('QA failed: 2 scenario(s)');
-    expect(lines[2]).toContain("review loop round 1: reading the round's result off the pull request");
     expect(lines[3]).toContain(
       'QA failed (Claude HQ exited with code 1); not running — send_to_worker starts a retry when the worker settles',
     );
     expect(lines[3]).not.toContain('QA queued');
     expect(lines[4]).toContain(
-      'QA retry pending after an incomplete run; not running — send_to_worker starts a retry when the worker settles',
+      'QA waiting for the worker to settle; not running — send_to_worker starts a retry when the worker settles',
     );
     expect(lines[4]).not.toContain('QA queued');
   });
@@ -341,8 +283,8 @@ describe('the worker tools', () => {
       reply({
         body: {
           sessions: [
-            worker({ reviewLoop: { rounds: 1, reviewing: true, waitingForDatabase: true } }),
-            worker({ id: 'w2', reviewLoop: { rounds: 2, fixing: true, waitingForDatabase: true } }),
+            worker({}),
+            worker({ id: 'w2' }),
             worker({ id: 'w3', qaLoop: { running: true, waitingForDatabase: true } }),
           ],
         },
@@ -351,85 +293,7 @@ describe('the worker tools', () => {
     const s = await boot();
     const [res] = await s.send(callTool('list_workers', {}));
     const lines = res.result.content[0].text.split('\n');
-    expect(lines[0]).toContain('review loop round 1: waiting for a database slot; starts automatically');
-    expect(lines[1]).toContain('review loop round 2: waiting for a database slot; starts automatically');
     expect(lines[2]).toContain('QA waiting for a database slot; starts automatically');
-  });
-
-  it('list_workers tells a round that could not run from a loop that converged', async () => {
-    stubFetch(
-      reply({
-        body: {
-          sessions: [
-            worker({
-              reviewLoop: {
-                rounds: 2,
-                done: false,
-                failure: { round: 2, reason: 'Claude HD exited with code 1' },
-              },
-            }),
-          ],
-        },
-      }),
-    );
-    const s = await boot();
-
-    const [res] = await s.send(callTool('list_workers', {}));
-
-    expect(res.result.content[0].text).toContain(
-      'review loop round 2: round 2 could not run (Claude HD exited with code 1) — nothing approved, retry_review re-runs it',
-    );
-  });
-
-  it('retry_review re-runs the round, on another runtime when one is named', async () => {
-    const fetched = stubFetch(reply({ body: { session: worker(), started: true, round: 3 } }));
-    const s = await boot();
-
-    const [res] = await s.send(
-      callTool('retry_review', { id: 'w1', provider_id: 16, model: 'claude-opus-5' }),
-    );
-
-    expect(fetched).toHaveBeenCalledWith(`${URL_BASE}/api/agent/sessions/w1/retry-review`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ providerId: 16, model: 'claude-opus-5' }),
-    });
-    expect(res.result.content[0].text).toMatch(/^Review round 3 is running again\./);
-  });
-
-  it('retry_review says a queued round starts when the worker is free', async () => {
-    stubFetch(reply({ body: { session: worker(), started: false, round: 2 } }));
-    const s = await boot();
-
-    const [res] = await s.send(callTool('retry_review', { id: 'w1' }));
-
-    expect(res.result.content[0].text).toMatch(/^The round is queued/);
-  });
-
-  it('list_workers exposes a transient PR discovery failure and retry state', async () => {
-    stubFetch(
-      reply({
-        body: {
-          sessions: [
-            worker({
-              reviewLoop: {
-                rounds: 0,
-                discoveryError: 'GitHub returned 503',
-                discoveryRetries: 1,
-                discoveryRetryPending: true,
-              },
-            }),
-          ],
-        },
-      }),
-    );
-    const s = await boot();
-
-    const [res] = await s.send(callTool('list_workers', {}));
-
-    expect(res.result.content[0].text).toContain(
-      'review loop round 0: PR discovery failed (GitHub returned 503); retry 1/3 pending',
-    );
   });
 
   it('list_workers formats one line per worker, waiting state included', async () => {
@@ -538,110 +402,6 @@ describe('the worker tools', () => {
     expect(res.result.content[0].text).toMatch(/^Sent\. Worker is now: w1 \[running\]/);
   });
 
-  const heldRound = {
-    prNumber: 7,
-    round: 2,
-    findings: [
-      {
-        key: 'abc123',
-        severity: 'high',
-        title: 'Race in the cache',
-        file: 'lib/c.js',
-        line: 9,
-        parked: null,
-      },
-      { key: 'def456', severity: 'low', title: 'Nit', file: null, line: null, parked: 'below the floor' },
-    ],
-  };
-
-  it('list_workers says a round is waiting for the user’s triage', async () => {
-    stubFetch(
-      reply({
-        body: {
-          sessions: [
-            worker({ reviewLoop: { rounds: 2, reviewing: false, fixing: false, triage: heldRound } }),
-          ],
-        },
-      }),
-    );
-    const s = await boot();
-
-    const [res] = await s.send(callTool('list_workers', {}));
-
-    expect(res.result.content[0].text).toContain(
-      "review loop round 2: 2 finding(s) awaiting the user's triage",
-    );
-  });
-
-  it('read_worker lists the held findings by key, with the loop’s advice', async () => {
-    stubFetch(
-      reply({
-        body: {
-          session: worker({ reviewLoop: { rounds: 2, triage: heldRound } }),
-          events: [{ kind: 'text', text: 'Pushed.' }],
-        },
-      }),
-    );
-    const s = await boot();
-
-    const [res] = await s.send(callTool('read_worker', { id: 'w1' }));
-
-    const text = res.result.content[0].text;
-    expect(text).toContain(
-      "Review round 2 of PR #7 is on hold, waiting for the user's verdicts in the dashboard's ⚑ Findings screen",
-    );
-    expect(text).toContain('- [abc123] HIGH: Race in the cache (lib/c.js:9)');
-    expect(text).toContain('- [def456] LOW: Nit — the loop would have parked it: below the floor');
-  });
-
-  it('triage_findings posts the verdicts and says what the loop did with them', async () => {
-    const fetched = stubFetch(
-      reply({
-        body: {
-          session: worker({ reviewLoop: { rounds: 2, fixing: true, triage: null } }),
-          fixing: true,
-          converged: false,
-        },
-      }),
-      reply({
-        body: {
-          session: worker({ reviewLoop: { rounds: 2, done: true, triage: null } }),
-          fixing: false,
-          converged: true,
-        },
-      }),
-    );
-    const s = await boot();
-
-    const verdicts = [
-      { key: 'abc123', decision: 'fix' },
-      { key: 'def456', decision: 'dismissed', reason: 'a nit on generated code' },
-    ];
-    const [res] = await s.send(
-      callTool('triage_findings', { id: 'w1', verdicts, note: 'Mind the lock order.' }),
-    );
-
-    expect(fetched.mock.calls[0][0]).toBe(`${URL_BASE}/api/agent/sessions/w1/triage`);
-    expect(JSON.parse(fetched.mock.calls[0][1].body)).toEqual({ verdicts, note: 'Mind the lock order.' });
-    expect(res.result.content[0].text).toMatch(
-      /^Triaged\. A fix session is implementing what you kept.*Worker is now: w1 .*review loop round 2: fixing findings/,
-    );
-
-    const [again] = await s.send(callTool('triage_findings', { id: 'w1', verdicts }));
-    expect(again.result.content[0].text).toMatch(/^Triaged\. Nothing left to fix: the loop converged/);
-  });
-
-  it('triage_findings without a worker id says which tool finds it', async () => {
-    const fetched = stubFetch();
-    const s = await boot();
-
-    const [res] = await s.send(callTool('triage_findings', { verdicts: [] }));
-
-    expect(res.result.isError).toBe(true);
-    expect(res.result.content[0].text).toMatch(/needs the worker session id/);
-    expect(fetched).not.toHaveBeenCalled();
-  });
-
   it('close_worker posts the close', async () => {
     const fetched = stubFetch(reply({ body: { session: worker({ status: 'closed' }) } }));
     const s = await boot();
@@ -718,64 +478,6 @@ describe('set_worker_qa_loop', () => {
     const [res] = await s.send(callTool('set_worker_qa_loop', { id: 'w1', on: true }));
     expect(res.result.isError).toBe(true);
     expect(res.result.content[0].text).toContain('turn the review loop on first');
-  });
-});
-
-describe('review/fix question tools', () => {
-  it('lists a paused fix with a usable parent-scoped recovery command', async () => {
-    stubFetch(
-      reply({
-        body: {
-          sessions: [
-            worker({
-              reviewLoop: { rounds: 4, fixing: true },
-              pendingWorkerQuestion: {
-                childId: 'f1',
-                role: 'fix',
-                status: 'idle',
-                questionSeq: 9,
-                answerable: true,
-              },
-            }),
-          ],
-        },
-      }),
-    );
-    const s = await boot();
-    const [res] = await s.send(callTool('list_workers', {}));
-    expect(res.result.content[0].text).toContain('review/fix paused on a question');
-    expect(res.result.content[0].text).toContain("read_worker_question({id: 'w1'})");
-    expect(res.result.content[0].text).not.toContain('fixing findings');
-  });
-  it('reads and answers using parent id and exact child question token', async () => {
-    const fetched = stubFetch(
-      reply({
-        body: {
-          question: { role: 'fix', childId: 'f1', questionSeq: 9, status: 'idle', answerable: true },
-          events: [{ kind: 'ask', question: 'Which option?' }],
-        },
-      }),
-      reply({ body: { session: worker() } }),
-    );
-    const s = await boot();
-    const [res] = await s.send(callTool('read_worker_question', { id: 'w1', tail: 4, full_text: true }));
-    expect(fetched.mock.calls[0][0]).toBe(`${URL_BASE}/api/agent/sessions/w1/question?tail=4&full_text=true`);
-    expect(res.result.content[0].text).toContain('child_id=f1, question_seq=9');
-    expect(res.result.content[0].text).toContain('Which option?');
-    await s.send(
-      callTool('answer_worker_question', {
-        id: 'w1',
-        child_id: 'f1',
-        question_seq: 9,
-        message: 'Option one',
-      }),
-    );
-    expect(fetched.mock.calls[1][0]).toBe(`${URL_BASE}/api/agent/sessions/w1/question`);
-    expect(JSON.parse(fetched.mock.calls[1][1].body)).toEqual({
-      childId: 'f1',
-      questionSeq: 9,
-      text: 'Option one',
-    });
   });
 });
 
