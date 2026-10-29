@@ -169,6 +169,9 @@ a verdict, collapsible findings grouped by severity, reviewed commit references,
 and validation results and limitations; a “Not fixed” section and acceptance-criteria
 checklist are included when applicable. The same Markdown output
 is saved as `review-summary.md` outside the checkout and shown in the session.
+The server checks for the reviewing account’s top-level overview and publishes
+the saved output if the CLI omitted it; publication failures retain the session
+as failed instead of reporting a completed review.
 When the review finishes, its session is automatically deleted and its workspace
 and database are released; review comments remain on the pull request.
 

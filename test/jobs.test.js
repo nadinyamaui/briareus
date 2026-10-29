@@ -1279,7 +1279,11 @@ describe('createDevSession: the validation gauntlet', () => {
 });
 
 describe('Claude code review output', () => {
-  it.each([0, 1])('captures the complete markdown stdout and respects exit code %s', async (code) => {
+  it.each([
+    { code: 0, publicationFails: false },
+    { code: 1, publicationFails: false },
+    { code: 0, publicationFails: true },
+  ])('captures stdout and requires publication: %o', async ({ code, publicationFails }) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-review-'));
     const configDir = path.join(root, 'claude-config');
     fs.mkdirSync(configDir);
@@ -1291,6 +1295,21 @@ describe('Claude code review output', () => {
     let child;
     let invocation;
     let stdin = '';
+    const previousGithub = githubRest.getMockImplementation();
+    const posts = [];
+    githubRest.mockImplementation(async (_cfg, method, route, body) => {
+      if (route === '/user') return { ok: true, json: async () => ({ login: 'reviewer' }) };
+      if (method === 'GET' && route.includes('/comments?')) return { ok: true, json: async () => [] };
+      if (method === 'POST' && route.endsWith('/comments')) {
+        posts.push(body);
+        return {
+          ok: !publicationFails,
+          status: publicationFails ? 403 : 201,
+          json: async () => ({ html_url: 'https://github.com/acme/shop/pull/3747#issuecomment-1' }),
+        };
+      }
+      return previousGithub?.(_cfg, method, route, body);
+    });
     spawn.mockImplementation((cmd, args, opts) => {
       if (cmd !== '/mock/review-agent') return realSpawn(cmd, args, opts);
       invocation = { args, opts };
@@ -1350,11 +1369,25 @@ describe('Claude code review output', () => {
       expect(fs.readFileSync(summaryPath, 'utf8')).toBe(summary);
       child.emit('close', code);
       await vi.waitFor(() => expect(job.status).toBe('idle'));
-      expect(job.error).toBe(code === 0 ? null : 'Claude entry exited with code 1');
+      expect(job.error).toBe(
+        code !== 0
+          ? 'Claude entry exited with code 1'
+          : publicationFails
+            ? 'Claude entry reported a failed turn'
+            : null,
+      );
+      expect(posts).toHaveLength(code === 0 ? 1 : 0);
+      if (code === 0) expect(posts[0].body).toContain(summary);
+      if (publicationFails) {
+        expect(job.recoveryTurn.completed).toBe(false);
+        expect(
+          job.events.some((event) => event.text?.includes('Could not publish code review overview')),
+        ).toBe(true);
+      }
       expect(fs.readFileSync(summaryPath, 'utf8')).toBe(summary);
       expect(job.events.findLast((e) => e.kind === 'result')).toMatchObject({
         text: summary,
-        isError: code !== 0,
+        isError: code !== 0 || publicationFails,
       });
       expect(job.events.some((e) => e.text === `[review-summary.md](${summaryPath})`)).toBe(true);
       expect(fs.existsSync(path.join(root, 'review-summary.md'))).toBe(false);
@@ -1365,6 +1398,7 @@ describe('Claude code review output', () => {
       spawn.mockReset();
       getProviderForJob.mockReset();
       captureProviderAuth.mockReset();
+      githubRest.mockImplementation(previousGithub);
       fs.rmSync(root, { recursive: true, force: true });
       fs.rmSync(summaryPath, { force: true });
     }
