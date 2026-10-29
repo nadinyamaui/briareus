@@ -1508,7 +1508,9 @@ describe('native Codex code review', () => {
     expect(publish.child.prompt).toContain('Verify every finding independently');
     expect(publish.child.prompt).toContain('assess whether its fix is worth');
     expect(publish.child.prompt).toContain('Not fixed');
-    expect(publish.child.prompt).toContain(providerTools.CODE_REVIEW_SUMMARY_PROMPT);
+    expect(publish.child.prompt).toContain('found nothing to report');
+    expect(publish.child.prompt).toContain('do not call the review clean');
+    expect(publish.child.prompt).toContain('Never claim checks or verification you did not perform');
     expect(publish.child.prompt).toContain(head);
     expect(publish.child.prompt).toContain('<workspace-context>');
     expect(job.recoveryTurn).toMatchObject({
@@ -1524,7 +1526,7 @@ describe('native Codex code review', () => {
     expect(fs.existsSync(path.join(root, 'review-summary.md'))).toBe(false);
   });
 
-  it('keeps the session through discovery and publication, then deletes it and releases its database', async () => {
+  it('keeps the session through discovery and publication, then closes it, keeping its record', async () => {
     Object.assign(job, {
       autoClose: true,
       status: 'interrupted',
@@ -1544,10 +1546,11 @@ describe('native Codex code review', () => {
     const publish = invocations[1];
     publish.child.complete({ input_tokens: 30, output_tokens: 8, cached_input_tokens: 0 });
     publish.child.emit('close', 0);
-    await vi.waitFor(() => expect(getJob(id)).toBeNull());
+    await vi.waitFor(() => expect(job.status).toBe('closed'));
     expect(job.error).toBeNull();
     expect(dropSessionDatabase).toHaveBeenCalledWith(job, expect.any(Function));
-    expect(deleteJob).toHaveBeenCalledWith(id, null);
+    expect(getJob(id)).toBe(job);
+    expect(deleteJob).not.toHaveBeenCalledWith(id, null);
   });
 
   it.each(['failure', 'empty', 'missing', 'canceled'])(
