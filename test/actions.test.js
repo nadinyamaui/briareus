@@ -4,7 +4,10 @@ const stubs = vi.hoisted(() => ({
   readFeedbackSnapshot: vi.fn(),
   feedbackAssessmentSpec: vi.fn(),
 }));
-vi.mock('../lib/feedback-assessment.js', () => stubs);
+vi.mock('../lib/feedback-assessment.js', async (importOriginal) => ({
+  incomingFeedbackSources: (await importOriginal()).incomingFeedbackSources,
+  ...stubs,
+}));
 
 // The prompt builders are lib/prtasks.js's own business, tested there; here
 // they only need to prove the action handed them the right facts.
@@ -22,9 +25,20 @@ vi.mock('../lib/prtasks.js', () => ({
 import { ACTIONS, getAction, listActions, actionSessionSpec } from '../lib/actions.js';
 import * as prtasks from '../lib/prtasks.js';
 
+const snapshot = {
+  sha: 'abc',
+  author: 'Morgan',
+  sources: [
+    { id: 'review:1', author: 'sergio', bot: false },
+    { id: 'comment:2', author: 'morgan', bot: false },
+    { id: 'comment:3', author: 'ci[bot]', bot: true },
+    { id: 'issue:4', author: 'qa-team', bot: false },
+  ],
+};
+
 beforeEach(() => {
   prtasks.testSheetPrompt.mockClear();
-  stubs.readFeedbackSnapshot.mockReset().mockResolvedValue({ sha: 'abc', sources: [] });
+  stubs.readFeedbackSnapshot.mockReset().mockResolvedValue(snapshot);
   stubs.feedbackAssessmentSpec
     .mockReset()
     .mockReturnValue({ prompt: 'ASSESS', autoClose: true, reviewLoop: false });
@@ -314,9 +328,23 @@ describe('actionSessionSpec', () => {
   it('requires a canonical feedback snapshot and prepares an assessment instead of a fix', async () => {
     const spec = await actionSessionSpec(getAction('implement-feedback'), context);
     expect(stubs.readFeedbackSnapshot).toHaveBeenCalledWith('a/b', 4);
-    expect(stubs.feedbackAssessmentSpec).toHaveBeenCalledWith(null, { sha: 'abc', sources: [] });
     expect(spec).toEqual({ reviewLoop: false, autoClose: true, prompt: 'ASSESS' });
     stubs.readFeedbackSnapshot.mockRejectedValueOnce(new Error('rate limited'));
     await expect(actionSessionSpec(getAction('implement-feedback'), context)).rejects.toThrow('rate limited');
+  });
+
+  // On the user's own PR, Briareus's reviews are posted as the author and were already
+  // triaged; assessing them again listed every finding the PR ever had.
+  it("assesses only other people's feedback, never the author's own comments or bots", async () => {
+    await actionSessionSpec(getAction('implement-feedback'), context);
+    expect(stubs.feedbackAssessmentSpec).toHaveBeenCalledWith(null, snapshot, ['review:1', 'issue:4']);
+  });
+
+  it('starts nothing when only the author or bots commented', async () => {
+    stubs.readFeedbackSnapshot.mockResolvedValueOnce({ ...snapshot, sources: snapshot.sources.slice(1, 3) });
+    await expect(actionSessionSpec(getAction('implement-feedback'), context)).rejects.toThrow(
+      '#4 has no feedback from anyone but its author to assess',
+    );
+    expect(stubs.feedbackAssessmentSpec).not.toHaveBeenCalled();
   });
 });
