@@ -620,12 +620,20 @@ describe('buildArgs', () => {
       '--permission-mode',
       'bypassPermissions',
       '--append-system-prompt',
-      "After posting the inline comments, end with a markdown summary for the PR: a one-paragraph description of what the change does, a count line (N critical, N high, N medium, N low findings), each finding in a collapsible <details> section grouped by severity, a 'Not fixed' section, and a checklist of what was verified against the issue's acceptance criteria.",
+      expect.stringContaining('Post one top-level summary comment on the pull request'),
       '--output-format',
       'text',
       '--session-id',
       'review-session',
     ]);
+    const summaryPrompt = built.args[built.args.indexOf('--append-system-prompt') + 1];
+    expect(summaryPrompt).toContain('# Code Review\n\n---');
+    expect(summaryPrompt).toContain('N critical, N high, N medium, N low findings.');
+    expect(summaryPrompt).toContain('<summary>🔵 Low findings</summary>');
+    expect(summaryPrompt).toContain('Reviewed head `<head SHA>` against base branch `<base branch>`');
+    expect(summaryPrompt).toContain('Validation: summarize the checks actually run');
+    expect(summaryPrompt).toContain('returning the summary only in stdout is insufficient');
+    expect(summaryPrompt).toContain('When existing feedback is rejected');
     expect(built).toMatchObject({ promptVia: 'argument', textOutput: true });
   });
 
