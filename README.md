@@ -164,8 +164,10 @@ Code review currently supports Claude Code only. It prepares a workspace on the
 PR’s head branch and runs `claude -p "/code-review <effort> --comment"`
 with the selected provider’s `CLAUDE_CONFIG_DIR`, model and effort, and
 `--permission-mode bypassPermissions`; its empty `--allowedTools` value restricts nothing. An appended system prompt requests
-a change description, severity counts, collapsible findings grouped by severity,
-a “Not fixed” section and a checklist of acceptance criteria verified. The output
+a top-level “Code Review” PR comment with a change description, severity counts,
+a verdict, collapsible findings grouped by severity, reviewed commit references,
+and validation results and limitations; a “Not fixed” section and acceptance-criteria
+checklist are included when applicable. The same Markdown output
 is saved as `review-summary.md` outside the checkout and shown in the session.
 When the review finishes, its session is automatically deleted and its workspace
 and database are released; review comments remain on the pull request.
