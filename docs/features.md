@@ -200,7 +200,8 @@ These additions are present in the server revision documented here:
   instructions stay active when browser startup fails.
 - Repository trees, files and tarball downloads are available through the
   client API. Configured MCP servers support OAuth sign-in at setup.
-- Orchestrators can resolve conflicts on existing PRs through `start_pr_action`
+- Orchestrators can run code review or resolve conflicts on existing PRs through
+  `start_pr_action`
   and control worker QA independently.
 - Pull request reads share cached work and return a retryable 429 when the
   GitHub allowance is exhausted.
