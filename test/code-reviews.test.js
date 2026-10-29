@@ -179,6 +179,12 @@ describe('pullCodeReviewRoutes', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ repo: 'acme/shop', pr: 12, ...body }),
     }).then(async (r) => ({ status: r.status, json: await r.json() }));
+  const updateReview = (body, reviewId = 7) =>
+    fetch(`${base}/api/pr/code-reviews/${reviewId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: 'acme/shop', pr: 12, ...body }),
+    }).then(async (r) => ({ status: r.status, json: await r.json() }));
 
   beforeEach(async () => {
     asked = [];
@@ -189,9 +195,18 @@ describe('pullCodeReviewRoutes', () => {
         repo: 'acme/shop',
         prNumber: 12,
         status: 'completed',
+        handlingStatus: 'pending',
         findings: [{ id: 3, codeReviewId: 7, severity: 'high', shouldFix: 'fix', title: 'Null deref' }],
       },
-      { id: 5, jobId: 'rev1', repo: 'acme/shop', prNumber: 12, status: 'failed', findings: [] },
+      {
+        id: 5,
+        jobId: 'rev1',
+        repo: 'acme/shop',
+        prNumber: 12,
+        status: 'failed',
+        handlingStatus: 'pending',
+        findings: [],
+      },
     ];
     store = {
       listPullCodeReviews: async (repo, prNumber, limit) => {
@@ -203,6 +218,11 @@ describe('pullCodeReviewRoutes', () => {
         if (prNumber === 99) throw new Error('database down');
         return stored.find((r) => r.repo === repo && r.prNumber === prNumber && r.id === id) || null;
       }),
+      setPullCodeReviewHandlingStatus: vi.fn(async (repo, prNumber, id, handlingStatus) => {
+        const review = await store.getPullCodeReview(repo, prNumber, id);
+        return review ? Object.assign(review, { handlingStatus }) : null;
+      }),
+      listCodeReviewFindings: async (reviewId) => stored.find((r) => r.id === reviewId)?.findings || [],
       getCodeReviewFinding: async (reviewId, id) =>
         stored.find((r) => r.id === reviewId)?.findings.find((f) => f.id === id) || null,
       updateCodeReviewFinding: vi.fn(async (reviewId, id, changes) => {
@@ -233,9 +253,18 @@ describe('pullCodeReviewRoutes', () => {
         repo: 'acme/shop',
         prNumber: 12,
         status: 'completed',
+        handlingStatus: 'pending',
         findings: [{ id: 3, severity: 'high', shouldFix: 'fix', title: 'Null deref' }],
       },
-      { id: 5, sessionId: 'rev1', repo: 'acme/shop', prNumber: 12, status: 'failed', findings: [] },
+      {
+        id: 5,
+        sessionId: 'rev1',
+        repo: 'acme/shop',
+        prNumber: 12,
+        status: 'failed',
+        handlingStatus: 'pending',
+        findings: [],
+      },
     ]);
   });
 
@@ -359,5 +388,67 @@ describe('pullCodeReviewRoutes', () => {
     });
     store.updateCodeReviewFinding.mockResolvedValueOnce(null);
     expect((await update({ shouldFix: 'dismiss' })).status).toBe(404);
+  });
+
+  it('marks a review handled and reopens it without changing its execution status or findings', async () => {
+    const original = (await read({ repo: 'acme/shop', pr: 12 })).json.codeReviews[0];
+    for (const handlingStatus of ['handled', 'pending']) {
+      expect(await updateReview({ handlingStatus, repo: 'Acme/Shop' })).toEqual({
+        status: 200,
+        json: { review: { ...original, handlingStatus } },
+      });
+      expect((await read({ repo: 'acme/shop', pr: 12 })).json.codeReviews[0].handlingStatus).toBe(
+        handlingStatus,
+      );
+    }
+    expect(store.setPullCodeReviewHandlingStatus).toHaveBeenLastCalledWith('acme/shop', 12, 7, 'pending');
+    expect(store.updateCodeReviewFinding).not.toHaveBeenCalled();
+  });
+
+  it('keeps handling an explicit decision rather than inferring it from finding verdicts', async () => {
+    await update({ shouldFix: 'dismiss', comments: 'Caller validates the input' });
+    expect((await read({ repo: 'acme/shop', pr: 12 })).json.codeReviews[0].handlingStatus).toBe('pending');
+    expect((await updateReview({ handlingStatus: 'handled' })).json.review).toMatchObject({
+      handlingStatus: 'handled',
+      findings: [{ shouldFix: 'dismiss' }],
+    });
+    await update({ comments: 'Added evidence' });
+    expect((await read({ repo: 'acme/shop', pr: 12 })).json.codeReviews[0].handlingStatus).toBe('handled');
+  });
+
+  it('scopes review handling to the named repository and pull request', async () => {
+    for (const [body, reviewId] of [
+      [{ repo: 'acme/second' }, 7],
+      [{ repo: 'acme/unknown' }, 7],
+      [{ pr: 13 }, 7],
+      [{}, 8],
+    ]) {
+      expect((await updateReview({ handlingStatus: 'handled', ...body }, reviewId)).status).toBe(404);
+    }
+    expect(stored.every((r) => r.handlingStatus === 'pending')).toBe(true);
+  });
+
+  it('rejects invalid review updates and reports database failures', async () => {
+    for (const body of [
+      {},
+      { handlingStatus: null },
+      { handlingStatus: true },
+      { handlingStatus: 'done' },
+      { handlingStatus: 'handled', status: 'completed' },
+      { handlingStatus: 'handled', shouldFix: 'optional' },
+      { handlingStatus: 'handled', pr: 0 },
+      { handlingStatus: 'handled', pr: 'bad' },
+    ]) {
+      expect((await updateReview(body)).status).toBe(400);
+    }
+    for (const reviewId of ['bad', '0', '-1', '1.5', '9007199254740992']) {
+      expect((await updateReview({ handlingStatus: 'handled' }, reviewId)).status).toBe(400);
+    }
+    expect(store.setPullCodeReviewHandlingStatus).not.toHaveBeenCalled();
+    store.setPullCodeReviewHandlingStatus.mockRejectedValueOnce(new Error('write failed'));
+    expect(await updateReview({ handlingStatus: 'handled' })).toMatchObject({
+      status: 503,
+      json: { error: 'write failed' },
+    });
   });
 });

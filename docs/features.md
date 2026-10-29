@@ -77,6 +77,14 @@ sending `repo` and the fields to change. For example,
 records a decision not to fix a real issue; `dismiss` rejects a refuted finding,
 `fix` requires a fix, and `null` clears the verdict. Omitted fields stay unchanged.
 
+Each review also carries `handlingStatus`: `pending` until someone has addressed
+its findings or decided not to fix them, then `handled`. Clients set this explicitly
+with `PATCH /api/v1/pulls/{number}/code-reviews/{reviewId}` and a body such as
+`{"repo":"acme/shop","handlingStatus":"handled"}`; sending `pending` reopens it.
+It is independent of the agent's `running`/`completed`/`failed` execution status
+and the individual findings' verdicts. Existing and new reviews start as `pending`,
+and rerunning a review in the same session resets it to `pending`.
+
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).
 

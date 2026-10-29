@@ -319,6 +319,19 @@ Read the code reviews Briareus sessions ran on a pull request, with their findin
 
 **Returns** `{ codeReviews: CodeReview[] }`. Reads Briareus’s own records, not GitHub: the latest 20 reviews, newest first, each with every finding it registered and the verification step’s `shouldFix` verdict on it. A rerun of a review in the same session replaces that review’s findings. A pull request with none answers an empty list; an unreadable database is 503.
 
+### `PATCH /pulls/{number}/code-reviews/{reviewId}`
+
+Mark a stored code review’s findings handled or reopen it as pending. Needs `manage`, held to `repo`.
+
+**Body**
+
+| Field                         | Type               |                                                                                                                                         |
+| ----------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `repo` **required**           | `string`           | A project, as `owner/name`                                                                                                              |
+| `handlingStatus` **required** | `pending\|handled` | Whether someone has addressed the findings or decided not to fix them; explicitly set by a client, pending by default and after a rerun |
+
+**Returns** `{ review: CodeReview }`. Use a review id from GET /pulls/{number}/code-reviews. Set handlingStatus to handled after addressing the findings or deciding not to fix them, or pending to reopen it. This is an explicit client decision, independent of the execution status (running/completed/failed) and of individual shouldFix verdicts; it does not verify fixes or start an agent. New and existing reviews default to pending; rerunning discovery in the same session resets it to pending. The review must belong to the named repository and pull request, otherwise 404; invalid values, missing handlingStatus and unknown fields get 400. Database failures get 503.
+
 ### `PATCH /pulls/{number}/code-reviews/{reviewId}/findings/{findingId}`
 
 Update a stored code review finding, including its verdict and the reason for not fixing it. Needs `manage`, held to `repo`.
@@ -2808,31 +2821,32 @@ A comment on a line of a pull request’s diff.
 
 A code review a session ran on a pull request, as Briareus stored it.
 
-| Field           | Type                         |                                                                               |
-| --------------- | ---------------------------- | ----------------------------------------------------------------------------- |
-| `id`            | `integer`                    | Its id                                                                        |
-| `sessionId`     | `string`                     | The review session, which keeps its transcript after it closes                |
-| `projectId`     | `integer?`                   | Its project                                                                   |
-| `repo`          | `string`                     | The project, as `owner/name`                                                  |
-| `prNumber`      | `integer?`                   | The pull request                                                              |
-| `branch`        | `string`                     | The branch it checked out                                                     |
-| `headSha`       | `string?`                    | The commit it reviewed, once the checkout was verified                        |
-| `userId`        | `integer?`                   | Who started it                                                                |
-| `providerId`    | `integer?`                   | The provider it ran on                                                        |
-| `provider`      | `string`                     | The provider’s label when it ran                                              |
-| `model`         | `string`                     | The model; empty for the provider’s default                                   |
-| `effort`        | `string`                     | The effort; empty for the default                                             |
-| `inputTokens`   | `integer?`                   | Tokens read, summed over its turns                                            |
-| `outputTokens`  | `integer?`                   | Tokens written, summed over its turns                                         |
-| `costUsd`       | `number?`                    | What it cost in US dollars                                                    |
-| `costEstimated` | `boolean`                    | Whether `costUsd` includes catalog estimates for a provider that reports none |
-| `unpricedTurns` | `integer`                    | Turns no price covered, left out of `costUsd`                                 |
-| `status`        | `running\|completed\|failed` | Whether it is still running, finished, or died before finishing               |
-| `summary`       | `string?`                    | The summary comment it posted on the pull request, Markdown                   |
-| `completedAt`   | `string?`                    | ISO time                                                                      |
-| `createdAt`     | `string`                     | ISO time                                                                      |
-| `updatedAt`     | `string`                     | ISO time                                                                      |
-| `findings`      | `CodeReviewFinding[]`        | What it found, in the order it registered them                                |
+| Field            | Type                         |                                                                                                                                         |
+| ---------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`             | `integer`                    | Its id                                                                                                                                  |
+| `sessionId`      | `string`                     | The review session, which keeps its transcript after it closes                                                                          |
+| `projectId`      | `integer?`                   | Its project                                                                                                                             |
+| `repo`           | `string`                     | The project, as `owner/name`                                                                                                            |
+| `prNumber`       | `integer?`                   | The pull request                                                                                                                        |
+| `branch`         | `string`                     | The branch it checked out                                                                                                               |
+| `headSha`        | `string?`                    | The commit it reviewed, once the checkout was verified                                                                                  |
+| `userId`         | `integer?`                   | Who started it                                                                                                                          |
+| `providerId`     | `integer?`                   | The provider it ran on                                                                                                                  |
+| `provider`       | `string`                     | The provider’s label when it ran                                                                                                        |
+| `model`          | `string`                     | The model; empty for the provider’s default                                                                                             |
+| `effort`         | `string`                     | The effort; empty for the default                                                                                                       |
+| `inputTokens`    | `integer?`                   | Tokens read, summed over its turns                                                                                                      |
+| `outputTokens`   | `integer?`                   | Tokens written, summed over its turns                                                                                                   |
+| `costUsd`        | `number?`                    | What it cost in US dollars                                                                                                              |
+| `costEstimated`  | `boolean`                    | Whether `costUsd` includes catalog estimates for a provider that reports none                                                           |
+| `unpricedTurns`  | `integer`                    | Turns no price covered, left out of `costUsd`                                                                                           |
+| `status`         | `running\|completed\|failed` | Whether it is still running, finished, or died before finishing                                                                         |
+| `handlingStatus` | `pending\|handled`           | Whether someone has addressed the findings or decided not to fix them; explicitly set by a client, pending by default and after a rerun |
+| `summary`        | `string?`                    | The summary comment it posted on the pull request, Markdown                                                                             |
+| `completedAt`    | `string?`                    | ISO time                                                                                                                                |
+| `createdAt`      | `string`                     | ISO time                                                                                                                                |
+| `updatedAt`      | `string`                     | ISO time                                                                                                                                |
+| `findings`       | `CodeReviewFinding[]`        | What it found, in the order it registered them                                                                                          |
 
 ### CodeReviewFinding
 
@@ -3483,6 +3497,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/pr/view?section=reviews`                                               | `GET /pulls/{number}/reviews`                                                                                                     |
 | `GET /api/pr/view?section=review-comments`                                       | `GET /pulls/{number}/review-comments`                                                                                             |
 | `GET /api/pr/code-reviews`                                                       | `GET /pulls/{number}/code-reviews`                                                                                                |
+| `PATCH /api/pr/code-reviews/:reviewId`                                           | `PATCH /pulls/{number}/code-reviews/{reviewId}`                                                                                   |
 | `PATCH /api/pr/code-reviews/:reviewId/findings/:findingId`                       | `PATCH /pulls/{number}/code-reviews/{reviewId}/findings/{findingId}`                                                              |
 | `PATCH /api/pr/update`                                                           | `PATCH /pulls/{number}`                                                                                                           |
 | `PATCH /api/issues/update`                                                       | `PATCH /issues/{number}`                                                                                                          |

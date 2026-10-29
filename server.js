@@ -84,6 +84,7 @@ import {
   listPullCodeReviews,
   getCodeReviewFinding,
   getPullCodeReview,
+  setPullCodeReviewHandlingStatus,
   addCodeReviewFinding,
   updateCodeReviewFinding,
   setCodeReviewSummary,
@@ -762,6 +763,8 @@ api.use(
     store: {
       listPullCodeReviews,
       getPullCodeReview,
+      setPullCodeReviewHandlingStatus,
+      listCodeReviewFindings,
       getCodeReviewFinding,
       updateCodeReviewFinding,
     },
