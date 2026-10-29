@@ -160,19 +160,28 @@ fix failing CI checks, and delete the configured account's comments. The project
 `actionEffort` select the runtime for PR actions. QA steps can override that runtime
 through `stepRuntimes.testSheet` and `stepRuntimes.testRun`.
 
-Code review currently supports Codex. Select a Codex provider for the action in
-Settings or when starting it. It prepares a workspace on the PR’s head branch and
-runs the native `codex review` engine through `codex exec review --json --base <PR-base-ref>`,
-using the selected provider’s `CODEX_HOME`, model and effort. It fetches the actual
-PR base, including stacked branches, and refuses a checkout that differs from the
-current PR head. The native output is saved as `review-summary.md` outside the checkout.
-A second turn on the same Codex account, model and effort verifies the findings,
-assesses fix value, and publishes the verified findings as inline comments, with
-“Not fixed” notes for rejected or optional ones, following the project’s publishing
-instructions, or a short note when nothing is worth posting. It returns a Markdown
-summary with links to the published review.
-Failed or canceled reviews do not start publication; interrupted publication resumes
-its own stage without rerunning discovery.
+Code review runs on a Claude or Codex provider, selected for the action in Settings
+or when starting it. It prepares a workspace on the PR’s head branch, fetches the
+actual PR base (stacked branches included) and refuses a checkout that differs from
+the current PR head. It then runs three turns of one conversation on the same
+account, model and effort:
+
+1. **Discovery**: the provider’s own review command. Claude runs
+   `/code-review <effort> <PR>` (without `--comment`, so it only reports); Codex runs
+   `codex exec review --json --base <PR-base-ref>` with the provider’s `CODEX_HOME`.
+   The report is saved as `review-summary.md` outside the checkout.
+2. **Publish**: one summary comment on the PR (`# Code Review`, a summary, the
+   counts, and a collapsible section per severity, dismissed findings left out),
+   then each finding as an inline comment on its line. Each finding is registered
+   with `review_finding_add` and the summary comment with `review_summary_set`.
+3. **Verify**: each finding is checked against the code, trying to refute it, and
+   classified Fix, Optional or Dismissed with evidence. The verdict goes into
+   `review_finding_update`, and the agent replies on the finding’s own review
+   thread, resolving the thread of a dismissed one. It posts no other comments. It then labels the PR `feedback-given` when any finding
+   is Fix, Optional or unverified, or `code-approved` when none is.
+
+Failed or canceled discovery does not start publication; an interrupted step resumes
+itself and the steps after it without rerunning discovery.
 When the review finishes, its session closes and its workspace and database are
 released; the closed session keeps its transcript.
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 
 const db = vi.hoisted(() => ({ rows: [], all: [], jobs: [], calibration: [], saved: [] }));
 
@@ -14,6 +14,7 @@ vi.mock('../lib/db.js', () => ({
   loadAllTurnUsage: vi.fn(async () => db.all),
   loadJobTurnUsage: vi.fn(async () => db.jobs),
   loadTurnUsageCalibration: vi.fn(async () => db.calibration),
+  setCodeReviewUsage: vi.fn(async () => {}),
 }));
 
 const {
@@ -42,9 +43,16 @@ const {
   recordTurnUsage,
   resetUsageCalibration,
   splitSubagentUsage,
+  refreshCodeReviewUsage,
 } = await import('../lib/usage.js');
-const { loadTurnUsage, loadAllTurnUsage, loadJobTurnUsage, loadTurnUsageCalibration, saveTurnUsage } =
-  await import('../lib/db.js');
+const {
+  loadTurnUsage,
+  loadAllTurnUsage,
+  loadJobTurnUsage,
+  loadTurnUsageCalibration,
+  saveTurnUsage,
+  setCodeReviewUsage,
+} = await import('../lib/db.js');
 const { estimateCosts } = await import('../lib/prices.js');
 
 describe('turnUsageRecord', () => {
@@ -923,6 +931,68 @@ describe('recordTurnUsage', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('code review usage', () => {
+  // The calibration is process-wide; later tests count its loads from zero.
+  afterEach(() => {
+    resetUsageCalibration();
+    loadTurnUsageCalibration.mockClear();
+  });
+  it('sums the ledger into the review, marking estimated cost and counting unpriced turns', async () => {
+    resetUsageCalibration();
+    setCodeReviewUsage.mockClear();
+    db.jobs = [
+      { jobId: 'rev', inputTokens: 100, outputTokens: 10, costUsd: 0.25, costEstimated: true, at: 1 },
+      { jobId: 'rev', inputTokens: 50, outputTokens: null, costUsd: null, at: 2 },
+    ];
+    await refreshCodeReviewUsage('rev');
+    expect(setCodeReviewUsage).toHaveBeenCalledWith('rev', {
+      inputTokens: 150,
+      outputTokens: 10,
+      costUsd: 0.25,
+      costEstimated: true,
+      unpricedTurns: 1,
+    });
+  });
+
+  it('leaves totals unknown when the ledger has nothing for the review', async () => {
+    setCodeReviewUsage.mockClear();
+    db.jobs = [];
+    await refreshCodeReviewUsage('none');
+    expect(setCodeReviewUsage).toHaveBeenCalledWith('none', {
+      inputTokens: null,
+      outputTokens: null,
+      costUsd: null,
+      costEstimated: false,
+      unpricedTurns: 0,
+    });
+  });
+
+  it('applies refreshes of one review in the order they were asked for', async () => {
+    setCodeReviewUsage.mockClear();
+    db.jobs = [{ jobId: 'ord', inputTokens: 1, at: 1 }];
+    let release;
+    setCodeReviewUsage.mockImplementationOnce(() => new Promise((resolve) => (release = resolve)));
+    const first = refreshCodeReviewUsage('ord');
+    await vi.waitFor(() => expect(setCodeReviewUsage).toHaveBeenCalledTimes(1));
+    db.jobs = [...db.jobs, { jobId: 'ord', inputTokens: 2, at: 2 }];
+    const second = refreshCodeReviewUsage('ord');
+    await Promise.resolve();
+    expect(setCodeReviewUsage).toHaveBeenCalledTimes(1);
+    release();
+    await Promise.all([first, second]);
+    expect(setCodeReviewUsage.mock.calls.map(([, u]) => u.inputTokens)).toEqual([1, 3]);
+  });
+
+  it('refreshes after a review turn is recorded, and not for other sessions', async () => {
+    setCodeReviewUsage.mockClear();
+    db.jobs = [];
+    await recordTurnUsage({ id: 'chat' }, { inputTokens: 1 }, { binary: 'codex' }, 'm');
+    await recordTurnUsage({ id: 'rv', activity: 'review' }, { inputTokens: 1 }, { binary: 'codex' }, 'm');
+    await vi.waitFor(() => expect(setCodeReviewUsage).toHaveBeenCalledTimes(1));
+    expect(setCodeReviewUsage.mock.calls[0][0]).toBe('rv');
   });
 });
 

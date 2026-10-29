@@ -139,6 +139,10 @@ vi.mock('../lib/db.js', () => ({
   loadJobEvents: vi.fn(async () => []),
   deleteJob: vi.fn(async () => true),
   jobEventMaxSeqs: vi.fn(async () => new Map()),
+  createCodeReview: vi.fn(async () => null),
+  restartCodeReview: vi.fn(async () => {}),
+  completeCodeReview: vi.fn(async () => {}),
+  failCodeReview: vi.fn(async () => {}),
 }));
 
 vi.mock('../lib/github.js', async (importOriginal) => ({
@@ -245,7 +249,18 @@ vi.mock('../lib/usage.js', async (importOriginal) => ({
   splitSubagentUsage: (await importOriginal()).splitSubagentUsage,
 }));
 
-import { deleteJob, jobEventMaxSeqs, loadJobs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
+import {
+  completeCodeReview,
+  createCodeReview,
+  deleteJob,
+  failCodeReview,
+  jobEventMaxSeqs,
+  loadJobs,
+  loadJobEvents,
+  saveJob,
+  saveJobEvents,
+  restartCodeReview,
+} from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
 import {
   acquireInstance,
@@ -1125,15 +1140,16 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(() => createDevSession({ ...base, provider: 99 })).toThrow(/Unknown provider: 99/);
   });
 
-  it('only accepts Codex for code review, with a head branch', () => {
+  it('only accepts Claude or Codex for code review, with a head branch', () => {
     const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex', source: 'test' });
     state.provider = { ...state.provider, binary: 'codex' };
     const review = { ...base, activity: 'review', prompt: '/review' };
     expect(() => createDevSession(review)).toThrow(/requires the branch to check out/);
-    state.provider = { ...state.provider, binary: 'claude' };
+    state.provider = { ...state.provider, binary: 'grok' };
     expect(() => createDevSession({ ...review, prNumber: 3747, branch: 'feature' })).toThrow(
-      /requires a Codex provider/,
+      /requires a Claude or Codex provider/,
     );
+    state.provider = { ...state.provider, binary: 'claude' };
     bin.mockRestore();
   });
 
@@ -1155,6 +1171,55 @@ describe('createDevSession: the validation gauntlet', () => {
       local: false,
       startBranch: 'feature',
     });
+    bin.mockRestore();
+  });
+
+  it('records a code review for the session, and none for other sessions', () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex', source: 'test' });
+    state.provider = { ...state.provider, binary: 'codex' };
+    createCodeReview.mockClear();
+    const session = createDevSession({
+      ...base,
+      activity: 'review',
+      prompt: '/review',
+      prNumber: 3747,
+      branch: 'feature',
+      ownerId: 2,
+    });
+    expect(createCodeReview).toHaveBeenCalledTimes(1);
+    expect(createCodeReview).toHaveBeenCalledWith({
+      jobId: session.id,
+      projectId: session.projectId,
+      repo: 'acme/shop',
+      prNumber: 3747,
+      branch: 'feature',
+      userId: 2,
+      providerId: 1,
+      provider: session.provider,
+      model: session.model,
+      effort: 'high',
+    });
+    createDevSession(base);
+    expect(createCodeReview).toHaveBeenCalledTimes(1);
+    bin.mockRestore();
+  });
+
+  it('fails the code review when its session cannot start', async () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex', source: 'test' });
+    state.provider = { ...state.provider, binary: 'codex' };
+    failCodeReview.mockClear();
+    acquireInstance.mockRejectedValueOnce(new Error('fixture: no database server'));
+    const session = createDevSession({
+      ...base,
+      activity: 'review',
+      prompt: '/review',
+      prNumber: 3747,
+      branch: 'feature',
+    });
+    const job = getJob(session.id);
+    await vi.waitFor(() => expect(job.status).toBe('failed'));
+    expect(job.error).toMatch(/no database server/);
+    expect(failCodeReview).toHaveBeenCalledWith(session.id);
     bin.mockRestore();
   });
 
@@ -1294,97 +1359,214 @@ describe('createDevSession: the validation gauntlet', () => {
   });
 });
 
-describe('Claude code review output', () => {
-  it.each([0, 1])('captures the complete markdown stdout and respects exit code %s', async (code) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-review-'));
-    const configDir = path.join(root, 'claude-config');
-    fs.mkdirSync(configDir);
-    const home = vi.spyOn(providerTools, 'ensureClaudeHome').mockReturnValue(configDir);
-    const bin = vi
-      .spyOn(BINARIES.claude, 'bin')
-      .mockReturnValue({ bin: '/mock/review-agent', source: 'test' });
-    const realSpawn = spawn.getMockImplementation();
-    let child;
-    let invocation;
-    let stdin = '';
-    spawn.mockImplementation((cmd, args, opts) => {
-      if (cmd !== '/mock/review-agent') return realSpawn(cmd, args, opts);
-      invocation = { args, opts };
-      child = new EventEmitter();
-      child.stdin = new PassThrough();
-      child.stdout = null;
-      child.writeReview = (bytes) => fs.appendFileSync(summaryPath, bytes);
-      child.stderr = new PassThrough();
-      child.stdin.on('data', (chunk) => (stdin += chunk.toString()));
-      return child;
-    });
-    getProviderForJob.mockReturnValue(state.provider);
-    captureProviderAuth.mockResolvedValue(undefined);
-    const id = `simple-review-${code}`;
-    const summaryPath = path.join(os.tmpdir(), 'reviewer-prompts', `${id}-review-summary.md`);
-    state.stored = [
-      {
-        id,
-        kind: 'devchat',
-        status: 'closed',
-        repo: 'acme/shop',
-        providerId: 1,
-        model: 'claude-fable-5-1',
-        effort: 'high',
-        activity: 'review',
-        startedOnPr: 3747,
-        providerSessionId: '12345678-1234-1234-1234-123456789abc',
-        turns: 0,
-        chatStarted: false,
-        workDir: root,
-        branch: 'feature',
-        createdAt: '2026-10-29T00:00:00Z',
-      },
-    ];
-    try {
-      await initJobs();
-      const job = getJob(id);
-      job.status = 'idle';
-      sendDevMessage(id, '/code-review high --comment');
-      expect(invocation.args.slice(0, 4)).toEqual([
-        '-p',
-        '/code-review high --comment',
-        '--model',
-        'claude-fable-5-1',
+describe('Claude code review', () => {
+  // Discovery is Claude's /code-review in text mode (its report captured to the summary
+  // file); publication and verification are ordinary stream-json turns resuming it. A
+  // discovery that hits the account's usage limit runs /code-review again on another one.
+  it.each([0, 1, 'quota'])(
+    'runs /code-review, then publishes and verifies, when discovery exits %s',
+    async (code) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-review-'));
+      spawnSync('git', ['init', '-b', 'feature', root]);
+      spawnSync('git', [
+        '-C',
+        root,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'Fixture',
       ]);
-      expect(invocation.opts).toMatchObject({ cwd: root, env: { CLAUDE_CONFIG_DIR: configDir } });
-      expect(invocation.opts.stdio).toEqual(['pipe', expect.any(Number), 'pipe']);
-      expect(invocation.args).not.toContain('--append-system-prompt-file');
-      expect(invocation.args).not.toContain('--mcp-config');
-      expect(stdin).toBe('');
-      // Preserve whitespace, long lines, an incomplete final line and split UTF-8 bytes.
-      const summary = `# Review\n\n${'Details '.repeat(100)}café\n\n- [x] Acceptance criteria verified`;
-      const bytes = Buffer.from(summary);
-      const split = bytes.indexOf(Buffer.from('é')) + 1;
-      child.writeReview(bytes.subarray(0, split));
-      child.writeReview(bytes.subarray(split));
-      expect(fs.readFileSync(summaryPath, 'utf8')).toBe(summary);
-      child.emit('close', code);
-      await vi.waitFor(() => expect(job.status).toBe('idle'));
-      expect(job.error).toBe(code === 0 ? null : 'Claude entry exited with code 1');
-      expect(fs.readFileSync(summaryPath, 'utf8')).toBe(summary);
-      expect(job.events.findLast((e) => e.kind === 'result')).toMatchObject({
-        text: summary,
-        isError: code !== 0,
+      const head = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+      const configDir = path.join(root, 'claude-config');
+      fs.mkdirSync(configDir);
+      const home = vi.spyOn(providerTools, 'ensureClaudeHome').mockReturnValue(configDir);
+      const bin = vi
+        .spyOn(BINARIES.claude, 'bin')
+        .mockReturnValue({ bin: '/mock/review-agent', source: 'test' });
+      const realSpawn = spawn.getMockImplementation();
+      const invocations = [];
+      spawn.mockImplementation((cmd, args, opts) => {
+        if (cmd === 'git' && args.includes('fetch')) {
+          const git = new EventEmitter();
+          git.stdout = new PassThrough();
+          git.stderr = new PassThrough();
+          queueMicrotask(() => git.emit('close', 0));
+          return git;
+        }
+        if (cmd !== '/mock/review-agent') return realSpawn(cmd, args, opts);
+        const child = new EventEmitter();
+        // The /context probe after each stream turn is not part of the review.
+        if (args[1] === '/context') {
+          child.stdin = new PassThrough();
+          child.stdout = new PassThrough();
+          child.stderr = new PassThrough();
+          setImmediate(() => {
+            child.stdout.end();
+            child.emit('close', 0);
+          });
+          return child;
+        }
+        const invocation = { args, opts, child, prompt: null, mcp: null };
+        invocations.push(invocation);
+        child.stdin = new PassThrough();
+        child.stderr = new PassThrough();
+        if (args[args.indexOf('--output-format') + 1] === 'text') {
+          // Text mode: stdout is the summary file's descriptor.
+          child.stdout = null;
+          child.writeReview = (bytes) => fs.appendFileSync(summaryPath, bytes);
+          return child;
+        }
+        child.stdout = new PassThrough();
+        invocation.mcp = JSON.parse(
+          fs.readFileSync(args[args.indexOf('--mcp-config') + 1], 'utf8'),
+        ).mcpServers;
+        child.stdin.on('data', (chunk) => {
+          invocation.prompt ??= JSON.parse(chunk.toString()).message.content;
+          child.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'done' }) + '\n');
+        });
+        child.stdin.on('finish', () => setImmediate(() => child.emit('close', 0)));
+        return child;
       });
-      expect(job.events.some((e) => e.text === `[review-summary.md](${summaryPath})`)).toBe(true);
-      expect(fs.existsSync(path.join(root, 'review-summary.md'))).toBe(false);
-    } finally {
-      await closeDevSession(id);
-      home.mockRestore();
-      bin.mockRestore();
-      spawn.mockReset();
-      getProviderForJob.mockReset();
-      captureProviderAuth.mockReset();
-      fs.rmSync(root, { recursive: true, force: true });
-      fs.rmSync(summaryPath, { force: true });
-    }
-  });
+      getProviderForJob.mockReturnValue(state.provider);
+      if (code === 'quota') {
+        state.otherProviders = [{ ...state.provider, id: 2, label: 'Claude 2' }];
+        state.group = [state.provider, ...state.otherProviders];
+        await providerUsage(state.otherProviders[0], {
+          read: async () => ({ windows: [{ short: '5h', usedPct: 20 }] }),
+        });
+        getProviderForJob.mockImplementation((j) => state.group.find((p) => p.id === j.providerId));
+      }
+      captureProviderAuth.mockResolvedValue(undefined);
+      // What recovery would find at each PR sync, the one between discovery and the
+      // publish checkpoint included.
+      const checkpoints = [];
+      githubRest.mockImplementation(async () => {
+        const turn = getJob(`claude-review-${code}`)?.recoveryTurn;
+        if (turn) checkpoints.push({ prompt: turn.prompt, completed: turn.completed });
+        return {
+          ok: true,
+          json: async () => ({
+            number: 3747,
+            state: 'open',
+            head: { ref: 'feature', sha: head },
+            base: { ref: 'main' },
+            html_url: 'https://github.com/acme/shop/pull/3747',
+          }),
+        };
+      });
+      completeCodeReview.mockClear();
+      failCodeReview.mockClear();
+      const id = `claude-review-${code}`;
+      const summaryPath = path.join(os.tmpdir(), 'reviewer-prompts', `${id}-review-summary.md`);
+      state.stored = [
+        {
+          id,
+          kind: 'devchat',
+          status: 'closed',
+          repo: 'acme/shop',
+          providerId: 1,
+          model: 'claude-fable-5-1',
+          effort: 'high',
+          activity: 'review',
+          startedOnPr: 3747,
+          providerSessionId: '12345678-1234-1234-1234-123456789abc',
+          turns: 0,
+          chatStarted: false,
+          workDir: root,
+          branch: 'feature',
+          createdAt: '2026-10-29T00:00:00Z',
+        },
+      ];
+      try {
+        await initJobs();
+        const job = getJob(id);
+        job.status = 'idle';
+        sendDevMessage(id, '/code-review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        // The second account runs the review again, rewriting the report that held the
+        // first one's usage-limit error.
+        const first = code === 'quota' ? 1 : 0;
+        if (code === 'quota') {
+          invocations[0].child.writeReview("You've hit your limit");
+          invocations[0].child.emit('close', 1);
+          await vi.waitFor(() => expect(invocations).toHaveLength(2));
+          expect(job.providerId).toBe(2);
+          expect(invocations[1].args[1]).toBe('/code-review high 3747');
+          expect(invocations[1].opts.env.CLAUDE_CONFIG_DIR).toBe(configDir);
+          expect(fs.readFileSync(summaryPath, 'utf8')).toBe('');
+        }
+        const discovery = invocations[first];
+        if (code !== 'quota')
+          expect(discovery.args.slice(0, 4)).toEqual([
+            '-p',
+            '/code-review high 3747',
+            '--model',
+            'claude-fable-5-1',
+          ]);
+        expect(discovery.opts).toMatchObject({ cwd: root, env: { CLAUDE_CONFIG_DIR: configDir } });
+        expect(discovery.opts.stdio).toEqual(['pipe', expect.any(Number), 'pipe']);
+        expect(discovery.args).not.toContain('--mcp-config');
+        // Preserve whitespace, long lines, an incomplete final line and split UTF-8 bytes.
+        const summary = `# Review\n\n${'Details '.repeat(100)}café\n\n- [x] Acceptance criteria verified`;
+        const bytes = Buffer.from(summary);
+        const split = bytes.indexOf(Buffer.from('é')) + 1;
+        discovery.child.writeReview(bytes.subarray(0, split));
+        discovery.child.writeReview(bytes.subarray(split));
+        discovery.child.emit('close', code === 'quota' ? 0 : code);
+        if (code === 1) {
+          await vi.waitFor(() => expect(job.status).toBe('idle'));
+          expect(job.error).toBe('Claude entry exited with code 1');
+          expect(invocations).toHaveLength(1);
+          expect(failCodeReview).toHaveBeenCalledWith(id);
+          return;
+        }
+        // Publication and verification follow without anyone sending a message.
+        await vi.waitFor(() => expect(invocations).toHaveLength(first + 3));
+        expect(fs.readFileSync(summaryPath, 'utf8')).toBe(summary);
+        expect(job.events.some((e) => e.text === `[review-summary.md](${summaryPath})`)).toBe(true);
+        // A finished discovery is never a completed checkpoint: a restart before the
+        // publish step is saved runs the review again instead of skipping the rest.
+        expect(checkpoints.length).toBeGreaterThan(0);
+        expect(checkpoints.filter((c) => /^\/(code-)?review/.test(c.prompt) && c.completed)).toEqual([]);
+        const publish = invocations[first + 1];
+        expect(publish.args).toEqual(expect.arrayContaining(['--resume']));
+        await vi.waitFor(() => expect(publish.prompt).toBeTruthy());
+        expect(publish.prompt).toContain('Create a single comment in the PR with this format');
+        expect(publish.prompt).toContain('<summary>🟠 Medium findings</summary>');
+        expect(publish.prompt).toContain('review_finding_add');
+        expect(publish.prompt).toContain('review_summary_set');
+        expect(publish.prompt).toContain(head);
+        // Claude has the briefing as its system prompt, not in the message.
+        expect(publish.prompt).not.toContain('<workspace-context>');
+        expect(publish.mcp).toHaveProperty('reviewer_code_review');
+        const verify = invocations[first + 2];
+        await vi.waitFor(() => expect(verify.prompt).toBeTruthy());
+        expect(verify.prompt).toContain('Your goal is to try to REFUTE them');
+        expect(verify.prompt).toContain('review_finding_update');
+        expect(verify.prompt).toContain('resolveReviewThread');
+        await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+        expect(failCodeReview).not.toHaveBeenCalled();
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        expect(job.error).toBeNull();
+        expect(fs.existsSync(path.join(root, 'review-summary.md'))).toBe(false);
+      } finally {
+        await closeDevSession(id);
+        home.mockRestore();
+        bin.mockRestore();
+        spawn.mockImplementation(realSpawn);
+        getProviderForJob.mockReset();
+        captureProviderAuth.mockReset();
+        githubRest.mockReset();
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(summaryPath, { force: true });
+      }
+    },
+    30_000,
+  );
 });
 
 describe('native Codex code review', () => {
@@ -1473,6 +1655,10 @@ describe('native Codex code review', () => {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(summaryPath, { force: true });
   });
+  const finishTurn = (invocation) => {
+    invocation.child.complete({ input_tokens: 30, output_tokens: 8, cached_input_tokens: 0 });
+    invocation.child.emit('close', 0);
+  };
   const finishReview = (invocation, code = 0) => {
     const { child } = invocation;
     child.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'native-review-thread' }) + '\n');
@@ -1485,9 +1671,13 @@ describe('native Codex code review', () => {
     child.emit('close', code);
   };
 
-  it('reviews the actual stacked base and resumes the same runtime to verify and publish', async () => {
+  it('reviews the actual stacked base, then publishes and verifies on the same runtime', async () => {
+    restartCodeReview.mockClear();
+    completeCodeReview.mockClear();
+    failCodeReview.mockClear();
     sendDevMessage(id, '/review');
     await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    expect(restartCodeReview).toHaveBeenCalledWith(id, head);
     const native = invocations[0];
     expect(native.args.slice(0, 5)).toEqual([
       'exec',
@@ -1507,28 +1697,66 @@ describe('native Codex code review', () => {
     expect(publish.opts.env.CODEX_HOME).toBe(root);
     const resume = publish.child.rpc.find((r) => r.method === 'thread/resume');
     expect(resume.params).toMatchObject({ threadId: 'native-review-thread', model: 'gpt-6.1-sol' });
-    expect(publish.child.prompt).toContain('Verify every finding independently');
-    expect(publish.child.prompt).toContain('assess whether its fix is worth');
-    expect(publish.child.prompt).toContain('Not fixed');
-    expect(publish.child.prompt).toContain('found nothing to report');
-    expect(publish.child.prompt).toContain('do not call the review clean');
-    expect(publish.child.prompt).toContain('Never claim checks or verification you did not perform');
+    expect(publish.child.prompt).toContain('Create a single comment in the PR with this format');
+    expect(publish.child.prompt).toContain('Include only findings that are not dismissed');
+    expect(publish.child.prompt).toContain('add each finding as an inline review comment');
+    expect(publish.child.prompt).toContain(JSON.stringify(summaryPath));
     expect(publish.child.prompt).toContain(head);
+    // Codex takes the workspace briefing in the prompt.
     expect(publish.child.prompt).toContain('<workspace-context>');
+    expect(publish.child.prompt).toContain('review_finding_add');
+    expect(publish.child.prompt).toContain('review_summary_set');
     expect(job.recoveryTurn).toMatchObject({
       prompt: publish.child.prompt,
+      opts: { codeReviewStage: 'publish' },
       completed: false,
       runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
     });
-    publish.child.complete({ input_tokens: 30, output_tokens: 8, cached_input_tokens: 0 });
-    publish.child.emit('close', 0);
+    finishTurn(publish);
+    await vi.waitFor(() => expect(invocations).toHaveLength(3));
+    const verify = invocations[2];
+    expect(verify.child.rpc.find((r) => r.method === 'thread/resume').params).toMatchObject({
+      threadId: 'native-review-thread',
+    });
+    expect(verify.child.prompt).toContain('Your goal is to try to REFUTE them');
+    expect(verify.child.prompt).toContain('review_finding_update');
+    expect(verify.child.prompt).toContain('**Fix**, **Optional**, or **Dismissed**');
+    expect(verify.child.prompt).toContain('resolveReviewThread');
+    expect(verify.child.prompt).toContain('only replies to the review threads');
+    // Feedback left labels the PR feedback-given; none labels it code-approved.
+    expect(verify.child.prompt).toContain('add the `feedback-given` label and remove `code-approved`');
+    expect(verify.child.prompt).toContain('add the `code-approved` label and remove `feedback-given`');
+    expect(job.recoveryTurn).toMatchObject({ opts: { codeReviewStage: 'verify' }, completed: false });
+    // The findings tools ride on every turn of a review session.
+    for (const turn of [native, publish, verify])
+      expect(turn.args.join(' ')).toContain('mcp_servers.reviewer_code_review.command');
+    expect(completeCodeReview).not.toHaveBeenCalled();
+    finishTurn(verify);
     await vi.waitFor(() => expect(job.status).toBe('idle'));
     expect(job.error).toBeNull();
     expect(job.recoveryTurn.completed).toBe(true);
+    expect(completeCodeReview).toHaveBeenCalledWith(id);
+    expect(failCodeReview).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(root, 'review-summary.md'))).toBe(false);
+    // Closing a settled review leaves its status alone.
+    await closeDevSession(id);
+    expect(failCodeReview).not.toHaveBeenCalled();
   });
 
-  it('keeps the session through discovery and publication, then closes it, keeping its record', async () => {
+  it('fails a review closed before any review turn settled it', async () => {
+    failCodeReview.mockClear();
+    await closeDevSession(id);
+    expect(failCodeReview).toHaveBeenCalledWith(id);
+  });
+
+  it('fails a review deleted without being closed', async () => {
+    failCodeReview.mockClear();
+    job.status = 'failed';
+    await deleteJobById(id);
+    expect(failCodeReview).toHaveBeenCalledWith(id);
+  });
+
+  it('keeps the session through discovery, publication and verification, then closes it, keeping its record', async () => {
     Object.assign(job, {
       autoClose: true,
       status: 'interrupted',
@@ -1545,9 +1773,10 @@ describe('native Codex code review', () => {
     await vi.waitFor(() => expect(invocations).toHaveLength(2));
     expect(getJob(id)).toBe(job);
     expect(job.status).toBe('running');
-    const publish = invocations[1];
-    publish.child.complete({ input_tokens: 30, output_tokens: 8, cached_input_tokens: 0 });
-    publish.child.emit('close', 0);
+    finishTurn(invocations[1]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(3));
+    expect(job.status).toBe('running');
+    finishTurn(invocations[2]);
     await vi.waitFor(() => expect(job.status).toBe('closed'));
     expect(job.error).toBeNull();
     expect(dropSessionDatabase).toHaveBeenCalledWith(job, expect.any(Function));
@@ -1558,6 +1787,8 @@ describe('native Codex code review', () => {
   it.each(['failure', 'empty', 'missing', 'canceled'])(
     'does not publish when native review is %s',
     async (outcome) => {
+      completeCodeReview.mockClear();
+      failCodeReview.mockClear();
       fs.mkdirSync(path.dirname(summaryPath), { recursive: true });
       fs.writeFileSync(summaryPath, 'Old summary that must not be reused');
       sendDevMessage(id, '/review');
@@ -1569,8 +1800,120 @@ describe('native Codex code review', () => {
       await vi.waitFor(() => expect(job.status).toBe('idle'));
       expect(invocations).toHaveLength(1);
       if (outcome !== 'canceled') expect(job.error).toBeTruthy();
+      expect(failCodeReview).toHaveBeenCalledWith(id);
+      expect(completeCodeReview).not.toHaveBeenCalled();
     },
   );
+
+  it('completes the review when a restart resumes its publish step, after verifying', async () => {
+    completeCodeReview.mockClear();
+    failCodeReview.mockClear();
+    Object.assign(job, {
+      status: 'interrupted',
+      interruptedFrom: 'running',
+      restartPending: true,
+      workspacePrepared: true,
+      recoveryTurn: {
+        prompt: 'Publish the review above',
+        opts: { codeReviewStage: 'publish' },
+        phase: 'initial',
+        runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
+        completed: false,
+      },
+    });
+    claimSlot(root, id, { prepared: true });
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    expect(invocations[0].child.prompt).toContain('Publish the review above');
+    finishTurn(invocations[0]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(2));
+    expect(invocations[1].child.prompt).toContain('Your goal is to try to REFUTE them');
+    expect(completeCodeReview).not.toHaveBeenCalled();
+    finishTurn(invocations[1]);
+    await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+    expect(failCodeReview).not.toHaveBeenCalled();
+  });
+
+  it('runs the review again when a restart cuts off a discovery that had started its thread', async () => {
+    completeCodeReview.mockClear();
+    Object.assign(job, {
+      status: 'interrupted',
+      interruptedFrom: 'running',
+      restartPending: true,
+      workspacePrepared: true,
+      chatStarted: true,
+      providerSessionId: 'native-review-thread',
+      chats: { 1: { sessionId: 'native-review-thread', started: true } },
+      recoveryTurn: {
+        prompt: '/review',
+        opts: {},
+        phase: 'initial',
+        runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
+        completed: false,
+      },
+    });
+    claimSlot(root, id, { prepared: true });
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    // The review command itself, not a chat turn told to continue it.
+    expect(invocations[0].args.slice(0, 2)).toEqual(['exec', 'review']);
+    fs.writeFileSync(summaryPath, 'A finding');
+    finishReview(invocations[0]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(2));
+    expect(invocations[1].child.prompt).toContain('Create a single comment in the PR with this format');
+    finishTurn(invocations[1]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(3));
+    finishTurn(invocations[2]);
+    await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+  });
+
+  it('starts the review record over when /review is sent again, failing it if the rerun fails', async () => {
+    restartCodeReview.mockClear();
+    completeCodeReview.mockClear();
+    failCodeReview.mockClear();
+    sendDevMessage(id, '/review');
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    fs.writeFileSync(summaryPath, 'A finding');
+    finishReview(invocations[0]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(2));
+    finishTurn(invocations[1]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(3));
+    finishTurn(invocations[2]);
+    await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    sendDevMessage(id, '/code-review the auth module');
+    await vi.waitFor(() => expect(invocations).toHaveLength(4));
+    expect(restartCodeReview).toHaveBeenCalledTimes(2);
+    expect(restartCodeReview).toHaveBeenLastCalledWith(id, head);
+    finishReview(invocations[3], 1);
+    await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledWith(id));
+    expect(invocations).toHaveLength(4);
+  });
+
+  it('fails the review when its verification step fails', async () => {
+    completeCodeReview.mockClear();
+    failCodeReview.mockClear();
+    Object.assign(job, {
+      status: 'interrupted',
+      interruptedFrom: 'running',
+      restartPending: true,
+      workspacePrepared: true,
+      recoveryTurn: {
+        prompt: 'Verify each finding',
+        opts: { codeReviewStage: 'verify' },
+        phase: 'initial',
+        runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
+        completed: false,
+      },
+    });
+    claimSlot(root, id, { prepared: true });
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    invocations[0].child.emit('close', 1);
+    await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledWith(id));
+    expect(invocations).toHaveLength(1);
+    expect(completeCodeReview).not.toHaveBeenCalled();
+  });
 
   it('refuses discovery when the checkout is behind the PR head', async () => {
     head = '1234567890123456789012345678901234567890';
@@ -12424,6 +12767,8 @@ describe('the shared browser in a session', () => {
         headers: { Authorization: expect.stringMatching(/^Bearer [0-9a-f]{48}$/) },
       });
       expect(seen.mcp.reviewer_memory).toHaveProperty('command');
+      // The findings tools are for code review sessions only.
+      expect(seen.mcp).not.toHaveProperty('reviewer_code_review');
     } finally {
       setExternalMcp(() => []);
       homeSpy.mockRestore();
