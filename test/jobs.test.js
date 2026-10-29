@@ -1506,6 +1506,8 @@ describe('native Codex code review', () => {
     expect(publish.child.prompt).toContain('assess whether its fix is worth');
     expect(publish.child.prompt).toContain('Not fixed');
     expect(publish.child.prompt).toContain('found nothing to report');
+    expect(publish.child.prompt).toContain('do not call the review clean');
+    expect(publish.child.prompt).toContain('Never claim checks or verification you did not perform');
     expect(publish.child.prompt).toContain(head);
     expect(publish.child.prompt).toContain('<workspace-context>');
     expect(job.recoveryTurn).toMatchObject({
