@@ -139,6 +139,8 @@ vi.mock('../lib/db.js', () => ({
   loadJobEvents: vi.fn(async () => []),
   deleteJob: vi.fn(async () => true),
   jobEventMaxSeqs: vi.fn(async () => new Map()),
+  createCodeReview: vi.fn(async () => null),
+  setCodeReviewHead: vi.fn(async () => {}),
 }));
 
 vi.mock('../lib/github.js', async (importOriginal) => ({
@@ -245,7 +247,16 @@ vi.mock('../lib/usage.js', async (importOriginal) => ({
   splitSubagentUsage: (await importOriginal()).splitSubagentUsage,
 }));
 
-import { deleteJob, jobEventMaxSeqs, loadJobs, loadJobEvents, saveJob, saveJobEvents } from '../lib/db.js';
+import {
+  createCodeReview,
+  deleteJob,
+  jobEventMaxSeqs,
+  loadJobs,
+  loadJobEvents,
+  saveJob,
+  saveJobEvents,
+  setCodeReviewHead,
+} from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
 import {
   acquireInstance,
@@ -1156,6 +1167,35 @@ describe('createDevSession: the validation gauntlet', () => {
     bin.mockRestore();
   });
 
+  it('records a code review for the session, and none for other sessions', () => {
+    const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex', source: 'test' });
+    state.provider = { ...state.provider, binary: 'codex' };
+    createCodeReview.mockClear();
+    const session = createDevSession({
+      ...base,
+      activity: 'review',
+      prompt: '/review',
+      prNumber: 3747,
+      branch: 'feature',
+      ownerId: 2,
+    });
+    expect(createCodeReview).toHaveBeenCalledTimes(1);
+    expect(createCodeReview).toHaveBeenCalledWith({
+      jobId: session.id,
+      projectId: session.projectId,
+      repo: 'acme/shop',
+      prNumber: 3747,
+      branch: 'feature',
+      userId: 2,
+      providerId: 1,
+      model: session.model,
+      effort: 'high',
+    });
+    createDevSession(base);
+    expect(createCodeReview).toHaveBeenCalledTimes(1);
+    bin.mockRestore();
+  });
+
   it('files a session under its starter, and a worker under its orchestrator’s owner', () => {
     const orchestrator = createDevSession({ ...base, orchestrator: true, ownerId: 2 });
     expect(orchestrator.ownerId).toBe(2);
@@ -1484,8 +1524,10 @@ describe('native Codex code review', () => {
   };
 
   it('reviews the actual stacked base and resumes the same runtime to verify and publish', async () => {
+    setCodeReviewHead.mockClear();
     sendDevMessage(id, '/review');
     await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    expect(setCodeReviewHead).toHaveBeenCalledWith(id, head);
     const native = invocations[0];
     expect(native.args.slice(0, 5)).toEqual([
       'exec',
