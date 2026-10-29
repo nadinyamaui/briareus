@@ -35,7 +35,7 @@ import { readSessionFile } from './lib/ssh-upload.js';
 import { createPrintService } from './lib/print.js';
 import { printAgentRoutes } from './lib/print-agent.js';
 import { projectEnvRoutes } from './lib/project-env.js';
-import { codeReviewRoutes } from './lib/code-reviews.js';
+import { codeReviewRoutes, pullCodeReviewRoutes } from './lib/code-reviews.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
 import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
 import { createSlackService } from './lib/slack.js';
@@ -81,6 +81,7 @@ import {
   getProjectRow,
   getCodeReviewByJob,
   listCodeReviewFindings,
+  listPullCodeReviews,
   getCodeReviewFinding,
   addCodeReviewFinding,
   updateCodeReviewFinding,
@@ -754,6 +755,7 @@ api.use(
     },
   }),
 );
+api.use(pullCodeReviewRoutes({ getProject, store: { listPullCodeReviews } }));
 api.use(
   printAgentRoutes({
     service: createPrintService(),

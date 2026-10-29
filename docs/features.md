@@ -68,6 +68,8 @@ finding in `code_review_findings` (severity, type, location) and stores the
 summary comment; the verify step records each `fix`/`optional`/`dismiss`
 verdict, its verification and the evidence. Review sessions close when done and retain their history. Review
 records and findings also survive explicit session deletion.
+Clients read a pull request's latest stored reviews, with their findings and
+verdicts, through `GET /api/v1/pulls/{number}/code-reviews`.
 
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).
@@ -170,7 +172,8 @@ These additions are present in the server revision documented here:
 - Sessions can edit their project's `.env` template through MCP (admins'
   interactive sessions only).
 - Code reviews and their findings are stored in the database; review sessions
-  register findings through their own MCP tools.
+  register findings through their own MCP tools.; clients read them per
+  pull request through the API.
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.
