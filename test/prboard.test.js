@@ -41,12 +41,12 @@ describe('hasLabel', () => {
   });
 
   it('takes plain names too, case-insensitively', () => {
-    expect(hasLabel(['HAS-CONFLICTS'], LABELS.conflicts)).toBe(true);
+    expect(hasLabel(['FEEDBACK-GIVEN'], LABELS.feedbackGiven)).toBe(true);
   });
 
   it('answers false for no labels at all', () => {
-    expect(hasLabel(null, LABELS.conflicts)).toBe(false);
-    expect(hasLabel([], LABELS.conflicts)).toBe(false);
+    expect(hasLabel(null, LABELS.approved)).toBe(false);
+    expect(hasLabel([], LABELS.approved)).toBe(false);
   });
 });
 
@@ -488,7 +488,7 @@ describe('projectPulls', () => {
     const result = await projectPulls(p);
     expect(result).toMatchObject({
       repo: p.repo,
-      pulls: [{ title: 'Saved pull', recommended: null }],
+      pulls: [{ title: 'Saved pull', recommended: 'review' }],
       syncedAt: '2026-10-01T00:00:00Z',
     });
     expect(gh.graphql).not.toHaveBeenCalled();
@@ -871,6 +871,34 @@ describe('projectPulls', () => {
     expect(gh.graphql.mock.calls.map((call) => call[3])).toEqual([{ reserve }, { reserve }]);
   });
 
+  it('paginates every label used by filters and recommendations', async () => {
+    const node = prNode({ labels: ['first'] });
+    node.labels.pageInfo = { hasNextPage: true, endCursor: 'labels-2' };
+    gh.graphql
+      .mockResolvedValueOnce({
+        repository: {
+          defaultBranchRef: { name: 'main' },
+          stackRefs: { pageInfo: { hasNextPage: false }, nodes: [node] },
+          pullRequests: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [node] },
+        },
+      })
+      .mockResolvedValueOnce({
+        repository: {
+          pullRequest: {
+            labels: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [{ name: 'feedback-given', color: 'ededed' }],
+            },
+          },
+        },
+      });
+
+    const { pulls } = await projectPulls(project());
+    expect(pulls[0].labels.map((label) => label.name)).toEqual(['first', 'feedback-given']);
+    expect(pulls[0].recommended).toBe('implement-feedback');
+    expect(gh.graphql.mock.calls[1][2]).toMatchObject({ number: 1, cursor: 'labels-2' });
+  });
+
   it('maps a pull request row for the board', async () => {
     serve([
       prNode({
@@ -909,7 +937,7 @@ describe('projectPulls', () => {
       checks: 'success',
       headSha: 'c0ffee1',
       reviewDecision: 'review_required',
-      recommended: null,
+      recommended: 'review',
     });
     expect(pulls[0].issues[0]).toMatchObject({ number: 9, state: 'open', stateReason: 'reopened' });
   });
@@ -1670,20 +1698,24 @@ describe('projectPulls', () => {
     });
 
     it('UNKNOWN mergeable is GitHub still computing, not a conflict', async () => {
-      expect(await recommendedFor(prNode({ mergeable: 'UNKNOWN' }))).toBeNull();
+      expect(await recommendedFor(prNode({ mergeable: 'UNKNOWN' }))).toBe('review');
+    });
+
+    it('feedback-given asks for the feedback to be implemented', async () => {
+      expect(await recommendedFor(prNode({ labels: ['feedback-given'] }))).toBe('implement-feedback');
     });
 
     it("approved code is QA's cue, even when a review label also sits there", async () => {
-      expect(await recommendedFor(prNode({ labels: ['code-approved', 'requires-dev-review'] }))).toBeNull();
+      expect(await recommendedFor(prNode({ labels: ['code-approved', 'requires-dev-review'] }))).toBe('qa');
     });
 
     it('either review label asks for a review', async () => {
-      expect(await recommendedFor(prNode({ labels: ['requires-dev-review'] }))).toBeNull();
-      expect(await recommendedFor(prNode({ labels: ['feedback-implemented'] }))).toBeNull();
+      expect(await recommendedFor(prNode({ labels: ['requires-dev-review'] }))).toBe('review');
+      expect(await recommendedFor(prNode({ labels: ['feedback-implemented'] }))).toBe('review');
     });
 
     it('a label-less pull request asks for a review', async () => {
-      expect(await recommendedFor(prNode())).toBeNull();
+      expect(await recommendedFor(prNode())).toBe('review');
     });
 
     it('labels outside the workflow recommend nothing', async () => {
