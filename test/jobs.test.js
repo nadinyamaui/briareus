@@ -1297,7 +1297,7 @@ describe('Claude code review output', () => {
       child = new EventEmitter();
       child.stdin = new PassThrough();
       child.stdout = null;
-      child.writeReview = (bytes) => fs.appendFileSync(path.join(opts.cwd, 'review-summary.md'), bytes);
+      child.writeReview = (bytes) => fs.appendFileSync(summaryPath, bytes);
       child.stderr = new PassThrough();
       child.stdin.on('data', (chunk) => (stdin += chunk.toString()));
       return child;
@@ -1305,6 +1305,7 @@ describe('Claude code review output', () => {
     getProviderForJob.mockReturnValue(state.provider);
     captureProviderAuth.mockResolvedValue(undefined);
     const id = `simple-review-${code}`;
+    const summaryPath = path.join(os.tmpdir(), 'reviewer-prompts', `${id}-review-summary.md`);
     state.stored = [
       {
         id,
@@ -1346,16 +1347,17 @@ describe('Claude code review output', () => {
       const split = bytes.indexOf(Buffer.from('é')) + 1;
       child.writeReview(bytes.subarray(0, split));
       child.writeReview(bytes.subarray(split));
-      expect(fs.readFileSync(path.join(root, 'review-summary.md'), 'utf8')).toBe(summary);
+      expect(fs.readFileSync(summaryPath, 'utf8')).toBe(summary);
       child.emit('close', code);
       await vi.waitFor(() => expect(job.status).toBe('idle'));
       expect(job.error).toBe(code === 0 ? null : 'Claude entry exited with code 1');
-      expect(fs.readFileSync(path.join(root, 'review-summary.md'), 'utf8')).toBe(summary);
+      expect(fs.readFileSync(summaryPath, 'utf8')).toBe(summary);
       expect(job.events.findLast((e) => e.kind === 'result')).toMatchObject({
         text: summary,
         isError: code !== 0,
       });
-      expect(job.events.some((e) => e.text === `[review-summary.md](${root}/review-summary.md)`)).toBe(true);
+      expect(job.events.some((e) => e.text === `[review-summary.md](${summaryPath})`)).toBe(true);
+      expect(fs.existsSync(path.join(root, 'review-summary.md'))).toBe(false);
     } finally {
       await closeDevSession(id);
       home.mockRestore();
@@ -1364,6 +1366,7 @@ describe('Claude code review output', () => {
       getProviderForJob.mockReset();
       captureProviderAuth.mockReset();
       fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(summaryPath, { force: true });
     }
   });
 });

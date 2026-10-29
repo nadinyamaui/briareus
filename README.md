@@ -162,11 +162,11 @@ through `stepRuntimes.testSheet` and `stepRuntimes.testRun`.
 
 Code review currently supports Claude Code only. It prepares a workspace on the
 PR’s head branch and runs `claude -p "/code-review <effort> --comment"`
-with the selected provider’s `CLAUDE_CONFIG_DIR`, model, an empty `--allowedTools`
-value and `--permission-mode bypassPermissions`. An appended system prompt requests
+with the selected provider’s `CLAUDE_CONFIG_DIR`, model and effort, and
+`--permission-mode bypassPermissions`; its empty `--allowedTools` value restricts nothing. An appended system prompt requests
 a change description, severity counts, collapsible findings grouped by severity,
 a “Not fixed” section and a checklist of acceptance criteria verified. The output
-is saved as `review-summary.md` and shown in the session.
+is saved as `review-summary.md` outside the checkout and shown in the session.
 
 With `babysitPrs` enabled, the server checks open PRs every 15 minutes and starts
 conflict resolution or CI fixes. Each action is deduplicated by head commit, with

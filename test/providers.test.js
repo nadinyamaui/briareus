@@ -584,6 +584,8 @@ describe('buildArgs', () => {
       '/code-review high --comment',
       '--model',
       'claude-opus-5-5',
+      '--effort',
+      'high',
       '--allowedTools',
       '',
       '--permission-mode',
