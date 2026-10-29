@@ -1120,6 +1120,28 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(() => createDevSession({ ...base, provider: 99 })).toThrow(/Unknown provider: 99/);
   });
 
+  it('only accepts Claude Code for code review, with a head branch', () => {
+    const review = { ...base, activity: 'review', prompt: '/code-review' };
+    expect(() => createDevSession(review)).toThrow(/requires the branch to check out/);
+    state.provider = { ...state.provider, binary: 'codex' };
+    expect(() => createDevSession({ ...review, prNumber: 3747, branch: 'feature' })).toThrow(
+      /requires a Claude Code provider/,
+    );
+  });
+
+  it.each(['low', 'high', undefined])('uses the resolved review effort (%s) in the command', (effort) => {
+    const session = createDevSession({
+      ...base,
+      effort,
+      activity: 'review',
+      prompt: '/code-review',
+      prNumber: 3747,
+      branch: 'feature',
+    });
+    expect(getJob(session.id).recoveryTurn.prompt).toBe(`/code-review ${effort || 'high'} --comment`);
+    expect(session).toMatchObject({ providerId: 1, local: false, startBranch: 'feature' });
+  });
+
   it('files a session under its starter, and a worker under its orchestrator’s owner', () => {
     const orchestrator = createDevSession({ ...base, orchestrator: true, ownerId: 2 });
     expect(orchestrator.ownerId).toBe(2);
@@ -1253,6 +1275,99 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(loose).toMatchObject({ model: 'claude-fable-5-1', effort: 'high' });
     const bare = createDevSession({ ...base, model: undefined, effort: undefined });
     expect(bare).toMatchObject({ model: 'claude-fable-5-1', effort: 'high' });
+  });
+});
+
+describe('Claude code review output', () => {
+  it.each([0, 1])('captures the complete markdown stdout and respects exit code %s', async (code) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-review-'));
+    const configDir = path.join(root, 'claude-config');
+    fs.mkdirSync(configDir);
+    const home = vi.spyOn(providerTools, 'ensureClaudeHome').mockReturnValue(configDir);
+    const bin = vi
+      .spyOn(BINARIES.claude, 'bin')
+      .mockReturnValue({ bin: '/mock/review-agent', source: 'test' });
+    const realSpawn = spawn.getMockImplementation();
+    let child;
+    let invocation;
+    let stdin = '';
+    spawn.mockImplementation((cmd, args, opts) => {
+      if (cmd !== '/mock/review-agent') return realSpawn(cmd, args, opts);
+      invocation = { args, opts };
+      child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = null;
+      child.writeReview = (bytes) => fs.appendFileSync(summaryPath, bytes);
+      child.stderr = new PassThrough();
+      child.stdin.on('data', (chunk) => (stdin += chunk.toString()));
+      return child;
+    });
+    getProviderForJob.mockReturnValue(state.provider);
+    captureProviderAuth.mockResolvedValue(undefined);
+    const id = `simple-review-${code}`;
+    const summaryPath = path.join(os.tmpdir(), 'reviewer-prompts', `${id}-review-summary.md`);
+    state.stored = [
+      {
+        id,
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/shop',
+        providerId: 1,
+        model: 'claude-fable-5-1',
+        effort: 'high',
+        activity: 'review',
+        startedOnPr: 3747,
+        providerSessionId: '12345678-1234-1234-1234-123456789abc',
+        turns: 0,
+        chatStarted: false,
+        workDir: root,
+        branch: 'feature',
+        createdAt: '2026-10-29T00:00:00Z',
+      },
+    ];
+    try {
+      await initJobs();
+      const job = getJob(id);
+      job.status = 'idle';
+      sendDevMessage(id, '/code-review high --comment');
+      expect(invocation.args.slice(0, 4)).toEqual([
+        '-p',
+        '/code-review high --comment',
+        '--model',
+        'claude-fable-5-1',
+      ]);
+      expect(invocation.opts).toMatchObject({ cwd: root, env: { CLAUDE_CONFIG_DIR: configDir } });
+      expect(invocation.opts.stdio).toEqual(['pipe', expect.any(Number), 'pipe']);
+      expect(invocation.args).not.toContain('--append-system-prompt-file');
+      expect(invocation.args).not.toContain('--mcp-config');
+      expect(stdin).toBe('');
+      // Preserve whitespace, long lines, an incomplete final line and split UTF-8 bytes.
+      const summary = `# Review\n\n${'Details '.repeat(100)}café\n\n- [x] Acceptance criteria verified`;
+      const bytes = Buffer.from(summary);
+      const split = bytes.indexOf(Buffer.from('é')) + 1;
+      child.writeReview(bytes.subarray(0, split));
+      child.writeReview(bytes.subarray(split));
+      expect(fs.readFileSync(summaryPath, 'utf8')).toBe(summary);
+      child.emit('close', code);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      expect(job.error).toBe(code === 0 ? null : 'Claude entry exited with code 1');
+      expect(fs.readFileSync(summaryPath, 'utf8')).toBe(summary);
+      expect(job.events.findLast((e) => e.kind === 'result')).toMatchObject({
+        text: summary,
+        isError: code !== 0,
+      });
+      expect(job.events.some((e) => e.text === `[review-summary.md](${summaryPath})`)).toBe(true);
+      expect(fs.existsSync(path.join(root, 'review-summary.md'))).toBe(false);
+    } finally {
+      await closeDevSession(id);
+      home.mockRestore();
+      bin.mockRestore();
+      spawn.mockReset();
+      getProviderForJob.mockReset();
+      captureProviderAuth.mockReset();
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(summaryPath, { force: true });
+    }
   });
 });
 

@@ -11,7 +11,7 @@ vi.mock('../lib/prtasks.js', () => ({
   prBodyPrompt: vi.fn(() => 'BODY'),
 }));
 
-import { getAction, actionSessionSpec } from '../lib/actions.js';
+import { getAction, listActions, actionSessionSpec } from '../lib/actions.js';
 import * as prtasks from '../lib/prtasks.js';
 
 beforeEach(() => {
@@ -169,6 +169,21 @@ describe('actionSessionSpec', () => {
     project: null,
     input: '',
   };
+
+  it('starts a Claude review in an isolated workspace on the PR head branch', async () => {
+    expect(listActions().find((a) => a.id === 'review')).toMatchObject({ binary: 'claude' });
+    expect(await actionSessionSpec(getAction('review'), context)).toEqual({
+      repo: 'a/b',
+      branch: 'feature/x',
+      local: false,
+      prompt: '/code-review',
+      prNumber: 4,
+      prBranch: 'feature/x',
+      autoClose: false,
+      title: 'Code review: #4',
+      activity: 'review',
+    });
+  });
 
   it('checks out the PR branch in a worktree for an errand that pushes, and closes it when done', async () => {
     expect(await actionSessionSpec(getAction('fix-checks'), context)).toEqual({

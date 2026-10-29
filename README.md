@@ -154,11 +154,19 @@ machine's CUPS printers, through the internal print MCP in projects with
 
 ### Pull request actions and QA
 
-PR actions can write a description or test sheet, run a test sheet, resolve conflicts,
+PR actions can review code, write a description or test sheet, run a test sheet, resolve conflicts,
 fix failing CI checks, and delete the configured account's comments. The project’s
 `prAuthor` filters its pull requests; `actionProviderId`, `actionModel`, and
 `actionEffort` select the runtime for PR actions. QA steps can override that runtime
 through `stepRuntimes.testSheet` and `stepRuntimes.testRun`.
+
+Code review currently supports Claude Code only. It prepares a workspace on the
+PR’s head branch and runs `claude -p "/code-review <effort> --comment"`
+with the selected provider’s `CLAUDE_CONFIG_DIR`, model and effort, and
+`--permission-mode bypassPermissions`; its empty `--allowedTools` value restricts nothing. An appended system prompt requests
+a change description, severity counts, collapsible findings grouped by severity,
+a “Not fixed” section and a checklist of acceptance criteria verified. The output
+is saved as `review-summary.md` outside the checkout and shown in the session.
 
 With `babysitPrs` enabled, the server checks open PRs every 15 minutes and starts
 conflict resolution or CI fixes. Each action is deduplicated by head commit, with

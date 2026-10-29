@@ -157,7 +157,7 @@ Read what a project spent this calendar month. Needs `read`, held to `repo`.
 
 List the errands that can be run on a pull request. Needs `read`.
 
-**Returns** `{ actions: object[] }`. An errand is `{ id, label, icon, hint, input }`; `input` is null or `{ label, required }` when it asks the user something.
+**Returns** `{ actions: object[] }`. An errand is `{ id, label, icon, hint, input, binary? }`; `input` is null or `{ label, required }` when it asks the user something, and `binary` restricts the supported CLI when present.
 
 ### `POST /actions`
 
@@ -175,7 +175,7 @@ Start an errand on a pull request; starts a paid session. Needs `manage`, held t
 | `model`                 | `string`  | A model of that provider; its default when absent                                |
 | `effort`                | `string`  | An effort that model offers; its default when absent                             |
 
-**Returns** 201 `{ session: Session }`
+**Returns** 201 `{ session: Session }`. The `review` action supports Claude Code only: it prepares the PR head branch and runs `/code-review <effort> --comment` with the selected provider account, model and effort, and bypass permissions (its empty allowed-tools value restricts nothing); stdout is saved as `review-summary.md` outside the checkout and shown in the session. The appended system prompt requests a change description, severity counts, collapsible findings by severity, a Not fixed section and an acceptance-criteria verification checklist.
 
 ## Pull requests and issues
 
