@@ -393,6 +393,17 @@ describe('the worker runtime', () => {
   });
 });
 
+describe('the local session limit', () => {
+  it('defaults to one and takes a whole number from 1 to 10', async () => {
+    expect((await createProject({ ...base })).localSessionLimit).toBe(1);
+    expect((await createProject({ repo: 'acme/two', localSessionLimit: '3' })).localSessionLimit).toBe(3);
+    for (const bad of [0, 11, 2.5, 'many', null])
+      await expect(createProject({ repo: 'acme/bad', localSessionLimit: bad })).rejects.toThrow(
+        /localSessionLimit must be a whole number from 1 to 10/,
+      );
+  });
+});
+
 describe('the local checkout auto-update', () => {
   it('keeps the update commands one per line and needs a checkout to be on', async () => {
     const saved = await createProject({
