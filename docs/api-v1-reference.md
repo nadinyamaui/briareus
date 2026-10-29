@@ -307,6 +307,18 @@ Read one page of a pull request’s inline review comments. Needs `read`, held t
 
 **Returns** `{ pr: PullRequest, reviewComments: ReviewComment[], nextPage: integer? }`
 
+### `GET /pulls/{number}/code-reviews`
+
+Read the code reviews Briareus sessions ran on a pull request, with their findings and verdicts. Needs `read`, held to `repo`.
+
+**Query**
+
+| Field               | Type     |                            |
+| ------------------- | -------- | -------------------------- |
+| `repo` **required** | `string` | A project, as `owner/name` |
+
+**Returns** `{ codeReviews: CodeReview[] }`. Reads Briareus’s own records, not GitHub: the latest 20 reviews, newest first, each with every finding it registered and the verification step’s `shouldFix` verdict on it. A rerun of a review in the same session replaces that review’s findings. A pull request with none answers an empty list; an unreadable database is 503.
+
 ### `PATCH /pulls/{number}`
 
 Update a pull request on GitHub. Needs `manage`, held to `repo`.
@@ -2770,6 +2782,56 @@ A comment on a line of a pull request’s diff.
 | `updatedAt`    | `string`   | ISO time                                                 |
 | `url`          | `string`   | Its place on GitHub                                      |
 
+### CodeReview
+
+A code review a session ran on a pull request, as Briareus stored it.
+
+| Field           | Type                         |                                                                               |
+| --------------- | ---------------------------- | ----------------------------------------------------------------------------- |
+| `id`            | `integer`                    | Its id                                                                        |
+| `sessionId`     | `string`                     | The review session, which keeps its transcript after it closes                |
+| `projectId`     | `integer?`                   | Its project                                                                   |
+| `repo`          | `string`                     | The project, as `owner/name`                                                  |
+| `prNumber`      | `integer?`                   | The pull request                                                              |
+| `branch`        | `string`                     | The branch it checked out                                                     |
+| `headSha`       | `string?`                    | The commit it reviewed, once the checkout was verified                        |
+| `userId`        | `integer?`                   | Who started it                                                                |
+| `providerId`    | `integer?`                   | The provider it ran on                                                        |
+| `provider`      | `string`                     | The provider’s label when it ran                                              |
+| `model`         | `string`                     | The model; empty for the provider’s default                                   |
+| `effort`        | `string`                     | The effort; empty for the default                                             |
+| `inputTokens`   | `integer?`                   | Tokens read, summed over its turns                                            |
+| `outputTokens`  | `integer?`                   | Tokens written, summed over its turns                                         |
+| `costUsd`       | `number?`                    | What it cost in US dollars                                                    |
+| `costEstimated` | `boolean`                    | Whether `costUsd` includes catalog estimates for a provider that reports none |
+| `unpricedTurns` | `integer`                    | Turns no price covered, left out of `costUsd`                                 |
+| `status`        | `running\|completed\|failed` | Whether it is still running, finished, or died before finishing               |
+| `summary`       | `string?`                    | The summary comment it posted on the pull request, Markdown                   |
+| `completedAt`   | `string?`                    | ISO time                                                                      |
+| `createdAt`     | `string`                     | ISO time                                                                      |
+| `updatedAt`     | `string`                     | ISO time                                                                      |
+| `findings`      | `CodeReviewFinding[]`        | What it found, in the order it registered them                                |
+
+### CodeReviewFinding
+
+One finding a code review registered.
+
+| Field          | Type                          |                                                                                              |
+| -------------- | ----------------------------- | -------------------------------------------------------------------------------------------- |
+| `id`           | `integer`                     | Its id                                                                                       |
+| `severity`     | `critical\|high\|medium\|low` | How bad it is                                                                                |
+| `type`         | `string`                      | What kind of defect: `correctness`, `security`, `efficiency`, …; may be empty                |
+| `shouldFix`    | `fix\|optional\|dismiss?`     | The verification step’s verdict on whether the pull request must change; null until it ruled |
+| `verification` | `confirmed\|plausible?`       | Whether an independent check reproduced it or it is only likely                              |
+| `title`        | `string`                      | Its one-line statement                                                                       |
+| `body`         | `string?`                     | Its explanation, Markdown                                                                    |
+| `filePath`     | `string?`                     | The file it is in                                                                            |
+| `startLine`    | `integer?`                    | Its first line                                                                               |
+| `endLine`      | `integer?`                    | Its last line                                                                                |
+| `comments`     | `string?`                     | Why the verdict is what it is, e.g. why it is not worth fixing                               |
+| `createdAt`    | `string`                      | ISO time                                                                                     |
+| `updatedAt`    | `string`                      | ISO time                                                                                     |
+
 ### ClosedIssue
 
 An issue as closing it left it.
@@ -3398,6 +3460,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `GET /api/pr/view?section=comments`                                              | `GET /pulls/{number}/comments`                                                                                                    |
 | `GET /api/pr/view?section=reviews`                                               | `GET /pulls/{number}/reviews`                                                                                                     |
 | `GET /api/pr/view?section=review-comments`                                       | `GET /pulls/{number}/review-comments`                                                                                             |
+| `GET /api/pr/code-reviews`                                                       | `GET /pulls/{number}/code-reviews`                                                                                                |
 | `PATCH /api/pr/update`                                                           | `PATCH /pulls/{number}`                                                                                                           |
 | `PATCH /api/issues/update`                                                       | `PATCH /issues/{number}`                                                                                                          |
 | `POST /api/pr/update-branch`                                                     | `POST /pulls/{number}/update-branch`                                                                                              |
