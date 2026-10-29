@@ -20787,8 +20787,18 @@ describe('official orchestrator PR actions', () => {
     base: { ref: 'main' },
     ...extra,
   });
+  // Implement feedback assesses only somebody other than the author.
+  const review = { id: 7, user: { login: 'sergio', type: 'User' }, body: 'Rename it', state: 'COMMENTED' };
   const respondPull = (_cfg, _method, route) =>
-    Promise.resolve({ ok: true, json: async () => (/\/pulls\/\d+$/.test(route) ? pull() : []) });
+    Promise.resolve({
+      ok: true,
+      json: async () =>
+        /\/pulls\/\d+$/.test(route)
+          ? pull()
+          : /\/reviews\?/.test(route) && route.endsWith('page=1')
+            ? [review]
+            : [],
+    });
   beforeAll(async () => {
     state.stored = [
       {

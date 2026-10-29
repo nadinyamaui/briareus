@@ -207,8 +207,10 @@ push it made from one a human made.
 
 The composer's 🔁 chip arms a **review loop** on the next from-scratch session.
 🛠 Implement feedback first assesses the PR's existing review bodies, inline
-comments and discussion on the project's configured review provider, model and
-effort. Its findings wait for **Fix / Optional / Dismiss** decisions in Findings;
+comments and discussion from anyone but the PR's author or a bot, on the
+project's configured review provider, model and effort. The author's own comments
+include, on their own PRs, Briareus's earlier reviews, already ruled on in their
+own triage; a PR with no other feedback starts nothing. Its findings wait for **Fix / Optional / Dismiss** decisions in Findings;
 only the selected fixes start an implementation session with the review loop armed.
 The assessment includes source links, verification evidence, fix-value advice and
 previous fixes or dismissals, including feedback listed only in a review summary.
