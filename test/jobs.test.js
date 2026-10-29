@@ -348,6 +348,7 @@ import {
   claimLocalCheckout,
   releaseLocalCheckout,
   localCheckoutBusy,
+  readmitLocalWaiters,
   ensureClone,
   trustWorkspace,
 } from '../lib/jobs.js';
@@ -10715,31 +10716,117 @@ describe('Codex turn usage', () => {
     }
   });
 
-  it('lets any number of sessions into the local checkout with a limit of 0, behind a waiting update', async () => {
+  it('lets any number of sessions into the local checkout with a limit of 0, ahead of a waiting update', async () => {
     const local = localCheckout('unlimited-local-');
     state.projects[0].localSessionLimit = 0;
     try {
       const sessions = ['One', 'Two', 'Three'].map((p) => startLocal(p));
       await vi.waitFor(() => expect(children).toHaveLength(3));
       for (const job of sessions) expect(job.workDir).toBe(local);
-      // A waiting update still gets the checkout before sessions that arrive after it.
+      // An update needs the checkout empty; sessions arriving meanwhile do not wait with it.
       let updated = false;
       const update = claimLocalCheckout(local).then(() => (updated = true));
       const late = startLocal('Four');
-      await vi.waitFor(() =>
-        expect(late.events.some((e) => /update is waiting for the local checkout/.test(e.text || ''))).toBe(
-          true,
-        ),
-      );
-      for (const [i, job] of sessions.entries()) await finishAndClose(job, children[i]);
+      await vi.waitFor(() => expect(children).toHaveLength(4));
+      expect(late.workDir).toBe(local);
+      for (const [i, job] of [...sessions, late].entries()) await finishAndClose(job, children[i]);
       await update;
       expect(updated).toBe(true);
-      expect(children).toHaveLength(3);
+      // Sessions arriving during the update wait for it.
+      const after = startLocal('Five');
+      await vi.waitFor(() =>
+        expect(after.events.some((e) => /updating after a merge/.test(e.text || ''))).toBe(true),
+      );
+      expect(children).toHaveLength(4);
       releaseLocalCheckout(local);
-      await vi.waitFor(() => expect(children).toHaveLength(4));
-      await finishAndClose(late, children[3]);
+      await vi.waitFor(() => expect(children).toHaveLength(5));
+      await finishAndClose(after, children[4]);
       expect(localCheckoutBusy(local)).toBe(false);
     } finally {
+      delete state.projects[0].localSessionLimit;
+    }
+  });
+
+  it('lets queued sessions in when the local session limit is raised', async () => {
+    const local = localCheckout('raised-local-');
+    try {
+      const first = startLocal('One');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      const second = startLocal('Two');
+      await vi.waitFor(() => expect(second.status).toBe('queued'));
+      state.projects[0].localSessionLimit = 2;
+      readmitLocalWaiters();
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(second.workDir).toBe(local);
+      // The shared tree's rules reach the agent, not the single-session ones.
+      expect(children[1].prompt).toContain('git push origin HEAD:refs/heads/<branch>');
+      expect(children[1].prompt).not.toContain('pushing a feature branch or opening a PR is fine');
+      // The queue message counts the sessions actually in the checkout.
+      const third = startLocal('Three');
+      await vi.waitFor(() =>
+        expect(
+          third.events.some((e) => /2 sessions are already working .* limit is 2/.test(e.text || '')),
+        ).toBe(true),
+      );
+      await finishAndClose(first, children[0]);
+      await vi.waitFor(() => expect(children).toHaveLength(3));
+      await finishAndClose(second, children[1]);
+      await finishAndClose(third, children[2]);
+      expect(localCheckoutBusy(local)).toBe(false);
+    } finally {
+      delete state.projects[0].localSessionLimit;
+    }
+  });
+
+  it('does not leak a place when a session closed while queued is reopened', async () => {
+    const local = localCheckout('reopen-local-');
+    const first = startLocal('One');
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('pushing a feature branch or opening a PR is fine');
+    const second = startLocal('Two');
+    await vi.waitFor(() => expect(second.status).toBe('queued'));
+    await closeDevSession(second.id);
+    expect(second.status).toBe('closed');
+    reopenDevSession(second.id);
+    await vi.waitFor(() => expect(second.status).toBe('queued'));
+    await finishAndClose(first, children[0]);
+    await vi.waitFor(() => expect(second.status).toBe('idle'));
+    expect(second.workDir).toBe(local);
+    await closeDevSession(second.id);
+    // One place was taken and given back; a leaked one would keep the checkout busy.
+    expect(localCheckoutBusy(local)).toBe(false);
+  });
+
+  it('keeps sessions out of the local checkout while one switches its branch', async () => {
+    const local = localCheckout('switching-local-');
+    state.projects[0].localSessionLimit = 2;
+    let fetch = null;
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, args, ...rest) => {
+      if (cmd !== 'git' || !args.includes('fetch')) return realSpawn(cmd, args, ...rest);
+      fetch = new EventEmitter();
+      fetch.stdout = new PassThrough();
+      fetch.stderr = new PassThrough();
+      return fetch;
+    });
+    try {
+      const switching = startLocal('One', { branch: 'feature' });
+      await vi.waitFor(() => expect(fetch).toBeTruthy());
+      const other = startLocal('Two');
+      await vi.waitFor(() =>
+        expect(other.events.some((e) => /switching the local checkout/.test(e.text || ''))).toBe(true),
+      );
+      expect(other.status).toBe('queued');
+      // The checkout of the fake tree fails, which still lets the waiting session in.
+      fetch.emit('close', 0);
+      await vi.waitFor(() => expect(switching.status).toBe('failed'));
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(other.workDir).toBe(local);
+      await finishAndClose(other, children[0]);
+      await closeDevSession(switching.id);
+      expect(localCheckoutBusy(local)).toBe(false);
+    } finally {
+      spawn.mockImplementation(realSpawn);
       delete state.projects[0].localSessionLimit;
     }
   });
