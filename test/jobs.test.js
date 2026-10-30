@@ -11,6 +11,7 @@ import { BINARIES } from '../lib/providers.js';
 import * as r2 from '../lib/r2.js';
 import { getUpload } from '../lib/uploads.js';
 import * as providerTools from '../lib/providers.js';
+import * as codexConfig from '../lib/codex-config.js';
 import { compactCodexThread } from '../lib/codex-session.js';
 import { askClaudeSideQuestion, transferClaudeSession } from '../lib/claude-session.js';
 import { forgetProviderUsage, providerUsage } from '../lib/balancer.js';
@@ -12919,6 +12920,53 @@ describe('the shared browser in a session', () => {
       expect(Object.hasOwn(seen.mcp, '__proto__')).toBe(true);
       expect(seen.mcp.__proto__).toEqual({ command: 'node', args: [], env: {} });
     } finally {
+      setExternalMcp(() => []);
+    }
+  });
+
+  it('does not spawn a Codex turn when its effective MCP shell policy cannot be resolved', async () => {
+    const job = getJob('br-turn');
+    job.browser = false;
+    setExternalMcp(() => [{ id: 7, name: 'meta', transport: 'http' }]);
+    const policy = vi
+      .spyOn(codexConfig, 'codexMcpShellArgs')
+      .mockRejectedValueOnce(new Error('Codex shell policy lookup failed'));
+    try {
+      const { seen, settled } = await turn(job, 'List my apps', { binary: 'codex' });
+      await settled;
+      expect(policy).toHaveBeenCalledWith(expect.objectContaining({ bin: '/mock/agent', cwd: job.workDir }));
+      expect(Object.keys(policy.mock.calls[0][0].env).some((name) => name.startsWith('BRIAREUS_MCP_'))).toBe(
+        false,
+      );
+      expect(seen.spawned).toBe(false);
+      expect(job.events.some((e) => e.text?.includes('Codex shell policy lookup failed'))).toBe(true);
+    } finally {
+      policy.mockRestore();
+      setExternalMcp(() => []);
+    }
+  });
+
+  it('honors Stop while resolving the Codex MCP shell policy', async () => {
+    const job = getJob('br-turn');
+    job.browser = false;
+    setExternalMcp(() => [{ id: 7, name: 'meta', transport: 'http' }]);
+    let resolved;
+    const policy = vi.spyOn(codexConfig, 'codexMcpShellArgs').mockImplementationOnce(
+      ({ args }) =>
+        new Promise((resolve) => {
+          resolved = () => resolve(args);
+        }),
+    );
+    try {
+      const { seen, settled } = await turn(job, 'List my apps', { binary: 'codex' });
+      await vi.waitFor(() => expect(policy).toHaveBeenCalledOnce());
+      cancelDevTurn(job.id);
+      resolved();
+      await settled;
+      expect(seen.spawned).toBe(false);
+      expect(job.turnCanceled).toBe(true);
+    } finally {
+      policy.mockRestore();
       setExternalMcp(() => []);
     }
   });

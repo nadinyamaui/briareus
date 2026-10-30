@@ -733,7 +733,8 @@ describe('buildArgs', () => {
       BRIAREUS_MCP_1_SENTRY_ACCESS_TOKEN: 'secret',
       BRIAREUS_MCP_1_REVIEWER_MEMORY_TOKEN: 'other',
     });
-    expect(args).toContain('shell_environment_policy.exclude=["BRIAREUS_MCP_*"]');
+    // The effective exclusions are resolved asynchronously before spawning the turn.
+    expect(args.join(' ')).not.toContain('shell_environment_policy');
   });
 
   it('codex leaves the shell policy alone when no credential needed moving', () => {
