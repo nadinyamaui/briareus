@@ -548,6 +548,43 @@ describe('durable GitHub synchronization', () => {
     expect(h.errors).toEqual([]);
   });
 
+  it('attributes runners for Actions checks collected by a PR refresh, with no webhook', async () => {
+    const h = harness({ initial: [issue(1, { pull_request: {} })] });
+    const pr = pull(1);
+    const check = {
+      id: 7,
+      name: 'test',
+      head_sha: pr.head.sha,
+      status: 'completed',
+      conclusion: 'success',
+      app: { slug: 'github-actions' },
+      details_url: 'https://github.com/acme/shop/actions/runs/70/job/7',
+    };
+    h.routes.set('/repos/acme/shop/pulls/1', pr);
+    h.routes.set(`/repos/acme/shop/commits/${pr.head.sha}/check-runs`, { check_runs: [check] });
+    const jobs = [{ id: 7, status: 'completed', runner_name: 'ubuntu-eu-2' }];
+    h.routes.set('/repos/acme/shop/actions/runs/70/jobs', { jobs });
+    await h.service.tick();
+    expect(h.ci.missingRunners).toHaveBeenCalledWith(project.repo, ['7']);
+    expect(h.ci.saveRunners).toHaveBeenCalledExactlyOnceWith(project.repo, jobs, expect.any(Number));
+    expect(h.store.finishSync).toHaveBeenLastCalledWith(project.repo, expect.any(Number));
+    // A failed attribution keeps the snapshot but leaves the CI target to retry.
+    h.ci.saveRunners.mockClear();
+    h.ci.saveRunners.mockRejectedValueOnce(new Error('database offline'));
+    h.store.saveItem.mockClear();
+    h.routes.set('/repos/acme/shop/pulls/1', pull(1, { updated_at: '2026-10-27T11:00:00Z' }));
+    h.routes.set('/repos/acme/shop/issues', [
+      issue(1, { pull_request: {}, updated_at: '2026-10-27T11:00:00Z' }),
+    ]);
+    await h.service.tick();
+    expect(h.store.saveItem).toHaveBeenCalled();
+    expect(h.store.finishSync).toHaveBeenLastCalledWith(
+      project.repo,
+      null,
+      expect.stringContaining('database offline'),
+    );
+  });
+
   it('leaves checks unattributed without failing collection when Actions are unreadable', async () => {
     const h = harness();
     const sha = 'd'.repeat(40);
