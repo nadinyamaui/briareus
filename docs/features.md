@@ -59,9 +59,11 @@ branch, the reviewed head, its provider, model and effort, its tokens and cost
 (estimated for providers that report none, with a count of turns no price
 covered) and whether it completed or failed, with the published summary. A
 review whose session fails to start, or is closed or deleted before its review
-turn ends, is marked failed; it completes when its verification step ends.
+turn ends, is marked failed; it completes when its labelling step ends.
 A review runs on Claude (`/code-review`) or Codex (`codex exec review`), then
-publishes and verifies in the same conversation. Through MCP tools mounted
+publishes, verifies and labels the PR in the same conversation. When nothing is
+left to fix on a PR another account opened, the labelling step also approves the
+reviewed commit on GitHub. Through MCP tools mounted
 only on review sessions (`review_finding_add`, `review_finding_update`,
 `review_summary_set`, `review_findings_list`), the publish step registers each
 finding in `code_review_findings` (severity, type, location) and stores the

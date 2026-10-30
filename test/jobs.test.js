@@ -1563,6 +1563,9 @@ describe('Claude code review', () => {
         const label = invocations[first + 3];
         await vi.waitFor(() => expect(label.prompt).toBeTruthy());
         expect(label.prompt).toContain('add the `feedback-given` label');
+        expect(label.prompt).toContain(
+          `\`gh api repos/acme/shop/pulls/3747/reviews -f commit_id=${head} -f event=APPROVE\``,
+        );
         await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
         expect(failCodeReview).not.toHaveBeenCalled();
         await vi.waitFor(() => expect(job.status).toBe('idle'));
@@ -1755,6 +1758,16 @@ describe('native Codex code review', () => {
     expect(label.child.prompt).toContain(
       'once the new label is on, remove `feedback-implemented` and `requires-dev-review`',
     );
+    // With nothing left to fix, someone else's PR is approved at the reviewed commit
+    // as the account the review runs as; anything else gets no review at all.
+    expect(label.child.prompt).toContain('otherwise submit no review at all');
+    expect(label.child.prompt).toContain('every one was Dismissed (none is Fix, Optional or unverified)');
+    expect(label.child.prompt).toContain('its author is not the account `gh` is signed in as');
+    expect(label.child.prompt).toContain(`Its head is still ${head}, the commit you reviewed`);
+    expect(label.child.prompt).toContain('gh pr view 77 --repo acme/shop --json author,headRefOid,reviews');
+    expect(label.child.prompt).toContain(
+      `\`gh api repos/acme/shop/pulls/77/reviews -f commit_id=${head} -f event=APPROVE\``,
+    );
     expect(job.recoveryTurn).toMatchObject({ opts: { codeReviewStage: 'label' }, completed: false });
     // The findings tools ride on every turn of a review session.
     for (const turn of [native, publish, verify, label])
@@ -1846,6 +1859,8 @@ describe('native Codex code review', () => {
       interruptedFrom: 'running',
       restartPending: true,
       workspacePrepared: true,
+      // Saved with the session when discovery started.
+      codeReviewHead: head,
       recoveryTurn: {
         prompt: 'Publish the review above',
         opts: { codeReviewStage: 'publish' },
@@ -1863,8 +1878,14 @@ describe('native Codex code review', () => {
     expect(invocations[1].child.prompt).toContain('Your goal is to try to REFUTE them');
     finishTurn(invocations[1]);
     await vi.waitFor(() => expect(invocations).toHaveLength(3));
-    expect(invocations[2].child.prompt).toMatch(/accordingly, and post no comments:\nPROJECT LABEL RULES$/);
+    expect(invocations[2].child.prompt).toContain(
+      'accordingly, and post no comments:\nPROJECT LABEL RULES\n\nThen approve the PR on GitHub',
+    );
     expect(invocations[2].child.prompt).not.toContain('feedback-given');
+    // The approval is not a label rule, so the project's own rules keep it.
+    expect(invocations[2].child.prompt).toContain(
+      `\`gh api repos/acme/shop/pulls/77/reviews -f commit_id=${head} -f event=APPROVE\``,
+    );
     expect(completeCodeReview).not.toHaveBeenCalled();
     finishTurn(invocations[2]);
     await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));

@@ -163,7 +163,7 @@ through `stepRuntimes.testSheet` and `stepRuntimes.testRun`.
 Code review runs on a Claude or Codex provider, selected for the action in Settings
 or when starting it. It prepares a workspace on the PR’s head branch, fetches the
 actual PR base (stacked branches included) and refuses a checkout that differs from
-the current PR head. It then runs three turns of one conversation on the same
+the current PR head. It then runs four turns of one conversation on the same
 account, model and effort:
 
 1. **Discovery**: the provider’s own review command. Claude runs
@@ -182,6 +182,10 @@ account, model and effort:
    is Fix, Optional or unverified, or `code-approved` when none is, then
    `feedback-implemented` and `requires-dev-review` come off if the PR has them. A
    project can replace these label rules with its own Code review labels template.
+   When nothing is left to fix and another account opened the PR, the reviewed
+   commit is also approved on GitHub, as the account the review runs as, provided
+   it is still the PR’s head. This applies whatever the project’s label rules are;
+   the review never approves its own account’s PRs.
 
 Failed or canceled discovery does not start publication; an interrupted step resumes
 itself and the steps after it without rerunning discovery.
