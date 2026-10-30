@@ -6,6 +6,7 @@ import { createGithubStore } from '../lib/github-store.js';
 import { createGithubSync } from '../lib/github-sync.js';
 import { createCiStore } from '../lib/ci-store.js';
 import { up as ciUp, down as ciDown } from '../migrations/2026_10_28_100000_add_ci_checks.js';
+import { up as runnersUp, down as runnersDown } from '../migrations/2026_10_30_100000_add_ci_runners.js';
 import { up, down } from '../migrations/2026_10_27_120000_add_github_mirror.js';
 import {
   up as observationUp,
@@ -119,11 +120,13 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     await metadataNamesUp({ context: pool });
     await metadataNamesUp({ context: pool });
     await ciUp({ context: pool });
+    await runnersUp({ context: pool });
     ci = createCiStore({ connection: () => pool.getConnection() });
     store = createGithubStore({ connection: () => pool.getConnection() });
   });
   afterAll(async () => {
     if (pool) {
+      await runnersDown({ context: pool });
       await ciDown({ context: pool });
       await metadataNamesDown({ context: pool });
       await metadataNamesDown({ context: pool });

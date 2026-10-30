@@ -548,6 +548,40 @@ describe('durable GitHub synchronization', () => {
     expect(h.errors).toEqual([]);
   });
 
+  it.each(['check', 'suite'])(
+    'attributes runners for a delivered %s the commit list omitted, read by its fallback',
+    async (kind) => {
+      const h = harness();
+      const sha = 'e'.repeat(40);
+      const check = {
+        id: 9,
+        name: 'late',
+        head_sha: sha,
+        status: 'completed',
+        conclusion: 'success',
+        app: { slug: 'github-actions' },
+        check_suite: { id: 90 },
+        details_url: 'https://github.com/acme/shop/actions/runs/900/job/9',
+      };
+      h.routes.set(`/repos/acme/shop/commits/${sha}/check-runs`, { check_runs: [] });
+      h.routes.set('/repos/acme/shop/check-runs/9', check);
+      h.routes.set('/repos/acme/shop/check-suites/90/check-runs', { check_runs: [check] });
+      const jobs = [{ id: 9, status: 'completed', runner_name: 'ubuntu-eu-3' }];
+      h.routes.set('/repos/acme/shop/actions/runs/900/jobs', { jobs });
+      h.service.onWebhook(
+        kind === 'check' ? 'check_run' : 'check_suite',
+        kind === 'check'
+          ? { repository: { full_name: project.repo }, check_run: { id: 9, head_sha: sha } }
+          : { repository: { full_name: project.repo }, check_suite: { id: 90, head_sha: sha } },
+      );
+      await h.service.flush(project.repo);
+      expect(h.ci.save).toHaveBeenCalledWith(project.repo, [check], expect.objectContaining({ sha }));
+      expect(h.ci.missingRunners).toHaveBeenCalledWith(project.repo, ['9']);
+      expect(h.ci.saveRunners).toHaveBeenCalledExactlyOnceWith(project.repo, jobs, expect.any(Number));
+      expect(h.errors).toEqual([]);
+    },
+  );
+
   it('attributes runners for Actions checks collected by a PR refresh, with no webhook', async () => {
     const h = harness({ initial: [issue(1, { pull_request: {} })] });
     const pr = pull(1);
