@@ -7318,7 +7318,7 @@ describe('the QA loop: reporting a finished QA run', () => {
 });
 
 describe('the restored review loop lifecycle', () => {
-  let parent, child, rejectPreparation;
+  let parent, child, rejectPreparation, poll;
   beforeEach(async () => {
     state.projects = [
       {
@@ -7363,7 +7363,15 @@ describe('the restored review loop lifecycle', () => {
         codeReviewSettled: true,
       },
     ];
-    await initJobs();
+    const interval = vi.spyOn(globalThis, 'setInterval').mockImplementation((fn) => {
+      if (fn.name === 'syncDevPrs') poll = fn;
+      return { unref() {} };
+    });
+    try {
+      await initJobs();
+    } finally {
+      interval.mockRestore();
+    }
     parent = getJob('review-loop-task');
     child = getJob('review-loop-child');
     child.status = 'idle';
@@ -7405,6 +7413,76 @@ describe('the restored review loop lifecycle', () => {
     expect(getCodeReviewByJob).toHaveBeenCalledWith(child.id);
     expect(getJob(child.id)).toBeNull();
   });
+
+  it('reviews the new attachment after a completed task leaves its previous PR branch', async () => {
+    await closeDevSession(child.id);
+    parent.prStatus.headRef = 'feature';
+    parent.prAttachedByBranch = true;
+    parent.startedOnPr = null;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-reattach-'));
+    spawnSync('git', ['init', '-q', '-b', 'next-feature', dir]);
+    parent.workDir = dir;
+    state.claimsServer = true;
+    state.eligibleServers = [{ id: 1 }];
+    state.capacity = 10000;
+    acquireInstance.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectPreparation = reject;
+        }),
+    );
+    githubRest.mockImplementation(async (_cfg, _method, url) => ({
+      ok: true,
+      json: async () =>
+        url.includes('/pulls?')
+          ? [{ number: 43, base: { ref: 'main' } }]
+          : {
+              number: 43,
+              state: 'open',
+              head: { sha: 'sha-a', ref: 'next-feature', repo: { full_name: parent.repo } },
+              base: { ref: 'main' },
+            },
+    }));
+    try {
+      refreshJobBranch(parent);
+      expect(parent.prStatus).toBeNull();
+      await attachPrForBranch(parent, { fresh: true });
+      await vi.waitFor(() => expect(parent.reviewLoop.sessionId).toBeTruthy());
+      expect(parent.reviewLoop).toMatchObject({ done: false, prNumber: 43, rounds: 1 });
+      expect(getJob(parent.reviewLoop.sessionId)).toMatchObject({
+        activity: 'review',
+        reviewParentId: parent.id,
+      });
+      await vi.waitFor(() => expect(rejectPreparation).toBeTypeOf('function'));
+    } finally {
+      parent.workDir = null;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['closed', 'merged'])(
+    'stops scheduler reads for an implicitly attached %s PR and supports explicit re-arming',
+    async (prState) => {
+      await closeDevSession(child.id);
+      parent.reviewLoop = newReviewLoop();
+      parent.startedOnPr = null;
+      parent.prStatus = { number: 42, state: prState, syncedAt: new Date().toISOString() };
+      githubRest.mockClear();
+      githubRest.mockResolvedValue({ ok: true, json: async () => ({ number: 42, state: 'closed' }) });
+      poll();
+      await vi.waitFor(() => expect(parent.reviewLoop.failure?.reason).toMatch(/no longer open/));
+      for (let i = 0; i < 3; i++) poll();
+      const reads = () =>
+        githubRest.mock.calls.filter(
+          ([, method, url]) => method === 'GET' && url === `/repos/${parent.repo}/pulls/42`,
+        ).length;
+      expect(reads()).toBe(1);
+      setReviewLoop(parent.id, true);
+      await vi.waitFor(() => expect(parent.reviewLoop.failure?.reason).toMatch(/no longer open/));
+      poll();
+      expect(reads()).toBe(2);
+    },
+  );
 
   it('uses the configured action provider/model/effort for the feedback child, inheriting its owner', async () => {
     listCodeReviewFindings.mockResolvedValue([

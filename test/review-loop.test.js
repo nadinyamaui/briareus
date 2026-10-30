@@ -255,6 +255,44 @@ describe('review and feedback loop', () => {
     expect(parent.reviewLoop).toMatchObject({ done: false, rounds: 0, phase: 'review' });
   });
 
+  it('invalidates a completed verdict when another PR attaches at the same head', async () => {
+    await loop.tick(parent);
+    await finish();
+    parent.prStatus = null; // releasePrLeftBehind clears the previous attachment
+    parent.prStatus = { number: 43, headSha: 'head-a' };
+    pr.number = 43;
+    loop.pushed(parent);
+    await loop.tick(parent);
+    expect(parent.reviewLoop).toMatchObject({ done: false, prNumber: 43, rounds: 1 });
+    expect(deps.startAction).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['before review', 'after review'])(
+    'stops polling a closed PR %s, including after restart',
+    async (when) => {
+      if (when === 'after review') await loop.tick(parent);
+      pr.state = 'closed';
+      if (when === 'after review') await finish();
+      else await loop.tick(parent);
+      expect(parent.reviewLoop).toMatchObject({
+        done: false,
+        sessionId: null,
+        pendingResult: null,
+        failure: { reason: 'the pull request is no longer open' },
+      });
+      const reads = deps.readPull.mock.calls.length;
+      parent = structuredClone(parent);
+      loop = createReviewLoop(deps);
+      for (let i = 0; i < 3; i++) await loop.tick(parent);
+      expect(deps.readPull).toHaveBeenCalledTimes(reads);
+      pr.state = 'open';
+      parent.reviewLoop = newReviewLoop(); // explicit re-arm
+      await loop.tick(parent);
+      expect(parent.reviewLoop).toMatchObject({ failure: null, rounds: 1, prNumber: 42 });
+      expect(deps.startAction).toHaveBeenCalledTimes(when === 'after review' ? 2 : 1);
+    },
+  );
+
   it('does not reset an active fix when its expected push arrives', async () => {
     review.findings = [fix];
     await loop.tick(parent);
