@@ -326,6 +326,7 @@ import {
   attachPrForBranch,
   refreshJobBranch,
   spawnWorkerSession,
+  eligibleWorkerProjects,
   startOrchestratorPrAction,
   workerSessionsFor,
   workerSummary,
@@ -4066,6 +4067,32 @@ describe('spawnWorkerSession: project targets and tooling fixes', () => {
   afterEach(() => {
     setSessionProjectFilter(() => true);
     getJob('tool-orch').ownerId = null;
+  });
+
+  it('lists only enabled shared projects with the same inherited owner used by spawn', () => {
+    const parent = getJob('tool-orch');
+    parent.ownerId = 2;
+    state.projects[0] = { ...state.projects[0], id: 10, env: { SECRET: 'hidden' } };
+    state.projects.push({ id: 12, repo: 'acme/disabled', enabled: false });
+    const allowed = vi.fn((ownership, project) => ownership.ownerId === 2 && project.id === 10);
+    setSessionProjectFilter(allowed);
+    acquireInstance.mockClear();
+    expect(eligibleWorkerProjects(parent)).toEqual([
+      { id: 10, name: 'Shop', repo: 'acme/shop', enabled: true },
+    ]);
+    expect(allowed).toHaveBeenCalledWith({ ownerId: 2 }, dashboard);
+    expect(allowed).not.toHaveBeenCalledWith(expect.anything(), state.projects[2]);
+    expect(acquireInstance).not.toHaveBeenCalled();
+    allowed.mockReturnValue(false);
+    expect(eligibleWorkerProjects(parent)).toEqual([]);
+  });
+
+  it('normalizes legacy ownership and rejects non-orchestrators for discovery', () => {
+    const allowed = vi.fn(() => true);
+    setSessionProjectFilter(allowed);
+    expect(eligibleWorkerProjects(getJob('tool-orch'))).toHaveLength(2);
+    expect(allowed).toHaveBeenCalledWith({ ownerId: null }, dashboard);
+    expect(() => eligibleWorkerProjects({ orchestrator: false })).toThrow(/Only an orchestrator/);
   });
 
   it.each([undefined, 'ACME/Shop'])('keeps the same-project runtime precedence for repo %s', (repo) => {
@@ -15537,15 +15564,145 @@ describe('official orchestrator PR actions', () => {
       expect(githubRest).not.toHaveBeenCalled();
     },
   );
-  it('rejects another project and arbitrary actions before GitHub', async () => {
+  it('rejects unknown projects and arbitrary actions before GitHub', async () => {
     await expect(
       startOrchestratorPrAction(parent, { action: 'solve-conflicts', prNumber: 12, repo: 'other/repo' }),
-    ).rejects.toMatchObject({ status: 403 });
+    ).rejects.toMatchObject({ status: 404 });
     await expect(
       startOrchestratorPrAction(parent, { action: 'custom-feedback', prNumber: 12 }),
     ).rejects.toMatchObject({ status: 400 });
     expect(githubRest).not.toHaveBeenCalled();
   });
+  const targetProject = () => {
+    const target = { ...state.projects[0], repo: 'acme/tools', label: 'Tools' };
+    state.projects.push(target);
+    githubRest.mockResolvedValue({
+      ok: true,
+      json: async () =>
+        pull({
+          head: { ref: 'target-feature', repo: { full_name: target.repo } },
+        }),
+    });
+    return target;
+  };
+  it('starts an accessible cross-project review with canonical repo, target runtime and inherited owner', async () => {
+    targetProject();
+    parent.ownerId = 42;
+    state.projects[0].actionProviderId = 999;
+    setSessionProjectFilter((job, project) => job.ownerId === 42 && project.repo === 'acme/tools');
+    const session = await startOrchestratorPrAction(parent, {
+      action: 'review',
+      prNumber: 12,
+      repo: ' ACME/TOOLS ',
+    });
+    expect(githubRest).toHaveBeenCalledWith(expect.anything(), 'GET', '/repos/acme/tools/pulls/12');
+    expect(session).toMatchObject({
+      repo: 'acme/tools',
+      ownerId: 42,
+      parentId: parent.id,
+      providerId: 2,
+      model: 'claude-fable-5-1',
+      effort: 'low',
+      startedOnPr: 12,
+      prBranch: 'target-feature',
+    });
+    expect(createCodeReview).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: session.id, repo: 'acme/tools' }),
+    );
+  });
+  it('uses the target worker runtime when its action runtime is unset', async () => {
+    const target = targetProject();
+    delete target.actionProviderId;
+    Object.assign(target, { workerProviderId: 2, workerModel: 'claude-fable-5-1', workerEffort: 'low' });
+    const session = await startOrchestratorPrAction(parent, {
+      action: 'solve-conflicts',
+      prNumber: 12,
+      repo: target.repo,
+    });
+    expect(session).toMatchObject({ providerId: 2, model: 'claude-fable-5-1', effort: 'low' });
+    const { solveConflictsPrompt } = await import('../lib/prtasks.js');
+    expect(solveConflictsPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repo: target.repo,
+        project: target,
+        prNumber: 12,
+        branch: 'target-feature',
+      }),
+    );
+  });
+  it.each(['disabled', 'unshared'])('rejects a %s target before GitHub', async (mode) => {
+    const target = targetProject();
+    if (mode === 'disabled') target.enabled = false;
+    else setSessionProjectFilter((_job, project) => project.repo !== target.repo);
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'review', prNumber: 12, repo: target.repo }),
+    ).rejects.toThrow(/Project unavailable/);
+    expect(githubRest).not.toHaveBeenCalled();
+  });
+  it('rejects an unavailable target action runtime without using the parent runtime', async () => {
+    const target = targetProject();
+    target.actionProviderId = 999;
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'review', prNumber: 12, repo: target.repo }),
+    ).rejects.toThrow(/configured action runtime is unavailable/);
+  });
+  it.each(['closed', 'fork'])('rejects a cross-project %s PR', async (mode) => {
+    const target = targetProject();
+    githubRest.mockResolvedValueOnce({
+      ok: true,
+      json: async () => (mode === 'closed' ? pull({ state: 'closed' }) : pull()),
+    });
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'review', prNumber: 12, repo: target.repo }),
+    ).rejects.toMatchObject({ status: mode === 'closed' ? 409 : 400 });
+  });
+  it('rejects ordinary sessions before GitHub', async () => {
+    await expect(
+      startOrchestratorPrAction({ ...parent, orchestrator: false }, { action: 'review', prNumber: 12 }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(githubRest).not.toHaveBeenCalled();
+  });
+  it.each([null, '', 42, {}])('rejects invalid repo %s before GitHub', async (repo) => {
+    await expect(
+      startOrchestratorPrAction(parent, { action: 'review', prNumber: 12, repo }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(githubRest).not.toHaveBeenCalled();
+  });
+  it.each(['revoked', 'disabled', 'concurrent', 'cap'])(
+    'rechecks %s after asynchronous prompt composition',
+    async (mode) => {
+      const target = targetProject();
+      const { getAction } = await import('../lib/actions.js');
+      const action = getAction('solve-conflicts');
+      const original = action.prompt;
+      const before = workerSessionsFor(parent).length;
+      action.prompt = async () => {
+        await Promise.resolve();
+        if (mode === 'revoked') setSessionProjectFilter(() => false);
+        if (mode === 'disabled') target.enabled = false;
+        if (mode === 'concurrent')
+          Object.assign(getJob('pr-cap-0'), { status: 'idle', repo: target.repo, startedOnPr: 12 });
+        if (mode === 'cap') for (let i = 0; i < 8; i++) getJob(`pr-cap-${i}`).status = 'idle';
+        return 'Target prompt';
+      };
+      try {
+        await expect(
+          startOrchestratorPrAction(parent, { action: 'solve-conflicts', prNumber: 12, repo: target.repo }),
+        ).rejects.toThrow(
+          mode === 'concurrent'
+            ? /already has an open session/
+            : mode === 'cap'
+              ? /open workers/
+              : /Project unavailable/,
+        );
+        expect(workerSessionsFor(parent)).toHaveLength(before);
+      } finally {
+        action.prompt = original;
+        Object.assign(getJob('pr-cap-0'), { repo: parent.repo, startedOnPr: null });
+        for (let i = 0; i < 8; i++) getJob(`pr-cap-${i}`).status = 'closed';
+      }
+    },
+  );
   it('checks current owner access before reading the PR', async () => {
     parent.ownerId = 2;
     setSessionProjectFilter(() => false);

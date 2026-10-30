@@ -13,7 +13,7 @@ let server,
   jobEventsFor,
   startOrchestratorPrAction,
   spawnWorkerSession;
-let deleteJobById;
+let deleteJobById, eligibleWorkerProjects;
 beforeEach(async () => {
   worker = {
     id: 'w1',
@@ -49,7 +49,9 @@ beforeEach(async () => {
     worker.parentId = null;
     return true;
   });
+  eligibleWorkerProjects = vi.fn(() => [{ id: 1, name: 'Shop', repo: 'acme/shop', enabled: true }]);
   const routes = orchestratorRoutes({
+    eligibleWorkerProjects,
     deleteJobById,
     startOrchestratorPrAction,
     spawnWorkerSession,
@@ -69,6 +71,7 @@ beforeEach(async () => {
   });
   const app = express();
   app.use(express.json());
+  app.get('/api/agent/sessions/projects', routes.projects);
   app.post('/api/agent/sessions/pr-actions', routes.prAction);
   app.post('/api/agent/sessions', routes.spawn);
   app.post('/api/agent/sessions/:id/qa-loop', routes.qaLoop);
@@ -310,5 +313,24 @@ describe('scoped PR action route', () => {
   it('preserves explicit scope and validation failures', async () => {
     startOrchestratorPrAction.mockRejectedValue(Object.assign(new Error('wrong project'), { status: 403 }));
     expect((await action('o1', { action: 'review', prNumber: 12, repo: 'other/repo' })).status).toBe(403);
+  });
+});
+
+describe('eligible worker project discovery', () => {
+  it.each([
+    ['bad', 401],
+    ['w1', 403],
+  ])('rejects token %s', async (token, status) => {
+    const response = await fetch(`${base}/projects`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(response.status).toBe(status);
+    expect(eligibleWorkerProjects).not.toHaveBeenCalled();
+  });
+  it('returns eligible metadata only for the authenticated orchestrator', async () => {
+    const response = await fetch(`${base}/projects`, { headers: { Authorization: 'Bearer o1' } });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      projects: [{ id: 1, name: 'Shop', repo: 'acme/shop', enabled: true }],
+    });
+    expect(eligibleWorkerProjects).toHaveBeenCalledExactlyOnceWith({ id: 'o1', orchestrator: true });
   });
 });

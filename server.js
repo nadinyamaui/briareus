@@ -130,6 +130,7 @@ import {
   openSessionBrowser,
   closeSessionBrowser,
   spawnWorkerSession,
+  eligibleWorkerProjects,
   startOrchestratorPrAction,
   workerSessionsFor,
   workerSummary,
@@ -1003,12 +1004,14 @@ const workerRoutes = orchestratorRoutes({
   startOrchestratorPrAction,
   agentSession,
   spawnWorkerSession,
+  eligibleWorkerProjects,
   workerSessionsFor,
   setQaLoop,
   setReviewLoop,
   workerSummary,
 });
 const { orchestratorSession, workerOf } = workerRoutes;
+api.get('/api/agent/sessions/projects', workerRoutes.projects);
 api.post('/api/agent/sessions/pr-actions', workerRoutes.prAction);
 api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
 api.post('/api/agent/sessions/:id/review-loop', workerRoutes.reviewLoop);
