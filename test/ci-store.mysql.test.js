@@ -738,5 +738,17 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
     expect((await store.runs({ ...filters, runner: 'GitHub Actions 1' })).runs).toEqual([
       expect.objectContaining({ id: '9003', cost: null }),
     ]);
+
+    // A rate matches its group name exactly: a trailing space is another group,
+    // though the column's collation would compare the two as equal.
+    stats = await store.stats(filters, { 'Ubuntu EU ': 99, 'Ubuntu EU': 0.2 });
+    expect(stats.totals).toMatchObject({ pricedDurationMs: 1.5 * hour, cost: 0.3 });
+    stats = await store.stats(filters, { 'Ubuntu EU ': 99 });
+    expect(stats.totals).toMatchObject({ pricedDurationMs: 0, cost: null });
+    const spaced = await store.runs(
+      { ...filters, runnerGroup: 'Ubuntu EU' },
+      { rates: { 'Ubuntu EU ': 99 } },
+    );
+    expect(spaced.runs.map((r) => r.cost)).toEqual([null, null]);
   });
 });

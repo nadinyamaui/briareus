@@ -172,7 +172,7 @@ describe('CI store boundaries', () => {
     });
     // Rates bind ahead of the filters, in the order they appear in the SQL.
     const [sql, values] = c.query.mock.calls[0];
-    expect(sql).toContain('CASE r.runner_group WHEN ? THEN ? END');
+    expect(sql).toContain('CASE CAST(r.runner_group AS BINARY) WHEN CAST(? AS BINARY) THEN ? END');
     expect(values).toEqual(['Ubuntu EU', 0.2, 'check_run', 0, 10000, 'acme/shop', 'Ubuntu EU', 2, 5]);
     c.query.mockResolvedValue([
       [

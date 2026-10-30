@@ -619,6 +619,30 @@ describe('durable GitHub synchronization', () => {
     );
   });
 
+  it('collects commit statuses before a rate-limited runner attribution', async () => {
+    const h = harness();
+    const sha = 'f'.repeat(40);
+    const check = {
+      id: 1,
+      name: 'build',
+      head_sha: sha,
+      status: 'completed',
+      app: { slug: 'github-actions' },
+      details_url: 'https://github.com/acme/shop/actions/runs/10/job/1',
+    };
+    const status = { id: 5, context: 'external/ci', state: 'success', sha };
+    h.routes.set(`/repos/acme/shop/commits/${sha}/check-runs`, { check_runs: [check] });
+    h.routes.set(`/repos/acme/shop/commits/${sha}/statuses`, [status]);
+    h.routes.set(
+      '/repos/acme/shop/actions/runs/10/jobs',
+      Object.assign(new Error('secondary rate limit'), { status: 429 }),
+    );
+    h.service.onWebhook('check_run', { repository: { full_name: project.repo }, check_run: check });
+    await h.service.flush(project.repo).catch(() => {});
+    expect(h.ci.save).toHaveBeenCalledWith(project.repo, [status], expect.objectContaining({ sha }));
+    expect(h.ci.saveRunners).not.toHaveBeenCalled();
+  });
+
   it('leaves checks unattributed without failing collection when Actions are unreadable', async () => {
     const h = harness();
     const sha = 'd'.repeat(40);
