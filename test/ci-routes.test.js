@@ -4,12 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { createServer } from 'node:http';
 import { ciRoutes } from '../lib/ci-routes.js';
+import { normalizeCiRates } from '../lib/ci-rates.js';
 import { apiV1Routes } from '../lib/api-v1.js';
 import { createMobileAuth } from '../lib/mobile-auth.js';
 
 const now = Date.parse('2026-10-28T12:00:00Z');
 const secret = 'test-owner-secret';
-let server, url, store, tokens, shared;
+let server, url, store, rates, tokens, shared;
 
 beforeEach(async () => {
   let saved = [];
@@ -33,8 +34,14 @@ beforeEach(async () => {
     stats: vi.fn(async () => ({ totals: { total: 0 }, daily: [], repositories: [], checks: [] })),
     runs: vi.fn(async () => ({ runs: [], nextOffset: null })),
   };
+  let savedRates = { currency: 'EUR', groups: { 'Ubuntu EU': 0.2 } };
+  rates = {
+    get: vi.fn(async () => savedRates),
+    set: vi.fn(async (input) => (savedRates = normalizeCiRates(input))),
+  };
   const handlers = express.Router();
-  handlers.use(ciRoutes({ store, now: () => now }));
+  handlers.use(express.json());
+  handlers.use(ciRoutes({ store, rates, now: () => now }));
   const app = express();
   app.use(
     apiV1Routes({
@@ -67,7 +74,11 @@ describe('CI dashboard API through the authenticated gateway', () => {
     'accepts a persisted Unicode or long name filter',
     async (name) => {
       expect((await get(`/ci/runs?name=${encodeURIComponent(name)}`)).status).toBe(200);
-      expect(store.runs).toHaveBeenCalledWith(expect.objectContaining({ name }), { limit: 50, offset: 0 });
+      expect(store.runs).toHaveBeenCalledWith(expect.objectContaining({ name }), {
+        limit: 50,
+        offset: 0,
+        rates: { 'Ubuntu EU': 0.2 },
+      });
     },
   );
 
@@ -94,7 +105,7 @@ describe('CI dashboard API through the authenticated gateway', () => {
         status: 'completed',
         conclusion: 'success',
       }),
-      { limit: 10, offset: 20 },
+      { limit: 10, offset: 20, rates: { 'Ubuntu EU': 0.2 } },
     );
   });
 
@@ -169,5 +180,36 @@ describe('CI dashboard API through the authenticated gateway', () => {
       until: now,
       repos: ['acme/shop'],
     });
+  });
+
+  it('prices reports with the stored rates and filters by runner', async () => {
+    const data = await (await get('/stats/ci?runnerGroup=Ubuntu%20EU&runner=ubuntu-eu-1')).json();
+    expect(data.currency).toBe('EUR');
+    expect(store.stats).toHaveBeenCalledWith(
+      expect.objectContaining({ runnerGroup: 'Ubuntu EU', runner: 'ubuntu-eu-1' }),
+      { 'Ubuntu EU': 0.2 },
+    );
+    expect((await (await get('/ci/runs')).json()).currency).toBe('EUR');
+  });
+
+  it('lets only admins read and replace runner group rates', async () => {
+    const put = (body, token = 'admin') =>
+      fetch(`${url}/settings/ci-rates`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${tokens[token]}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    expect((await get('/settings/ci-rates')).status).toBe(403);
+    expect((await put({ groups: { Default: 1 } }, 'read')).status).toBe(403);
+    expect(rates.set).not.toHaveBeenCalled();
+    const res = await put({ groups: { Default: 0, 'Ubuntu EU': 0.05 } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ currency: 'USD', groups: { Default: 0, 'Ubuntu EU': 0.05 } });
+    expect(await (await get('/settings/ci-rates', 'admin')).json()).toEqual({
+      currency: 'USD',
+      groups: { Default: 0, 'Ubuntu EU': 0.05 },
+    });
+    expect((await put({ groups: { Default: -1 } })).status).toBe(400);
+    expect((await put({ currency: 'usd', groups: {} })).status).toBe(400);
   });
 });

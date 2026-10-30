@@ -5,6 +5,7 @@ import { getConfig } from '../lib/config.js';
 import { createGithubSync } from '../lib/github-sync.js';
 import { createCiStore } from '../lib/ci-store.js';
 import { up, down } from '../migrations/2026_10_28_100000_add_ci_checks.js';
+import * as runnersMigration from '../migrations/2026_10_30_100000_add_ci_runners.js';
 
 describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => {
   const database = `briareus_ci_test_${randomBytes(6).toString('hex')}`;
@@ -33,10 +34,14 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
     pool = mysql.createPool({ ...config, database, connectionLimit: 2 });
     await up({ context: pool });
     await up({ context: pool });
+    await runnersMigration.up({ context: pool });
+    await runnersMigration.up({ context: pool });
     store = createCiStore({ connection: () => pool.getConnection() });
   });
   afterAll(async () => {
     if (pool) {
+      await runnersMigration.down({ context: pool });
+      await runnersMigration.down({ context: pool });
       await down({ context: pool });
       await down({ context: pool });
       const [tables] = await pool.query('SHOW TABLES');
@@ -662,5 +667,88 @@ describe.skipIf(process.env.CI_STORE_MYSQL !== '1')('CI ledger on MySQL', () => 
       succeeded: 0,
       timed: 0,
     });
+  });
+
+  it('attributes runners and prices their time by group, restating history when rates change', async () => {
+    const repo = 'acme/runners';
+    const filters = { ...query, repos: [repo] };
+    const hour = 3600000;
+    const job = (id, minutes) =>
+      check({
+        id,
+        completed_at: new Date(start + minutes * 60000).toISOString(),
+        app: { slug: 'github-actions' },
+      });
+    await save([job(9001, 60), job(9002, 30), job(9003, 90), job(9004, 10)], {}, repo);
+    // A job delivered before its check is still joined once the check arrives.
+    await store.saveRunners(
+      'Acme/Runners',
+      [
+        {
+          id: 9001,
+          run_id: 1,
+          status: 'completed',
+          runner_name: 'eu-1',
+          runner_group_name: 'Ubuntu EU',
+          labels: ['self-hosted'],
+        },
+        { id: 9002, run_id: 1, status: 'in_progress', runner_name: 'eu-2', runner_group_name: 'Ubuntu EU' },
+        {
+          id: 9003,
+          run_id: 2,
+          status: 'completed',
+          runner_name: 'GitHub Actions 1',
+          runner_group_name: 'GitHub Actions',
+        },
+        { id: 9005, run_id: 3, status: 'queued', runner_name: null },
+      ],
+      start,
+    );
+    // A later read without a runner keeps the recorded one.
+    await store.saveRunners(repo, [{ id: 9002, status: 'completed', runner_name: null }], start + 1);
+    expect(await store.missingRunners(repo, ['9001', '9004', '9005'])).toEqual(['9004', '9005']);
+
+    let stats = await store.stats(filters, { 'Ubuntu EU': 0.2 });
+    expect(stats.totals).toMatchObject({
+      totalDurationMs: 190 * 60000,
+      pricedDurationMs: 1.5 * hour,
+      cost: 0.3,
+    });
+    expect(stats.totals.unpricedDurationMs).toBe(100 * 60000);
+    expect(stats.runnerGroups).toEqual([
+      expect.objectContaining({ runnerGroup: null, total: 1, cost: null, unpricedDurationMs: hour / 6 }),
+      expect.objectContaining({ runnerGroup: 'GitHub Actions', total: 1, cost: null }),
+      expect.objectContaining({ runnerGroup: 'Ubuntu EU', total: 2, cost: 0.3 }),
+    ]);
+    expect(stats.runners.map((r) => [r.runnerGroup, r.runnerName, r.cost])).toEqual([
+      [null, null, null],
+      ['GitHub Actions', 'GitHub Actions 1', null],
+      ['Ubuntu EU', 'eu-1', 0.2],
+      ['Ubuntu EU', 'eu-2', 0.1],
+    ]);
+
+    stats = await store.stats(filters, { 'Ubuntu EU': 0, 'GitHub Actions': 0.48 });
+    expect(stats.totals).toMatchObject({ pricedDurationMs: 3 * hour, cost: 0.72 });
+
+    const page = await store.runs({ ...filters, runnerGroup: 'Ubuntu EU' }, { rates: { 'Ubuntu EU': 0.2 } });
+    expect(page.runs.map((r) => [r.id, r.runner, r.cost])).toEqual([
+      ['9001', { name: 'eu-1', group: 'Ubuntu EU', labels: ['self-hosted'] }, 0.2],
+      ['9002', { name: 'eu-2', group: 'Ubuntu EU', labels: [] }, 0.1],
+    ]);
+    expect((await store.runs({ ...filters, runner: 'GitHub Actions 1' })).runs).toEqual([
+      expect.objectContaining({ id: '9003', cost: null }),
+    ]);
+
+    // A rate matches its group name exactly: a trailing space is another group,
+    // though the column's collation would compare the two as equal.
+    stats = await store.stats(filters, { 'Ubuntu EU ': 99, 'Ubuntu EU': 0.2 });
+    expect(stats.totals).toMatchObject({ pricedDurationMs: 1.5 * hour, cost: 0.3 });
+    stats = await store.stats(filters, { 'Ubuntu EU ': 99 });
+    expect(stats.totals).toMatchObject({ pricedDurationMs: 0, cost: null });
+    const spaced = await store.runs(
+      { ...filters, runnerGroup: 'Ubuntu EU' },
+      { rates: { 'Ubuntu EU ': 99 } },
+    );
+    expect(spaced.runs.map((r) => r.cost)).toEqual([null, null]);
   });
 });

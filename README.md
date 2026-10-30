@@ -515,8 +515,9 @@ attachments.
 
 What each delivery does: no agent session is started by one. The hook subscribes to
 `pull_request`, `pull_request_review`, `pull_request_review_comment`, `issues`,
-`issue_comment`, `check_suite`, `check_run`, `status`, `label`, `milestone` and
-`sub_issues`. Authenticated deliveries for enabled repositories refresh affected
+`issue_comment`, `check_suite`, `check_run`, `workflow_job`, `status`, `push`, `label`,
+`milestone` and `sub_issues` (`workflow_job` only records which runner ran each
+CI job). Authenticated deliveries for enabled repositories refresh affected
 items and their board, coalescing the first burst for two seconds; hourly sync catches
 missed events. Existing session events also refresh the PR panel of any open
 session on that branch as the event lands rather

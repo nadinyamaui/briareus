@@ -1075,18 +1075,20 @@ Read durable CI/CD totals and trends across the token’s projects. Needs `read`
 
 **Query**
 
-| Field        | Type                |                                                                        |
-| ------------ | ------------------- | ---------------------------------------------------------------------- |
-| `repo`       | `string`            | Optional repository; absent means all projects visible to the token    |
-| `since`      | `integer`           | Inclusive epoch milliseconds; defaults to 30 days before until         |
-| `until`      | `integer`           | Exclusive epoch milliseconds; defaults to now; maximum window 366 days |
-| `kind`       | `check_run\|status` | check_run by default; legacy statuses are reported separately          |
-| `branch`     | `string`            | Exact branch hint                                                      |
-| `name`       | `string`            | Exact check name or status context                                     |
-| `status`     | `string`            | Exact execution status                                                 |
-| `conclusion` | `string`            | Exact conclusion                                                       |
+| Field         | Type                |                                                                        |
+| ------------- | ------------------- | ---------------------------------------------------------------------- |
+| `repo`        | `string`            | Optional repository; absent means all projects visible to the token    |
+| `since`       | `integer`           | Inclusive epoch milliseconds; defaults to 30 days before until         |
+| `until`       | `integer`           | Exclusive epoch milliseconds; defaults to now; maximum window 366 days |
+| `kind`        | `check_run\|status` | check_run by default; legacy statuses are reported separately          |
+| `branch`      | `string`            | Exact branch hint                                                      |
+| `name`        | `string`            | Exact check name or status context                                     |
+| `status`      | `string`            | Exact execution status                                                 |
+| `conclusion`  | `string`            | Exact conclusion                                                       |
+| `runnerGroup` | `string`            | Exact runner group name                                                |
+| `runner`      | `string`            | Exact runner name                                                      |
 
-**Returns** `{ since: integer, until: integer, kind: check_run|status, totals: CiMetrics, daily: CiDailyMetrics[], repositories: CiRepositoryMetrics[], checks: CiNamedMetrics[] }`. Observed checks only, collected by GitHub synchronization and signed webhooks; not a complete historical backfill. Daily buckets use UTC and omit empty days. Repeated observations do not increment totals. Durations exclude records without valid timestamps. All aggregates respect project access.
+**Returns** `{ since: integer, until: integer, kind: check_run|status, currency: string, totals: CiMetrics, daily: CiDailyMetrics[], repositories: CiRepositoryMetrics[], checks: CiNamedMetrics[], runnerGroups: CiRunnerGroupMetrics[], runners: CiRunnerMetrics[] }`. Observed checks only, collected by GitHub synchronization and signed webhooks; not a complete historical backfill. Daily buckets use UTC and omit empty days. Repeated observations do not increment totals. Durations exclude records without valid timestamps. Cost applies the current runner group rates (settings.ciRates) to recorded durations, so a rate change restates history; GitHub-hosted billing and idle server time are not included. All aggregates respect project access.
 
 ### `GET /ci/runs`
 
@@ -1094,20 +1096,22 @@ List persisted CI/CD checks with status, commit, duration and details URL. Needs
 
 **Query**
 
-| Field        | Type                |                                                                        |
-| ------------ | ------------------- | ---------------------------------------------------------------------- |
-| `repo`       | `string`            | Optional repository; absent means all projects visible to the token    |
-| `since`      | `integer`           | Inclusive epoch milliseconds; defaults to 30 days before until         |
-| `until`      | `integer`           | Exclusive epoch milliseconds; defaults to now; maximum window 366 days |
-| `kind`       | `check_run\|status` | check_run by default; legacy statuses are reported separately          |
-| `branch`     | `string`            | Exact branch hint                                                      |
-| `name`       | `string`            | Exact check name or status context                                     |
-| `status`     | `string`            | Exact execution status                                                 |
-| `conclusion` | `string`            | Exact conclusion                                                       |
-| `limit`      | `integer`           | Page size, 1–100; default 50                                           |
-| `offset`     | `integer`           | Offset, 0–100000; default 0                                            |
+| Field         | Type                |                                                                        |
+| ------------- | ------------------- | ---------------------------------------------------------------------- |
+| `repo`        | `string`            | Optional repository; absent means all projects visible to the token    |
+| `since`       | `integer`           | Inclusive epoch milliseconds; defaults to 30 days before until         |
+| `until`       | `integer`           | Exclusive epoch milliseconds; defaults to now; maximum window 366 days |
+| `kind`        | `check_run\|status` | check_run by default; legacy statuses are reported separately          |
+| `branch`      | `string`            | Exact branch hint                                                      |
+| `name`        | `string`            | Exact check name or status context                                     |
+| `status`      | `string`            | Exact execution status                                                 |
+| `conclusion`  | `string`            | Exact conclusion                                                       |
+| `runnerGroup` | `string`            | Exact runner group name                                                |
+| `runner`      | `string`            | Exact runner name                                                      |
+| `limit`       | `integer`           | Page size, 1–100; default 50                                           |
+| `offset`      | `integer`           | Offset, 0–100000; default 0                                            |
 
-**Returns** `{ since: integer, until: integer, kind: check_run|status, runs: CiRun[], nextOffset: integer?, truncated: boolean }`. Newest runAt first; use nextOffset until null and keep since/until fixed while paging. When more results exist beyond offset 100000, nextOffset is null and truncated is true; narrow the window or filters to retrieve them. Results can change during collection. Legacy statuses keep the latest transition per SHA/context; individual retries cannot be inferred from that API.
+**Returns** `{ since: integer, until: integer, kind: check_run|status, currency: string, runs: CiRun[], nextOffset: integer?, truncated: boolean }`. Newest runAt first; use nextOffset until null and keep since/until fixed while paging. When more results exist beyond offset 100000, nextOffset is null and truncated is true; narrow the window or filters to retrieve them. Results can change during collection. Legacy statuses keep the latest transition per SHA/context; individual retries cannot be inferred from that API.
 
 ### `GET /usage/all`
 
@@ -1866,6 +1870,25 @@ Change the prompt templates. Needs `admin`.
 
 **Returns** `{ templates: object }`
 
+### `GET /settings/ci-rates`
+
+Read CI runner group rates. Needs `admin`.
+
+**Returns** `CiRates`
+
+### `PUT /settings/ci-rates`
+
+Replace the hourly cost of each CI runner group. Needs `admin`.
+
+**Body**
+
+| Field                 | Type     |                                                |
+| --------------------- | -------- | ---------------------------------------------- |
+| `currency`            | `string` | Three-letter currency code; USD when absent    |
+| `groups` **required** | `object` | Runner group name → cost per runner-hour (≥ 0) |
+
+**Returns** `CiRates`. Replaces every rate. A rate is per runner-hour: a server running four runners at once and costing 1/hour is 0.25 per runner. 0 prices a group as free; leave a group out to report its time as unpriced. Runner group names are those in `/stats/ci` `runnerGroups`, matched exactly. 400 on an invalid currency or rate, or more than 100 groups.
+
 ### `POST /settings/providers/test`
 
 Probe a provider endpoint and key as a form holds them, before saving. Needs `admin`.
@@ -2272,107 +2295,189 @@ Remove a account. Needs `admin`.
 
 CI/CD metrics for observed GitHub checks.
 
-| Field             | Type       |                                                                     |
-| ----------------- | ---------- | ------------------------------------------------------------------- |
-| `total`           | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context) |
-| `pending`         | `integer`  | Queued, waiting or running checks                                   |
-| `succeeded`       | `integer`  | Completed successfully                                              |
-| `failed`          | `integer`  | Failure, error, timeout, startup failure or action required         |
-| `cancelled`       | `integer`  | Cancelled executions                                                |
-| `skipped`         | `integer`  | Skipped or neutral executions                                       |
-| `other`           | `integer`  | Other terminal conclusions, including a missing conclusion          |
-| `successRate`     | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results |
-| `timed`           | `integer`  | Executions with valid start and completion timestamps               |
-| `avgDurationMs`   | `number?`  | Mean duration of timed executions; null when none                   |
-| `maxDurationMs`   | `number?`  | Longest timed execution; null when none                             |
-| `totalDurationMs` | `number`   | Sum of timed execution durations, not wall time or billed minutes   |
-| `lastObservedAt`  | `integer?` | Most recent successful observation, epoch milliseconds              |
+| Field                | Type       |                                                                                          |
+| -------------------- | ---------- | ---------------------------------------------------------------------------------------- |
+| `total`              | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context)                      |
+| `pending`            | `integer`  | Queued, waiting or running checks                                                        |
+| `succeeded`          | `integer`  | Completed successfully                                                                   |
+| `failed`             | `integer`  | Failure, error, timeout, startup failure or action required                              |
+| `cancelled`          | `integer`  | Cancelled executions                                                                     |
+| `skipped`            | `integer`  | Skipped or neutral executions                                                            |
+| `other`              | `integer`  | Other terminal conclusions, including a missing conclusion                               |
+| `successRate`        | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results                      |
+| `timed`              | `integer`  | Executions with valid start and completion timestamps                                    |
+| `avgDurationMs`      | `number?`  | Mean duration of timed executions; null when none                                        |
+| `maxDurationMs`      | `number?`  | Longest timed execution; null when none                                                  |
+| `totalDurationMs`    | `number`   | Sum of timed execution durations, not wall time or billed minutes                        |
+| `pricedDurationMs`   | `number`   | Part of totalDurationMs run on a runner group that has an hourly rate                    |
+| `unpricedDurationMs` | `number`   | Part of totalDurationMs with no runner recorded or no rate for its group                 |
+| `cost`               | `number?`  | pricedDurationMs at each group’s hourly rate, in `currency`; null when nothing is priced |
+| `lastObservedAt`     | `integer?` | Most recent successful observation, epoch milliseconds                                   |
 
 ### CiDailyMetrics
 
 One non-empty UTC day.
 
-| Field             | Type       |                                                                     |
-| ----------------- | ---------- | ------------------------------------------------------------------- |
-| `day`             | `string`   | UTC date, YYYY-MM-DD                                                |
-| `total`           | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context) |
-| `pending`         | `integer`  | Queued, waiting or running checks                                   |
-| `succeeded`       | `integer`  | Completed successfully                                              |
-| `failed`          | `integer`  | Failure, error, timeout, startup failure or action required         |
-| `cancelled`       | `integer`  | Cancelled executions                                                |
-| `skipped`         | `integer`  | Skipped or neutral executions                                       |
-| `other`           | `integer`  | Other terminal conclusions, including a missing conclusion          |
-| `successRate`     | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results |
-| `timed`           | `integer`  | Executions with valid start and completion timestamps               |
-| `avgDurationMs`   | `number?`  | Mean duration of timed executions; null when none                   |
-| `maxDurationMs`   | `number?`  | Longest timed execution; null when none                             |
-| `totalDurationMs` | `number`   | Sum of timed execution durations, not wall time or billed minutes   |
-| `lastObservedAt`  | `integer?` | Most recent successful observation, epoch milliseconds              |
+| Field                | Type       |                                                                                          |
+| -------------------- | ---------- | ---------------------------------------------------------------------------------------- |
+| `day`                | `string`   | UTC date, YYYY-MM-DD                                                                     |
+| `total`              | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context)                      |
+| `pending`            | `integer`  | Queued, waiting or running checks                                                        |
+| `succeeded`          | `integer`  | Completed successfully                                                                   |
+| `failed`             | `integer`  | Failure, error, timeout, startup failure or action required                              |
+| `cancelled`          | `integer`  | Cancelled executions                                                                     |
+| `skipped`            | `integer`  | Skipped or neutral executions                                                            |
+| `other`              | `integer`  | Other terminal conclusions, including a missing conclusion                               |
+| `successRate`        | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results                      |
+| `timed`              | `integer`  | Executions with valid start and completion timestamps                                    |
+| `avgDurationMs`      | `number?`  | Mean duration of timed executions; null when none                                        |
+| `maxDurationMs`      | `number?`  | Longest timed execution; null when none                                                  |
+| `totalDurationMs`    | `number`   | Sum of timed execution durations, not wall time or billed minutes                        |
+| `pricedDurationMs`   | `number`   | Part of totalDurationMs run on a runner group that has an hourly rate                    |
+| `unpricedDurationMs` | `number`   | Part of totalDurationMs with no runner recorded or no rate for its group                 |
+| `cost`               | `number?`  | pricedDurationMs at each group’s hourly rate, in `currency`; null when nothing is priced |
+| `lastObservedAt`     | `integer?` | Most recent successful observation, epoch milliseconds                                   |
 
 ### CiRepositoryMetrics
 
 Metrics for one repository.
 
-| Field             | Type       |                                                                     |
-| ----------------- | ---------- | ------------------------------------------------------------------- |
-| `repo`            | `string`   | owner/name                                                          |
-| `total`           | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context) |
-| `pending`         | `integer`  | Queued, waiting or running checks                                   |
-| `succeeded`       | `integer`  | Completed successfully                                              |
-| `failed`          | `integer`  | Failure, error, timeout, startup failure or action required         |
-| `cancelled`       | `integer`  | Cancelled executions                                                |
-| `skipped`         | `integer`  | Skipped or neutral executions                                       |
-| `other`           | `integer`  | Other terminal conclusions, including a missing conclusion          |
-| `successRate`     | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results |
-| `timed`           | `integer`  | Executions with valid start and completion timestamps               |
-| `avgDurationMs`   | `number?`  | Mean duration of timed executions; null when none                   |
-| `maxDurationMs`   | `number?`  | Longest timed execution; null when none                             |
-| `totalDurationMs` | `number`   | Sum of timed execution durations, not wall time or billed minutes   |
-| `lastObservedAt`  | `integer?` | Most recent successful observation, epoch milliseconds              |
+| Field                | Type       |                                                                                          |
+| -------------------- | ---------- | ---------------------------------------------------------------------------------------- |
+| `repo`               | `string`   | owner/name                                                                               |
+| `total`              | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context)                      |
+| `pending`            | `integer`  | Queued, waiting or running checks                                                        |
+| `succeeded`          | `integer`  | Completed successfully                                                                   |
+| `failed`             | `integer`  | Failure, error, timeout, startup failure or action required                              |
+| `cancelled`          | `integer`  | Cancelled executions                                                                     |
+| `skipped`            | `integer`  | Skipped or neutral executions                                                            |
+| `other`              | `integer`  | Other terminal conclusions, including a missing conclusion                               |
+| `successRate`        | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results                      |
+| `timed`              | `integer`  | Executions with valid start and completion timestamps                                    |
+| `avgDurationMs`      | `number?`  | Mean duration of timed executions; null when none                                        |
+| `maxDurationMs`      | `number?`  | Longest timed execution; null when none                                                  |
+| `totalDurationMs`    | `number`   | Sum of timed execution durations, not wall time or billed minutes                        |
+| `pricedDurationMs`   | `number`   | Part of totalDurationMs run on a runner group that has an hourly rate                    |
+| `unpricedDurationMs` | `number`   | Part of totalDurationMs with no runner recorded or no rate for its group                 |
+| `cost`               | `number?`  | pricedDurationMs at each group’s hourly rate, in `currency`; null when nothing is priced |
+| `lastObservedAt`     | `integer?` | Most recent successful observation, epoch milliseconds                                   |
 
 ### CiNamedMetrics
 
 Metrics for one check name and GitHub App.
 
-| Field             | Type       |                                                                     |
-| ----------------- | ---------- | ------------------------------------------------------------------- |
-| `name`            | `string`   | Check name or status context                                        |
-| `app`             | `string?`  | GitHub App slug, if available                                       |
-| `total`           | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context) |
-| `pending`         | `integer`  | Queued, waiting or running checks                                   |
-| `succeeded`       | `integer`  | Completed successfully                                              |
-| `failed`          | `integer`  | Failure, error, timeout, startup failure or action required         |
-| `cancelled`       | `integer`  | Cancelled executions                                                |
-| `skipped`         | `integer`  | Skipped or neutral executions                                       |
-| `other`           | `integer`  | Other terminal conclusions, including a missing conclusion          |
-| `successRate`     | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results |
-| `timed`           | `integer`  | Executions with valid start and completion timestamps               |
-| `avgDurationMs`   | `number?`  | Mean duration of timed executions; null when none                   |
-| `maxDurationMs`   | `number?`  | Longest timed execution; null when none                             |
-| `totalDurationMs` | `number`   | Sum of timed execution durations, not wall time or billed minutes   |
-| `lastObservedAt`  | `integer?` | Most recent successful observation, epoch milliseconds              |
+| Field                | Type       |                                                                                          |
+| -------------------- | ---------- | ---------------------------------------------------------------------------------------- |
+| `name`               | `string`   | Check name or status context                                                             |
+| `app`                | `string?`  | GitHub App slug, if available                                                            |
+| `total`              | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context)                      |
+| `pending`            | `integer`  | Queued, waiting or running checks                                                        |
+| `succeeded`          | `integer`  | Completed successfully                                                                   |
+| `failed`             | `integer`  | Failure, error, timeout, startup failure or action required                              |
+| `cancelled`          | `integer`  | Cancelled executions                                                                     |
+| `skipped`            | `integer`  | Skipped or neutral executions                                                            |
+| `other`              | `integer`  | Other terminal conclusions, including a missing conclusion                               |
+| `successRate`        | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results                      |
+| `timed`              | `integer`  | Executions with valid start and completion timestamps                                    |
+| `avgDurationMs`      | `number?`  | Mean duration of timed executions; null when none                                        |
+| `maxDurationMs`      | `number?`  | Longest timed execution; null when none                                                  |
+| `totalDurationMs`    | `number`   | Sum of timed execution durations, not wall time or billed minutes                        |
+| `pricedDurationMs`   | `number`   | Part of totalDurationMs run on a runner group that has an hourly rate                    |
+| `unpricedDurationMs` | `number`   | Part of totalDurationMs with no runner recorded or no rate for its group                 |
+| `cost`               | `number?`  | pricedDurationMs at each group’s hourly rate, in `currency`; null when nothing is priced |
+| `lastObservedAt`     | `integer?` | Most recent successful observation, epoch milliseconds                                   |
+
+### CiRunnerGroupMetrics
+
+Metrics for one GitHub Actions runner group; null holds checks without a recorded runner.
+
+| Field                | Type       |                                                                                          |
+| -------------------- | ---------- | ---------------------------------------------------------------------------------------- |
+| `runnerGroup`        | `string?`  | Runner group name as GitHub reports it                                                   |
+| `total`              | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context)                      |
+| `pending`            | `integer`  | Queued, waiting or running checks                                                        |
+| `succeeded`          | `integer`  | Completed successfully                                                                   |
+| `failed`             | `integer`  | Failure, error, timeout, startup failure or action required                              |
+| `cancelled`          | `integer`  | Cancelled executions                                                                     |
+| `skipped`            | `integer`  | Skipped or neutral executions                                                            |
+| `other`              | `integer`  | Other terminal conclusions, including a missing conclusion                               |
+| `successRate`        | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results                      |
+| `timed`              | `integer`  | Executions with valid start and completion timestamps                                    |
+| `avgDurationMs`      | `number?`  | Mean duration of timed executions; null when none                                        |
+| `maxDurationMs`      | `number?`  | Longest timed execution; null when none                                                  |
+| `totalDurationMs`    | `number`   | Sum of timed execution durations, not wall time or billed minutes                        |
+| `pricedDurationMs`   | `number`   | Part of totalDurationMs run on a runner group that has an hourly rate                    |
+| `unpricedDurationMs` | `number`   | Part of totalDurationMs with no runner recorded or no rate for its group                 |
+| `cost`               | `number?`  | pricedDurationMs at each group’s hourly rate, in `currency`; null when nothing is priced |
+| `lastObservedAt`     | `integer?` | Most recent successful observation, epoch milliseconds                                   |
+
+### CiRunnerMetrics
+
+Metrics for one runner (the machine or slot that ran the jobs) within its group.
+
+| Field                | Type       |                                                                                          |
+| -------------------- | ---------- | ---------------------------------------------------------------------------------------- |
+| `runnerGroup`        | `string?`  | Runner group name                                                                        |
+| `runnerName`         | `string?`  | Runner name                                                                              |
+| `total`              | `integer`  | Distinct observed executions (legacy statuses: one per SHA/context)                      |
+| `pending`            | `integer`  | Queued, waiting or running checks                                                        |
+| `succeeded`          | `integer`  | Completed successfully                                                                   |
+| `failed`             | `integer`  | Failure, error, timeout, startup failure or action required                              |
+| `cancelled`          | `integer`  | Cancelled executions                                                                     |
+| `skipped`            | `integer`  | Skipped or neutral executions                                                            |
+| `other`              | `integer`  | Other terminal conclusions, including a missing conclusion                               |
+| `successRate`        | `number?`  | succeeded / (succeeded + failed), 0–1; null without decided results                      |
+| `timed`              | `integer`  | Executions with valid start and completion timestamps                                    |
+| `avgDurationMs`      | `number?`  | Mean duration of timed executions; null when none                                        |
+| `maxDurationMs`      | `number?`  | Longest timed execution; null when none                                                  |
+| `totalDurationMs`    | `number`   | Sum of timed execution durations, not wall time or billed minutes                        |
+| `pricedDurationMs`   | `number`   | Part of totalDurationMs run on a runner group that has an hourly rate                    |
+| `unpricedDurationMs` | `number`   | Part of totalDurationMs with no runner recorded or no rate for its group                 |
+| `cost`               | `number?`  | pricedDurationMs at each group’s hourly rate, in `currency`; null when nothing is priced |
+| `lastObservedAt`     | `integer?` | Most recent successful observation, epoch milliseconds                                   |
+
+### CiRunner
+
+Where a GitHub Actions job ran.
+
+| Field    | Type       |                                                   |
+| -------- | ---------- | ------------------------------------------------- |
+| `name`   | `string?`  | Runner name; null when the job never got one      |
+| `group`  | `string?`  | Runner group name, e.g. Default or GitHub Actions |
+| `labels` | `string[]` | The labels the job asked for                      |
+
+### CiRates
+
+Hourly cost per runner group, applied to job durations when CI cost is reported.
+
+| Field      | Type     |                                                                                |
+| ---------- | -------- | ------------------------------------------------------------------------------ |
+| `currency` | `string` | Three-letter currency code; USD by default                                     |
+| `groups`   | `object` | Runner group name → cost per runner-hour (≥ 0); a group not listed is unpriced |
 
 ### CiRun
 
 A durable observed GitHub check, retained across PR head changes and core restarts.
 
-| Field         | Type                |                                                                      |
-| ------------- | ------------------- | -------------------------------------------------------------------- |
-| `repo`        | `string`            | owner/name                                                           |
-| `kind`        | `check_run\|status` | GitHub Checks or legacy commit status                                |
-| `id`          | `string`            | GitHub ID; for legacy statuses, the latest transition ID             |
-| `name`        | `string`            | Check name or status context                                         |
-| `app`         | `string?`           | GitHub App slug                                                      |
-| `headSha`     | `string`            | Commit SHA                                                           |
-| `branch`      | `string?`           | Branch hint when known; a SHA can belong to multiple branches        |
-| `status`      | `string`            | GitHub check status; legacy pending maps to in_progress              |
-| `conclusion`  | `string?`           | GitHub conclusion or legacy state                                    |
-| `url`         | `string?`           | Details URL                                                          |
-| `startedAt`   | `integer?`          | Start, epoch milliseconds                                            |
-| `completedAt` | `integer?`          | Completion, epoch milliseconds                                       |
-| `durationMs`  | `integer?`          | Completion minus start; unavailable for legacy statuses              |
-| `runAt`       | `integer`           | Start, legacy creation time or first observation, epoch milliseconds |
-| `observedAt`  | `integer`           | Last accepted observation, epoch milliseconds                        |
+| Field         | Type                |                                                                                 |
+| ------------- | ------------------- | ------------------------------------------------------------------------------- |
+| `repo`        | `string`            | owner/name                                                                      |
+| `kind`        | `check_run\|status` | GitHub Checks or legacy commit status                                           |
+| `id`          | `string`            | GitHub ID; for legacy statuses, the latest transition ID                        |
+| `name`        | `string`            | Check name or status context                                                    |
+| `app`         | `string?`           | GitHub App slug                                                                 |
+| `headSha`     | `string`            | Commit SHA                                                                      |
+| `branch`      | `string?`           | Branch hint when known; a SHA can belong to multiple branches                   |
+| `status`      | `string`            | GitHub check status; legacy pending maps to in_progress                         |
+| `conclusion`  | `string?`           | GitHub conclusion or legacy state                                               |
+| `url`         | `string?`           | Details URL                                                                     |
+| `startedAt`   | `integer?`          | Start, epoch milliseconds                                                       |
+| `completedAt` | `integer?`          | Completion, epoch milliseconds                                                  |
+| `durationMs`  | `integer?`          | Completion minus start; unavailable for legacy statuses                         |
+| `runner`      | `CiRunner?`         | The runner, for GitHub Actions jobs once recorded                               |
+| `cost`        | `number?`           | durationMs at the runner group’s hourly rate, in `currency`; null when unpriced |
+| `runAt`       | `integer`           | Start, legacy creation time or first observation, epoch milliseconds            |
+| `observedAt`  | `integer`           | Last accepted observation, epoch milliseconds                                   |
 
 ### HomeAssistantData
 
@@ -3639,6 +3744,8 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/projects/:id/update`                                                  | `POST /settings/projects/{id}/update`                                                                                             |
 | `GET /api/templates`                                                             | `GET /settings/templates`                                                                                                         |
 | `PUT /api/templates/1`                                                           | `PUT /settings/templates`                                                                                                         |
+| `GET /api/dev/ci/rates`                                                          | `GET /settings/ci-rates`                                                                                                          |
+| `PUT /api/dev/ci/rates`                                                          | `PUT /settings/ci-rates`                                                                                                          |
 | `POST /api/providers/test`                                                       | `POST /settings/providers/test`                                                                                                   |
 | `GET /api/providers`                                                             | `GET /settings/providers`                                                                                                         |
 | `POST /api/providers`                                                            | `POST /settings/providers`                                                                                                        |
