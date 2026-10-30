@@ -320,6 +320,7 @@ import {
   attachPrForBranch,
   refreshJobBranch,
   spawnWorkerSession,
+  eligibleWorkerProjects,
   startOrchestratorPrAction,
   workerSessionsFor,
   workerSummary,
@@ -4060,6 +4061,32 @@ describe('spawnWorkerSession: project targets and tooling fixes', () => {
   afterEach(() => {
     setSessionProjectFilter(() => true);
     getJob('tool-orch').ownerId = null;
+  });
+
+  it('lists only enabled shared projects with the same inherited owner used by spawn', () => {
+    const parent = getJob('tool-orch');
+    parent.ownerId = 2;
+    state.projects[0] = { ...state.projects[0], id: 10, env: { SECRET: 'hidden' } };
+    state.projects.push({ id: 12, repo: 'acme/disabled', enabled: false });
+    const allowed = vi.fn((ownership, project) => ownership.ownerId === 2 && project.id === 10);
+    setSessionProjectFilter(allowed);
+    acquireInstance.mockClear();
+    expect(eligibleWorkerProjects(parent)).toEqual([
+      { id: 10, name: 'Shop', repo: 'acme/shop', enabled: true },
+    ]);
+    expect(allowed).toHaveBeenCalledWith({ ownerId: 2 }, dashboard);
+    expect(allowed).not.toHaveBeenCalledWith(expect.anything(), state.projects[2]);
+    expect(acquireInstance).not.toHaveBeenCalled();
+    allowed.mockReturnValue(false);
+    expect(eligibleWorkerProjects(parent)).toEqual([]);
+  });
+
+  it('normalizes legacy ownership and rejects non-orchestrators for discovery', () => {
+    const allowed = vi.fn(() => true);
+    setSessionProjectFilter(allowed);
+    expect(eligibleWorkerProjects(getJob('tool-orch'))).toHaveLength(2);
+    expect(allowed).toHaveBeenCalledWith({ ownerId: null }, dashboard);
+    expect(() => eligibleWorkerProjects({ orchestrator: false })).toThrow(/Only an orchestrator/);
   });
 
   it.each([undefined, 'ACME/Shop'])('keeps the same-project runtime precedence for repo %s', (repo) => {
