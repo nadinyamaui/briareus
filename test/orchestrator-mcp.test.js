@@ -535,3 +535,17 @@ it('starts an official PR action with the session bearer and no runtime override
   expect(response.result.content[0].text).toContain('review-1');
   expect(response.result.content[0].text).toContain('list_workers/read_worker');
 });
+
+it('advertises read-only project discovery and calls the orchestrator endpoint with its token', async () => {
+  const projects = [{ id: 1, name: 'Shop', repo: 'acme/shop', enabled: true }];
+  const fetched = stubFetch(reply({ body: { projects } }));
+  const s = await boot();
+  const [listed] = await s.send({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+  expect(listed.result.tools.find((tool) => tool.name === 'list_worker_projects')).toBeDefined();
+  const [result] = await s.send(callTool('list_worker_projects', {}));
+  expect(JSON.parse(result.result.content[0].text)).toEqual({ projects });
+  expect(fetched).toHaveBeenCalledWith(`${URL_BASE}/api/agent/sessions/projects`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+  });
+});
