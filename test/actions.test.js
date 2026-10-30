@@ -8,6 +8,7 @@ vi.mock('../lib/prtasks.js', () => ({
   solveConflictsPrompt: vi.fn(() => 'CONFLICTS'),
   deleteSelfCommentsPrompt: vi.fn(({ author }) => `DELETE:${author}`),
   fixFailingChecksPrompt: vi.fn(() => 'CHECKS'),
+  implementFeedbackPrompt: vi.fn(() => 'FEEDBACK'),
   prBodyPrompt: vi.fn(() => 'BODY'),
 }));
 
@@ -156,6 +157,33 @@ describe('fix-checks', () => {
 
   it('titles the session after that pull request', () => {
     expect(action.title({ prNumber: 3 })).toBe('Fix checks: #3');
+  });
+});
+
+describe('implement-feedback', () => {
+  const action = getAction('implement-feedback');
+
+  it('runs in a prepared worktree and closes when done: the fixes must build and pass their tests', () => {
+    expect(action.workspace).toBe('worktree');
+    expect(action.autoClose).toBe(true);
+  });
+
+  it('hands the prompt the pull request and its branch', async () => {
+    const project = { repo: 'acme/shop' };
+
+    expect(
+      await action.prompt({ repo: 'acme/shop', prNumber: 5, branch: 'feat', baseBranch: 'main', project }),
+    ).toBe('FEEDBACK');
+    expect(prtasks.implementFeedbackPrompt).toHaveBeenCalledWith({
+      repo: 'acme/shop',
+      prNumber: 5,
+      branch: 'feat',
+      project,
+    });
+  });
+
+  it('titles the session after that pull request', () => {
+    expect(action.title({ prNumber: 5 })).toBe('Feedback: #5');
   });
 });
 
