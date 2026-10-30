@@ -522,14 +522,21 @@ it('starts an official PR action with the session bearer and no runtime override
     }),
   );
   const [response] = await server.send(
-    callTool('start_pr_action', { action: 'review', pr_number: 12, provider_id: 999 }),
+    callTool('start_pr_action', {
+      action: 'review',
+      pr_number: 12,
+      repo: 'acme/tools',
+      provider_id: 999,
+      model: 'override',
+      ownerId: 99,
+    }),
   );
   expect(fetch).toHaveBeenCalledWith(
     `${URL_BASE}/api/agent/sessions/pr-actions`,
     expect.objectContaining({
       method: 'POST',
       headers: expect.objectContaining({ Authorization: `Bearer ${TOKEN}` }),
-      body: JSON.stringify({ action: 'review', prNumber: 12 }),
+      body: JSON.stringify({ action: 'review', prNumber: 12, repo: 'acme/tools' }),
     }),
   );
   expect(response.result.content[0].text).toContain('review-1');
