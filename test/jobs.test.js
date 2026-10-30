@@ -1933,6 +1933,48 @@ describe('native Codex code review', () => {
     expect(invocations).toHaveLength(5);
   });
 
+  it('keeps verification recoverable until the label step is checkpointed', async () => {
+    completeCodeReview.mockClear();
+    // Each turn's video publication is held, so the step has exited but its turn
+    // has not returned to the review loop yet.
+    const held = [];
+    const sync = vi
+      .spyOn(r2, 'syncVideos')
+      .mockImplementation(() => new Promise((resolve) => held.push(resolve)));
+    try {
+      Object.assign(job, {
+        status: 'interrupted',
+        interruptedFrom: 'running',
+        restartPending: true,
+        workspacePrepared: true,
+        recoveryTurn: {
+          prompt: 'Verify each finding',
+          opts: { codeReviewStage: 'verify' },
+          phase: 'initial',
+          runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
+          completed: false,
+        },
+      });
+      claimSlot(root, id, { prepared: true });
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(invocations).toHaveLength(1));
+      finishTurn(invocations[0]);
+      await vi.waitFor(() => expect(held).toHaveLength(1));
+      // A restart now must run verification again, or labelling would never run.
+      expect(job.recoveryTurn).toMatchObject({ opts: { codeReviewStage: 'verify' }, completed: false });
+      held[0]({ uploaded: [], failed: [], deferred: 0 });
+      await vi.waitFor(() => expect(invocations).toHaveLength(2));
+      finishTurn(invocations[1]);
+      await vi.waitFor(() => expect(held).toHaveLength(2));
+      // Labelling is the last step, so it is complete as soon as it exits.
+      expect(job.recoveryTurn).toMatchObject({ opts: { codeReviewStage: 'label' }, completed: true });
+      held[1]({ uploaded: [], failed: [], deferred: 0 });
+      await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+    } finally {
+      sync.mockRestore();
+    }
+  });
+
   it('fails the review when its verification step fails', async () => {
     completeCodeReview.mockClear();
     failCodeReview.mockClear();
