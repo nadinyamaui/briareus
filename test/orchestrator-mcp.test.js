@@ -130,6 +130,7 @@ describe('the worker tools', () => {
         effort: 'low',
         branch: 'dev-x',
         qaLoop: false,
+        reviewLoop: false,
       }),
     });
     expect(res.result.content[0].text).toMatch(/^Started worker w1 \[idle\] Fix the login/);

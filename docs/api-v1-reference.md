@@ -171,11 +171,12 @@ Start an errand on a pull request; starts a paid session. Needs `manage`, held t
 | `action` **required**   | `string`  | An errand id from `GET /actions`                                                 |
 | `prNumber` **required** | `integer` | The pull request the work is about                                               |
 | `input`                 | `string`  | The answer to what the errand asks, when it asks something                       |
+| `reviewLoop`            | `boolean` | Review and fix verified feedback after the task settles on a pull request        |
 | `provider`              | `integer` | A provider id from `GET /runtimes`; the project’s configured runtime when absent |
 | `model`                 | `string`  | A model of that provider; its default when absent                                |
 | `effort`                | `string`  | An effort that model offers; its default when absent                             |
 
-**Returns** 201 `{ session: Session }`. The `review` action requires a Codex provider: it prepares the PR head branch, checks it matches the current PR head, fetches the actual PR base (including stacked branches), and runs the native review engine through `codex exec review --json --base <PR-base-ref>` with the selected account, model and effort. Native output is saved as `review-summary.md` outside the checkout; a second turn on the same runtime verifies findings and fix value, publishes the verified findings as inline comments with Not fixed notes for rejected or optional ones, following the project’s publishing instructions, or a short note when nothing is worth posting. The final output is a Markdown summary with links to the published review. When the review finishes, its session is automatically deleted and its workspace and database are released; the stored review and the PR comments remain. Failed or canceled discovery does not publish; interrupted publication resumes its own stage.
+**Returns** 201 `{ session: Session }`. The `review` action requires a Codex provider: it prepares the PR head branch, checks it matches the current PR head, fetches the actual PR base (including stacked branches), and runs the native review engine through `codex exec review --json --base <PR-base-ref>` with the selected account, model and effort. Native output is saved as `review-summary.md` outside the checkout; a second turn on the same runtime verifies findings and fix value, publishes the verified findings as inline comments with Not fixed notes for rejected or optional ones, following the project’s publishing instructions, or a short note when nothing is worth posting. The final output is a Markdown summary with links to the published review. When the review finishes, its session is automatically deleted and its workspace and database are released; the stored review and the PR comments remain. Failed or canceled discovery does not publish; interrupted publication resumes its own stage. Set reviewLoop: true on implement-feedback to keep its session as the task and continue with automatic reviews and verified feedback fixes; other actions reject this option.
 
 ## Pull requests and issues
 
@@ -576,6 +577,7 @@ Start a session; starts a paid agent. Needs `manage`, held to `repo`.
 | `attachments`       | `string[]` | Upload ids from `POST /uploads`                                                  |
 | `qa`                | `boolean`  | Start a QA run on `branch`: a test sheet, then its execution                     |
 | `qaLoop`            | `boolean`  | Run QA after the task settles                                                    |
+| `reviewLoop`        | `boolean`  | Review and fix verified feedback after the task settles on a pull request        |
 | `local`             | `boolean`  | Work in the project’s local checkout instead of a workspace clone                |
 | `orchestrator`      | `boolean`  | Start a supervisor that runs worker sessions instead of editing code             |
 | `workerRuntime`     | `object`   | `{ providerId, model, effort }` an orchestrator’s workers default to             |
@@ -806,6 +808,18 @@ Arm or disarm automatic QA. Needs `manage`, held to the session’s project.
 | `on` **required** | `boolean` | Armed or not |
 
 **Returns** `{ session: Session }`
+
+### `POST /sessions/{id}/review-loop`
+
+Arm, retry or disarm the review and feedback loop. Needs `manage`, held to the session’s project.
+
+**Body**
+
+| Field             | Type      |              |
+| ----------------- | --------- | ------------ |
+| `on` **required** | `boolean` | Armed or not |
+
+**Returns** `{ session: Session }`. Requires an open task session in its own workspace. Uses the project action runtime for both review and feedback fixes. Only findings marked fix with confirmed verification and evidence are implemented; unresolved verdicts stop for a decision. Stops after ten review rounds, an action failure or a fix that pushes no commit. QA waits until the review loop finishes. Turning it off leaves an action already running to finish independently. Set on to true again to retry a failed loop; a pending result read is retried without starting another review.
 
 ### `POST /sessions/{id}/link-pr`
 
@@ -2612,6 +2626,7 @@ A conversation with an agent. The record is pushed whole on every change, so rep
 | `serveLinks`      | `object[]?`                                                     | Where ▶ Run is serving its checkout, each `{ url }`; null when not running                                                                                                                                                    |
 | `browser`         | `object?`                                                       | The shared browser, `{ running }`, when it is switched on; null when off. Switched on and not running, the next turn starts it                                                                                                |
 | `qaLoop`          | `object?`                                                       | The QA loop’s state when armed                                                                                                                                                                                                |
+| `reviewLoop`      | `object?`                                                       | The review loop’s phase (review or fix), rounds, sessionId, headSha, done and failure when armed                                                                                                                              |
 | `orchestrator`    | `boolean`                                                       | Whether it is a supervisor of worker sessions                                                                                                                                                                                 |
 | `parentId`        | `string?`                                                       | The orchestrator it works for                                                                                                                                                                                                 |
 | `canCompact`      | `boolean`                                                       | Whether `POST /sessions/{id}/compact` would run now                                                                                                                                                                           |
@@ -3648,6 +3663,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/dev/sessions/:id/btw`                                                 | `POST /sessions/{id}/btw`                                                                                                         |
 | `POST /api/dev/sessions/:id/clear`                                               | `POST /sessions/{id}/clear`                                                                                                       |
 | `POST /api/dev/sessions/:id/qa-loop`                                             | `POST /sessions/{id}/qa-loop`                                                                                                     |
+| `POST /api/dev/sessions/:id/review-loop`                                         | `POST /sessions/{id}/review-loop`                                                                                                 |
 | `POST /api/dev/sessions/:id/link-pr`                                             | `POST /sessions/{id}/link-pr`                                                                                                     |
 | `GET /api/operations/preview/:id`                                                | `GET /sessions/{id}/preview`                                                                                                      |
 | `POST /api/operations/preview/:id`                                               | `POST /sessions/{id}/preview/feedback`                                                                                            |

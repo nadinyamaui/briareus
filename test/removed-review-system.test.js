@@ -25,13 +25,14 @@ describe('retired review system', () => {
       expect(binary).not.toHaveProperty('buildReviewArgs');
     }
   });
-  it('keeps retired findings and loop endpoints and review settings out of the public contract', () => {
+  it('keeps retired triage and project review settings out of the public contract', () => {
     const paths = API_V1_ROUTES.map((route) => route.path);
     expect(paths.filter((path) => path.includes('/findings'))).toEqual([
       '/pulls/:number/code-reviews/:reviewId/findings/:findingId',
     ]);
-    expect(JSON.stringify(API_V1_ROUTES)).not.toMatch(/review-loop|triage\/save/);
-    expect(JSON.stringify(FIELDS)).not.toMatch(/"review"|"reviewLoop"/);
+    expect(paths).toContain('/sessions/:id/review-loop');
+    expect(JSON.stringify(API_V1_ROUTES)).not.toMatch(/triage\/save/);
+    expect(FIELDS).toHaveProperty('reviewLoop');
     expect(OBJECTS).not.toHaveProperty('Finding');
     for (const key of [
       'reviewProviderId',

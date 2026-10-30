@@ -188,6 +188,16 @@ describe('implement-feedback', () => {
 });
 
 describe('actionSessionSpec', () => {
+  it('can keep Implement feedback as the task for a review loop on an existing PR', async () => {
+    const context = { repo: 'acme/shop', prNumber: 42, branch: 'feature', reviewLoop: true };
+    expect(await actionSessionSpec(getAction('implement-feedback'), context)).toMatchObject({
+      reviewLoop: true,
+      autoClose: false,
+      activity: 'implement-feedback',
+      prompt: 'FEEDBACK',
+    });
+    await expect(actionSessionSpec(getAction('review'), context)).rejects.toThrow(/Only Implement feedback/);
+  });
   const context = {
     repo: 'a/b',
     prNumber: 4,

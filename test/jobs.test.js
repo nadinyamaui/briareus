@@ -25,6 +25,8 @@ vi.mock('../lib/claude-session.js', async (original) => ({
   transferClaudeSession: vi.fn(),
   askClaudeSideQuestion: vi.fn(),
 }));
+import { newReviewLoop } from '../lib/review-loop.js';
+import { getCodeReviewByJob, listCodeReviewFindings } from '../lib/db.js';
 import { testSheetPrompt } from '../lib/prtasks.js';
 import { recordTurnUsage } from '../lib/usage.js';
 import { claimSlot, maintenanceState, setDraining } from '../lib/recovery.js';
@@ -143,6 +145,8 @@ vi.mock('../lib/db.js', () => ({
   restartCodeReview: vi.fn(async () => {}),
   completeCodeReview: vi.fn(async () => {}),
   failCodeReview: vi.fn(async () => {}),
+  getCodeReviewByJob: vi.fn(async () => null),
+  listCodeReviewFindings: vi.fn(async () => []),
 }));
 
 vi.mock('../lib/github.js', async (importOriginal) => ({
@@ -213,6 +217,7 @@ vi.mock('../lib/prtasks.js', () => ({
   testSheetPrompt: vi.fn(() => 'SHEET'),
   testRunPrompt: vi.fn(() => 'RUN'),
   solveConflictsPrompt: vi.fn(() => 'CONFLICTS'),
+  implementFeedbackPrompt: vi.fn(() => 'IMPLEMENT FEEDBACK'),
 }));
 
 vi.mock('../lib/qa-verdict.js', () => ({
@@ -311,6 +316,7 @@ import {
   repoHasWebhook,
   spottedPrIsThisSession,
   setQaLoop,
+  setReviewLoop,
   renameDevSession,
   setDevSessionAutoCompact,
   setDevSessionCompactInstructions,
@@ -7281,6 +7287,173 @@ describe('the QA loop: reporting a finished QA run', () => {
     expect(parent.qaLoop).toMatchObject({ done: true, failedScenarios: 0 });
     expect(parent.qaLoop.pendingVerdict).toBeNull();
     vi.useRealTimers();
+  });
+});
+
+describe('the restored review loop lifecycle', () => {
+  let parent, child, rejectPreparation;
+  beforeEach(async () => {
+    state.projects = [
+      {
+        repo: 'acme/review-loop',
+        label: 'Review loop',
+        actionProviderId: 2,
+        actionModel: 'claude-fable-5-1',
+        actionEffort: 'low',
+      },
+    ];
+    state.otherProviders = [{ id: 2, label: 'Action provider', binary: 'claude', active: true }];
+    state.stored = [
+      {
+        id: 'review-loop-task',
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/review-loop',
+        providerId: 1,
+        ownerId: 7,
+        model: 'claude-fable-5-1',
+        effort: 'high',
+        branch: 'feature',
+        startedOnPr: 42,
+        reviewLoop: {
+          ...newReviewLoop(),
+          prNumber: 42,
+          headSha: 'sha-a',
+          rounds: 1,
+          sessionId: 'review-loop-child',
+        },
+      },
+      {
+        id: 'review-loop-child',
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/review-loop',
+        ownerId: 7,
+        activity: 'review',
+        reviewParentId: 'review-loop-task',
+        autoClose: true,
+        reviewLoopDone: true,
+        codeReviewSettled: true,
+      },
+    ];
+    await initJobs();
+    parent = getJob('review-loop-task');
+    child = getJob('review-loop-child');
+    child.status = 'idle';
+    parent.status = 'idle';
+    parent.prStatus = { number: 42, state: 'open', headSha: 'sha-a' };
+    githubRest.mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({
+        number: 42,
+        state: 'open',
+        head: { sha: 'sha-a', ref: 'feature', repo: { full_name: parent.repo } },
+        base: { ref: 'main' },
+      }),
+    }));
+    getCodeReviewByJob.mockResolvedValue({
+      id: 101,
+      headSha: 'sha-a',
+      status: 'completed',
+      summary: 'Stored review',
+    });
+    listCodeReviewFindings.mockResolvedValue([]);
+  });
+  afterEach(async () => {
+    parent.status = 'closed';
+    parent.reviewLoop = null;
+    for (const session of childSessionsOf(parent)) await closeDevSession(session.id);
+    rejectPreparation?.(new Error('closed'));
+    rejectPreparation = null;
+    acquireInstance.mockReset();
+    getCodeReviewByJob.mockReset();
+    listCodeReviewFindings.mockReset();
+    githubRest.mockReset();
+  });
+
+  it('reads the completed review before auto-deleting its action and retains task ownership', async () => {
+    expect(childSessionsOf(parent)).toContain(child);
+    await closeDevSession(child.id);
+    expect(parent.reviewLoop).toMatchObject({ done: true, sessionId: null, pendingResult: null });
+    expect(getCodeReviewByJob).toHaveBeenCalledWith(child.id);
+    expect(getJob(child.id)).toBeNull();
+  });
+
+  it('uses the configured action provider/model/effort for the feedback child, inheriting its owner', async () => {
+    listCodeReviewFindings.mockResolvedValue([
+      { id: 1, title: 'Lost update', shouldFix: 'fix', verification: 'confirmed', comments: 'Reproduced' },
+    ]);
+    state.claimsServer = true;
+    state.eligibleServers = [{ id: 1 }];
+    state.capacity = 10000;
+    acquireInstance.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectPreparation = reject;
+        }),
+    );
+    await closeDevSession(child.id);
+    expect(parent.reviewLoop.failure).toBeNull();
+    const fix = getJob(parent.reviewLoop.sessionId);
+    expect(fix).toMatchObject({
+      activity: 'implement-feedback',
+      providerId: 2,
+      model: 'claude-fable-5-1',
+      effort: 'low',
+      ownerId: 7,
+      reviewParentId: parent.id,
+      autoClose: true,
+    });
+    expect(fix.recoveryTurn.prompt).toContain('Only implement the confirmed findings below');
+    expect(fix.recoveryTurn.prompt).toContain('Lost update');
+    expect(parent.reviewLoop).toMatchObject({ phase: 'fix', rounds: 1 });
+    await vi.waitFor(() => expect(rejectPreparation).toBeTypeOf('function'));
+  });
+
+  it('fails visibly if the configured action runtime is unavailable', async () => {
+    listCodeReviewFindings.mockResolvedValue([
+      { shouldFix: 'fix', verification: 'confirmed', comments: 'Reproduced' },
+    ]);
+    state.otherProviders[0].active = false;
+    await closeDevSession(child.id);
+    expect(parent.reviewLoop.failure.reason).toMatch(/configured action runtime is unavailable/);
+    expect(parent.reviewLoop.done).toBe(false);
+  });
+
+  it('keeps a pending read when the action is deleted and retries it without another action', async () => {
+    getCodeReviewByJob.mockRejectedValueOnce(new Error('DB unavailable'));
+    await closeDevSession(child.id);
+    expect(parent.reviewLoop).toMatchObject({
+      done: false,
+      pendingResult: { sessionId: child.id, success: true },
+      failure: { reason: 'DB unavailable' },
+    });
+    expect(getJob(child.id)).toBeNull();
+    setReviewLoop(parent.id, true);
+    await vi.waitFor(() => expect(parent.reviewLoop.done).toBe(true));
+    expect(childSessionsOf(parent)).toEqual([]);
+  });
+
+  it('retains the closed action if the parent result could not be persisted', async () => {
+    saveJob.mockRejectedValueOnce(new Error('metadata write unavailable'));
+    await closeDevSession(child.id);
+    expect(parent.reviewLoop.done).toBe(true);
+    expect(getJob(child.id)).toBe(child);
+    expect(child.status).toBe('closed');
+    await flushJobs();
+  });
+
+  it('does not start QA while the review loop is pending', () => {
+    parent.reviewLoop = newReviewLoop();
+    setQaLoop(parent.id, true);
+    expect(parent.qaLoop).toMatchObject({ running: false, sessionId: null });
+  });
+
+  it('disarming prevents a completed action from advancing the loop', async () => {
+    setReviewLoop(parent.id, false);
+    await closeDevSession(child.id);
+    expect(parent.reviewLoop).toBeNull();
+    expect(getCodeReviewByJob).not.toHaveBeenCalled();
   });
 });
 

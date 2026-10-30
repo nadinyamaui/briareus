@@ -114,6 +114,7 @@ import {
   closeDevSession,
   reopenDevSession,
   setQaLoop,
+  setReviewLoop,
   renameDevSession,
   setDevSessionAutoCompact,
   setDevSessionCompactInstructions,
@@ -1004,11 +1005,13 @@ const workerRoutes = orchestratorRoutes({
   spawnWorkerSession,
   workerSessionsFor,
   setQaLoop,
+  setReviewLoop,
   workerSummary,
 });
 const { orchestratorSession, workerOf } = workerRoutes;
 api.post('/api/agent/sessions/pr-actions', workerRoutes.prAction);
 api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
+api.post('/api/agent/sessions/:id/review-loop', workerRoutes.reviewLoop);
 api.delete('/api/agent/sessions/:id', workerRoutes.deleteWorker);
 
 api.post('/api/agent/sessions', workerRoutes.spawn);
@@ -1846,7 +1849,7 @@ api.get('/api/dev/actions', (req, res) => {
 // errands run in the local checkout (no clone or pooled database wasted); actions that run the
 // app get a fully set up workspace clone (lib/actions.js).
 api.post('/api/dev/actions', async (req, res) => {
-  const { action: actionId, repo, prNumber, provider, model, effort, input } = req.body || {};
+  const { action: actionId, repo, prNumber, provider, model, effort, input, reviewLoop } = req.body || {};
   const action = getAction(actionId);
   if (!action) return res.status(400).json({ error: `Unknown action: ${actionId}` });
   // An action with required input (✍ Give feedback) has no errand without it.
@@ -1880,6 +1883,13 @@ api.post('/api/dev/actions', async (req, res) => {
       return res
         .status(502)
         .json({ error: `Pull request #${number} has no head branch; its fork may be gone` });
+    if (
+      reviewLoop === true &&
+      (pr.state !== 'open' || pr.head.repo?.full_name?.toLowerCase() !== project.repo.toLowerCase())
+    )
+      return res
+        .status(400)
+        .json({ error: 'A review loop requires an open pull request with a head branch in this project' });
     const context = {
       repo: project.repo,
       prNumber: number,
@@ -1889,6 +1899,7 @@ api.post('/api/dev/actions', async (req, res) => {
       project,
       // What the user typed, verbatim; only an action with `input` reads it.
       input: answer,
+      reviewLoop: reviewLoop === true,
     };
     // A prompt that refuses fails the request rather than starting an empty errand.
     const spec = await actionSessionSpec(action, context);
@@ -2039,6 +2050,7 @@ api.post('/api/dev/sessions', (req, res) => {
     attachments,
     prNumber,
     qaLoop,
+    reviewLoop,
     activity,
   } = req.body || {};
   try {
@@ -2058,6 +2070,7 @@ api.post('/api/dev/sessions', (req, res) => {
         attachments,
         prNumber: number,
         qaLoop: qaLoop === true,
+        reviewLoop: reviewLoop === true,
         activity: COMPOSER_ACTIVITIES.has(activity) ? activity : undefined,
         ownerId: requestOwner(res),
       }),
@@ -2199,6 +2212,16 @@ api.delete('/api/dev/sessions/:id/queue/:index', (req, res) => {
     res.json({ ok: true, dropped, session: publicJob(getJob(req.params.id)) });
   } catch (e) {
     res.status(400).json({ error: e.message });
+  }
+});
+
+api.post('/api/dev/sessions/:id/review-loop', (req, res) => {
+  try {
+    const { on } = req.body || {};
+    if (typeof on !== 'boolean') return res.status(400).json({ error: 'on must be a boolean' });
+    res.json({ session: setReviewLoop(req.params.id, on) });
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message });
   }
 });
 

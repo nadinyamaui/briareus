@@ -7,6 +7,7 @@ let server,
   base,
   worker,
   setQaLoop,
+  setReviewLoop,
   child,
   sendDevMessage,
   jobEventsFor,
@@ -35,6 +36,9 @@ beforeEach(async () => {
     child.status = 'running';
   });
   jobEventsFor = vi.fn(async () => [{ kind: 'ask', question: 'Which option?', seq: 9 }]);
+  setReviewLoop = vi.fn((_id, on) => {
+    worker.reviewLoop = on ? { phase: 'review' } : null;
+  });
   setQaLoop = vi.fn((_id, on) => {
     worker.qaLoop = on ? { running: false } : null;
   });
@@ -56,6 +60,7 @@ beforeEach(async () => {
     },
     workerSessionsFor: (orchestrator) => (worker.parentId === orchestrator.id ? [worker] : []),
     setQaLoop,
+    setReviewLoop,
     getJob: (id) => (id === child.id ? child : null),
     workerTranscript,
     jobEventsFor,
@@ -67,6 +72,7 @@ beforeEach(async () => {
   app.post('/api/agent/sessions/pr-actions', routes.prAction);
   app.post('/api/agent/sessions', routes.spawn);
   app.post('/api/agent/sessions/:id/qa-loop', routes.qaLoop);
+  app.post('/api/agent/sessions/:id/review-loop', routes.reviewLoop);
   app.delete('/api/agent/sessions/:id', routes.deleteWorker);
   app.get('/api/agent/sessions', (req, res) => {
     const parent = routes.orchestratorSession(req, res);
@@ -99,6 +105,28 @@ const spawnWorker = (body, token = 'o1') =>
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+
+describe('scoped review loop controls', () => {
+  const toggle = (body, token = 'o1', id = 'w1') =>
+    fetch(`${base}/${id}/review-loop`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  it.each([
+    ['w1', 'w1', 403],
+    ['o2', 'w1', 404],
+    ['o1', 'missing', 404],
+  ])('refuses %s changing %s', async (token, id, status) => {
+    expect((await toggle({ on: true }, token, id)).status).toBe(status);
+    expect(setReviewLoop).not.toHaveBeenCalled();
+  });
+  it('requires a boolean and only forwards the owned worker id and decision', async () => {
+    expect((await toggle({ on: 'true' })).status).toBe(400);
+    expect((await toggle({ on: true, ownerId: 99 })).status).toBe(200);
+    expect(setReviewLoop).toHaveBeenCalledExactlyOnceWith('w1', true);
+  });
+});
 
 describe('scoped worker deletion', () => {
   const remove = (token = 'o1', id = 'w1') =>
@@ -152,6 +180,7 @@ describe('scoped worker spawning', () => {
       repo: 'companion/repo',
       branch: 'stack-base',
       qaLoop: true,
+      reviewLoop: true,
       ownerId: 99,
       parentId: 'o2',
     });
@@ -164,6 +193,7 @@ describe('scoped worker spawning', () => {
         repo: 'companion/repo',
         branch: 'stack-base',
         qaLoop: true,
+        reviewLoop: true,
         tooling: false,
         providerId: undefined,
         model: undefined,

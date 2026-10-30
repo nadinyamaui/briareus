@@ -40,6 +40,16 @@ describe('operator attention', () => {
     expect(items.map((i) => i.id)).toEqual(['a:webhook-paused']);
     expect(items[0]).toMatchObject({ summary: paused.reason, href: '/sessions/a', at: 'x' });
   });
+
+  it('shows a review failure once on the task and links a child question to that task', () => {
+    const items = attentionItems([
+      { id: 'task', status: 'idle', reviewLoop: { failure: { reason: 'No new commit', at: 'today' } } },
+      { id: 'fix', status: 'failed', reviewParentId: 'task' },
+      { id: 'question', status: 'idle', reviewParentId: 'task', awaitingAnswer: true },
+    ]);
+    expect(items.map((i) => i.id)).toEqual(['task:review-failed', 'question:question']);
+    expect(items.every((i) => i.taskId === 'task')).toBe(true);
+  });
   it('dates each item by when it began to wait, not by session creation', () => {
     const items = attentionItems([
       { id: 'old', status: 'idle', createdAt: '2026-09-01', awaitingAnswer: true, askedAt: '2026-09-26' },

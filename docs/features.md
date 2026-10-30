@@ -90,6 +90,23 @@ and rerunning a review in the same session resets it to `pending`.
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).
 
+Task sessions can opt into the review loop with `reviewLoop: true` when created,
+or `POST /api/v1/sessions/{id}/review-loop` with `{"on":true}`. For an existing
+PR, start `implement-feedback` through `POST /api/v1/actions` with
+`reviewLoop: true`; its session stays as the task for the loop. Orchestrators
+can use `review_loop` on `spawn_worker` or `set_worker_review_loop`.
+Once the task settles, the loop runs Code review, implements only findings
+marked `fix` with confirmed verification and evidence, and reviews the pushed
+commit again. Both actions use the project's action runtime, falling back to
+the task's runtime when none is configured. Optional and dismissed findings
+stay out of automatic fixes; undecided findings stop for a decision.
+The loop stops after ten reviews, on a failed action or missing report, or
+when feedback implementation pushes no new commit. Failures appear in attention.
+Set `on` to `true` again to retry; a pending result read reuses the stored review.
+State survives restarts, and a result for an older commit cannot finish the loop.
+QA waits until no verified fix remains. Setting `on` to `false` leaves any
+action already running to finish independently and prevents the next round.
+
 ## Previews and browser access
 
 Run profiles serve session checkouts, branches and pull requests. A shared
