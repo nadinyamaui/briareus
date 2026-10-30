@@ -249,26 +249,26 @@ describe('actions', () => {
     expect(state.removed).toEqual([]);
   });
 
-  it('prunes whole idle slots but keeps claimed and unrelated directories', () => {
+  it('prunes whole idle slots but keeps claimed and unrelated directories', async () => {
     const idle = slot('acme__app');
     const claimed = slot('acme__app__2');
     state.files[path.join(state.root, 'notes')] = { dir: true };
     state.files[path.join(state.root, 'acme__app__3')] = { dir: false };
     state.sessions = [{ id: 's2', status: 'idle', workDir: claimed }];
 
-    expect(pruneUnusedWorkspaces()).toMatchObject({ removed: ['acme__app'], errors: [] });
+    expect(await pruneUnusedWorkspaces()).toMatchObject({ removed: ['acme__app'], errors: [] });
     expect(state.removed).toEqual([idle]);
     expect(state.files[claimed]).toBeDefined();
     expect(state.files[path.join(state.root, 'notes')]).toBeDefined();
   });
 
-  it('expires recovery checkouts before quarantining, so freed capacity is used the same run', () => {
+  it('expires recovery checkouts before quarantining, so freed capacity is used the same run', async () => {
     const idle = slot('acme__app');
     state.expireResult = {
       expired: [`${state.root}/.briareus-recovery/acme__app-x`],
       errors: [{ path: `${state.root}/.briareus-recovery/acme__app-y`, error: 'EACCES' }],
     };
-    expect(pruneUnusedWorkspaces()).toMatchObject({
+    expect(await pruneUnusedWorkspaces()).toMatchObject({
       removed: ['acme__app'],
       expired: state.expireResult.expired,
       expireErrors: state.expireResult.errors,
@@ -276,23 +276,24 @@ describe('actions', () => {
     expect(state.calls).toEqual([`expire ${state.root}`, `quarantine ${idle}`]);
   });
 
-  it('logs expired recovery checkouts and the ones it could not delete', () => {
+  it('logs expired recovery checkouts and the ones it could not delete', async () => {
     state.expireResult = {
       expired: ['/a', '/b'],
       errors: [{ path: '/c', error: 'EACCES: permission denied' }],
     };
     const lines = [];
     clearInterval(startWorkspacePruner((line) => lines.push(line), 1000));
+    await vi.waitFor(() => expect(lines).toHaveLength(2));
     expect(lines).toEqual([
       'Workspace cleanup deleted 2 recovery checkouts that held no local work.',
       'Workspace cleanup could not inspect or delete recovery checkout /c: EACCES: permission denied. Inspect it and recover any local work before removing it manually.',
     ]);
   });
 
-  it('leaves a failed quarantine in place and reports the error without deleting files', () => {
+  it('leaves a failed quarantine in place and reports the error without deleting files', async () => {
     const dir = slot('acme__app');
     state.quarantineError = new Error('Could not quarantine: permission denied; inspect permissions');
-    const result = pruneUnusedWorkspaces();
+    const result = await pruneUnusedWorkspaces();
     expect(result.removed).toEqual([]);
     expect(result.preserved).toEqual([]);
     expect(result.errors).toEqual([{ slot: 'acme__app', error: state.quarantineError.message }]);
@@ -300,15 +301,15 @@ describe('actions', () => {
     expect(state.removed).toEqual([]);
   });
 
-  it('never prunes recovery-backup siblings', () => {
+  it('never prunes recovery-backup siblings', async () => {
     const backup = path.join(state.root, 'acme__app__3.recovery-backup-20261007T221639Z');
     state.files[backup] = { dir: true };
-    expect(pruneUnusedWorkspaces().removed).toEqual([]);
+    expect((await pruneUnusedWorkspaces()).removed).toEqual([]);
     expect(state.files[backup]).toBeDefined();
     expect(state.removed).toEqual([]);
   });
 
-  it('keeps a slot an interrupted or failed session left work in', () => {
+  it('keeps a slot an interrupted or failed session left work in', async () => {
     const kept = slot('acme__app');
     const failed = slot('acme__app__2');
     const child = slot('acme__app__3');
@@ -340,7 +341,7 @@ describe('actions', () => {
       },
     ];
 
-    expect(pruneUnusedWorkspaces().removed.sort()).toEqual([
+    expect((await pruneUnusedWorkspaces()).removed.sort()).toEqual([
       'acme__app__3',
       'acme__app__4',
       'acme__app__5',
@@ -350,7 +351,7 @@ describe('actions', () => {
     expect(() => cleanWorkspace('acme__app')).toThrow(expect.objectContaining({ status: 409 }));
   });
 
-  it('prunes only slots owned by a known session while the registry is incomplete', () => {
+  it('prunes only slots owned by a known session while the registry is incomplete', async () => {
     // A failed (or truncated) restore: the sessions are still stored, just not
     // loaded, so a slot the registry cannot account for may hold their work.
     state.registryComplete = false;
@@ -361,28 +362,55 @@ describe('actions', () => {
     state.files[path.join(unknown, '.git', 'briareus-owner')] = { content: 's9' };
     state.sessions = [{ id: 's1', status: 'closed', workDir: known }];
 
-    expect(pruneUnusedWorkspaces()).toMatchObject({ removed: ['acme__app'], errors: [] });
+    expect(await pruneUnusedWorkspaces()).toMatchObject({ removed: ['acme__app'], errors: [] });
     expect(state.removed).toEqual([known]);
     expect(state.files[unknown]).toBeDefined();
     expect(state.files[unmarked]).toBeDefined();
 
     state.registryComplete = true;
-    expect(pruneUnusedWorkspaces().removed.sort()).toEqual(['acme__app__2', 'acme__app__3']);
+    expect((await pruneUnusedWorkspaces()).removed.sort()).toEqual(['acme__app__2', 'acme__app__3']);
   });
 
-  it('prunes at startup and again on the configured interval', () => {
+  it('prunes at startup and again on the configured interval', async () => {
     vi.useFakeTimers();
     try {
       const first = slot('acme__app');
       const timer = startWorkspacePruner(() => {}, 1000);
+      await vi.advanceTimersByTimeAsync(0);
       expect(state.removed).toEqual([first]);
 
       const second = slot('acme__app__2');
-      vi.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
       expect(state.removed).toEqual([first, second]);
       clearInterval(timer);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('does not start a pass while the previous one is still expiring recovery checkouts', async () => {
+    vi.useFakeTimers();
+    try {
+      let finish;
+      state.expireResult = new Promise((resolve) => {
+        finish = () => resolve({ expired: [], errors: [] });
+      });
+      const timer = startWorkspacePruner(() => {}, 1000);
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(state.calls).toEqual([`expire ${state.root}`]);
+      finish();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(state.calls).toEqual([`expire ${state.root}`, `expire ${state.root}`]);
+      clearInterval(timer);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('logs a failed pass instead of leaving an unhandled rejection', async () => {
+    state.expireResult = Promise.reject(new Error('disk gone'));
+    const lines = [];
+    clearInterval(startWorkspacePruner((line) => lines.push(line), 1000));
+    await vi.waitFor(() => expect(lines).toEqual(['Workspace cleanup failed: disk gone']));
   });
 });

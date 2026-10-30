@@ -8,6 +8,20 @@ import { sessionTranscriptRoutes } from '../lib/transcript-routes.js';
 let server, base, routes, job, log, hidden, bus, clearDevTranscript, presentEvent;
 const ev = (seq, text) => ({ seq, kind: 'text', text });
 
+const deps = () => ({
+  getJob: (id) => (id === job.id ? job : null),
+  publicJob: (j) => ({ id: j.id, status: j.status }),
+  jobEventsFor: async (j, since) => log.filter((e) => e.seq > since),
+  jobEventsSince: (j, since) => log.filter((e) => e.seq > since),
+  visibleEvents: (j, events) => events.filter((e) => !hidden.has(e.seq)),
+  clearDevTranscript,
+  currentEstimates: async () => null,
+  jobUsageEstimates: async () => new Map(),
+  estimateEventCosts: (events) => events,
+  bus,
+  presentEvent,
+});
+
 beforeEach(async () => {
   job = { id: 'abc123', kind: 'devchat', status: 'idle' };
   log = [ev(1, 'old'), ev(2, 'older reply'), ev(3, 'new')];
@@ -19,19 +33,7 @@ beforeEach(async () => {
     if (job.status === 'running') throw new Error('Wait until the session is idle to clear its transcript');
     return { session: { id }, hidden: 2 };
   });
-  routes = sessionTranscriptRoutes({
-    getJob: (id) => (id === job.id ? job : null),
-    publicJob: (j) => ({ id: j.id, status: j.status }),
-    jobEventsFor: async (j, since) => log.filter((e) => e.seq > since),
-    jobEventsSince: (j, since) => log.filter((e) => e.seq > since),
-    visibleEvents: (j, events) => events.filter((e) => !hidden.has(e.seq)),
-    clearDevTranscript,
-    currentEstimates: async () => null,
-    jobUsageEstimates: async () => new Map(),
-    estimateEventCosts: (events) => events,
-    bus,
-    presentEvent,
-  });
+  routes = sessionTranscriptRoutes(deps());
   const app = express();
   app.use(express.json());
   app.get('/api/dev/sessions/:id', routes.read);
@@ -57,6 +59,20 @@ describe('the transcript a page opens with', () => {
     // Anything but 1 is not a request for all of it.
     expect(seqs((await (await fetch(`${base}/abc123?all=true`)).json()).events)).toEqual([3]);
     expect((await fetch(`${base}/nope`)).status).toBe(404);
+  });
+
+  it('prices only this session, not every session the server holds', async () => {
+    const currentEstimates = vi.fn(async () => null);
+    const app = express();
+    app.get('/s/:id', sessionTranscriptRoutes({ ...deps(), currentEstimates }).read);
+    const other = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => other.once('listening', resolve));
+    try {
+      await (await fetch(`http://127.0.0.1:${other.address().port}/s/abc123`)).json();
+      expect(currentEstimates).toHaveBeenCalledWith([job]);
+    } finally {
+      await new Promise((resolve) => other.close(resolve));
+    }
   });
 });
 

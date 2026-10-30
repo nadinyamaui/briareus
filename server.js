@@ -103,6 +103,7 @@ import {
   bus,
   listDevSessions,
   devSessionRecords,
+  sessionTreeIds,
   createDevSession,
   sendDevMessage,
   askDevSessionBtw,
@@ -1504,8 +1505,16 @@ api.post('/api/providers/:id/login', async (req, res) => {
     return res.status(500).json({ error: `Could not start ${provider.binary} login: ${e.message}` });
   }
   cliLogins.set(provider.binary, child);
-  child.on('exit', () => {
+  const forget = () => {
     if (cliLogins.get(provider.binary) === child) cliLogins.delete(provider.binary);
+  };
+  child.on('exit', forget);
+  // A binary that exists but cannot run (EACCES, replaced mid-update) fails
+  // asynchronously; unheard, that 'error' would take the whole server down.
+  let spawnError = null;
+  child.on('error', (e) => {
+    spawnError = e;
+    forget();
   });
   let output = '';
   const login = await new Promise((resolve) => {
@@ -1530,7 +1539,13 @@ api.post('/api/providers/:id/login', async (req, res) => {
       clearTimeout(timer);
       resolve(null);
     });
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
   });
+  if (spawnError)
+    return res.status(500).json({ error: `Could not start ${provider.binary} login: ${spawnError.message}` });
   if (!login) {
     try {
       child.kill();
@@ -1982,10 +1997,11 @@ api.post('/api/dev/branches/serve', async (req, res) => {
   }
 });
 
-async function currentJobUsageEstimates() {
-  const plain = listDevSessions();
+// Only the asked-for sessions and their descendants: reading the ledger for every
+// session ever loaded made each transcript poll slower as history grew.
+async function currentJobUsageEstimates(sessions) {
   try {
-    return await jobUsageEstimates(plain.map((session) => session.id));
+    return await jobUsageEstimates(sessionTreeIds(sessions));
   } catch (e) {
     // An unreadable ledger must not make the session list disappear.
     console.error(`session costs unavailable: ${e.message}`);
@@ -1994,15 +2010,13 @@ async function currentJobUsageEstimates() {
 }
 
 api.get('/api/dev/sessions', async (req, res) => {
-  const estimates = await currentJobUsageEstimates();
-  const sessions = listDevSessions(estimates);
   // A project-limited token sees only its projects (lib/api-v1.js), and a member only the
   // sessions they may see (lib/ownership.js).
   const repos = res.locals.apiRepos;
   const user = res.locals.apiUser;
-  res.json({
-    sessions: sessions.filter((s) => (!repos || repos.includes(s.repo)) && seesSession(user, s)),
-  });
+  const visible = (s) => (!repos || repos.includes(s.repo)) && seesSession(user, s);
+  const estimates = await currentJobUsageEstimates(devSessionRecords().filter(visible));
+  res.json({ sessions: listDevSessions(estimates).filter(visible) });
 });
 
 // Activities only the client can know (▶ Start on an issue looks like plain chat server-side);

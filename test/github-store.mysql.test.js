@@ -178,6 +178,86 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
     expect(count.n).toBe(1); // the issue and pull share the same label
   });
 
+  it('writes a label or user shared by many rows once per board save', async () => {
+    const r = repo();
+    const statements = [];
+    const counting = createGithubStore({
+      connection: async () => {
+        const c = await pool.getConnection();
+        const query = c.query.bind(c);
+        c.query = (sql, ...rest) => {
+          statements.push(sql);
+          return query(sql, ...rest);
+        };
+        return c;
+      },
+    });
+    const labels = [
+      { name: 'bug', color: 'ff0000' },
+      { name: 'ui', color: '00ff00' },
+    ];
+    const data = board({
+      pulls: [1, 2, 3].map((number) =>
+        pull({ number, url: `https://github.com/${r}/pull/${number}`, labels, assignees: ['alice', 'bob'] }),
+      ),
+      issues: [4, 5].map((number) =>
+        issue({ number, url: `https://github.com/${r}/issues/${number}`, labels, assignees: ['alice'] }),
+      ),
+    });
+    await counting.saveBoard(r, data);
+    expect(statements.filter((sql) => /INSERT INTO github_labels/.test(sql))).toHaveLength(2);
+    expect(statements.filter((sql) => /INSERT INTO github_users/.test(sql))).toHaveLength(2);
+    const result = await store.readBoard(r);
+    const byNumber = (x, y) => x[0] - y[0];
+    expect(
+      result.pulls.map((p) => [p.number, p.labels.map((l) => l.name), p.assignees]).sort(byNumber),
+    ).toEqual([
+      [1, ['bug', 'ui'], ['alice', 'bob']],
+      [2, ['bug', 'ui'], ['alice', 'bob']],
+      [3, ['bug', 'ui'], ['alice', 'bob']],
+    ]);
+    expect(
+      result.issues.map((i) => [i.number, i.labels.map((l) => l.name), i.assignees]).sort(byNumber),
+    ).toEqual([
+      [4, ['bug', 'ui'], ['alice']],
+      [5, ['bug', 'ui'], ['alice']],
+    ]);
+  });
+
+  it('saves the boards of two repositories that reference each other at the same time', async () => {
+    const a = repo();
+    const b = repo();
+    const parallel = createGithubStore({ connection: () => pool.getConnection() });
+    for (let round = 1; round <= 5; round++) {
+      const observedAt = 1000 * round;
+      const at = { observedAt, syncedAt: new Date(observedAt).toISOString() };
+      await Promise.all([
+        parallel.saveBoard(
+          a,
+          board({
+            ...at,
+            pulls: [
+              pull({ issues: [{ number: 2, title: 'An issue', url: issue().url, state: 'open', repo: b }] }),
+            ],
+            issues: [],
+          }),
+        ),
+        parallel.saveBoard(
+          b,
+          board({
+            ...at,
+            pulls: [],
+            issues: [
+              issue({ pulls: [{ number: 1, title: 'A pull', url: pull().url, draft: false, repo: a }] }),
+            ],
+          }),
+        ),
+      ]);
+    }
+    expect((await store.readBoard(a)).pulls[0].issues.map((i) => i.number)).toEqual([2]);
+    expect((await store.readBoard(b)).issues[0].pulls.map((p) => p.number)).toEqual([1]);
+  });
+
   it('retains full bodies and closed/merged history after removing board membership', async () => {
     const r = repo();
     await store.saveBoard(r, board());
