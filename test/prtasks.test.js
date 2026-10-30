@@ -295,6 +295,18 @@ describe('implementFeedbackPrompt', () => {
     expect(prompt).toContain('not fixed');
   });
 
+  it('reads every thread and whether it is resolved before choosing what to change', () => {
+    const prompt = implementFeedbackPrompt(base);
+    const threads = prompt.indexOf('reviewThreads(first:100,after:$endCursor)');
+    expect(threads).toBeGreaterThan(-1);
+    expect(prompt.slice(threads)).toMatch(/^[^`]*isResolved[^`]*pageInfo\{hasNextPage endCursor\}/);
+    expect(prompt).toContain('gh api graphql --paginate');
+    // Read in step 1, before step 2 picks the open feedback, and only once.
+    expect(threads).toBeLessThan(prompt.indexOf('2. Work out which feedback is still open'));
+    expect(prompt.indexOf('reviewThreads', threads + 1)).toBe(-1);
+    expect(prompt).toContain('A thread whose `isResolved` is true');
+  });
+
   it('a project override replaces the built-in text', () => {
     expect(
       implementFeedbackPrompt({
