@@ -39,6 +39,8 @@ function harness({
     save: vi.fn(async () => {}),
     pendingCommits: vi.fn(async () => []),
     markPendingAttempt: vi.fn(),
+    saveRunners: vi.fn(async () => {}),
+    missingRunners: vi.fn(async (_repo, ids) => ids),
   };
   const store = {
     syncState: vi.fn(async () => ({ synced_at: cursor })),
@@ -497,6 +499,73 @@ describe('durable GitHub synchronization', () => {
       expect.objectContaining({ reviewDecision: 'changes_requested' }),
       expect.anything(),
     );
+  });
+
+  it('records a workflow_job runner from the delivery itself, without an API call or batch', async () => {
+    const h = harness();
+    const job = { id: 456, run_id: 123, status: 'in_progress', runner_name: 'ubuntu-eu-1' };
+    h.service.onWebhook('workflow_job', { repository: { full_name: 'Acme/Shop' }, workflow_job: job });
+    h.service.onWebhook('workflow_job', { repository: { full_name: 'other/repo' }, workflow_job: job });
+    await Promise.resolve();
+    expect(h.ci.saveRunners).toHaveBeenCalledExactlyOnceWith('acme/shop', [job], expect.any(Number));
+    await h.service.flush(project.repo);
+    expect(h.rest).not.toHaveBeenCalled();
+    h.ci.saveRunners.mockRejectedValueOnce(new Error('database offline'));
+    h.service.onWebhook('workflow_job', { repository: { full_name: project.repo }, workflow_job: job });
+    await vi.waitFor(() => expect(h.errors).toEqual([expect.stringContaining('database offline')]));
+  });
+
+  it('attributes started Actions checks missing a runner with one jobs read per run', async () => {
+    const h = harness();
+    const sha = 'c'.repeat(40);
+    const actions = (id, run, extra = {}) => ({
+      id,
+      name: `job ${id}`,
+      head_sha: sha,
+      status: 'completed',
+      conclusion: 'success',
+      app: { slug: 'github-actions' },
+      details_url: `https://github.com/acme/shop/actions/runs/${run}/job/${id}`,
+      ...extra,
+    });
+    const checks = [
+      actions(1, 10),
+      actions(2, 10),
+      actions(3, 20),
+      actions(4, 30, { status: 'queued' }),
+      { ...actions(5, 40), app: { slug: 'other-ci' } },
+    ];
+    h.routes.set(`/repos/acme/shop/commits/${sha}/check-runs`, { check_runs: checks });
+    h.ci.missingRunners.mockImplementation(async (_repo, ids) => ids.filter((id) => id !== '3'));
+    const jobs = [{ id: 1, status: 'completed', runner_name: 'ubuntu-eu-1' }];
+    h.routes.set('/repos/acme/shop/actions/runs/10/jobs', { jobs });
+    h.service.onWebhook('check_run', { repository: { full_name: project.repo }, check_run: checks[0] });
+    await h.service.flush(project.repo);
+    expect(h.ci.missingRunners).toHaveBeenCalledWith(project.repo, ['1', '2', '3']);
+    const reads = h.rest.mock.calls.map((call) => call[2]).filter((path) => path.includes('/actions/'));
+    expect(reads).toEqual(['/repos/acme/shop/actions/runs/10/jobs?filter=all&per_page=100&page=1']);
+    expect(h.ci.saveRunners).toHaveBeenCalledExactlyOnceWith(project.repo, jobs, expect.any(Number));
+    expect(h.errors).toEqual([]);
+  });
+
+  it('leaves checks unattributed without failing collection when Actions are unreadable', async () => {
+    const h = harness();
+    const sha = 'd'.repeat(40);
+    const check = {
+      id: 1,
+      name: 'build',
+      head_sha: sha,
+      status: 'completed',
+      app: { slug: 'github-actions' },
+      details_url: 'https://github.com/acme/shop/actions/runs/10/job/1',
+    };
+    h.routes.set(`/repos/acme/shop/commits/${sha}/check-runs`, { check_runs: [check] });
+    h.routes.set('/repos/acme/shop/actions/runs/10/jobs', () => ({ ok: false, status: 403 }));
+    h.service.onWebhook('check_run', { repository: { full_name: project.repo }, check_run: check });
+    await h.service.flush(project.repo);
+    expect(h.ci.save).toHaveBeenCalledWith(project.repo, [check], expect.objectContaining({ sha }));
+    expect(h.ci.saveRunners).not.toHaveBeenCalled();
+    expect(h.errors).toEqual([]);
   });
 
   it.each([403, 503, 429])(

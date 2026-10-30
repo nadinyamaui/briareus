@@ -8,6 +8,8 @@ Collection uses the existing GitHub token and signed repository webhooks:
 
 - PR synchronization records checks on the current head, including available
   older attempts, and all legacy status transitions.
+- `workflow_job` deliveries record which runner (name, group, labels) ran each
+  GitHub Actions job; see [Runners and cost](#runners-and-cost).
 - `check_run`, `check_suite`, `status` and `push` deliveries refresh authoritative
   checks for the affected commit, including checks without a PR; bursts of matrix
   job notifications are coalesced by commit.
@@ -45,7 +47,8 @@ GET /api/v1/ci/runs?repo=acme/shop&branch=main&limit=50
 Authorization: Bearer <token>
 ```
 
-`/stats/ci` returns `totals`, `daily`, `repositories` and `checks`. Each group
+`/stats/ci` returns `currency`, `totals`, `daily`, `repositories`, `checks`,
+`runnerGroups` and `runners`. Each group
 includes counts for success, failure, pending, cancelled, skipped and other
 terminal results, a success rate, and mean/maximum/total duration in milliseconds.
 `lastObservedAt` indicates the most recent accepted observation in that group;
@@ -53,14 +56,14 @@ it is not a guarantee that GitHub has no newer results. Daily series use UTC dat
 are ordered oldest first and omit empty days; a dashboard may fill those gaps.
 
 `/ci/runs` returns individual executions with commit SHA, branch hint, GitHub App,
-status, conclusion, details URL and timestamps. Use `nextOffset` for pagination
+status, conclusion, details URL, timestamps, runner and cost. Use `nextOffset` for pagination
 until null, keeping the same `since` and `until`. Concurrent collection can shift
 offset pages, so refresh the list when exact reconciliation is needed. If more
 results exist beyond the supported offset range, `nextOffset` is null and
 `truncated` is true; narrow the time window or filters to retrieve those results.
 
 Shared optional filters are `repo`, `branch`, `name`, `kind`, `status`, `conclusion`,
-`since` and `until`. `since` is inclusive and `until` exclusive, both epoch
+`runnerGroup`, `runner`, `since` and `until`. `since` is inclusive and `until` exclusive, both epoch
 milliseconds; the default is the last 30 days, with a maximum window of 366 days.
 The window applies to execution start time, falling back to legacy creation time
 or first observation when no start is available. `limit` (1–100, default 50) and
@@ -90,9 +93,41 @@ or first observation when no start is available. `limit` (1–100, default 50) a
   on multiple branches. A check without a known branch is still counted in
   unfiltered results.
 
+## Runners and cost
+
+Each GitHub Actions job is attributed to the runner that ran it, with its runner
+group and requested labels. The `workflow_job` webhook carries this without an API
+call; existing hooks gain the subscription at the next core start. For started
+Actions checks still missing a runner (a missed delivery, or jobs from before the
+subscription), commit collection reads the run's job list once per workflow run.
+That read needs Actions read access; a token without it leaves those checks
+unattributed and is not reported as a collection error. Checks from other GitHub
+Apps and legacy statuses have no runner.
+
+An admin sets an hourly rate per runner group:
+
+```http
+PUT /api/v1/settings/ci-rates
+Authorization: Bearer <admin token>
+Content-Type: application/json
+
+{ "currency": "USD", "groups": { "Ubuntu EU": 0.05, "Default": 0 } }
+```
+
+Names match `runnerGroups[].runnerGroup` exactly (GitHub-hosted runners report
+`GitHub Actions`). A rate is per runner-hour of job time: a server costing 1/hour
+that runs four runners at once is 0.25 per runner. `0` prices a group as free;
+a group left out stays unpriced. Every group reports `pricedDurationMs`,
+`unpricedDurationMs` and `cost`, which is null when nothing in it is priced.
+Cost is computed when read from stored durations and the current rates, so
+changing a rate restates past periods too. It is an allocation of server cost to
+job time: idle server time, GitHub's own billing and minute rounding are not
+included. Runner attribution starts with this change; older checks remain in the
+null runner group unless a later collection revisits their commit.
+
 The generated [API reference](api-v1-reference.md) and `/api/v1/openapi.json`
-describe the response fields. The additive `ci_checks` migration runs during normal
-core startup; it does not modify the existing PR snapshot tables. There is no
+describe the response fields. The additive `ci_checks` and `ci_runners` migrations run during normal
+core startup; they do not modify the existing PR snapshot tables. There is no
 automatic pruning of this ledger.
 
 ## Verification
