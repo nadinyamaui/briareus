@@ -497,6 +497,48 @@ describe('holding a token to its projects', () => {
 });
 
 describe('handing a request to the dashboard’s handler', () => {
+  it('limits review handling updates to manage tokens in the named repository', async () => {
+    const route = '/pulls/12/code-reviews/7';
+    const body = { repo, pr: 99, handlingStatus: 'handled' };
+    const options = { method: 'PATCH', body };
+    expect((await request(route, { ...options, token: tokens.read })).status).toBe(403);
+    expect((await request(route, { ...options, token: '' })).status).toBe(401);
+    expect((await request(route, { ...options, body: { ...body, repo: 'other/project' } })).status).toBe(403);
+    expect((await request(route, { ...options, body: { handlingStatus: 'handled' } })).status).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
+    expect(await json(route, options)).toMatchObject({
+      method: 'PATCH',
+      path: '/api/pr/code-reviews/7',
+      body: { ...body, pr: '12' },
+      authorization: null,
+      repos: [repo],
+    });
+    const operation = (await json('/openapi.json')).paths['/pulls/{number}/code-reviews/{reviewId}'].patch;
+    expect(operation).toMatchObject({ 'x-briareus-access': 'manage', 'x-briareus-scope': 'repo' });
+  });
+
+  it('limits finding updates to manage tokens and forwards the PR from the path', async () => {
+    const route = '/pulls/12/code-reviews/7/findings/3';
+    const body = { repo, pr: 99, shouldFix: 'optional', comments: 'Defer low impact change' };
+    const options = { method: 'PATCH', body };
+    expect((await request(route, { ...options, token: tokens.read })).status).toBe(403);
+    expect((await request(route, { ...options, token: '' })).status).toBe(401);
+    expect((await request(route, { ...options, body: { ...body, repo: 'other/project' } })).status).toBe(403);
+    expect((await request(route, { ...options, body: { shouldFix: 'dismiss' } })).status).toBe(403);
+    expect(handler).not.toHaveBeenCalled();
+    expect(await json(route, options)).toMatchObject({
+      method: 'PATCH',
+      path: '/api/pr/code-reviews/7/findings/3',
+      body: { ...body, pr: '12' },
+      authorization: null,
+      repos: [repo],
+    });
+    const operation = (await json('/openapi.json')).paths[
+      '/pulls/{number}/code-reviews/{reviewId}/findings/{findingId}'
+    ].patch;
+    expect(operation).toMatchObject({ 'x-briareus-access': 'manage', 'x-briareus-scope': 'repo' });
+  });
+
   it('scopes and forwards a board move, with the token’s repositories', async () => {
     const body = { repo, itemId: 'PVTI_1', columnId: null };
     const options = { method: 'POST', body };
