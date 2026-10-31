@@ -91,7 +91,7 @@ MCP (`reviewer_home_assistant`), so a chat can start a vacuum or turn on a light
 | `ha_entity`       | One entity's state, attributes and change times                 |
 | `ha_services`     | The actions Home Assistant offers and their fields, by `domain` |
 | `ha_call_service` | Run an action, such as `vacuum.start`, with its service data    |
-| `ha_fire_event`   | Fire an event for an automation listening for it                |
+| `ha_fire_event`   | Fire a `briareus_*` event for an automation listening for it    |
 
 The setting is off by default for existing and new projects. An admin opts a project in with
 `PUT /api/v1/settings/projects/{id}` and `{ "homeAssistantToolsEnabled": true }`, and revokes
@@ -108,14 +108,19 @@ review, QA or worker sessions, read-only analysts, previews, or turns nobody is 
 since an action switches a real device.
 
 A session acts on what it reads, and an entity's attributes or a web page may be someone
-else's words, so it never calls `lock`, `alarm_control_panel`, `homeassistant`, `hassio`,
-`shell_command`, `python_script` or `pyscript` actions, and never fires Home Assistant's own
-events (`homeassistant_*`, `state_changed`, `call_service`, `*_registry_updated`, `tag_scanned`,
-`mobile_app_notification_action` and the like): those answer 403 and stay on `/api/v1` for the
-user's own clients. A stopped or closing turn controls nothing.
+else's words, so it runs only the actions of everyday devices: `light`, `switch`, `fan`,
+`vacuum`, `lawn_mower`, `media_player`, `remote`, `climate`, `humidifier`, `water_heater` and
+`todo`. Home Assistant applies those to entities of that domain alone. It fires only
+`briareus_*` events, such as `briareus_command`. Everything else answers 403 and stays on
+`/api/v1` for the user's own clients: locks, alarm panels, covers such as garage doors and
+gates, scenes, scripts and automations (which can reach those), Home Assistant's own system
+actions (`homeassistant`, `update`, `backup`, `recorder`, ...), integration commands (`mqtt`,
+`zwave_js`, `zha`, ...), and the core and device events automations trigger on. The list is of
+what is allowed, so an integration installed later reaches nothing new. A stopped or closing
+turn controls nothing, and only a running turn calls actions or fires events.
 
 Without MCP, the same calls are on `/api/agent/home-assistant` with the session's
 `REVIEWER_MEMORY_TOKEN`: `GET /`, `GET /entities?domain&search`, `GET /entities/{id}`,
 `GET /services?domain` (without a domain, only each domain's action names), `POST /services/{domain}/{service}` (`?returnResponse=1`) and
-`POST /events/{type}`. Lists and receipts carry each entity's id, name and state only;
+`POST /events/briareus_{name}`. Lists and receipts carry each entity's id, name and state only;
 read the entity for its attributes.

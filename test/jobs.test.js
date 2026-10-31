@@ -12835,6 +12835,7 @@ describe('the shared browser in a session', () => {
       expect(homeAssistantProtocol(job)).toContain(
         'POST /api/agent/home-assistant/services/<domain>/<service>',
       );
+      expect(homeAssistantProtocol(job)).toContain('only briareus_* events');
       const unwatched = await turn(job, 'A delivery', { unattended: true });
       await unwatched.settled;
       expect(unwatched.seen.mcp).not.toHaveProperty('reviewer_home_assistant');

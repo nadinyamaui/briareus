@@ -54,3 +54,16 @@ it('reads one entity, and refuses ha_entity without an id instead of listing the
   }
   expect(calls).toEqual(['/api/agent/home-assistant/entities/vacuum.manolo']);
 });
+
+it('refuses ha_call_service and ha_fire_event without their names instead of posting an empty path', async () => {
+  for (const [name, args, error] of [
+    ['ha_call_service', { domain: 'vacuum' }, 'domain and service are required'],
+    ['ha_call_service', { service: 'start' }, 'domain and service are required'],
+    ['ha_fire_event', {}, 'eventType is required'],
+    ['ha_fire_event', { eventType: '' }, 'eventType is required'],
+  ]) {
+    const missing = await rpc('tools/call', { name, arguments: args });
+    expect(missing.result).toEqual({ content: [{ type: 'text', text: `Error: ${error}` }], isError: true });
+  }
+  expect(calls).toEqual([]);
+});

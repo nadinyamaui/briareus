@@ -120,6 +120,16 @@ describe('session Home Assistant authorization', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it('switches devices only in a running turn, while an idle one still reads', async () => {
+    job.status = 'idle';
+    expect((await request('/services/vacuum/start', 'POST', { entity_id: 'vacuum.manolo' })).status).toBe(
+      403,
+    );
+    expect((await request('/events/briareus_command', 'POST', {})).status).toBe(403);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect((await request('/entities')).status).toBe(200);
+  });
+
   it.each([
     'lock/unlock',
     'alarm_control_panel/alarm_disarm',
@@ -128,8 +138,22 @@ describe('session Home Assistant authorization', () => {
     'shell_command/anything',
     'python_script/anything',
     'pyscript/anything',
-  ])('refuses guarded %s actions', async (action) => {
-    const res = await request(`/services/${action}`, 'POST', { entity_id: 'lock.front_door' });
+    'scene/apply',
+    'scene/turn_on',
+    'script/turn_on',
+    'automation/trigger',
+    'conversation/process',
+    'zwave_js/set_value',
+    'mqtt/publish',
+    'zha/issue_zigbee_cluster_command',
+    'update/install',
+    'backup/create',
+    'recorder/purge',
+    'logger/set_level',
+    'cover/open_cover',
+    'button/press',
+  ])('refuses %s actions outside the session domains', async (action) => {
+    const res = await request(`/services/${action}`, 'POST', { entities: { 'lock.front_door': 'unlocked' } });
     expect(res.status).toBe(403);
     expect(fetcher).not.toHaveBeenCalled();
   });
@@ -141,8 +165,15 @@ describe('session Home Assistant authorization', () => {
     'entity_registry_updated',
     'tag_scanned',
     'mobile_app_notification_action',
-    'State_Changed',
-  ])("refuses Home Assistant's own %s event", async (type) => {
+    'zha_event',
+    'zwave_js_value_notification',
+    'hue_event',
+    'ios.action_fired',
+    'timer.finished',
+    'briareus_',
+    'Briareus_command',
+    'briareus_command%2F..',
+  ])('refuses the %s event, firing only briareus_* ones', async (type) => {
     expect((await request(`/events/${type}`, 'POST', {})).status).toBe(403);
     expect(fetcher).not.toHaveBeenCalled();
   });
