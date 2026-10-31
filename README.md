@@ -197,8 +197,11 @@ When the review finishes, its session is automatically deleted and its workspace
 and database are released; the stored review and the PR comments remain.
 
 With `babysitPrs` enabled, the server checks open PRs every 15 minutes and starts
-conflict resolution or CI fixes. Each action is deduplicated by head commit, with
-a cap on repeated pushes. It skips drafts, forks, blocked PRs, and occupied sessions.
+conflict resolution, CI fixes, or a code review when the board recommends one
+(no labels yet, `requires-dev-review` or `feedback-implemented`). Each action is
+deduplicated by head commit, with a cap on repeated pushes; reviews push nothing,
+so they also run on PRs by other authors. It skips drafts, forks, blocked PRs, and
+occupied sessions.
 
 A session’s `qaLoop` starts QA when the task settles on an open pull request. QA
 writes and executes a test sheet and reports passed, failed, or incomplete coverage.
