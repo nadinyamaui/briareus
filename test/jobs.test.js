@@ -15466,12 +15466,39 @@ describe('official orchestrator PR actions', () => {
     ).rejects.toThrow(/Project unavailable/);
     expect(githubRest).not.toHaveBeenCalled();
   });
-  it('rejects an unavailable target action runtime without using the parent runtime', async () => {
-    const target = targetProject();
-    target.actionProviderId = 999;
-    await expect(
-      startOrchestratorPrAction(parent, { action: 'review', prNumber: 12, repo: target.repo }),
-    ).rejects.toThrow(/configured action runtime is unavailable/);
+  it.each(
+    ['review', 'solve-conflicts'].flatMap((action) =>
+      ['same', 'cross'].flatMap((scope) =>
+        ['missing', 'inactive'].map((reason) => ({ action, scope, reason })),
+      ),
+    ),
+  )(
+    'diagnoses a $reason $scope-project $action runtime without starting a worker',
+    async ({ action, scope, reason }) => {
+      const target = scope === 'cross' ? targetProject() : state.projects[0];
+      target.actionProviderId = 999;
+      if (reason === 'inactive') state.otherProviders.push({ id: 999, binary: 'claude', active: false });
+      const before = workerSessionsFor(parent).length;
+      const reviewsBefore = createCodeReview.mock.calls.length;
+      await expect(
+        startOrchestratorPrAction(parent, { action, prNumber: 12, repo: target.repo }),
+      ).rejects.toMatchObject({
+        status: 409,
+        message: `The configured action runtime is unavailable for ${target.repo}: provider ID 999 is ${reason === 'missing' ? 'missing' : 'inactive'} (model: claude-fable-5-1; effort: low). Ask an operator to check Settings > Projects > ${target.repo} > Action runtime and Settings > Providers to restore the intended provider or explicitly select its replacement. No session was created.`,
+      });
+      expect(workerSessionsFor(parent)).toHaveLength(before);
+      expect(createCodeReview.mock.calls).toHaveLength(reviewsBefore);
+    },
+  );
+  it('identifies inherited model and effort in an unavailable action runtime', async () => {
+    Object.assign(state.projects[0], {
+      actionProviderId: 999,
+      actionModel: '',
+      actionEffort: '',
+    });
+    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toThrow(
+      'provider ID 999 is missing (model: provider default; effort: provider default)',
+    );
   });
   it.each(['closed', 'fork'])('rejects a cross-project %s PR', async (mode) => {
     const target = targetProject();
