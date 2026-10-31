@@ -7539,6 +7539,34 @@ describe('the restored review loop lifecycle', () => {
     expect(childSessionsOf(parent)).toEqual([]);
   });
 
+  it('re-arms after a completed feedback fix pushed no commit', async () => {
+    parent.reviewLoop.phase = 'fix';
+    child.activity = 'implement-feedback';
+    await closeDevSession(child.id);
+    expect(parent.reviewLoop.failure.reason).toMatch(/did not push/);
+    expect(getJob(child.id)).toBeNull();
+    state.claimsServer = true;
+    state.eligibleServers = [{ id: 1 }];
+    state.capacity = 10000;
+    acquireInstance.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectPreparation = reject;
+        }),
+    );
+    setReviewLoop(parent.id, true);
+    await vi.waitFor(() => {
+      expect(parent.reviewLoop.failure).toBeNull();
+      expect(parent.reviewLoop.sessionId).toBeTruthy();
+      expect(getJob(parent.reviewLoop.sessionId)).toMatchObject({
+        activity: 'review',
+        reviewParentId: parent.id,
+      });
+    });
+    expect(parent.reviewLoop).toMatchObject({ phase: 'review', rounds: 1, pendingResult: null });
+    await vi.waitFor(() => expect(rejectPreparation).toBeTypeOf('function'));
+  });
+
   it('retains the closed action if the parent result could not be persisted', async () => {
     saveJob.mockRejectedValueOnce(new Error('metadata write unavailable'));
     await closeDevSession(child.id);

@@ -132,6 +132,7 @@ describe('review and feedback loop', () => {
     await finish();
     await finish();
     expect(parent.reviewLoop.failure.reason).toMatch(/did not push/);
+    expect(parent.reviewLoop).toMatchObject({ sessionId: null, pendingResult: null });
     expect(deps.startAction).toHaveBeenCalledTimes(2);
   });
 
@@ -158,6 +159,33 @@ describe('review and feedback loop', () => {
     await loop.tick(parent);
     expect(parent.reviewLoop.done).toBe(true);
     expect(deps.startAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains a completed fix after a failed PR read and reviews its push on retry', async () => {
+    review.findings = [fix];
+    await loop.tick(parent);
+    await finish();
+    pr.head.sha = 'head-b';
+    deps.readPull.mockRejectedValueOnce(new Error('GitHub unavailable'));
+    await finish();
+    expect(parent.reviewLoop).toMatchObject({
+      phase: 'fix',
+      pendingResult: { success: true },
+      failure: { reason: 'GitHub unavailable' },
+    });
+    sessions.clear(); // completed action was auto-deleted
+    parent = structuredClone(parent); // restored job
+    loop = createReviewLoop(deps);
+    parent.reviewLoop.failure = null; // explicit retry
+    await loop.tick(parent);
+    expect(parent.reviewLoop).toMatchObject({
+      phase: 'review',
+      rounds: 2,
+      headSha: 'head-b',
+      pendingResult: null,
+      failure: null,
+    });
+    expect(deps.startAction).toHaveBeenCalledTimes(3);
   });
 
   it('waits for a recovering child and consumes its persisted close result', async () => {
