@@ -313,6 +313,18 @@ describe('linked worktrees holding a branch', () => {
     }
   });
 
+  it('keeps a worktree with untracked files even when status hides them', () => {
+    const { root, dir, holder } = slotWithWorktree();
+    try {
+      git(dir, 'config', 'status.showUntrackedFiles', 'no');
+      fs.writeFileSync(path.join(holder, 'new.js'), 'draft\n');
+      expect(() => releaseBranchFromLinkedWorktrees(dir, 'feature')).toThrow(holder);
+      expect(fs.readFileSync(path.join(holder, 'new.js'), 'utf8')).toBe('draft\n');
+    } finally {
+      cleanup(root, dir);
+    }
+  });
+
   it('keeps a worktree with commits on no remote', () => {
     const { root, dir, holder } = slotWithWorktree();
     try {
