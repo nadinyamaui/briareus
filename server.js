@@ -42,6 +42,7 @@ import { createSlackService } from './lib/slack.js';
 import { slackRoutes, slackEventsRouter } from './lib/slack-routes.js';
 import { createHomeAssistantService } from './lib/home-assistant.js';
 import { homeAssistantRoutes } from './lib/home-assistant-routes.js';
+import { homeAssistantAgentRoutes } from './lib/home-assistant-agent.js';
 import { createWhatsAppService, readMedia } from './lib/whatsapp.js';
 import { whatsappRoutes } from './lib/whatsapp-routes.js';
 import { whatsappAgentRoutes, whatsappMediaPath, whatsappWatchAllowed } from './lib/whatsapp-agent.js';
@@ -816,6 +817,23 @@ api.use(
       createHomeAssistantService({
         config: () => homeAssistantOf(user),
         unconfigured: 'Connect your Home Assistant first: PUT /api/v1/me/home-assistant',
+      }),
+  }),
+);
+// A session controls its inbox owner's home, resolved on every call so a disconnect, or the
+// owner being disabled, takes effect on the tools it already loaded.
+api.use(
+  homeAssistantAgentRoutes({
+    agentSession,
+    getProject,
+    serviceFor: (job) =>
+      createHomeAssistantService({
+        config: () => {
+          const owner = inboxOwner(job);
+          return owner == null ? null : homeAssistantOf(users.get(owner));
+        },
+        unconfigured:
+          "The session's owner has not connected a Home Assistant; they connect it from a client (PUT /api/v1/me/home-assistant)",
       }),
   }),
 );
