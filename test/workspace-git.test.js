@@ -8,6 +8,7 @@ import {
   fetchWithWorkspaceRecovery,
   isEmptyLooseObjectFailure,
   quarantineEmptyLooseObjects,
+  releaseBranchFromLinkedWorktrees,
   repairBrokenRemoteTrackingRef,
 } from '../lib/workspace-git.js';
 
@@ -242,6 +243,96 @@ describe('empty loose object recovery', () => {
       expect(fs.existsSync(empty)).toBe(true);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('linked worktrees holding a branch', () => {
+  // A pooled clone whose `feature` branch is pushed and then checked out in a sibling
+  // worktree, the way an agent's `git worktree add ../wt-feature feature` leaves it.
+  function slotWithWorktree() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'briareus-worktree-'));
+    const origin = path.join(root, 'origin.git');
+    execFileSync('git', ['init', '-q', '--bare', origin]);
+    const dir = repo();
+    git(dir, 'remote', 'add', 'origin', origin);
+    git(dir, 'branch', 'feature');
+    git(dir, 'push', '-q', 'origin', 'feature');
+    const holder = path.join(root, 'wt-feature');
+    git(dir, 'worktree', 'add', '-q', holder, 'feature');
+    return { root, dir, holder };
+  }
+  const cleanup = (...dirs) => dirs.forEach((d) => fs.rmSync(d, { recursive: true, force: true }));
+
+  it('removes a clean, pushed worktree so the slot can check the branch out', () => {
+    const { root, dir, holder } = slotWithWorktree();
+    try {
+      expect(() => git(dir, 'checkout', '-q', '-f', '-B', 'feature', 'origin/feature')).toThrow(
+        /already (used|checked out)/,
+      );
+      expect(releaseBranchFromLinkedWorktrees(dir, 'feature')).toEqual([holder]);
+      expect(fs.existsSync(holder)).toBe(false);
+      git(dir, 'checkout', '-q', '-f', '-B', 'feature', 'origin/feature');
+      expect(git(dir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('feature');
+    } finally {
+      cleanup(root, dir);
+    }
+  });
+
+  it('leaves worktrees on other branches and the slot itself alone', () => {
+    const { root, dir, holder } = slotWithWorktree();
+    try {
+      const head = git(dir, 'rev-parse', '--abbrev-ref', 'HEAD');
+      expect(releaseBranchFromLinkedWorktrees(dir, 'local-work')).toEqual([]);
+      expect(releaseBranchFromLinkedWorktrees(dir, head)).toEqual([]);
+      expect(fs.existsSync(holder)).toBe(true);
+    } finally {
+      cleanup(root, dir);
+    }
+  });
+
+  it('prunes a registration whose directory is gone', () => {
+    const { root, dir, holder } = slotWithWorktree();
+    try {
+      fs.rmSync(holder, { recursive: true, force: true });
+      expect(releaseBranchFromLinkedWorktrees(dir, 'feature')).toEqual([]);
+      git(dir, 'checkout', '-q', 'feature');
+    } finally {
+      cleanup(root, dir);
+    }
+  });
+
+  it('keeps a worktree with uncommitted files and says where it is', () => {
+    const { root, dir, holder } = slotWithWorktree();
+    try {
+      fs.writeFileSync(path.join(holder, 'draft.txt'), 'unsaved\n');
+      expect(() => releaseBranchFromLinkedWorktrees(dir, 'feature')).toThrow(holder);
+      expect(fs.readFileSync(path.join(holder, 'draft.txt'), 'utf8')).toBe('unsaved\n');
+    } finally {
+      cleanup(root, dir);
+    }
+  });
+
+  it('keeps a worktree with untracked files even when status hides them', () => {
+    const { root, dir, holder } = slotWithWorktree();
+    try {
+      git(dir, 'config', 'status.showUntrackedFiles', 'no');
+      fs.writeFileSync(path.join(holder, 'new.js'), 'draft\n');
+      expect(() => releaseBranchFromLinkedWorktrees(dir, 'feature')).toThrow(holder);
+      expect(fs.readFileSync(path.join(holder, 'new.js'), 'utf8')).toBe('draft\n');
+    } finally {
+      cleanup(root, dir);
+    }
+  });
+
+  it('keeps a worktree with commits on no remote', () => {
+    const { root, dir, holder } = slotWithWorktree();
+    try {
+      git(holder, 'commit', '-q', '--allow-empty', '-m', 'local only');
+      expect(() => releaseBranchFromLinkedWorktrees(dir, 'feature')).toThrow(/unpushed/);
+      expect(fs.existsSync(holder)).toBe(true);
+    } finally {
+      cleanup(root, dir);
     }
   });
 });

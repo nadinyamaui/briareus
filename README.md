@@ -69,6 +69,13 @@ The Home Assistant bridge exposes live entities, available actions, and automati
 events from each user's own Home Assistant through `/api/v1/home-assistant` endpoints.
 See [Connect Home Assistant to Briareus](docs/home-assistant.md).
 
+## Home Assistant in agent sessions
+
+Ask the agent to start the vacuum or turn off a light: projects with
+`homeAssistantToolsEnabled: true` (off by default) give their interactive
+sessions an internal Home Assistant MCP on the session owner's connected
+home. See [Home Assistant from a session](docs/home-assistant.md#home-assistant-from-a-session).
+
 ## Email in agent sessions
 
 Chat with Claude to read, search, reply to, send and archive Gmail or Outlook

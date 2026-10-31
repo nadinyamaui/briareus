@@ -845,6 +845,31 @@ describe('WhatsApp tool project opt-in', () => {
   });
 });
 
+describe('Home Assistant tool project opt-in', () => {
+  it('defaults new projects to no Home Assistant access, independently of the other tools', async () => {
+    expect(PROJECT_DEFAULTS.homeAssistantToolsEnabled).toBe(false);
+    const p = await createProject({ ...base, whatsappToolsEnabled: true, printToolsEnabled: true });
+    expect(p.homeAssistantToolsEnabled).toBe(false);
+  });
+  it('persists explicit opt-in, preserves it on unrelated edits, and can revoke it', async () => {
+    const p = await createProject({ ...base, homeAssistantToolsEnabled: true });
+    expect(p.homeAssistantToolsEnabled).toBe(true);
+    expect((await updateProject(p.id, { label: 'Renamed' })).homeAssistantToolsEnabled).toBe(true);
+    expect((await updateProject(p.id, { homeAssistantToolsEnabled: false })).homeAssistantToolsEnabled).toBe(
+      false,
+    );
+  });
+  it.each(['true', 1, null])(
+    'rejects non-boolean permission values: %j',
+    async (homeAssistantToolsEnabled) => {
+      await expect(createProject({ ...base, homeAssistantToolsEnabled })).rejects.toThrow(
+        /must be true or false/,
+      );
+      expect(state.saved).toHaveLength(0);
+    },
+  );
+});
+
 describe('main database backup settings', () => {
   it('defaults off and preserves explicit choices through unrelated edits', async () => {
     const saved = await createProject(base);
