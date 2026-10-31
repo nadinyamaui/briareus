@@ -12,6 +12,15 @@ import * as r2 from '../lib/r2.js';
 import { getUpload } from '../lib/uploads.js';
 import * as providerTools from '../lib/providers.js';
 import * as codexConfig from '../lib/codex-config.js';
+vi.mock('../lib/codex-config.js', () => ({
+  // Process lifecycle tests use synthetic Codex peers without a configuration layer.
+  // The real CLI's policy lookup and precedence have their own integration coverage.
+  codexMcpShellArgs: vi.fn(async ({ args }) => [
+    ...args,
+    '-c',
+    'shell_environment_policy.exclude=["BRIAREUS_MCP_*"]',
+  ]),
+}));
 import { compactCodexThread } from '../lib/codex-session.js';
 import { askClaudeSideQuestion, transferClaudeSession } from '../lib/claude-session.js';
 import { forgetProviderUsage, providerUsage } from '../lib/balancer.js';
@@ -404,6 +413,7 @@ function resumeRestartedSessions(...args) {
 }
 
 beforeEach(() => {
+  vi.mocked(codexConfig.codexMcpShellArgs).mockClear();
   forgetProviderUsage();
   transferClaudeSession.mockReset();
   state.provider = { id: 1, label: 'Claude entry', binary: 'claude', active: true };
@@ -1708,7 +1718,10 @@ describe('native Codex code review', () => {
     ]);
     expect(native.args).toContain('model_reasoning_effort="low"');
     expect(native.opts.env.CODEX_HOME).toBe(root);
-    expect(native.args.slice(-2)).toEqual(['--output-last-message', summaryPath]);
+    const outputFlag = native.args.indexOf('--output-last-message');
+    expect(outputFlag).toBeGreaterThan(-1);
+    expect(native.args.slice(outputFlag, outputFlag + 2)).toEqual(['--output-last-message', summaryPath]);
+    expect(native.args.slice(-2)).toEqual(['-c', 'shell_environment_policy.exclude=["BRIAREUS_MCP_*"]']);
     fs.writeFileSync(summaryPath, 'A candidate finding');
     finishReview(native);
     await vi.waitFor(() => expect(invocations).toHaveLength(2));
@@ -10447,6 +10460,7 @@ describe('auto-compaction after a turn', () => {
         }),
     );
     sendDevMessage(job.id, 'First');
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     children[0].complete();
     children[0].emit('close', 0);
     await vi.waitFor(() => expect(compactCodexThread).toHaveBeenCalledTimes(1));
@@ -10470,6 +10484,7 @@ describe('auto-compaction after a turn', () => {
     const job = getJob('auto-compact');
     let done = idle(job);
     sendDevMessage(job.id, 'Not opted in');
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     children[0].complete();
     children[0].emit('close', 0);
     await done;
@@ -10477,6 +10492,7 @@ describe('auto-compaction after a turn', () => {
     job.contextUsage.tokens = 249999;
     done = idle(job);
     sendDevMessage(job.id, 'Under');
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     children[1].complete();
     children[1].emit('close', 0);
     await done;
@@ -10489,6 +10505,7 @@ describe('auto-compaction after a turn', () => {
     compactCodexThread.mockRejectedValueOnce(new Error('No quota'));
     const done = idle(job);
     sendDevMessage(job.id, 'Go');
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     children[0].complete();
     children[0].emit('close', 0);
     await done;
@@ -10504,6 +10521,7 @@ describe('auto-compaction after a turn', () => {
     compactCodexThread.mockResolvedValue(undefined);
     const done = idle(job);
     sendDevMessage(job.id, 'CI failed', undefined, { unattended: true });
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     const bubble = job.events.findLast((e) => e.kind === 'user').seq;
     children[0].complete();
     children[0].emit('close', 0);
@@ -10528,6 +10546,7 @@ describe('auto-compaction after a turn', () => {
     compactCodexThread.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
     const done = idle(job);
     sendDevMessage(job.id, 'CI failed', undefined, { unattended: true });
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     const bubble = job.events.findLast((e) => e.kind === 'user').seq;
     children.at(-1).complete();
     children.at(-1).emit('close', 0);
@@ -10610,6 +10629,7 @@ describe('Codex turn usage', () => {
   it('delivers messages into the running Codex turn and books its usage once', async () => {
     const job = getJob('codex-usage');
     sendDevMessage(job.id, 'Build the form');
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     const child = children[0];
     expect(publicJob(job).liveInput).toBe(true);
     const answer = sendDevMessage(job.id, 'Make the phone mandatory');
@@ -10644,6 +10664,7 @@ describe('Codex turn usage', () => {
   it('queues a rejected completion-race message without losing it or duplicating its bubble', async () => {
     const job = getJob('codex-usage');
     sendDevMessage(job.id, 'First');
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     const child = children[0];
     child.holdSteers = true;
     sendDevMessage(job.id, 'Late correction');
@@ -10662,6 +10683,7 @@ describe('Codex turn usage', () => {
   it('recovers an accepted but unanswered live message after Stop', async () => {
     const job = getJob('codex-usage');
     sendDevMessage(job.id, 'First');
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     sendDevMessage(job.id, 'Correction');
     await flushJobs();
     expect(saveJob.mock.calls.findLast(([j]) => j.id === job.id)?.[0].recoveryQueue).toEqual([
@@ -10680,6 +10702,7 @@ describe('Codex turn usage', () => {
   it('reports uncompleted live messages on failure instead of silently replaying them', async () => {
     const job = getJob('codex-usage');
     sendDevMessage(job.id, 'First');
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     sendDevMessage(job.id, 'Correction');
     children[0].complete(null, 'failed');
     children[0].emit('close', 0);
@@ -10720,6 +10743,7 @@ describe('Codex turn usage', () => {
       bus.on('job', onJob);
     });
     sendDevMessage(job.id, text);
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     const child = children.at(-1);
     child.complete(usage);
     setImmediate(() => child.emit('close', 0));
@@ -10733,6 +10757,7 @@ describe('Codex turn usage', () => {
     try {
       const job = getJob('codex-usage');
       sendDevMessage(job.id, 'Long request');
+      await vi.waitFor(() => expect(job.proc).toBeTruthy());
       const total = { input_tokens: 800000, cached_input_tokens: 730000, output_tokens: 21000 };
       writeRollout(total);
       const file = path.join(
@@ -10805,6 +10830,7 @@ describe('Codex turn usage', () => {
     );
     try {
       sendDevMessage(job.id, 'One second of work');
+      await vi.waitFor(() => expect(job.proc).toBeTruthy());
       clock.mockReturnValue(1800000001000);
       children.at(-1).complete({ input_tokens: 500100, cached_input_tokens: 450050, output_tokens: 20010 });
       children.at(-1).emit('close', 0);
@@ -10826,6 +10852,7 @@ describe('Codex turn usage', () => {
   it('books shutdown usage before the final flush without completing the recovery turn', async () => {
     const job = getJob('codex-usage');
     sendDevMessage(job.id, 'Interrupted work');
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     writeRollout({ input_tokens: 800000, cached_input_tokens: 730000, output_tokens: 21000 });
     try {
       await stopAllJobProcesses();
@@ -11016,6 +11043,7 @@ describe('Codex turn usage', () => {
       const total = { input_tokens: 800000, cached_input_tokens: 730000, output_tokens: 21000 };
       writeRollout(total);
       sendDevMessage(job.id, 'Next');
+      await vi.waitFor(() => expect(job.proc).toBeTruthy());
       const scan = new PassThrough();
       const reader = vi.spyOn(fs, 'createReadStream').mockReturnValueOnce(scan);
       let finishAccounting;
@@ -11135,6 +11163,7 @@ describe('Codex turn usage', () => {
         else {
           setDevSessionAutoCompact(job.id, true);
           sendDevMessage(job.id, 'Next');
+          await vi.waitFor(() => expect(job.proc).toBeTruthy());
           const file = path.join(
             home,
             '.codex-provider-2',
@@ -11236,6 +11265,7 @@ describe('Codex turn usage', () => {
   it('drains accepted corrections after Stop cancels a follow-up turn', async () => {
     const job = getJob('codex-usage');
     sendDevMessage(job.id, 'Start the next change');
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     expect(sendDevMessage(job.id, 'Use the corrected approach').liveInput).toBe(true);
     cancelDevTurn(job.id);
     children[0].emit('close', null);
@@ -11578,6 +11608,7 @@ describe('Codex turn usage', () => {
     });
     returnedThreadId = 'thread-2';
     sendDevMessage(job.id, 'Next');
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     // The resume opened thread-2, which used 800k before the stream failed;
     // thread-1 was at 500k.
     writeRollout({ input_tokens: 800000, cached_input_tokens: 700000, output_tokens: 30000 }, 'thread-2');
@@ -11606,6 +11637,7 @@ describe('Codex turn usage', () => {
       bus.on('job', onJob);
     });
     sendDevMessage(job.id, 'Long one');
+    await vi.waitFor(() => expect(job.proc).toBeTruthy());
     // The model calls it made before the stream failed are in the rollout.
     writeRollout({ input_tokens: 900000, cached_input_tokens: 810000, output_tokens: 31000 });
     const child = children.at(-1);
@@ -13665,7 +13697,7 @@ describe('/btw side questions', () => {
       askClaudeSideQuestion.mockResolvedValue({ text: 'The active run', costUsd: 0.01 });
       try {
         sendDevMessage(job.id, 'Continue the QA run');
-        expect(job.proc).toBe(child);
+        await vi.waitFor(() => expect(job.proc).toBe(child));
         // A step runtime does not replace the session's stored provider/model.
         getProviderForJob.mockReturnValue(state.provider);
         job.model = originalModel;
@@ -14386,6 +14418,7 @@ describe('automatic recovery after a server restart', () => {
     let snapshot;
     try {
       sendDevMessage(saved.id, 'Publish the completed work');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
       finish(children[0]);
       await vi.waitFor(() => expect(land).toBeTypeOf('function'));
       expect(saved.proc).toBeNull();
@@ -14439,6 +14472,7 @@ describe('automatic recovery after a server restart', () => {
       }
       try {
         sendDevMessage(child.id, 'The operator answer');
+        await vi.waitFor(() => expect(children).toHaveLength(1));
         finish(children[0]);
         await vi.waitFor(() => expect(children).toHaveLength(2));
         expect(child.recoveryTurn.phase).toBe('testRun');
@@ -14461,6 +14495,7 @@ describe('automatic recovery after a server restart', () => {
           expect(() => sendDevMessage(child.id, 'Retry')).toThrow(/finish.*cleanup/);
           // A parent settling during cleanup must not retire this child early.
           sendDevMessage(parent.id, 'Report progress');
+          await vi.waitFor(() => expect(children).toHaveLength(3));
           finish(children[2]);
           await vi.waitFor(() => expect(parent.status).toBe('idle'));
           expect(parent.qaLoop.running).toBe(true);

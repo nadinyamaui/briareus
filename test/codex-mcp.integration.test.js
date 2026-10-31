@@ -4,8 +4,128 @@ import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { createInterface } from 'node:readline';
 import { BINARIES } from '../lib/providers.js';
 import { codexMcpShellArgs } from '../lib/codex-config.js';
+
+it.each(['provider', 'project'])(
+  'forwards current session credentials despite %s literal MCP environment settings',
+  async (layer) => {
+    const root = mkdtempSync(join(tmpdir(), 'codex-mcp-env-'));
+    const cwd = join(root, 'repo');
+    mkdirSync(cwd);
+    execFileSync('git', ['init', '-q', cwd]);
+    mkdirSync(join(cwd, '.codex'));
+    const received = [];
+    let authenticated;
+    const requests = new Promise((r) => (authenticated = r));
+    const server = createServer((req, res) => {
+      received.push({ path: req.url, authorization: req.headers.authorization });
+      const ok = req.headers.authorization === 'Bearer current-session-token';
+      res.writeHead(ok ? 200 : 401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(ok ? { ok: true } : { error: 'Invalid session token' }));
+      if (received.length === 2) authenticated();
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    let child, exited, lines, timer;
+    try {
+      const script = join(root, 'probe.mjs');
+      const plumbing = pathToFileURL(resolve('lib/mcp-stdio.js')).href;
+      writeFileSync(
+        script,
+        `import { createApiClient, serveStdio } from ${JSON.stringify(plumbing)};
+await createApiClient('/probe', 'Missing session credentials')('GET', '/' + process.argv[2]).catch(() => {});
+serveStdio({ name: 'probe', tools: [], runTool: async () => '' });
+`,
+      );
+      const literals = ['reviewer_memory', 'renamed']
+        .map((name) => `[mcp_servers.${name}.env]\nREVIEWER_MEMORY_TOKEN="stale-token"\n`)
+        .join('');
+      writeFileSync(join(root, 'config.toml'), layer === 'provider' ? literals : '');
+      writeFileSync(join(cwd, '.codex/config.toml'), layer === 'project' ? literals : '');
+      const env = {
+        PATH: process.env.PATH,
+        HOME: root,
+        CODEX_HOME: root,
+        REVIEWER_MEMORY_URL: `http://127.0.0.1:${server.address().port}`,
+        REVIEWER_MEMORY_TOKEN: 'current-session-token',
+      };
+      const built = BINARIES.codex.buildArgs({
+        model: 'gpt-6.1-sol',
+        effort: 'low',
+        live: true,
+        cwd,
+        inheritedEnv: env,
+        mcp: ['reviewer_memory', 'renamed'].map((name) => ({
+          name,
+          command: process.execPath,
+          args: [script, name],
+          env: {
+            REVIEWER_MEMORY_URL: env.REVIEWER_MEMORY_URL,
+            REVIEWER_MEMORY_TOKEN: env.REVIEWER_MEMORY_TOKEN,
+            ...(name === 'renamed' ? { EXTRA: 'server-only' } : {}),
+          },
+        })),
+      });
+      expect(built.args.join(' ')).not.toContain(env.REVIEWER_MEMORY_TOKEN);
+      child = spawn(resolve('node_modules/.bin/codex'), built.args, {
+        cwd,
+        env: { ...env, ...built.env },
+        detached: true,
+      });
+      exited = new Promise((r, reject) => {
+        child.once('error', reject);
+        child.once('close', r);
+      });
+      let stderr = '';
+      child.stderr.on('data', (c) => (stderr += c));
+      child.stdin.on('error', () => {});
+      const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
+      lines = createInterface({ input: child.stdout });
+      lines.on('line', (line) => {
+        const message = JSON.parse(line);
+        if (message.id === 0) {
+          send({ method: 'initialized', params: {} });
+          send({ id: 1, method: 'thread/start', params: { cwd } });
+        }
+      });
+      send({ id: 0, method: 'initialize', params: { clientInfo: { name: 'probe', version: '1' } } });
+      await Promise.race([
+        requests,
+        exited.then(() => {
+          throw new Error(`Codex exited before MCP authentication: ${stderr}`);
+        }),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`MCP startup timed out: ${stderr}`)), 10000);
+        }),
+      ]);
+      expect(received).toEqual(
+        expect.arrayContaining(
+          ['reviewer_memory', 'renamed'].map((name) => ({
+            path: `/probe/${name}`,
+            authorization: 'Bearer current-session-token',
+          })),
+        ),
+      );
+    } finally {
+      clearTimeout(timer);
+      lines?.close();
+      if (child?.pid) {
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+        } catch (error) {
+          expect(error.code).toBe('ESRCH');
+        }
+      }
+      if (exited) await exited;
+      server.closeAllConnections();
+      await new Promise((r) => server.close(r));
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  15000,
+);
 
 // Real CLI, synthetic environment, local Responses stub: no credentials or paid requests.
 it.each(['provider', 'project'])(

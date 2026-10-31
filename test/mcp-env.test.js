@@ -19,6 +19,7 @@ describe('mcp-env', () => {
         env: {
           PATH: process.env.PATH,
           KEEP: 'k',
+          SENTRY_ACCESS_TOKEN: 'stale',
           BRIAREUS_MCP_3_SENTRY_ACCESS_TOKEN: 's',
           BRIAREUS_MCP_4_X: 'x',
         },

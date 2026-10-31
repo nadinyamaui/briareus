@@ -717,10 +717,14 @@ describe('buildArgs', () => {
     expect(line).not.toContain('tok');
     expect(line).not.toContain('secret');
     expect(line).not.toContain('.env=');
-    // The turn already holds the session token under that name, so it passes as it is.
-    expect(args).toContain('mcp_servers.reviewer_memory.command="/node"');
-    expect(args).toContain('mcp_servers.reviewer_memory.args=["/memory.js"]');
-    expect(args).toContain('mcp_servers.reviewer_memory.env_vars=["REVIEWER_MEMORY_TOKEN"]');
+    // Even an inherited session token travels prefixed to defeat stale literal env entries.
+    expect(args).toContain(`mcp_servers.reviewer_memory.command=${JSON.stringify(process.execPath)}`);
+    const memoryArgs = JSON.parse(
+      args.find((a) => a.startsWith('mcp_servers.reviewer_memory.args=')).split('=')[1],
+    );
+    expect(memoryArgs[0]).toMatch(/lib\/mcp-env\.js$/);
+    expect(memoryArgs.slice(1)).toEqual(['BRIAREUS_MCP_0_', '/node', '/memory.js']);
+    expect(args).toContain('mcp_servers.reviewer_memory.env_vars=["BRIAREUS_MCP_0_REVIEWER_MEMORY_TOKEN"]');
     // The rest travel prefixed, even a name the turn holds with another value.
     expect(args).toContain(`mcp_servers.sentry.command=${JSON.stringify(process.execPath)}`);
     const sentryArgs = JSON.parse(args.find((a) => a.startsWith('mcp_servers.sentry.args=')).split('=')[1]);
@@ -730,6 +734,7 @@ describe('buildArgs', () => {
       'mcp_servers.sentry.env_vars=["BRIAREUS_MCP_1_SENTRY_ACCESS_TOKEN","BRIAREUS_MCP_1_REVIEWER_MEMORY_TOKEN"]',
     );
     expect(env).toEqual({
+      BRIAREUS_MCP_0_REVIEWER_MEMORY_TOKEN: 'tok',
       BRIAREUS_MCP_1_SENTRY_ACCESS_TOKEN: 'secret',
       BRIAREUS_MCP_1_REVIEWER_MEMORY_TOKEN: 'other',
     });
@@ -737,8 +742,8 @@ describe('buildArgs', () => {
     expect(args.join(' ')).not.toContain('shell_environment_policy');
   });
 
-  it('codex leaves the shell policy alone when no credential needed moving', () => {
-    const mcp = [{ name: 'm', command: '/node', args: [], env: { REVIEWER_MEMORY_TOKEN: 'tok' } }];
+  it('codex leaves the command and shell policy alone for a server without environment variables', () => {
+    const mcp = [{ name: 'm', command: '/node', args: [] }];
     const { args, env } = BINARIES.codex.buildArgs({
       model: 'gpt',
       effort: 'high',
@@ -747,6 +752,8 @@ describe('buildArgs', () => {
       inheritedEnv: { REVIEWER_MEMORY_TOKEN: 'tok' },
     });
     expect(env).toEqual({});
+    expect(args).toContain('mcp_servers.m.command="/node"');
+    expect(args).toContain('mcp_servers.m.args=[]');
     expect(args.join(' ')).not.toContain('shell_environment_policy');
   });
 
