@@ -1752,7 +1752,7 @@ describe('native Codex code review', () => {
     expect(label.child.rpc.find((r) => r.method === 'thread/resume').params).toMatchObject({
       threadId: 'native-review-thread',
     });
-    // Feedback left labels the PR feedback-given; none labels it code-approved.
+    // Only required Fix findings label the PR feedback-given; Optional is nonblocking.
     // Either way feedback-implemented and requires-dev-review come off afterwards.
     expect(label.child.prompt).toContain('add the `feedback-given` label and remove `code-approved`');
     expect(label.child.prompt).toContain('add the `code-approved` label and remove `feedback-given`');
@@ -1762,7 +1762,8 @@ describe('native Codex code review', () => {
     // With nothing left to fix, someone else's PR is approved at the reviewed commit
     // as the account the review runs as; anything else gets no review at all.
     expect(label.child.prompt).toContain('otherwise submit no review at all');
-    expect(label.child.prompt).toContain('every one was Dismissed (none is Fix, Optional or unverified)');
+    expect(label.child.prompt).toContain('every finding was verified as Optional or Dismissed');
+    expect(label.child.prompt).toContain('none is Fix or unverified');
     expect(label.child.prompt).toContain('its author is not the account `gh` is signed in as');
     expect(label.child.prompt).toContain(`Its head is still ${head}, the commit you reviewed`);
     expect(label.child.prompt).toContain('gh pr view 77 --repo acme/shop --json author,headRefOid,reviews');
@@ -1880,7 +1881,7 @@ describe('native Codex code review', () => {
     finishTurn(invocations[1]);
     await vi.waitFor(() => expect(invocations).toHaveLength(3));
     expect(invocations[2].child.prompt).toContain(
-      'accordingly, and post no comments:\nPROJECT LABEL RULES\n\nThen approve the PR on GitHub',
+      'configured rules below, and post no comments:\nPROJECT LABEL RULES',
     );
     expect(invocations[2].child.prompt).not.toContain('feedback-given');
     // The approval is not a label rule, so the project's own rules keep it.

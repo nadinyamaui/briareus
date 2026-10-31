@@ -178,9 +178,13 @@ account, model and effort:
    classified Fix, Optional or Dismissed with evidence. The verdict goes into
    `review_finding_update`, and the agent replies on the finding’s own review
    thread, resolving the thread of a dismissed one. It posts no other comments.
-4. **Label**: last of all, the PR is labelled `feedback-given` when any finding
-   is Fix, Optional or unverified, or `code-approved` when none is, then
-   `feedback-implemented` and `requires-dev-review` come off if the PR has them. A
+4. **Label**: after successful discovery, publication and independent verification
+   of the current head, the PR is labelled `feedback-given` when any verified
+   finding is Fix, or `code-approved` when there are no findings or only verified
+   Optional/Dismissed findings, then `feedback-implemented` and `requires-dev-review`
+   come off if the PR has them; QA and unrelated labels are preserved. Optional
+   feedback stays visible without requiring code changes. Incomplete verification,
+   failed steps or a changed head leave labels unchanged and skip approval. A
    project can replace these label rules with its own Code review labels template.
    When nothing is left to fix and another account opened the PR, the reviewed
    commit is also approved on GitHub, as the account the review runs as, provided

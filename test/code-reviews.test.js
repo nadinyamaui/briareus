@@ -6,7 +6,40 @@ import {
   codeReviewRoutes,
   findingFields,
   pullCodeReviewRoutes,
+  reviewLabelPrompt,
 } from '../lib/code-reviews.js';
+
+describe('review finalization prompt', () => {
+  const head = 'a'.repeat(40);
+  const prompt = reviewLabelPrompt({ labels: 'CUSTOM LABEL POLICY', repo: 'a/b', prNumber: 7, head });
+
+  it('checks completion, verification and exact head before changing labels or approving', () => {
+    expect(prompt).toContain('check review_findings_list and the PR head');
+    expect(prompt).toContain(
+      `Discovery, publication and independent verification must all have succeeded for ${head}`,
+    );
+    expect(prompt).toContain('any finding is unverified or lacks a verdict, or the PR head has moved');
+    expect(prompt).toContain('leave labels unchanged and submit no approval');
+    expect(prompt.indexOf('leave labels unchanged')).toBeLessThan(prompt.indexOf('CUSTOM LABEL POLICY'));
+  });
+
+  it('allows verified Optional/Dismissed-only reviews but keeps Fix and self-approval guards', () => {
+    expect(prompt).toContain('every finding was verified as Optional or Dismissed');
+    expect(prompt).toContain('none is Fix or unverified');
+    expect(prompt).toContain('its author is not the account `gh` is signed in as');
+    expect(prompt).toContain('If you cannot tell who that is, do not approve');
+    expect(prompt).toContain('you have not approved that commit already');
+    expect(prompt).toContain(`-f commit_id=${head} -f event=APPROVE`);
+  });
+
+  it('keeps configured label policy separate from GitHub approval and reports contradictions', () => {
+    expect(prompt).toContain('CUSTOM LABEL POLICY');
+    expect(prompt).toContain('do not silently override an explicit project policy');
+    expect(prompt).toContain('Report any contradiction with the requested workflow');
+    expect(prompt).toContain('otherwise submit no review at all');
+    expect(prompt).not.toContain('feedback-given');
+  });
+});
 
 describe('findingFields', () => {
   it('requires severity and title on a new finding, normalising case', () => {

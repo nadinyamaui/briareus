@@ -108,6 +108,36 @@ describe('renderTemplate', () => {
   });
 });
 
+describe('code review label policy', () => {
+  it('requires feedback only for verified required Fix findings', () => {
+    const labels = templateText('reviewLabels');
+    expect(labels).toContain(
+      'If any verified finding is Fix (a required change), add the `feedback-given` label and remove `code-approved`',
+    );
+    expect(labels).toContain(
+      'If there were no findings, or every finding was verified as Optional or Dismissed (no required Fix findings), add the `code-approved` label and remove `feedback-given`',
+    );
+    expect(labels).toContain('do not change finding verdicts to obtain a label');
+    expect(labels).toContain('remove `feedback-implemented` and `requires-dev-review`');
+    expect(labels).toContain('Preserve QA labels and all unrelated labels');
+    expect(labels).not.toContain('Fix or Optional');
+  });
+
+  it('preserves explicit global and project label policies instead of rewriting them', async () => {
+    const globalPolicy = 'Optional findings require feedback-given.';
+    const projectPolicy = 'Use requires-dev-review for the PR author specified by this project.';
+    try {
+      await saveGlobalTemplates({ reviewLabels: globalPolicy });
+      expect(renderTemplate('reviewLabels', {})).toBe(globalPolicy);
+      expect(renderTemplate('reviewLabels', {}, { promptTemplates: { reviewLabels: projectPolicy } })).toBe(
+        projectPolicy,
+      );
+    } finally {
+      await saveGlobalTemplates({});
+    }
+  });
+});
+
 describe('the orchestrator instructions', () => {
   it('appends nothing by default and resolves project over global', async () => {
     expect(templateText('orchestrator')).toBe('');
