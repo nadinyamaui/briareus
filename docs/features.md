@@ -121,6 +121,11 @@ sessions print tools: list the core machine's CUPS printers, print a session
 file with copies, pages, sides, color and paper size, and follow or cancel the
 jobs the session sent. See [printing from a session](printing.md).
 
+Projects with `homeAssistantToolsEnabled` (off by default) give their
+interactive sessions Home Assistant tools on the session owner's connected
+home: find entities, read their state, list actions, call a service and fire
+an event. See [Home Assistant from a session](home-assistant.md#home-assistant-from-a-session).
+
 ## Operations, integrations and memory
 
 The attention API reports unanswered questions, held findings, failed work
@@ -183,7 +188,7 @@ These additions are present in the server revision documented here:
 - Per-user GitHub identity for API changes and session commits.
 - Per-user mailboxes, for the API and for sessions' mail tools.
 - Per-user Slack workspaces, inbox and approvals.
-- Per-user Home Assistant connections.
+- Per-user Home Assistant connections, for the API and for sessions' Home Assistant tools.
 - Per-user WhatsApp accounts for the inbox, session tools and watches.
 - Per-user attention feed and task history.
 - Sessions can edit their project's `.env` template through MCP (admins'

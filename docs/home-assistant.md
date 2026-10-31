@@ -78,3 +78,37 @@ The bridge never retries an action automatically. Changed states do not prove a 
 An upstream authentication failure returns 502, so clients do not interpret it as a rejected Briareus login.
 
 See the [API reference](api-v1-reference.md#home-assistant) for response shapes and endpoints.
+
+## Home Assistant from a session
+
+Projects with `homeAssistantToolsEnabled: true` give their interactive sessions an internal
+MCP (`reviewer_home_assistant`), so a chat can start a vacuum or turn on a light when the user asks:
+
+| Tool              | What it does                                                    |
+| ----------------- | --------------------------------------------------------------- |
+| `ha_status`       | Whether the owner's Home Assistant is connected and answering   |
+| `ha_entities`     | Entity ids, names and states, filtered by `domain` and `search` |
+| `ha_entity`       | One entity's state, attributes and change times                 |
+| `ha_services`     | The actions Home Assistant offers and their fields, by `domain` |
+| `ha_call_service` | Run an action, such as `vacuum.start`, with its service data    |
+| `ha_fire_event`   | Fire an event for an automation listening for it                |
+
+The setting is off by default for existing and new projects. An admin opts a project in with
+`PUT /api/v1/settings/projects/{id}` and `{ "homeAssistantToolsEnabled": true }`, and revokes
+it with `false`; it is independent of the mail, WhatsApp and print tools. The tools appear on
+the next turn of an eligible session, and revocation takes effect on every call, including
+tools loaded earlier.
+
+A session reaches its owner's Home Assistant, the one they connected with
+`PUT /api/v1/me/home-assistant`, or the server's own `HOME_ASSISTANT_URL` for the original
+operator, resolved on every call. Without one, `ha_status` answers
+`{"configured":false}` and actions fail with 503 until the owner connects it from a client;
+the token is never handed to the session. Only interactive chats get the tools: never
+review, QA or worker sessions, read-only analysts, previews, or turns nobody is watching,
+since an action switches a real device.
+
+Without MCP, the same calls are on `/api/agent/home-assistant` with the session's
+`REVIEWER_MEMORY_TOKEN`: `GET /`, `GET /entities?domain&search`, `GET /entities/{id}`,
+`GET /services?domain`, `POST /services/{domain}/{service}` (`?returnResponse=1`) and
+`POST /events/{type}`. Lists and receipts carry each entity's id, name and state only;
+read the entity for its attributes.
