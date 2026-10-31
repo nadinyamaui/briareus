@@ -352,7 +352,7 @@ See [mailbox setup](../README.md#mail) and [email from a session](email-mcp.md).
 
 `babysitPrs` enables periodic conflict resolution, CI fixes and code reviews on open
 pull requests. A review starts when the board recommends one, at most once per head
-commit. The project’s action runtime is required, and must be Claude or Codex for
+commit and at most three per project each round. The project’s action runtime is required, and must be Claude or Codex for
 reviews. Author filters (for errands that push), head-commit deduplication, capacity
 limits and the repeated-push cap still apply; no feedback agents run.
 

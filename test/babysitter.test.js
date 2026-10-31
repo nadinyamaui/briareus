@@ -13,7 +13,13 @@ vi.mock('../lib/actions.js', () => ({
   actionSessionSpec: vi.fn(async (action, context) => ({ activity: action.id, prNumber: context.prNumber })),
 }));
 
-import { createBabysitter, errandsFor, startErrand, MAX_PUSH_ERRANDS } from '../lib/babysitter.js';
+import {
+  createBabysitter,
+  errandsFor,
+  startErrand,
+  MAX_PUSH_ERRANDS,
+  MAX_REVIEWS_PER_TICK,
+} from '../lib/babysitter.js';
 import { createDevSession } from '../lib/jobs.js';
 import { actionSessionSpec } from '../lib/actions.js';
 
@@ -128,6 +134,20 @@ describe('PR errands', () => {
       expect.anything(),
       expect.anything(),
     );
+  });
+  it('caps the reviews started per project in one round, but not push errands', async () => {
+    const many = Array.from({ length: MAX_REVIEWS_PER_TICK + 2 }, (_, i) =>
+      pr({ number: i + 1, author: 'other' }),
+    );
+    const failing = pr({ number: 99, checks: 'failure', labels: labelled('code-approved') });
+    const { b, start, saved } = sitter({ pulls: [...many, failing] });
+    await b.tick();
+    expect(start.mock.calls.map((c) => [c[0], c[2].number])).toEqual([
+      ...many.slice(0, MAX_REVIEWS_PER_TICK).map((p) => ['review', p.number]),
+      ['fix-checks', 99],
+    ]);
+    // The rest are left unmarked, so the next round reviews them.
+    expect(saved.at(-1)[`acme/shop#${MAX_REVIEWS_PER_TICK + 1}`]).toBeUndefined();
   });
   it('reviews once the failing checks were already tried on the head', async () => {
     const { b, start } = sitter({
