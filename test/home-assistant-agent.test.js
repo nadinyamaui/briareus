@@ -113,6 +113,40 @@ describe('session Home Assistant authorization', () => {
     },
   );
 
+  it.each(['closing', 'turnCanceled'])('refuses a %s turn', async (key) => {
+    job[key] = true;
+    for (const [path, method] of ROUTES)
+      expect((await request(path, method, method === 'POST' ? {} : undefined)).status).toBe(403);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'lock/unlock',
+    'alarm_control_panel/alarm_disarm',
+    'homeassistant/restart',
+    'hassio/host_shutdown',
+    'shell_command/anything',
+    'python_script/anything',
+    'pyscript/anything',
+  ])('refuses guarded %s actions', async (action) => {
+    const res = await request(`/services/${action}`, 'POST', { entity_id: 'lock.front_door' });
+    expect(res.status).toBe(403);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'homeassistant_stop',
+    'state_changed',
+    'call_service',
+    'entity_registry_updated',
+    'tag_scanned',
+    'mobile_app_notification_action',
+    'State_Changed',
+  ])("refuses Home Assistant's own %s event", async (type) => {
+    expect((await request(`/events/${type}`, 'POST', {})).status).toBe(403);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("reaches only the session owner's home, and says so when they have none", async () => {
     await request('/entities');
     expect(fetcher.mock.calls[0][0]).toBe('http://ha.test:8123/api/states');
@@ -145,6 +179,7 @@ describe('session Home Assistant tools', () => {
     expect((await (await request('/entities?search=kitch')).json()).entities.map((e) => e.id)).toEqual([
       'light.kitchen',
     ]);
+    expect((await (await request('/entities?domain=%20Vacuum')).json()).entities).toHaveLength(2);
     expect((await request('/entities?domain=Not-A-Domain')).status).toBe(400);
     expect((await request('/entities?search=a&search=b')).status).toBe(400);
   });
@@ -162,8 +197,13 @@ describe('session Home Assistant tools', () => {
     });
   });
 
-  it('lists services, optionally for one domain', async () => {
-    expect((await (await request('/services')).json()).services).toHaveLength(2);
+  it('lists action names, and one domain with its fields', async () => {
+    expect(await (await request('/services')).json()).toEqual({
+      services: [
+        { domain: 'vacuum', services: ['start'] },
+        { domain: 'light', services: ['turn_on'] },
+      ],
+    });
     expect(await (await request('/services?domain=vacuum')).json()).toEqual({
       services: [{ domain: 'vacuum', services: { start: {} } }],
     });

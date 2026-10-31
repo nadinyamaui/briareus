@@ -107,8 +107,15 @@ the token is never handed to the session. Only interactive chats get the tools: 
 review, QA or worker sessions, read-only analysts, previews, or turns nobody is watching,
 since an action switches a real device.
 
+A session acts on what it reads, and an entity's attributes or a web page may be someone
+else's words, so it never calls `lock`, `alarm_control_panel`, `homeassistant`, `hassio`,
+`shell_command`, `python_script` or `pyscript` actions, and never fires Home Assistant's own
+events (`homeassistant_*`, `state_changed`, `call_service`, `*_registry_updated`, `tag_scanned`,
+`mobile_app_notification_action` and the like): those answer 403 and stay on `/api/v1` for the
+user's own clients. A stopped or closing turn controls nothing.
+
 Without MCP, the same calls are on `/api/agent/home-assistant` with the session's
 `REVIEWER_MEMORY_TOKEN`: `GET /`, `GET /entities?domain&search`, `GET /entities/{id}`,
-`GET /services?domain`, `POST /services/{domain}/{service}` (`?returnResponse=1`) and
+`GET /services?domain` (without a domain, only each domain's action names), `POST /services/{domain}/{service}` (`?returnResponse=1`) and
 `POST /events/{type}`. Lists and receipts carry each entity's id, name and state only;
 read the entity for its attributes.
