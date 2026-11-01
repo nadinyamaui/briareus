@@ -153,7 +153,8 @@ A per-turn ledger keeps token counts, agent time and reported costs even
 after sessions are deleted. Usage views group spending by project, account,
 session and model. When a CLI reports no cost, the server estimates a list-price
 equivalent from token usage. Subscription estimates are not invoices.
-Claude accounts can fail over when quota is exhausted.
+Claude accounts can fail over when quota is exhausted, and a runtime whose
+provider was switched off runs on the closest active provider of the same CLI.
 
 See [session costs](../README.md#what-a-session-costs) and
 [Claude account failover](../README.md#claude-account-failover).

@@ -117,6 +117,7 @@ const {
   providerDefaultModel,
   providerDefaultEffort,
   resolveRuntime,
+  closestActiveProvider,
   runtimeCatalog,
   providerGroupKey,
   providerGroup,
@@ -579,14 +580,76 @@ describe('resolveRuntime', () => {
     expect(resolveRuntime({ providerId: 99, model: 'opus' }, cfg)).toBeNull();
   });
 
-  it('answers null when the provider row is inactive', async () => {
+  it('answers null when the provider row is inactive and nothing can stand in', async () => {
     await seed([row({ id: 1, binary: 'claude', active: false })]);
 
     expect(resolveRuntime({ providerId: 1, model: 'opus' }, cfg)).toBeNull();
   });
 
+  it('runs a switched-off provider on its closest active stand-in, naming the one replaced', async () => {
+    await seed([
+      row({ id: 1, label: 'Claude A', binary: 'claude', active: false }),
+      row({ id: 2, label: 'Claude B', binary: 'claude', sortOrder: 1 }),
+    ]);
+
+    const resolved = resolveRuntime({ providerId: 1, model: 'sonnet', effort: 'low' }, cfg);
+    expect(resolved).toMatchObject({ model: 'sonnet', effort: 'low' });
+    expect(resolved.provider.id).toBe(2);
+    expect(resolved.replaced.id).toBe(1);
+  });
+
+  it('names no replacement when the configured provider is active', () => {
+    expect(resolveRuntime({ providerId: 1, model: 'opus' }, cfg).replaced).toBeNull();
+  });
+
   it('answers null when there is no runtime at all', () => {
     expect(resolveRuntime(null, cfg)).toBeNull();
+  });
+});
+
+describe('closestActiveProvider', () => {
+  it('answers an active row itself', async () => {
+    await seed([row({ id: 1, binary: 'claude' })]);
+
+    expect(closestActiveProvider(getProvider(1), 'opus', cfg).id).toBe(1);
+  });
+
+  it('prefers an interchangeable login over picker order', async () => {
+    await seed([
+      row({ id: 1, binary: 'claude', active: false }),
+      // Earlier in the picker, but a different catalog, so not the same account kind.
+      row({ id: 2, binary: 'claude', models: ['sonnet'], sortOrder: 1 }),
+      row({ id: 3, binary: 'claude', sortOrder: 2 }),
+    ]);
+
+    expect(closestActiveProvider(getProvider(1), 'opus', cfg).id).toBe(3);
+  });
+
+  it('then prefers a row that offers the configured model', async () => {
+    await seed([
+      row({ id: 1, binary: 'claude', models: ['opus'], active: false }),
+      row({ id: 2, binary: 'claude', models: ['sonnet'], sortOrder: 1 }),
+      row({ id: 3, binary: 'claude', models: ['opus', 'sonnet'], sortOrder: 2 }),
+    ]);
+
+    expect(closestActiveProvider(getProvider(1), 'opus', cfg).id).toBe(3);
+    // With no model to match, picker order decides.
+    expect(closestActiveProvider(getProvider(1), '', cfg).id).toBe(2);
+  });
+
+  it('never stands in another CLI or another endpoint', async () => {
+    await seed([
+      row({ id: 1, binary: 'claude', active: false }),
+      row({ id: 2, binary: 'codex' }),
+      row({ id: 3, binary: 'codex', baseUrl: 'https://llm.internal.example', active: false }),
+    ]);
+
+    expect(closestActiveProvider(getProvider(1), 'opus', cfg)).toBeNull();
+    expect(closestActiveProvider(getProvider(3), 'gpt-a', cfg)).toBeNull();
+  });
+
+  it('answers null for no row', () => {
+    expect(closestActiveProvider(null, 'opus', cfg)).toBeNull();
   });
 });
 
@@ -655,6 +718,17 @@ describe('the runtimes a client picks from', () => {
     // With the whole group switched off there is nothing to start on.
     await seed([{ ...first, active: false }, { ...second, active: false }, ...rest]);
     expect(runtimeCatalog(fallback, cfg).default).toBeNull();
+  });
+
+  it('defaults to the closest active provider when no login of the group is left', async () => {
+    const [first, second, ...rest] = rows();
+    const other = row({ id: 6, label: 'Claude Team', models: ['sonnet'], sortOrder: 5 });
+    await seed([{ ...first, active: false }, { ...second, active: false }, ...rest, other]);
+    expect(runtimeCatalog({ providerId: 3, model: 'sonnet', effort: 'low' }, cfg).default).toEqual({
+      providerId: 6,
+      model: 'sonnet',
+      effort: 'low',
+    });
   });
 
   it('flags a runtime whose CLI is missing or whose logins are all signed out', async () => {

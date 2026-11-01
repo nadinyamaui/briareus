@@ -174,10 +174,15 @@ vi.mock('../lib/dbpool.js', () => ({
 
 vi.mock('../lib/providerstore.js', () => ({
   getProvider: (id) => [state.provider, ...state.otherProviders].find((p) => p.id === Number(id)) || null,
-  providerGroup: (p) => state.group || [p],
+  providerGroup: (p) => (typeof state.group === 'function' ? state.group(p) : state.group || [p]),
   providerGroupKey: (p) => `${p.binary}|${p.baseUrl || ''}${state.catalog}`,
   providerGroups: () => [{ key: 'claude|', label: state.provider.label, members: [state.provider] }],
   getProviderForJob: vi.fn(),
+  // The stand-in for a switched-off row: the first active row of its binary.
+  closestActiveProvider: (p) =>
+    p.active
+      ? p
+      : [state.provider, ...state.otherProviders].find((r) => r.active && r.binary === p.binary) || null,
   providerModels: () => ['claude-fable-5-1'],
   providerEfforts: () => ['low', 'high'],
   providerDefaultModel: () => 'claude-fable-5-1',
@@ -1260,11 +1265,30 @@ describe('createDevSession: the validation gauntlet', () => {
     ]);
   });
 
-  it('refuses a provider whose whole group is inactive', () => {
+  it('refuses a provider whose whole group is inactive and nothing can stand in', () => {
     state.provider = { ...state.provider, active: false };
     state.group = [];
 
     expect(() => createDevSession(base)).toThrow(/Claude entry: this provider is inactive/);
+  });
+
+  it('starts a switched-off provider on its closest active stand-in and says so', () => {
+    state.provider = { ...state.provider, active: false };
+    state.otherProviders = [
+      { id: 5, label: 'Codex entry', binary: 'codex', active: true },
+      { id: 6, label: 'Claude backup', binary: 'claude', active: true },
+    ];
+    // Only active rows have a group to balance over.
+    state.group = (p) => (p.active ? [p] : []);
+
+    const started = createDevSession(base);
+    expect(started).toMatchObject({ providerId: 6, provider: 'Claude backup' });
+    expect(getJob(started.id).events).toContainEqual(
+      expect.objectContaining({
+        kind: 'info',
+        text: 'Claude entry is switched off, so this session runs on Claude backup, the closest active provider.',
+      }),
+    );
   });
 
   it('refuses when no projects exist, and an unknown repo', () => {
@@ -15523,7 +15547,7 @@ describe('official orchestrator PR actions', () => {
         startOrchestratorPrAction(parent, { action, prNumber: 12, repo: target.repo }),
       ).rejects.toMatchObject({
         status: 409,
-        message: `The configured action runtime is unavailable for ${target.repo}: provider ID 999 is ${reason === 'missing' ? 'missing' : 'inactive'} (model: claude-fable-5-1; effort: low). Ask an operator to check Settings > Projects > ${target.repo} > Action runtime and Settings > Providers to restore the intended provider or explicitly select its replacement. No session was created.`,
+        message: `The configured action runtime is unavailable for ${target.repo}: provider ID 999 is ${reason === 'missing' ? 'missing' : 'inactive, and no active provider like it can stand in'} (model: claude-fable-5-1; effort: low). Ask an operator to check Settings > Projects > ${target.repo} > Action runtime and Settings > Providers to restore the intended provider or explicitly select its replacement. No session was created.`,
       });
       expect(workerSessionsFor(parent)).toHaveLength(before);
       expect(createCodeReview.mock.calls).toHaveLength(reviewsBefore);
