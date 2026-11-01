@@ -51,7 +51,7 @@ pull requests and issues, move board cards, update PR branches and merge.
 Repository routes expose trees, files and gzipped archives at a revision.
 
 QA loops create and execute test sheets when a task settles on an open pull request.
-With `babysitPrs` enabled, conflict resolution and CI fixes run every 15 minutes,
+With `babysitPrs` enabled, conflict resolution, CI fixes and recommended code reviews run every 15 minutes,
 using the project's action runtime and respecting author filters and retry limits.
 
 Each code review session is recorded in the `code_reviews` table: its PR,

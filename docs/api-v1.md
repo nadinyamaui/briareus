@@ -350,9 +350,11 @@ See [mailbox setup](../README.md#mail) and [email from a session](email-mcp.md).
 
 ## Babysitting pull requests
 
-`babysitPrs` enables periodic conflict resolution and CI fixes on open pull requests.
-The project’s action runtime is required. Author filters, head-commit deduplication,
-capacity limits and the repeated-push cap still apply; no review or feedback agents run.
+`babysitPrs` enables periodic conflict resolution, CI fixes and code reviews on open
+pull requests. A review starts when the board recommends one, at most once per head
+commit and at most three per project each round. The project’s action runtime is required, and must be Claude or Codex for
+reviews. Author filters (for errands that push), head-commit deduplication, capacity
+limits and the repeated-push cap still apply; no feedback agents run.
 
 ## Pull request data
 
