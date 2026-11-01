@@ -15697,6 +15697,7 @@ describe('official orchestrator PR actions', () => {
     ['legacy unowned sessions', 'pr-orch', null, null, false],
   ])('limits blocker diagnostics for %s', async (_scope, parentId, ownerId, blockerOwner, visible) => {
     parent.ownerId = ownerId;
+    state.otherProviders.push({ id: 3, label: 'Review account', binary: 'codex', active: true });
     const blocker = getJob('pr-cap-0');
     const original = { ...blocker };
     const before = workerSessionsFor(parent).length;
@@ -15708,7 +15709,8 @@ describe('official orchestrator PR actions', () => {
       startedOnPr: 12,
       activity: 'review',
       title: 'Review feature',
-      provider: 'codex',
+      providerId: 3,
+      provider: 'Review account',
       model: 'configured-model',
       lastText: 'private transcript',
       error: 'private error',
@@ -15727,7 +15729,8 @@ describe('official orchestrator PR actions', () => {
             status: 'idle',
             activity: 'review',
             title: 'Review feature',
-            provider: 'codex',
+            provider: 'Review account',
+            providerBinary: 'codex',
             model: 'configured-model',
           }),
         );
