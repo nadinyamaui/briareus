@@ -200,6 +200,18 @@ account, model and effort:
 
 Failed or canceled discovery does not start publication; an interrupted step resumes
 itself and the steps after it without rerunning discovery.
+Review database preparation uses the existing project settings: `dbPoolDatabase`
+and the `.env` template select the database mode and server, `dbExtensions` names
+the PostgreSQL extensions to enable, and setup commands perform project migrations
+or other preparation. Unpooled sessions export their own `DB_DATABASE` to setup
+and provider processes as well as writing it to `.env`, so test-runner defaults
+such as PHPUnit XML cannot silently select a shared test database. Codex reviews
+also pin that name in the shell environment and receive the database contract in
+native discovery and subsequent briefings. Missing database configuration,
+extensions, permissions or preparation must be reported as environment blockers;
+they do not justify blaming the PR or approving incomplete verification. Operators
+must install required extension packages and grant preparation permissions on the
+configured server; Briareus does not invent a database template or infrastructure.
 When the review finishes, its session is automatically deleted and its workspace
 and database are released; the stored review and the PR comments remain.
 

@@ -580,6 +580,8 @@ describe('buildArgs', () => {
       live: true,
       resume: true,
       sessionId: 'old-thread',
+      reviewContext: 'Use only the session database.\nReport environment blockers.',
+      database: 'shop_review123',
     });
     expect(built.args.slice(0, 5)).toEqual([
       'exec',
@@ -592,6 +594,10 @@ describe('buildArgs', () => {
     expect(built.args).toContain('review_model="gpt-6.1-sol"');
     expect(built.args).toContain('model_reasoning_effort="low"');
     expect(built.args).toContain('model_context_window=872000');
+    expect(built.args).toContain(
+      'developer_instructions="Use only the session database.\\nReport environment blockers."',
+    );
+    expect(built.args).toContain('shell_environment_policy.set.DB_DATABASE="shop_review123"');
     expect(built.args.slice(-2)).toEqual(['--output-last-message', '/tmp/review-output/summary.md']);
     expect(built.args).not.toContain('resume');
     expect(built.args).not.toContain('app-server');

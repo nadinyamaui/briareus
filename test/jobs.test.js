@@ -162,7 +162,7 @@ vi.mock('../lib/dbpool.js', () => ({
   profileDbElsewhere: vi.fn(() => false),
   sessionDatabaseName: vi.fn(() => 'app'),
   dropSessionDatabase: vi.fn(),
-  instanceEnv: vi.fn(() => ({})),
+  instanceEnv: vi.fn((job) => (job.sessionDb ? { DB_DATABASE: job.sessionDb } : {})),
   assertInstanceAccess: vi.fn(),
   instanceAppPort: vi.fn(() => 8101),
   sessionCapacity: () => state.capacity,
@@ -1695,6 +1695,7 @@ describe('native Codex code review', () => {
     restartCodeReview.mockClear();
     completeCodeReview.mockClear();
     failCodeReview.mockClear();
+    job.sessionDb = 'shop_review123';
     sendDevMessage(id, '/review');
     await vi.waitFor(() => expect(invocations).toHaveLength(1));
     expect(restartCodeReview).toHaveBeenCalledWith(id, head);
@@ -1708,6 +1709,19 @@ describe('native Codex code review', () => {
     ]);
     expect(native.args).toContain('model_reasoning_effort="low"');
     expect(native.opts.env.CODEX_HOME).toBe(root);
+    expect(native.opts.env.DB_DATABASE).toBe('shop_review123');
+    const context = JSON.parse(
+      native.args
+        .find((a) => a.startsWith('developer_instructions='))
+        .split('=')
+        .slice(1)
+        .join('='),
+    );
+    expect(context).toContain('The provisioned review database is "shop_review123"');
+    expect(context).toContain('PHPUnit XML');
+    expect(context).toContain('dbExtensions');
+    expect(context).toContain('setup commands');
+    expect(context).toContain('approving an incompletely verified review');
     expect(native.args.slice(-2)).toEqual(['--output-last-message', summaryPath]);
     fs.writeFileSync(summaryPath, 'A candidate finding');
     finishReview(native);
@@ -1727,6 +1741,7 @@ describe('native Codex code review', () => {
     expect(publish.child.prompt).toContain('<workspace-context>');
     expect(publish.child.prompt).toContain('review_finding_add');
     expect(publish.child.prompt).toContain('review_summary_set');
+    expect(publish.child.prompt).toContain(context);
     expect(job.recoveryTurn).toMatchObject({
       prompt: publish.child.prompt,
       opts: { codeReviewStage: 'publish' },
@@ -1773,8 +1788,11 @@ describe('native Codex code review', () => {
     );
     expect(job.recoveryTurn).toMatchObject({ opts: { codeReviewStage: 'label' }, completed: false });
     // The findings tools ride on every turn of a review session.
-    for (const turn of [native, publish, verify, label])
+    for (const turn of [native, publish, verify, label]) {
       expect(turn.args.join(' ')).toContain('mcp_servers.reviewer_code_review.command');
+      expect(turn.opts.env.DB_DATABASE).toBe('shop_review123');
+      expect(turn.args).toContain('shell_environment_policy.set.DB_DATABASE="shop_review123"');
+    }
     expect(completeCodeReview).not.toHaveBeenCalled();
     finishTurn(label);
     await vi.waitFor(() => expect(job.status).toBe('idle'));
@@ -1786,6 +1804,18 @@ describe('native Codex code review', () => {
     // Closing a settled review leaves its status alone.
     await closeDevSession(id);
     expect(failCodeReview).not.toHaveBeenCalled();
+  });
+
+  it('tells native review that database verification is blocked when none was provisioned', async () => {
+    sendDevMessage(id, '/review');
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    const native = invocations[0];
+    expect(native.args.find((a) => a.startsWith('developer_instructions='))).toContain(
+      'No isolated database has been provisioned',
+    );
+    expect(native.args.join(' ')).not.toContain('shell_environment_policy.set.DB_DATABASE');
+    finishReview(native, 1);
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
   });
 
   it('fails a review closed before any review turn settled it', async () => {

@@ -651,6 +651,25 @@ describe('ensureSessionDatabase', () => {
     state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
   });
 
+  it('provisions, exports and cleans only the review database, including its extensions', async () => {
+    state.project.dbExtensions = ['vector'];
+    const review = { ...job('review123'), repo: 'acme/app', activity: 'review' };
+    await ensureSessionDatabase(review, review.repo, () => {});
+
+    // The XML test database and .env template database must not replace this
+    // environment value when a runner loads its defaults before dotenv.
+    expect(instanceEnv(review)).toEqual({ DB_DATABASE: 'sample_review123' });
+    const extension = state.psqlCalls.find((c) => c.args.at(-1).includes('CREATE EXTENSION'));
+    expect(extension.args.at(-1)).toBe('CREATE EXTENSION IF NOT EXISTS "vector"');
+    expect(extension.args[extension.args.indexOf('--dbname') + 1]).toBe(instanceEnv(review).DB_DATABASE);
+
+    await dropSessionDatabase(review, () => {});
+    expect(state.psqlCalls.at(-1).args.at(-1)).toBe(
+      'DROP DATABASE IF EXISTS "sample_review123" WITH (FORCE)',
+    );
+    expect(instanceEnv(review)).toEqual({});
+  });
+
   it('creates the session database on Postgres when the template says pgsql', async () => {
     state.psqlResults = [
       { code: 0, stdout: '' },
