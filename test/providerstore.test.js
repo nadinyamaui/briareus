@@ -66,7 +66,7 @@ vi.mock('../lib/db.js', () => ({
 vi.mock('../lib/providers.js', async (importOriginal) => {
   // The default-model fall-through is shared with providers.js's own callers,
   // so the real one runs against these fake binaries.
-  const { resolveDefaultModel } = await importOriginal();
+  const { resolveDefaultModel, opencodeServiceId } = await importOriginal();
   const binary = (name, models, efforts, defaultModel, defaultEffort) => ({
     label: `${name} label`,
     // Every CLI is installed except grok's.
@@ -101,6 +101,7 @@ vi.mock('../lib/providers.js', async (importOriginal) => {
     // two sizes and the rest are not, which is all this module branches on.
     codexWideVariants: (slugs) => slugs.flatMap((s) => (s === 'gpt-a' ? [s, 'gpt-a (872k)'] : [s])),
     resolveDefaultModel,
+    opencodeServiceId,
   };
 });
 
@@ -646,6 +647,34 @@ describe('closestActiveProvider', () => {
 
     expect(closestActiveProvider(getProvider(1), 'opus', cfg)).toBeNull();
     expect(closestActiveProvider(getProvider(3), 'gpt-a', cfg)).toBeNull();
+  });
+
+  it('never stands a metered API key in for a login, or the reverse', async () => {
+    await seed([
+      row({ id: 1, binary: 'claude', active: false }),
+      row({ id: 2, binary: 'claude', apiKey: 'k2' }),
+      row({ id: 3, binary: 'claude', apiKey: 'k3', active: false }),
+      row({ id: 4, binary: 'claude', sortOrder: 1, active: false }),
+    ]);
+
+    expect(closestActiveProvider(getProvider(1), 'opus', cfg)).toBeNull();
+    // A key stands in for a key on the same CLI and endpoint.
+    expect(closestActiveProvider(getProvider(3), 'opus', cfg).id).toBe(2);
+  });
+
+  it('never stands in another opencode service', async () => {
+    await seed([
+      row({ id: 1, binary: 'opencode', apiKey: 'k1', defaultModel: 'anthropic/x', active: false }),
+      row({ id: 2, binary: 'opencode', apiKey: 'k2', defaultModel: 'openai/y' }),
+    ]);
+
+    expect(closestActiveProvider(getProvider(1), 'anthropic/x', cfg)).toBeNull();
+    await seed([
+      row({ id: 1, binary: 'opencode', apiKey: 'k1', defaultModel: 'anthropic/x', active: false }),
+      row({ id: 2, binary: 'opencode', apiKey: 'k2', defaultModel: 'openai/y' }),
+      row({ id: 3, binary: 'opencode', apiKey: 'k3', defaultModel: 'anthropic/z', sortOrder: 1 }),
+    ]);
+    expect(closestActiveProvider(getProvider(1), 'anthropic/x', cfg).id).toBe(3);
   });
 
   it('answers null for no row', () => {

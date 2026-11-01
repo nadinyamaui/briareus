@@ -1291,6 +1291,26 @@ describe('createDevSession: the validation gauntlet', () => {
     );
   });
 
+  it('names the stand-in login the session actually runs on', () => {
+    state.provider = { ...state.provider, active: false };
+    // Ids no other test opens a session on, so the balancer sees only these two.
+    const backup = { id: 61, label: 'Claude backup', binary: 'claude', active: true };
+    const spare = { id: 62, label: 'Claude spare', binary: 'claude', active: true };
+    state.otherProviders = [backup, spare];
+    state.group = (p) => (p.active ? [backup, spare] : []);
+
+    createDevSession(base);
+    // Claude backup now has an open session, so the balancer moves on to Claude spare.
+    const started = createDevSession(base);
+    expect(started).toMatchObject({ providerId: 62, provider: 'Claude spare' });
+    expect(getJob(started.id).events).toContainEqual(
+      expect.objectContaining({
+        kind: 'info',
+        text: 'Claude entry is switched off, so this session runs on Claude spare, the closest active provider.',
+      }),
+    );
+  });
+
   it('refuses when no projects exist, and an unknown repo', () => {
     state.projects = [];
     expect(() => createDevSession(base)).toThrow(/No projects are set up yet/);
@@ -15553,6 +15573,29 @@ describe('official orchestrator PR actions', () => {
       expect(createCodeReview.mock.calls).toHaveLength(reviewsBefore);
     },
   );
+  it('names the login a switched-off action runtime’s stand-in session runs on', async () => {
+    const off = { id: 998, label: 'Claude off', binary: 'claude', active: false };
+    const head = { id: 63, label: 'Claude head', binary: 'claude', active: true };
+    const spare = { id: 64, label: 'Claude spare', binary: 'claude', active: true };
+    state.otherProviders.push(off, head, spare);
+    state.projects[0].actionProviderId = off.id;
+    resolveRuntime.mockImplementationOnce((runtime) => ({
+      provider: head,
+      model: runtime.model,
+      effort: runtime.effort,
+      replaced: off,
+    }));
+    // The stand-in's group balances onto its other login.
+    state.group = (p) => (p.active ? [spare, head] : [p]);
+    const session = await startOrchestratorPrAction(parent, { action: 'solve-conflicts', prNumber: 12 });
+    expect(session).toMatchObject({ providerId: 64, provider: 'Claude spare' });
+    expect(parent.events).toContainEqual(
+      expect.objectContaining({
+        kind: 'info',
+        text: `Started solve-conflicts session ${session.id} on PR #12 on Claude spare, since the configured Claude off is switched off.`,
+      }),
+    );
+  });
   it('identifies inherited model and effort in an unavailable action runtime', async () => {
     Object.assign(state.projects[0], {
       actionProviderId: 999,
