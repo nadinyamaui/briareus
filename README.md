@@ -306,7 +306,7 @@ name it as their action, step or worker runtime. New sessions, PR actions and
 step turns run on the closest active provider: an interchangeable login first,
 then another active entry of the same CLI and endpoint that offers the
 configured model, then picker order. The transcript names the stand-in. It is
-never another CLI or a custom endpoint, so a provider with no such stand-in, or
+never another CLI or another endpoint, so a provider with no such stand-in, or
 one that was deleted, still refuses to start.
 
 ### Merged pull requests
