@@ -225,6 +225,10 @@ These additions are present in the server revision documented here:
 - Orchestrators can run code review or resolve conflicts on existing PRs through
   `start_pr_action`
   and control worker QA independently.
+  Concurrent PR actions remain blocked; HTTP and MCP errors identify the blocking
+  session's ID, status, activity, title and provider/model only for the same explicit
+  owner with current project access. Other blockers remain anonymous, and diagnostics
+  grant no transcript or session control access.
 - Pull request reads share cached work and return a retryable 429 when the
   GitHub allowance is exhausted.
 

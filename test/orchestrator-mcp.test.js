@@ -543,6 +543,17 @@ it('starts an official PR action with the session bearer and no runtime override
   expect(response.result.content[0].text).toContain('list_workers/read_worker');
 });
 
+it.each([
+  'This pull request already has an open session',
+  'This pull request already has an open session. Blocking session: {"id":"review-1","status":"idle","activity":"review","title":"Review feature","provider":"codex","model":"configured"}',
+])('presents the HTTP concurrency diagnostic verbatim: %s', async (message) => {
+  stubFetch(reply({ status: 409, body: { error: message } }));
+  const server = await boot();
+  const [response] = await server.send(callTool('start_pr_action', { action: 'review', pr_number: 12 }));
+  expect(response.result.isError).toBe(true);
+  expect(response.result.content).toEqual([{ type: 'text', text: `Error: ${message}` }]);
+});
+
 it('advertises read-only project discovery and calls the orchestrator endpoint with its token', async () => {
   const projects = [{ id: 1, name: 'Shop', repo: 'acme/shop', enabled: true }];
   const fetched = stubFetch(reply({ body: { projects } }));

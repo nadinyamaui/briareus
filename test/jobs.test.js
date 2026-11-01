@@ -15689,16 +15689,117 @@ describe('official orchestrator PR actions', () => {
     );
   });
 
+  it.each([
+    ['own worker', 'pr-orch', 42, 42, true],
+    ['another orchestration', 'orphan-pr-orch', 42, 42, true],
+    ['another owner', 'orphan-pr-orch', 42, 43, false],
+    ['unowned blocker', 'pr-orch', 42, null, false],
+    ['legacy unowned sessions', 'pr-orch', null, null, false],
+  ])('limits blocker diagnostics for %s', async (_scope, parentId, ownerId, blockerOwner, visible) => {
+    parent.ownerId = ownerId;
+    const blocker = getJob('pr-cap-0');
+    const original = { ...blocker };
+    const before = workerSessionsFor(parent).length;
+    const reviewsBefore = createCodeReview.mock.calls.length;
+    Object.assign(blocker, {
+      parentId,
+      ownerId: blockerOwner,
+      status: 'idle',
+      startedOnPr: 12,
+      activity: 'review',
+      title: 'Review feature',
+      provider: 'codex',
+      model: 'configured-model',
+      lastText: 'private transcript',
+      error: 'private error',
+    });
+    try {
+      const error = await startOrchestratorPrAction(parent, {
+        action: 'review',
+        prNumber: 12,
+      }).catch((e) => e);
+      expect(error.status).toBe(409);
+      const generic = 'This pull request already has an open session';
+      if (visible) {
+        expect(error.message).toContain(
+          JSON.stringify({
+            id: blocker.id,
+            status: 'idle',
+            activity: 'review',
+            title: 'Review feature',
+            provider: 'codex',
+            model: 'configured-model',
+          }),
+        );
+        expect(error.message).not.toContain('private');
+      } else expect(error.message).toBe(generic);
+      expect(workerSessionsFor(parent)).toHaveLength(before - (parentId === parent.id ? 0 : 1));
+      expect(createCodeReview.mock.calls).toHaveLength(reviewsBefore);
+    } finally {
+      for (const key of Object.keys(blocker)) delete blocker[key];
+      Object.assign(blocker, original);
+    }
+  });
+
+  it('does not disclose a blocker when sharing is revoked while reading GitHub', async () => {
+    parent.ownerId = 42;
+    const blocker = getJob('pr-cap-0');
+    Object.assign(blocker, { ownerId: 42, status: 'idle', startedOnPr: 12 });
+    githubRest.mockImplementationOnce(async () => {
+      setSessionProjectFilter(() => false);
+      return { ok: true, json: async () => pull() };
+    });
+    try {
+      const error = await startOrchestratorPrAction(parent, {
+        action: 'review',
+        prNumber: 12,
+      }).catch((e) => e);
+      expect(error.message).toMatch(/Project unavailable/);
+      expect(error.message).not.toContain(blocker.id);
+    } finally {
+      Object.assign(blocker, { ownerId: null, status: 'closed', startedOnPr: null });
+    }
+  });
+
+  it.each(['closed', 'historical startBranch'])('does not block on a %s reference', async (mode) => {
+    const blocker = getJob('pr-cap-0');
+    Object.assign(blocker, {
+      status: mode === 'closed' ? 'closed' : 'idle',
+      startedOnPr: mode === 'closed' ? 12 : null,
+      prBranch: mode === 'closed' ? 'feature' : null,
+      startBranch: 'feature',
+      branch: mode === 'closed' ? 'feature' : 'different-checkout',
+    });
+    try {
+      const session = await startOrchestratorPrAction(parent, {
+        action: 'solve-conflicts',
+        prNumber: 12,
+      });
+      expect(session.id).not.toBe(blocker.id);
+    } finally {
+      blocker.status = 'closed';
+      delete blocker.startedOnPr;
+      delete blocker.prBranch;
+      delete blocker.startBranch;
+      delete blocker.branch;
+    }
+  });
+
   it.each(['startBranch', 'branch', 'prBranch'])('blocks a branch-only worker using %s', async (field) => {
     const worker = getJob('pr-cap-0');
+    parent.ownerId = 42;
+    worker.ownerId = 42;
     worker.status = 'idle';
+    if (field === 'prBranch') worker.branch = 'different-checkout';
     worker[field] = 'feature';
     try {
       await expect(
         startOrchestratorPrAction(parent, { action: 'solve-conflicts', prNumber: 12 }),
-      ).rejects.toThrow(/already has an open session/);
+      ).rejects.toThrow(`"id":"${worker.id}"`);
     } finally {
       worker.status = 'closed';
+      worker.ownerId = null;
+      delete worker.branch;
       delete worker[field];
     }
   });

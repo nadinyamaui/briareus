@@ -284,6 +284,15 @@ describe('scoped PR action route', () => {
     startOrchestratorPrAction.mockRejectedValue(Object.assign(new Error('wrong project'), { status: 403 }));
     expect((await action('o1', { action: 'review', prNumber: 12, repo: 'other/repo' })).status).toBe(403);
   });
+  it.each([
+    'This pull request already has an open session',
+    'This pull request already has an open session. Blocking session: {"id":"review-1","status":"idle","activity":"review","title":"Review feature","provider":"codex","model":"configured"}',
+  ])('preserves a concurrency refusal verbatim: %s', async (message) => {
+    startOrchestratorPrAction.mockRejectedValue(Object.assign(new Error(message), { status: 409 }));
+    const response = await action('o1', { action: 'review', prNumber: 12 });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: message });
+  });
 });
 
 describe('eligible worker project discovery', () => {
