@@ -1556,6 +1556,14 @@ describe('Claude code review', () => {
           expect(invocations[1].args[1]).toBe('/code-review high 3747');
           expect(invocations[1].opts.env.CLAUDE_CONFIG_DIR).toBe(configDir);
           expect(fs.readFileSync(summaryPath, 'utf8')).toBe('');
+          // The second account holds no copy of the first one's conversation, so the
+          // rerun opens one of its own instead of resuming an id it never saw.
+          const firstId = invocations[0].args[invocations[0].args.indexOf('--session-id') + 1];
+          expect(invocations[1].args).not.toContain('--resume');
+          const rerunId = invocations[1].args[invocations[1].args.indexOf('--session-id') + 1];
+          expect(rerunId).toMatch(/^[\da-f-]{36}$/);
+          expect(rerunId).not.toBe(firstId);
+          expect(transferClaudeSession).not.toHaveBeenCalled();
         }
         const discovery = invocations[first];
         if (code !== 'quota')
@@ -1591,7 +1599,10 @@ describe('Claude code review', () => {
         expect(checkpoints.length).toBeGreaterThan(0);
         expect(checkpoints.filter((c) => /^\/(code-)?review/.test(c.prompt) && c.completed)).toEqual([]);
         const publish = invocations[first + 1];
-        expect(publish.args).toEqual(expect.arrayContaining(['--resume']));
+        // Each later step resumes the discovery's own conversation, on its account.
+        const discoveryId = discovery.args[discovery.args.indexOf('--session-id') + 1];
+        expect(publish.args).toEqual(expect.arrayContaining(['--resume', discoveryId]));
+        expect(job.providerSessionId).toBe(discoveryId);
         await vi.waitFor(() => expect(publish.prompt).toBeTruthy());
         expect(publish.prompt).toContain('Create a single comment in the PR with this format');
         expect(publish.prompt).toContain('<summary>🟠 Medium findings</summary>');
@@ -1631,6 +1642,114 @@ describe('Claude code review', () => {
     },
     30_000,
   );
+});
+
+describe('Claude code review rerun', () => {
+  // A discovery run again on a conversation an earlier attempt marked started (a
+  // restart, a retry, or another account) never resumes it: that attempt may have
+  // been killed before the CLI saved anything.
+  it('opens a fresh conversation for /code-review instead of resuming the earlier attempt', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-rerun-'));
+    spawnSync('git', ['init', '-b', 'feature', root]);
+    spawnSync('git', [
+      '-C',
+      root,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'Fixture',
+    ]);
+    const head = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    const configDir = path.join(root, 'claude-config');
+    fs.mkdirSync(configDir);
+    const home = vi.spyOn(providerTools, 'ensureClaudeHome').mockReturnValue(configDir);
+    const bin = vi
+      .spyOn(BINARIES.claude, 'bin')
+      .mockReturnValue({ bin: '/mock/rerun-agent', source: 'test' });
+    const realSpawn = spawn.getMockImplementation();
+    const invocations = [];
+    spawn.mockImplementation((cmd, args, opts) => {
+      if (cmd === 'git' && args.includes('fetch')) {
+        const git = new EventEmitter();
+        git.stdout = new PassThrough();
+        git.stderr = new PassThrough();
+        queueMicrotask(() => git.emit('close', 0));
+        return git;
+      }
+      if (cmd !== '/mock/rerun-agent') return realSpawn(cmd, args, opts);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = null;
+      child.stderr = new PassThrough();
+      invocations.push({ args, child });
+      return child;
+    });
+    getProviderForJob.mockReturnValue(state.provider);
+    captureProviderAuth.mockResolvedValue(undefined);
+    githubRest.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        number: 4211,
+        state: 'open',
+        head: { ref: 'feature', sha: head },
+        base: { ref: 'main' },
+        html_url: 'https://github.com/acme/shop/pull/4211',
+      }),
+    });
+    const id = 'claude-rerun';
+    const stale = '433f1194-ac70-47e8-9a3b-79e38268c0a2';
+    state.stored = [
+      {
+        id,
+        kind: 'devchat',
+        status: 'closed',
+        repo: 'acme/shop',
+        providerId: 1,
+        model: 'claude-fable-5-1',
+        effort: 'high',
+        activity: 'review',
+        startedOnPr: 4211,
+        providerSessionId: stale,
+        turns: 0,
+        chatStarted: true,
+        chats: { 1: { sessionId: stale, started: true } },
+        workDir: root,
+        branch: 'feature',
+        createdAt: '2026-11-02T00:00:00Z',
+      },
+    ];
+    try {
+      await initJobs();
+      const job = getJob(id);
+      job.status = 'idle';
+      sendDevMessage(id, '/code-review');
+      await vi.waitFor(() => expect(invocations).toHaveLength(1));
+      const { args } = invocations[0];
+      expect(args[1]).toBe('/code-review high 4211');
+      expect(args).not.toContain('--resume');
+      const fresh = args[args.indexOf('--session-id') + 1];
+      expect(fresh).not.toBe(stale);
+      expect(job.chats[1]).toEqual({ sessionId: fresh, started: true });
+      expect(job.providerSessionId).toBe(fresh);
+      expect(job.events.some((e) => /resuming session/.test(e.text || ''))).toBe(false);
+      invocations[0].child.emit('close', 1);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+    } finally {
+      await closeDevSession(id);
+      home.mockRestore();
+      bin.mockRestore();
+      spawn.mockImplementation(realSpawn);
+      getProviderForJob.mockReset();
+      captureProviderAuth.mockReset();
+      githubRest.mockReset();
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(path.join(os.tmpdir(), 'reviewer-prompts', `${id}-review-summary.md`), { force: true });
+    }
+  });
 });
 
 describe('native Codex code review', () => {
@@ -2709,6 +2828,75 @@ describe('spawnWorkerSession', () => {
       }
     },
   );
+
+  // The account was picked for this turn but holds no transcript under the stored id
+  // (a turn killed before the CLI saved it, or one moved without its conversation).
+  it('runs a turn again in a fresh conversation when the account has no record of the resumed one', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.providerId = 1;
+    job.providerSessionId = 'bg-sid';
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    const { children, settled, restore } = fakeClaude();
+    try {
+      const done = settled(job);
+      sendDevMessage(job.id, 'Publish the findings');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(spawn.mock.calls.filter(([cmd]) => cmd === '/mock/agent')[0][1]).toEqual(
+        expect.arrayContaining(['--resume', 'bg-sid']),
+      );
+      children[0].stderr.write('No conversation found with session ID: bg-sid\n');
+      await vi.waitFor(() =>
+        expect(job.events.some((e) => /No conversation found/.test(e.text || ''))).toBe(true),
+      );
+      children[0].emit('close', 1);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      const retry = spawn.mock.calls.filter(([cmd]) => cmd === '/mock/agent')[1][1];
+      expect(retry).not.toContain('--resume');
+      const fresh = retry[retry.indexOf('--session-id') + 1];
+      expect(fresh).not.toBe('bg-sid');
+      expect(job.providerId).toBe(1);
+      expect(children[1].writes[0]).toContain('could not be resumed');
+      expect(children[1].writes[0]).toContain('Publish the findings');
+      children[1].emitLines(replay(children[1].writes[0]), result('Published.'));
+      children[1].stdin.end();
+      children[1].emit('close', 0);
+      await done;
+      expect(job.error).toBeFalsy();
+      expect(job.chats[1]).toMatchObject({ sessionId: fresh, started: true });
+      expect(job.providerSessionId).toBe(fresh);
+      expect(job.events.some((e) => /holds no copy of this session's conversation/.test(e.text || ''))).toBe(
+        true,
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it('fails the turn when the fresh conversation cannot be found either', async () => {
+    const job = getJob('bg-claude');
+    job.status = 'idle';
+    job.providerId = 1;
+    job.chats = { 1: { sessionId: 'bg-sid', started: true } };
+    const { children, settled, restore } = fakeClaude();
+    try {
+      const done = settled(job);
+      sendDevMessage(job.id, 'Continue');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      children[0].stderr.write('No conversation found with session ID: bg-sid\n');
+      await vi.waitFor(() =>
+        expect(job.events.some((e) => /No conversation found/.test(e.text || ''))).toBe(true),
+      );
+      children[0].emit('close', 1);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      // A fresh conversation is not resumed, so its own failure is an ordinary one.
+      children[1].emit('close', 1);
+      await done;
+      expect(children).toHaveLength(2);
+    } finally {
+      restore();
+    }
+  });
 
   it('tries each eligible Claude account once and stops when all quotas are exhausted', async () => {
     const job = getJob('bg-claude');
