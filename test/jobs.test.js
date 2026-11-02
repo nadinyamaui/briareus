@@ -1908,29 +1908,37 @@ describe('native Codex code review', () => {
     },
   );
 
-  it.each(['verify', 'label'])('gates a recovered %s before starting its provider turn', async (stage) => {
-    completeCodeReview.mockClear();
-    failCodeReview.mockClear();
-    Object.assign(job, {
-      status: 'interrupted',
-      interruptedFrom: 'running',
-      restartPending: true,
-      workspacePrepared: true,
-      codeReviewHead: head,
-      recoveryTurn: {
-        prompt: `Recovered ${stage}`,
-        opts: { codeReviewStage: stage },
-        phase: 'initial',
-        runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
-        completed: false,
-      },
-    });
-    claimSlot(root, id, { prepared: true });
-    resumeRestartedSessions();
-    await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledWith(id));
-    expect(invocations).toHaveLength(0);
-    expect(completeCodeReview).not.toHaveBeenCalled();
-  });
+  it.each([
+    ['verify', true],
+    ['label', true],
+    ['verify', false],
+    ['label', false],
+  ])(
+    'gates a recovered %s before starting its provider turn (saved runtime: %s)',
+    async (stage, savedRuntime) => {
+      completeCodeReview.mockClear();
+      failCodeReview.mockClear();
+      Object.assign(job, {
+        status: 'interrupted',
+        interruptedFrom: 'running',
+        restartPending: true,
+        workspacePrepared: true,
+        codeReviewHead: head,
+        recoveryTurn: {
+          prompt: `Recovered ${stage}`,
+          opts: { codeReviewStage: stage },
+          phase: 'initial',
+          ...(savedRuntime ? { runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' } } : {}),
+          completed: false,
+        },
+      });
+      claimSlot(root, id, { prepared: true });
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledWith(id));
+      expect(invocations).toHaveLength(0);
+      expect(completeCodeReview).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['verify', 'label'])(
     'resumes a %s with completed reviewers without repeating discovery or delegation',
