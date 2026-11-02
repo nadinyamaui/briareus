@@ -1590,11 +1590,12 @@ describe('Claude code review', () => {
 });
 
 describe('native Codex code review', () => {
-  let root, id, summaryPath, head, invocations, home, bin, realSpawn, job;
+  let root, id, summaryPath, completionPath, head, invocations, home, bin, realSpawn, job;
   beforeEach(async () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-review-'));
     id = path.basename(root);
     summaryPath = path.join(os.tmpdir(), 'reviewer-prompts', `${id}-review-summary.md`);
+    completionPath = path.join(os.tmpdir(), 'reviewer-prompts', `${id}-review-completion.json`);
     spawnSync('git', ['init', '-b', 'feature', root]);
     spawnSync('git', [
       '-C',
@@ -1674,8 +1675,11 @@ describe('native Codex code review', () => {
     githubRest.mockReset();
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(summaryPath, { force: true });
+    fs.rmSync(completionPath, { force: true });
   });
-  const finishTurn = (invocation) => {
+  const finishTurn = (invocation, receipt = { head, status: 'complete', requirements: [] }) => {
+    if (job.recoveryTurn?.opts?.codeReviewStage === 'publish' && receipt)
+      fs.writeFileSync(completionPath, JSON.stringify(receipt));
     invocation.child.complete({ input_tokens: 30, output_tokens: 8, cached_input_tokens: 0 });
     invocation.child.emit('close', 0);
   };
@@ -1722,6 +1726,7 @@ describe('native Codex code review', () => {
     expect(context).toContain('dbExtensions');
     expect(context).toContain('setup commands');
     expect(context).toContain('approving an incompletely verified review');
+    expect(context).toContain('Native Codex review disables subagent delegation');
     expect(native.args.slice(-2)).toEqual(['--output-last-message', summaryPath]);
     fs.writeFileSync(summaryPath, 'A candidate finding');
     finishReview(native);
@@ -1742,6 +1747,11 @@ describe('native Codex code review', () => {
     expect(publish.child.prompt).toContain('review_finding_add');
     expect(publish.child.prompt).toContain('review_summary_set');
     expect(publish.child.prompt).toContain(context);
+    expect(publish.child.prompt).toContain('Before publishing, complete the repository');
+    expect(publish.child.prompt).toContain(JSON.stringify(completionPath));
+    expect(publish.child.prompt.indexOf('Before publishing')).toBeLessThan(
+      publish.child.prompt.indexOf('Create a single comment'),
+    );
     expect(job.recoveryTurn).toMatchObject({
       prompt: publish.child.prompt,
       opts: { codeReviewStage: 'publish' },
@@ -1818,6 +1828,160 @@ describe('native Codex code review', () => {
     await vi.waitFor(() => expect(job.status).toBe('idle'));
   });
 
+  it('finishes required reviewers through real Codex events in the normal publication turn', async () => {
+    completeCodeReview.mockClear();
+    sendDevMessage(id, '/review');
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    fs.writeFileSync(summaryPath, 'No native findings; independent reviews pending');
+    finishReview(invocations[0]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(2));
+    const publish = invocations[1];
+    const requirements = ['security-thread', 'compatibility-thread'].map((reviewerId) => ({
+      source: 'AGENTS.md:12',
+      requirement: `Independent ${reviewerId} review`,
+      reviewerId,
+      evidence: 'Reviewed the changed code on the pinned head; no findings.',
+    }));
+    for (const { reviewerId } of requirements) {
+      for (const kind of ['started', 'completed'])
+        publish.child.notify('item/completed', {
+          item: { type: 'subAgentActivity', kind, agentThreadId: reviewerId },
+        });
+    }
+    finishTurn(publish, { head, status: 'complete', requirements });
+    await vi.waitFor(() => expect(invocations).toHaveLength(3));
+    finishTurn(invocations[2]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(4));
+    finishTurn(invocations[3]);
+    await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+    expect(invocations.filter((call) => call.args[0] === 'exec')).toHaveLength(1);
+    expect(job.codeReviewDelegates).toEqual({
+      'security-thread': { started: true, completed: true },
+      'compatibility-thread': { started: true, completed: true },
+    });
+    expect(publicJob(job)).not.toHaveProperty('codeReviewDelegates');
+    await vi.waitFor(() =>
+      expect(saveJob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id,
+          codeReviewDelegates: job.codeReviewDelegates,
+        }),
+      ),
+    );
+  });
+
+  it.each(['missing', 'malformed', 'blocked', 'wrong-head', 'unobserved', 'unfinished'])(
+    'does not verify, label, approve or complete a zero-finding review with %s required-review evidence',
+    async (outcome) => {
+      completeCodeReview.mockClear();
+      failCodeReview.mockClear();
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(invocations).toHaveLength(1));
+      fs.writeFileSync(summaryPath, 'No findings');
+      finishReview(invocations[0]);
+      await vi.waitFor(() => expect(invocations).toHaveLength(2));
+      let receipt = { head, status: 'complete', requirements: [] };
+      if (outcome === 'blocked')
+        receipt = { ...receipt, status: 'blocked', blocker: 'Delegation unavailable' };
+      if (outcome === 'wrong-head') receipt.head = 'b'.repeat(40);
+      if (['unobserved', 'unfinished'].includes(outcome)) {
+        receipt.requirements = [
+          {
+            source: 'AGENTS.md:12',
+            requirement: 'Independent review',
+            reviewerId: 'claimed-thread',
+            evidence: 'No findings',
+          },
+        ];
+        if (outcome === 'unfinished')
+          invocations[1].child.notify('item/completed', {
+            item: { type: 'subAgentActivity', kind: 'started', agentThreadId: 'claimed-thread' },
+          });
+      }
+      if (outcome === 'malformed') fs.writeFileSync(completionPath, 'invalid JSON');
+      finishTurn(invocations[1], ['missing', 'malformed'].includes(outcome) ? null : receipt);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      expect(invocations).toHaveLength(2);
+      expect(job.error).toBeTruthy();
+      expect(failCodeReview).toHaveBeenCalledWith(id);
+      expect(completeCodeReview).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['verify', 'label'])('gates a recovered %s before starting its provider turn', async (stage) => {
+    completeCodeReview.mockClear();
+    failCodeReview.mockClear();
+    Object.assign(job, {
+      status: 'interrupted',
+      interruptedFrom: 'running',
+      restartPending: true,
+      workspacePrepared: true,
+      codeReviewHead: head,
+      recoveryTurn: {
+        prompt: `Recovered ${stage}`,
+        opts: { codeReviewStage: stage },
+        phase: 'initial',
+        runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
+        completed: false,
+      },
+    });
+    claimSlot(root, id, { prepared: true });
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledWith(id));
+    expect(invocations).toHaveLength(0);
+    expect(completeCodeReview).not.toHaveBeenCalled();
+  });
+
+  it.each(['verify', 'label'])(
+    'resumes a %s with completed reviewers without repeating discovery or delegation',
+    async (stage) => {
+      completeCodeReview.mockClear();
+      const reviewerId = 'completed-before-restart';
+      fs.mkdirSync(path.dirname(completionPath), { recursive: true });
+      fs.writeFileSync(
+        completionPath,
+        JSON.stringify({
+          head,
+          status: 'complete',
+          requirements: [
+            {
+              source: 'AGENTS.md:12',
+              requirement: 'Independent review',
+              reviewerId,
+              evidence: 'No defects found on this head',
+            },
+          ],
+        }),
+      );
+      Object.assign(job, {
+        status: 'interrupted',
+        interruptedFrom: 'running',
+        restartPending: true,
+        workspacePrepared: true,
+        codeReviewHead: head,
+        codeReviewDelegates: { [reviewerId]: { started: true, completed: true } },
+        recoveryTurn: {
+          prompt: `Recovered ${stage}`,
+          opts: { codeReviewStage: stage },
+          phase: 'initial',
+          runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
+          completed: false,
+        },
+      });
+      claimSlot(root, id, { prepared: true });
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(invocations).toHaveLength(1));
+      expect(invocations[0].child.prompt).toContain(`Recovered ${stage}`);
+      finishTurn(invocations[0]);
+      if (stage === 'verify') {
+        await vi.waitFor(() => expect(invocations).toHaveLength(2));
+        finishTurn(invocations[1]);
+      }
+      await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+      expect(invocations.every((call) => call.args[0] === 'app-server')).toBe(true);
+    },
+  );
+
   it('fails a review closed before any review turn settled it', async () => {
     failCodeReview.mockClear();
     await closeDevSession(id);
@@ -1868,9 +2032,13 @@ describe('native Codex code review', () => {
       failCodeReview.mockClear();
       fs.mkdirSync(path.dirname(summaryPath), { recursive: true });
       fs.writeFileSync(summaryPath, 'Old summary that must not be reused');
+      fs.writeFileSync(completionPath, JSON.stringify({ head, status: 'complete', requirements: [] }));
+      job.codeReviewDelegates = { oldReviewer: { started: true, completed: true } };
       sendDevMessage(id, '/review');
       await vi.waitFor(() => expect(invocations).toHaveLength(1));
       expect(fs.existsSync(summaryPath)).toBe(false);
+      expect(fs.existsSync(completionPath)).toBe(false);
+      expect(job.codeReviewDelegates).toEqual({});
       if (outcome !== 'missing') fs.writeFileSync(summaryPath, outcome === 'empty' ? '' : 'Partial finding');
       if (outcome === 'canceled') cancelDevTurn(id);
       finishReview(invocations[0], outcome === 'failure' ? 1 : 0);
@@ -1987,6 +2155,9 @@ describe('native Codex code review', () => {
 
   it('keeps verification recoverable until the label step is checkpointed', async () => {
     completeCodeReview.mockClear();
+    fs.mkdirSync(path.dirname(completionPath), { recursive: true });
+    fs.writeFileSync(completionPath, JSON.stringify({ head, status: 'complete', requirements: [] }));
+    job.codeReviewHead = head;
     // Each turn's video publication is held, so the step has exited but its turn
     // has not returned to the review loop yet.
     const held = [];
@@ -2030,6 +2201,9 @@ describe('native Codex code review', () => {
   it('fails the review when its verification step fails', async () => {
     completeCodeReview.mockClear();
     failCodeReview.mockClear();
+    fs.mkdirSync(path.dirname(completionPath), { recursive: true });
+    fs.writeFileSync(completionPath, JSON.stringify({ head, status: 'complete', requirements: [] }));
+    job.codeReviewHead = head;
     Object.assign(job, {
       status: 'interrupted',
       interruptedFrom: 'running',
