@@ -177,7 +177,11 @@ account, model and effort:
    `/code-review <effort> <PR>` (without `--comment`, so it only reports); Codex runs
    `codex exec review --json --base <PR-base-ref>` with the provider’s `CODEX_HOME`.
    The report is saved as `review-summary.md` outside the checkout.
-2. **Publish**: one summary comment on the PR (`# Code Review`, a summary, the
+2. **Publish**: Codex first completes any independent reviewers required by the
+   repository's AGENTS/skills in this normal turn, using real subagents on the
+   same runtime, head/base and isolated database; it combines their results with
+   native discovery without repeating it (no reviewers are spawned when none are
+   required). Then one summary comment on the PR (`# Code Review`, a summary, the
    counts, and a collapsible section per severity, dismissed findings left out),
    then each finding as an inline comment on its line. Each finding is registered
    with `review_finding_add` and the summary comment with `review_summary_set`.
@@ -200,6 +204,15 @@ account, model and effort:
 
 Failed or canceled discovery does not start publication; an interrupted step resumes
 itself and the steps after it without rerunning discovery.
+Codex 0.165.0's [native review task](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/tasks/review.rs)
+explicitly disables both delegation implementations, even when normal turns can
+delegate. The normal publication turn therefore records instruction sources,
+reviewer thread IDs and result evidence in a completion receipt outside the
+checkout. Briareus checks those IDs against actual Codex creation/completion
+events before verification and labelling, including after a restart. Missing,
+invalid or blocked receipts fail the review; unavailable required delegation is
+reported as INCOMPLETE and cannot turn zero findings into approval. Native
+discovery, its report and the selected account/model/effort are preserved.
 Review database preparation uses the existing project settings: `dbPoolDatabase`
 and the `.env` template select the database mode and server, `dbExtensions` names
 the PostgreSQL extensions to enable, and setup commands perform project migrations
