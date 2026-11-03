@@ -16,6 +16,7 @@ vi.mock('../lib/db.js', () => ({
   deleteMailMessagesOutsideFolders: vi.fn(),
   deleteMailMessagesReceivedBefore: vi.fn(),
   deleteMailMessagesSyncedBefore: vi.fn(),
+  loadMailMessageIdsSyncedSince: vi.fn(),
   getMailMessage: vi.fn(),
   insertMailAccount: vi.fn(),
   listMailMessages: vi.fn(),
@@ -110,6 +111,10 @@ function memoryStore() {
         (m) =>
           m.accountId === accountId && m.syncedAt < syncedAt && (folderId == null || m.folderId === folderId),
       ),
+    syncedSince: async (accountId, at) =>
+      ofAccount(accountId)
+        .filter((m) => m.syncedAt >= at)
+        .map((m) => m.id),
     keepFolders: async (accountId, folderIds) =>
       drop((m) => m.accountId === accountId && !folderIds.includes(m.folderId)),
     renameLabels: async (accountId, renames, changes) => {
@@ -699,6 +704,31 @@ describe('syncing', () => {
     expect(store.accounts.get(account.id).syncState).toEqual({ historyId: '11', labels: {} });
   });
 
+  it('starts a resumed first pass after it began when a restart sets the clock back', async () => {
+    const account = await connect();
+    await settled();
+    const passStart = clock + 10 * 60_000;
+    service.stop();
+    await store.updateAccount(account.id, {
+      syncState: { historyId: '10', labels: {}, firstPass: { startedAt: passStart, skipped: [] } },
+    });
+    mailbox.messages.c = { at: clock - 3 * DAY, unread: false };
+    service = createMailService({ store, request: gmail.request, sleep: async () => {}, now: () => clock });
+    await service.init();
+
+    await service.sync(account.id);
+    await settled();
+
+    expect(
+      store
+        .ofAccount(account.id)
+        .map((m) => m.id)
+        .sort(),
+    ).toEqual(['a', 'b', 'c']);
+    expect(store.ofAccount(account.id).every((m) => m.syncedAt > passStart)).toBe(true);
+    expect(store.accounts.get(account.id).syncState.firstPass).toBeUndefined();
+  });
+
   it('marks an account whose grant was revoked, and will not sync it until it is reconnected', async () => {
     const account = await connect();
     await settled();
@@ -780,7 +810,9 @@ describe('syncing', () => {
     expect(updated).toMatchObject({ syncDays: 90, label: 'Renamed', syncing: true });
     expect(store.accounts.get(account.id).syncState).toBeNull();
 
-    await expect(service.update(account.id, { syncDays: 0 })).rejects.toThrow(/1–365/);
+    await expect(service.update(account.id, { syncDays: 0 })).rejects.toThrow(/1–1095/);
+    await expect(service.update(account.id, { syncDays: 1096 })).rejects.toThrow(/1–1095/);
+    expect(await service.update(account.id, { syncDays: 1095 })).toMatchObject({ syncDays: 1095 });
     await expect(service.update(account.id, { enabled: 'yes' })).rejects.toThrow(/true or false/);
     await expect(service.update(999, {})).rejects.toMatchObject({ status: 404 });
   });

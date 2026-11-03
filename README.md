@@ -1174,12 +1174,15 @@ about a minute.
 
 Every enabled mailbox is synced every `MAIL_SYNC_MINUTES` (5 by default; `0`
 leaves it to `POST …/settings/mail/accounts/{id}/sync`). The server keeps the
-last `syncDays` days (30 by default, up to 365).
+last `syncDays` days (30 by default, up to 1,095: three years).
 
 - **Gmail** syncs everything except trash, spam and drafts, through its
-  history. A first pass takes the newest 2,000 messages in the window, paced
-  to Gmail's quota of 6,000 units a minute per user (a message read costs 20),
-  so it takes up to about eight minutes.
+  history. A first pass reads up to 2,000 messages of the window a sync,
+  newest first, paced to Gmail's quota of 6,000 units a minute per user (a
+  message read costs 20), so a chunk takes up to about eight minutes. The
+  syncs after it read the history first, so new mail keeps arriving, and then
+  the next chunk, until the whole window is in: about 15,000 messages an
+  hour.
 - **Outlook** syncs every folder except Deleted Items, Junk Email, Drafts,
   Outbox, search folders and their subfolders, through Graph's per-folder
   delta, at most four requests at a time. A folder's first pass takes at most
