@@ -1163,29 +1163,41 @@ api.post('/api/issues/close', async (req, res) => {
   }
 });
 
+// A failed board read: a spent GitHub allowance is a 429 that says when to
+// come back, so a client can tell "try again at 15:41" from a server fault.
+// Anything else stays a 502: a GraphQL error carries the 200 it arrived with,
+// and an expired GitHub token its 401, and neither is the client's own status.
+function boardReadFailed(res, e) {
+  if (e && e.rateLimited) {
+    const retryAt = Number(e.retryAt) || null;
+    if (retryAt) res.set('Retry-After', String(Math.max(1, Math.ceil((retryAt - Date.now()) / 1000))));
+    return res
+      .status(429)
+      .json({ error: e.message, retryAt: retryAt ? new Date(retryAt).toISOString() : null });
+  }
+  res.status(502).json({ error: e.message });
+}
+
 // The board's open issues a page at a time, past what /pulls listed.
 api.get('/api/issues/list', async (req, res) => {
+  const project = getProject(String(req.query.repo || ''));
+  if (!project) return res.status(404).json({ error: `Unknown project: ${req.query.repo || ''}` });
+  // Digits only, as ci.runs reads them: Number() alone takes 0x10, 1e1, " 10" and limit[]=5.
+  const whole = (key, fallback, min, max) => {
+    const raw = req.query[key];
+    if (raw === undefined || raw === '') return fallback;
+    const value = typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : NaN;
+    return Number.isSafeInteger(value) && value >= min && value <= max ? value : null;
+  };
+  const limit = whole('limit', 50, 1, 100);
+  const offset = whole('offset', 0, 0, Number.MAX_SAFE_INTEGER);
+  if (limit === null) return res.status(400).json({ error: 'limit must be a whole number from 1 to 100' });
+  if (offset === null) return res.status(400).json({ error: 'offset must be a whole number from 0 up' });
   try {
-    const project = getProject(String(req.query.repo || ''));
-    if (!project) throw Object.assign(new Error(`Unknown project: ${req.query.repo || ''}`), { status: 404 });
-    const whole = (key, fallback, min, max) => {
-      const raw = req.query[key];
-      if (raw === undefined || raw === '') return fallback;
-      const value = Number(raw);
-      if (!Number.isInteger(value) || value < min || value > max)
-        throw Object.assign(new Error(`${key} must be a whole number from ${min} to ${max}`), {
-          status: 400,
-        });
-      return value;
-    };
-    const limit = whole('limit', 50, 1, 100);
-    const offset = whole('offset', 0, 0, Number.MAX_SAFE_INTEGER);
-    // The whole project: a missing mirror is read through the board's cache, which keeps its label and author.
+    // The whole project: a missing mirror is populated by the board's first read.
     res.json(await projectIssues(project, { offset, limit }));
   } catch (e) {
-    if (e && e.rateLimited && Number(e.retryAt))
-      res.set('Retry-After', String(Math.max(1, Math.ceil((Number(e.retryAt) - Date.now()) / 1000))));
-    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+    boardReadFailed(res, e);
   }
 });
 
@@ -1675,18 +1687,7 @@ api.get('/api/dev/pulls', async (req, res) => {
   try {
     res.json(await projectPulls(project, { fresh: req.query.fresh === '1' }));
   } catch (e) {
-    // A spent GitHub allowance is a 429 that says when to come back, so a
-    // client can tell "try again at 15:41" from a server fault. Anything else
-    // stays a 502: a GraphQL error carries the 200 it arrived with, and that
-    // must not reach the client as a success.
-    if (e && e.rateLimited) {
-      const retryAt = Number(e.retryAt) || null;
-      if (retryAt) res.set('Retry-After', String(Math.max(1, Math.ceil((retryAt - Date.now()) / 1000))));
-      return res
-        .status(429)
-        .json({ error: e.message, retryAt: retryAt ? new Date(retryAt).toISOString() : null });
-    }
-    res.status(502).json({ error: e.message });
+    boardReadFailed(res, e);
   }
 });
 

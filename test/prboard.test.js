@@ -1812,6 +1812,26 @@ describe('projectIssues', () => {
     expect(gh.graphql).toHaveBeenCalled();
     expect(githubStore.saveBoard).toHaveBeenCalledWith(p.repo, expect.anything());
     expect(page).toMatchObject({ repo: p.repo, issues: [], total: 0, nextOffset: null });
+    expect(githubStore.readBoard).toHaveBeenCalledTimes(2);
+  });
+
+  it('says when the mirror itself stops short', async () => {
+    const cut = issues.slice(0, 100);
+    vi.mocked(githubStore.readBoard).mockResolvedValue({
+      pulls: [],
+      issues: cut,
+      issuesError: null,
+      issuesTruncated: true,
+      syncedAt,
+    });
+    expect(await projectIssues(project(), { offset: 100 })).toMatchObject({
+      issues: [],
+      total: 100,
+      nextOffset: null,
+      issuesTruncated: true,
+    });
+    vi.mocked(githubStore.readBoard).mockResolvedValue({ pulls: [], issues, issuesError: null, syncedAt });
+    expect((await projectIssues(project())).issuesTruncated).toBe(false);
   });
 });
 
