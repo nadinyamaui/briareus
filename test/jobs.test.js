@@ -45,11 +45,6 @@ const state = vi.hoisted(() => ({
   // Appended to every group key: what a rewritten model cache does to it.
   catalog: '',
   projects: [],
-  claimsServer: false,
-  eligibleServers: [],
-  dbWaiters: new Set(),
-  dbHolders: new Map(),
-  capacity: 3,
   // What initJobs loads: the only way to register a session here without spawning one.
   stored: [],
   appSettings: {},
@@ -122,7 +117,7 @@ vi.mock('../lib/config.js', () => ({
     dshBin: '',
     githubToken: 'tok',
     workspaceDir: state.workspaceDir,
-    dev: { maxSessions: 3, timeoutMin: 60, autoCompactTokens: 250000 },
+    dev: { autoCompactTokens: 250000 },
   }),
 }));
 
@@ -153,23 +148,13 @@ vi.mock('../lib/github.js', async (importOriginal) => ({
 }));
 
 vi.mock('../lib/dbpool.js', () => ({
-  acquireInstance: vi.fn(),
-  reclaimInstance: vi.fn(),
   stopDatabaseProcesses: vi.fn(async () => {}),
-  releaseInstance: vi.fn(),
   ensureSessionDatabase: vi.fn(),
   ensureProfileDatabase: vi.fn(),
   profileDbElsewhere: vi.fn(() => false),
   sessionDatabaseName: vi.fn(() => 'app'),
   dropSessionDatabase: vi.fn(),
-  instanceEnv: vi.fn((job) => (job.sessionDb ? { DB_DATABASE: job.sessionDb } : {})),
-  assertInstanceAccess: vi.fn(),
-  instanceAppPort: vi.fn(() => 8101),
-  sessionCapacity: () => state.capacity,
-  eligibleDbServers: vi.fn(() => state.eligibleServers),
-  waitingForInstance: (id) => state.dbWaiters.has(id),
-  claimHolder: (id) => state.dbHolders.get(id) || null,
-  projectClaimsServer: () => state.claimsServer,
+  sessionDbEnv: vi.fn((job) => (job.sessionDb ? { DB_DATABASE: job.sessionDb } : {})),
 }));
 
 vi.mock('../lib/providerstore.js', () => ({
@@ -257,20 +242,13 @@ import {
   deleteJob,
   failCodeReview,
   jobEventMaxSeqs,
-  loadJobs,
   loadJobEvents,
   saveJob,
   saveJobEvents,
   restartCodeReview,
 } from '../lib/db.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
-import {
-  acquireInstance,
-  reclaimInstance,
-  releaseInstance,
-  dropSessionDatabase,
-  assertInstanceAccess,
-} from '../lib/dbpool.js';
+import { ensureSessionDatabase, dropSessionDatabase } from '../lib/dbpool.js';
 import { latestTestVerdict } from '../lib/qa-verdict.js';
 import {} from '../lib/prtasks.js';
 import { jobUsageEstimates } from '../lib/usage.js';
@@ -302,10 +280,8 @@ import {
   createDevSession,
   agentGithubEnv,
   setOwnerGithub,
-  startDevServe,
   setSessionProjectFilter,
   stepProvider,
-  devSessionSlots,
   pullRequestHasOpenSession,
   dropQueuedMessage,
   cancelDevTurn,
@@ -413,11 +389,6 @@ beforeEach(() => {
   transferClaudeSession.mockReset();
   state.provider = { id: 1, label: 'Claude entry', binary: 'claude', active: true };
   state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '' }];
-  state.claimsServer = false;
-  state.capacity = 3;
-  state.eligibleServers = [];
-  state.dbWaiters = new Set();
-  state.dbHolders = new Map();
   setSessionProjectFilter(() => true);
   state.otherProviders = [];
   state.group = null;
@@ -816,231 +787,6 @@ describe('getJob', () => {
   });
 });
 
-describe('devSessionSlots', () => {
-  it('a project that claims no database server is never capped', () => {
-    expect(devSessionSlots('acme/shop')).toBe(Infinity);
-  });
-
-  it('a claiming project gets the pool capacity (no sessions are open here)', () => {
-    state.claimsServer = true;
-    state.capacity = 2;
-    expect(devSessionSlots('acme/shop')).toBe(2);
-  });
-});
-
-describe('database admission across owners', () => {
-  const ids = ['member-db-holder', 'member-db-waiter', 'other-db-start'];
-  beforeEach(async () => {
-    state.stored = ids.map((id) => ({
-      id,
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/shop',
-      providerId: 1,
-    }));
-    await initJobs();
-    state.claimsServer = true;
-    const holder = getJob(ids[0]);
-    Object.assign(holder, { status: 'idle', ownerId: 2, dbServerId: 1 });
-    Object.assign(getJob(ids[1]), { status: 'preparing', ownerId: 2 });
-    Object.assign(getJob(ids[2]), { ownerId: 3 });
-    // Include unrelated open records from other blocks in the global capacity.
-    state.capacity = 10000;
-    state.capacity -= devSessionSlots('acme/shop');
-  });
-  afterEach(() => {
-    for (const id of ids) getJob(id).status = 'closed';
-    acquireInstance.mockReset();
-    assertInstanceAccess.mockReset();
-  });
-
-  it.each(['idle', 'running'])('refuses a message to a %s session after DB access is revoked', (status) => {
-    const job = getJob(ids[0]);
-    job.status = status;
-    const events = [...job.events];
-    assertInstanceAccess.mockImplementationOnce(() => {
-      throw new Error('Database server is no longer shared');
-    });
-    expect(() => sendDevMessage(job.id, 'new work')).toThrow(/no longer shared/);
-    expect(job.events).toEqual(events);
-    expect(job.status).toBe(status);
-    expect(job.dbServerId).toBe(1);
-  });
-
-  it('refuses a preview on an open session after DB access is revoked', async () => {
-    const job = getJob(ids[0]);
-    job.workDir = '/unused/revoked-workspace';
-    assertInstanceAccess.mockImplementationOnce(() => {
-      throw new Error('Database server is no longer shared');
-    });
-    await expect(startDevServe(job.id)).rejects.toThrow(/no longer shared/);
-    expect(job.serveProc).toBeFalsy();
-    expect(job.dbServerId).toBe(1);
-  });
-
-  it('still counts the same owner’s pending sessions against admission', () => {
-    expect(() => createDevSession({ provider: 1, repo: 'acme/shop', prompt: 'another', ownerId: 2 })).toThrow(
-      /holding a database server/,
-    );
-  });
-
-  it('still counts another owner’s waiter once it has a claimed server', () => {
-    getJob(ids[1]).dbServerId = 2;
-    expect(() =>
-      createDevSession({ provider: 1, repo: 'acme/shop', prompt: 'Bob starts', ownerId: 3 }),
-    ).toThrow(/holding a database server/);
-  });
-
-  it.each(['new', 'reopen'])(
-    'another owner’s unallocated waiter cannot block a %s session',
-    async (action) => {
-      let rejectPreparation;
-      acquireInstance.mockImplementation(
-        () =>
-          new Promise((_, reject) => {
-            rejectPreparation = reject;
-          }),
-      );
-      let started;
-      try {
-        if (action === 'new') {
-          started = createDevSession({ provider: 1, repo: 'acme/shop', prompt: 'Bob starts', ownerId: 3 });
-        } else {
-          started = sendDevMessage(ids[2], 'Bob reopens');
-        }
-        await vi.waitFor(() => expect(rejectPreparation).toBeTypeOf('function'));
-        expect(getJob(started.id).status).toBe('preparing');
-      } finally {
-        if (started) {
-          getJob(started.id).status = 'closed';
-          rejectPreparation?.(new Error('closed'));
-          await closeDevSession(started.id);
-        }
-      }
-    },
-  );
-});
-
-describe('loop children waiting for a database slot', () => {
-  const ids = ['slot-review-a', 'slot-review-b', 'slot-holder'];
-  let blocked;
-  let children;
-  beforeEach(async () => {
-    blocked = [];
-    children = [];
-    state.claimsServer = true;
-    state.projects = [{ repo: 'acme/slots' }];
-    state.stored = ids.map((id, index) => ({
-      id,
-      kind: 'devchat',
-      status: 'closed',
-      repo: 'acme/slots',
-      providerId: 1,
-      model: 'claude-fable-5-1',
-      effort: 'high',
-      branch: 'task/slots',
-      startedOnPr: 900 + index,
-      prStatus: { number: 900 + index, state: 'open', headSha: 'slot-sha' },
-    }));
-    await initJobs();
-    for (const id of ids) {
-      const job = getJob(id);
-      job.status = 'idle';
-      job.prStatus.syncedAt = new Date().toISOString();
-    }
-    // Other blocks' open records share this module's registry and pool.
-    state.capacity = 10000;
-    state.capacity -= devSessionSlots('acme/slots');
-    acquireInstance.mockImplementation((job) => {
-      state.dbWaiters.add(job.id);
-      return new Promise((resolve, reject) => blocked.push({ id: job.id, reject })).finally(() =>
-        state.dbWaiters.delete(job.id),
-      );
-    });
-  });
-  afterEach(async () => {
-    setDraining(false);
-    // Retire the parents first, so cleanup cannot start a further round.
-    for (const id of ids) getJob(id).status = 'closed';
-    for (const child of children) if (child) await closeDevSession(child.id);
-    for (const { reject } of blocked) reject(new Error('closed'));
-    acquireInstance.mockReset();
-  });
-
-  const queueQa = async (id) => {
-    setQaLoop(id, true);
-    const parent = getJob(id);
-    const child = getJob(parent.qaLoop.sessionId);
-    children.push(child);
-    return child;
-  };
-
-  it('services existing waiters before a new session can claim added capacity', async () => {
-    const first = await queueQa(ids[0]);
-    const second = await queueQa(ids[1]);
-    state.capacity += 1;
-    expect(() => createDevSession({ provider: 1, repo: 'acme/slots', prompt: 'new worker' })).toThrow(
-      /holding a database server/,
-    );
-    await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([first.id]));
-    expect(first.status).toBe('preparing');
-    expect(second.status).toBe('queued');
-    state.capacity += 2;
-    const newcomer = createDevSession({ provider: 1, repo: 'acme/slots', prompt: 'new worker' });
-    children.push(getJob(newcomer.id));
-    expect(second.databaseSlotQueuedAt).toBeNull();
-    expect(second.status).toBe('preparing');
-    await vi.waitFor(() =>
-      expect(blocked.map((j) => j.id).sort()).toEqual([first.id, second.id, newcomer.id].sort()),
-    );
-  });
-
-  it.each(['explicit', 'message'])(
-    'services existing waiters before %s reopening can claim added capacity',
-    async (method) => {
-      const holder = getJob('slot-holder');
-      holder.status = 'closed';
-      state.capacity -= 1;
-      const first = await queueQa(ids[0]);
-      const reopen = () =>
-        method === 'explicit' ? reopenDevSession(holder.id) : sendDevMessage(holder.id, 'continue');
-
-      state.capacity += 1;
-      expect(reopen).toThrow(/holding a database server/);
-      await vi.waitFor(() => expect(blocked.map((j) => j.id)).toEqual([first.id]));
-      expect(holder.status).toBe('closed');
-
-      state.capacity += 1;
-      reopen();
-      await vi.waitFor(() => expect(blocked.map((j) => j.id).sort()).toEqual([first.id, holder.id].sort()));
-    },
-  );
-
-  it('starts accepted loop children during maintenance drain', async () => {
-    const child = await queueQa(ids[0]);
-    setDraining(true);
-    expect(maintenanceState(devSessionRecords()).ready).toBe(false);
-    await closeDevSession('slot-holder');
-    expect(blocked.map((j) => j.id)).toEqual([child.id]);
-    expect(child.status).toBe('preparing');
-  });
-
-  it('does not start queued loop children during shutdown', async () => {
-    const child = await queueQa(ids[0]);
-    await stopAllJobProcesses();
-    await closeDevSession('slot-holder');
-    expect(blocked).toEqual([]);
-    expect(child.status).toBe('queued');
-  });
-
-  it('does not start queued work after its parent closes', async () => {
-    const child = await queueQa(ids[0]);
-    await closeDevSession(ids[0]);
-    await vi.waitFor(() => expect(child.status).toBe('closed'));
-    expect(blocked).toEqual([]);
-  });
-});
-
 describe('pullRequestHasOpenSession', () => {
   const openIds = ['bs-number', 'bs-synced', 'bs-borrowed', 'bs-own-branch', 'bs-preparing'];
   // Own repo and PR numbers, so the rows restored here match nothing the other blocks sync.
@@ -1227,7 +973,7 @@ describe('createDevSession: the validation gauntlet', () => {
     const bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/codex', source: 'test' });
     state.provider = { ...state.provider, binary: 'codex' };
     failCodeReview.mockClear();
-    acquireInstance.mockRejectedValueOnce(new Error('fixture: no database server'));
+    ensureSessionDatabase.mockRejectedValueOnce(new Error('fixture: no database'));
     const session = createDevSession({
       ...base,
       activity: 'review',
@@ -1237,7 +983,7 @@ describe('createDevSession: the validation gauntlet', () => {
     });
     const job = getJob(session.id);
     await vi.waitFor(() => expect(job.status).toBe('failed'));
-    expect(job.error).toMatch(/no database server/);
+    expect(job.error).toMatch(/no database/);
     expect(failCodeReview).toHaveBeenCalledWith(session.id);
     bin.mockRestore();
   });
@@ -1341,12 +1087,6 @@ describe('createDevSession: the validation gauntlet', () => {
     expect(() => createDevSession({ ...base, local: true })).toThrow(/no local checkout configured/);
     state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '/tmp/definitely-not-a-checkout' }];
     expect(() => createDevSession({ ...base, local: true })).toThrow(/is not a git checkout/);
-  });
-
-  it('a full database pool refuses the session before creating anything', () => {
-    state.claimsServer = true;
-    state.capacity = 0;
-    expect(() => createDevSession(base)).toThrow(/holding a database server; close one first/);
   });
 
   it('an orchestrator only chats: no review, QA, local mode, loops, autoClose or branch', () => {
@@ -3201,29 +2941,6 @@ describe('spawnWorkerSession', () => {
     }
   });
 
-  it('each live message restarts the time limit', async () => {
-    const job = getJob('bg-claude');
-    job.status = 'idle';
-    job.dbServerId = 7;
-    const { children, settled, restore } = fakeClaude();
-    try {
-      sendDevMessage(job.id, 'Start');
-      const first = job.timeout;
-      expect(first).toBeTruthy();
-      sendDevMessage(job.id, 'More');
-      expect(job.timeout).toBeTruthy();
-      expect(job.timeout).not.toBe(first);
-      const done = settled(job);
-      children[0].emitLines(replay('Start'), replay('More'), result('ok'));
-      await vi.waitFor(() => expect(children[0].ended).toBe(true));
-      children[0].emit('close', 0);
-      await done;
-    } finally {
-      delete job.dbServerId;
-      restore();
-    }
-  });
-
   it('messages queued before a claude turn starts go into it at once', async () => {
     const job = getJob('bg-claude');
     job.status = 'idle';
@@ -4361,46 +4078,6 @@ describe('spawnWorkerSession', () => {
     }
   });
 
-  it('a timed-out claude turn drops what it never answered and keeps what was queued after', async () => {
-    const job = getJob('bg-claude');
-    job.status = 'idle';
-    job.dbServerId = 7;
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
-    const { children, restore } = fakeClaude();
-    try {
-      sendDevMessage(job.id, 'Migrate the schema');
-      children[0].emitLines(replay('Migrate the schema'));
-      sendDevMessage(job.id, 'Also rename the table');
-      await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
-      expect(job.events.some((e) => e.kind === 'info' && /Timeout after 60 min/.test(e.text))).toBe(true);
-      // Sent once the limit took the input away: an ordinary queued message.
-      expect(sendDevMessage(job.id, 'Then fix the lint').queued).toEqual([{ text: 'Then fix the lint' }]);
-      const idle = new Promise((resolve) => {
-        const onJob = (session) => {
-          if (session.id !== job.id || session.status !== 'idle') return;
-          bus.off('job', onJob);
-          resolve();
-        };
-        bus.on('job', onJob);
-      });
-      children[0].emit('close', null);
-      await vi.advanceTimersByTimeAsync(2000);
-      await idle;
-      // The dead turn's input is not left to run unannounced on a later reopen.
-      expect(publicJob(job).queued).toEqual([{ text: 'Then fix the lint' }]);
-      expect(job.events.filter((e) => e.kind === 'info').at(-1).text).toMatch(
-        /never answered 1 message\(s\).*"Also rename the table"/,
-      );
-      expect(children).toHaveLength(1);
-    } finally {
-      dropQueuedMessage(job.id, 0);
-      job.error = null;
-      delete job.dbServerId;
-      vi.useRealTimers();
-      restore();
-    }
-  });
-
   it('a session stored with only a provider slug still takes messages live', async () => {
     const job = getJob('bg-claude');
     job.status = 'idle';
@@ -4516,13 +4193,13 @@ describe('spawnWorkerSession: project targets and tooling fixes', () => {
     state.projects.push({ id: 12, repo: 'acme/disabled', enabled: false });
     const allowed = vi.fn((ownership, project) => ownership.ownerId === 2 && project.id === 10);
     setSessionProjectFilter(allowed);
-    acquireInstance.mockClear();
+    ensureSessionDatabase.mockClear();
     expect(eligibleWorkerProjects(parent)).toEqual([
       { id: 10, name: 'Shop', repo: 'acme/shop', enabled: true },
     ]);
     expect(allowed).toHaveBeenCalledWith({ ownerId: 2 }, dashboard);
     expect(allowed).not.toHaveBeenCalledWith(expect.anything(), state.projects[2]);
-    expect(acquireInstance).not.toHaveBeenCalled();
+    expect(ensureSessionDatabase).not.toHaveBeenCalled();
     allowed.mockReturnValue(false);
     expect(eligibleWorkerProjects(parent)).toEqual([]);
   });
@@ -4567,12 +4244,12 @@ describe('spawnWorkerSession: project targets and tooling fixes', () => {
       state.projects[1] = { ...dashboard, enabled: false };
       const parent = getJob('tool-orch');
       const before = workerSessionsFor(parent).length;
-      acquireInstance.mockClear();
+      ensureSessionDatabase.mockClear();
       expect(() => spawnWorkerSession(parent, { prompt: 'Companion', repo })).toThrow(
         /Unknown or disabled project/,
       );
       expect(workerSessionsFor(parent)).toHaveLength(before);
-      expect(acquireInstance).not.toHaveBeenCalled();
+      expect(ensureSessionDatabase).not.toHaveBeenCalled();
     },
   );
 
@@ -4588,13 +4265,13 @@ describe('spawnWorkerSession: project targets and tooling fixes', () => {
     const allowed = vi.fn((_job, project) => project.repo === parent.repo);
     setSessionProjectFilter(allowed);
     const before = workerSessionsFor(parent).length;
-    acquireInstance.mockClear();
+    ensureSessionDatabase.mockClear();
     expect(() => spawnWorkerSession(parent, { prompt: 'Companion', repo: dashboard.repo })).toThrow(
       /Project unavailable/,
     );
     expect(allowed).toHaveBeenCalledWith({ ownerId: 2 }, dashboard);
     expect(workerSessionsFor(parent)).toHaveLength(before);
-    expect(acquireInstance).not.toHaveBeenCalled();
+    expect(ensureSessionDatabase).not.toHaveBeenCalled();
   });
 
   it('refuses an explicit repo on tooling fixes instead of redirecting them', () => {
@@ -4669,7 +4346,7 @@ describe('spawnWorkerSession: project targets and tooling fixes', () => {
       const allowed = vi.fn((job, project) => job.ownerId !== 2 || project.repo !== dashboard.repo);
       setSessionProjectFilter(allowed);
       spawn.mockClear();
-      acquireInstance.mockClear();
+      ensureSessionDatabase.mockClear();
       const attempt = () =>
         action === 'message'
           ? sendDevMessage(worker.id, 'Continue fixing the dashboard')
@@ -4677,13 +4354,12 @@ describe('spawnWorkerSession: project targets and tooling fixes', () => {
       if (action === 'recovery') {
         expect(attempt).not.toThrow();
         await vi.waitFor(() => expect(worker.restartPending).toBe(false));
-        expect(releaseInstance).toHaveBeenCalledWith(worker);
       } else expect(attempt).toThrow(/Project unavailable/);
       expect(allowed).toHaveBeenCalledWith(expect.objectContaining({ ownerId: 2 }), dashboard);
       expect(worker.status).toBe('closed');
       expect(worker.events).toEqual(events);
       expect(worker.workDir).toBeFalsy();
-      expect(acquireInstance).not.toHaveBeenCalled();
+      expect(ensureSessionDatabase).not.toHaveBeenCalled();
       expect(spawn).not.toHaveBeenCalled();
     },
   );
@@ -4957,7 +4633,6 @@ describe('webhook deliveries', () => {
       row('hk-orch', { orchestrator: true, costUsd: 5, webhook: armed() }),
       row('hk-brief', { chats: undefined, webhook: armed() }),
       row('hk-closed', { webhook: armed() }),
-      row('hk-noslot', { webhook: armed() }),
       row('hk-failed', { status: 'failed', webhook: armed() }),
       row('hk-worker', { parentId: 'hk-orch' }),
       row('hk-review', { autoClose: true, reviewBranch: 'feature' }),
@@ -5026,8 +4701,6 @@ describe('webhook deliveries', () => {
     if (cli) cli.restore();
     cli = null;
     setDraining(false);
-    state.claimsServer = false;
-    state.capacity = 3;
   });
 
   const users = (job) => job.events.filter((e) => e.kind === 'user');
@@ -5493,25 +5166,11 @@ describe('webhook deliveries', () => {
     await cli.finish(job);
   });
 
-  it('wakes a closed session, and holds nothing for one that cannot be woken', () => {
+  it('wakes a closed session', () => {
     const woken = getJob('hk-closed');
     expect(deliverToSession('hk-closed', { text: 'wake up' }).status).toBe('running');
     expect(woken.status).not.toBe('closed');
     expect(users(woken)).toHaveLength(1);
-
-    state.claimsServer = true;
-    state.capacity = 0;
-    const stuck = getJob('hk-noslot');
-    expect(refused(() => deliverToSession('hk-noslot', { text: 'wake up', id: 'n1' }))).toMatchObject({
-      status: 409,
-      message: expect.stringMatching(/holding a database server/),
-    });
-    expect(stuck.status).toBe('closed');
-    expect(stuck.pendingDeliveries).toHaveLength(0);
-    expect(users(stuck)).toHaveLength(0);
-    expect(stuck.unattendedTurns || 0).toBe(0);
-    // Refused, so its sender's retry is no duplicate.
-    expect(stuck.webhook.seen || []).toEqual([]);
   });
 
   it('is refused while the dashboard drains for a restart, and by a session that failed', () => {
@@ -5871,10 +5530,10 @@ describe('webhook deliveries', () => {
       const rule = setSessionMailWake(job.id, { rules: [{ account: 7 }] }).rules[0];
       const workDir = job.workDir;
       const { promise, resolve } = Promise.withResolvers();
-      releaseInstance.mockReturnValueOnce(promise);
+      dropSessionDatabase.mockReturnValueOnce(promise);
       const closing = closeDevSession(job.id);
       try {
-        await vi.waitFor(() => expect(releaseInstance).toHaveBeenCalledWith(job));
+        await vi.waitFor(() => expect(dropSessionDatabase).toHaveBeenCalledWith(job, expect.any(Function)));
         expect(job.closing).toBe(true);
         expect(job.status).toBe('idle');
         await mailReceivedDurably(account, email('during-close', rule.since));
@@ -7033,7 +6692,6 @@ describe('closed-only worker deletion', () => {
     { closing: true },
     { closePending: true },
     { restartPending: true },
-    { dbServerId: 1 },
     { proc: {} },
     { serveProc: {} },
     { qaLoop: { running: true } },
@@ -7723,11 +7381,8 @@ describe('the QA loop: reporting a finished QA run', () => {
       {
         ...parentRow('qa-restart-2', 'qa-restart-run-2'),
         // idle, not closed: restoreFromDb only marks interrupted a session still holding its
-        // clone/database claim, the restart this must survive.
+        // clone, the restart this must survive.
         status: 'idle',
-        dbServerId: 9,
-        dbHost: 'db-host',
-        dbPort: 3306,
         qaLoop: {
           running: false,
           sessionId: null,
@@ -7748,7 +7403,6 @@ describe('the QA loop: reporting a finished QA run', () => {
     const parent = getJob('qa-restart-2');
     // The real restart transition (restoreFromDb -> markInterrupted), not a hand-set status.
     expect(parent.status).toBe('interrupted');
-    expect(parent.dbServerId).toBeNull();
     expect(parent.error).toBeTruthy();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(parent.qaLoop).toMatchObject({ done: true, failedScenarios: 0 });
@@ -11699,7 +11353,6 @@ describe('Codex turn usage', () => {
       jobUsageEstimates.mockImplementationOnce(async () => ledger);
       deleteJob.mockClear();
       dropSessionDatabase.mockClear();
-      releaseInstance.mockClear();
       try {
         if (mode === 'manual') pending = compactDevSession(job.id);
         else {
@@ -11724,7 +11377,6 @@ describe('Codex turn usage', () => {
         const duplicate = closeDevSession(job.id);
         await new Promise((resolve) => setImmediate(resolve));
         expect(dropSessionDatabase).not.toHaveBeenCalled();
-        expect(releaseInstance).not.toHaveBeenCalled();
         expect(deleteJob).not.toHaveBeenCalled();
         scan.end(
           `${JSON.stringify({
@@ -11744,7 +11396,6 @@ describe('Codex turn usage', () => {
         expect(recordTurnUsage.mock.lastCall[1]).toMatchObject({ longInputTokens: 300000 });
         finishAccounting();
         await Promise.all([closing, duplicate, pending]);
-        expect(releaseInstance).toHaveBeenCalledOnce();
         // Close drops with logging; deletion makes its existing final cleanup call.
         expect(dropSessionDatabase.mock.calls).toEqual([[job, expect.any(Function)], [job]]);
         expect(deleteJob).toHaveBeenCalledOnce();
@@ -14510,7 +14161,6 @@ describe('automatic recovery after a server restart', () => {
     state.otherProviders = [];
     state.workspaceDir = '/tmp/nowhere';
     fs.rmSync(root, { recursive: true, force: true });
-    reclaimInstance.mockReset();
   });
   const finish = (child) => {
     if (child.complete) child.complete({ input_tokens: 1, output_tokens: 1 });
@@ -14674,11 +14324,9 @@ describe('automatic recovery after a server restart', () => {
     const stale = row({ status: 'closed', workDir: checkout, orchestrator: false });
     state.stored = [stale];
     await initJobs();
-    const releases = releaseInstance.mock.calls.length;
     await deleteJobById(stale.id, { closedOnly: true });
     expect(getJob(stale.id)).toBeNull();
     expect(holdsWorkDir(first, checkout)).toBe(true);
-    expect(releaseInstance.mock.calls).toHaveLength(releases);
     expect(fs.readFileSync(path.join(checkout, 'unfinished'), 'utf8')).toBe('first worker work');
     expect(git('-C', checkout, 'branch', '--show-current')).toBe('first');
     // A corrupted status must not turn a live workspace holder into a
@@ -14715,7 +14363,7 @@ describe('automatic recovery after a server restart', () => {
     const parent = row({ id: 'curl-task-parent', status: 'closed', taskBrief });
     state.stored = [parent];
     await initJobs();
-    acquireInstance.mockRejectedValueOnce(new Error('fixture: allocation observed'));
+    ensureSessionDatabase.mockRejectedValueOnce(new Error('fixture: allocation observed'));
     const publicChild = createDevSession({
       provider: 2,
       repo: 'acme/restart',
@@ -14864,37 +14512,31 @@ describe('automatic recovery after a server restart', () => {
       status: 'idle',
       ownerId: 2,
       orchestrator: false,
-      dbServerId: 7,
       workDir: checkout,
       recoveryTurn: null,
     });
     const allowed = row({ status: 'idle', recoveryTurn: null });
     state.stored = [denied, allowed];
     setSessionProjectFilter((job) => job.ownerId !== 2);
-    releaseInstance.mockClear();
-    acquireInstance.mockClear();
+    ensureSessionDatabase.mockClear();
     await initJobs({ deferPolling: true });
-    expect(denied).toMatchObject({ status: 'interrupted', restartPending: true, restartDbServerId: 7 });
+    expect(denied).toMatchObject({ status: 'interrupted', restartPending: true });
     expect(() => resumeRestartedSessions()).not.toThrow();
     await vi.waitFor(() => {
       expect(denied).toMatchObject({
         status: 'failed',
         error: 'Project unavailable for the user who owns this session',
         restartPending: false,
-        restartDbServerId: null,
       });
       expect(allowed.status).toBe('idle');
     });
-    expect(reclaimInstance).toHaveBeenCalledWith(denied, 7);
-    expect(releaseInstance).toHaveBeenCalledWith(denied);
-    expect(acquireInstance).not.toHaveBeenCalled();
+    expect(ensureSessionDatabase).not.toHaveBeenCalled();
     expect(children).toHaveLength(0);
     expect(fs.readFileSync(path.join(checkout, 'unfinished.txt'), 'utf8')).toBe('keep this work');
     await vi.waitFor(() =>
       expect(saveJob.mock.calls.findLast(([j]) => j.id === denied.id)?.[0]).toMatchObject({
         status: 'failed',
         restartPending: false,
-        restartDbServerId: null,
       }),
     );
     await initJobs({ deferPolling: true });
@@ -14992,11 +14634,6 @@ describe('automatic recovery after a server restart', () => {
         parent.qaLoop.sessionId = null;
         parent.qaLoop.staleSessionId = child.id;
       } else if (tracking === 'replaced') parent.qaLoop.sessionId = 'replacement-qa';
-      let release;
-      const releases = releaseInstance.mock.calls.length;
-      if (tracking === 'current' || tracking === 'stale') {
-        releaseInstance.mockImplementationOnce(() => new Promise((resolve) => (release = resolve)));
-      }
       try {
         sendDevMessage(child.id, 'The operator answer');
         finish(children[0]);
@@ -15012,21 +14649,8 @@ describe('automatic recovery after a server restart', () => {
         }
         children[1].emit('close', 1);
         if (tracking === 'current' || tracking === 'stale') {
-          await vi.waitFor(() => expect(release).toBeTypeOf('function'));
-          expect(child.status).toBe('failed');
-          expect(parent.qaLoop.running).toBe(true);
-          expect(parent.qaLoop.failure).toBeUndefined();
-          expect(child.workDir).toBeTruthy();
-          expect(() => reopenDevSession(child.id)).toThrow(/finish.*cleanup/);
-          expect(() => sendDevMessage(child.id, 'Retry')).toThrow(/finish.*cleanup/);
-          // A parent settling during cleanup must not retire this child early.
-          sendDevMessage(parent.id, 'Report progress');
-          finish(children[2]);
-          await vi.waitFor(() => expect(parent.status).toBe('idle'));
-          expect(parent.qaLoop.running).toBe(true);
-          release();
           await vi.waitFor(() => expect(parent.qaLoop.running).toBe(false));
-          expect(releaseInstance.mock.calls.slice(releases)).toEqual([[child]]);
+          expect(child.status).toBe('failed');
           expect(child.qaLoopDone).not.toBe(true);
           if (tracking === 'current') {
             expect(parent.qaLoop.failure).toMatchObject({ kind: 'failed', reason: child.error });
@@ -15034,7 +14658,7 @@ describe('automatic recovery after a server restart', () => {
         } else {
           await vi.waitFor(() => expect(child.status).toBe('idle'));
           await new Promise((resolve) => setImmediate(resolve));
-          expect(releaseInstance.mock.calls).toHaveLength(releases);
+          expect(child.workDir).toBeTruthy();
           expect(parent.qaLoop.running).toBe(true);
           expect(parent.qaLoop.failure).toBeUndefined();
           if (tracking === 'asking') {
@@ -15043,30 +14667,23 @@ describe('automatic recovery after a server restart', () => {
           } else expect(parent.qaLoop.sessionId).toBe('replacement-qa');
         }
       } finally {
-        release?.();
         await new Promise((resolve) => setImmediate(resolve));
       }
     },
   );
 
-  it.each([
-    ['preparing', 'release'],
-    ['running', 'drop'],
-  ])('recovers explicit Close during %s resource cleanup', async (status, cleanupStep) => {
+  it.each(['preparing', 'running'])('recovers explicit Close during %s resource cleanup', async (status) => {
     const saved = row({
       status,
-      dbServerId: 7,
       recoveryQueue: [{ prompt: 'Queued replacement', shown: 'Queued replacement', files: [] }],
     });
     state.stored = [saved];
     await initJobs();
     // The checkpoint now represents an open session on the current server.
     saved.status = status;
-    saved.dbServerId = 7;
     saved.restartPending = false;
-    const cleanup = cleanupStep === 'release' ? releaseInstance : dropSessionDatabase;
     let allowCleanup;
-    cleanup.mockImplementationOnce(
+    dropSessionDatabase.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
           allowCleanup = resolve;
@@ -15089,31 +14706,27 @@ describe('automatic recovery after a server restart', () => {
     }
     state.stored = [snapshot];
     await initJobs();
-    const acquiresBefore = acquireInstance.mock.calls.length;
+    const acquiresBefore = ensureSessionDatabase.mock.calls.length;
     expect(resumeRestartedSessions()).toBe(1);
     await vi.waitFor(() => expect(snapshot.status).toBe('closed'));
-    expect(reclaimInstance).toHaveBeenCalledWith(snapshot, 7);
-    expect(acquireInstance.mock.calls).toHaveLength(acquiresBefore);
+    expect(ensureSessionDatabase.mock.calls).toHaveLength(acquiresBefore);
     expect(children).toHaveLength(0);
     expect(snapshot.closePending).toBe(false);
     expect(snapshot.restartPending).toBe(false);
     expect(publicJob(snapshot).queued).toBeUndefined();
   });
 
-  it.each([7, null])('finishes Close after a second restart (remaining database: %s)', async (dbServerId) => {
+  it('finishes Close after a second restart', async () => {
     const saved = row({
       status: 'interrupted',
       interruptedFrom: 'preparing',
       closePending: true,
       restartPending: false,
-      restartDbServerId: null,
-      dbServerId,
     });
     state.stored = [saved];
     await initJobs();
     expect(resumeRestartedSessions()).toBe(1);
     await vi.waitFor(() => expect(saved.status).toBe('closed'));
-    expect(reclaimInstance).toHaveBeenCalledWith(saved, dbServerId);
     expect(children).toHaveLength(0);
     expect(saved.closePending).toBe(false);
   });
@@ -15601,7 +15214,6 @@ describe('automatic recovery after a server restart', () => {
       finish(children[0]);
       await vi.waitFor(() => expect(worker.status).toBe('idle'));
       expect(worker.awaitingAnswer).toBe(true);
-      const releases = releaseInstance.mock.calls.length;
       sendDevMessage(worker.id, 'Keep the new implementation');
       await vi.waitFor(() => expect(children).toHaveLength(2));
       if (outcome === 'question') {
@@ -15612,11 +15224,9 @@ describe('automatic recovery after a server restart', () => {
       finish(children[1]);
       await vi.waitFor(() => expect(worker.status).toBe(outcome === 'success' ? 'closed' : 'idle'));
       if (outcome === 'success') {
-        expect(releaseInstance.mock.calls.slice(releases)).toEqual([[worker]]);
         expect(dropSessionDatabase).toHaveBeenCalledWith(worker, expect.any(Function));
       } else {
         expect(worker.workDir).toBeTruthy();
-        expect(releaseInstance.mock.calls).toHaveLength(releases);
         expect(outcome === 'question' ? worker.awaitingAnswer : worker.turnCanceled).toBe(true);
       }
     },
@@ -15709,7 +15319,6 @@ describe('automatic recovery after a server restart', () => {
       status: 'interrupted',
       interruptedFrom: 'running',
       restartPending: true,
-      restartDbServerId: 7,
     });
     state.stored = [saved];
     await initJobs();
@@ -15717,81 +15326,6 @@ describe('automatic recovery after a server restart', () => {
     await vi.waitFor(() => expect(children).toHaveLength(1));
     finish(children[0]);
     await vi.waitFor(() => expect(saved.status).toBe('idle'));
-  });
-
-  it('reclaims an older owner beyond 2000 rows before allocating a new database', async () => {
-    const checkout = path.join(root, 'checkout');
-    fs.mkdirSync(checkout);
-    spawnSync('git', ['-C', checkout, 'init', '-b', 'feature'], { stdio: 'ignore' });
-    spawnSync(
-      'git',
-      [
-        '-C',
-        checkout,
-        '-c',
-        'user.name=Test',
-        '-c',
-        'user.email=test@example.com',
-        'commit',
-        '--allow-empty',
-        '-m',
-        'Initial',
-      ],
-      { stdio: 'ignore' },
-    );
-    spawnSync('git', ['-C', checkout, 'remote', 'add', 'origin', checkout], { stdio: 'ignore' });
-    const newer = row({ orchestrator: false, workDir: checkout, branch: 'feature', workspacePrepared: true });
-    const owner = row({ status: 'idle', dbServerId: 7 });
-    state.stored = [newer, ...Array.from({ length: 1999 }, () => row({ status: 'closed' })), owner];
-    loadJobs.mockImplementationOnce(async (limit) =>
-      limit == null ? state.stored : state.stored.slice(0, limit),
-    );
-    const claims = new Map();
-    const data = new Map([
-      [7, 'unfinished session data'],
-      [8, 'seed'],
-    ]);
-    reclaimInstance.mockImplementation((job, serverId) => {
-      if (serverId != null) {
-        claims.set(serverId, job.id);
-        job.dbServerId = serverId;
-      }
-    });
-    acquireInstance.mockImplementation(async (job) => {
-      if (job.dbServerId != null) return job.dbServerId;
-      const free = [7, 8].find((id) => !claims.has(id));
-      claims.set(free, job.id);
-      data.set(free, 'restored seed');
-      job.dbServerId = free;
-      return free;
-    });
-    try {
-      await initJobs();
-      expect(resumeRestartedSessions()).toBe(2);
-      await vi.waitFor(() => expect(children).toHaveLength(1));
-      expect(claims.get(7)).toBe(owner.id);
-      expect(newer.dbServerId).toBe(8);
-      expect(data.get(7)).toBe('unfinished session data');
-      finish(children[0]);
-      await vi.waitFor(() => expect(newer.status).toBe('idle'));
-    } finally {
-      acquireInstance.mockReset();
-    }
-  });
-
-  it('reports an unavailable original database without blocking other sessions', async () => {
-    const failed = row({ dbServerId: 7 });
-    const running = row();
-    reclaimInstance.mockImplementation((job) => {
-      if (job.id === failed.id) throw new Error('Previous database server is unavailable');
-    });
-    state.stored = [failed, running];
-    await initJobs();
-    expect(resumeRestartedSessions()).toBe(1);
-    expect(failed).toMatchObject({ status: 'failed', error: 'Previous database server is unavailable' });
-    await vi.waitFor(() => expect(children).toHaveLength(1));
-    finish(children[0]);
-    await vi.waitFor(() => expect(running.status).toBe('idle'));
   });
 
   it('holds background deliveries until boot recovery has reclaimed the workspace', async () => {

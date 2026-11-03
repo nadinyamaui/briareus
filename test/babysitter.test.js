@@ -55,7 +55,6 @@ function sitter({ projects = [project()], pulls = [pr()], stored = {}, ...over }
     projects: () => projects,
     pulls: async () => ({ pulls }),
     hasSession: () => false,
-    slots: () => Infinity,
     start,
     load: async () => stored,
     save: async (v) => saved.push(JSON.parse(JSON.stringify(v))),
@@ -197,7 +196,6 @@ describe('PR errands', () => {
     { projects: [project({ babysitPrs: false })] },
     { projects: [project({ actionProviderId: null })] },
     { hasSession: () => true },
-    { slots: () => 0 },
   ])('does not start when unavailable', async (extra) => {
     const { b, start } = sitter({ pulls: [pr({ checks: 'failure' })], ...extra });
     await b.tick();

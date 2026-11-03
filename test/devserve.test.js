@@ -70,7 +70,7 @@ vi.mock('../lib/config.js', () => ({
     opencodeBin: '',
     githubToken: 'tok',
     workspaceDir: path.join(os.tmpdir(), 'briareus-devserve-test'),
-    dev: { maxSessions: 3, timeoutMin: 60 },
+    dev: {},
   }),
   parseEnvFile: () => ({}),
 }));
@@ -92,18 +92,12 @@ vi.mock('../lib/github.js', () => ({
 }));
 
 vi.mock('../lib/dbpool.js', () => ({
-  acquireInstance: vi.fn(),
-  releaseInstance: vi.fn(async () => {}),
   ensureSessionDatabase: vi.fn(),
   ensureProfileDatabase: vi.fn(async () => true),
   profileDbElsewhere: vi.fn(() => []),
   sessionDatabaseName: () => state.database,
   dropSessionDatabase: vi.fn(async () => false),
-  instanceEnv: vi.fn(() => ({})),
-  assertInstanceAccess: vi.fn(),
-  instanceAppPort: vi.fn(() => 8101),
-  sessionCapacity: () => 3,
-  projectClaimsServer: () => false,
+  sessionDbEnv: vi.fn(() => ({})),
 }));
 
 vi.mock('../lib/providerstore.js', () => ({
@@ -248,7 +242,7 @@ describe('▶ Run: the serial queue', () => {
     const [a, b] = await Promise.all([startDevServe(job.id), startDevServe(job.id)]);
 
     expect(spawn).toHaveBeenCalledTimes(1);
-    expect(a).toEqual({ url: 'http://127.0.0.1:8101', profile: 'projects' });
+    expect(a).toEqual({ url: 'http://127.0.0.1:8100', profile: 'projects' });
     expect(b).toEqual(a);
     expect(job.serveProc).toBe(state.procs[0]);
   });
@@ -278,14 +272,14 @@ describe('▶ Run: the serial queue', () => {
     const plain = startDevServe(job.id);
     const switched = await startDevServe(job.id, { profile: 'crm' });
 
-    expect(switched).toEqual({ url: 'http://127.0.0.1:8101', profile: 'crm' });
+    expect(switched).toEqual({ url: 'http://127.0.0.1:8100', profile: 'crm' });
     expect(spawn).toHaveBeenCalledTimes(2);
     expect(state.procs[0].exitCode).not.toBeNull();
     held.resolve(null);
-    expect(await plain).toEqual({ url: 'http://127.0.0.1:8101', profile: 'projects' });
+    expect(await plain).toEqual({ url: 'http://127.0.0.1:8100', profile: 'projects' });
     // The stopped server's late links do not land on the session.
     await tick();
-    expect(job.serveLinks).toEqual([{ tenant: null, url: 'http://127.0.0.1:8101' }]);
+    expect(job.serveLinks).toEqual([{ tenant: null, url: 'http://127.0.0.1:8100' }]);
   });
 });
 
@@ -297,10 +291,10 @@ describe('▶ Run: switching profile', () => {
 
     const res = await startDevServe(job.id, { profile: 'crm' });
 
-    expect(res).toEqual({ url: 'http://127.0.0.1:8101', profile: 'crm' });
+    expect(res).toEqual({ url: 'http://127.0.0.1:8100', profile: 'crm' });
     expect(old.exitCode).not.toBeNull();
     expect(job.serveProc).toBe(state.procs[1]);
-    expect(state.procs[1].command).toBe('php -S 127.0.0.1:8101');
+    expect(state.procs[1].command).toBe('php -S 127.0.0.1:8100');
     expect(state.procs[1].env.DB_DATABASE).toBe('shop_crm');
     expect(ensureProfileDatabase).toHaveBeenCalledWith(job, 'shop_crm', expect.any(Function));
   });
@@ -335,7 +329,7 @@ describe('▶ Run: switching profile', () => {
     const job = session();
 
     await expect(startDevServe(job.id)).rejects.toThrow(
-      /tenant a{30} makes the hostname a{30}--p{27}-8101\.example\.com, whose first label is longer than the 63 characters/,
+      /tenant a{30} makes the hostname a{30}--p{27}-8100\.example\.com, whose first label is longer than the 63 characters/,
     );
     expect(spawn).not.toHaveBeenCalled();
 
@@ -407,7 +401,7 @@ describe('▶ Run: a running app whose settings changed', () => {
     const res = await startDevServe(job.id);
 
     expect(spawn).toHaveBeenCalledTimes(1);
-    expect(res).toEqual({ url: 'http://127.0.0.1:8101', profile: 'projects' });
+    expect(res).toEqual({ url: 'http://127.0.0.1:8100', profile: 'projects' });
   });
 
   it('keeps the app running when no recipe builds, and answers with the tenants it started with', async () => {
@@ -423,7 +417,7 @@ describe('▶ Run: a running app whose settings changed', () => {
     await tick();
 
     expect(spawn).toHaveBeenCalledTimes(1);
-    expect(res).toEqual({ url: 'http://central--preview-8101.localhost:8101', profile: 'tenants' });
+    expect(res).toEqual({ url: 'http://central--preview-8100.localhost:8100', profile: 'tenants' });
     expect(publicAppUrl.mock.calls.map(([, tenant]) => tenant)).toEqual(['central', 'demo']);
     expect(job.serveLinks.map((l) => l.tenant)).toEqual(['central', 'demo']);
     expect(job.events.some((e) => /Keeping the running app: No run command/.test(e.text || ''))).toBe(true);

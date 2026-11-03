@@ -32,7 +32,6 @@ it('loads core services even when WhatsApp account discovery fails', async () =>
     'initDb',
     'initTemplates',
     'initProjects',
-    'initDbServers',
     'initSavedPrompts',
     'initMemorySelection',
     'initMemories',

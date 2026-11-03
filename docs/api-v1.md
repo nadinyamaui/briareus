@@ -106,7 +106,7 @@ npm run create-token -- --user Ana --label Laptop --permission manage --repo own
 
 An admin reaches every project and server. A member reaches only what an admin
 shared with them, through `PUT /settings/shares` with the resource's `kind`
-(`project`, `dbServer`, `sshServer`, `mcpServer`, `forgeAccount` or
+(`project`, `sshServer`, `mcpServer`, `forgeAccount` or
 `envoyerAccount`), its `id` and the `userIds` it is shared with:
 
 ```sh
@@ -140,8 +140,7 @@ admin sees every session; a member sees their own and the ownerless ones of
 projects shared with them, in `/sessions`, `/events`, the stats routes and
 every session route (another user's session answers 404).
 
-A session a member owns uses only the database servers, SSH servers and MCP
-servers shared with that member, on top of what its project is given; one
+A session a member owns uses only the SSH servers and MCP servers shared with that member, on top of what its project is given; one
 nobody owns uses what its project is given. If the owner is disabled, their
 sessions lose those servers. A member sees and rules on the SSH commands of
 their own sessions with a `manage` token (`GET /ssh/requests`); an admin on
@@ -225,7 +224,7 @@ See the [feature overview](features.md) for server capabilities and recent addit
 | Mail                     | `/mail/messages`, `/mail/accounts/{account}/messages/{id}`                                                                                                                                           | your own                  |
 | Laravel Forge            | `/forge/accounts/{account}/servers`, sites, deployment scripts and environment files                                                                                                                 | admin                     |
 | Laravel Envoyer          | `/envoyer/accounts`, account projects, servers and deployments                                                                                                                                       | read / manage             |
-| Settings                 | `/settings/projects`, `providers`, `db-servers`, `workspaces`, `ssh/servers`, `mcp/servers`, `forge/accounts`, `envoyer/accounts`, `templates`, `shares`; `slack/workspaces`, `mail/accounts`        | admin; your own           |
+| Settings                 | `/settings/projects`, `providers`, `workspaces`, `ssh/servers`, `mcp/servers`, `forge/accounts`, `envoyer/accounts`, `templates`, `shares`; `slack/workspaces`, `mail/accounts`                      | admin; your own           |
 
 Everything the removed dashboard could do has a route, except its browser push
 notifications, which went with it. The reference ends with a table from each of

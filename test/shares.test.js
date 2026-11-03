@@ -30,7 +30,7 @@ describe('the share store', () => {
     expect(shares.allows(ana, 'project', 3)).toBe(true);
     expect(shares.allows(ana, 'project', '3')).toBe(true);
     expect(shares.allows(ana, 'project', 4)).toBe(false);
-    expect(shares.allows(ana, 'dbServer', 3)).toBe(false);
+    expect(shares.allows(ana, 'mcpServer', 3)).toBe(false);
     expect(shares.allows(null, 'project', 3)).toBe(false);
     expect(shares.idsFor(2, 'project')).toEqual(['3']);
     expect(shares.list({ id: '3' })).toHaveLength(2);

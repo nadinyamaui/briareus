@@ -1353,7 +1353,6 @@ describe('the contract', () => {
   it('keeps the object lists in step with the settings they describe', async () => {
     const { PROJECT_DEFAULTS } = await import('../lib/projects.js');
     const { PROVIDER_DEFAULTS } = await import('../lib/providerstore.js');
-    const { DB_SERVER_DEFAULTS } = await import('../lib/dbservers.js');
     const { SSH_DEFAULTS } = await import('../lib/ssh.js');
     const { WEBHOOK_DEFAULTS } = await import('../lib/deliveries.js');
     const { MAIL_ACCOUNT_DEFAULTS } = await import('../lib/mail.js');
@@ -1362,7 +1361,6 @@ describe('the contract', () => {
     // The stored login is the one provider field that never leaves the server.
     for (const key of Object.keys(PROVIDER_DEFAULTS).filter((k) => k !== 'authData'))
       expect(fields('Provider'), key).toContain(key);
-    for (const key of Object.keys(DB_SERVER_DEFAULTS)) expect(fields('DbServer'), key).toContain(key);
     for (const key of Object.keys(SSH_DEFAULTS)) expect(fields('SshServer'), key).toContain(key);
     for (const key of Object.keys(WEBHOOK_DEFAULTS).filter((k) => k !== 'epoch'))
       expect(fields('Webhook'), key).toContain(key);

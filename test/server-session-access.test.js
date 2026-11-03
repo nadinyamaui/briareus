@@ -66,14 +66,9 @@ it('checks session project access against the shared project ID', async () => {
     { id: 4, repo: 'acme/private' },
   ];
   let allowed;
-  new Function('users', 'shares', 'setDbServerFilter', 'setSessionProjectFilter', wiring)(
-    users,
-    shares,
-    vi.fn(),
-    (fn) => {
-      allowed = fn;
-    },
-  );
+  new Function('users', 'shares', 'setSessionProjectFilter', wiring)(users, shares, (fn) => {
+    allowed = fn;
+  });
   expect(allowed({ ownerId: 2 }, projects[0])).toBe(true);
   expect(allowed({ ownerId: 2 }, projects[1])).toBe(false);
   expect(allowed({ ownerId: 1 }, projects[1])).toBe(true);

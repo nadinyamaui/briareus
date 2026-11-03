@@ -167,16 +167,10 @@ describe('the label', () => {
 });
 
 describe('the database settings', () => {
-  it('refuses a pooled project with no database to point at', async () => {
-    await expect(createProject({ repo: 'a/b', dbPoolEnabled: true })).rejects.toThrow(
-      /A pooled project needs the database its sessions should point at/,
-    );
-  });
-
-  it('accepts a pooled project that names one', async () => {
-    await expect(
-      createProject({ repo: 'a/b', dbPoolEnabled: true, dbPoolDatabase: 'sample' }),
-    ).resolves.toMatchObject({ dbPoolEnabled: true, dbPoolDatabase: 'sample' });
+  it('takes the database name its sessions build theirs from', async () => {
+    await expect(createProject({ repo: 'a/b', dbPoolDatabase: ' sample ' })).resolves.toMatchObject({
+      dbPoolDatabase: 'sample',
+    });
   });
 
   it('refuses a database name that is not an identifier', async () => {
@@ -189,12 +183,6 @@ describe('the database settings', () => {
     await expect(createProject({ repo: 'a/b', dbPoolDatabase: '' })).resolves.toMatchObject({
       dbPoolDatabase: '',
     });
-  });
-
-  it('trims the restore dump path', async () => {
-    expect((await createProject({ ...base, dbRestoreSql: '  /dumps/x.sql  ' })).dbRestoreSql).toBe(
-      '/dumps/x.sql',
-    );
   });
 });
 
@@ -285,7 +273,6 @@ describe('the text fields', () => {
       label: null,
       phpBinDir: null,
       localDir: null,
-      dbRestoreSql: null,
       actionModel: null,
       actionEffort: null,
       promptTemplates: null,
@@ -295,7 +282,6 @@ describe('the text fields', () => {
       label: 'sample-app', // falls back rather than staying blank
       phpBinDir: '',
       localDir: '',
-      dbRestoreSql: '',
       actionModel: '',
       actionEffort: '',
       promptTemplates: {},

@@ -20,9 +20,7 @@ APP_ENV=/app/.env
 # keep the defaults config.js gives them.
 MANAGED='PORT BIND_HOST PUBLIC_BASE_URL GITHUB_TOKEN WORKSPACE_DIR TEST_VIDEOS_DIR
 CLAUDE_MODEL CLAUDE_EFFORT CLAUDE_BIN CODEX_BIN GROK_BIN OPENCODE_BIN
-DB_HOST DB_PORT DB_DATABASE DB_USERNAME DB_PASSWORD
-DB_POOL_ENABLED DB_POOL_WAIT_TIMEOUT_MIN DB_POOL_POLL_SECONDS
-DEV_MAX_SESSIONS DEV_TIMEOUT_MIN'
+DB_HOST DB_PORT DB_DATABASE DB_USERNAME DB_PASSWORD'
 # R2_* is deliberately NOT written to the file: every shell command a session
 # runs can read this .env, and the bucket's write credential must not be in
 # it. lib/config.js reads those five straight from the process environment,
