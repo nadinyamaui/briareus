@@ -39,6 +39,8 @@ pin sessions to the top of the list, close and reopen sessions, and attach files
 or transcribed voice notes. Claude `/btw` questions use a separate fork of
 the conversation. Orchestrators coordinate worker sessions and their
 PR actions and QA work.
+CI verdict wakes are deduplicated per orchestrator and PR head across workers;
+empty, skipped-only and neutral-only check rollups do not wake it or claim merge readiness.
 
 See [how sessions run](../README.md#how-a-session-runs) and the
 [session API reference](api-v1-reference.md#sessions).
