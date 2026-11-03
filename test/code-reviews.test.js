@@ -18,9 +18,19 @@ describe('review finalization prompt', () => {
     expect(prompt).toContain(
       `Discovery, publication and independent verification must all have succeeded for ${head}`,
     );
-    expect(prompt).toContain('any finding is unverified or lacks a verdict, or the PR head has moved');
+    expect(prompt).toContain('any finding is unverified or lacks a verdict, stop and report why');
     expect(prompt).toContain('leave labels unchanged and submit no approval');
     expect(prompt.indexOf('leave labels unchanged')).toBeLessThan(prompt.indexOf('CUSTOM LABEL POLICY'));
+  });
+
+  it('still labels Fix feedback when the head moved, but never approves or labels a clean result', () => {
+    expect(prompt).toContain(`If the PR head has moved past ${head}`);
+    expect(prompt).toContain('If any finding is Fix, still apply the label rules below');
+    expect(prompt).toContain('Leave in place any label added after the newer commits were pushed');
+    expect(prompt).toContain(
+      'Otherwise leave labels unchanged: a clean result must not mark commits nobody reviewed',
+    );
+    expect(prompt.indexOf('has moved past')).toBeLessThan(prompt.indexOf('CUSTOM LABEL POLICY'));
   });
 
   it('allows verified Optional/Dismissed-only reviews but keeps Fix and self-approval guards', () => {
