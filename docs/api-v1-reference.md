@@ -2217,7 +2217,7 @@ Start connecting a mailbox: where to sign in. Needs `manage`.
 | `access`                | `read\|manage`   | Defaults to read for a new mailbox and preserves existing access when accountId is supplied; manage requests Gmail gmail.modify or Outlook Mail.ReadWrite and Mail.Send |
 | `label`                 | `string`         | A name to show                                                                                                                                                          |
 | `enabled`               | `boolean`        | Whether the periodic sync includes it; true when absent                                                                                                                 |
-| `syncDays`              | `integer`        | How many days back to keep, 1–365; 30 when absent                                                                                                                       |
+| `syncDays`              | `integer`        | How many days back to keep, 1–1095; 30 when absent                                                                                                                      |
 
 **Returns** `{ url: string, state: string, redirectUri: string, finishesOnServer: boolean, expiresAt: integer }`. Open `url` in a browser and sign in; the provider then sends the browser to `redirectUri` with `code` and `state` in its query. With `finishesOnServer` (the redirect is this server’s `callbackUrl`) the server finishes the sign-in as the browser arrives, and the client only waits for the account to appear in the list. Otherwise the client receives the redirect itself (a loopback listener of its own on a Google Desktop client’s `http://127.0.0.1:<port>`, or a web view it embeds on Microsoft’s nativeclient page) and sends the address to `…/connect/finish` at once: a Microsoft code typically lasts about a minute, and the start itself expires at `expiresAt` (15 minutes). Google’s sign-in must open in a browser, not an embedded web view. New sign-ins default to read-only; reconnects with `accountId` preserve existing access unless `access` is supplied. `access: manage` requests sending and filing permissions. 503 when this server has no OAuth client for `provider`; 400 until `CREDENTIALS_KEY` is set, since the tokens are stored encrypted with it.
 
@@ -2233,7 +2233,7 @@ Finish connecting a mailbox with the address its sign-in ended on. Needs `manage
 | `state` | `string` | Instead of `url`: its `state`          |
 | `code`  | `string` | Instead of `url`: its `code`           |
 
-**Returns** 201 `{ account: MailAccount }`. For a client that received the redirect itself; a sign-in that ends on the server’s `callbackUrl` is finished there. Each start finishes once, whether or not it succeeds. Signing in to a mailbox that is already connected connects it again (new tokens, the same messages); a start with `accountId` answers 409 when the sign-in was to another mailbox. The first sync starts at once: follow `syncing` and `lastSyncAt`. A Gmail mailbox’s first pass takes the newest 2,000 messages of its window and is paced to Gmail’s per-user quota, so it takes about eight minutes at most; an Outlook folder’s first pass takes at most 5,000 messages, Graph’s limit for a filtered delta.
+**Returns** 201 `{ account: MailAccount }`. For a client that received the redirect itself; a sign-in that ends on the server’s `callbackUrl` is finished there. Each start finishes once, whether or not it succeeds. Signing in to a mailbox that is already connected connects it again (new tokens, the same messages); a start with `accountId` answers 409 when the sign-in was to another mailbox. The first sync starts at once: follow `syncing` and `lastSyncAt`. A Gmail mailbox’s first pass reads up to 2,000 messages of its window a sync, newest first, paced to Gmail’s per-user quota (about eight minutes a chunk), and carries on in the syncs after it until the whole window is in, reading new mail first each time; an Outlook folder’s first pass takes at most 5,000 messages, Graph’s limit for a filtered delta.
 
 ### `PUT /settings/mail/accounts/{id}`
 
@@ -2241,11 +2241,11 @@ Change a mailbox’s label, switch or window. Needs `manage`.
 
 **Body**
 
-| Field      | Type      |                                   |
-| ---------- | --------- | --------------------------------- |
-| `label`    | `string`  | A name to show                    |
-| `enabled`  | `boolean` | Switched on or not                |
-| `syncDays` | `integer` | How many days back to keep, 1–365 |
+| Field      | Type      |                                    |
+| ---------- | --------- | ---------------------------------- |
+| `label`    | `string`  | A name to show                     |
+| `enabled`  | `boolean` | Switched on or not                 |
+| `syncDays` | `integer` | How many days back to keep, 1–1095 |
 
 **Returns** `{ account: MailAccount }`. A new `syncDays` starts its sync over with a first pass.
 
@@ -3251,7 +3251,7 @@ A mailbox connected with its provider’s own sign-in, whose messages the server
 | `email`         | `string`            | Its address, as the provider names it                                                                                                 |
 | `label`         | `string`            | A name to show; empty for none                                                                                                        |
 | `enabled`       | `boolean`           | Whether the periodic sync includes it                                                                                                 |
-| `syncDays`      | `integer`           | How many days back its messages are kept, 1–365                                                                                       |
+| `syncDays`      | `integer`           | How many days back its messages are kept, 1–1095                                                                                      |
 | `status`        | `connected\|reauth` | `reauth` once the provider stopped honouring its sign-in (revoked, expired, a password change): connect it again with its `accountId` |
 | `syncing`       | `boolean`           | Whether a sync pass is running now                                                                                                    |
 | `lastSyncAt`    | `integer?`          | When the last pass that succeeded finished, epoch milliseconds                                                                        |

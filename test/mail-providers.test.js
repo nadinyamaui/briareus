@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
-import { gmailMessage, gmailProvider, outlookMessage, outlookProvider } from '../lib/mail-providers.js';
+import {
+  GMAIL_FIRST_PASS_CHUNK,
+  gmailMessage,
+  gmailProvider,
+  outlookMessage,
+  outlookProvider,
+} from '../lib/mail-providers.js';
 
 // Nothing here reaches Google or Microsoft: `request` is a fake that answers
 // from a list of routes and records every call.
@@ -46,6 +52,7 @@ function fakeSink() {
       return sink.stored.has(id) ? 1 : 0;
     }),
     pruneUnseen: vi.fn(async (folderId = null) => sink.pruned.push(folderId)),
+    syncedSince: vi.fn(async () => new Set(sink.stored)),
     restartFolder: vi.fn(async () => {}),
     keepFolders: vi.fn(async (ids) => (sink.kept = ids)),
     renameLabels: vi.fn(async () => {}),
@@ -331,6 +338,96 @@ describe('gmailProvider', () => {
       const minute = sent.filter((c) => c.at > at - 60_000 && c.at <= at).reduce((n, c) => n + c.units, 0);
       expect(minute).toBeLessThanOrEqual(5000);
     }
+  });
+
+  it('spreads a first pass larger than a chunk over syncs, reading new mail first', async () => {
+    let clock = 0;
+    const sleep = vi.fn(async (ms) => {
+      clock += ms;
+    });
+    // The newest is a draft: read once, not kept, and not read again.
+    const ids = ['d0', ...Array.from({ length: GMAIL_FIRST_PASS_CHUNK + 2 }, (_, i) => `m${i}`)];
+    const { request, calls } = fakeFetch([
+      [`${GMAIL}/labels`, () => ({ body: { labels: [] } })],
+      [`${GMAIL}/profile`, () => ({ body: { historyId: '1' } })],
+      [
+        `${GMAIL}/history?`,
+        () => ({ body: { historyId: '2', history: [{ messagesAdded: [{ message: { id: 'new' } }] }] } }),
+      ],
+      [
+        `${GMAIL}/messages?`,
+        (url) => {
+          const from = Number(new URL(url).searchParams.get('pageToken') || 0);
+          const next = from + 500 < ids.length ? { nextPageToken: String(from + 500) } : {};
+          return { body: { messages: ids.slice(from, from + 500).map((id) => ({ id })), ...next } };
+        },
+      ],
+      [
+        /\/messages\/\w+\?format=full$/,
+        (url) => {
+          const id = /messages\/(\w+)\?/.exec(url)[1];
+          return { body: gmailFull(id, id === 'd0' ? { labels: ['DRAFT'] } : {}) };
+        },
+      ],
+    ]);
+    const gmail = gmailProvider(GOOGLE, { request, sleep, now: () => clock });
+    const sink = fakeSink();
+    const read = () =>
+      calls.filter((c) => /format=full$/.test(c.url)).map((c) => /messages\/(\w+)\?/.exec(c.url)[1]);
+
+    const first = await gmail.sync({
+      api: gmail.api(token),
+      state: null,
+      since: SINCE,
+      sink,
+      email: 'me',
+      startedAt: 7,
+    });
+
+    expect(first).toEqual({ historyId: '1', labels: {}, firstPass: { startedAt: 7, skipped: ['d0'] } });
+    expect(read().sort()).toEqual(ids.slice(0, GMAIL_FIRST_PASS_CHUNK).sort());
+    expect(sink.pruned).toEqual([]);
+
+    calls.length = 0;
+    const second = await gmail.sync({
+      api: gmail.api(token),
+      state: first,
+      since: SINCE,
+      sink,
+      email: 'me',
+      startedAt: 8,
+    });
+
+    // The history after the cursor first, then the rest of the window.
+    expect(read()[0]).toBe('new');
+    expect(read().slice(1).sort()).toEqual(ids.slice(GMAIL_FIRST_PASS_CHUNK).sort());
+    expect(sink.syncedSince).toHaveBeenLastCalledWith(7);
+    expect(sink.pruneUnseen).toHaveBeenCalledWith(null, 7);
+    expect(second).toEqual({ historyId: '2', labels: {} });
+  });
+
+  it('starts a first pass over when Gmail forgot the cursor in the middle of one', async () => {
+    const { request } = fakeFetch([
+      [`${GMAIL}/labels`, () => ({ body: { labels: [] } })],
+      [`${GMAIL}/history?`, () => ({ status: 404, body: { error: { message: 'Not found' } } })],
+      [`${GMAIL}/profile`, () => ({ body: { historyId: '9' } })],
+      [`${GMAIL}/messages?`, () => ({ body: {} })],
+    ]);
+    const gmail = gmailProvider(GOOGLE, { request });
+    const sink = fakeSink();
+
+    const state = await gmail.sync({
+      api: gmail.api(token),
+      state: { historyId: '1', firstPass: { startedAt: 3, skipped: ['d0'] } },
+      since: SINCE,
+      sink,
+      email: 'me',
+      startedAt: 5,
+    });
+
+    expect(sink.syncedSince).toHaveBeenCalledWith(5);
+    expect(sink.pruneUnseen).toHaveBeenCalledWith(null, 5);
+    expect(state).toEqual({ historyId: '9', labels: {} });
   });
 
   it('fetches a text body Gmail sent as a separate attachment', async () => {

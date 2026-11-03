@@ -16,6 +16,7 @@ vi.mock('../lib/db.js', () => ({
   deleteMailMessagesOutsideFolders: vi.fn(),
   deleteMailMessagesReceivedBefore: vi.fn(),
   deleteMailMessagesSyncedBefore: vi.fn(),
+  loadMailMessageIdsSyncedSince: vi.fn(),
   getMailMessage: vi.fn(),
   insertMailAccount: vi.fn(),
   listMailMessages: vi.fn(),
@@ -110,6 +111,10 @@ function memoryStore() {
         (m) =>
           m.accountId === accountId && m.syncedAt < syncedAt && (folderId == null || m.folderId === folderId),
       ),
+    syncedSince: async (accountId, at) =>
+      ofAccount(accountId)
+        .filter((m) => m.syncedAt >= at)
+        .map((m) => m.id),
     keepFolders: async (accountId, folderIds) =>
       drop((m) => m.accountId === accountId && !folderIds.includes(m.folderId)),
     renameLabels: async (accountId, renames, changes) => {
@@ -780,7 +785,9 @@ describe('syncing', () => {
     expect(updated).toMatchObject({ syncDays: 90, label: 'Renamed', syncing: true });
     expect(store.accounts.get(account.id).syncState).toBeNull();
 
-    await expect(service.update(account.id, { syncDays: 0 })).rejects.toThrow(/1–365/);
+    await expect(service.update(account.id, { syncDays: 0 })).rejects.toThrow(/1–1095/);
+    await expect(service.update(account.id, { syncDays: 1096 })).rejects.toThrow(/1–1095/);
+    expect(await service.update(account.id, { syncDays: 1095 })).toMatchObject({ syncDays: 1095 });
     await expect(service.update(account.id, { enabled: 'yes' })).rejects.toThrow(/true or false/);
     await expect(service.update(999, {})).rejects.toMatchObject({ status: 404 });
   });
