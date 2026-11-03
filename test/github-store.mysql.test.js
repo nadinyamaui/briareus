@@ -304,8 +304,18 @@ describe.skipIf(process.env.GITHUB_STORE_MYSQL !== '1')('GitHub mirror on MySQL'
       board({ issues: [], issuesTruncated: true, observedAt: 3000, syncedAt: new Date(3000).toISOString() }),
     );
     expect((await store.readBoard(r)).issues).toHaveLength(1);
+    // A complete list was saved before the cut one, so the mirror is not cut.
+    expect((await store.readBoard(r)).issuesTruncated).toBe(false);
     await store.saveBoard(r, board({ issues: [], observedAt: 4000, syncedAt: new Date(4000).toISOString() }));
     expect((await store.readBoard(r)).issues).toHaveLength(0);
+  });
+
+  it('says a mirror that never held a complete issue list is cut', async () => {
+    const r = repo();
+    await store.saveBoard(r, board({ issuesTruncated: true }));
+    expect((await store.readBoard(r)).issuesTruncated).toBe(true);
+    await store.saveBoard(r, board({ observedAt: 2000, syncedAt: new Date(2000).toISOString() }));
+    expect((await store.readBoard(r)).issuesTruncated).toBe(false);
   });
 
   it('rejects an older in-flight board and stale item metadata', async () => {
