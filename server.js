@@ -246,7 +246,7 @@ import {
   removeMemoryByName,
 } from './lib/memories.js';
 import { initTemplates, globalTemplates, saveGlobalTemplates, templateCatalog } from './lib/templates.js';
-import { closeIssue, projectPulls, pullOverview, updateGithubItem } from './lib/prboard.js';
+import { closeIssue, projectIssues, projectPulls, pullOverview, updateGithubItem } from './lib/prboard.js';
 import {
   commitView,
   mergePullRequest,
@@ -1159,6 +1159,32 @@ api.post('/api/issues/close', async (req, res) => {
       }),
     );
   } catch (e) {
+    res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
+  }
+});
+
+// The board's open issues a page at a time, past what /pulls listed.
+api.get('/api/issues/list', async (req, res) => {
+  try {
+    const project = getProject(String(req.query.repo || ''));
+    if (!project) throw Object.assign(new Error(`Unknown project: ${req.query.repo || ''}`), { status: 404 });
+    const whole = (key, fallback, min, max) => {
+      const raw = req.query[key];
+      if (raw === undefined || raw === '') return fallback;
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value < min || value > max)
+        throw Object.assign(new Error(`${key} must be a whole number from ${min} to ${max}`), {
+          status: 400,
+        });
+      return value;
+    };
+    const limit = whole('limit', 50, 1, 100);
+    const offset = whole('offset', 0, 0, Number.MAX_SAFE_INTEGER);
+    // The whole project: a missing mirror is read through the board's cache, which keeps its label and author.
+    res.json(await projectIssues(project, { offset, limit }));
+  } catch (e) {
+    if (e && e.rateLimited && Number(e.retryAt))
+      res.set('Retry-After', String(Math.max(1, Math.ceil((Number(e.retryAt) - Date.now()) / 1000))));
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
   }
 });

@@ -432,6 +432,20 @@ Prepare a workspace for a pull request and serve it with the project’s run com
 
 **Returns** 201 `{ session: Session, url: string, profile: string? }`
 
+### `GET /issues`
+
+Read a project’s open issues a page at a time, past what the board listed. Needs `read`, held to `repo`.
+
+**Query**
+
+| Field               | Type      |                                                                                                          |
+| ------------------- | --------- | -------------------------------------------------------------------------------------------------------- |
+| `repo` **required** | `string`  | A project, as `owner/name`                                                                               |
+| `limit`             | `integer` | Issues to a page, 1–100; 50 by default                                                                   |
+| `offset`            | `integer` | Where the page starts: the previous page’s nextOffset, or how many issues the board listed; 0 by default |
+
+**Returns** `{ repo: string, issues: object[], total: integer, nextOffset: integer?, issuesError: string?, syncedAt: string }`. Rows are the board’s issue rows (see `pulls.list`), most recently updated first, read from the durable mirror, which the hourly sync walks to the end; a board read from GitHub lists only the first 100 and sets `issuesTruncated`, and this route serves the rest. `limit` is 1 to 100 (50 by default) and `offset` starts at 0; use `nextOffset` until null. The list can move between pages as issues are updated, so a client keeps the rows it holds by number. A missing mirror is populated first, as the board’s first read does.
+
 ### `GET /issues/{number}`
 
 Read an issue in full: body, type, parent and sub-issues, linked pull requests and its Projects v2 fields. Needs `read`, held to `repo`.
@@ -3610,6 +3624,7 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/pr/update-branch`                                                     | `POST /pulls/{number}/update-branch`                                                                                              |
 | `POST /api/pr/merge`                                                             | `POST /pulls/{number}/merge`                                                                                                      |
 | `POST /api/dev/pulls/:number/serve`                                              | `POST /pulls/{number}/serve`                                                                                                      |
+| `GET /api/issues/list`                                                           | `GET /issues`                                                                                                                     |
 | `GET /api/issues/view`                                                           | `GET /issues/{number}`                                                                                                            |
 | `GET /api/issues/timeline`                                                       | `GET /issues/{number}/timeline`                                                                                                   |
 | `POST /api/issues/close`                                                         | `POST /issues/{number}/close`                                                                                                     |
