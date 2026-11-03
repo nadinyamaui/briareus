@@ -8876,6 +8876,7 @@ describe('the CI verdict a worker hands its orchestrator', () => {
         turns: 1,
         orchestrator: true,
         awaitingAnswer: true,
+        workerCheckVerdicts: { 'acme/ci#245': { headSha: 'sha245', result: 'passed' } },
       },
       worker('ci-green', 201),
       worker('ci-cancelled', 215),
@@ -8883,6 +8884,15 @@ describe('the CI verdict a worker hands its orchestrator', () => {
       worker('ci-qa', 217, { qaLoop: { done: false } }),
       worker('ci-pending', 218),
       worker('ci-terminal', 219),
+      worker('ci-skipped', 240),
+      worker('ci-skipped-handoff', 240),
+      worker('ci-duplicate', 241),
+      worker('ci-duplicate-handoff', 241),
+      worker('ci-transitions', 242),
+      worker('ci-unverified', 243),
+      worker('ci-first-handoff', 244, { prStatus: null }),
+      worker('ci-watched-handoff', 244),
+      worker('ci-restored-verdict', 245),
       ...[
         ['ci-qa-failed', 220, { done: true, failedScenarios: 1 }],
         ['ci-qa-error', 221, { done: true, failedScenarios: 0, verdictError: 'could not read sheet' }],
@@ -9112,6 +9122,121 @@ describe('the CI verdict a worker hands its orchestrator', () => {
         },
       };
     });
+  });
+
+  const syncChecks = async (number, ids) => {
+    const before = ids.map((id) => getJob(id).prStatus);
+    syncSessionsOn('acme/ci', getJob(ids[0]).branch, number);
+    await vi.waitFor(() => {
+      ids.forEach((id, i) => expect(getJob(id).prStatus).not.toBe(before[i]));
+    });
+  };
+  const prNotices = (number) =>
+    (getJob('ci-orch').pendingWorkerNotices || []).filter((n) => n.text.includes(`PR #${number}`));
+
+  it('suppresses growing skip-only rollups across workers without changing handoff tracking', async () => {
+    const ids = ['ci-skipped', 'ci-skipped-handoff'];
+    getJob(ids[1]).status = 'running';
+    for (const count of [3, 4, 6, 7, 8]) {
+      answers.set(240, () =>
+        rollupOf(Array.from({ length: count }, (_, i) => identified(i, `Job ${i}`, 'skipped', `t${i}`))),
+      );
+      await syncChecks(240, ids);
+      for (const id of ids) {
+        expect(getJob(id).prStatus.checks).toMatchObject({ total: count, passed: 0, pending: 0 });
+        expect(notices(id)).toBe('');
+        expect(workerSummary(getJob(id)).pr.number).toBe(240);
+      }
+    }
+    expect(getJob(ids[1]).status).toBe('running');
+    getJob(ids[1]).status = 'idle';
+  });
+
+  it('does not wake or claim readiness for empty, neutral-only or mixed unverified checks', async () => {
+    for (const conclusions of [[], ['neutral'], ['neutral', 'skipped']]) {
+      answers.set(243, () =>
+        rollupOf(conclusions.map((conclusion, i) => identified(i, `Job ${i}`, conclusion, `t${i}`))),
+      );
+      await syncChecks(243, ['ci-unverified']);
+      expect(notices('ci-unverified')).toBe('');
+    }
+  });
+
+  it('deduplicates terminal results across workers and late optional checks after delivery', async () => {
+    const ids = ['ci-duplicate', 'ci-duplicate-handoff'];
+    answers.set(241, green);
+    await syncChecks(241, ids);
+    expect(prNotices(241)).toHaveLength(1);
+    expect(prNotices(241)[0].text).toContain('ready to merge');
+    // Delivery drains the buffer; deduplication must outlive it.
+    const parent = getJob('ci-orch');
+    parent.pendingWorkerNotices = parent.pendingWorkerNotices.filter((n) => !n.text.includes('PR #241'));
+    answers.set(241, () =>
+      rollupOf([
+        identified(1, 'Fast checks', 'success', 't1'),
+        identified(2, 'Tests', 'success', 't2'),
+        identified(3, 'Optional', 'skipped', 't3'),
+      ]),
+    );
+    await syncChecks(241, ids);
+    expect(prNotices(241)).toHaveLength(0);
+    answers.set(241, () => rollupOf([identified(4, 'Tests', 'failure', 't4')]));
+    await syncChecks(241, ids);
+    expect(prNotices(241)).toHaveLength(1);
+    expect(prNotices(241)[0].text).toContain('Do not merge');
+    expect(publicJob(parent).workerCheckVerdicts).toBeUndefined();
+    const { saveJob } = await import('../lib/db.js');
+    await flushJobs();
+    const stored = saveJob.mock.calls.findLast(([j]) => j.id === parent.id)[0];
+    expect(stored.workerCheckVerdicts['acme/ci#241']).toEqual(parent.workerCheckVerdicts['acme/ci#241']);
+  });
+
+  it('does not let a fresh handoff attachment swallow a watched verdict', async () => {
+    await syncChecks(244, ['ci-first-handoff', 'ci-watched-handoff']);
+    expect(prNotices(244)).toHaveLength(1);
+    expect(notices('ci-first-handoff')).toBe('');
+    expect(notices('ci-watched-handoff')).toContain('ready to merge');
+  });
+
+  it('restores deduplication from the orchestrator record without a queued notice', async () => {
+    await syncChecks(245, ['ci-restored-verdict']);
+    expect(getJob('ci-restored-verdict').prStatus.checks.passed).toBe(2);
+    expect(notices('ci-restored-verdict')).toBe('');
+  });
+
+  it('keeps failures, fixes, pending reruns and new heads actionable', async () => {
+    const id = 'ci-transitions';
+    const update = async (contexts) => {
+      answers.set(242, () => rollupOf(contexts));
+      await syncChecks(242, [id]);
+    };
+    await update([identified(1, 'Tests', 'skipped', 't1')]);
+    expect(prNotices(242)).toHaveLength(0);
+    await update([identified(2, 'Tests', 'failure', 't2')]);
+    expect(prNotices(242)).toHaveLength(1);
+    await update([identified(3, 'Tests', 'failure', 't3')]);
+    expect(prNotices(242)).toHaveLength(2);
+    await update([identified(4, 'Tests', 'success', 't4')]);
+    expect(prNotices(242)).toHaveLength(3);
+    await update([{ __typename: 'CheckRun', name: 'Tests', status: 'IN_PROGRESS', conclusion: null }]);
+    expect(prNotices(242)).toHaveLength(3);
+    await update([identified(5, 'Tests', 'success', 't5')]);
+    expect(prNotices(242)).toHaveLength(4);
+    // The actual head changes, even if GitHub reports the same outcomes.
+    const rest = githubRest.getMockImplementation();
+    githubRest.mockImplementation(async (...args) => {
+      const response = await rest(...args);
+      if (!args[2].endsWith('/pulls/242')) return response;
+      const pr = await response.json();
+      return { ...response, json: async () => ({ ...pr, head: { ...pr.head, sha: 'new-head' } }) };
+    });
+    try {
+      await update([identified(7, 'Tests', 'success', 't7')]);
+      expect(prNotices(242)).toHaveLength(5);
+      expect(prNotices(242).at(-1).text).toContain('ready to merge');
+    } finally {
+      githubRest.mockImplementation(rest);
+    }
   });
 
   it('reports two successes and two cancellations without a green or repeated notice', async () => {
