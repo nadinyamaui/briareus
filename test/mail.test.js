@@ -704,6 +704,31 @@ describe('syncing', () => {
     expect(store.accounts.get(account.id).syncState).toEqual({ historyId: '11', labels: {} });
   });
 
+  it('starts a resumed first pass after it began when a restart sets the clock back', async () => {
+    const account = await connect();
+    await settled();
+    const passStart = clock + 10 * 60_000;
+    service.stop();
+    await store.updateAccount(account.id, {
+      syncState: { historyId: '10', labels: {}, firstPass: { startedAt: passStart, skipped: [] } },
+    });
+    mailbox.messages.c = { at: clock - 3 * DAY, unread: false };
+    service = createMailService({ store, request: gmail.request, sleep: async () => {}, now: () => clock });
+    await service.init();
+
+    await service.sync(account.id);
+    await settled();
+
+    expect(
+      store
+        .ofAccount(account.id)
+        .map((m) => m.id)
+        .sort(),
+    ).toEqual(['a', 'b', 'c']);
+    expect(store.ofAccount(account.id).every((m) => m.syncedAt > passStart)).toBe(true);
+    expect(store.accounts.get(account.id).syncState.firstPass).toBeUndefined();
+  });
+
   it('marks an account whose grant was revoked, and will not sync it until it is reconnected', async () => {
     const account = await connect();
     await settled();
