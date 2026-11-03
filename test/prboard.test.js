@@ -29,6 +29,7 @@ import {
   closeIssue,
   hasLabel,
   LABELS,
+  projectIssues,
   projectPulls,
   fetchProjectPulls,
   pullOverview,
@@ -1776,6 +1777,63 @@ function detail(overrides = {}) {
     },
   });
 }
+
+describe('projectIssues', () => {
+  const issues = Array.from({ length: 120 }, (_, i) => ({
+    number: 120 - i,
+    title: `Issue ${120 - i}`,
+    labels: [],
+  }));
+  const syncedAt = '2026-10-01T00:00:00Z';
+
+  it('pages the mirror past what a GitHub read listed, without asking GitHub', async () => {
+    vi.mocked(githubStore.readBoard).mockResolvedValue({ pulls: [], issues, issuesError: null, syncedAt });
+    const first = await projectIssues(project(), { offset: 100, limit: 15 });
+    expect(first).toMatchObject({ total: 120, nextOffset: 115, issuesError: null, syncedAt });
+    expect(first.issues.map((i) => i.number)).toEqual(issues.slice(100, 115).map((i) => i.number));
+    const last = await projectIssues(project(), { offset: 115, limit: 15 });
+    expect(last.issues).toHaveLength(5);
+    expect(last.nextOffset).toBeNull();
+    expect((await projectIssues(project(), { offset: 200 })).issues).toEqual([]);
+    expect(gh.graphql).not.toHaveBeenCalled();
+  });
+
+  it('populates a missing mirror through the board first', async () => {
+    const p = project();
+    let saved = null;
+    vi.mocked(githubStore.readBoard).mockImplementation(async () => saved);
+    vi.mocked(githubStore.saveBoard).mockImplementationOnce(async (_repo, board) => {
+      saved = board;
+    });
+    gh.graphql.mockResolvedValue({
+      repository: { pullRequests: { nodes: [] }, issues: { nodes: [] } },
+    });
+    const page = await projectIssues(p);
+    expect(gh.graphql).toHaveBeenCalled();
+    expect(githubStore.saveBoard).toHaveBeenCalledWith(p.repo, expect.anything());
+    expect(page).toMatchObject({ repo: p.repo, issues: [], total: 0, nextOffset: null });
+    expect(githubStore.readBoard).toHaveBeenCalledTimes(2);
+  });
+
+  it('says when the mirror itself stops short', async () => {
+    const cut = issues.slice(0, 100);
+    vi.mocked(githubStore.readBoard).mockResolvedValue({
+      pulls: [],
+      issues: cut,
+      issuesError: null,
+      issuesTruncated: true,
+      syncedAt,
+    });
+    expect(await projectIssues(project(), { offset: 100 })).toMatchObject({
+      issues: [],
+      total: 100,
+      nextOffset: null,
+      issuesTruncated: true,
+    });
+    vi.mocked(githubStore.readBoard).mockResolvedValue({ pulls: [], issues, issuesError: null, syncedAt });
+    expect((await projectIssues(project())).issuesTruncated).toBe(false);
+  });
+});
 
 describe('pullOverview', () => {
   it('maps the overview the panel shows', async () => {
