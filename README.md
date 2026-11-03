@@ -4,7 +4,7 @@ The core of a system for running coding agents against a project: a server
 with no UI of its own, driven by clients through one API, [`/api/v1`](#client-api).
 Each session is a conversation with one agent, **Claude Code**, **Codex**,
 **Grok**, **opencode**, **DeepSeek Harness**, **Qwen Code** or **Z.AI** (GLM through the codex CLI), inside a workspace clone of
-its own, with a database server of its
+its own, with a database of its
 own, so parallel sessions never share a working tree or a database. You
 describe what to build; the agent edits, runs the app and its tests, and can
 push a feature branch / open a PR when asked.
@@ -36,16 +36,16 @@ belong in the corresponding client repository.
 The server provides these capabilities through its API; each client decides
 which controls and screens it implements.
 
-| Area                     | Capabilities                                                                                                                                            |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Coding sessions          | Multiple agent providers, isolated workspaces and optional database servers, streamed conversations, queued messages, orchestrators and worker sessions |
-| GitHub                   | Pull requests, issues, Projects v2 boards, branch updates, merges, repository files and archive downloads                                               |
-| QA                       | Test sheets, execution evidence, coverage verdicts and independent QA loops                                                                             |
-| Previews                 | Run profiles, branch and PR previews, a shared browser, screenshot feedback and recorded QA videos                                                      |
-| Business inboxes         | Slack, Gmail, Outlook and WhatsApp access for clients, plus controlled tools for interactive agent sessions                                             |
-| Operations               | Operator attention, restart recovery, maintenance draining, SSH approvals, deployment workflows, Laravel Forge and Envoyer                              |
-| Configuration and memory | Projects, providers, credentials, MCP servers with OAuth, saved prompts and project memories                                                            |
-| Usage                    | Per-turn tokens and costs, project/account/model breakdowns, provider quota readings and Claude account failover                                        |
+| Area                     | Capabilities                                                                                                                                        |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Coding sessions          | Multiple agent providers, isolated workspaces and per-session databases, streamed conversations, queued messages, orchestrators and worker sessions |
+| GitHub                   | Pull requests, issues, Projects v2 boards, branch updates, merges, repository files and archive downloads                                           |
+| QA                       | Test sheets, execution evidence, coverage verdicts and independent QA loops                                                                         |
+| Previews                 | Run profiles, branch and PR previews, a shared browser, screenshot feedback and recorded QA videos                                                  |
+| Business inboxes         | Slack, Gmail, Outlook and WhatsApp access for clients, plus controlled tools for interactive agent sessions                                         |
+| Operations               | Operator attention, restart recovery, maintenance draining, SSH approvals, deployment workflows, Laravel Forge and Envoyer                          |
+| Configuration and memory | Projects, providers, credentials, MCP servers with OAuth, saved prompts and project memories                                                        |
+| Usage                    | Per-turn tokens and costs, project/account/model breakdowns, provider quota readings and Claude account failover                                    |
 
 See the [feature overview and recent additions](docs/features.md) for details
 and the [client API guide](docs/api-v1.md) for integration.
@@ -94,9 +94,8 @@ machine's CUPS printers, through the internal print MCP in projects with
 
 1. **Claim resources.** The session takes an idle workspace clone from the
    pool (`<owner>__<repo>`, then `…__2`, `…__3` as concurrency demands) and,
-   if its project asks for one, claims one of the configured database servers,
-   exclusively for as long as it stays open. The project's
-   database is created on the claimed server if it does not exist yet. A
+   if its project names a database, creates one of its own (that name plus the
+   session id) on the server the project's `.env` template points at. A
    session that already knows its branch prefers the idle slot that is still
    on that branch: the one whose dependencies, build output and framework
    caches are already the right ones. Idle slots are quarantined when Briareus
@@ -138,15 +137,14 @@ machine's CUPS printers, through the internal print MCP in projects with
    `backgroundTasks`, so clients can show it as waiting rather than thinking;
    messages sent meanwhile go straight in while `liveInput` is true.
    QA steps keep queued input. Output streams to the client live (SSE). The
-   session keeps its clone and database server between turns, for as long as
+   session keeps its clone and database between turns, for as long as
    it stays open. On a Claude session, a message starting with `/btw` (or
    `POST /api/v1/sessions/{id}/btw`) is a side question instead: it is
    answered from a fork of the conversation that is never saved, without
    tools, even while a turn runs, and neither it nor its answer reaches the
    agent. Both show in the transcript as `btw` / `btw_answer` lines.
 4. **▶ Run** serves the session's checkout with the project's run commands
-   against the session's own database, on an app port of its own (one per
-   pool entry: 8101, 8102, …).
+   against the session's own database, on the first free app port from 8100.
 5. If the session's branch gets a PR on GitHub, its state and CI checks are
    mirrored into the header and the right panel, synced at the end of every
    turn, every 20s while a turn is running, and once a minute otherwise. The
@@ -154,7 +152,7 @@ machine's CUPS printers, through the internal print MCP in projects with
    **🔗 Link PR** recovers one automatic discovery missed: enter its number or
    URL, and the server verifies that its repository and head branch match
    the session before attaching it.
-6. **Close** releases the clone slot and the database server; the conversation
+6. **Close** releases the clone slot and drops the session's database; the conversation
    stays readable. **Delete** also trashes the record and its log.
 7. The **✎** beside a conversation's heading edits its title without sending a
    message to the agent.
@@ -214,9 +212,9 @@ invalid or blocked receipts fail the review; unavailable required delegation is
 reported as INCOMPLETE and cannot turn zero findings into approval. Native
 discovery, its report and the selected account/model/effort are preserved.
 Review database preparation uses the existing project settings: `dbPoolDatabase`
-and the `.env` template select the database mode and server, `dbExtensions` names
+and the `.env` template select the database name and server, `dbExtensions` names
 the PostgreSQL extensions to enable, and setup commands perform project migrations
-or other preparation. Unpooled sessions export their own `DB_DATABASE` to setup
+or other preparation. Sessions export their own `DB_DATABASE` to setup
 and provider processes as well as writing it to `.env`, so test-runner defaults
 such as PHPUnit XML cannot silently select a shared test database. Codex reviews
 also pin that name in the shell environment and receive the database contract in
@@ -338,8 +336,8 @@ one that was deleted, still refuses to start.
 
 A merge ends every errand on a pull request. As soon as any session mirroring it
 sees `merged`, every open session working on that pull request (errand,
-QA) is closed: its turn is killed and its clone and database server go back to the
-pool. The conversations stay readable, as they do after any close.
+QA) is closed: its turn is killed, its clone goes back to the pool and its
+database is dropped. The conversations stay readable, as they do after any close.
 
 ### Local mode
 
@@ -347,7 +345,7 @@ The composer's workspace chip switches a session from **⌗ Worktree** (all of
 the above) to **⌂ Local**: the agent works directly in the project's existing
 checkout on this machine: the path configured as _Local checkout_ in the
 project's settings. Nothing is prepared: no clone, no branch juggling, no
-`.env` seeding, no setup steps, and no pooled database. The tree, whatever
+`.env` seeding, no setup steps, and no session database. The tree, whatever
 branch it has checked out, and its real local database are used as they stand.
 One local session at a time per checkout; the branch picker
 only apply to worktree sessions.
@@ -483,12 +481,6 @@ added by hand) are carried across each rewrite. Mounting your own file over
 `claude`/`codex`/`grok`/`opencode`/`qwen` stay signed in across a rebuild (`dsh` keeps its sessions there); `state` holds the
 `.env`; `workspaces` the session clones; `dbdata` the session history. Removing
 them is what starting over means.
-
-**The pool**, the extra MySQL servers a session claims so parallel sessions
-never share a database, is the `pool` profile:
-`docker compose --profile pool up -d`. Add them through
-`POST /api/v1/settings/db-servers` as `db-pool-1:3306` and `db-pool-2:3306`; the app reaches them by service name, and
-their datadir is tmpfs for the reason [deploy/README.md](deploy/README.md) gives.
 
 **What the image does not carry is any project's toolchain.** It has node, git,
 the `gh` CLI, the four agent CLIs and the `mysql`/`psql` clients, enough to run
@@ -667,14 +659,7 @@ fresh.
 
 Key `.env` settings, with `.env.example` holding the full list:
 
-- `DEV_MAX_SESSIONS`: how many sessions of the projects that claim a database
-  server may be open at once, when the pool cannot answer for it (claiming off,
-  or no servers configured yet). Otherwise the pool size is the cap. A project
-  with its database switched off holds nothing exclusive and is never capped
 - `DB_*`: where projects and session history are stored
-- `DB_POOL_*`: switches the per-session database pool off, and tunes how long
-  a session waits for a server to free up. The servers themselves live in the
-  database and are managed through `/api/v1/settings/db-servers`
 
 ## Projects
 
@@ -684,9 +669,9 @@ row, edited through **`/api/v1/settings/projects`**:
 - **Repository** and label
 - **Setup**: the install/build commands run in the checkout before the agent
   starts, their per-step timeout, and the PHP version to run them with
-- **Database**: whether the session claims a database server of its own from
-  the pool, which database it points at there (created if missing), and the
-  line logged when a server is claimed (`{host}`, `{port}`, `{database}`)
+- **Database**: the name each session's own database is built from
+  (`<name>_<session id>`, created on the server the `.env` template names and
+  dropped on close), and the PostgreSQL extensions to enable in it
 
 - **Checkout .env**: written into the clone as `.env` before setup runs
   each time it is prepared, so an edit to a checkout's own `.env` does not last.
@@ -751,12 +736,6 @@ with `$REVIEWER_MEMORY_TOKEN` as a bearer token, both in the turn's
 environment). The token is the session's own, minted per process and never
 stored, and it only reaches that session's project. Read, correct or prune what
 was remembered through `/api/v1/memories`.
-
-The **database pool** (`/api/v1/settings/db-servers`) holds the servers sessions can
-claim: label, host, port, username and password per entry. One session holds a
-server at a time, so add as many entries as sessions you want to run in parallel
-with a database. Migrations and seeding belong in the project's setup
-commands, which run on every session against the claimed server.
 
 ## Client API
 
@@ -981,10 +960,8 @@ API is listening. Active turns continue in their saved provider conversation,
 queued instructions are retained, and QA steps continue
 from their saved stage. Completed turns are skipped. Idle sessions reopen their
 workspaces without starting a turn, and standing questions still wait for the
-operator's answer. Recovery reserves workspace slots and reclaims each session's
-previous database server without restoring seed SQL or dropping profile
-databases. If that server is unavailable, recovery fails visibly instead of
-moving the session onto different data. Sessions already closed, failed or
+operator's answer. Recovery reserves workspace slots and keeps each session's
+own database and its run profiles' databases. Sessions already closed, failed or
 interrupted before this restart stay as they were.
 An explicit Stop stays stopped, including when the canceled process was still
 exiting at shutdown.

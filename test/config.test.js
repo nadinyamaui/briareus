@@ -289,51 +289,17 @@ describe('the API secret', () => {
   });
 });
 
-describe('the database pool', () => {
-  it('is on unless switched off', async () => {
-    const { getConfig } = await loadConfig(complete());
-
-    expect(getConfig().dbPool).toMatchObject({ enabled: true, waitTimeoutMin: 30, pollSeconds: 10 });
-  });
-
-  it('switches off on DB_POOL_ENABLED=false, whatever its case', async () => {
-    const { getConfig } = await loadConfig(complete({ DB_POOL_ENABLED: 'FALSE' }));
-
-    expect(getConfig().dbPool.enabled).toBe(false);
-  });
-
-  it('stays on for any other value', async () => {
-    const { getConfig } = await loadConfig(complete({ DB_POOL_ENABLED: 'yes' }));
-
-    expect(getConfig().dbPool.enabled).toBe(true);
-  });
-
-  it('never polls faster than once a second', async () => {
-    const { getConfig } = await loadConfig(complete({ DB_POOL_POLL_SECONDS: '0' }));
-
-    expect(getConfig().dbPool.pollSeconds).toBe(1);
-  });
-
-  it('takes the wait timeout that was given', async () => {
-    const { getConfig } = await loadConfig(complete({ DB_POOL_WAIT_TIMEOUT_MIN: '5' }));
-
-    expect(getConfig().dbPool.waitTimeoutMin).toBe(5);
-  });
-});
-
 describe('developer sessions', () => {
-  it('caps at three sessions and an hour, and auto-compacts past 250k, by default', async () => {
+  it('auto-compacts past 250k by default', async () => {
     const { getConfig } = await loadConfig(complete());
 
-    expect(getConfig().dev).toEqual({ maxSessions: 3, timeoutMin: 60, autoCompactTokens: 250000 });
+    expect(getConfig().dev).toEqual({ autoCompactTokens: 250000 });
   });
 
-  it('takes the caps that were given', async () => {
-    const { getConfig } = await loadConfig(
-      complete({ DEV_MAX_SESSIONS: '8', DEV_TIMEOUT_MIN: '15', DEV_AUTO_COMPACT_TOKENS: '200000' }),
-    );
+  it('takes the threshold that was given', async () => {
+    const { getConfig } = await loadConfig(complete({ DEV_AUTO_COMPACT_TOKENS: '200000' }));
 
-    expect(getConfig().dev).toEqual({ maxSessions: 8, timeoutMin: 15, autoCompactTokens: 200000 });
+    expect(getConfig().dev).toEqual({ autoCompactTokens: 200000 });
   });
 
   it('reads an auto-compact threshold left empty as the default, not as off', async () => {

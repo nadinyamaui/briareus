@@ -218,15 +218,6 @@ import {
   stepRuntime,
 } from './lib/projects.js';
 import { projectRunProfiles } from './lib/runprofiles.js';
-import {
-  initDbServers,
-  listDbServers,
-  createDbServer,
-  updateDbServer,
-  removeDbServer,
-  DB_SERVER_DEFAULTS,
-} from './lib/dbservers.js';
-import { probeDbServer, claimHolder, sessionCapacity, setDbServerFilter } from './lib/dbpool.js';
 import { listActions, getAction, actionSessionSpec } from './lib/actions.js';
 import {
   initSavedPrompts,
@@ -340,7 +331,6 @@ const sessionMayUse = (job, kind, id) => {
     return false;
   }
 };
-setDbServerFilter((job, server) => sessionMayUse(job, 'dbServer', server.id));
 setSessionProjectFilter((job, project) => sessionMayUse(job, 'project', project.id));
 
 // On every response, including the webhooks': nothing here is a page, and the
@@ -933,7 +923,6 @@ api.use(
     users,
     exists: {
       project: hasId(listProjects),
-      dbServer: hasId(listDbServers),
       sshServer: hasId(() => sshService.list()),
       mcpServer: hasId(() => mcpService.list()),
       forgeAccount: hasId(() => forgeAccounts.list()),
@@ -1282,57 +1271,6 @@ api.get('/api/repo/archive', async (req, res) => {
   } catch (e) {
     if (res.destroyed) return;
     res.status(e.status || (e.rateLimited ? 429 : 502)).json({ error: e.message });
-  }
-});
-
-// ---- database pool ----
-//
-// Database servers sessions can claim, one session per server at a time.
-
-api.get('/api/dbservers', (req, res) => {
-  res.json({ servers: listDbServers(), defaults: DB_SERVER_DEFAULTS });
-});
-
-// Probes the connection as the form holds it, so an entry can be verified before saving. The
-// pool size rides along because it caps how many sessions may be open at once.
-api.post('/api/dbservers/test', async (req, res) => {
-  try {
-    const { id, host, port, username, password } = req.body || {};
-    const probe = await probeDbServer({ host, port, username, password });
-    res.json({
-      ...probe,
-      claimedBy: id ? claimHolder(id) : null,
-      capacity: sessionCapacity(),
-      poolSize: listDbServers().filter((s) => s.enabled).length,
-    });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-api.post('/api/dbservers', async (req, res) => {
-  try {
-    res.status(201).json({ server: await createDbServer(req.body || {}) });
-  } catch (e) {
-    res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
-  }
-});
-
-api.put('/api/dbservers/:id', async (req, res) => {
-  try {
-    res.json({ server: await updateDbServer(Number(req.params.id), req.body || {}) });
-  } catch (e) {
-    res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
-  }
-});
-
-api.delete('/api/dbservers/:id', async (req, res) => {
-  try {
-    const removed = await removeDbServer(Number(req.params.id));
-    if (!removed) return res.status(404).json({ error: 'Database server not found' });
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(e.status === 503 ? 503 : 400).json({ error: e.message });
   }
 });
 
@@ -2331,7 +2269,6 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     await users.init().catch((e) => console.error('Could not load users:', e.message));
     await initTemplates();
     await initProjects();
-    await initDbServers();
     await sshService.init();
     await slackService.init();
     await mcpService.init();

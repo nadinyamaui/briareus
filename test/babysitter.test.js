@@ -3,7 +3,6 @@ import { describe, it, expect, vi } from 'vitest';
 vi.mock('../lib/db.js', () => ({ loadAppSetting: vi.fn(), saveAppSetting: vi.fn() }));
 vi.mock('../lib/jobs.js', () => ({
   createDevSession: vi.fn(),
-  devSessionSlots: vi.fn(() => Infinity),
   pullRequestHasOpenSession: vi.fn(() => false),
 }));
 // The spec itself is lib/actions.js's business, tested there; here it only has to
@@ -55,7 +54,6 @@ function sitter({ projects = [project()], pulls = [pr()], stored = {}, ...over }
     projects: () => projects,
     pulls: async () => ({ pulls }),
     hasSession: () => false,
-    slots: () => Infinity,
     start,
     load: async () => stored,
     save: async (v) => saved.push(JSON.parse(JSON.stringify(v))),
@@ -197,7 +195,6 @@ describe('PR errands', () => {
     { projects: [project({ babysitPrs: false })] },
     { projects: [project({ actionProviderId: null })] },
     { hasSession: () => true },
-    { slots: () => 0 },
   ])('does not start when unavailable', async (extra) => {
     const { b, start } = sitter({ pulls: [pr({ checks: 'failure' })], ...extra });
     await b.tick();

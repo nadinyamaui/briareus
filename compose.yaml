@@ -1,9 +1,6 @@
-# The core, its own MySQL, and, behind the `pool` profile, the extra
-# MySQL instances a session can claim so parallel sessions never share a
-# database.
+# The core and its own MySQL.
 #
 #   docker compose up -d --build          the core and its database
-#   docker compose --profile pool up -d   plus two servers for the pool
 #
 # Settings that describe this install are read from the shell (or from the .env
 # next to this file, which docker compose loads on its own); everything the
@@ -93,30 +90,6 @@ services:
       timeout: 5s
       retries: 20
       start_period: 30s
-    restart: unless-stopped
-
-  # The pool. Add them at /settings as db-pool-1:3306 and db-pool-2:3306; the
-  # app reaches them by service name over the compose network, so neither needs
-  # a published port. Their datadir is tmpfs, for the same reason the bare-metal
-  # deploy puts it there (deploy/README.md): a session's database is memory and
-  # nothing else, and an instance that comes back empty is repopulated from the
-  # project's dump on first use.
-  db-pool-1:
-    profiles: ['pool']
-    image: mysql:8.4
-    environment:
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-reviewer}
-    tmpfs:
-      - /var/lib/mysql:size=3g
-    restart: unless-stopped
-
-  db-pool-2:
-    profiles: ['pool']
-    image: mysql:8.4
-    environment:
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-reviewer}
-    tmpfs:
-      - /var/lib/mysql:size=3g
     restart: unless-stopped
 
 volumes:

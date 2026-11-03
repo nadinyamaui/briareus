@@ -10,7 +10,7 @@ import { repoArchive } from '../lib/repofiles.js';
 const source = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
 const route = source.slice(
   source.indexOf("api.get('/api/repo/archive'"),
-  source.indexOf('// ---- database pool ----'),
+  source.indexOf('// ---- workspace pool ----'),
 );
 const servers = [];
 const clients = [];

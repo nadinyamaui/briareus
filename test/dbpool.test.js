@@ -1,14 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 
-// No database server here: mysql2, spawn and fs are mocked, and tests assert what was reached
-// with what. The pool (activeDbServers, config) is driven from `state` so one module can be
-// walked through an empty, a contended and a healthy pool.
+// No database server here: mysql2 and spawn are mocked, and tests assert what was reached
+// with what. The project (and so its .env template) is driven from `state`.
 const state = vi.hoisted(() => ({
   project: null,
   otherProjects: [], // what listProjects answers beside `project`
-  servers: [],
-  config: null,
   psqlCalls: [],
   psqlResults: [], // per call: {code, stdout, stderr}
   mysqlQueries: [],
@@ -17,27 +14,15 @@ const state = vi.hoisted(() => ({
   mysqlConnectErrors: [], // one per connect attempt, ahead of mysqlConnectError
   mysqlFailOn: null, // a query matching this regex rejects
   mysqlHold: null, // { on: regex, until: promise }: a matching query waits for it
-  mysqlVersion: '8.0.36',
   mysqlDatabases: [],
   mysqlLowerCase: 0, // @@lower_case_table_names
   spawnError: null, // makes the child emit 'error' instead of running
-  files: new Set(), // what fs.existsSync says yes to
-  dumpError: null, // makes the dump read stream fail
-  restoreSpawn: null,
   psqlSpawn: null,
-  stdinError: null, // makes the write into mysql's stdin fail
 }));
-
-vi.mock('../lib/config.js', () => ({ getConfig: () => state.config }));
 
 vi.mock('../lib/projects.js', () => ({
   getProject: () => state.project,
   listProjects: () => [state.project, ...state.otherProjects],
-}));
-
-vi.mock('../lib/dbservers.js', () => ({
-  activeDbServers: () => state.servers,
-  getDbServer: (id) => state.servers.find((s) => s.id === Number(id)) || null,
 }));
 
 vi.mock('mysql2/promise', () => ({
@@ -57,7 +42,6 @@ vi.mock('mysql2/promise', () => ({
             ...(values ? { values } : {}),
           });
           if (state.mysqlFailOn && state.mysqlFailOn.test(sql)) throw new Error('ER_DB_DROP_EXISTS');
-          if (/VERSION\(\)/.test(sql)) return [[{ version: state.mysqlVersion }]];
           if (/SHOW DATABASES/.test(sql)) return [state.mysqlDatabases];
           if (/lower_case_table_names/.test(sql)) return [[{ lowerCase: state.mysqlLowerCase }]];
           return [[]];
@@ -73,23 +57,9 @@ vi.mock('mysql2/promise', () => ({
   },
 }));
 
-vi.mock('node:fs', () => ({
-  default: {
-    existsSync: (p) => state.files.has(p),
-    createReadStream: () => {
-      const s = new EventEmitter();
-      s.pipe = () => {};
-      s.destroy = () => {};
-      if (state.dumpError) setTimeout(() => s.emit('error', state.dumpError), 0);
-      return s;
-    },
-  },
-}));
-
 vi.mock('node:child_process', () => ({
   spawn: (bin, args, opts) => {
     state.psqlCalls.push({ bin, args, env: opts.env, ...(opts.timeout ? { timeout: opts.timeout } : {}) });
-    if (bin === 'mysql' && state.restoreSpawn) return state.restoreSpawn(opts);
     if (bin === 'psql' && state.psqlSpawn) return state.psqlSpawn(args, opts);
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
@@ -100,14 +70,13 @@ vi.mock('node:child_process', () => ({
       setTimeout(() => child.emit('error', state.spawnError), 0);
       return child;
     }
-    if (state.stdinError) setTimeout(() => child.stdin.emit('error', state.stdinError), 0);
     const result = state.psqlResults.shift() || { code: 0, stdout: '' };
     // The close listener is attached after this call returns, so let the tick
     // finish before the process "exits".
     setTimeout(() => {
       if (result.stdout) child.stdout.emit('data', result.stdout);
       if (result.stderr) child.stderr.emit('data', result.stderr);
-      if (!state.dumpError) child.emit('close', result.code);
+      child.emit('close', result.code);
     }, 0);
     return child;
   },
@@ -115,23 +84,12 @@ vi.mock('node:child_process', () => ({
 
 const {
   ensureSessionDatabase,
-  acquireInstance,
-  reclaimInstance,
   stopDatabaseProcesses,
-  releaseInstance,
-  claimHolder,
-  waitingForInstance,
-  sessionCapacity,
-  projectClaimsServer,
-  probeDbServer,
-  instanceAppPort,
-  instanceEnv,
-  assertInstanceAccess,
+  sessionDbEnv,
   dropSessionDatabase,
   ensureProfileDatabase,
   profileDbElsewhere,
   sessionDatabaseName,
-  setDbServerFilter,
   _resetForTests,
 } = await import('../lib/dbpool.js');
 
@@ -152,35 +110,7 @@ function job(id = 'abc123') {
   return { id, kind: 'devchat' };
 }
 
-function server(over = {}) {
-  return {
-    id: 1,
-    label: 'local',
-    host: '127.0.0.1',
-    port: 3306,
-    username: 'root',
-    password: 'pw',
-    enabled: true,
-    ...over,
-  };
-}
-
-const config = (over = {}) => ({
-  dbPool: { enabled: true, waitTimeoutMin: 10, pollSeconds: 0.001, ...(over.dbPool || {}) },
-  dev: { maxSessions: 3, ...(over.dev || {}) },
-});
-
-// Claims live in a module-level Map that outlives a test, and a leaked one makes the next test
-// wait forever, so every claim goes through here for afterEach to hand back.
-const claimed = [];
-async function acquire(j, repo = 'r/r', onEvent = () => {}) {
-  const id = await acquireInstance(j, repo, onEvent);
-  if (id != null) claimed.push(j);
-  return id;
-}
-
 afterEach(() => {
-  for (const j of claimed.splice(0)) releaseInstance(j);
   _resetForTests();
 });
 
@@ -196,20 +126,14 @@ beforeEach(() => {
   state.mysqlHold = null;
   state.mysqlDatabases = [];
   state.spawnError = null;
-  state.dumpError = null;
-  state.stdinError = null;
-  state.restoreSpawn = null;
   state.psqlSpawn = null;
-  state.files = new Set();
-  state.servers = [];
   state.otherProjects = [];
-  state.config = config();
-  state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
+  state.project = { dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
 });
 
 describe('database preparation shutdown', () => {
   it.each(['lookup', 'database', 'extension'])(
-    'suspends unpooled PostgreSQL %s preparation when shutdown kills the command',
+    'suspends PostgreSQL %s preparation when shutdown kills the command',
     async (stage) => {
       state.project.dbExtensions = ['pg_trgm'];
       let active;
@@ -250,7 +174,7 @@ describe('database preparation shutdown', () => {
     },
   );
 
-  it('suspends unpooled preparation when its final PostgreSQL command exits successfully during shutdown', async () => {
+  it('suspends preparation when its final PostgreSQL command exits successfully during shutdown', async () => {
     state.project.dbExtensions = ['pg_trgm'];
     let active;
     state.psqlSpawn = (args) => {
@@ -276,93 +200,6 @@ describe('database preparation shutdown', () => {
     expect(session.sessionDb).toBeUndefined();
   });
 
-  it.each(['lookup', 'database', 'extension'])(
-    'awaits the PostgreSQL %s process and starts no later DDL during shutdown',
-    async (stage) => {
-      state.project = {
-        dbPoolEnabled: true,
-        dbPoolDatabase: 'app',
-        dbExtensions: ['pg_trgm', 'vector'],
-      };
-      state.servers = [server({ engine: 'pgsql', port: 5432 })];
-      let active;
-      state.psqlSpawn = (args) => {
-        const child = new EventEmitter();
-        child.stdout = new EventEmitter();
-        child.stderr = new EventEmitter();
-        child.kill = vi.fn();
-        const sql = args.at(-1);
-        if (
-          (stage === 'lookup' && sql.startsWith('SELECT')) ||
-          (stage === 'database' && sql.startsWith('CREATE DATABASE')) ||
-          (stage === 'extension' && sql.includes('pg_trgm'))
-        )
-          active = child;
-        else setTimeout(() => child.emit('close', 0), 0);
-        return child;
-      };
-      const session = { ...job(), repo: 'acme/app' };
-      let settled = false;
-      acquireInstance(session, session.repo, vi.fn()).finally(() => {
-        settled = true;
-      });
-      await vi.waitFor(() => expect(active).toBeDefined());
-      const callCount = state.psqlCalls.length;
-      let stopped = false;
-      const stopping = stopDatabaseProcesses().then(() => {
-        stopped = true;
-      });
-      await Promise.resolve();
-      expect(active.kill).toHaveBeenCalledWith('SIGKILL');
-      expect(stopped).toBe(false);
-      // A successful exit can race with the kill: its continuation must still
-      // suspend before creating a database or the next extension.
-      active.emit('close', 0);
-      await stopping;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(state.psqlCalls).toHaveLength(callCount);
-      expect(session).toMatchObject({ dbServerId: 1, dbPreparing: true });
-      expect(claimHolder(1)).toBe(session.id);
-      expect(settled).toBe(false);
-      const recovered = { ...session };
-      _resetForTests();
-      await releaseInstance(session);
-      state.psqlSpawn = null;
-      reclaimInstance(recovered, 1);
-      await acquireInstance(recovered, recovered.repo, vi.fn());
-      expect(recovered.dbPreparing).toBe(false);
-      await releaseInstance(recovered);
-    },
-  );
-
-  it('retains a preparing claim until a concurrent close finishes database cleanup', async () => {
-    let allowQuery;
-    const query = new Promise((resolve) => {
-      allowQuery = resolve;
-    });
-    state.mysqlHold = { on: /^CREATE DATABASE/, until: query };
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
-    state.servers = [server()];
-    state.files.add('/seed.sql');
-    const session = { ...job(), status: 'preparing' };
-    const preparation = acquireInstance(session, 'acme/app', vi.fn()).catch((e) => e);
-    expect(session.dbServerId).toBe(1);
-    session.status = 'closed';
-    let released = false;
-    const closing = releaseInstance(session).then(() => {
-      released = true;
-    });
-    expect(claimHolder(1)).toBe(session.id);
-    await Promise.resolve();
-    expect(released).toBe(false);
-    allowQuery();
-    expect((await preparation).message).toContain('canceled');
-    await closing;
-    expect(claimHolder(1)).toBeNull();
-    expect(session.dbPreparing).toBe(false);
-    expect(state.psqlCalls).toEqual([]);
-  });
-
   it('kills and awaits a real PostgreSQL extension process before preparation can recover', async () => {
     const { spawn: actualSpawn } = await vi.importActual('node:child_process');
     const { default: actualFs } = await vi.importActual('node:fs');
@@ -372,12 +209,7 @@ describe('database preparation shutdown', () => {
     const ready = path.join(root, 'ready');
     const late = path.join(root, 'late');
     let ddl;
-    state.project = {
-      dbPoolEnabled: true,
-      dbPoolDatabase: 'app',
-      dbExtensions: ['pg_trgm', 'vector'],
-    };
-    state.servers = [server({ engine: 'pgsql', port: 5432 })];
+    state.project = { dbPoolDatabase: 'app', envTemplate: PG_TEMPLATE, dbExtensions: ['pg_trgm', 'vector'] };
     state.psqlSpawn = (args, opts) => {
       const sql = args.at(-1);
       const script = sql.includes('pg_trgm')
@@ -389,7 +221,7 @@ describe('database preparation shutdown', () => {
     };
     const session = { ...job(), repo: 'acme/app' };
     let settled = false;
-    acquireInstance(session, session.repo, vi.fn()).finally(() => {
+    ensureSessionDatabase(session, session.repo, vi.fn()).finally(() => {
       settled = true;
     });
     try {
@@ -399,256 +231,19 @@ describe('database preparation shutdown', () => {
       await new Promise((resolve) => setTimeout(resolve, 900));
       expect(actualFs.existsSync(late)).toBe(false);
       expect(state.psqlCalls.some((c) => c.args.at(-1).includes('vector'))).toBe(false);
-      expect(session).toMatchObject({ dbServerId: 1, dbPreparing: true });
+      expect(session.sessionDb).toBeUndefined();
       expect(settled).toBe(false);
     } finally {
       ddl?.kill('SIGKILL');
       _resetForTests();
-      await releaseInstance(session);
       actualFs.rmSync(root, { recursive: true, force: true });
     }
-  });
-
-  it('kills and awaits a real seed importer, preserving the incomplete claim for recovery', async () => {
-    const { spawn: actualSpawn } = await vi.importActual('node:child_process');
-    const { default: actualFs } = await vi.importActual('node:fs');
-    const { default: os } = await vi.importActual('node:os');
-    const { default: path } = await vi.importActual('node:path');
-    const root = actualFs.mkdtempSync(path.join(os.tmpdir(), 'db-import-shutdown-'));
-    const ready = path.join(root, 'ready');
-    const late = path.join(root, 'late');
-    let importer;
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
-    state.servers = [server()];
-    state.files.add('/seed.sql');
-    state.restoreSpawn = (opts) => {
-      importer = actualSpawn(
-        process.execPath,
-        [
-          '-e',
-          `require('fs').writeFileSync(${JSON.stringify(ready)}, 'ready'); setTimeout(() => require('fs').writeFileSync(${JSON.stringify(late)}, 'buffered SQL write'), 800); setInterval(() => {}, 1000);`,
-        ],
-        opts,
-      );
-      return importer;
-    };
-    const session = { ...job(), repo: 'acme/app' };
-    const onClaim = vi.fn(() => {
-      expect(session).toMatchObject({ dbServerId: 1, dbPreparing: true });
-      expect(state.mysqlQueries).toEqual([]);
-    });
-    let settled = false;
-    acquireInstance(session, session.repo, vi.fn(), onClaim).finally(() => {
-      settled = true;
-    });
-    try {
-      await vi.waitFor(() => expect(actualFs.existsSync(ready)).toBe(true));
-      expect(onClaim).toHaveBeenCalledOnce();
-      await stopDatabaseProcesses();
-      expect(importer.signalCode).toBe('SIGKILL');
-      expect(session).toMatchObject({ dbServerId: 1, dbPreparing: true });
-      expect(claimHolder(1)).toBe(session.id);
-      await new Promise((resolve) => setTimeout(resolve, 900));
-      expect(actualFs.existsSync(late)).toBe(false);
-      expect(settled).toBe(false);
-      const recovered = { ...session };
-      _resetForTests();
-      await releaseInstance(session);
-      state.restoreSpawn = null;
-      reclaimInstance(recovered, recovered.dbServerId);
-      await acquireInstance(recovered, recovered.repo, vi.fn());
-      expect(recovered.dbPreparing).toBe(false);
-      expect(state.psqlCalls.filter((c) => c.bin === 'mysql')).toHaveLength(2);
-      expect(state.mysqlQueries.some((q) => q.sql === 'SELECT 1')).toBe(true);
-      await releaseInstance(recovered);
-    } finally {
-      importer?.kill('SIGKILL');
-      _resetForTests();
-      await releaseInstance(session);
-      actualFs.rmSync(root, { recursive: true, force: true });
-    }
-  });
-});
-
-describe('restart database claims', () => {
-  it.each([null, 0])(
-    'suspends a reclaimed PostgreSQL probe that closes during shutdown (exit %s)',
-    async (code) => {
-      state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
-      state.servers = [server({ engine: 'pgsql', port: 5432 })];
-      let active;
-      state.psqlSpawn = () => {
-        active = new EventEmitter();
-        active.stdout = new EventEmitter();
-        active.stderr = new EventEmitter();
-        active.kill = vi.fn();
-        return active;
-      };
-      const session = { ...job(), repo: 'acme/app', recoveryTurn: { completed: false } };
-      reclaimInstance(session, 1);
-      claimed.push(session);
-      const settled = vi.fn();
-      acquireInstance(session, session.repo, vi.fn()).then(settled, settled);
-      expect(state.psqlCalls).toHaveLength(1);
-      expect(state.psqlCalls[0].args.at(-1)).toBe('SELECT 1');
-      const stopping = stopDatabaseProcesses();
-      expect(active.kill).toHaveBeenCalledWith('SIGKILL');
-      active.emit('close', code, code === null ? 'SIGKILL' : null);
-      await stopping;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(settled).not.toHaveBeenCalled();
-      expect(claimHolder(1)).toBe(session.id);
-      expect(session).toMatchObject({ dbServerId: 1, recoveryTurn: { completed: false } });
-      expect(state.psqlCalls).toHaveLength(1);
-      expect(state.mysqlQueries).toEqual([]);
-
-      // The next boot can reclaim and probe the original server without reseeding.
-      _resetForTests();
-      state.psqlSpawn = null;
-      reclaimInstance(session, 1);
-      expect(await acquireInstance(session, session.repo, vi.fn())).toBe(1);
-      expect(state.psqlCalls).toHaveLength(2);
-      expect(state.psqlCalls[1].args.at(-1)).toBe('SELECT 1');
-      expect(claimHolder(1)).toBe(session.id);
-    },
-  );
-
-  it.each(['project', 'global'])(
-    'retains the original database claim after %s pooling is disabled',
-    async (mode) => {
-      state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
-      state.servers = [server({ id: 7 }), server({ id: 8, port: 3307 })];
-      state.files.add('/seed.sql');
-      const session = { ...job('recovered'), repo: 'acme/app' };
-      if (mode === 'project') state.project.dbPoolEnabled = false;
-      else state.config.dbPool.enabled = false;
-      reclaimInstance(session, 7);
-      claimed.push(session);
-      expect(claimHolder(7)).toBe(session.id);
-      expect(await acquireInstance(session, session.repo, vi.fn())).toBe(7);
-      expect(await ensureSessionDatabase(session, session.repo, vi.fn())).toBeNull();
-      expect(session.sessionDb).toBeNull();
-      expect(instanceEnv(session)).toMatchObject({
-        DB_HOST: '127.0.0.1',
-        DB_PORT: '3306',
-        DB_DATABASE: 'app',
-      });
-      expect(state.mysqlQueries.map((q) => q.sql)).toEqual(['SELECT 1']);
-      expect(state.psqlCalls).toEqual([]);
-
-      // New pooled work must use a different server until this session closes.
-      state.project.dbPoolEnabled = true;
-      state.config.dbPool.enabled = true;
-      const other = job('other');
-      expect(await acquire(other)).toBe(8);
-      expect(claimHolder(7)).toBe(session.id);
-      expect(state.mysqlQueries.filter((q) => /CREATE DATABASE/.test(q.sql)).map((q) => q.opts.port)).toEqual(
-        [3307],
-      );
-      expect(
-        state.psqlCalls.filter((c) => c.bin === 'mysql').map((c) => c.args[c.args.indexOf('--port') + 1]),
-      ).toEqual(['3307']);
-      await releaseInstance(session);
-      expect(claimHolder(7)).toBeNull();
-    },
-  );
-
-  it('reuses the original server without dropping profile databases or restoring seed SQL', async () => {
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
-    state.servers = [server({ id: 1 }), server({ id: 2, port: 3307 })];
-    const session = { ...job(), repo: 'acme/app' };
-    reclaimInstance(session, 2);
-    expect(claimHolder(2)).toBe(session.id);
-    expect(session).toMatchObject({ dbServerId: 2, dbHost: '127.0.0.1', dbPort: 3307 });
-    expect(await acquireInstance(session, session.repo, vi.fn())).toBe(2);
-    expect(state.mysqlQueries).toEqual([
-      {
-        opts: { host: '127.0.0.1', port: 3307, user: 'root', password: 'pw', connectTimeout: 5000 },
-        sql: 'SELECT 1',
-        timeout: 5000,
-      },
-    ]);
-    expect(state.psqlCalls).toEqual([]);
-    await releaseInstance(session);
-    expect(claimHolder(2)).toBeNull();
-  });
-
-  it.each([false, true])(
-    'rejects a reclaimed unshared server before probing (preparing=%s)',
-    async (dbPreparing) => {
-      state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
-      state.servers = [server()];
-      const session = { ...job(), repo: 'acme/app', ownerId: 2, dbPreparing };
-      reclaimInstance(session, 1);
-      const allowed = vi.fn(() => false);
-      setDbServerFilter(allowed);
-      try {
-        await expect(acquireInstance(session, session.repo, vi.fn())).rejects.toThrow(/no longer shared/);
-        expect(allowed).toHaveBeenCalledWith(session, state.servers[0]);
-        expect(claimHolder(1)).toBe(session.id);
-        expect(session.dbServerId).toBe(1);
-        expect(state.mysqlQueries).toEqual([]);
-        expect(state.psqlCalls).toEqual([]);
-      } finally {
-        setDbServerFilter(() => true);
-        await releaseInstance(session);
-      }
-      expect(claimHolder(1)).toBeNull();
-    },
-  );
-
-  it('fails reclaimed acquisition when MySQL cannot be reached, retaining the claim until cleanup', async () => {
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
-    state.servers = [server()];
-    const session = { ...job(), repo: 'acme/app' };
-    reclaimInstance(session, 1);
-    claimed.push(session);
-    state.mysqlConnectError = new Error('ECONNREFUSED');
-    await expect(acquireInstance(session, session.repo, vi.fn())).rejects.toThrow(
-      /previous database server.*ECONNREFUSED/,
-    );
-    expect(claimHolder(1)).toBe(session.id);
-    expect(state.mysqlQueries).toEqual([]);
-    expect(state.psqlCalls).toEqual([]);
-  });
-
-  it.each([0, 1])('probes a reclaimed Postgres server without DDL or restores (exit %s)', async (code) => {
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app', dbRestoreSql: '/seed.sql' };
-    state.servers = [server({ engine: 'pgsql', port: 5432 })];
-    const session = { ...job(), repo: 'acme/app' };
-    reclaimInstance(session, 1);
-    claimed.push(session);
-    state.psqlResults = [{ code, stderr: code ? 'connection refused' : '', stdout: '1' }];
-    const acquisition = acquireInstance(session, session.repo, vi.fn());
-    if (code) await expect(acquisition).rejects.toThrow(/previous database server.*connection refused/);
-    else expect(await acquisition).toBe(1);
-    expect(state.psqlCalls).toHaveLength(1);
-    expect(state.psqlCalls[0]).toMatchObject({
-      bin: 'psql',
-      args: expect.arrayContaining(['SELECT 1']),
-      timeout: 5000,
-    });
-    expect(state.mysqlQueries).toEqual([]);
-  });
-
-  it('refuses a missing or conflicting server instead of moving the session onto seed data', async () => {
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'app' };
-    state.servers = [server()];
-    const first = { ...job('first'), repo: 'acme/app' };
-    const second = { ...job('second'), repo: 'acme/app' };
-    reclaimInstance(first, 1);
-    expect(() => reclaimInstance(second, 1)).toThrow(/previous database server.*unavailable/);
-    expect(() => reclaimInstance(second, 99)).toThrow(/previous database server.*unavailable/);
-    expect(claimHolder(1)).toBe('first');
-    expect(second.dbServerId).toBeUndefined();
-    expect(state.mysqlQueries).toEqual([]);
-    await releaseInstance(first);
   });
 });
 
 describe('ensureSessionDatabase', () => {
   beforeEach(() => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
   });
 
   it('provisions, exports and cleans only the review database, including its extensions', async () => {
@@ -658,16 +253,16 @@ describe('ensureSessionDatabase', () => {
 
     // The XML test database and .env template database must not replace this
     // environment value when a runner loads its defaults before dotenv.
-    expect(instanceEnv(review)).toEqual({ DB_DATABASE: 'sample_review123' });
+    expect(sessionDbEnv(review)).toEqual({ DB_DATABASE: 'sample_review123' });
     const extension = state.psqlCalls.find((c) => c.args.at(-1).includes('CREATE EXTENSION'));
     expect(extension.args.at(-1)).toBe('CREATE EXTENSION IF NOT EXISTS "vector"');
-    expect(extension.args[extension.args.indexOf('--dbname') + 1]).toBe(instanceEnv(review).DB_DATABASE);
+    expect(extension.args[extension.args.indexOf('--dbname') + 1]).toBe(sessionDbEnv(review).DB_DATABASE);
 
     await dropSessionDatabase(review, () => {});
     expect(state.psqlCalls.at(-1).args.at(-1)).toBe(
       'DROP DATABASE IF EXISTS "sample_review123" WITH (FORCE)',
     );
-    expect(instanceEnv(review)).toEqual({});
+    expect(sessionDbEnv(review)).toEqual({});
   });
 
   it('creates the session database on Postgres when the template says pgsql', async () => {
@@ -748,7 +343,7 @@ describe('ensureSessionDatabase', () => {
   });
 
   it('still goes through mysql2 for a project without DB_CONNECTION', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
 
     await ensureSessionDatabase(job(), 'exampleco/sample-app', () => {});
 
@@ -760,7 +355,6 @@ describe('ensureSessionDatabase', () => {
 
   it('creates the extensions the project names in the new database', async () => {
     state.project = {
-      dbPoolEnabled: false,
       dbPoolDatabase: 'sample',
       dbExtensions: ['vector', 'pg_trgm'],
       envTemplate: PG_TEMPLATE,
@@ -785,7 +379,6 @@ describe('ensureSessionDatabase', () => {
 
   it('creates the extensions on a database that already existed', async () => {
     state.project = {
-      dbPoolEnabled: false,
       dbPoolDatabase: 'sample',
       dbExtensions: ['vector'],
       envTemplate: PG_TEMPLATE,
@@ -803,7 +396,6 @@ describe('ensureSessionDatabase', () => {
 
   it('fails the session when an extension is missing on the server', async () => {
     state.project = {
-      dbPoolEnabled: false,
       dbPoolDatabase: 'sample',
       dbExtensions: ['vector'],
       envTemplate: PG_TEMPLATE,
@@ -820,7 +412,6 @@ describe('ensureSessionDatabase', () => {
 
   it('keeps a Postgres name within the 63-byte identifier limit', async () => {
     state.project = {
-      dbPoolEnabled: false,
       dbPoolDatabase: 'c'.repeat(60),
       envTemplate: PG_TEMPLATE,
     };
@@ -833,7 +424,6 @@ describe('ensureSessionDatabase', () => {
 
   it('keeps a MySQL name within the 64-byte identifier limit', async () => {
     state.project = {
-      dbPoolEnabled: false,
       dbPoolDatabase: 'c'.repeat(70),
       envTemplate: MYSQL_TEMPLATE,
     };
@@ -844,7 +434,7 @@ describe('ensureSessionDatabase', () => {
   });
 
   it('replaces anything in the session id that is not an identifier character', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
 
     const name = await ensureSessionDatabase(job('a-b.c/d'), 'exampleco/sample-app', () => {});
 
@@ -857,16 +447,8 @@ describe('ensureSessionDatabase', () => {
     expect(await ensureSessionDatabase(j, 'exampleco/sample-app', () => {})).toBeNull();
   });
 
-  it('clears a stale name when the project has moved onto the pool', async () => {
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
-    const j = { ...job(), sessionDb: 'sample_old' };
-
-    expect(await ensureSessionDatabase(j, 'exampleco/sample-app', () => {})).toBeNull();
-    expect(j.sessionDb).toBeNull();
-  });
-
   it('does not apply to a project with no database name', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: '', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: '', envTemplate: MYSQL_TEMPLATE };
 
     expect(await ensureSessionDatabase(job(), 'exampleco/sample-app', () => {})).toBeNull();
   });
@@ -883,7 +465,7 @@ describe('ensureSessionDatabase', () => {
     afterEach(() => vi.useRealTimers());
 
     it('waits for a connection instead of failing the session', async () => {
-      state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+      state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
       state.mysqlConnectErrors = [tooMany(), tooMany()];
       const j = job();
 
@@ -898,7 +480,7 @@ describe('ensureSessionDatabase', () => {
     });
 
     it('gives up after about a minute', async () => {
-      state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+      state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
       state.mysqlConnectError = tooMany();
 
       const ensuring = ensureSessionDatabase(job(), 'exampleco/sample-app', () => {});
@@ -912,7 +494,7 @@ describe('ensureSessionDatabase', () => {
     });
 
     it('stops retrying a creation once the session is closing, before anything is made', async () => {
-      state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+      state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
       state.mysqlConnectErrors = [tooMany()];
       const j = { ...job(), repo: 'r/r' };
 
@@ -932,7 +514,7 @@ describe('ensureSessionDatabase', () => {
     });
 
     it('drops a database whose CREATE was already running when the close came', async () => {
-      state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+      state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
       let finishCreate;
       state.mysqlHold = { on: /^CREATE DATABASE/, until: new Promise((r) => (finishCreate = r)) };
       const j = { ...job(), repo: 'r/r' };
@@ -956,7 +538,7 @@ describe('ensureSessionDatabase', () => {
     });
 
     it('does not reconnect once shutdown began during the backoff', async () => {
-      state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+      state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
       state.mysqlConnectErrors = [tooMany()];
       let settled = false;
       ensureSessionDatabase(job(), 'exampleco/sample-app', () => {}).finally(() => (settled = true));
@@ -970,7 +552,7 @@ describe('ensureSessionDatabase', () => {
     });
 
     it('does not retry other connection errors', async () => {
-      state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+      state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
       state.mysqlConnectError = Object.assign(new Error('Access denied'), { errno: 1045 });
 
       await expect(ensureSessionDatabase(job(), 'exampleco/sample-app', () => {})).rejects.toThrow(
@@ -983,7 +565,7 @@ describe('ensureSessionDatabase', () => {
 
 describe('dropSessionDatabase', () => {
   it('drops the session database on MySQL', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     const events = [];
     const j = { ...job(), repo: 'exampleco/sample-app', sessionDb: 'sample_abc123' };
 
@@ -1000,7 +582,7 @@ describe('dropSessionDatabase', () => {
   });
 
   it('drops the session database on Postgres, forcing connections off it', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
     const j = { ...job(), repo: 'exampleco/sample-app', sessionDb: 'sample_abc123' };
 
     expect(await dropSessionDatabase(j, () => {})).toBe(true);
@@ -1013,19 +595,10 @@ describe('dropSessionDatabase', () => {
   });
 
   it('does nothing for a session that never had a database of its own', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
 
     expect(await dropSessionDatabase(job(), () => {})).toBe(false);
     expect(state.mysqlQueries).toHaveLength(0);
-  });
-
-  it('never drops the shared database of a pooled project', async () => {
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
-    const j = { ...job(), repo: 'exampleco/sample-app', sessionDb: 'sample' };
-
-    expect(await dropSessionDatabase(j, () => {})).toBe(false);
-    expect(state.mysqlQueries).toHaveLength(0);
-    expect(j.sessionDb).toBe('sample');
   });
 
   it('does not drop anything when the repo has no project left', async () => {
@@ -1037,7 +610,7 @@ describe('dropSessionDatabase', () => {
   });
 
   it('reports a server it cannot reach instead of failing the close', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     state.mysqlConnectError = new Error('ECONNREFUSED');
     const events = [];
     const j = { ...job(), repo: 'exampleco/sample-app', sessionDb: 'sample_abc123' };
@@ -1052,24 +625,8 @@ describe('dropSessionDatabase', () => {
 });
 
 describe('ensureProfileDatabase', () => {
-  it("creates a run profile's database on the session's claimed server, and keeps no drop list", async () => {
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'demoapp', dbExtensions: [] };
-    state.servers = [server({ id: 4, host: '10.0.0.4', port: 3307 })];
-    const events = [];
-    const j = { ...job(), repo: 'r/r', dbServerId: 4 };
-
-    expect(await ensureProfileDatabase(j, 'demoapp_projects', (t) => events.push(t))).toBe(true);
-
-    expect(state.mysqlQueries).toHaveLength(1);
-    expect(state.mysqlQueries[0].sql).toMatch(/^CREATE DATABASE IF NOT EXISTS `demoapp_projects`/);
-    expect(state.mysqlQueries[0].opts).toMatchObject({ host: '10.0.0.4', port: 3307 });
-    // Pooled: shared by every session on that server, like the pooled database.
-    expect(j.profileDbs).toBeUndefined();
-    expect(events[0]).toContain('demoapp_projects');
-  });
-
-  it("creates it next to an unpooled session's own database, remembered for the close", async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+  it("creates it next to a session's own database, remembered for the close", async () => {
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123' };
 
     await ensureProfileDatabase(j, 'sample_abc123_projects');
@@ -1080,7 +637,7 @@ describe('ensureProfileDatabase', () => {
   });
 
   it('creates a name not built off the session database, but never remembers it for the close', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123' };
 
     // The developer's own base database, and one every session's profile shares.
@@ -1092,7 +649,7 @@ describe('ensureProfileDatabase', () => {
   });
 
   it("does nothing for the session's own database, or one this app does not manage", async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     const own = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123' };
     const local = { ...job(), repo: 'r/r' };
 
@@ -1113,9 +670,9 @@ describe('ensureProfileDatabase', () => {
     expect(events[0]).toMatch(/mydb_projects is not created: create it yourself/);
   });
 
-  it('tells an unpooled session without a database of its own the same', async () => {
+  it('tells a session without a database of its own the same', async () => {
     // No database name in Settings: every session shares the template's.
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: '', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: '', envTemplate: MYSQL_TEMPLATE };
     const events = [];
     const j = { ...job(), repo: 'r/r' };
 
@@ -1127,7 +684,7 @@ describe('ensureProfileDatabase', () => {
   });
 
   it('refuses a name that is not an identifier, or too long for the engine', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
     const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123' };
 
     await expect(ensureProfileDatabase(j, 'sample; DROP')).rejects.toThrow(/not a plain database identifier/);
@@ -1136,30 +693,18 @@ describe('ensureProfileDatabase', () => {
   });
 
   it('names the session database {database} stands for', () => {
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'demoapp' };
-    expect(sessionDatabaseName({ ...job(), repo: 'r/r' })).toBe('demoapp');
+    state.project = { dbPoolDatabase: 'demoapp' };
+    // Not the project's base name before the session has a database of its own.
+    expect(sessionDatabaseName({ ...job(), repo: 'r/r' })).toBe('');
     expect(sessionDatabaseName({ ...job(), repo: 'r/r', sessionDb: 'demoapp_abc' })).toBe('demoapp_abc');
-    // A local checkout runs against its own .env, not the pool's name.
+    // A local checkout runs against its own .env.
     expect(sessionDatabaseName({ ...job(), repo: 'r/r', local: true })).toBe('');
   });
 });
 
 describe('profileDbElsewhere', () => {
-  it("names only the keys that differ from the claimed server's", () => {
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'demoapp' };
-    state.servers = [server({ id: 4, host: '10.0.0.4', port: 3307 })];
-    const j = { ...job(), repo: 'r/r', dbServerId: 4 };
-
-    // A block copied from a .env restates the session's own server.
-    expect(profileDbElsewhere(j, { DB_CONNECTION: 'mysql', DB_HOST: '10.0.0.4', DB_PORT: '3307' })).toEqual(
-      [],
-    );
-    expect(profileDbElsewhere(j, { DB_HOST: 'reports-db', DB_PORT: '3306' })).toEqual(['DB_HOST', 'DB_PORT']);
-    expect(profileDbElsewhere(j, { DB_CONNECTION: 'pgsql' })).toEqual(['DB_CONNECTION']);
-  });
-
-  it('compares an unpooled session against the server its .env template points at', () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
+  it('compares a session against the server its .env template points at', () => {
+    state.project = { dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
     const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123' };
 
     expect(profileDbElsewhere(j, { DB_CONNECTION: 'postgres', DB_PORT: '5432' })).toEqual([]);
@@ -1168,11 +713,16 @@ describe('profileDbElsewhere', () => {
 
   it("takes the connection name the .env template gives the session as the session's own", () => {
     // A multi-tenant app names its central connection in config/database.php.
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'demoapp', envTemplate: 'DB_CONNECTION=central' };
-    state.servers = [server({ id: 4, host: '10.0.0.4', port: 3307 })];
-    const j = { ...job(), repo: 'r/r', dbServerId: 4 };
+    state.project = {
+      dbPoolDatabase: 'demoapp',
+      envTemplate: 'DB_CONNECTION=central\nDB_HOST=10.0.0.4\nDB_PORT=3307',
+    };
+    const j = { ...job(), repo: 'r/r', sessionDb: 'demoapp_abc123' };
 
     expect(profileDbElsewhere(j, { DB_CONNECTION: 'central', DB_HOST: '10.0.0.4' })).toEqual([]);
+    // A block copied from a .env restates the session's own server.
+    expect(profileDbElsewhere(j, { DB_HOST: '10.0.0.4', DB_PORT: '3307' })).toEqual([]);
+    expect(profileDbElsewhere(j, { DB_HOST: 'reports-db', DB_PORT: '3306' })).toEqual(['DB_HOST', 'DB_PORT']);
     expect(profileDbElsewhere(j, { DB_CONNECTION: 'CENTRAL' })).toEqual([]);
     expect(profileDbElsewhere(j, { DB_CONNECTION: 'mariadb' })).toEqual([]);
     expect(profileDbElsewhere(j, { DB_CONNECTION: 'landlord' })).toEqual(['DB_CONNECTION']);
@@ -1180,14 +730,14 @@ describe('profileDbElsewhere', () => {
   });
 
   it('leaves a session with no managed server to ensureProfileDatabase', () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     expect(profileDbElsewhere({ ...job(), repo: 'r/r', local: true }, { DB_HOST: 'x' })).toEqual([]);
   });
 });
 
 describe('dropping the run profiles databases with the session', () => {
   it('drops them before the session database, keeping one that would not drop', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     const events = [];
     const j = {
       ...job(),
@@ -1210,7 +760,7 @@ describe('dropping the run profiles databases with the session', () => {
   });
 
   it('never drops a listed name that was not built off the session database', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     const j = {
       ...job(),
       repo: 'r/r',
@@ -1228,7 +778,7 @@ describe('dropping the run profiles databases with the session', () => {
   });
 
   it('keeps the session database name while a profile database will not drop, so the next close retries it', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     state.mysqlFailOn = /sample_abc123_projects/;
     const events = [];
     const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123', profileDbs: ['sample_abc123_projects'] };
@@ -1261,7 +811,7 @@ describe('dropping the run profiles databases with the session', () => {
   });
 
   it('waits for a profile database being created, so the close finds it and drops it', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     let letGo;
     state.mysqlHold = { on: /^CREATE/, until: new Promise((resolve) => (letGo = resolve)) };
     const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123' };
@@ -1286,7 +836,7 @@ describe('dropping the run profiles databases with the session', () => {
   });
 
   it("drops the databases the app built off the session's name, such as its tenants", async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     const column = 'Database';
     state.mysqlDatabases = [
       { [column]: 'sample_abc123_tenant_4ada3fbe-9864-4075-93ac-4d3dd777048a' },
@@ -1311,7 +861,7 @@ describe('dropping the run profiles databases with the session', () => {
   });
 
   it("refuses an app database name that cannot be quoted, keeping the session's name for a retry", async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     state.mysqlDatabases = [{ Database: 'sample_abc123_x`; DROP DATABASE y' }];
     const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123' };
 
@@ -1326,8 +876,8 @@ describe('dropping the run profiles databases with the session', () => {
   });
 
   it("leaves another project's databases nested under the session's prefix", async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
-    state.otherProjects = [{ dbPoolEnabled: false, dbPoolDatabase: 'sample_abc123_other' }];
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.otherProjects = [{ dbPoolDatabase: 'sample_abc123_other' }];
     state.mysqlDatabases = [
       { Database: 'sample_abc123_tenant_1' },
       { Database: 'sample_abc123_other' },
@@ -1347,8 +897,8 @@ describe('dropping the run profiles databases with the session', () => {
   });
 
   it("drops nothing under a prefix that is another project's own database name", async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
-    state.otherProjects = [{ dbPoolEnabled: false, dbPoolDatabase: 'sample_abc123' }];
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.otherProjects = [{ dbPoolDatabase: 'sample_abc123' }];
     state.mysqlDatabases = [{ Database: 'sample_abc123_12345678' }];
     const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123' };
 
@@ -1360,7 +910,7 @@ describe('dropping the run profiles databases with the session', () => {
   });
 
   it('matches names case-insensitively only where MySQL folds identifier case', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'Sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'Sample', envTemplate: MYSQL_TEMPLATE };
     state.mysqlDatabases = [{ Database: 'sample_abc123_tenant' }];
     const drops = () => state.mysqlQueries.map((q) => q.sql).filter((q) => q.startsWith('DROP'));
 
@@ -1378,7 +928,7 @@ describe('dropping the run profiles databases with the session', () => {
   });
 
   it("reads PostgreSQL's names as JSON, so odd characters in them survive", async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
     state.psqlResults = [{ code: 0, stdout: JSON.stringify(['sample_abc123_tenant\nblue ']) }];
     const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123' };
 
@@ -1391,7 +941,7 @@ describe('dropping the run profiles databases with the session', () => {
   });
 
   it('leaves the list in place when the server cannot be reached', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
+    state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     state.mysqlConnectError = new Error('ECONNREFUSED');
     const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123', profileDbs: ['sample_abc123_projects'] };
 
@@ -1402,7 +952,7 @@ describe('dropping the run profiles databases with the session', () => {
 
 describe('reading the server out of the project .env template', () => {
   const nameOf = async (envTemplate) => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample', envTemplate };
+    state.project = { dbPoolDatabase: 'sample', envTemplate };
     state.psqlResults = [{ code: 0, stdout: '1' }];
     await ensureSessionDatabase(job(), 'r/r', () => {});
     return state.psqlCalls[0] || state.mysqlQueries[0];
@@ -1440,7 +990,7 @@ describe('reading the server out of the project .env template', () => {
   });
 
   it('treats a missing template as an empty one', async () => {
-    state.project = { dbPoolEnabled: false, dbPoolDatabase: 'sample' };
+    state.project = { dbPoolDatabase: 'sample' };
 
     await ensureSessionDatabase(job(), 'r/r', () => {});
 
@@ -1453,7 +1003,6 @@ describe('a database name that is not an identifier', () => {
     // It goes into CREATE DATABASE as an identifier, where a placeholder
     // cannot be used and a quote would end it.
     state.project = {
-      dbPoolEnabled: false,
       dbPoolDatabase: 'sample`; drop database x; --',
       envTemplate: MYSQL_TEMPLATE,
     };
@@ -1462,739 +1011,5 @@ describe('a database name that is not an identifier', () => {
       /is not a plain database identifier/,
     );
     expect(state.mysqlQueries).toHaveLength(0);
-  });
-});
-
-describe('whether the pool applies at all', () => {
-  it('says no when claiming is switched off install-wide', () => {
-    state.config = config({ dbPool: { enabled: false } });
-    state.project = { dbPoolEnabled: true };
-
-    expect(projectClaimsServer('r/r')).toBe(false);
-  });
-
-  it('says no for a project that does not claim one', () => {
-    state.project = { dbPoolEnabled: false };
-
-    expect(projectClaimsServer('r/r')).toBe(false);
-  });
-
-  it('says no for a repo with no project', () => {
-    state.project = null;
-
-    expect(projectClaimsServer('r/r')).toBe(false);
-  });
-
-  it('says yes for a project that does', () => {
-    state.project = { dbPoolEnabled: true };
-
-    expect(projectClaimsServer('r/r')).toBe(true);
-  });
-});
-
-describe('how many pooled sessions may be open', () => {
-  it('is the configured fallback when claiming is off', () => {
-    state.config = config({ dbPool: { enabled: false }, dev: { maxSessions: 7 } });
-    state.servers = [server(), server({ id: 2 })];
-
-    expect(sessionCapacity()).toBe(7);
-  });
-
-  it('is one per pool entry when claiming is on', () => {
-    state.servers = [server(), server({ id: 2 })];
-
-    expect(sessionCapacity()).toBe(2);
-  });
-
-  it('falls back to the configured cap while the pool is still empty', () => {
-    state.servers = [];
-
-    expect(sessionCapacity()).toBe(3);
-  });
-});
-
-describe('probing a server from the settings page', () => {
-  it('reports the version and how many databases it holds', async () => {
-    state.mysqlVersion = '8.4.0';
-    state.mysqlDatabases = [{}, {}, {}];
-
-    await expect(
-      probeDbServer({ host: ' db.test ', port: '3307', username: ' root ', password: 'pw' }),
-    ).resolves.toEqual({ version: '8.4.0', databases: 3 });
-  });
-
-  it('trims the form values and connects on a short timeout', async () => {
-    await probeDbServer({ host: ' db.test ', port: '3307', username: ' root ', password: 'pw' });
-
-    expect(state.mysqlQueries[0].opts).toMatchObject({
-      host: 'db.test',
-      port: 3307,
-      user: 'root',
-      connectTimeout: 5000,
-    });
-  });
-
-  it('reads a missing password as the empty one', async () => {
-    await probeDbServer({ host: 'db.test', port: 3306, username: 'root' });
-
-    expect(state.mysqlQueries[0].opts.password).toBe('');
-  });
-
-  it('reads missing host and username as blank rather than undefined', async () => {
-    await probeDbServer({ port: 3306 });
-
-    expect(state.mysqlQueries[0].opts).toMatchObject({ host: '', user: '' });
-  });
-
-  it('surfaces a server that will not answer', async () => {
-    state.mysqlConnectError = new Error('ECONNREFUSED');
-
-    await expect(probeDbServer({ host: 'db.test', port: 3306, username: 'root' })).rejects.toThrow(
-      /ECONNREFUSED/,
-    );
-  });
-});
-
-describe('claiming a server', () => {
-  beforeEach(() => {
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
-    state.servers = [server({ id: 1 }), server({ id: 2, host: 'db2', port: 3307 })];
-  });
-
-  it('does not apply to anything but a dev session', async () => {
-    expect(await acquire({ id: 'x', kind: 'review' }, 'r/r', () => {})).toBeNull();
-  });
-
-  it('does not apply to a project outside the pool', async () => {
-    state.project = { dbPoolEnabled: false };
-
-    expect(await acquire(job(), 'r/r', () => {})).toBeNull();
-  });
-
-  it('claims only a server shared with the session’s owner', async () => {
-    setDbServerFilter((session, s) => session.ownerId !== 2 || s.id === 2);
-    try {
-      expect(await acquire({ ...job(), ownerId: 2 })).toBe(2);
-      setDbServerFilter(() => false);
-      await expect(acquire(job('other'))).rejects.toThrow(
-        /none is shared with the user who owns this session/,
-      );
-    } finally {
-      setDbServerFilter(() => true);
-    }
-  });
-
-  it('refuses fresh credentials and profile DDL after a grant is revoked, retaining cleanup', async () => {
-    const session = { ...job(), repo: 'r/r', ownerId: 2 };
-    await acquire(session);
-    const queries = [...state.mysqlQueries];
-    setDbServerFilter(() => false);
-    try {
-      expect(() => instanceEnv(session)).toThrow(/no longer shared/);
-      await expect(ensureProfileDatabase(session, 'sample_new_profile')).rejects.toThrow(/no longer shared/);
-      expect(state.mysqlQueries).toEqual(queries);
-      expect(claimHolder(1)).toBe(session.id);
-      expect(session.dbServerId).toBe(1);
-      await releaseInstance(session);
-      expect(claimHolder(1)).toBeNull();
-    } finally {
-      setDbServerFilter(() => true);
-    }
-  });
-
-  it.each([false, true])('classifies database admission errors as non-provider (missing: %s)', (missing) => {
-    const session = { ...job(), ownerId: 2, dbServerId: missing ? 99 : 1 };
-    setDbServerFilter(() => false);
-    try {
-      expect(() => assertInstanceAccess(session)).toThrow(
-        expect.objectContaining({
-          message: missing
-            ? "The session's database server (99) is unavailable"
-            : 'Database server is no longer shared with the session owner',
-          fromProvider: false,
-        }),
-      );
-    } finally {
-      setDbServerFilter(() => true);
-    }
-  });
-
-  it('claims the first free entry and stamps the session with it', async () => {
-    const j = job();
-    const events = [];
-
-    const id = await acquire(j, 'r/r', (t) => events.push(t));
-
-    expect(id).toBe(1);
-    expect(j).toMatchObject({ dbServerId: 1, dbHost: '127.0.0.1', dbPort: 3306 });
-    expect(claimHolder(1)).toBe('abc123');
-    expect(events.at(-1)).toBe('Claimed database server 127.0.0.1:3306, using database sample.');
-    releaseInstance(j);
-  });
-
-  it('creates the database on the server it claimed', async () => {
-    const j = job();
-
-    await acquire(j, 'r/r', () => {});
-
-    expect(state.mysqlQueries[0].sql).toMatch(/CREATE DATABASE IF NOT EXISTS `sample`/);
-    expect(state.mysqlQueries[0].opts.host).toBe('127.0.0.1');
-    releaseInstance(j);
-  });
-
-  it('gives a second session the next entry rather than the same one', async () => {
-    const a = job('a');
-    const b = job('b');
-
-    await acquire(a, 'r/r', () => {});
-    const id = await acquire(b, 'r/r', () => {});
-
-    expect(id).toBe(2);
-    expect(claimHolder(2)).toBe('b');
-    releaseInstance(a);
-    releaseInstance(b);
-  });
-
-  it('claims a server without touching the database when the project names none', async () => {
-    // The project's own setup commands are then the only thing that creates it.
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: '', envTemplate: MYSQL_TEMPLATE };
-    const j = job();
-
-    expect(await acquire(j, 'r/r', () => {})).toBe(1);
-    expect(state.mysqlQueries).toHaveLength(0);
-  });
-
-  it('refuses when the project claims a server but the pool is empty', async () => {
-    state.servers = [];
-
-    await expect(acquireInstance(job(), 'r/r', () => {})).rejects.toThrow(/the pool is empty/);
-  });
-
-  it('waits for a peer to finish and says so once, not on every poll', async () => {
-    state.servers = [server({ id: 1 })];
-    const a = job('a');
-    await acquire(a, 'r/r', () => {});
-    const events = [];
-
-    const pending = acquire(job('b'), 'r/r', (t) => events.push(t));
-    // Let it poll a few times before the server frees up.
-    await new Promise((r) => setTimeout(r, 20));
-    releaseInstance(a);
-
-    await expect(pending).resolves.toBe(1);
-    expect(events.filter((e) => e.includes('waiting for one to free up'))).toHaveLength(1);
-  });
-
-  it('checks waiting progress on every poll and stops checking once a server is claimed', async () => {
-    state.servers = [server()];
-    state.project.dbPoolEnabled = true;
-    const holder = job('holder');
-    await acquire(holder);
-    const waiter = job('waiter');
-    claimed.push(waiter);
-    const onWait = vi.fn();
-    const onClaim = () => {
-      onWait.mockImplementation(() => {
-        throw new Error('already claimed');
-      });
-    };
-    const pending = acquireInstance(waiter, 'r/r', vi.fn(), onClaim, onWait);
-    try {
-      await vi.waitFor(() => expect(onWait.mock.calls.length).toBeGreaterThan(1));
-      await releaseInstance(holder);
-      await expect(pending).resolves.toBe(1);
-      expect(waitingForInstance(waiter.id)).toBe(false);
-      expect(claimHolder(1)).toBe(waiter.id);
-    } finally {
-      waiter.status = 'closed';
-      await pending.catch(() => {});
-    }
-  });
-
-  it.each(['claim', 'cancel', 'revoke', 'timeout'])(
-    'tracks an acquisition wait until it ends with %s',
-    async (outcome) => {
-      state.servers = [server({ id: 1 })];
-      state.project.dbPoolEnabled = true;
-      const holder = job('holder');
-      await acquire(holder);
-      const waiter = job('waiter');
-      const pending = acquire(waiter).catch((e) => e);
-      expect(waitingForInstance(waiter.id)).toBe(true);
-      expect(waitingForInstance(holder.id)).toBe(false);
-      try {
-        if (outcome === 'claim') await releaseInstance(holder);
-        else if (outcome === 'cancel') waiter.status = 'closed';
-        else if (outcome === 'revoke') setDbServerFilter(() => false);
-        // The deadline was captured at entry, so advance time only for timeout.
-        const clock =
-          outcome === 'timeout' ? vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 11 * 60_000) : null;
-        try {
-          const result = await pending;
-          if (outcome === 'claim') expect(result).toBe(1);
-          else
-            expect(result.message).toMatch(
-              outcome === 'cancel'
-                ? /canceled/
-                : outcome === 'revoke'
-                  ? /none is shared/
-                  : /no database server became free/,
-            );
-          expect(waitingForInstance(waiter.id)).toBe(false);
-        } finally {
-          clock?.mockRestore();
-        }
-      } finally {
-        setDbServerFilter(() => true);
-      }
-    },
-  );
-
-  it('gives up once the wait timeout has passed', async () => {
-    state.servers = [server({ id: 1 })];
-    state.config = config({ dbPool: { waitTimeoutMin: -1 } });
-    const a = job('a');
-    await acquire(a, 'r/r', () => {});
-
-    await expect(acquireInstance(job('b'), 'r/r', () => {})).rejects.toThrow(
-      /no database server became free within -1 min/,
-    );
-    releaseInstance(a);
-  });
-
-  it.each(['canceled', 'closed'])('stops waiting when the session is %s', async (status) => {
-    state.servers = [server({ id: 1 })];
-    const a = job('a');
-    await acquire(a, 'r/r', () => {});
-    const b = { ...job('b'), status };
-
-    await expect(acquireInstance(b, 'r/r', () => {})).rejects.toThrow('canceled');
-    releaseInstance(a);
-  });
-
-  it('hands the entry back when the server cannot be prepared', async () => {
-    // A server that cannot be reached will not come back on its own; better
-    // to fail the claim than retry into the same wall holding the entry.
-    state.servers = [server({ id: 1 })];
-    state.mysqlConnectError = new Error('ECONNREFUSED');
-
-    await expect(acquireInstance(job(), 'r/r', () => {})).rejects.toThrow(
-      /Could not prepare local \(127\.0\.0\.1:3306\): ECONNREFUSED/,
-    );
-    expect(claimHolder(1)).toBeNull();
-  });
-
-  it.each(['closing', 'closed', 'canceled'])(
-    'returns an in-flight preparation claim when the session is %s',
-    async (status) => {
-      const j = { ...job(), status: 'preparing' };
-      const { promise, resolve } = Promise.withResolvers();
-      state.mysqlHold = { on: /CREATE DATABASE/, until: promise };
-      const events = [];
-      const pending = acquire(j, 'r/r', (text) => events.push(text));
-      expect(claimHolder(1)).toBe(j.id);
-      expect(j.dbServerId).toBe(1);
-      if (status === 'closing') j.closing = true;
-      else j.status = status;
-      const releasing = releaseInstance(j); // close waits for the in-flight preparation
-      const rejected = expect(pending).rejects.toThrow('canceled');
-      resolve();
-      try {
-        await rejected;
-        await releasing;
-        expect(claimHolder(1)).toBeNull();
-        expect(j.dbServerId).toBeNull();
-        expect(events.some((text) => text.startsWith('Claimed database server'))).toBe(false);
-        expect(await acquire(job('replacement'))).toBe(1);
-      } finally {
-        // Keep the pool usable even when this regression fails against old code.
-        await releaseInstance(j);
-      }
-    },
-  );
-});
-
-describe('restoring the project dump into the claimed database', () => {
-  beforeEach(() => {
-    state.servers = [server({ id: 1 })];
-    state.project = {
-      dbPoolEnabled: true,
-      dbPoolDatabase: 'sample',
-      dbRestoreSql: '/dumps/sample.sql',
-      envTemplate: MYSQL_TEMPLATE,
-    };
-    state.files = new Set(['/dumps/sample.sql']);
-  });
-
-  it('streams the dump through the mysql CLI and says so', async () => {
-    const j = job();
-    const events = [];
-
-    await acquire(j, 'r/r', (t) => events.push(t));
-
-    const call = state.psqlCalls.at(-1);
-    expect(call.bin).toBe('mysql');
-    expect(call.args).toContain('sample');
-    expect(call.args).toContain('--init-command=SET SESSION FOREIGN_KEY_CHECKS=0');
-    // The password goes in the environment, never on a command line.
-    expect(call.env.MYSQL_PWD).toBe('pw');
-    expect(call.args.join(' ')).not.toContain('pw');
-    expect(events[0]).toContain('Restoring sample on 127.0.0.1:3306 from /dumps/sample.sql');
-    releaseInstance(j);
-  });
-
-  it("drops the run profiles' databases before the restore, so a claim after a restart starts them over", async () => {
-    state.project.runProfiles = [
-      'profile: projects',
-      'env:',
-      '  DB_DATABASE={database}_projects',
-      'profile: central',
-      'env:',
-      '  DB_DATABASE={database}',
-      'profile: other',
-      'env:',
-      '  DB_DATABASE=shared_db',
-      'profile: named',
-      'env:',
-      '  DB_DATABASE={database}_{profile}',
-    ].join('\n');
-    // What a previous session left: no release ever ran for it.
-    const j = job();
-    const events = [];
-
-    await acquire(j, 'r/r', (t) => events.push(t));
-
-    // Only the names built off the pooled one: never the pooled database
-    // itself, nor one that may be somebody else's.
-    expect(state.mysqlQueries.map((q) => q.sql).filter((q) => q.startsWith('DROP'))).toEqual([
-      'DROP DATABASE IF EXISTS `sample_projects`',
-      'DROP DATABASE IF EXISTS `sample_named`',
-    ]);
-    expect(events[0]).toMatch(/Dropping the run profiles' databases sample_projects, sample_named/);
-    expect(events[1]).toContain('Restoring sample');
-    expect(state.psqlCalls.at(-1).bin).toBe('mysql');
-    releaseInstance(j);
-  });
-
-  it('drops no database for a profile that points the app at another server', async () => {
-    state.project.runProfiles = [
-      'profile: restated',
-      'env:',
-      '  DB_CONNECTION=mysql',
-      '  DB_HOST=127.0.0.1',
-      '  DB_PORT=3306',
-      '  DB_DATABASE={database}_restated',
-      'profile: reports',
-      'env:',
-      '  DB_HOST=reports-db',
-      '  DB_DATABASE={database}_reports',
-    ].join('\n');
-    const j = job();
-    const events = [];
-
-    await acquire(j, 'r/r', (t) => events.push(t));
-
-    expect(state.mysqlQueries.map((q) => q.sql).filter((q) => q.startsWith('DROP'))).toEqual([
-      'DROP DATABASE IF EXISTS `sample_restated`',
-    ]);
-    expect(events[0]).toMatch(/Dropping the run profiles' databases sample_restated on/);
-    releaseInstance(j);
-  });
-
-  it('drops no profile database on a server whose project restores no dump', async () => {
-    state.project.dbRestoreSql = '';
-    state.project.runProfiles = 'profile: projects\nenv:\n  DB_DATABASE={database}_projects';
-
-    await acquire(job());
-
-    expect(state.mysqlQueries.some((q) => q.sql.startsWith('DROP'))).toBe(false);
-  });
-
-  it('refuses a dump that is not on disk', async () => {
-    state.files = new Set();
-
-    await expect(acquireInstance(job(), 'r/r', () => {})).rejects.toThrow(
-      /the restore dump \/dumps\/sample.sql does not exist/,
-    );
-  });
-
-  it('reports what mysql said when the load fails', async () => {
-    state.psqlResults = [{ code: 1, stderr: 'ERROR 1064 at line 3' }];
-
-    await expect(acquireInstance(job(), 'r/r', () => {})).rejects.toThrow(
-      /mysql exited with code 1: ERROR 1064 at line 3/,
-    );
-  });
-
-  it('reports a mysql that will not start at all', async () => {
-    state.spawnError = new Error('ENOENT');
-
-    await expect(acquireInstance(job(), 'r/r', () => {})).rejects.toThrow(/could not start mysql: ENOENT/);
-  });
-
-  it('reports a dump it cannot read, and kills the load', async () => {
-    state.dumpError = new Error('EACCES');
-
-    await expect(acquireInstance(job(), 'r/r', () => {})).rejects.toThrow(
-      /could not read \/dumps\/sample.sql: EACCES/,
-    );
-  });
-
-  it('swallows the broken pipe when mysql aborts mid-dump', async () => {
-    // mysql aborts on any SQL error and the pipe then writes into a closed stdin; an unhandled
-    // EPIPE would take the server down with every session not yet flushed.
-    state.stdinError = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
-    state.psqlResults = [{ code: 1, stderr: 'ERROR 1146: table does not exist' }];
-
-    await expect(acquireInstance(job(), 'r/r', () => {})).rejects.toThrow(
-      /mysql exited with code 1: ERROR 1146: table does not exist/,
-    );
-  });
-
-  it('reads a server with no password as the empty one', async () => {
-    state.servers = [server({ id: 1, password: '' })];
-    const j = job();
-
-    await acquire(j, 'r/r', () => {});
-
-    expect(state.psqlCalls.at(-1).env.MYSQL_PWD).toBe('');
-    releaseInstance(j);
-  });
-});
-
-describe("a run profile's database on a claimed server", () => {
-  beforeEach(() => {
-    state.servers = [server({ id: 1 })];
-    state.project = {
-      dbPoolEnabled: true,
-      dbPoolDatabase: 'sample',
-      dbRestoreSql: '/dumps/sample.sql',
-      envTemplate: MYSQL_TEMPLATE,
-    };
-    state.files = new Set(['/dumps/sample.sql']);
-  });
-
-  const drops = () => state.mysqlQueries.map((q) => q.sql).filter((q) => q.startsWith('DROP'));
-
-  it('is recorded when the server is released, and dropped at the next claim before its restore', async () => {
-    const j = { ...job(), repo: 'r/r' };
-    await acquire(j, 'r/r', () => {});
-    await ensureProfileDatabase(j, 'sample_projects');
-    await ensureProfileDatabase(j, 'sample_projects');
-    // Not built off the pooled database: it may be anybody's.
-    await ensureProfileDatabase(j, 'shared');
-    expect(j.poolProfileDbs).toEqual(['sample_projects']);
-    state.mysqlQueries = [];
-
-    const released = releaseInstance(j);
-    // Nothing is dropped while the claim is held: it is freed in the same tick.
-    expect(claimHolder(1)).toBeNull();
-    await released;
-    expect(drops()).toEqual([]);
-    expect(j.poolProfileDbs).toEqual([]);
-
-    const events = [];
-    await acquire(job('next'), 'r/r', (t) => events.push(t));
-
-    expect(drops()).toEqual(['DROP DATABASE IF EXISTS `sample_projects`']);
-    expect(events[0]).toMatch(/Dropping the run profiles' databases sample_projects/);
-    expect(events[1]).toContain('Restoring sample');
-  });
-
-  it('drops a name both recorded and rendered by the profiles only once', async () => {
-    state.project.runProfiles = 'profile: projects\nenv:\n  DB_DATABASE={database}_projects';
-    const j = { ...job(), repo: 'r/r' };
-    await acquire(j, 'r/r', () => {});
-    await ensureProfileDatabase(j, 'sample_projects');
-    await releaseInstance(j);
-    state.mysqlQueries = [];
-
-    await acquire(job('next'), 'r/r', () => {});
-
-    expect(drops()).toEqual(['DROP DATABASE IF EXISTS `sample_projects`']);
-  });
-
-  it('is recorded too when the release lands while it is being created, the claim freed once it is in', async () => {
-    const j = { ...job(), repo: 'r/r' };
-    await acquire(j, 'r/r', () => {});
-    state.mysqlQueries = [];
-    let letGo;
-    state.mysqlHold = { on: /^CREATE/, until: new Promise((resolve) => (letGo = resolve)) };
-
-    const creating = ensureProfileDatabase(j, 'sample_projects');
-    const released = releaseInstance(j);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(claimHolder(1)).toBe('abc123');
-    letGo();
-    await creating;
-    await released;
-    expect(claimHolder(1)).toBeNull();
-    expect(j.poolProfileDbs).toEqual([]);
-
-    await acquire(job('next'), 'r/r', () => {});
-
-    expect(state.mysqlQueries.map((q) => q.sql)).toEqual([
-      expect.stringMatching(/^CREATE DATABASE IF NOT EXISTS `sample_projects`/),
-      expect.stringMatching(/^CREATE DATABASE IF NOT EXISTS `sample`/),
-      'DROP DATABASE IF EXISTS `sample_projects`',
-    ]);
-  });
-
-  it('still claims the server when the drop fails, and tries the recorded one again at the next claim', async () => {
-    state.project.runProfiles = 'profile: crm\nenv:\n  DB_DATABASE={database}_crm';
-    const j = { ...job(), repo: 'r/r' };
-    await acquire(j, 'r/r', () => {});
-    await ensureProfileDatabase(j, 'sample_projects');
-    await releaseInstance(j);
-    state.mysqlFailOn = /^DROP/;
-    state.mysqlQueries = [];
-    const events = [];
-
-    const next = job('next');
-    expect(await acquire(next, 'r/r', (t) => events.push(t))).toBe(1);
-
-    expect(events).toEqual(
-      expect.arrayContaining([
-        expect.stringMatching(/Could not drop the run profile's database sample_projects on 127.0.0.1:3306/),
-        expect.stringMatching(/Could not drop the run profile's database sample_crm on 127.0.0.1:3306/),
-        expect.stringContaining('Restoring sample'),
-      ]),
-    );
-    expect(state.psqlCalls.at(-1).bin).toBe('mysql');
-    releaseInstance(next);
-    claimed.splice(claimed.indexOf(next), 1);
-    state.mysqlFailOn = null;
-    state.mysqlQueries = [];
-
-    await acquire(job('third'), 'r/r', () => {});
-
-    expect(drops()).toEqual([
-      'DROP DATABASE IF EXISTS `sample_projects`',
-      'DROP DATABASE IF EXISTS `sample_crm`',
-    ]);
-  });
-
-  it("never drops another project's pooled database, whatever the prefix", async () => {
-    state.otherProjects = [{ dbPoolEnabled: true, dbPoolDatabase: 'sample_crm' }];
-    state.project.runProfiles = [
-      'profile: crm',
-      'env:',
-      '  DB_DATABASE={database}_crm',
-      'profile: projects',
-      'env:',
-      '  DB_DATABASE={database}_projects',
-    ].join('\n');
-    const j = { ...job(), repo: 'r/r' };
-    await acquire(j, 'r/r', () => {});
-    await ensureProfileDatabase(j, 'sample_crm');
-    await releaseInstance(j);
-    state.mysqlQueries = [];
-
-    await acquire(job('next'), 'r/r', () => {});
-
-    expect(drops()).toEqual(['DROP DATABASE IF EXISTS `sample_projects`']);
-  });
-
-  it('stays, like the pooled database, when the project restores no dump', async () => {
-    state.project = { ...state.project, dbRestoreSql: '' };
-    const j = { ...job(), repo: 'r/r' };
-    await acquire(j, 'r/r', () => {});
-    await ensureProfileDatabase(j, 'sample_projects');
-    await releaseInstance(j);
-    state.mysqlQueries = [];
-
-    await acquire(job('next'), 'r/r', () => {});
-
-    expect(j.poolProfileDbs).toBeUndefined();
-    expect(drops()).toEqual([]);
-  });
-});
-
-describe('releasing a server', () => {
-  beforeEach(() => {
-    state.project = { dbPoolEnabled: true, dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
-    state.servers = [server({ id: 1 })];
-  });
-
-  it('frees the entry and clears the session stamp', async () => {
-    const j = job();
-    await acquire(j, 'r/r', () => {});
-
-    releaseInstance(j);
-
-    expect(claimHolder(1)).toBeNull();
-    expect(j).toMatchObject({ dbServerId: null, dbHost: null, dbPort: null });
-  });
-
-  it('does nothing for a session that never claimed one', () => {
-    const j = { ...job(), dbServerId: null };
-
-    expect(() => releaseInstance(j)).not.toThrow();
-  });
-});
-
-describe('the environment a claimed session runs with', () => {
-  it('is empty for a session without a claimed server', () => {
-    expect(instanceEnv({ dbServerId: null })).toEqual({});
-    expect(instanceAppPort({ dbServerId: null })).toBe(8100);
-  });
-
-  it('is empty when the claimed entry has since been deleted', () => {
-    state.servers = [];
-
-    expect(instanceEnv({ dbServerId: 9 })).toEqual({});
-  });
-
-  it('points the app at the claimed server and the project database', () => {
-    state.servers = [server({ id: 1, host: 'db1', port: 3307, username: 'u', password: 'p' })];
-    state.project = { dbPoolDatabase: 'sample' };
-
-    expect(instanceEnv({ dbServerId: 1, repo: 'r/r' })).toEqual({
-      DB_HOST: 'db1',
-      DB_PORT: '3307',
-      DB_DATABASE: 'sample',
-      DB_USERNAME: 'u',
-      DB_PASSWORD: 'p',
-      REDIS_DB: '2',
-      REDIS_DB_NUM: '2',
-      REDIS_CACHE_DB: '2',
-    });
-  });
-
-  it('leaves the database name blank when the project is gone', () => {
-    state.servers = [server({ id: 1 })];
-    state.project = null;
-
-    expect(instanceEnv({ dbServerId: 1, repo: 'r/r' }).DB_DATABASE).toBe('');
-  });
-
-  it('gives each pool entry a Redis keyspace of its own, above the developer two', () => {
-    state.servers = [server({ id: 1 }), server({ id: 2 }), server({ id: 3 })];
-    state.project = { dbPoolDatabase: 'sample' };
-
-    expect(instanceEnv({ dbServerId: 2, repo: 'r/r' }).REDIS_DB).toBe('3');
-    expect(instanceEnv({ dbServerId: 3, repo: 'r/r' }).REDIS_DB).toBe('4');
-  });
-
-  it('wraps the Redis keyspace back round rather than running past 15', () => {
-    // redis-server ships with 16 keyspaces and the developer keeps 0 and 1.
-    state.servers = Array.from({ length: 16 }, (_, i) => server({ id: i + 1 }));
-    state.project = { dbPoolDatabase: 'sample' };
-
-    expect(instanceEnv({ dbServerId: 15, repo: 'r/r' }).REDIS_DB).toBe('2');
-    expect(instanceEnv({ dbServerId: 16, repo: 'r/r' }).REDIS_DB).toBe('3');
-  });
-
-  it('gives each pool entry an app port of its own', () => {
-    state.servers = [server({ id: 1 }), server({ id: 2 })];
-
-    expect(instanceAppPort({ dbServerId: 1 })).toBe(8101);
-    expect(instanceAppPort({ dbServerId: 2 })).toBe(8102);
-  });
-
-  it('falls back to the shared port when the claimed entry is gone', () => {
-    state.servers = [server({ id: 1 })];
-
-    expect(instanceAppPort({ dbServerId: 9 })).toBe(8100);
   });
 });

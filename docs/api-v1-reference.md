@@ -704,7 +704,7 @@ Stop the running turn. Needs `manage`, held to the session’s project.
 
 ### `POST /sessions/{id}/close`
 
-Close a session, releasing its workspace and database server. Needs `manage`, held to the session’s project.
+Close a session, releasing its workspace and dropping its database. Needs `manage`, held to the session’s project.
 
 **Returns** `{ session: Session }`
 
@@ -1820,11 +1820,11 @@ List what is shared with whom. Needs `admin`.
 
 **Query**
 
-| Field  | Type                                                                    |                                    |
-| ------ | ----------------------------------------------------------------------- | ---------------------------------- |
-| `kind` | `project\|dbServer\|sshServer\|mcpServer\|forgeAccount\|envoyerAccount` | Only this kind                     |
-| `id`   | `string`                                                                | Only this resource, by its id      |
-| `user` | `integer`                                                               | Only what is shared with this user |
+| Field  | Type                                                          |                                    |
+| ------ | ------------------------------------------------------------- | ---------------------------------- |
+| `kind` | `project\|sshServer\|mcpServer\|forgeAccount\|envoyerAccount` | Only this kind                     |
+| `id`   | `string`                                                      | Only this resource, by its id      |
+| `user` | `integer`                                                     | Only what is shared with this user |
 
 **Returns** `{ shares: Share[] }`. An admin reaches every project and server whether or not it is shared; a member only what is shared with them. Shares of a resource that was removed are not listed.
 
@@ -1834,11 +1834,11 @@ Choose the users one project or server is shared with. Needs `admin`.
 
 **Body**
 
-| Field                  | Type                                                                    |                                                                   |
-| ---------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `kind` **required**    | `project\|dbServer\|sshServer\|mcpServer\|forgeAccount\|envoyerAccount` | What is shared                                                    |
-| `id` **required**      | `string`                                                                | Its id, as its own settings list gives it                         |
-| `userIds` **required** | `integer[]`                                                             | Every user it is shared with; an empty list shares it with nobody |
+| Field                  | Type                                                          |                                                                   |
+| ---------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `kind` **required**    | `project\|sshServer\|mcpServer\|forgeAccount\|envoyerAccount` | What is shared                                                    |
+| `id` **required**      | `string`                                                      | Its id, as its own settings list gives it                         |
+| `userIds` **required** | `integer[]`                                                   | Every user it is shared with; an empty list shares it with nobody |
 
 **Returns** `{ kind: string, id: string, userIds: integer[] }`. Replaces the whole list. A member loses a project from every token they hold as soon as it is no longer shared with them.
 
@@ -1983,50 +1983,6 @@ Finish a claude login with the code the authorization page showed. Needs `admin`
 | `code` **required** | `string` | The code the authorization page showed |
 
 **Returns** `{ provider: Provider }`
-
-### `POST /settings/db-servers/test`
-
-Probe a database server as a form holds it, before saving. Needs `admin`.
-
-**Body**
-
-| Field      | Type      |                                    |
-| ---------- | --------- | ---------------------------------- |
-| `host`     | `string`  | Its host                           |
-| `port`     | `integer` | Its port                           |
-| `username` | `string`  | The user sessions connect as       |
-| `password` | `string`  | That user’s password               |
-| `id`       | `integer` | The saved row being edited, if any |
-
-**Returns** `{ version: string, databases: integer, claimedBy: object?, capacity: integer, poolSize: integer }`
-
-### `GET /settings/db-servers`
-
-List every server, with the values a new one starts from. Needs `admin`.
-
-**Returns** `{ servers: DbServer[], defaults: DbServer }`
-
-### `POST /settings/db-servers`
-
-Add a server. Needs `admin`.
-
-**Body**: a [DbServer](#dbserver), whole or in part.
-
-**Returns** 201 `{ server: DbServer }`
-
-### `PUT /settings/db-servers/{id}`
-
-Change a server. Needs `admin`.
-
-**Body**: a [DbServer](#dbserver), whole or in part.
-
-**Returns** `{ server: DbServer }`
-
-### `DELETE /settings/db-servers/{id}`
-
-Remove a server. Needs `admin`.
-
-**Returns** `{ ok: boolean }`
 
 ### `GET /settings/workspaces`
 
@@ -2561,11 +2517,11 @@ Your own GitHub account on this server, if you connected one. The token is never
 
 One project or server shared with one user.
 
-| Field    | Type                                                                    |                            |
-| -------- | ----------------------------------------------------------------------- | -------------------------- |
-| `kind`   | `project\|dbServer\|sshServer\|mcpServer\|forgeAccount\|envoyerAccount` | What is shared             |
-| `id`     | `string`                                                                | Its id, as a string        |
-| `userId` | `integer`                                                               | The user it is shared with |
+| Field    | Type                                                          |                            |
+| -------- | ------------------------------------------------------------- | -------------------------- |
+| `kind`   | `project\|sshServer\|mcpServer\|forgeAccount\|envoyerAccount` | What is shared             |
+| `id`     | `string`                                                      | Its id, as a string        |
+| `userId` | `integer`                                                     | The user it is shared with |
 
 ### ProjectSummary
 
@@ -3138,9 +3094,7 @@ A project’s full settings. A body may carry any of these; what it leaves out k
 | `localSessionLimit`         | `integer`  | How many Local mode sessions may work in the local checkout at once, 1 to 10, or 0 for no limit (1 by default); more queue until one closes                                                                                                                                                                                                                        |
 | `autoUpdate`                | `boolean`  | Whether a merged pull request updates the local checkout                                                                                                                                                                                                                                                                                                           |
 | `updateCommands`            | `string[]` | Run in the local checkout after it updates                                                                                                                                                                                                                                                                                                                         |
-| `dbPoolEnabled`             | `boolean`  | Whether its sessions claim a database server                                                                                                                                                                                                                                                                                                                       |
-| `dbPoolDatabase`            | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
-| `dbRestoreSql`              | `string`   |                                                                                                                                                                                                                                                                                                                                                                    |
+| `dbPoolDatabase`            | `string`   | Each session gets its own database named this plus the session id, on the server the .env template names; empty for none                                                                                                                                                                                                                                           |
 | `databaseBackupEnabled`     | `boolean`  | Back up the main local checkout database daily to R2, compressed and encrypted with CREDENTIALS_KEY; defaults to false for new projects                                                                                                                                                                                                                            |
 | `dbExtensions`              | `string[]` |                                                                                                                                                                                                                                                                                                                                                                    |
 | `envTemplate`               | `string`   | The `.env` written into a checkout                                                                                                                                                                                                                                                                                                                                 |
@@ -3185,21 +3139,6 @@ A provider row: one login or endpoint of one CLI. A body may carry any of the fi
 | `loginDir`      | `string`                                   | Where its CLI keeps its login on the server                                |
 | `createdAt`     | `string`                                   | ISO time                                                                   |
 | `updatedAt`     | `string`                                   | ISO time                                                                   |
-
-### DbServer
-
-A database server sessions can claim, one session at a time.
-
-| Field       | Type      |                                          |
-| ----------- | --------- | ---------------------------------------- |
-| `id`        | `integer` | Its id; set by the server                |
-| `label`     | `string`  | Its display name                         |
-| `host`      | `string`  | Its host                                 |
-| `port`      | `integer` | Its port                                 |
-| `username`  | `string`  | The user sessions connect as             |
-| `password`  | `string`  | That user’s password. Returned as stored |
-| `enabled`   | `boolean` | Whether it is in the pool                |
-| `sortOrder` | `integer` | Its place in the list                    |
 
 ### ForgeAccount
 
@@ -3771,11 +3710,6 @@ The built-in dashboard, since removed, called its handlers by the paths on the l
 | `POST /api/providers/:id/login`                                                  | `POST /settings/providers/{id}/login`                                                                                             |
 | `POST /api/providers/:id/login/start`                                            | `POST /settings/providers/{id}/login/start`                                                                                       |
 | `POST /api/providers/:id/login/finish`                                           | `POST /settings/providers/{id}/login/finish`                                                                                      |
-| `POST /api/dbservers/test`                                                       | `POST /settings/db-servers/test`                                                                                                  |
-| `GET /api/dbservers`                                                             | `GET /settings/db-servers`                                                                                                        |
-| `POST /api/dbservers`                                                            | `POST /settings/db-servers`                                                                                                       |
-| `PUT /api/dbservers/:id`                                                         | `PUT /settings/db-servers/{id}`                                                                                                   |
-| `DELETE /api/dbservers/:id`                                                      | `DELETE /settings/db-servers/{id}`                                                                                                |
 | `GET /api/workspaces`                                                            | `GET /settings/workspaces`                                                                                                        |
 | `POST /api/workspaces/:slot/reset-setup`                                         | `POST /settings/workspaces/{slot}/reset-setup`                                                                                    |
 | `POST /api/workspaces/:slot/clean`                                               | `POST /settings/workspaces/{slot}/clean`                                                                                          |

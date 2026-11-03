@@ -28,7 +28,6 @@ describe('startup store loading', () => {
         'initDb',
         'initTemplates',
         'initProjects',
-        'initDbServers',
         'initSavedPrompts',
         'initMemorySelection',
         'initMemories',

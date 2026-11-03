@@ -54,8 +54,6 @@ when `AUTH_SECRET` changes. The API fails closed while `AUTH_SECRET` is unset.
   sessions against.
 - The provider CLI logins (Claude, Codex, Grok), which live in the CLIs' own
   config directories rather than here.
-- The database pool credentials, stored in the app's own database and edited
-  through `/api/v1/settings/db-servers`.
 - Git pushes use the machine's own credential helper. The app injects no git
   credentials of its own.
 
