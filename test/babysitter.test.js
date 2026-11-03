@@ -3,7 +3,6 @@ import { describe, it, expect, vi } from 'vitest';
 vi.mock('../lib/db.js', () => ({ loadAppSetting: vi.fn(), saveAppSetting: vi.fn() }));
 vi.mock('../lib/jobs.js', () => ({
   createDevSession: vi.fn(),
-  devSessionSlots: vi.fn(() => Infinity),
   pullRequestHasOpenSession: vi.fn(() => false),
 }));
 // The spec itself is lib/actions.js's business, tested there; here it only has to

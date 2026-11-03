@@ -355,7 +355,6 @@ describe('ensureSessionDatabase', () => {
 
   it('creates the extensions the project names in the new database', async () => {
     state.project = {
-      dbPoolEnabled: false,
       dbPoolDatabase: 'sample',
       dbExtensions: ['vector', 'pg_trgm'],
       envTemplate: PG_TEMPLATE,
@@ -380,7 +379,6 @@ describe('ensureSessionDatabase', () => {
 
   it('creates the extensions on a database that already existed', async () => {
     state.project = {
-      dbPoolEnabled: false,
       dbPoolDatabase: 'sample',
       dbExtensions: ['vector'],
       envTemplate: PG_TEMPLATE,
@@ -398,7 +396,6 @@ describe('ensureSessionDatabase', () => {
 
   it('fails the session when an extension is missing on the server', async () => {
     state.project = {
-      dbPoolEnabled: false,
       dbPoolDatabase: 'sample',
       dbExtensions: ['vector'],
       envTemplate: PG_TEMPLATE,
@@ -415,7 +412,6 @@ describe('ensureSessionDatabase', () => {
 
   it('keeps a Postgres name within the 63-byte identifier limit', async () => {
     state.project = {
-      dbPoolEnabled: false,
       dbPoolDatabase: 'c'.repeat(60),
       envTemplate: PG_TEMPLATE,
     };
@@ -428,7 +424,6 @@ describe('ensureSessionDatabase', () => {
 
   it('keeps a MySQL name within the 64-byte identifier limit', async () => {
     state.project = {
-      dbPoolEnabled: false,
       dbPoolDatabase: 'c'.repeat(70),
       envTemplate: MYSQL_TEMPLATE,
     };
@@ -630,7 +625,7 @@ describe('dropSessionDatabase', () => {
 });
 
 describe('ensureProfileDatabase', () => {
-  it("creates it next to an session's own database, remembered for the close", async () => {
+  it("creates it next to a session's own database, remembered for the close", async () => {
     state.project = { dbPoolDatabase: 'sample', envTemplate: MYSQL_TEMPLATE };
     const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123' };
 
@@ -675,7 +670,7 @@ describe('ensureProfileDatabase', () => {
     expect(events[0]).toMatch(/mydb_projects is not created: create it yourself/);
   });
 
-  it('tells an session without a database of its own the same', async () => {
+  it('tells a session without a database of its own the same', async () => {
     // No database name in Settings: every session shares the template's.
     state.project = { dbPoolDatabase: '', envTemplate: MYSQL_TEMPLATE };
     const events = [];
@@ -708,7 +703,7 @@ describe('ensureProfileDatabase', () => {
 });
 
 describe('profileDbElsewhere', () => {
-  it('compares an session against the server its .env template points at', () => {
+  it('compares a session against the server its .env template points at', () => {
     state.project = { dbPoolDatabase: 'sample', envTemplate: PG_TEMPLATE };
     const j = { ...job(), repo: 'r/r', sessionDb: 'sample_abc123' };
 
@@ -1008,7 +1003,6 @@ describe('a database name that is not an identifier', () => {
     // It goes into CREATE DATABASE as an identifier, where a placeholder
     // cannot be used and a quote would end it.
     state.project = {
-      dbPoolEnabled: false,
       dbPoolDatabase: 'sample`; drop database x; --',
       envTemplate: MYSQL_TEMPLATE,
     };

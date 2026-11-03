@@ -14857,6 +14857,52 @@ describe('automatic recovery after a server restart', () => {
     },
   );
 
+  it('runs setup on recovery when the session gets a database new to it (one that ran on the retired pool)', async () => {
+    const checkout = path.join(root, 'acme__restart');
+    fs.mkdirSync(checkout);
+    const git = (args) => {
+      const result = spawnSync('git', args, { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git(['-C', checkout, 'init', '-b', 'feature']);
+    git([
+      '-C',
+      checkout,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'fixture',
+    ]);
+    const remote = path.join(root, 'remote.git');
+    git(['clone', '--bare', checkout, remote]);
+    git(['-C', checkout, 'remote', 'add', 'origin', remote]);
+    state.projects[0].setupCommands = ['printf migrated > session-data'];
+    state.projects[0].envTemplate = 'DB_DATABASE=shared\n';
+    fs.writeFileSync(path.join(checkout, '.env'), 'DB_DATABASE=shared\n');
+    const child = row({
+      status: 'idle',
+      orchestrator: false,
+      workDir: checkout,
+      branch: 'feature',
+      workspacePrepared: true,
+      sessionDb: null,
+    });
+    ensureSessionDatabase.mockImplementationOnce(async (job) => {
+      job.sessionDb = 'shared_restart';
+    });
+    state.stored = [child];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(child.status, child.error).toBe('idle'));
+    await vi.waitFor(() => expect(child.workspacePrepared).toBe(true));
+    expect(fs.readFileSync(path.join(checkout, 'session-data'), 'utf8')).toBe('migrated');
+    expect(fs.readFileSync(path.join(checkout, '.env'), 'utf8')).toBe('DB_DATABASE=shared_restart\n');
+  });
+
   it('names the exception of a failed setup step, without colour codes', async () => {
     const checkout = path.join(root, 'acme__restart');
     fs.mkdirSync(checkout);
