@@ -348,6 +348,7 @@ import {
   readmitLocalWaiters,
   ensureClone,
   trustWorkspace,
+  resolveWorkspaceBaseBranch,
 } from '../lib/jobs.js';
 
 // Registry fixtures are restored many times in this file. Real recurring
@@ -13953,6 +13954,112 @@ describe('/btw side questions', () => {
     getProviderForJob.mockReturnValue({ id: 3, label: 'Codex', binary: 'codex', active: true });
     expect(() => askDevSessionBtw('btw-session', 'hi')).toThrow('Claude session');
     expect(askClaudeSideQuestion).not.toHaveBeenCalled();
+  });
+});
+
+describe('workspace base branch resolution', () => {
+  const git = (dir, ...args) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+  const roots = [];
+  afterAll(() => {
+    for (const dir of roots) fs.rmSync(dir, { recursive: true, force: true });
+  });
+  // A blobless clone of a real single-branch repository, the way ensureClone
+  // lays one down before prepareDevWorkspace resolves the base branch.
+  function fixture({ defaultBranch = 'main' } = {}) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-base-'));
+    roots.push(dir);
+    const origin = path.join(dir, 'origin.git');
+    const seed = path.join(dir, 'seed');
+    const clone = path.join(dir, 'acme__app');
+    spawnSync('git', ['init', '-q', '--bare', '-b', defaultBranch, origin]);
+    spawnSync('git', ['init', '-q', seed]);
+    git(seed, 'config', 'user.email', 't@example.com');
+    git(seed, 'config', 'user.name', 'Tester');
+    fs.writeFileSync(path.join(seed, 'a.txt'), 'hello');
+    git(seed, 'add', '.');
+    git(seed, 'commit', '-qm', 'x');
+    git(seed, 'remote', 'add', 'origin', origin);
+    git(seed, 'push', '-q', 'origin', `main:${defaultBranch}`);
+    spawnSync('git', ['clone', '-q', '--filter=blob:none', '--no-checkout', origin, clone]);
+    return { dir, origin, clone };
+  }
+  // origin answers the HEAD probe with nothing, the way a remote that no longer
+  // advertises its default does; the fetches it serves stay healthy.
+  const stopAdvertising = (origin) => git(origin, 'symbolic-ref', 'HEAD', 'refs/heads/nope-unborn');
+  const breakOrigin = ({ dir, clone }) =>
+    git(clone, 'remote', 'set-url', 'origin', path.join(dir, 'gone.git'));
+  const dropRecorded = (clone) => git(clone, 'symbolic-ref', '--delete', 'refs/remotes/origin/HEAD');
+
+  it('resolves the default branch origin advertises, whatever its name', async () => {
+    const main = fixture({ defaultBranch: 'main' });
+    await expect(resolveWorkspaceBaseBranch({ id: 'base-main', repo: 'acme/app' }, main.clone)).resolves.toBe(
+      'main',
+    );
+    const legacy = fixture({ defaultBranch: 'master' });
+    await expect(
+      resolveWorkspaceBaseBranch({ id: 'base-master', repo: 'acme/app' }, legacy.clone),
+    ).resolves.toBe('master');
+  });
+
+  it('uses the clone-recorded origin/HEAD when origin stops advertising HEAD', async () => {
+    const repo = fixture();
+    stopAdvertising(repo.origin);
+    // The fetch that killed the failed action once the base was assumed to be master.
+    const phantom = git(
+      repo.clone,
+      'fetch',
+      '--no-tags',
+      'origin',
+      '+refs/heads/master:refs/remotes/origin/master',
+    );
+    expect(phantom.status).toBe(128);
+    expect(phantom.stderr).toContain("couldn't find remote ref refs/heads/master");
+    await expect(
+      resolveWorkspaceBaseBranch({ id: 'base-recorded', repo: 'acme/app' }, repo.clone),
+    ).resolves.toBe('main');
+  });
+
+  it('uses the clone-recorded origin/HEAD when origin cannot be reached at all', async () => {
+    const repo = fixture();
+    breakOrigin(repo);
+    await expect(
+      resolveWorkspaceBaseBranch({ id: 'base-offline', repo: 'acme/app' }, repo.clone),
+    ).resolves.toBe('main');
+  });
+
+  it('uses the PR base GitHub verified when the clone carries no record and origin is unreachable', async () => {
+    const repo = fixture();
+    dropRecorded(repo.clone);
+    breakOrigin(repo);
+    await expect(
+      resolveWorkspaceBaseBranch({ id: 'base-prbase', repo: 'acme/app', prBase: 'trunk' }, repo.clone),
+    ).resolves.toBe('trunk');
+  });
+
+  it('prefers the default the clone recorded over the pull request base', async () => {
+    const repo = fixture();
+    stopAdvertising(repo.origin);
+    await expect(
+      resolveWorkspaceBaseBranch({ id: 'base-order', repo: 'acme/app', prBase: 'trunk' }, repo.clone),
+    ).resolves.toBe('main');
+  });
+
+  it('asks origin which conventional name exists when nothing else is known', async () => {
+    const repo = fixture();
+    stopAdvertising(repo.origin);
+    dropRecorded(repo.clone);
+    await expect(
+      resolveWorkspaceBaseBranch({ id: 'base-candidates', repo: 'acme/app' }, repo.clone),
+    ).resolves.toBe('main');
+  });
+
+  it('fails with an actionable error instead of fetching a phantom master', async () => {
+    const repo = fixture();
+    dropRecorded(repo.clone);
+    breakOrigin(repo);
+    await expect(
+      resolveWorkspaceBaseBranch({ id: 'base-dead', repo: 'acme/app' }, repo.clone),
+    ).rejects.toThrow(/Could not determine the default branch of acme\/app/);
   });
 });
 
