@@ -38,7 +38,15 @@ stream transcripts, send or queue messages, cancel turns, compact context,
 pin sessions to the top of the list, close and reopen sessions, and attach files
 or transcribed voice notes. Claude `/btw` questions use a separate fork of
 the conversation. Orchestrators coordinate worker sessions and their
-PR actions and QA work.
+PR actions and QA work. `reopen_worker` (session-token HTTP fallback:
+`POST /api/agent/sessions/<id>/reopen`) prepares an owned, fully closed task worker
+through the existing reopen lifecycle, preserving history and target-project configuration.
+It requests no new agent turn and returns HTTP 202 with `preparing`, `qaReady` and
+`messageSent: false`; buffered deliveries retain normal reopen behavior.
+For QA required after review, close implementation, run the official review, verify
+code approval at the current PR head, reopen implementation, poll until idle without
+an unanswered question, then arm `set_worker_qa_loop`. Reopening does not arm QA;
+worker limits and current project access still apply.
 CI verdict wakes are deduplicated per orchestrator and PR head across workers;
 empty, skipped-only and neutral-only check rollups do not wake it or claim merge readiness.
 

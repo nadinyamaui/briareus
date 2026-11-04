@@ -18,6 +18,7 @@ import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
 import { createUsers } from '../lib/users.js';
 import { createSlackService } from '../lib/slack.js';
 import { createSshService } from '../lib/ssh.js';
+import { orchestratorRoutes } from '../lib/orchestrator-routes.js';
 import {} from '../lib/github-store.js';
 import {} from '../lib/prboard.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
@@ -304,6 +305,7 @@ import {
   eligibleWorkerProjects,
   startOrchestratorPrAction,
   workerSessionsFor,
+  assertWorkerSlot,
   workerSummary,
   deliverWorkerNotices,
   deliverToSession,
@@ -14170,6 +14172,77 @@ describe('automatic recovery after a server restart', () => {
       );
     child.emit('close', 0);
   };
+
+  it('reopens an owned closed task through the agent route without a coding turn, then arms QA', async () => {
+    const checkout = path.join(root, 'acme__restart');
+    fs.mkdirSync(checkout);
+    const git = (...args) => {
+      const result = spawnSync('git', args, { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git('-C', checkout, 'init', '-b', 'feature');
+    git(
+      '-C',
+      checkout,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'fixture',
+    );
+    const remote = path.join(root, 'remote.git');
+    git('clone', '--bare', checkout, remote);
+    git('-C', checkout, 'remote', 'add', 'origin', remote);
+    state.projects[0].envTemplate = 'TARGET_PROJECT=yes\n';
+    state.projects[0].setupCommands = [];
+    const parent = row({ status: 'closed', repo: 'acme/parent' });
+    const saved = row({
+      status: 'closed',
+      orchestrator: false,
+      activity: 'worker',
+      parentId: parent.id,
+      ownerId: 2,
+      workDir: checkout,
+      branch: 'feature',
+      recoveryTurn: null,
+      events: [{ kind: 'assistant', text: 'Implementation completed', seq: 1 }],
+    });
+    claimSlot(checkout, saved.id, { prepared: true });
+    state.stored = [parent, saved];
+    await initJobs();
+    const history = [...saved.events];
+    const routes = orchestratorRoutes({
+      agentSession: () => parent,
+      workerSessionsFor,
+      workerSummary,
+      assertWorkerSlot,
+      reopenDevSession,
+      setQaLoop,
+    });
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    routes.reopenWorker({ params: { id: saved.id } }, res);
+    expect(res.status).toHaveBeenCalledWith(202);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        preparing: true,
+        qaReady: false,
+        messageSent: false,
+      }),
+    );
+    await vi.waitFor(() => expect(saved.status, saved.error).toBe('idle'));
+    expect(saved.events).toEqual(expect.arrayContaining(history));
+    expect(saved).toMatchObject({ ownerId: 2, repo: 'acme/restart', providerId: 2, model: 'gpt-6.1-sol' });
+    expect(fs.readFileSync(path.join(checkout, '.env'), 'utf8')).toContain('TARGET_PROJECT=yes');
+    expect(children).toHaveLength(0);
+    expect(saved.qaLoop).toBeFalsy();
+    routes.qaLoop({ params: { id: saved.id }, body: { on: true } }, res);
+    expect(saved.qaLoop).toMatchObject({ running: false, done: false });
+    expect(children).toHaveLength(0);
+    setQaLoop(saved.id, false);
+  });
 
   it('serializes local checkout claims through aliases, including before a clone exists', async () => {
     const alias = path.join(root, 'alias');
