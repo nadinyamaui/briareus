@@ -13972,7 +13972,7 @@ describe('workspace base branch resolution', () => {
     const seed = path.join(dir, 'seed');
     const clone = path.join(dir, 'acme__app');
     spawnSync('git', ['init', '-q', '--bare', '-b', defaultBranch, origin]);
-    spawnSync('git', ['init', '-q', seed]);
+    spawnSync('git', ['init', '-q', '-b', 'main', seed]);
     git(seed, 'config', 'user.email', 't@example.com');
     git(seed, 'config', 'user.name', 'Tester');
     fs.writeFileSync(path.join(seed, 'a.txt'), 'hello');
