@@ -159,6 +159,51 @@ describe('latestTestVerdict', () => {
     }
   });
 
+  it('stops an unterminated block at the next run block instead of reading its rows', async () => {
+    gh.comments = [
+      sheet([
+        `${QA_RUN_PREFIX}new-run ${gh.head} -->\n${sheet([pass]).body}`,
+        runBlock(sheet([fail]).body, 'old-run', 'a'.repeat(40)),
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toEqual({
+      failures: [],
+      total: 0,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it('matches run delimiters with surrounding whitespace', async () => {
+    gh.comments = [
+      sheet([
+        [`  ${QA_RUN_PREFIX}new-run ${gh.head} --> `, sheet([pass]).body, `  ${QA_RUN_END}\t`].join('\n'),
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
+      failures: [],
+      total: 1,
+      passed: 1,
+      incomplete: false,
+    });
+  });
+
+  it('reads the last block for the same run and head', async () => {
+    gh.comments = [
+      sheet([
+        runBlock(sheet(['| 1 | Current | Run | Works | ⬜ | Restarted |']).body),
+        runBlock(sheet([pass]).body),
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
+      failures: [],
+      total: 1,
+      passed: 1,
+      incomplete: false,
+    });
+  });
+
   it('propagates head read errors so the loop retries instead of trusting old rows', async () => {
     gh.comments = [sheet([runBlock(sheet([fail]).body)])];
     gh.headStatus = 503;
