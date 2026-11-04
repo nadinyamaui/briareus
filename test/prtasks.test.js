@@ -357,6 +357,9 @@ describe('fresh QA run requirements', () => {
       expect(text).toContain('"runId":"fresh-run"');
       expect(text).toContain('Historical passes never count');
       expect(text).toContain('head.sha, base.sha and base.ref');
+      expect(text).toContain('gh api repos/acme/shop/pulls/12');
+      expect(text).toContain('"repo":"acme/shop","prNumber":12');
+      expect(text).toContain('base.sha moves whenever the base branch advances');
     },
   );
   it('preserves history while resetting the new sheet', () => {

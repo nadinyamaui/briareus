@@ -50,7 +50,6 @@ describe('latestTestVerdict', () => {
   it.each([
     ['legacy all-passed sheet', null],
     ['old head', { head: 'old-head' }],
-    ['old parent SHA', { base: 'old-base' }],
     ['old parent branch', { baseRef: 'old-parent' }],
     ['same-head previous run', { runId: 'run-1' }],
     ['different PR', { prNumber: 6 }],
@@ -88,12 +87,41 @@ describe('latestTestVerdict', () => {
     });
   });
 
-  it('rejects a live base change even if the sheet stayed unchanged', async () => {
+  it('keeps a run valid when the base branch advances under it', async () => {
     gh.comments = [completedSheet()];
     gh.pr.base.sha = 'moved-base';
     expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
-      passed: 0,
-      incomplete: true,
+      passed: 1,
+      incomplete: false,
+    });
+    const prepared = await latestTestVerdict(repo, 5, { runId: 'run-2', prepared: true });
+    gh.comments = [completedSheet({ ...identity(), base: 'moved-base' })];
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2', identity: prepared.identity })).toMatchObject({
+      passed: 1,
+      incomplete: false,
+    });
+  });
+
+  it("reads this run's sheet even when another run posted a newer one", async () => {
+    const other = completedSheet({ ...identity(), runId: 'run-other', executed: false });
+    gh.comments = [completedSheet(), { ...other, id: 4 }];
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
+      passed: 1,
+      incomplete: false,
+    });
+  });
+
+  it.each([
+    ['repository casing', (body) => body.replace('"owner/repo"', '"Owner/Repo"')],
+    ['a quoted PR number', (body) => body.replace('"prNumber":5', '"prNumber":"5"')],
+    ['trailing whitespace', (body) => `${body}  `],
+    ['an indented marker', (body) => body.replace('<!-- briareus:qa-run', '  <!-- briareus:qa-run')],
+  ])('tolerates %s in the run metadata', async (_name, edit) => {
+    const comment = completedSheet();
+    gh.comments = [{ ...comment, body: edit(comment.body) }];
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
+      passed: 1,
+      incomplete: false,
     });
   });
 
