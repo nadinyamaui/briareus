@@ -4,10 +4,11 @@ import { readFileSync } from 'node:fs';
 import { TEST_SHEET_ANCHOR } from '../lib/markers.js';
 import {} from '../lib/github.js';
 import { latestTestVerdict } from '../lib/qa-verdict.js';
-const gh = vi.hoisted(() => ({ comments: [], token: 'tok' }));
+const gh = vi.hoisted(() => ({ comments: [], token: 'tok', pr: null }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ githubToken: gh.token }) }));
 vi.mock('../lib/github.js', () => ({
   githubRest: vi.fn(async (_cfg, _method, url) => {
+    if (/\/pulls\/\d+$/.test(url)) return { ok: true, json: async () => gh.pr };
     const page = Number(new URL(url, 'https://example.com').searchParams.get('page'));
     return { ok: true, status: 200, json: async () => gh.comments.slice((page - 1) * 100, page * 100) };
   }),
@@ -16,6 +17,7 @@ const repo = 'owner/repo';
 beforeEach(() => {
   gh.comments = [];
   gh.token = 'tok';
+  gh.pr = { head: { sha: 'new-head' }, base: { sha: 'new-base', ref: 'parent' } };
 });
 describe('latestTestVerdict', () => {
   const sheet = (rows) => ({
@@ -28,6 +30,71 @@ describe('latestTestVerdict', () => {
       '|---|----------|-------|----------|--------|----------|',
       ...rows,
     ].join('\n'),
+  });
+
+  const identity = () => ({
+    runId: 'run-2',
+    repo,
+    prNumber: 5,
+    head: 'new-head',
+    base: 'new-base',
+    baseRef: 'parent',
+    executed: true,
+  });
+  const completedSheet = (metadata = identity()) => {
+    const comment = sheet(['| 1 | API | curl | 200 | ✅ | response.json |']);
+    if (metadata) comment.body += `\n<!-- briareus:qa-run ${JSON.stringify(metadata)} -->`;
+    return comment;
+  };
+
+  it.each([
+    ['legacy all-passed sheet', null],
+    ['old head', { head: 'old-head' }],
+    ['old parent SHA', { base: 'old-base' }],
+    ['old parent branch', { baseRef: 'old-parent' }],
+    ['same-head previous run', { runId: 'run-1' }],
+    ['different PR', { prNumber: 6 }],
+    ['different repository', { repo: 'other/repo' }],
+    ['sheet prepared but never executed', { executed: false }],
+  ])('rejects %s without claiming historical passes', async (_name, patch) => {
+    gh.comments = [completedSheet(patch === null ? null : { ...identity(), ...patch })];
+    const original = JSON.stringify(gh.comments);
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
+      passed: 0,
+      incomplete: true,
+    });
+    expect(JSON.stringify(gh.comments)).toBe(original);
+  });
+
+  it('reuses completed evidence only for this run and current identity', async () => {
+    gh.comments = [completedSheet()];
+    for (let read = 0; read < 2; read++) {
+      expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
+        passed: 1,
+        incomplete: false,
+      });
+    }
+  });
+
+  it('pins the prepared sheet and rejects an identity change during execution', async () => {
+    gh.comments = [completedSheet({ ...identity(), executed: false })];
+    const prepared = await latestTestVerdict(repo, 5, { runId: 'run-2', prepared: true });
+    expect(prepared.identity).toEqual({ ...identity(), executed: false });
+    gh.pr.head.sha = 'moved-head';
+    gh.comments = [completedSheet({ ...identity(), head: 'moved-head' })];
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2', identity: prepared.identity })).toMatchObject({
+      passed: 0,
+      incomplete: true,
+    });
+  });
+
+  it('rejects a live base change even if the sheet stayed unchanged', async () => {
+    gh.comments = [completedSheet()];
+    gh.pr.base.sha = 'moved-base';
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
+      passed: 0,
+      incomplete: true,
+    });
   });
 
   it.each(['-', '+', '*', '1.', '2)', '- -', '-\t'])(

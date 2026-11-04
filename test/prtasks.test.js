@@ -342,3 +342,31 @@ describe('prBodyPrompt', () => {
     expect(prompt).toContain('Do not switch branches');
   });
 });
+
+describe('fresh QA run requirements', () => {
+  it.each([testSheetPrompt, testRunPrompt])(
+    'keeps run identity and fresh execution rules outside overrides',
+    (prompt) => {
+      const text = prompt({
+        repo: 'acme/shop',
+        prNumber: 12,
+        qaRunId: 'fresh-run',
+        project: { promptTemplates: { testSheet: 'CUSTOM', testRun: 'CUSTOM' } },
+      });
+      expect(text).toContain('fresh QA run: fresh-run');
+      expect(text).toContain('"runId":"fresh-run"');
+      expect(text).toContain('Historical passes never count');
+      expect(text).toContain('head.sha, base.sha and base.ref');
+    },
+  );
+  it('preserves history while resetting the new sheet', () => {
+    const text = testSheetPrompt({ repo: 'acme/shop', prNumber: 12, qaRunId: 'fresh-run' });
+    expect(text).toContain('Preserve previous sheets and evidence unchanged');
+    expect(text).toContain('start every executable row at ⬜ with empty Evidence');
+  });
+  it('requires actual execution before marking the run executed', () => {
+    const text = testRunPrompt({ repo: 'acme/shop', prNumber: 12, qaRunId: 'fresh-run' });
+    expect(text).toContain('including previously passed ones');
+    expect(text).toContain('Only after execution and a final live identity check');
+  });
+});

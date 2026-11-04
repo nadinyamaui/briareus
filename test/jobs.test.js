@@ -7026,6 +7026,12 @@ describe('the QA loop: reporting a finished QA run', () => {
       qaRow('qa-run-8', 'qa-par-8', false),
       { ...parentRow('qa-par-9', 'qa-run-9'), parentId: 'qa-orch' },
       qaRow('qa-run-9', 'qa-par-9', true),
+      { ...parentRow('qa-par-stale', 'qa-run-stale'), parentId: 'qa-orch' },
+      {
+        ...qaRow('qa-run-stale', 'qa-par-stale', true),
+        qaRunId: 'fresh-run',
+        qaIdentity: { head: 'approved-head' },
+      },
     ];
     await initJobs();
     for (const id of [
@@ -7048,6 +7054,8 @@ describe('the QA loop: reporting a finished QA run', () => {
       'qa-run-8',
       'qa-par-9',
       'qa-run-9',
+      'qa-par-stale',
+      'qa-run-stale',
     ]) {
       getJob(id).status = 'idle';
     }
@@ -7068,7 +7076,10 @@ describe('the QA loop: reporting a finished QA run', () => {
     const parent = getJob('qa-par-1');
     expect(parent.qaLoop).toMatchObject({ running: false, done: true, failedScenarios: 0 });
     expect(infoTexts(parent).join('\n')).toMatch(/no QA actions are required/);
-    expect(latestTestVerdict).toHaveBeenCalledWith('acme/qa-loop', 88);
+    expect(latestTestVerdict).toHaveBeenCalledWith('acme/qa-loop', 88, {
+      runId: 'qa-run-1',
+      identity: undefined,
+    });
   });
 
   it('failed scenarios are reported as feedback, and the loop stops there', async () => {
@@ -7106,6 +7117,35 @@ describe('the QA loop: reporting a finished QA run', () => {
     const notice = getJob('qa-orch').pendingWorkerNotices.find((n) => n.workerId === parent.id);
     expect(notice.text).toContain('QA has not passed');
     expect(notice.text).not.toContain('ready to merge');
+    expect(removePullRequestLabel).toHaveBeenCalledWith(expect.anything(), parent.repo, 88, 'qa-test-passed');
+  });
+
+  it('reports stale all-passed evidence as incomplete and removes the pass label without retrying QA', async () => {
+    latestTestVerdict.mockResolvedValueOnce({
+      failures: [],
+      total: 8,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+    await closeDevSession('qa-run-stale');
+    await vi.waitFor(() => expect(getJob('qa-par-stale').qaLoop.done).toBe(true));
+    const parent = getJob('qa-par-stale');
+    expect(latestTestVerdict).toHaveBeenLastCalledWith(parent.repo, 88, {
+      runId: 'fresh-run',
+      identity: { head: 'approved-head' },
+    });
+    expect(parent.qaLoop).toMatchObject({
+      running: false,
+      incomplete: true,
+      failedScenarios: 0,
+      pendingVerdict: null,
+    });
+    expect(infoTexts(parent).join('\n')).toContain('QA has not passed');
+    expect(infoTexts(parent).join('\n')).not.toContain('all 8 scenario(s) passed');
+    const notice = getJob('qa-orch').pendingWorkerNotices.find((n) => n.workerId === parent.id);
+    expect(notice.text).toContain('QA has not passed');
+    expect(notice.text).not.toContain('passed: all');
     expect(removePullRequestLabel).toHaveBeenCalledWith(expect.anything(), parent.repo, 88, 'qa-test-passed');
   });
 
@@ -15277,6 +15317,79 @@ describe('automatic recovery after a server restart', () => {
       }
     },
   );
+
+  it.each(['initial', 'followup'])(
+    'executes a fresh QA run after its %s turn before closing or reporting',
+    async (phase) => {
+      const parent = row({ status: 'closed', recoveryTurn: null });
+      const saved = row({
+        qaBranch: 'feature',
+        qaRunId: 'fresh-qa',
+        qaParentId: parent.id,
+        startedOnPr: 132,
+        autoClose: true,
+        recoveryTurn: { prompt: 'Prepare the fresh sheet', phase, completed: false },
+      });
+      parent.qaLoop = { running: true, sessionId: saved.id, done: false };
+      state.projects[0].qaTestRun = false; // loop QA must execute regardless of the board preference
+      latestTestVerdict.mockResolvedValueOnce({ identity: { runId: 'fresh-qa', head: 'approved-head' } });
+      state.stored = [parent, saved];
+      await initJobs();
+      resumeRestartedSessions();
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      expect(saved.qaLoopDone).not.toBe(true);
+      finish(children[0]);
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      expect(saved.recoveryTurn.phase).toBe('testRun');
+      expect(saved.recoveryTurn.opts.step).toBe('testRun');
+      expect(saved.status).toBe('running');
+      expect(parent.qaLoop.done).toBe(false);
+      expect(saved.qaLoopDone).not.toBe(true);
+      finish(children[1]);
+      await vi.waitFor(() => expect(saved.status).toBe('closed'));
+      expect(saved.qaExecutionComplete).toBe(true);
+      expect(saved.qaLoopDone).toBe(true);
+      expect(children).toHaveLength(2);
+    },
+  );
+
+  it('does not repeat a completed execution after a restart', async () => {
+    const saved = row({
+      qaBranch: 'feature',
+      qaRunId: 'fresh-qa',
+      autoClose: true,
+      recoveryTurn: { prompt: 'RUN', opts: { step: 'testRun' }, phase: 'testRun', completed: true },
+    });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(saved.status).toBe('closed'));
+    expect(saved.qaExecutionComplete).toBe(true);
+    expect(children).toHaveLength(0);
+  });
+
+  it('stops a fresh QA run with stale preparation before executing or reporting a verdict', async () => {
+    const parent = row({ status: 'idle', recoveryTurn: null });
+    const saved = row({
+      qaBranch: 'feature',
+      qaRunId: 'fresh-qa',
+      qaParentId: parent.id,
+      startedOnPr: 132,
+      autoClose: true,
+      recoveryTurn: { prompt: 'SHEET', phase: 'initial', completed: true },
+    });
+    parent.qaLoop = { running: true, sessionId: saved.id, done: false };
+    latestTestVerdict.mockResolvedValueOnce({ failures: [], passed: 0, incomplete: true });
+    state.stored = [parent, saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(saved.status).toBe('failed'));
+    expect(saved.error).toContain('QA sheet is missing or stale');
+    expect(saved.qaLoopDone).not.toBe(true);
+    expect(parent.qaLoop.done).toBe(false);
+    expect(parent.qaLoop.failure.kind).toBe('failed');
+    expect(children).toHaveLength(0);
+  });
 
   it('resumes QA on the configured step provider and thread without starting the sheet again', async () => {
     const saved = row({
