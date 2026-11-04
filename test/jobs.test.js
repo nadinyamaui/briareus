@@ -7077,7 +7077,7 @@ describe('the QA loop: reporting a finished QA run', () => {
     expect(parent.qaLoop).toMatchObject({ running: false, done: true, failedScenarios: 0 });
     expect(infoTexts(parent).join('\n')).toMatch(/no QA actions are required/);
     expect(latestTestVerdict).toHaveBeenCalledWith('acme/qa-loop', 88, {
-      runId: 'qa-run-1',
+      runId: undefined,
       identity: undefined,
     });
   });
@@ -15389,6 +15389,83 @@ describe('automatic recovery after a server restart', () => {
     expect(parent.qaLoop.done).toBe(false);
     expect(parent.qaLoop.failure.kind).toBe('failed');
     expect(children).toHaveLength(0);
+  });
+
+  it('retries a transient GitHub error before executing a fresh QA run, and tolerates a failed label removal', async () => {
+    const saved = row({
+      qaBranch: 'feature',
+      qaRunId: 'fresh-qa',
+      startedOnPr: 132,
+      recoveryTurn: { prompt: 'SHEET', phase: 'initial', completed: true },
+    });
+    const denied = new Error('GitHub answered 403 removing qa-test-passed');
+    removePullRequestLabel
+      .mockRejectedValueOnce(denied)
+      .mockRejectedValueOnce(denied)
+      .mockRejectedValueOnce(denied);
+    latestTestVerdict
+      .mockRejectedValueOnce(new Error('GitHub answered 502 listing PR #132 comments'))
+      .mockResolvedValueOnce({ identity: { runId: 'fresh-qa', head: 'approved-head' } });
+    const reads = latestTestVerdict.mock.calls.length;
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    // Two label retries and one read retry wait 400 + 800 + 400 ms.
+    await vi.waitFor(() => expect(children).toHaveLength(1), { timeout: 5000 });
+    expect(latestTestVerdict.mock.calls.length - reads).toBe(2);
+    expect(saved.recoveryTurn.phase).toBe('testRun');
+    expect(saved.qaIdentity).toEqual({ runId: 'fresh-qa', head: 'approved-head' });
+    expect(saved.events.some((e) => e.kind === 'stderr' && /403 removing qa-test-passed/.test(e.text))).toBe(
+      true,
+    );
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.qaExecutionComplete).toBe(true));
+  });
+
+  it('fails a fresh QA run clearly when no pull request is known for its branch', async () => {
+    const saved = row({
+      qaBranch: 'feature',
+      qaRunId: 'fresh-qa',
+      recoveryTurn: { prompt: 'SHEET', phase: 'initial', completed: true },
+    });
+    const writes = removePullRequestLabel.mock.calls.length;
+    const reads = latestTestVerdict.mock.calls.length;
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(saved.status).toBe('failed'));
+    expect(saved.error).toContain('no pull request is known for feature');
+    expect(removePullRequestLabel.mock.calls).toHaveLength(writes);
+    expect(latestTestVerdict.mock.calls).toHaveLength(reads);
+    expect(children).toHaveLength(0);
+  });
+
+  it('does not start the execution again after the operator stopped it', async () => {
+    const saved = row({
+      qaBranch: 'feature',
+      qaRunId: 'fresh-qa',
+      startedOnPr: 132,
+      recoveryTurn: { prompt: 'RUN', opts: { step: 'testRun' }, phase: 'testRun', completed: false },
+    });
+    state.stored = [saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    cancelDevTurn(saved.id);
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('idle'));
+    expect(saved.qaExecutionComplete).not.toBe(true);
+    expect(saved.qaExecutionStopped).toBe(true);
+    const writes = removePullRequestLabel.mock.calls.length;
+    sendDevMessage(saved.id, 'just summarise what you found');
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    finish(children[1]);
+    await vi.waitFor(() => expect(saved.recoveryTurn.completed).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(saved.status).toBe('idle');
+    expect(saved.recoveryTurn.phase).toBe('followup');
+    expect(removePullRequestLabel.mock.calls).toHaveLength(writes);
+    expect(children).toHaveLength(2);
   });
 
   it('resumes QA on the configured step provider and thread without starting the sheet again', async () => {
