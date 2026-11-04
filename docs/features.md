@@ -53,6 +53,9 @@ pull requests and issues, move board cards, update PR branches and merge.
 Repository routes expose trees, files and gzipped archives at a revision.
 
 QA loops create and execute test sheets when a task settles on an open pull request.
+Their verdicts read only the active results block for that QA session and the live PR head;
+historical tables and evidence remain outside it. Missing or stale execution is incomplete,
+while actual current-run failures still stop the loop for human judgment.
 With `babysitPrs` enabled, conflict resolution, CI fixes and recommended code reviews run every 15 minutes,
 using the project's action runtime and respecting author filters and retry limits.
 
