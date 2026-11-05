@@ -277,6 +277,84 @@ ${historical}
     });
   });
 
+  it.each([
+    ['<details><summary><b>Historical</b> runs</summary>\n', '</details>'],
+    ['<details><summary>📜 Historical</summary>\n', '</details>'],
+    ['## 🕰️ Historical runs', '## Test sheet'],
+  ])('excludes formatted history label %s', async (opening, closing) => {
+    const history = sheet(['| 1 | Old | Run | Expected | ❌ | old failure |']).body;
+    const current = sheet(['| 1 | Current | Run | Expected | ✅ | response.json |']).body;
+    gh.comments = [
+      {
+        id: 3,
+        body: `${TEST_SHEET_ANCHOR}\n${opening}\n\n${history.replace('## Test sheet', '')}\n\n${closing}\n\n${current}`,
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ failures: [], total: 1, passed: 1 });
+  });
+
+  it.each([null, 'new-run'])(
+    'still counts feature sections that start with a history word (run %s)',
+    async (runId) => {
+      const body = [
+        '## Login',
+        '',
+        '| # | Scenario | Steps | Expected | Status | Evidence |',
+        '|---|---|---|---|---|---|',
+        '| 1 | Login | Run | Works | ✅ | response.json |',
+        '',
+        '## Archive projects',
+        '',
+        '| # | Scenario | Steps | Expected | Status | Evidence |',
+        '|---|---|---|---|---|---|',
+        '| 2 | Archive a project | Run | Archived | ❌ | saw 500 |',
+        '',
+        '<details><summary>History tab</summary>',
+        '',
+        '| # | Scenario | Steps | Expected | Status | Evidence |',
+        '|---|---|---|---|---|---|',
+        '| 3 | Open history tab | Run | Lists events | ✅ | history.png |',
+        '',
+        '</details>',
+      ].join('\n');
+      gh.comments = [{ id: 3, body: `${TEST_SHEET_ANCHOR}\n${runId ? runBlock(body, runId) : body}` }];
+      expect(await latestTestVerdict(repo, 5, runId)).toEqual({
+        failures: [{ number: '2', scenario: 'Archive a project', expected: 'Archived', evidence: 'saw 500' }],
+        total: 3,
+        passed: 2,
+        manual: 0,
+        incomplete: false,
+      });
+    },
+  );
+
+  it('marks only the details a multi-line summary opened in, even when both close together', async () => {
+    gh.comments = [
+      {
+        id: 3,
+        body: [
+          TEST_SHEET_ANCHOR,
+          '<details><summary>Current sheet</summary>',
+          '',
+          '<details>',
+          '<summary>',
+          'Historical note',
+          '</summary></details>',
+          '',
+          '| # | Scenario | Steps | Expected | Status | Evidence |',
+          '|---|---|---|---|---|---|',
+          '| 1 | Current | Run | Expected | ❌ | saw 500 |',
+          '',
+          '</details>',
+        ].join('\n'),
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({
+      failures: [{ number: '1', scenario: 'Current', expected: 'Expected', evidence: 'saw 500' }],
+      total: 1,
+    });
+  });
+
   it('preserves collapsible current failures, blocked rows and unrelated tables', async () => {
     const current = sheet([
       '| 1 | Current | Run | Expected | ❌ | saw 500 |',
