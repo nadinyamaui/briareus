@@ -30,6 +30,133 @@ describe('latestTestVerdict', () => {
     ].join('\n'),
   });
 
+  it('counts only the active 10 rows, retaining its two unrun rows beside eight historical passes', async () => {
+    const current = sheet(
+      Array.from(
+        { length: 10 },
+        (_, i) =>
+          `| ${i + 1} | Current scenario | Run | Expected | ${[1, 8].includes(i) ? '⬜' : '✅'} | ${[1, 8].includes(i) ? '' : 'response.json'} |`,
+      ),
+    );
+    const historical = sheet(
+      Array.from(
+        { length: 8 },
+        (_, i) => `| ${i + 1} | Historical scenario | Run | Expected | ✅ | old-response.json |`,
+      ),
+    )
+      .body.replace(TEST_SHEET_ANCHOR, '')
+      .replace('## Test sheet', '### Historical test sheet');
+    gh.comments = [
+      {
+        id: 3,
+        body: `${current.body}
+
+<details><summary>Historical sheet and evidence, tested head ${'a'.repeat(40)} only</summary>
+
+${historical}
+
+</details>`,
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 10,
+      passed: 8,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it.each([
+    ['### Historical test sheet', '### Current test sheet'],
+    ['## Archived test sheet', '## Test sheet'],
+    ['<details><summary>Historical sheet and evidence</summary>\n', '</details>'],
+    ['<details>\n<summary>\nArchived test sheet\n</summary>\n', '</details>'],
+  ])('excludes historical failures scoped by %s and resumes current rows', async (opening, closing) => {
+    const history = sheet(['| 1 | Old | Run | Expected | ❌ | old failure |']).body;
+    const current = sheet(['| 1 | Current | Run | Expected | ✅ | response.json |']).body;
+    gh.comments = [
+      {
+        id: 3,
+        body: `${TEST_SHEET_ANCHOR}\n${opening}\n\n${history.replace('## Test sheet', '')}\n\n${closing}\n\n${current}`,
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
+  it('preserves collapsible current failures, blocked rows and unrelated tables', async () => {
+    const current = sheet([
+      '| 1 | Current | Run | Expected | ❌ | saw 500 |',
+      '| 2 | Current blocked | Run | Expected | ⬜ | Browser unavailable |',
+    ]).body;
+    gh.comments = [
+      {
+        id: 3,
+        body: `${TEST_SHEET_ANCHOR}
+<details><summary>Current test sheet</summary>
+
+${current}
+
+</details>
+
+## Supporting data
+
+| # | Name | Value |
+|---|---|---|
+| 1 | Historical records | 8 |
+`,
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '1', scenario: 'Current', expected: 'Expected', evidence: 'saw 500' }],
+      total: 2,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it('does not select history labels from literal examples or cell content', async () => {
+    gh.comments = [
+      sheet([
+        '| 1 | Current | Run | Expected | ✅ | <details><summary>Historical evidence</summary>response.json</details> |',
+        '',
+        '<!-- <details><summary>Historical sheet</summary> -->',
+        '',
+        '```html',
+        '<details><summary>Historical sheet</summary>',
+        '```',
+        '',
+        '    <details><summary>Historical sheet</summary>',
+        '',
+        '| # | Scenario | Steps | Expected | Status | Evidence |',
+        '|---|---|---|---|---|---|',
+        '| 2 | Current | Run | Expected | ⬜ | |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 2, passed: 1, incomplete: true });
+  });
+
+  it('does not fall back to historical passes when the current sheet is empty', async () => {
+    gh.comments = [
+      sheet([
+        '',
+        '### Historical test sheet',
+        '',
+        '| # | Scenario | Steps | Expected | Status | Evidence |',
+        '|---|---|---|---|---|---|',
+        '| 1 | Old | Run | Expected | ✅ | old-response.json |',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 0, passed: 0, incomplete: true });
+  });
+
   it.each(['-', '+', '*', '1.', '2)', '- -', '-\t'])(
     'retains custom results whose header starts on list marker %s',
     async (marker) => {
