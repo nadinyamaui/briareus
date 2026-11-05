@@ -1,13 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { TEST_SHEET_ANCHOR } from '../lib/markers.js';
+import { TEST_SHEET_ANCHOR, QA_RUN_PREFIX, QA_RUN_END } from '../lib/markers.js';
 import {} from '../lib/github.js';
 import { latestTestVerdict } from '../lib/qa-verdict.js';
-const gh = vi.hoisted(() => ({ comments: [], token: 'tok' }));
+const gh = vi.hoisted(() => ({ comments: [], token: 'tok', head: 'b'.repeat(40), headStatus: 200 }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ githubToken: gh.token }) }));
 vi.mock('../lib/github.js', () => ({
   githubRest: vi.fn(async (_cfg, _method, url) => {
+    if (/\/pulls\/\d+$/.test(url))
+      return {
+        ok: gh.headStatus === 200,
+        status: gh.headStatus,
+        json: async () => ({ head: { sha: gh.head } }),
+      };
     const page = Number(new URL(url, 'https://example.com').searchParams.get('page'));
     return { ok: true, status: 200, json: async () => gh.comments.slice((page - 1) * 100, page * 100) };
   }),
@@ -16,6 +22,8 @@ const repo = 'owner/repo';
 beforeEach(() => {
   gh.comments = [];
   gh.token = 'tok';
+  gh.head = 'b'.repeat(40);
+  gh.headStatus = 200;
 });
 describe('latestTestVerdict', () => {
   const sheet = (rows) => ({
@@ -28,6 +36,181 @@ describe('latestTestVerdict', () => {
       '|---|----------|-------|----------|--------|----------|',
       ...rows,
     ].join('\n'),
+  });
+
+  const runBlock = (body, runId = 'new-run', head = gh.head) =>
+    [`${QA_RUN_PREFIX}${runId} ${head} -->`, body, QA_RUN_END].join('\n');
+  const fail =
+    '| 9 | Mixed selection | Revoke | Atomic result | ❌ | [old video](https://example.com/old.webm) |';
+  const pass = '| 1 | Current | Run | Works | ✅ | response.json |';
+
+  it('ignores diagnostics that merely quote the marker, with or without an earlier real sheet', async () => {
+    const diagnostic = {
+      id: 4,
+      body: `The test sheet is missing: no PR comment contains ${TEST_SHEET_ANCHOR}. QA execution has not started; coverage is incomplete.`,
+    };
+    gh.comments = [sheet([runBlock(sheet([pass]).body)]), diagnostic];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
+      total: 1,
+      passed: 1,
+      incomplete: false,
+    });
+    gh.comments = [diagnostic];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
+      total: 0,
+      failures: [],
+      incomplete: true,
+    });
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 0, failures: [], incomplete: true });
+  });
+
+  it('does not recycle an old-head failure when a new run stops without publishing results', async () => {
+    gh.comments = [sheet([runBlock(sheet([fail]).body, 'old-run', 'a'.repeat(40))])];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toEqual({
+      failures: [],
+      total: 0,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+    // Even this run's block cannot certify a different head.
+    gh.comments = [sheet([runBlock(sheet([fail]).body, 'new-run', 'a'.repeat(40))])];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
+      failures: [],
+      passed: 0,
+      incomplete: true,
+    });
+  });
+
+  it('excludes historical tables and status glyphs while current rows remain unexecuted', async () => {
+    gh.comments = [
+      sheet([
+        runBlock(sheet(['| 1 | Current | Run | Works | ⬜ | Setup blocked |']).body),
+        '## Historical results on old head ' + 'a'.repeat(40),
+        sheet([fail, pass]).body,
+        'Old verdict: ❌; old video retained.',
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toEqual({
+      failures: [],
+      total: 1,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it('counts only fresh results even if historical failures surround the current block', async () => {
+    gh.comments = [sheet([sheet([fail]).body, runBlock(sheet([pass]).body), sheet([fail]).body])];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toEqual({
+      failures: [],
+      total: 1,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
+  it('retains a rerun failure on an unchanged current head', async () => {
+    gh.comments = [sheet([runBlock(sheet([fail]).body)])];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
+      failures: [{ number: '9', scenario: 'Mixed selection' }],
+      total: 1,
+      passed: 0,
+      incomplete: false,
+    });
+    // Same head alone is insufficient: another run must not inherit that verdict.
+    expect(await latestTestVerdict(repo, 5, 'later-run')).toMatchObject({ failures: [], incomplete: true });
+  });
+
+  it('keeps manual-only and blocked rows incomplete inside the current run', async () => {
+    gh.comments = [
+      sheet([
+        runBlock(
+          sheet([
+            '| 1 | Manual | Inspect | Works | 🖐 | Requires physical device |',
+            '| 2 | API | curl | 200 | ⬜ | Tool setup failed |',
+          ]).body,
+        ),
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toEqual({
+      failures: [],
+      total: 2,
+      passed: 0,
+      manual: 1,
+      incomplete: true,
+    });
+  });
+
+  it('does not certify unterminated, missing, or stale passing blocks', async () => {
+    for (const body of [
+      sheet([pass]).body,
+      runBlock(sheet([pass]).body, 'old-run'),
+      runBlock(sheet([pass]).body, 'new-run', 'a'.repeat(40)),
+      `${QA_RUN_PREFIX}new-run ${gh.head} -->\n${sheet([pass]).body}`,
+    ]) {
+      gh.comments = [sheet([body])];
+      expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
+        failures: [],
+        passed: 0,
+        incomplete: true,
+      });
+    }
+  });
+
+  it('stops an unterminated block at the next run block instead of reading its rows', async () => {
+    gh.comments = [
+      sheet([
+        `${QA_RUN_PREFIX}new-run ${gh.head} -->\n${sheet([pass]).body}`,
+        runBlock(sheet([fail]).body, 'old-run', 'a'.repeat(40)),
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toEqual({
+      failures: [],
+      total: 0,
+      passed: 0,
+      manual: 0,
+      incomplete: true,
+    });
+  });
+
+  it('matches run delimiters with surrounding whitespace', async () => {
+    gh.comments = [
+      sheet([
+        [`  ${QA_RUN_PREFIX}new-run ${gh.head} --> `, sheet([pass]).body, `  ${QA_RUN_END}\t`].join('\n'),
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
+      failures: [],
+      total: 1,
+      passed: 1,
+      incomplete: false,
+    });
+  });
+
+  it('reads the last block for the same run and head', async () => {
+    gh.comments = [
+      sheet([
+        runBlock(sheet(['| 1 | Current | Run | Works | ⬜ | Restarted |']).body),
+        runBlock(sheet([pass]).body),
+      ]),
+    ];
+    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
+      failures: [],
+      total: 1,
+      passed: 1,
+      incomplete: false,
+    });
+  });
+
+  it('propagates head read errors so the loop retries instead of trusting old rows', async () => {
+    gh.comments = [sheet([runBlock(sheet([fail]).body)])];
+    gh.headStatus = 503;
+    await expect(latestTestVerdict(repo, 5, 'new-run')).rejects.toThrow('503');
+    gh.headStatus = 200;
+    gh.head = '';
+    await expect(latestTestVerdict(repo, 5, 'new-run')).rejects.toThrow('invalid PR head');
   });
 
   it.each(['-', '+', '*', '1.', '2)', '- -', '-\t'])(

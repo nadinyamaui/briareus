@@ -7070,7 +7070,7 @@ describe('the QA loop: reporting a finished QA run', () => {
     const parent = getJob('qa-par-1');
     expect(parent.qaLoop).toMatchObject({ running: false, done: true, failedScenarios: 0 });
     expect(infoTexts(parent).join('\n')).toMatch(/no QA actions are required/);
-    expect(latestTestVerdict).toHaveBeenCalledWith('acme/qa-loop', 88);
+    expect(latestTestVerdict).toHaveBeenCalledWith('acme/qa-loop', 88, 'qa-run-1');
   });
 
   it('failed scenarios are reported as feedback, and the loop stops there', async () => {
@@ -7195,7 +7195,7 @@ describe('the QA loop: reporting a finished QA run', () => {
     await closeDevSession('qa-run-6');
     const parent = getJob('qa-par-6');
     expect(parent.qaLoop).toMatchObject({ running: false, done: false });
-    expect(parent.qaLoop.pendingVerdict).toMatchObject({ prNumber: 88 });
+    expect(parent.qaLoop.pendingVerdict).toMatchObject({ prNumber: 88, runId: 'qa-run-6' });
     await vi.advanceTimersByTimeAsync(100);
     expect(parent.qaLoop).toMatchObject({ running: false, done: true, failedScenarios: 1 });
     expect(latestTestVerdict.mock.calls.length).toBeGreaterThanOrEqual(2);
@@ -14431,6 +14431,27 @@ describe('automatic recovery after a server restart', () => {
     expect(holdsWorkDir(saved, checkout)).toBe(true);
   });
 
+  it('runs the initial QA sheet turn before starting the execution turn', async () => {
+    const child = row({
+      qaBranch: 'feature',
+      recoveryTurn: { prompt: 'SHEET', opts: {}, phase: 'initial', completed: false },
+    });
+    state.stored = [child];
+    await initJobs();
+    const { testRunPrompt } = await import('../lib/prtasks.js');
+    const callsBefore = testRunPrompt.mock.calls.length;
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('SHEET');
+    expect(testRunPrompt.mock.calls.length).toBe(callsBefore);
+    finish(children[0]);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(children[1].prompt).toBe('RUN');
+    expect(testRunPrompt).toHaveBeenLastCalledWith(expect.objectContaining({ runId: child.id }));
+    finish(children[1]);
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
+  });
+
   it('carries the original worker curl brief into QA sheet generation and execution', async () => {
     const taskBrief = 'Use curl and save bodies, headers and statuses; assert JSON response values.';
     const parent = row({ id: 'curl-task-parent', status: 'closed', taskBrief });
@@ -14459,7 +14480,9 @@ describe('automatic recovery after a server restart', () => {
     resumeRestartedSessions();
     await vi.waitFor(() => expect(children).toHaveLength(1));
     const { testRunPrompt } = await import('../lib/prtasks.js');
-    expect(testRunPrompt).toHaveBeenLastCalledWith(expect.objectContaining({ qaInstructions: taskBrief }));
+    expect(testRunPrompt).toHaveBeenLastCalledWith(
+      expect.objectContaining({ qaInstructions: taskBrief, runId: child.id }),
+    );
     finish(children[0]);
     await vi.waitFor(() => expect(child.status).toBe('idle'));
   });

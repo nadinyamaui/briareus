@@ -140,6 +140,22 @@ describe('testSheetPrompt', () => {
 });
 
 describe('testRunPrompt', () => {
+  it('requires head reconciliation and reruns even with a custom template', () => {
+    const prompt = testRunPrompt({
+      ...base,
+      runId: 'qa-session-1',
+      project: { promptTemplates: { testRun: 'Custom execution instructions' } },
+    });
+    expect(prompt).toContain('Custom execution instructions');
+    expect(prompt).toContain('git rev-parse HEAD');
+    expect(prompt).toContain('including previously passed or failed rows');
+    expect(prompt).toContain('<!-- reviewer:qa-run qa-session-1 <head-sha> -->');
+    expect(prompt).toContain('<!-- /reviewer:qa-run -->');
+    expect(prompt).toContain('historical tables, statuses and evidence links OUTSIDE');
+    expect(prompt).toContain('tool/setup failures leave affected rows ⬜');
+    expect(prompt).toContain('code-approved before QA');
+  });
+
   it('composes the video paths from the config, slugging the repo', () => {
     const prompt = testRunPrompt(base);
     expect(prompt).toContain('/srv/videos/acme__shop/pr-<pr-number>');
