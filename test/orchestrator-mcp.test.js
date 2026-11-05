@@ -449,6 +449,54 @@ describe('the worker tools', () => {
   });
 });
 
+describe('reopen_worker', () => {
+  it('advertises asynchronous workspace preparation and the post-review QA sequence', async () => {
+    const s = await boot();
+    const [res] = await s.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+    const tool = res.result.tools.find((t) => t.name === 'reopen_worker');
+    expect(tool.inputSchema).toMatchObject({ required: ['id'], additionalProperties: false });
+    expect(tool.description).toContain('fully closed task worker');
+    expect(tool.description).toContain('No new message or agent turn is requested');
+    expect(tool.description).toContain('Preparation is asynchronous');
+    expect(tool.description).toContain('verify code approval for the current PR head first');
+  });
+  it('posts the encoded id with session authorization and reports readiness truthfully', async () => {
+    const fetched = stubFetch(
+      reply({
+        status: 202,
+        body: {
+          session: worker({ status: 'preparing' }),
+          preparing: true,
+          qaReady: false,
+          messageSent: false,
+        },
+      }),
+    );
+    const s = await boot();
+    const [res] = await s.send(callTool('reopen_worker', { id: 'worker/id' }));
+    expect(fetched).toHaveBeenCalledExactlyOnceWith(`${URL_BASE}/api/agent/sessions/worker%2Fid/reopen`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+      body: undefined,
+    });
+    expect(res.result.content[0].text).toContain('w1 [preparing]');
+    expect(res.result.content[0].text).toContain('"qaReady":false');
+    expect(res.result.content[0].text).toContain('until idle without awaitingAnswer');
+  });
+  it('requires an id and surfaces refusal without retrying or sending a turn', async () => {
+    const fetched = stubFetch(
+      reply({ status: 409, body: { error: 'Only fully closed workers can be reopened' } }),
+    );
+    const s = await boot();
+    expect((await s.send(callTool('reopen_worker', {})))[0].result.isError).toBe(true);
+    expect(fetched).not.toHaveBeenCalled();
+    const [res] = await s.send(callTool('reopen_worker', { id: 'w1' }));
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toContain('Only fully closed workers can be reopened');
+    expect(fetched).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('set_worker_qa_loop', () => {
   it('requires an explicit boolean and id before making a request', async () => {
     const fetched = stubFetch();

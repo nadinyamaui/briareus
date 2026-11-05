@@ -18,6 +18,7 @@ import { createWhatsAppWatcher } from '../lib/whatsapp-watch.js';
 import { createUsers } from '../lib/users.js';
 import { createSlackService } from '../lib/slack.js';
 import { createSshService } from '../lib/ssh.js';
+import { orchestratorRoutes } from '../lib/orchestrator-routes.js';
 import {} from '../lib/github-store.js';
 import {} from '../lib/prboard.js';
 vi.mock('../lib/claude-session.js', async (original) => ({
@@ -304,6 +305,7 @@ import {
   eligibleWorkerProjects,
   startOrchestratorPrAction,
   workerSessionsFor,
+  assertWorkerSlot,
   workerSummary,
   deliverWorkerNotices,
   deliverToSession,
@@ -348,6 +350,7 @@ import {
   readmitLocalWaiters,
   ensureClone,
   trustWorkspace,
+  resolveWorkspaceBaseBranch,
 } from '../lib/jobs.js';
 
 // Registry fixtures are restored many times in this file. Real recurring
@@ -13996,6 +13999,153 @@ describe('/btw side questions', () => {
   });
 });
 
+describe('workspace base branch resolution', () => {
+  const roots = [];
+  afterAll(() => {
+    for (const dir of roots) fs.rmSync(dir, { recursive: true, force: true });
+  });
+  // A blobless clone of a real single-branch repository, the way ensureClone
+  // lays one down before prepareDevWorkspace resolves the base branch. The
+  // fixture is hermetic: no system or user gitconfig, no machine-wide
+  // init.defaultBranch (a runner left on git's built-in 'master' made the seed
+  // commit land elsewhere, an unchecked push leave origin.git empty, and every
+  // fallback fail for the wrong reason), and every setup command's exit status
+  // checked so a silently degraded fixture can never masquerade as a result.
+  function fixture({ defaultBranch = 'main' } = {}) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-base-'));
+    roots.push(dir);
+    const env = {
+      ...process.env,
+      HOME: dir,
+      GIT_CONFIG_GLOBAL: path.join(dir, 'no-such-gitconfig'),
+      GIT_CONFIG_SYSTEM: path.join(dir, 'no-such-gitconfig'),
+      GIT_TERMINAL_PROMPT: '0',
+    };
+    const run = (where, args) =>
+      spawnSync(
+        'git',
+        [
+          '-c',
+          `init.defaultBranch=${defaultBranch}`,
+          '-c',
+          'commit.gpgsign=false',
+          ...(where ? ['-C', where] : []),
+          ...args,
+        ],
+        { encoding: 'utf8', env },
+      );
+    const git = (where, ...args) => {
+      const r = run(where, args);
+      if (r.status !== 0)
+        throw new Error(`git ${args.join(' ')} failed (${r.status}): ${(r.stderr || r.stdout || '').trim()}`);
+      return r;
+    };
+    const origin = path.join(dir, 'origin.git');
+    const seed = path.join(dir, 'seed');
+    const clone = path.join(dir, 'acme__app');
+    git(null, 'init', '-q', '--bare', '-b', defaultBranch, origin);
+    git(null, 'init', '-q', seed);
+    git(seed, 'config', 'user.email', 't@example.com');
+    git(seed, 'config', 'user.name', 'Tester');
+    fs.writeFileSync(path.join(seed, 'a.txt'), 'hello');
+    git(seed, 'add', '.');
+    git(seed, 'commit', '-qm', 'x');
+    // The commit must sit on the branch this fixture claims to default to.
+    expect(git(seed, 'branch', '--show-current').stdout.trim()).toBe(defaultBranch);
+    git(seed, 'remote', 'add', 'origin', origin);
+    git(seed, 'push', '-q', 'origin', `${defaultBranch}:${defaultBranch}`);
+    expect(git(null, 'ls-remote', '--heads', origin, `refs/heads/${defaultBranch}`).stdout).toContain(
+      `refs/heads/${defaultBranch}`,
+    );
+    git(null, 'clone', '-q', '--filter=blob:none', '--no-checkout', origin, clone);
+    // The clone must really carry origin's recorded default, or the "recorded"
+    // fallback below tests the runner's luck instead of the code.
+    expect(git(clone, 'symbolic-ref', 'refs/remotes/origin/HEAD').stdout.trim()).toBe(
+      `refs/remotes/origin/${defaultBranch}`,
+    );
+    // And origin must really advertise it, so the advertised path is proven green.
+    expect(git(clone, 'ls-remote', '--symref', 'origin', 'HEAD').stdout).toContain(
+      `ref: refs/heads/${defaultBranch}`,
+    );
+    return { dir, origin, clone, git, run };
+  }
+  // origin answers the HEAD probe with nothing, the way a remote that no longer
+  // advertises its default does; the fetches it serves stay healthy.
+  const stopAdvertising = (repo) => repo.git(repo.origin, 'symbolic-ref', 'HEAD', 'refs/heads/nope-unborn');
+  const breakOrigin = (repo) =>
+    repo.git(repo.clone, 'remote', 'set-url', 'origin', path.join(repo.dir, 'gone.git'));
+  const dropRecorded = (repo) => repo.git(repo.clone, 'symbolic-ref', '--delete', 'refs/remotes/origin/HEAD');
+
+  it('resolves the default branch origin advertises, whatever its name', async () => {
+    for (const defaultBranch of ['main', 'master']) {
+      const repo = fixture({ defaultBranch });
+      await expect(
+        resolveWorkspaceBaseBranch({ id: `base-${defaultBranch}`, repo: 'acme/app' }, repo.clone),
+      ).resolves.toBe(defaultBranch);
+    }
+  });
+
+  it('uses the clone-recorded origin/HEAD when origin stops advertising HEAD', async () => {
+    const repo = fixture();
+    stopAdvertising(repo);
+    // The fetch that killed the failed action once the base was assumed to be master.
+    const phantom = repo.run(repo.clone, [
+      'fetch',
+      '--no-tags',
+      'origin',
+      '+refs/heads/master:refs/remotes/origin/master',
+    ]);
+    expect(phantom.status).toBe(128);
+    expect(phantom.stderr).toContain("couldn't find remote ref refs/heads/master");
+    await expect(
+      resolveWorkspaceBaseBranch({ id: 'base-recorded', repo: 'acme/app' }, repo.clone),
+    ).resolves.toBe('main');
+  });
+
+  it('uses the clone-recorded origin/HEAD when origin cannot be reached at all', async () => {
+    const repo = fixture();
+    breakOrigin(repo);
+    await expect(
+      resolveWorkspaceBaseBranch({ id: 'base-offline', repo: 'acme/app' }, repo.clone),
+    ).resolves.toBe('main');
+  });
+
+  it('uses the PR base GitHub verified when the clone carries no record and origin is unreachable', async () => {
+    const repo = fixture();
+    dropRecorded(repo);
+    breakOrigin(repo);
+    await expect(
+      resolveWorkspaceBaseBranch({ id: 'base-prbase', repo: 'acme/app', prBase: 'trunk' }, repo.clone),
+    ).resolves.toBe('trunk');
+  });
+
+  it('prefers the default the clone recorded over the pull request base', async () => {
+    const repo = fixture();
+    stopAdvertising(repo);
+    await expect(
+      resolveWorkspaceBaseBranch({ id: 'base-order', repo: 'acme/app', prBase: 'trunk' }, repo.clone),
+    ).resolves.toBe('main');
+  });
+
+  it('asks origin which conventional name exists when nothing else is known', async () => {
+    const repo = fixture();
+    stopAdvertising(repo);
+    dropRecorded(repo);
+    await expect(
+      resolveWorkspaceBaseBranch({ id: 'base-candidates', repo: 'acme/app' }, repo.clone),
+    ).resolves.toBe('main');
+  });
+
+  it('fails with an actionable error instead of fetching a phantom master', async () => {
+    const repo = fixture();
+    dropRecorded(repo);
+    breakOrigin(repo);
+    await expect(
+      resolveWorkspaceBaseBranch({ id: 'base-dead', repo: 'acme/app' }, repo.clone),
+    ).rejects.toThrow(/Could not determine the default branch of acme\/app/);
+  });
+});
+
 describe('invalid clone pool slots', () => {
   it('skips missing .git without touching files and reserves concurrent fresh allocations', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-pool-'));
@@ -14211,6 +14361,77 @@ describe('automatic recovery after a server restart', () => {
     child.emit('close', 0);
   };
 
+  it('reopens an owned closed task through the agent route without a coding turn, then arms QA', async () => {
+    const checkout = path.join(root, 'acme__restart');
+    fs.mkdirSync(checkout);
+    const git = (...args) => {
+      const result = spawnSync('git', args, { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git('-C', checkout, 'init', '-b', 'feature');
+    git(
+      '-C',
+      checkout,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'fixture',
+    );
+    const remote = path.join(root, 'remote.git');
+    git('clone', '--bare', checkout, remote);
+    git('-C', checkout, 'remote', 'add', 'origin', remote);
+    state.projects[0].envTemplate = 'TARGET_PROJECT=yes\n';
+    state.projects[0].setupCommands = [];
+    const parent = row({ status: 'closed', repo: 'acme/parent' });
+    const saved = row({
+      status: 'closed',
+      orchestrator: false,
+      activity: 'worker',
+      parentId: parent.id,
+      ownerId: 2,
+      workDir: checkout,
+      branch: 'feature',
+      recoveryTurn: null,
+      events: [{ kind: 'assistant', text: 'Implementation completed', seq: 1 }],
+    });
+    claimSlot(checkout, saved.id, { prepared: true });
+    state.stored = [parent, saved];
+    await initJobs();
+    const history = [...saved.events];
+    const routes = orchestratorRoutes({
+      agentSession: () => parent,
+      workerSessionsFor,
+      workerSummary,
+      assertWorkerSlot,
+      reopenDevSession,
+      setQaLoop,
+    });
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    routes.reopenWorker({ params: { id: saved.id } }, res);
+    expect(res.status).toHaveBeenCalledWith(202);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        preparing: true,
+        qaReady: false,
+        messageSent: false,
+      }),
+    );
+    await vi.waitFor(() => expect(saved.status, saved.error).toBe('idle'));
+    expect(saved.events).toEqual(expect.arrayContaining(history));
+    expect(saved).toMatchObject({ ownerId: 2, repo: 'acme/restart', providerId: 2, model: 'gpt-6.1-sol' });
+    expect(fs.readFileSync(path.join(checkout, '.env'), 'utf8')).toContain('TARGET_PROJECT=yes');
+    expect(children).toHaveLength(0);
+    expect(saved.qaLoop).toBeFalsy();
+    routes.qaLoop({ params: { id: saved.id }, body: { on: true } }, res);
+    expect(saved.qaLoop).toMatchObject({ running: false, done: false });
+    expect(children).toHaveLength(0);
+    setQaLoop(saved.id, false);
+  });
+
   it('serializes local checkout claims through aliases, including before a clone exists', async () => {
     const alias = path.join(root, 'alias');
     fs.symlinkSync(root, alias, 'dir');
@@ -14396,6 +14617,27 @@ describe('automatic recovery after a server restart', () => {
     await vi.waitFor(() => expect(saved.status, saved.error).toBe('idle'));
     expect(getJob(saved.id)).toBe(saved);
     expect(holdsWorkDir(saved, checkout)).toBe(true);
+  });
+
+  it('runs the initial QA sheet turn before starting the execution turn', async () => {
+    const child = row({
+      qaBranch: 'feature',
+      recoveryTurn: { prompt: 'SHEET', opts: {}, phase: 'initial', completed: false },
+    });
+    state.stored = [child];
+    await initJobs();
+    const { testRunPrompt } = await import('../lib/prtasks.js');
+    const callsBefore = testRunPrompt.mock.calls.length;
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    expect(children[0].prompt).toContain('SHEET');
+    expect(testRunPrompt.mock.calls.length).toBe(callsBefore);
+    finish(children[0]);
+    await vi.waitFor(() => expect(children).toHaveLength(2));
+    expect(children[1].prompt).toBe('RUN');
+    expect(testRunPrompt.mock.calls.length).toBe(callsBefore + 1);
+    finish(children[1]);
+    await vi.waitFor(() => expect(child.status).toBe('idle'));
   });
 
   it('carries the original worker curl brief into QA sheet generation and execution', async () => {

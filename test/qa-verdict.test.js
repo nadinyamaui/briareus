@@ -102,6 +102,26 @@ describe('latestTestVerdict', () => {
     });
   });
 
+  it('ignores diagnostics that merely quote the anchor, with or without a real sheet', async () => {
+    const diagnostic = {
+      id: 4,
+      body: `The test sheet is missing: no PR comment contains ${TEST_SHEET_ANCHOR}. QA execution has not started; coverage is incomplete.`,
+    };
+    gh.comments = [completedSheet(), diagnostic];
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
+      total: 1,
+      passed: 1,
+      incomplete: false,
+    });
+    gh.comments = [diagnostic];
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
+      total: 0,
+      failures: [],
+      incomplete: true,
+    });
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 0, failures: [], incomplete: true });
+  });
+
   it("reads this run's sheet even when another run posted a newer one", async () => {
     const other = completedSheet({ ...identity(), runId: 'run-other', executed: false });
     gh.comments = [completedSheet(), { ...other, id: 4 }];

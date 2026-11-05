@@ -140,6 +140,19 @@ describe('testSheetPrompt', () => {
 });
 
 describe('testRunPrompt', () => {
+  it('requires head checks and reruns even with a custom template', () => {
+    const prompt = testRunPrompt({
+      ...base,
+      qaRunId: 'qa-session-1',
+      project: { promptTemplates: { testRun: 'Custom execution instructions' } },
+    });
+    expect(prompt).toContain('Custom execution instructions');
+    expect(prompt).toContain('verify the checkout HEAD equals head.sha');
+    expect(prompt).toContain('including previously passed ones');
+    expect(prompt).toContain('tool/setup failures leave affected rows ⬜');
+    expect(prompt).toContain('code-approved before QA');
+  });
+
   it('composes the video paths from the config, slugging the repo', () => {
     const prompt = testRunPrompt(base);
     expect(prompt).toContain('/srv/videos/acme__shop/pr-<pr-number>');
