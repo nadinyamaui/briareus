@@ -1006,6 +1006,8 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 // its own workers".
 
 const workerRoutes = orchestratorRoutes({
+  assertWorkerSlot,
+  reopenDevSession,
   deleteJobById,
   startOrchestratorPrAction,
   agentSession,
@@ -1019,6 +1021,7 @@ const { orchestratorSession, workerOf } = workerRoutes;
 api.get('/api/agent/sessions/projects', workerRoutes.projects);
 api.post('/api/agent/sessions/pr-actions', workerRoutes.prAction);
 api.post('/api/agent/sessions/:id/qa-loop', workerRoutes.qaLoop);
+api.post('/api/agent/sessions/:id/reopen', workerRoutes.reopenWorker);
 api.delete('/api/agent/sessions/:id', workerRoutes.deleteWorker);
 
 api.post('/api/agent/sessions', workerRoutes.spawn);
