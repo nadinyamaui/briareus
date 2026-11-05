@@ -12,7 +12,7 @@ let server,
   jobEventsFor,
   startOrchestratorPrAction,
   spawnWorkerSession;
-let deleteJobById, eligibleWorkerProjects;
+let deleteJobById, eligibleWorkerProjects, reopenDevSession, assertWorkerSlot;
 beforeEach(async () => {
   worker = {
     id: 'w1',
@@ -46,7 +46,13 @@ beforeEach(async () => {
     return true;
   });
   eligibleWorkerProjects = vi.fn(() => [{ id: 1, name: 'Shop', repo: 'acme/shop', enabled: true }]);
+  assertWorkerSlot = vi.fn();
+  reopenDevSession = vi.fn(() => {
+    worker.status = 'preparing';
+  });
   const routes = orchestratorRoutes({
+    assertWorkerSlot,
+    reopenDevSession,
     eligibleWorkerProjects,
     deleteJobById,
     startOrchestratorPrAction,
@@ -70,6 +76,7 @@ beforeEach(async () => {
   app.post('/api/agent/sessions/pr-actions', routes.prAction);
   app.post('/api/agent/sessions', routes.spawn);
   app.post('/api/agent/sessions/:id/qa-loop', routes.qaLoop);
+  app.post('/api/agent/sessions/:id/reopen', routes.reopenWorker);
   app.delete('/api/agent/sessions/:id', routes.deleteWorker);
   app.get('/api/agent/sessions', (req, res) => {
     const parent = routes.orchestratorSession(req, res);
@@ -102,6 +109,97 @@ const spawnWorker = (body, token = 'o1') =>
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+
+describe('scoped task worker reopening', () => {
+  const reopen = (token = 'o1', id = 'w1', body = {}) =>
+    fetch(`${base}/${id}/reopen`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  beforeEach(() => {
+    worker.status = 'closed';
+    worker.activity = 'worker';
+  });
+  it.each([
+    ['invalid', 'w1', 401],
+    ['w1', 'w1', 403],
+    ['o2', 'w1', 404],
+    ['o1', 'o1', 404],
+    ['o1', 'missing', 404],
+  ])('rejects %s reopening %s', async (token, id, status) => {
+    expect((await reopen(token, id)).status).toBe(status);
+    expect(reopenDevSession).not.toHaveBeenCalled();
+    expect(assertWorkerSlot).not.toHaveBeenCalled();
+  });
+  it.each(['idle', 'preparing', 'running', 'failed', 'interrupted'])(
+    'rejects a %s worker',
+    async (status) => {
+      worker.status = status;
+      expect((await reopen()).status).toBe(409);
+      expect(reopenDevSession).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    { closing: true },
+    { closePending: true },
+    { qaBranch: 'feature' },
+    { autoClose: true },
+    { local: true },
+    { orchestrator: true },
+    { activity: 'review' },
+    { activity: 'solve-conflicts' },
+  ])('rejects an ineligible worker: %j', async (fields) => {
+    Object.assign(worker, fields);
+    expect((await reopen()).ok).toBe(false);
+    expect(reopenDevSession).not.toHaveBeenCalled();
+  });
+  it.each(['own/repo', 'authorized/companion'])(
+    'prepares the existing %s worker without accepting configuration overrides',
+    async (repo) => {
+      worker.repo = repo;
+      worker.lastText = 'Implementation finished';
+      const res = await reopen('o1', 'w1', {
+        repo: 'foreign/repo',
+        ownerId: 99,
+        model: 'override',
+        recovering: true,
+      });
+      expect(res.status).toBe(202);
+      expect(await res.json()).toMatchObject({
+        session: { id: 'w1', repo, status: 'preparing', lastText: 'Implementation finished' },
+        preparing: true,
+        qaReady: false,
+        messageSent: false,
+      });
+      expect(assertWorkerSlot).toHaveBeenCalledExactlyOnceWith({ id: 'o1', orchestrator: true });
+      expect(reopenDevSession).toHaveBeenCalledExactlyOnceWith('w1');
+      expect(setQaLoop).not.toHaveBeenCalled();
+      expect(sendDevMessage).not.toHaveBeenCalled();
+      expect((await reopen()).status).toBe(409);
+      worker.status = 'idle';
+      expect((await post({ on: true })).status).toBe(200);
+      expect(setQaLoop).toHaveBeenCalledExactlyOnceWith('w1', true);
+    },
+  );
+  it('applies the worker cap before reclaiming resources', async () => {
+    assertWorkerSlot.mockImplementation(() => {
+      throw new Error('close one before starting another');
+    });
+    expect((await reopen()).status).toBe(400);
+    expect(reopenDevSession).not.toHaveBeenCalled();
+  });
+  it.each([400, 503])('surfaces lifecycle/project-access refusal %s without retry', async (status) => {
+    reopenDevSession.mockImplementation(() => {
+      throw Object.assign(new Error('Project unavailable'), { status });
+    });
+    const res = await reopen();
+    expect(res.status).toBe(status);
+    expect(await res.json()).toEqual({ error: 'Project unavailable' });
+    expect(reopenDevSession).toHaveBeenCalledTimes(1);
+    expect(worker.status).toBe('closed');
+  });
+});
 
 describe('scoped worker deletion', () => {
   const remove = (token = 'o1', id = 'w1') =>
