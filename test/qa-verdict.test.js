@@ -285,6 +285,9 @@ ${historical}
     ['## Archive: restore flow', 'run-2'],
     ['## Archived results view', 'run-2'],
     ['## Historical results', 'run-2'],
+    ['### Historical runs — CI page pagination', null],
+    ['### Archived runs: list & restore', null],
+    ['### Historical test scenarios: export', 'run-2'],
   ])('counts the current failure under feature label %s (run %s)', async (opening, runId) => {
     const closing = opening.startsWith('<details>') ? '</details>' : '';
     const body = [
@@ -407,6 +410,41 @@ ${historical}
     ];
     expect(await latestTestVerdict(repo, 5)).toEqual({
       failures: [{ number: '3', scenario: 'Checkout', expected: 'Works', evidence: 'saw 500' }],
+      total: 2,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
+  it('closes a history details whose closer shares a line with </pre>', async () => {
+    const table = (row) =>
+      ['| # | Scenario | Steps | Expected | Status | Evidence |', '|---|---|---|---|---|---|', row].join(
+        '\n',
+      );
+    gh.comments = [
+      {
+        id: 3,
+        body: [
+          TEST_SHEET_ANCHOR,
+          '## Test sheet',
+          '',
+          table('| 1 | Login | Run | Works | ✅ | response.json |'),
+          '',
+          '<details><summary>Historical runs</summary>',
+          '',
+          '<pre>',
+          'old run log',
+          '</pre></details>',
+          '',
+          '## Regression',
+          '',
+          table('| 2 | Checkout | Run | Works | ❌ | saw 500 |'),
+        ].join('\n'),
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '2', scenario: 'Checkout', expected: 'Works', evidence: 'saw 500' }],
       total: 2,
       passed: 1,
       manual: 0,
