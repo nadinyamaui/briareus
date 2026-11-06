@@ -264,6 +264,8 @@ ${historical}
   );
 
   it.each([
+    ['## History', null],
+    ['## Archive', null],
     ['## Archive: bulk actions', null],
     ['## History, filters', null],
     ['## Archive-to-storage scenarios', null],
@@ -303,6 +305,9 @@ ${historical}
 
   it.each([
     '## Historical (head abc1234)',
+    '## Historical run 3',
+    '## Historical round 1',
+    '## Historical run #3',
     '## History: run 3, 2026-10-01',
     '## Archived test results - commit 1a2b3c4d',
     '<details>\n<summary>Historical\nsheet and evidence</summary>',
@@ -360,6 +365,44 @@ ${historical}
       });
     },
   );
+
+  it.each([
+    [
+      'Escaped markup such as `</details>` closes nothing.\n\n| # | Scenario | Steps | Expected | Status | Evidence |\n|---|---|---|---|---|---|\n| 2 | Old | Run | Expected | ❌ | old failure |\n\nold run end</details>',
+    ],
+    ['<table><tr><td>2</td><td>❌ old failure</td></tr>\n</table></details>'],
+  ])('closes a history details whose closer follows other content: %s', async (historyBody) => {
+    const table = (row) =>
+      ['| # | Scenario | Steps | Expected | Status | Evidence |', '|---|---|---|---|---|---|', row].join(
+        '\n',
+      );
+    gh.comments = [
+      {
+        id: 3,
+        body: [
+          TEST_SHEET_ANCHOR,
+          '## Login',
+          '',
+          table('| 1 | Login | Run | Works | ✅ | response.json |'),
+          '',
+          '<details><summary>Historical runs</summary>',
+          '',
+          historyBody,
+          '',
+          '## Current',
+          '',
+          table('| 3 | Checkout | Run | Works | ❌ | saw 500 |'),
+        ].join('\n'),
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '3', scenario: 'Checkout', expected: 'Works', evidence: 'saw 500' }],
+      total: 2,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
 
   it('marks only the details a multi-line summary opened in, even when both close together', async () => {
     gh.comments = [
