@@ -82,6 +82,14 @@ it('reads a database login on demand using the session token', async () => {
   const denied = await rpc('tools/call', { name: 'ssh_db_credentials', arguments: { serverId: 2 } });
   expect(denied.result.isError).toBe(true);
 });
+it('rejects a missing serverId locally without calling the core', async () => {
+  for (const args of [{}, { serverId: null }, { serverId: 0 }, { serverId: 'x' }]) {
+    const response = await rpc('tools/call', { name: 'ssh_db_credentials', arguments: args });
+    expect(response.result.isError).toBe(true);
+    expect(response.result.content[0].text).toContain('serverId');
+  }
+  expect(calls).toEqual([]);
+});
 it('uses the session token and returns a pending command without submitting twice', async () => {
   const response = await rpc('tools/call', {
     name: 'ssh_execute',

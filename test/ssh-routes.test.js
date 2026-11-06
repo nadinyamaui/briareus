@@ -425,6 +425,19 @@ describe('SSH database login over HTTP', () => {
       ).toBe(404);
     }
   });
+  it('refuses the login to a session that is not running a turn', async () => {
+    const row = await service.create({ ...input, dbUsername: 'app', dbPassword: 'db-secret' });
+    const path = `/api/agent/ssh/servers/${row.id}/db-credentials`;
+    for (const state of [{ status: 'idle' }, { status: 'done' }, { closing: true }, { turnCanceled: true }]) {
+      job = { id: 'one', repo: input.repo, status: 'running', turns: 0, ownerId: 1, ...state };
+      const response = await request(path, { token: 'session-token' });
+      expect(response.status).toBe(403);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      const body = await response.text();
+      expect(body).not.toContain('db-secret');
+      expect(JSON.parse(body)).toEqual({ error: 'Database credentials require a running session turn' });
+    }
+  });
   it('uses current persisted credentials and honors revocation by another core', async () => {
     const row = await service.create({ ...input, dbUsername: 'app', dbPassword: 'old-secret' });
     const peer = createSshService(registry);
@@ -435,7 +448,7 @@ describe('SSH database login over HTTP', () => {
     expect((await (await read()).json()).credentials.password).toBe('new-secret');
     registry.load.mockRejectedValueOnce(new Error('Settings unavailable'));
     const unavailable = await read();
-    expect(unavailable.status).toBe(400);
+    expect(unavailable.status).toBe(500);
     expect(await unavailable.json()).toEqual({ error: 'Settings unavailable' });
     await peer.update(row.id, { enabled: false });
     expect((await read()).status).toBe(404);
