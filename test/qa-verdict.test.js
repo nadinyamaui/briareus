@@ -271,6 +271,8 @@ ${historical}
     ['## History rows pagination', null],
     ['## Archive runs', null],
     ['## Archived results view', null],
+    ['## History — commit list', null],
+    ['## Archive: head branch selector', null],
     ['<details>\n<summary>History\ntab scenarios</summary>', null],
     ['## Archive: restore flow', 'run-2'],
     ['## Archived results view', 'run-2'],
@@ -304,6 +306,9 @@ ${historical}
     '## History: run 3, 2026-10-01',
     '## Archived test results - commit 1a2b3c4d',
     '<details>\n<summary>Historical\nsheet and evidence</summary>',
+    '## Historical runs (for reference only)',
+    '## Historical test sheet — superseded',
+    `<details><summary>Historical sheet preserved 2026-11-05; prior results belong to ffa2f33${'0'.repeat(33)}</summary>`,
   ])('excludes history labelled with provenance: %s', async (opening) => {
     const closing = opening.startsWith('<details>') ? '</details>' : '## Test sheet';
     const history = sheet(['| 1 | Old | Run | Expected | ❌ | old failure |']).body;
@@ -316,6 +321,45 @@ ${historical}
     ];
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ failures: [], total: 1, passed: 1 });
   });
+
+  it.each([null, 'run-2'])(
+    'keeps the history scope over sheets copied into details under it (run %s)',
+    async (runId) => {
+      const table = (row) =>
+        ['| # | Scenario | Steps | Expected | Status | Evidence |', '|---|---|---|---|---|---|', row].join(
+          '\n',
+        );
+      const body = [
+        '## Test sheet',
+        '',
+        table('| 1 | Current | Run | Expected | ✅ | response.json |'),
+        '',
+        '## Historical runs',
+        '',
+        '<details><summary>Run 2</summary>',
+        '',
+        '## Test sheet',
+        '',
+        table('| 2 | Old | Run | Expected | ❌ | old failure |'),
+        '',
+        '</details>',
+        '',
+        '<details><summary>Run 1</summary>',
+        '',
+        table('| 3 | Older | Run | Expected | ❌ | older failure |'),
+        '',
+        '</details>',
+      ].join('\n');
+      gh.comments = [{ id: 3, body: `${TEST_SHEET_ANCHOR}\n${runId ? scoped(body) : body}` }];
+      expect(await latestTestVerdict(repo, 5, runId && { runId })).toEqual({
+        failures: [],
+        total: 1,
+        passed: 1,
+        manual: 0,
+        incomplete: false,
+      });
+    },
+  );
 
   it('marks only the details a multi-line summary opened in, even when both close together', async () => {
     gh.comments = [
