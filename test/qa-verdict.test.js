@@ -328,6 +328,60 @@ ${historical}
     },
   );
 
+  it.each([
+    ['## Archive: bulk actions', null],
+    ['## History, filters', null],
+    ['## Archive-to-storage scenarios', null],
+    ['## Archive (bulk)', null],
+    ['## History rows pagination', null],
+    ['## Archive runs', null],
+    ['## Archived results view', null],
+    ['<details>\n<summary>History\ntab scenarios</summary>', '</details>'],
+    ['## Archive: restore flow', 'new-run'],
+    ['## Archived results view', 'new-run'],
+  ])('counts the current failure under feature label %s (run %s)', async (opening, runId) => {
+    const closing = opening.startsWith('<details>') ? '</details>' : '';
+    const body = [
+      '## Login',
+      '',
+      '| # | Scenario | Steps | Expected | Status | Evidence |',
+      '|---|---|---|---|---|---|',
+      '| 1 | Login | Run | Works | ✅ | response.json |',
+      '',
+      opening,
+      '',
+      '| # | Scenario | Steps | Expected | Status | Evidence |',
+      '|---|---|---|---|---|---|',
+      '| 2 | Feature | Run | Works | ❌ | saw 500 |',
+      '',
+      closing,
+    ].join('\n');
+    gh.comments = [{ id: 3, body: `${TEST_SHEET_ANCHOR}\n${runId ? runBlock(body, runId) : body}` }];
+    expect(await latestTestVerdict(repo, 5, runId)).toMatchObject({
+      failures: [{ number: '2', scenario: 'Feature', expected: 'Works', evidence: 'saw 500' }],
+      total: 2,
+      passed: 1,
+    });
+  });
+
+  it.each([
+    '## Historical (head abc1234)',
+    '## History: run 3, 2026-10-01',
+    '## Archived test results - commit 1a2b3c4d',
+    '<details>\n<summary>Historical\nsheet and evidence</summary>',
+  ])('excludes history labelled with provenance: %s', async (opening) => {
+    const closing = opening.startsWith('<details>') ? '</details>' : '## Test sheet';
+    const history = sheet(['| 1 | Old | Run | Expected | ❌ | old failure |']).body;
+    const current = sheet(['| 2 | Current | Run | Expected | ✅ | response.json |']).body;
+    gh.comments = [
+      {
+        id: 3,
+        body: `${TEST_SHEET_ANCHOR}\n${opening}\n\n${history.replace('## Test sheet', '')}\n\n${closing}\n\n${current}`,
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toMatchObject({ failures: [], total: 1, passed: 1 });
+  });
+
   it('marks only the details a multi-line summary opened in, even when both close together', async () => {
     gh.comments = [
       {
