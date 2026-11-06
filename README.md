@@ -821,7 +821,7 @@ When `hasDbCredentials` is true, `ssh_db_credentials {serverId}` reads the store
 login without requiring sudo. Its HTTP equivalent is
 `GET /api/agent/ssh/servers/:id/db-credentials`, authenticated with the session token;
 it returns `{credentials: {host, port, username, password}}` with `Cache-Control: no-store`.
-Only a running session turn may read it, and only for enabled servers in the session's project that its owner may use;
+Only a running session turn may read it (not a webhook-started turn unless its operator waived SSH approval for unattended turns), and only for enabled servers in the session's project that its owner may use;
 each read uses current settings so credential rotation or removal takes effect immediately.
 The database host and port are relative to the SSH server. Keep the login out of chat,
 command text, logs and commits; use private client configuration or process input.

@@ -438,6 +438,38 @@ describe('SSH database login over HTTP', () => {
       expect(JSON.parse(body)).toEqual({ error: 'Database credentials require a running session turn' });
     }
   });
+  it('refuses the login to an unattended turn unless its operator waived that', async () => {
+    const row = await service.create({ ...input, dbUsername: 'app', dbPassword: 'db-secret' });
+    const path = `/api/agent/ssh/servers/${row.id}/db-credentials`;
+    job = { ...job, unattendedTurn: true };
+    const response = await request(path, { token: 'session-token' });
+    expect(response.status).toBe(403);
+    const body = await response.text();
+    expect(body).not.toContain('db-secret');
+    expect(JSON.parse(body)).toEqual({
+      error: 'Database credentials are not released to an unattended turn',
+    });
+    job = { ...job, webhook: { sshUnattended: true } };
+    expect((await (await request(path, { token: 'session-token' })).json()).credentials.password).toBe(
+      'db-secret',
+    );
+  });
+  it('refuses the login when the turn ends during the settings read', async () => {
+    const row = await service.create({ ...input, dbUsername: 'app', dbPassword: 'db-secret' });
+    const path = `/api/agent/ssh/servers/${row.id}/db-credentials`;
+    for (const change of [{ turnCanceled: true }, { closing: true }, { status: 'idle' }, { turns: 1 }]) {
+      job = { id: 'one', repo: input.repo, status: 'running', turns: 0, ownerId: 1 };
+      const load = registry.load.getMockImplementation();
+      registry.load.mockImplementationOnce(async (...args) => {
+        const rows = await load(...args);
+        job = { ...job, ...change };
+        return rows;
+      });
+      const response = await request(path, { token: 'session-token' });
+      expect(response.status).toBe(403);
+      expect(await response.text()).not.toContain('db-secret');
+    }
+  });
   it('uses current persisted credentials and honors revocation by another core', async () => {
     const row = await service.create({ ...input, dbUsername: 'app', dbPassword: 'old-secret' });
     const peer = createSshService(registry);
