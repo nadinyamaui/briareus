@@ -276,8 +276,15 @@ ${historical}
     ['## History — commit list', null],
     ['## Archive: head branch selector', null],
     ['<details>\n<summary>History\ntab scenarios</summary>', null],
+    ['## Historical results', null],
+    ['## Archived rows', null],
+    ['## Historical scenarios', null],
+    ['## History: order 12345678', null],
+    ['## History: account 1234567', null],
+    ['## History for 2024-01-01 filter', null],
     ['## Archive: restore flow', 'run-2'],
     ['## Archived results view', 'run-2'],
+    ['## Historical results', 'run-2'],
   ])('counts the current failure under feature label %s (run %s)', async (opening, runId) => {
     const closing = opening.startsWith('<details>') ? '</details>' : '';
     const body = [
@@ -313,6 +320,9 @@ ${historical}
     '<details>\n<summary>Historical\nsheet and evidence</summary>',
     '## Historical runs (for reference only)',
     '## Historical test sheet — superseded',
+    '## Historical test results',
+    '## Historical results (head abc1234)',
+    '## History: commit 1234567',
     `<details><summary>Historical sheet preserved 2026-11-05; prior results belong to ffa2f33${'0'.repeat(33)}</summary>`,
   ])('excludes history labelled with provenance: %s', async (opening) => {
     const closing = opening.startsWith('<details>') ? '</details>' : '## Test sheet';
