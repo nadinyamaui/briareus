@@ -1,19 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { TEST_SHEET_ANCHOR, QA_RUN_PREFIX, QA_RUN_END } from '../lib/markers.js';
+import { TEST_SHEET_ANCHOR } from '../lib/markers.js';
 import {} from '../lib/github.js';
 import { latestTestVerdict } from '../lib/qa-verdict.js';
-const gh = vi.hoisted(() => ({ comments: [], token: 'tok', head: 'b'.repeat(40), headStatus: 200 }));
+const gh = vi.hoisted(() => ({ comments: [], token: 'tok', pr: null }));
 vi.mock('../lib/config.js', () => ({ getConfig: () => ({ githubToken: gh.token }) }));
 vi.mock('../lib/github.js', () => ({
   githubRest: vi.fn(async (_cfg, _method, url) => {
-    if (/\/pulls\/\d+$/.test(url))
-      return {
-        ok: gh.headStatus === 200,
-        status: gh.headStatus,
-        json: async () => ({ head: { sha: gh.head } }),
-      };
+    if (/\/pulls\/\d+$/.test(url)) return { ok: true, json: async () => gh.pr };
     const page = Number(new URL(url, 'https://example.com').searchParams.get('page'));
     return { ok: true, status: 200, json: async () => gh.comments.slice((page - 1) * 100, page * 100) };
   }),
@@ -22,8 +17,7 @@ const repo = 'owner/repo';
 beforeEach(() => {
   gh.comments = [];
   gh.token = 'tok';
-  gh.head = 'b'.repeat(40);
-  gh.headStatus = 200;
+  gh.pr = { head: { sha: 'new-head' }, base: { sha: 'new-base', ref: 'parent' } };
 });
 describe('latestTestVerdict', () => {
   const sheet = (rows) => ({
@@ -38,25 +32,89 @@ describe('latestTestVerdict', () => {
     ].join('\n'),
   });
 
-  const runBlock = (body, runId = 'new-run', head = gh.head) =>
-    [`${QA_RUN_PREFIX}${runId} ${head} -->`, body, QA_RUN_END].join('\n');
-  const fail =
-    '| 9 | Mixed selection | Revoke | Atomic result | ❌ | [old video](https://example.com/old.webm) |';
-  const pass = '| 1 | Current | Run | Works | ✅ | response.json |';
+  const identity = () => ({
+    runId: 'run-2',
+    repo,
+    prNumber: 5,
+    head: 'new-head',
+    base: 'new-base',
+    baseRef: 'parent',
+    executed: true,
+  });
+  const completedSheet = (metadata = identity()) => {
+    const comment = sheet(['| 1 | API | curl | 200 | ✅ | response.json |']);
+    if (metadata) comment.body += `\n<!-- briareus:qa-run ${JSON.stringify(metadata)} -->`;
+    return comment;
+  };
 
-  it('ignores diagnostics that merely quote the marker, with or without an earlier real sheet', async () => {
+  it.each([
+    ['legacy all-passed sheet', null],
+    ['old head', { head: 'old-head' }],
+    ['old parent branch', { baseRef: 'old-parent' }],
+    ['same-head previous run', { runId: 'run-1' }],
+    ['different PR', { prNumber: 6 }],
+    ['different repository', { repo: 'other/repo' }],
+    ['sheet prepared but never executed', { executed: false }],
+  ])('rejects %s without claiming historical passes', async (_name, patch) => {
+    gh.comments = [completedSheet(patch === null ? null : { ...identity(), ...patch })];
+    const original = JSON.stringify(gh.comments);
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
+      passed: 0,
+      incomplete: true,
+    });
+    expect(JSON.stringify(gh.comments)).toBe(original);
+  });
+
+  it('reuses completed evidence only for this run and current identity', async () => {
+    gh.comments = [completedSheet()];
+    for (let read = 0; read < 2; read++) {
+      expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
+        passed: 1,
+        incomplete: false,
+      });
+    }
+  });
+
+  it('pins the prepared sheet and rejects an identity change during execution', async () => {
+    gh.comments = [completedSheet({ ...identity(), executed: false })];
+    const prepared = await latestTestVerdict(repo, 5, { runId: 'run-2', prepared: true });
+    expect(prepared.identity).toEqual({ ...identity(), executed: false });
+    gh.pr.head.sha = 'moved-head';
+    gh.comments = [completedSheet({ ...identity(), head: 'moved-head' })];
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2', identity: prepared.identity })).toMatchObject({
+      passed: 0,
+      incomplete: true,
+    });
+  });
+
+  it('keeps a run valid when the base branch advances under it', async () => {
+    gh.comments = [completedSheet()];
+    gh.pr.base.sha = 'moved-base';
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
+      passed: 1,
+      incomplete: false,
+    });
+    const prepared = await latestTestVerdict(repo, 5, { runId: 'run-2', prepared: true });
+    gh.comments = [completedSheet({ ...identity(), base: 'moved-base' })];
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2', identity: prepared.identity })).toMatchObject({
+      passed: 1,
+      incomplete: false,
+    });
+  });
+
+  it('ignores diagnostics that merely quote the anchor, with or without a real sheet', async () => {
     const diagnostic = {
       id: 4,
       body: `The test sheet is missing: no PR comment contains ${TEST_SHEET_ANCHOR}. QA execution has not started; coverage is incomplete.`,
     };
-    gh.comments = [sheet([runBlock(sheet([pass]).body)]), diagnostic];
-    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
+    gh.comments = [completedSheet(), diagnostic];
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
       total: 1,
       passed: 1,
       incomplete: false,
     });
     gh.comments = [diagnostic];
-    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
       total: 0,
       failures: [],
       incomplete: true,
@@ -64,156 +122,33 @@ describe('latestTestVerdict', () => {
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ total: 0, failures: [], incomplete: true });
   });
 
-  it('does not recycle an old-head failure when a new run stops without publishing results', async () => {
-    gh.comments = [sheet([runBlock(sheet([fail]).body, 'old-run', 'a'.repeat(40))])];
-    expect(await latestTestVerdict(repo, 5, 'new-run')).toEqual({
-      failures: [],
-      total: 0,
-      passed: 0,
-      manual: 0,
-      incomplete: true,
-    });
-    // Even this run's block cannot certify a different head.
-    gh.comments = [sheet([runBlock(sheet([fail]).body, 'new-run', 'a'.repeat(40))])];
-    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
-      failures: [],
-      passed: 0,
-      incomplete: true,
-    });
-  });
-
-  it('excludes historical tables and status glyphs while current rows remain unexecuted', async () => {
-    gh.comments = [
-      sheet([
-        runBlock(sheet(['| 1 | Current | Run | Works | ⬜ | Setup blocked |']).body),
-        '## Historical results on old head ' + 'a'.repeat(40),
-        sheet([fail, pass]).body,
-        'Old verdict: ❌; old video retained.',
-      ]),
-    ];
-    expect(await latestTestVerdict(repo, 5, 'new-run')).toEqual({
-      failures: [],
-      total: 1,
-      passed: 0,
-      manual: 0,
-      incomplete: true,
-    });
-  });
-
-  it('counts only fresh results even if historical failures surround the current block', async () => {
-    gh.comments = [sheet([sheet([fail]).body, runBlock(sheet([pass]).body), sheet([fail]).body])];
-    expect(await latestTestVerdict(repo, 5, 'new-run')).toEqual({
-      failures: [],
-      total: 1,
-      passed: 1,
-      manual: 0,
-      incomplete: false,
-    });
-  });
-
-  it('retains a rerun failure on an unchanged current head', async () => {
-    gh.comments = [sheet([runBlock(sheet([fail]).body)])];
-    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
-      failures: [{ number: '9', scenario: 'Mixed selection' }],
-      total: 1,
-      passed: 0,
-      incomplete: false,
-    });
-    // Same head alone is insufficient: another run must not inherit that verdict.
-    expect(await latestTestVerdict(repo, 5, 'later-run')).toMatchObject({ failures: [], incomplete: true });
-  });
-
-  it('keeps manual-only and blocked rows incomplete inside the current run', async () => {
-    gh.comments = [
-      sheet([
-        runBlock(
-          sheet([
-            '| 1 | Manual | Inspect | Works | 🖐 | Requires physical device |',
-            '| 2 | API | curl | 200 | ⬜ | Tool setup failed |',
-          ]).body,
-        ),
-      ]),
-    ];
-    expect(await latestTestVerdict(repo, 5, 'new-run')).toEqual({
-      failures: [],
-      total: 2,
-      passed: 0,
-      manual: 1,
-      incomplete: true,
-    });
-  });
-
-  it('does not certify unterminated, missing, or stale passing blocks', async () => {
-    for (const body of [
-      sheet([pass]).body,
-      runBlock(sheet([pass]).body, 'old-run'),
-      runBlock(sheet([pass]).body, 'new-run', 'a'.repeat(40)),
-      `${QA_RUN_PREFIX}new-run ${gh.head} -->\n${sheet([pass]).body}`,
-    ]) {
-      gh.comments = [sheet([body])];
-      expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
-        failures: [],
-        passed: 0,
-        incomplete: true,
-      });
-    }
-  });
-
-  it('stops an unterminated block at the next run block instead of reading its rows', async () => {
-    gh.comments = [
-      sheet([
-        `${QA_RUN_PREFIX}new-run ${gh.head} -->\n${sheet([pass]).body}`,
-        runBlock(sheet([fail]).body, 'old-run', 'a'.repeat(40)),
-      ]),
-    ];
-    expect(await latestTestVerdict(repo, 5, 'new-run')).toEqual({
-      failures: [],
-      total: 0,
-      passed: 0,
-      manual: 0,
-      incomplete: true,
-    });
-  });
-
-  it('matches run delimiters with surrounding whitespace', async () => {
-    gh.comments = [
-      sheet([
-        [`  ${QA_RUN_PREFIX}new-run ${gh.head} --> `, sheet([pass]).body, `  ${QA_RUN_END}\t`].join('\n'),
-      ]),
-    ];
-    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
-      failures: [],
-      total: 1,
+  it("reads this run's sheet even when another run posted a newer one", async () => {
+    const other = completedSheet({ ...identity(), runId: 'run-other', executed: false });
+    gh.comments = [completedSheet(), { ...other, id: 4 }];
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
       passed: 1,
       incomplete: false,
     });
   });
 
-  it('reads the last block for the same run and head', async () => {
-    gh.comments = [
-      sheet([
-        runBlock(sheet(['| 1 | Current | Run | Works | ⬜ | Restarted |']).body),
-        runBlock(sheet([pass]).body),
-      ]),
-    ];
-    expect(await latestTestVerdict(repo, 5, 'new-run')).toMatchObject({
-      failures: [],
-      total: 1,
+  it.each([
+    ['repository casing', (body) => body.replace('"owner/repo"', '"Owner/Repo"')],
+    ['a quoted PR number', (body) => body.replace('"prNumber":5', '"prNumber":"5"')],
+    ['trailing whitespace', (body) => `${body}  `],
+    ['an indented marker', (body) => body.replace('<!-- briareus:qa-run', '  <!-- briareus:qa-run')],
+  ])('tolerates %s in the run metadata', async (_name, edit) => {
+    const comment = completedSheet();
+    gh.comments = [{ ...comment, body: edit(comment.body) }];
+    expect(await latestTestVerdict(repo, 5, { runId: 'run-2' })).toMatchObject({
       passed: 1,
       incomplete: false,
     });
   });
 
-  it('propagates head read errors so the loop retries instead of trusting old rows', async () => {
-    gh.comments = [sheet([runBlock(sheet([fail]).body)])];
-    gh.headStatus = 503;
-    await expect(latestTestVerdict(repo, 5, 'new-run')).rejects.toThrow('503');
-    gh.headStatus = 200;
-    gh.head = '';
-    await expect(latestTestVerdict(repo, 5, 'new-run')).rejects.toThrow('invalid PR head');
-  });
+  // Tags a body with this run's identity marker, so scoped reads accept it.
+  const scoped = (body) => `${body}\n<!-- briareus:qa-run ${JSON.stringify(identity())} -->`;
 
-  it.each([null, 'new-run'])(
+  it.each([null, 'run-2'])(
     'counts only the active 10 rows beside eight historical passes (run %s)',
     async (runId) => {
       const current = sheet(
@@ -243,8 +178,8 @@ ${historical}
 </details>`,
         },
       ];
-      if (runId) gh.comments[0].body = `${TEST_SHEET_ANCHOR}\n${runBlock(gh.comments[0].body, runId)}`;
-      expect(await latestTestVerdict(repo, 5, runId)).toEqual({
+      if (runId) gh.comments[0].body = scoped(gh.comments[0].body);
+      expect(await latestTestVerdict(repo, 5, runId && { runId })).toEqual({
         failures: [],
         total: 10,
         passed: 8,
@@ -293,7 +228,7 @@ ${historical}
     expect(await latestTestVerdict(repo, 5)).toMatchObject({ failures: [], total: 1, passed: 1 });
   });
 
-  it.each([null, 'new-run'])(
+  it.each([null, 'run-2'])(
     'still counts feature sections that start with a history word (run %s)',
     async (runId) => {
       const body = [
@@ -317,8 +252,8 @@ ${historical}
         '',
         '</details>',
       ].join('\n');
-      gh.comments = [{ id: 3, body: `${TEST_SHEET_ANCHOR}\n${runId ? runBlock(body, runId) : body}` }];
-      expect(await latestTestVerdict(repo, 5, runId)).toEqual({
+      gh.comments = [{ id: 3, body: `${TEST_SHEET_ANCHOR}\n${runId ? scoped(body) : body}` }];
+      expect(await latestTestVerdict(repo, 5, runId && { runId })).toEqual({
         failures: [{ number: '2', scenario: 'Archive a project', expected: 'Archived', evidence: 'saw 500' }],
         total: 3,
         passed: 2,
@@ -336,9 +271,9 @@ ${historical}
     ['## History rows pagination', null],
     ['## Archive runs', null],
     ['## Archived results view', null],
-    ['<details>\n<summary>History\ntab scenarios</summary>', '</details>'],
-    ['## Archive: restore flow', 'new-run'],
-    ['## Archived results view', 'new-run'],
+    ['<details>\n<summary>History\ntab scenarios</summary>', null],
+    ['## Archive: restore flow', 'run-2'],
+    ['## Archived results view', 'run-2'],
   ])('counts the current failure under feature label %s (run %s)', async (opening, runId) => {
     const closing = opening.startsWith('<details>') ? '</details>' : '';
     const body = [
@@ -356,8 +291,8 @@ ${historical}
       '',
       closing,
     ].join('\n');
-    gh.comments = [{ id: 3, body: `${TEST_SHEET_ANCHOR}\n${runId ? runBlock(body, runId) : body}` }];
-    expect(await latestTestVerdict(repo, 5, runId)).toMatchObject({
+    gh.comments = [{ id: 3, body: `${TEST_SHEET_ANCHOR}\n${runId ? scoped(body) : body}` }];
+    expect(await latestTestVerdict(repo, 5, runId && { runId })).toMatchObject({
       failures: [{ number: '2', scenario: 'Feature', expected: 'Works', evidence: 'saw 500' }],
       total: 2,
       passed: 1,

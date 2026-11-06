@@ -140,18 +140,15 @@ describe('testSheetPrompt', () => {
 });
 
 describe('testRunPrompt', () => {
-  it('requires head reconciliation and reruns even with a custom template', () => {
+  it('requires head checks and reruns even with a custom template', () => {
     const prompt = testRunPrompt({
       ...base,
-      runId: 'qa-session-1',
+      qaRunId: 'qa-session-1',
       project: { promptTemplates: { testRun: 'Custom execution instructions' } },
     });
     expect(prompt).toContain('Custom execution instructions');
-    expect(prompt).toContain('git rev-parse HEAD');
-    expect(prompt).toContain('including previously passed or failed rows');
-    expect(prompt).toContain('<!-- reviewer:qa-run qa-session-1 <head-sha> -->');
-    expect(prompt).toContain('<!-- /reviewer:qa-run -->');
-    expect(prompt).toContain('historical tables, statuses and evidence links OUTSIDE');
+    expect(prompt).toContain('verify the checkout HEAD equals head.sha');
+    expect(prompt).toContain('including previously passed ones');
     expect(prompt).toContain('tool/setup failures leave affected rows ⬜');
     expect(prompt).toContain('code-approved before QA');
   });
@@ -356,5 +353,36 @@ describe('prBodyPrompt', () => {
     expect(prompt).toContain('never let gh infer the pull request');
     expect(prompt).toContain('never work from `git diff`, `git log` or the working tree');
     expect(prompt).toContain('Do not switch branches');
+  });
+});
+
+describe('fresh QA run requirements', () => {
+  it.each([testSheetPrompt, testRunPrompt])(
+    'keeps run identity and fresh execution rules outside overrides',
+    (prompt) => {
+      const text = prompt({
+        repo: 'acme/shop',
+        prNumber: 12,
+        qaRunId: 'fresh-run',
+        project: { promptTemplates: { testSheet: 'CUSTOM', testRun: 'CUSTOM' } },
+      });
+      expect(text).toContain('fresh QA run: fresh-run');
+      expect(text).toContain('"runId":"fresh-run"');
+      expect(text).toContain('Historical passes never count');
+      expect(text).toContain('head.sha, base.sha and base.ref');
+      expect(text).toContain('gh api repos/acme/shop/pulls/12');
+      expect(text).toContain('"repo":"acme/shop","prNumber":12');
+      expect(text).toContain('base.sha moves whenever the base branch advances');
+    },
+  );
+  it('preserves history while resetting the new sheet', () => {
+    const text = testSheetPrompt({ repo: 'acme/shop', prNumber: 12, qaRunId: 'fresh-run' });
+    expect(text).toContain('Preserve previous sheets and evidence unchanged');
+    expect(text).toContain('start every executable row at ⬜ with empty Evidence');
+  });
+  it('requires actual execution before marking the run executed', () => {
+    const text = testRunPrompt({ repo: 'acme/shop', prNumber: 12, qaRunId: 'fresh-run' });
+    expect(text).toContain('including previously passed ones');
+    expect(text).toContain('Only after execution and a final live identity check');
   });
 });
