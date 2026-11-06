@@ -11,6 +11,10 @@ beforeEach(async () => {
   app.use((req, res) => {
     calls.push({ path: req.path, method: req.method, body: req.body, token: req.headers.authorization });
     if (req.path.endsWith('/servers')) return res.json({ servers: [{ id: 1, permissionMode: 'ask' }] });
+    if (req.path === '/api/agent/ssh/servers/1/db-credentials')
+      return res.json({
+        credentials: { host: '127.0.0.1', port: 3306, username: 'app', password: 'db-secret' },
+      });
     if (req.path.endsWith('/execute') || req.path.endsWith('/upload'))
       return res.json({ request: { id: 'command-id', status: 'pending' } });
     if (req.path.endsWith('/command-id'))
@@ -53,10 +57,38 @@ it('advertises SSH tools and initializes as a tools-only MCP server', async () =
   );
   expect((await rpc('tools/list')).result.tools.map((t) => t.name)).toEqual([
     'ssh_list_servers',
+    'ssh_db_credentials',
     'ssh_execute',
     'ssh_upload',
     'ssh_result',
   ]);
+});
+it('reads a database login on demand using the session token', async () => {
+  const response = await rpc('tools/call', {
+    name: 'ssh_db_credentials',
+    arguments: { serverId: 1 },
+  });
+  expect(JSON.parse(response.result.content[0].text)).toEqual({
+    credentials: { host: '127.0.0.1', port: 3306, username: 'app', password: 'db-secret' },
+  });
+  expect(calls).toEqual([
+    {
+      path: '/api/agent/ssh/servers/1/db-credentials',
+      method: 'GET',
+      body: undefined,
+      token: 'Bearer test-token',
+    },
+  ]);
+  const denied = await rpc('tools/call', { name: 'ssh_db_credentials', arguments: { serverId: 2 } });
+  expect(denied.result.isError).toBe(true);
+});
+it('rejects a missing serverId locally without calling the core', async () => {
+  for (const args of [{}, { serverId: null }, { serverId: 0 }, { serverId: 'x' }]) {
+    const response = await rpc('tools/call', { name: 'ssh_db_credentials', arguments: args });
+    expect(response.result.isError).toBe(true);
+    expect(response.result.content[0].text).toContain('serverId');
+  }
+  expect(calls).toEqual([]);
 });
 it('uses the session token and returns a pending command without submitting twice', async () => {
   const response = await rpc('tools/call', {

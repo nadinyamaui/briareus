@@ -809,13 +809,26 @@ Each server has one permission mode:
   (`POST /api/v1/ssh/requests/:id/decision`) executes it once, and denying returns the denial to the agent.
 - **Don't ask anything**: every command submitted through the SSH tool starts immediately.
 
-Claude and Codex sessions receive `ssh_list_servers`, `ssh_execute`, `ssh_upload` and `ssh_result` MCP
+Claude and Codex sessions receive `ssh_list_servers`, `ssh_db_credentials`, `ssh_execute`, `ssh_upload` and `ssh_result` MCP
 tools. Providers without headless MCP configuration use the equivalent session-authenticated
 HTTP routes described in their briefing. Only enabled servers assigned to the session's
 project are available. Each command runs in a fresh noninteractive shell, so include `cd`
 in the command when a working directory is needed. Execution defaults to a 60-second timeout
 (maximum 300 seconds) and 256 KiB per output stream; timeout or excess output terminates the
 local SSH client, but cannot guarantee that a remote process has stopped.
+
+When `hasDbCredentials` is true, `ssh_db_credentials {serverId}` reads the stored database
+login without requiring sudo. Its HTTP equivalent is
+`GET /api/agent/ssh/servers/:id/db-credentials`, authenticated with the session token;
+it returns `{credentials: {host, port, username, password}}` with `Cache-Control: no-store`.
+Only a running session turn may read it, and only for enabled servers in the session's project that its owner may use.
+Unattended turns (started by a webhook, an orchestrator instruction or an automatic worker notice) get 403
+unless the session's operator waived SSH approval for unattended turns;
+each read uses current settings so credential rotation or removal takes effect immediately.
+The database host and port are relative to the SSH server. Keep the login out of chat,
+command text, logs and commits; use private client configuration or process input.
+Reading it does not approve SSH commands, which still follow the permission mode above.
+SSH and sudo passwords remain private to the core.
 
 `ssh_upload` sends a private local file to one registered server using the same approval,
 polling, authentication and strict host-key checks as commands. Submit

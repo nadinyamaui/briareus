@@ -10,7 +10,7 @@ import { agentOnly } from '../lib/auth.js';
 vi.mock('../lib/config.js', () => ({
   getConfig: () => ({ auth: { secret: 'secret' }, credentialsKey: 'k'.repeat(32) }),
 }));
-let server, base, service, job, execute, apiUser, apiRepos, monitor, sharedServers, registry;
+let server, base, service, job, execute, apiUser, apiRepos, monitor, sharedServers, registry, sessionMayUse;
 const input = {
   repo: 'owner/repo',
   host: 'server.example',
@@ -27,6 +27,7 @@ beforeEach(async () => {
     history: vi.fn(async (server, since) => ({ serverId: server.id, since, samples: [] })),
   };
   execute = vi.fn(async () => ({ stdout: 'done', exitCode: 0 }));
+  sessionMayUse = vi.fn(() => true);
   let saved = [];
   registry = {
     load: vi.fn(async () => structuredClone(saved)),
@@ -38,6 +39,7 @@ beforeEach(async () => {
     ...registry,
     execute,
     getJob: () => job,
+    mayUse: (job, server) => sessionMayUse(job, server),
   });
   await service.init();
   const app = express();
@@ -236,6 +238,7 @@ describe('SSH HTTP authorization and registration', () => {
   it('requires a valid session token for every agent route', async () => {
     for (const [path, method] of [
       ['/api/agent/ssh/servers', 'GET'],
+      ['/api/agent/ssh/servers/1/db-credentials', 'GET'],
       ['/api/agent/ssh/execute', 'POST'],
       ['/api/agent/ssh/upload', 'POST'],
       ['/api/agent/ssh/requests/fake', 'GET'],
@@ -356,7 +359,7 @@ describe('SSH HTTP authorization and registration', () => {
 });
 
 describe('SSH database login over HTTP', () => {
-  it('hands the opened login to the operator only, uncached', async () => {
+  it('keeps the operator endpoint restricted and server lists free of credentials', async () => {
     const created = await request('/api/ssh/servers', {
       operator: true,
       method: 'POST',
@@ -379,6 +382,115 @@ describe('SSH database login over HTTP', () => {
     const agents = await (await request('/api/agent/ssh/servers', { token: 'session-token' })).text();
     expect(agents).not.toContain('s3cret');
   });
+  it('lets an authorized session read only the database login, uncached, without sudo or SSH execution', async () => {
+    const row = await service.create({
+      ...input,
+      dbHost: 'db.example',
+      dbPort: 5432,
+      dbUsername: 'app',
+      dbPassword: 'db-secret',
+      password: 'ssh-secret',
+      sudoPassword: 'sudo-secret',
+    });
+    const response = await request(`/api/agent/ssh/servers/${row.id}/db-credentials`, {
+      token: 'session-token',
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({
+      credentials: { host: 'db.example', port: 5432, username: 'app', password: 'db-secret' },
+    });
+    expect(sessionMayUse).toHaveBeenCalledWith(job, expect.objectContaining({ id: row.id }));
+    expect(execute).not.toHaveBeenCalled();
+    expect(service.pending()).toEqual([]);
+  });
+  it('hides missing, disabled, cross-project and unshared servers from a session', async () => {
+    const login = { dbUsername: 'app', dbPassword: 'db-secret' };
+    const mine = await service.create({ ...input, ...login });
+    const disabled = await service.create({ ...input, ...login, enabled: false });
+    const other = await service.create({ ...input, ...login, repo: 'other/repo' });
+    sessionMayUse.mockReturnValue(false);
+    for (const id of [mine.id, disabled.id, other.id, 0]) {
+      const response = await request(`/api/agent/ssh/servers/${id}/db-credentials`, {
+        token: 'session-token',
+      });
+      expect(response.status).toBe(404);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toEqual({ error: 'SSH server unavailable for this project' });
+    }
+    sessionMayUse.mockReturnValue(true);
+    for (const id of [disabled.id, other.id]) {
+      expect(
+        (await request(`/api/agent/ssh/servers/${id}/db-credentials`, { token: 'session-token' })).status,
+      ).toBe(404);
+    }
+  });
+  it('refuses the login to a session that is not running a turn', async () => {
+    const row = await service.create({ ...input, dbUsername: 'app', dbPassword: 'db-secret' });
+    const path = `/api/agent/ssh/servers/${row.id}/db-credentials`;
+    for (const state of [{ status: 'idle' }, { status: 'done' }, { closing: true }, { turnCanceled: true }]) {
+      job = { id: 'one', repo: input.repo, status: 'running', turns: 0, ownerId: 1, ...state };
+      const response = await request(path, { token: 'session-token' });
+      expect(response.status).toBe(403);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      const body = await response.text();
+      expect(body).not.toContain('db-secret');
+      expect(JSON.parse(body)).toEqual({ error: 'Database credentials require a running session turn' });
+    }
+  });
+  it('refuses the login to an unattended turn unless its operator waived that', async () => {
+    const row = await service.create({ ...input, dbUsername: 'app', dbPassword: 'db-secret' });
+    const path = `/api/agent/ssh/servers/${row.id}/db-credentials`;
+    job = { ...job, unattendedTurn: true };
+    const response = await request(path, { token: 'session-token' });
+    expect(response.status).toBe(403);
+    const body = await response.text();
+    expect(body).not.toContain('db-secret');
+    expect(JSON.parse(body)).toEqual({
+      error: 'Database credentials are not released to an unattended turn',
+    });
+    job = { ...job, webhook: { sshUnattended: true } };
+    expect((await (await request(path, { token: 'session-token' })).json()).credentials.password).toBe(
+      'db-secret',
+    );
+  });
+  it('refuses the login when the turn ends during the settings read', async () => {
+    const row = await service.create({ ...input, dbUsername: 'app', dbPassword: 'db-secret' });
+    const path = `/api/agent/ssh/servers/${row.id}/db-credentials`;
+    for (const change of [{ turnCanceled: true }, { closing: true }, { status: 'idle' }, { turns: 1 }]) {
+      job = { id: 'one', repo: input.repo, status: 'running', turns: 0, ownerId: 1 };
+      const load = registry.load.getMockImplementation();
+      registry.load.mockImplementationOnce(async (...args) => {
+        const rows = await load(...args);
+        job = { ...job, ...change };
+        return rows;
+      });
+      const response = await request(path, { token: 'session-token' });
+      expect(response.status).toBe(403);
+      expect(await response.text()).not.toContain('db-secret');
+    }
+  });
+  it('uses current persisted credentials and honors revocation by another core', async () => {
+    const row = await service.create({ ...input, dbUsername: 'app', dbPassword: 'old-secret' });
+    const peer = createSshService(registry);
+    await peer.init();
+    const path = `/api/agent/ssh/servers/${row.id}/db-credentials`;
+    const read = () => request(path, { token: 'session-token' });
+    await peer.update(row.id, { dbPassword: 'new-secret' });
+    expect((await (await read()).json()).credentials.password).toBe('new-secret');
+    registry.load.mockRejectedValueOnce(new Error('Settings unavailable'));
+    const unavailable = await read();
+    expect(unavailable.status).toBe(500);
+    expect(await unavailable.json()).toEqual({ error: 'Settings unavailable' });
+    await peer.update(row.id, { enabled: false });
+    expect((await read()).status).toBe(404);
+    await peer.update(row.id, { enabled: true, repo: 'other/repo' });
+    expect((await read()).status).toBe(404);
+    await peer.update(row.id, { repo: input.repo, dbUsername: '', dbPassword: '' });
+    expect((await read()).status).toBe(404);
+    await peer.remove(row.id);
+    expect((await read()).status).toBe(404);
+  });
   it('answers 404 for a server without one', async () => {
     const { server } = await (
       await request('/api/ssh/servers', { operator: true, method: 'POST', body: input })
@@ -386,6 +498,10 @@ describe('SSH database login over HTTP', () => {
     expect((await request(`/api/ssh/servers/${server.id}/db-credentials`, { operator: true })).status).toBe(
       404,
     );
+    expect(
+      (await request(`/api/agent/ssh/servers/${server.id}/db-credentials`, { token: 'session-token' }))
+        .status,
+    ).toBe(404);
   });
 });
 
