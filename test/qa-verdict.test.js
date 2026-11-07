@@ -288,6 +288,9 @@ ${historical}
     ['### Historical runs — CI page pagination', null],
     ['### Archived runs: list & restore', null],
     ['### Historical test scenarios: export', 'run-2'],
+    ['### Archived', null],
+    ['### Historical', null],
+    ['## 📜 Archived', 'run-2'],
   ])('counts the current failure under feature label %s (run %s)', async (opening, runId) => {
     const closing = opening.startsWith('<details>') ? '</details>' : '';
     const body = [
