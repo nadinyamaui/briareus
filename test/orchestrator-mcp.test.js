@@ -192,6 +192,41 @@ describe('the worker tools', () => {
     expect(text).toContain('until the user redeploys');
   });
 
+  it('spawn_worker stacks a worker on a branch through stack_on, offered beside branch', async () => {
+    const fetched = stubFetch(
+      reply({ status: 201, body: { session: worker({ branch: null, stackOn: 'dev-lower' }) } }),
+    );
+    const s = await boot();
+    const [listed] = await s.send({ jsonrpc: '2.0', id: 21, method: 'tools/list' });
+    const { properties } = listed.result.tools.find((tool) => tool.name === 'spawn_worker').inputSchema;
+    expect(properties.stack_on.type).toBe('string');
+    // A stacked PR is no longer briefed through branch, which holds the lower PR.
+    expect(properties.branch.description).toContain('use stack_on instead');
+
+    const [res] = await s.send(
+      callTool('spawn_worker', { title: 'UI', prompt: 'Build the UI', stack_on: 'dev-lower' }),
+    );
+
+    expect(JSON.parse(fetched.mock.lastCall[1].body)).toEqual({
+      title: 'UI',
+      prompt: 'Build the UI',
+      stackOn: 'dev-lower',
+      qaLoop: false,
+    });
+    expect(res.result.content[0].text).toContain('stacked on dev-lower');
+  });
+
+  it('list_workers names the branch a stacked worker is on and the one it stacks on', async () => {
+    stubFetch(reply({ body: { sessions: [worker({ branch: 'dev-ui', stackOn: 'dev-lower' }), worker()] } }));
+    const s = await boot();
+
+    const [res] = await s.send(callTool('list_workers', {}));
+
+    const lines = res.result.content[0].text.split('\n');
+    expect(lines[0]).toContain('· branch dev-ui (stacked on dev-lower) ·');
+    expect(lines[1]).toContain('· branch dev-w1 ·');
+  });
+
   it('list_workers marks a tooling fix on its line', async () => {
     stubFetch(
       reply({

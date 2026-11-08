@@ -274,6 +274,12 @@ describe('scoped worker spawning', () => {
     expect(await res.json()).toMatchObject({ session: { repo: 'companion/repo', parentId: 'o1' } });
   });
 
+  it('forwards the branch a stacked worker cuts its own off', async () => {
+    const res = await spawnWorker({ title: 'UI', prompt: 'x', stackOn: 'dev-lower' });
+    expect(res.status).toBe(201);
+    expect(spawnWorkerSession.mock.lastCall[1]).toMatchObject({ stackOn: 'dev-lower', branch: undefined });
+  });
+
   it('leaves repo omitted for default and tooling spawns', async () => {
     for (const tooling of [false, true]) {
       expect((await spawnWorker({ prompt: 'x', tooling })).status).toBe(201);
