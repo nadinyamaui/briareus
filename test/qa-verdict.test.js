@@ -561,6 +561,46 @@ ${historical}
     });
   });
 
+  it('reads setext headings in a CRLF sheet edited on the web', async () => {
+    const table = (row) =>
+      ['| # | Scenario | Steps | Expected | Status | Evidence |', '|---|---|---|---|---|---|', row].join(
+        '\r\n',
+      );
+    gh.comments = [
+      {
+        id: 3,
+        body: [
+          TEST_SHEET_ANCHOR,
+          '## Results',
+          '',
+          table('| 1 | Login | Run | Works | ✅ | response.json |'),
+          '',
+          '## History (run 2)',
+          '',
+          table('| 2 | Old | Run | Works | ❌ | old failure |'),
+          '',
+          'Regression',
+          '===',
+          '',
+          table('| 3 | Checkout | Run | Works | ❌ | saw 500 |'),
+          '',
+          'History: run 1',
+          '---',
+          '',
+          table('| 4 | Older | Run | Works | ❌ | older failure |'),
+          '',
+        ].join('\r\n'),
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '3', scenario: 'Checkout', expected: 'Works', evidence: 'saw 500' }],
+      total: 2,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
   it('marks only the details a multi-line summary opened in, even when both close together', async () => {
     gh.comments = [
       {
