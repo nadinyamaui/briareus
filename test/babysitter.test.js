@@ -200,6 +200,19 @@ describe('PR errands', () => {
     await b.tick();
     expect(start).not.toHaveBeenCalled();
   });
+  it('reviews past an idle session but pushes only when no session is open', async () => {
+    const hasSession = vi.fn((repo, number, branch, { busyOnly }) => !busyOnly);
+    const { b, start } = sitter({
+      pulls: [pr({ number: 7 }), pr({ number: 8, branch: 'feature/fix', checks: 'failure' })],
+      hasSession,
+    });
+    await b.tick();
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start.mock.calls[0][0]).toBe('review');
+    expect(start.mock.calls[0][2].number).toBe(7);
+    expect(hasSession).toHaveBeenCalledWith('acme/shop', 7, 'feature/cart', { busyOnly: true });
+    expect(hasSession).toHaveBeenCalledWith('acme/shop', 8, 'feature/fix', { busyOnly: false });
+  });
   it('starts the requested action', async () => {
     await startErrand('fix-checks', project(), pr(), { providerId: 3, model: 'opus', effort: 'high' });
     expect(actionSessionSpec).toHaveBeenCalledWith(

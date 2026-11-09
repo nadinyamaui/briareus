@@ -840,6 +840,16 @@ describe('pullRequestHasOpenSession', () => {
     expect(pullRequestHasOpenSession('acme/other', 211, 'feature/213')).toBe(false);
     expect(pullRequestHasOpenSession('acme/babysit', 299, '')).toBe(false);
   });
+
+  it('counts only sessions with a turn under way when asked for busy ones', () => {
+    expect(pullRequestHasOpenSession('acme/babysit', 211, 'feature/211', { busyOnly: true })).toBe(false);
+    getJob('bs-number').status = 'running';
+    try {
+      expect(pullRequestHasOpenSession('acme/babysit', 211, 'feature/211', { busyOnly: true })).toBe(true);
+    } finally {
+      getJob('bs-number').status = 'idle';
+    }
+  });
 });
 
 describe('the agent’s GitHub identity', () => {
