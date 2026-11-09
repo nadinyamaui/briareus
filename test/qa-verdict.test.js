@@ -214,7 +214,7 @@ ${historical}
 
   it.each([
     ['<details><summary><b>Historical</b> runs</summary>\n', '</details>'],
-    ['<details><summary>📜 Historical</summary>\n', '</details>'],
+    ['<details><summary>📜 Historical runs</summary>\n', '</details>'],
     ['## 🕰️ Historical runs', '## Test sheet'],
   ])('excludes formatted history label %s', async (opening, closing) => {
     const history = sheet(['| 1 | Old | Run | Expected | ❌ | old failure |']).body;
@@ -291,6 +291,8 @@ ${historical}
     ['### Archived', null],
     ['### Historical', null],
     ['## 📜 Archived', 'run-2'],
+    ['<details><summary>Archived</summary>', null],
+    ['<details><summary>📜 Historical</summary>', 'run-2'],
   ])('counts the current failure under feature label %s (run %s)', async (opening, runId) => {
     const closing = opening.startsWith('<details>') ? '</details>' : '';
     const body = [
