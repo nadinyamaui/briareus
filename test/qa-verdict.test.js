@@ -604,6 +604,44 @@ ${historical}
     });
   });
 
+  it('skips old failures under the history label the QA prompts name', async () => {
+    const templates = readFileSync(new URL('../lib/templates.js', import.meta.url), 'utf8');
+    const labels = [
+      ...templates.matchAll(/<summary>(Historical runs \(head <sha>, <YYYY-MM-DD>\))<\/summary>/g),
+    ];
+    expect(labels).toHaveLength(1);
+    expect(templates).toContain('untouched in its `Historical runs (head <sha>, <YYYY-MM-DD>)` collapsible');
+    const label = labels[0][1].replace('<sha>', 'abc1234').replace('<YYYY-MM-DD>', '2026-11-05');
+    gh.comments = [
+      {
+        id: 3,
+        body: [
+          TEST_SHEET_ANCHOR,
+          '## Test sheet',
+          '',
+          '| # | Scenario | Steps | Expected | Status | Evidence |',
+          '|---|---|---|---|---|---|',
+          '| 1 | Login | Run | Works | ✅ | response.json |',
+          '',
+          `<details><summary>${label}</summary>`,
+          '',
+          '| # | Scenario | Steps | Expected | Status | Evidence |',
+          '|---|---|---|---|---|---|',
+          '| 1 | Login | Run | Works | ❌ | old failure |',
+          '',
+          '</details>',
+        ].join('\n'),
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
   it('skips old failures under a setext history heading inside a list item', async () => {
     const table = (row) =>
       ['| # | Scenario | Steps | Expected | Status | Evidence |', '|---|---|---|---|---|---|', row].join(
