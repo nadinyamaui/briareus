@@ -284,6 +284,7 @@ import {
   setSessionProjectFilter,
   stepProvider,
   pullRequestHasOpenSession,
+  markPullRequestSessionsBehind,
   dropQueuedMessage,
   cancelDevTurn,
   closeDevSessionWithReason,
@@ -848,6 +849,20 @@ describe('pullRequestHasOpenSession', () => {
       expect(pullRequestHasOpenSession('acme/babysit', 211, 'feature/211', { busyOnly: true })).toBe(true);
     } finally {
       getJob('bs-number').status = 'idle';
+    }
+  });
+
+  it('marks only the idle sessions on a pull request to catch up with origin', () => {
+    // bs-number is on #211 and bs-own-branch on its branch; bs-borrowed is on neither.
+    getJob('bs-own-branch').status = 'running';
+    try {
+      markPullRequestSessionsBehind('acme/babysit', 211, 'feature/214');
+      expect(getJob('bs-number').originMoved).toBe(true);
+      expect(getJob('bs-own-branch').originMoved).toBeUndefined();
+      expect(getJob('bs-borrowed').originMoved).toBeUndefined();
+    } finally {
+      getJob('bs-own-branch').status = 'idle';
+      delete getJob('bs-number').originMoved;
     }
   });
 });
