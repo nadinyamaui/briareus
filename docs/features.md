@@ -47,6 +47,12 @@ For QA required after review, close implementation, run the official review, ver
 code approval at the current PR head, reopen implementation, poll until idle without
 an unanswered question, then arm `set_worker_qa_loop`. Reopening does not arm QA;
 worker limits and current project access still apply.
+For a stacked PR, `spawn_worker` takes `stack_on` (HTTP `stackOn`): the worker cuts
+its own branch off that branch and opens its PR against it, without checking it out
+or holding its PR, so review and solve-conflicts on the lower PR stay available.
+Whether a session mid-turn holds a branch or its PR is read from the branch it has
+checked out at that moment, so a worker that moves to a branch of its own stops
+blocking the PR it was spawned on, and `list_workers` shows the branch it is actually on.
 CI verdict wakes are deduplicated per orchestrator and PR head across workers;
 empty, skipped-only and neutral-only check rollups do not wake it or claim merge readiness.
 

@@ -351,6 +351,7 @@ import {
   ensureClone,
   trustWorkspace,
   resolveWorkspaceBaseBranch,
+  workspaceCheckoutPlan,
 } from '../lib/jobs.js';
 
 // Registry fixtures are restored many times in this file. Real recurring
@@ -1073,6 +1074,19 @@ describe('createDevSession: the validation gauntlet', () => {
     }
   });
 
+  it('stacks on a branch only by cutting a branch of its own, in a workspace clone of its own', () => {
+    for (const stackOn of ['-leading-dash', 'a..b', 'x.lock']) {
+      expect(() => createDevSession({ ...base, stackOn })).toThrow(/is not a valid branch name/);
+    }
+    // Continuing a branch and cutting a fresh one off it are two different sessions.
+    expect(() => createDevSession({ ...base, branch: 'feature', stackOn: 'lower' })).toThrow(/not both/);
+    for (const extra of [{ local: true }, { qa: true }, { preview: true, prompt: '' }]) {
+      expect(() => createDevSession({ ...base, stackOn: 'lower', ...extra })).toThrow(
+        /workspace clone of its own/,
+      );
+    }
+  });
+
   it('a chat session with nothing to say does not start', () => {
     expect(() => createDevSession({ ...base, prompt: '   ' })).toThrow(/first message cannot be empty/);
   });
@@ -1099,6 +1113,7 @@ describe('createDevSession: the validation gauntlet', () => {
       { autoClose: true },
       { qaLoop: true },
       { branch: 'feature' },
+      { stackOn: 'feature' },
     ]) {
       expect(() => createDevSession({ ...base, orchestrator: true, ...extra })).toThrow(
         /only chats and manages workers/,
@@ -8323,12 +8338,12 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       Object.assign(job, { status: 'closed', branch: 'dev-a', prStatus: null, prAttachedByBranch: false });
     });
 
-    it("does not take the parent's pull request when a push to the parent branch nudges it", async () => {
+    it("does not take the parent's pull request when the parent branch is pushed", async () => {
       githubRest.mockImplementation(pulls({ 'dev-a': [{ number: 1, base: { ref: 'main' } }] }));
       await onBranch(job, 'dev-child', async () => {
-        // The parent's push: the webhook still finds the worker by its recorded branch.
-        expect(syncSessionsOn('acme/midturn', 'dev-a')).toBe(1);
-        await vi.waitFor(() => expect(heads()).toContain('dev-child'));
+        // The parent's push: the worker's record follows its checkout off dev-a, so
+        // the push is not news for it.
+        expect(syncSessionsOn('acme/midturn', 'dev-a')).toBe(0);
         await new Promise((r) => setTimeout(r, 20));
       });
       expect(job.branch).toBe('dev-child');
@@ -8374,6 +8389,153 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       });
       expect(job.prStatus).toMatchObject({ number: 1, headRef: 'dev-a' });
     });
+  });
+});
+
+// The record follows the checkout mid-turn, not only when the turn ends, whenever
+// something decides who holds a branch or its PR.
+describe('a worker that cut a stacked branch off the one it was spawned on, mid-turn', () => {
+  // Its own repository and branches per test, so nothing here matches another block's rows.
+  const repo = 'acme/stacked';
+  const row = (id, extra) => ({
+    id,
+    kind: 'devchat',
+    status: 'closed',
+    repo,
+    providerId: 1,
+    provider: 'Claude entry',
+    turns: 1,
+    baseBranch: 'main',
+    startedOnPr: null,
+    prStatus: null,
+    ...extra,
+  });
+  const lowerPr = (number, headRef) => ({
+    number,
+    state: 'open',
+    headRef,
+    baseRef: 'main',
+    headSha: `sha-${number}`,
+  });
+  const ids = [
+    'stk-mid-webhook',
+    'stk-mid-babysat',
+    'stk-mid-babysitter-on',
+    'stk-mid-holder',
+    'stk-mid-fixer',
+  ];
+  const dirs = [];
+
+  beforeAll(async () => {
+    state.stored = [
+      // Spawned on dev-lower-a; the lower PR's owner was busy at checkout, so it found nothing.
+      row('stk-mid-webhook', { startBranch: 'dev-lower-a', branch: 'dev-lower-a' }),
+      // Spawned on dev-lower-b and found #22 there at checkout.
+      row('stk-mid-babysat', {
+        startBranch: 'dev-lower-b',
+        branch: 'dev-lower-b',
+        prStatus: lowerPr(22, 'dev-lower-b'),
+        prAttachedByBranch: true,
+      }),
+      // Spawned on dev-lower-b to push review fixes to #22.
+      row('stk-mid-babysitter-on', { startBranch: 'dev-lower-b', branch: 'dev-lower-b' }),
+      // Found #32 on dev-lower-c at checkout, busy mid-turn.
+      row('stk-mid-holder', {
+        startBranch: 'dev-lower-c',
+        branch: 'dev-lower-c',
+        prStatus: lowerPr(32, 'dev-lower-c'),
+        prAttachedByBranch: true,
+      }),
+      // Spawned on dev-lower-c to push review fixes to #32.
+      row('stk-mid-fixer', { startBranch: 'dev-lower-c', branch: 'dev-lower-c' }),
+    ];
+    await initJobs();
+  });
+  beforeEach(() => {
+    githubRest.mockReset();
+    githubGraphql.mockReset();
+  });
+  // Retired after each test, so later ticks cannot discover their branches under other mocks.
+  afterEach(() => {
+    for (const id of ids) getJob(id).status = 'closed';
+  });
+  afterAll(() => {
+    for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // The session's own slot with its working tree on `head`, mid-turn.
+  const checkout = (job, head) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `${job.id}-`));
+    dirs.push(dir);
+    expect(spawnSync('git', ['init', '-q', '-b', head, dir]).status).toBe(0);
+    claimSlot(dir, job.id, { prepared: true });
+    Object.assign(job, { workDir: dir, status: 'running' });
+    return dir;
+  };
+  // GitHub knows one open PR per branch named in `open`.
+  const githubWith = (open) =>
+    githubRest.mockImplementation(async (_cfg, _method, route) => {
+      const head = route.match(/[?&]head=[^:]+:([^&]+)/);
+      if (head) {
+        const pr = open[decodeURIComponent(head[1])];
+        return { ok: true, json: async () => (pr ? [{ number: pr, base: { ref: 'main' } }] : []) };
+      }
+      const single = route.match(/\/pulls\/(\d+)$/);
+      const ref = single && Object.keys(open).find((b) => open[b] === Number(single[1]));
+      if (ref)
+        return {
+          ok: true,
+          json: async () => ({
+            number: Number(single[1]),
+            state: 'open',
+            head: { ref, sha: `sha-${single[1]}` },
+            base: { ref: 'main' },
+          }),
+        };
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+  const askedAbout = (branch) =>
+    githubRest.mock.calls.some(([, , route]) => String(route).includes(`head=acme:${branch}`));
+
+  it('is not nudged onto the lower PR by a push to the branch it left', async () => {
+    const job = getJob('stk-mid-webhook');
+    checkout(job, 'dev-upper-a');
+    githubWith({ 'dev-lower-a': 12 });
+    // The fix worker's push to dev-lower-a, as the webhook reports it.
+    expect(syncSessionsOn(repo, 'dev-lower-a')).toBe(0);
+    expect(job.branch).toBe('dev-upper-a');
+    // Its own lookup asks about the branch it is on, which has no PR yet.
+    expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
+    expect(job.prStatus).toBeNull();
+    expect(askedAbout('dev-lower-a')).toBe(false);
+    expect(askedAbout('dev-upper-a')).toBe(true);
+  });
+
+  it('leaves the lower PR to the babysitter once it is on a branch of its own', () => {
+    const moved = getJob('stk-mid-babysat');
+    checkout(moved, 'dev-upper-b');
+    expect(pullRequestHasOpenSession(repo, 22, 'dev-lower-b')).toBe(false);
+    expect(moved).toMatchObject({ branch: 'dev-upper-b', prStatus: null });
+    // A session whose tree is on the branch still has it.
+    checkout(getJob('stk-mid-babysitter-on'), 'dev-lower-b');
+    expect(pullRequestHasOpenSession(repo, 22, 'dev-lower-b')).toBe(true);
+  });
+
+  it('keeps the lower PR from a session on its branch only while busy on that branch', async () => {
+    const holder = getJob('stk-mid-holder');
+    const fixer = getJob('stk-mid-fixer');
+    const holderTree = checkout(holder, 'dev-lower-c');
+    checkout(fixer, 'dev-lower-c');
+    githubWith({ 'dev-lower-c': 32 });
+    expect(await attachPrForBranch(fixer, { fresh: true })).toBeNull();
+    expect(fixer.prStatus).toBeNull();
+    // The holder cuts its stacked branch: busy on that one, not on #32.
+    expect(
+      spawnSync('git', ['-C', holderTree, 'symbolic-ref', 'HEAD', 'refs/heads/dev-upper-c']).status,
+    ).toBe(0);
+    expect(await attachPrForBranch(fixer, { fresh: true })).toBe(32);
+    expect(fixer.prStatus).toMatchObject({ number: 32, headRef: 'dev-lower-c' });
+    expect(holder).toMatchObject({ branch: 'dev-upper-c', prStatus: null });
   });
 });
 
@@ -16572,6 +16734,92 @@ describe('official orchestrator PR actions', () => {
     },
   );
 
+  // A worker spawned with branch: 'feature' (PR #12's head) to build a stacked PR on it.
+  // It found #12 from that branch at checkout; its working tree is on `head` now, mid-turn.
+  const spawnedOnFeature = (head) => {
+    const worker = getJob('pr-cap-0');
+    const original = { ...worker };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-stacked-child-'));
+    expect(spawnSync('git', ['init', '-q', '-b', head, dir]).status).toBe(0);
+    claimSlot(dir, worker.id, { prepared: true });
+    Object.assign(worker, {
+      status: 'running',
+      ownerId: 42,
+      workDir: dir,
+      startBranch: 'feature',
+      branch: 'feature',
+      baseBranch: 'main',
+      prStatus: { number: 12, state: 'open', headRef: 'feature', baseRef: 'main', headSha: 'feedback-head' },
+      prAttachedByBranch: true,
+    });
+    parent.ownerId = 42;
+    return {
+      worker,
+      restore() {
+        for (const key of Object.keys(worker)) delete worker[key];
+        Object.assign(worker, original);
+        fs.rmSync(dir, { recursive: true, force: true });
+      },
+    };
+  };
+
+  it('does not block on a worker spawned on the branch that has since cut a stacked branch of its own', async () => {
+    const { worker, restore } = spawnedOnFeature('feature-ui');
+    try {
+      const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+      expect(session.id).not.toBe(worker.id);
+      // It let go of #12, which it had only found from the branch it left.
+      expect(worker).toMatchObject({ branch: 'feature-ui', prStatus: null, prAttachedByBranch: false });
+      expect(workerSummary(worker)).toMatchObject({ branch: 'feature-ui', pr: null });
+    } finally {
+      restore();
+    }
+  });
+
+  it('still blocks on a worker spawned on the branch whose checkout is on it', async () => {
+    const { worker, restore } = spawnedOnFeature('feature');
+    try {
+      await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toThrow(
+        `"id":"${worker.id}"`,
+      );
+      expect(worker).toMatchObject({ branch: 'feature', prStatus: { number: 12 } });
+    } finally {
+      restore();
+    }
+  });
+
+  it('tracks the stacked pull request a worker opened from its own branch, and holds only that one', async () => {
+    const { worker, restore } = spawnedOnFeature('feature-ui');
+    const stacked = pull({
+      number: 13,
+      head: { ref: 'feature-ui', sha: 'ui-head', repo: { full_name: 'acme/shop' } },
+      base: { ref: 'feature' },
+    });
+    githubRest.mockImplementation(async (_cfg, _method, route) => {
+      if (route.startsWith('/repos/acme/shop/pulls?'))
+        return {
+          ok: true,
+          json: async () =>
+            route.includes('head=acme:feature-ui') ? [{ number: 13, base: { ref: 'feature' } }] : [],
+        };
+      if (route.endsWith('/pulls/13')) return { ok: true, json: async () => stacked };
+      if (route.endsWith('/pulls/12')) return { ok: true, json: async () => pull({ number: 12 }) };
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    try {
+      expect(await attachPrForBranch(worker, { fresh: true })).toBe(13);
+      expect(worker.prStatus).toMatchObject({ number: 13, headRef: 'feature-ui', baseRef: 'feature' });
+      expect(workerSummary(worker)).toMatchObject({ branch: 'feature-ui', pr: { number: 13 } });
+      await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 13 })).rejects.toThrow(
+        `"id":"${worker.id}"`,
+      );
+      const session = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+      expect(session.id).not.toBe(worker.id);
+    } finally {
+      restore();
+    }
+  });
+
   it.each(['failed', 'closed', 'idle'])(
     'refuses to reactivate a %s official action while its replacement is open',
     async (status) => {
@@ -16597,4 +16845,208 @@ describe('official orchestrator PR actions', () => {
       expect(DEV_OPEN).toContain(replacement.status);
     },
   );
+});
+
+describe('the checkout plan of a stacked session', () => {
+  it('cuts its own branch off the branch it stacks on, also when a failed first checkout is retried', () => {
+    const job = { id: 'abc', branch: null, startBranch: null, stackOn: 'lower' };
+    const fromLower = { branch: 'dev-abc', startPoint: 'lower', checkoutRef: 'refs/remotes/origin/lower' };
+    expect(workspaceCheckoutPlan(job, 'main')).toMatchObject({ ...fromLower, source: 'remote' });
+    // Named its branch, then failed before the checkout: on neither side yet.
+    job.branch = 'dev-abc';
+    expect(workspaceCheckoutPlan(job, 'main')).toMatchObject({ ...fromLower, source: 'remote' });
+    // Pushed, or still in its slot: its own branch, as for any session.
+    expect(workspaceCheckoutPlan(job, 'main', { remoteWorkerRef: true })).toMatchObject({
+      startPoint: 'dev-abc',
+      checkoutRef: 'refs/remotes/origin/dev-abc',
+    });
+    expect(workspaceCheckoutPlan(job, 'main', { localBranch: true })).toMatchObject({
+      source: 'local',
+      checkoutRef: 'dev-abc',
+    });
+    // Any other session's lost branch starts over from the default, as before.
+    expect(workspaceCheckoutPlan({ id: 'abc', branch: 'dev-abc' }, 'main')).toMatchObject({
+      source: 'base',
+      checkoutRef: 'refs/remotes/origin/main',
+    });
+  });
+});
+
+// The orchestrator's stack_on: the lower PR's branch is the start point of the worker's
+// own branch, never its checkout, so nothing ties the worker to the lower PR.
+describe('a worker spawned to stack on another branch', () => {
+  let root;
+  let children;
+  let homeSpy;
+  let bin;
+  const git = (...args) => {
+    const result = spawnSync('git', args, { encoding: 'utf8' });
+    expect(result.status, result.stderr).toBe(0);
+    return result.stdout.trim();
+  };
+  // origin has main and dev-lower, one commit ahead; the pool slot is a clone of it on main.
+  const fixture = () => {
+    const seed = path.join(root, 'seed');
+    git('init', '-q', '-b', 'main', seed);
+    const commit = (message) =>
+      git(
+        '-C',
+        seed,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        '-c',
+        'commit.gpgsign=false',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        message,
+      );
+    commit('base');
+    git('-C', seed, 'checkout', '-q', '-b', 'dev-lower');
+    commit('lower PR');
+    git('-C', seed, 'checkout', '-q', 'main');
+    const remote = path.join(root, 'remote.git');
+    git('clone', '-q', '--bare', seed, remote);
+    const slot = path.join(root, 'acme__stack');
+    git('clone', '-q', remote, slot);
+    return { slot, lowerSha: git('-C', remote, 'rev-parse', 'refs/heads/dev-lower') };
+  };
+  const row = (id, extra) => ({
+    id,
+    kind: 'devchat',
+    status: 'closed',
+    repo: 'acme/stack',
+    providerId: 2,
+    model: 'gpt-6.1-sol',
+    effort: 'high',
+    turns: 0,
+    createdAt: '2026-11-08T00:00:00.000Z',
+    ...extra,
+  });
+
+  beforeEach(() => {
+    for (const job of devSessionRecords()) job.restartPending = false;
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'jobs-stack-on-'));
+    state.workspaceDir = root;
+    state.otherProviders = [{ id: 2, binary: 'codex', label: 'Codex', active: true }];
+    state.projects = [{ id: 1, repo: 'acme/stack', label: 'Stack', localDir: '', setupCommands: [] }];
+    getProviderForJob.mockImplementation((job) => state.otherProviders.find((p) => p.id === job.providerId));
+    captureProviderAuth.mockResolvedValue(undefined);
+    homeSpy = vi.spyOn(providerTools, 'ensureCodexHome').mockReturnValue(path.join(root, 'codex-home'));
+    bin = vi.spyOn(BINARIES.codex, 'bin').mockReturnValue({ bin: '/mock/stack-agent', source: 'test' });
+    children = [];
+    const realSpawn = spawn.getMockImplementation();
+    spawn.mockImplementation((cmd, args, opts) => {
+      if (cmd !== '/mock/stack-agent') return realSpawn(cmd, args, opts);
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      spawnedScope(child, child.stdout, child.stderr);
+      fakeCodexServer(child, args);
+      children.push(child);
+      return child;
+    });
+    githubRest.mockReset();
+    githubRest.mockResolvedValue({ ok: false, status: 404, json: async () => ({}) });
+  });
+  afterEach(async () => {
+    for (const job of devSessionRecords().filter(
+      (j) => j.repo === 'acme/stack' && DEV_OPEN.includes(j.status),
+    )) {
+      await closeDevSession(job.id);
+    }
+    homeSpy.mockRestore();
+    bin.mockRestore();
+    spawn.mockReset();
+    getProviderForJob.mockReset();
+    captureProviderAuth.mockReset();
+    state.otherProviders = [];
+    state.workspaceDir = '/tmp/nowhere';
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('cuts a fresh branch off the lower PR’s branch and never holds that PR', async () => {
+    const { slot, lowerSha } = fixture();
+    state.stored = [row('stack-orch', { orchestrator: true, turns: 1 })];
+    await initJobs();
+    const parent = getJob('stack-orch');
+    parent.status = 'idle';
+    const spawned = spawnWorkerSession(parent, {
+      title: 'Upper PR',
+      prompt: 'Build the UI on top of the lower PR',
+      stackOn: 'dev-lower',
+      providerId: 2,
+    });
+    const worker = getJob(spawned.id);
+    const own = `dev-${worker.id}`;
+    await vi.waitFor(() => expect(children[0]?.prompt, worker.error).toContain('Build the UI'), {
+      timeout: 20_000,
+    });
+    expect(worker).toMatchObject({
+      branch: own,
+      startBranch: null,
+      stackOn: 'dev-lower',
+      baseBranch: 'main',
+    });
+    expect(git('-C', slot, 'branch', '--show-current')).toBe(own);
+    expect(git('-C', slot, 'rev-parse', 'HEAD')).toBe(lowerSha);
+    // No upstream, so a bare `git push` cannot offer to push onto dev-lower.
+    expect(spawnSync('git', ['-C', slot, 'rev-parse', '--abbrev-ref', '@{u}']).status).not.toBe(0);
+    expect(children[0].prompt).toContain(
+      `on branch ${own}, created from dev-lower to stack on it: open your pull request with dev-lower as its base`,
+    );
+    // Nothing looked up, attached or held the lower branch's PR.
+    expect(githubRest.mock.calls.some(([, , route]) => String(route).includes('dev-lower'))).toBe(false);
+    expect(pullRequestHasOpenSession('acme/stack', 12, 'dev-lower')).toBe(false);
+    expect(workerSummary(worker)).toMatchObject({ branch: own, stackOn: 'dev-lower', pr: null });
+    // start_pr_action on the lower PR gets past the open-session check while the worker
+    // runs: what refuses it here is the missing action runtime, and nothing is started.
+    state.projects[0].actionProviderId = 999;
+    githubRest.mockImplementation(async (_cfg, _method, route) =>
+      route === '/repos/acme/stack/pulls/12'
+        ? {
+            ok: true,
+            json: async () => ({
+              number: 12,
+              state: 'open',
+              head: { ref: 'dev-lower', sha: lowerSha, repo: { full_name: 'acme/stack' } },
+              base: { ref: 'main' },
+            }),
+          }
+        : { ok: false, status: 404, json: async () => ({}) },
+    );
+    await expect(startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 })).rejects.toThrow(
+      /configured action runtime is unavailable/,
+    );
+    expect(workerSessionsFor(parent).map((j) => j.id)).toEqual([worker.id]);
+    // Finished without waking the orchestrator into a turn of its own.
+    parent.status = 'closed';
+    children[0].complete({ input_tokens: 1, output_tokens: 1 });
+    children[0].emit('close', 0);
+    await vi.waitFor(() => expect(worker.status, worker.error).toBe('idle'), { timeout: 20_000 });
+    expect(worker.branch).toBe(own);
+  });
+
+  it('cuts its branch off the lower PR’s branch again when a failed first checkout is retried', async () => {
+    const { slot, lowerSha } = fixture();
+    // Its first preparation named its branch and failed before the checkout.
+    const saved = row('stack-retry', {
+      status: 'failed',
+      branch: 'dev-stack-retry',
+      startBranch: null,
+      stackOn: 'dev-lower',
+      error: 'git fetch failed',
+    });
+    state.stored = [saved];
+    await initJobs();
+    reopenDevSession(saved.id);
+    await vi.waitFor(() => expect(saved.status, saved.error).toBe('idle'), { timeout: 20_000 });
+    expect(git('-C', slot, 'branch', '--show-current')).toBe('dev-stack-retry');
+    expect(git('-C', slot, 'rev-parse', 'HEAD')).toBe(lowerSha);
+    expect(spawnSync('git', ['-C', slot, 'rev-parse', '--abbrev-ref', '@{u}']).status).not.toBe(0);
+  });
 });
