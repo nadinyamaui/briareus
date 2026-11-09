@@ -7817,6 +7817,9 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
       }),
       // Spawned on dev-a as well, and has not cut its own branch yet.
       row('stk-sibling', { branch: 'dev-a', startBranch: 'dev-a' }),
+      // Spawned on dev-a, whose PR #1 is open with no session on it; cuts its own
+      // branch mid-turn, which the record learns only at turn end.
+      row('stk-midturn', { repo: 'acme/midturn', branch: 'dev-a', startBranch: 'dev-a' }),
       // Moves off dev-a while its loop's round on #1 is still being reviewed.
       row('stk-inflight', {
         branch: 'dev-a',
@@ -8304,6 +8307,88 @@ describe('a worker that leaves the branch it was spawned on for one of its own',
     expect(job.qaLoop.done).toBe(false);
     expect(job.qaLoop.pendingVerdict).toBeFalsy();
     expect(infoTexts(job).join('\n')).not.toMatch(/no QA actions are required/);
+  });
+
+  describe('a lookup by branch while the worker is mid-turn', () => {
+    const pulls = (byHead) => async (_cfg, _method, url) => {
+      const head = url.match(/[?&]head=acme:([^&]+)/);
+      if (url.startsWith('/repos/acme/midturn/pulls?') && head)
+        return { ok: true, json: async () => byHead[decodeURIComponent(head[1])] || [] };
+      const one = url.match(/\/repos\/acme\/midturn\/pulls\/(\d+)$/);
+      if (one)
+        return {
+          ok: true,
+          json: async () => ({
+            number: Number(one[1]),
+            state: 'open',
+            head: { ref: Number(one[1]) === 1 ? 'dev-a' : 'dev-child', sha: `sha-${one[1]}` },
+            base: { ref: Number(one[1]) === 1 ? 'main' : 'dev-a' },
+          }),
+        };
+      return { ok: false, status: 404, json: async () => ({}) };
+    };
+    const heads = () =>
+      githubRest.mock.calls.map(([, , url]) => url.match(/[?&]head=acme:([^&]+)/)?.[1]).filter(Boolean);
+    let job;
+    beforeEach(() => {
+      job = getJob('stk-midturn');
+      Object.assign(job, { status: 'running', branch: 'dev-a', prStatus: null, prAttachedByBranch: false });
+    });
+    afterEach(() => {
+      Object.assign(job, { status: 'closed', branch: 'dev-a', prStatus: null, prAttachedByBranch: false });
+    });
+
+    it("does not take the parent's pull request when the parent branch is pushed", async () => {
+      githubRest.mockImplementation(pulls({ 'dev-a': [{ number: 1, base: { ref: 'main' } }] }));
+      await onBranch(job, 'dev-child', async () => {
+        // The parent's push: the worker's record follows its checkout off dev-a, so
+        // the push is not news for it.
+        expect(syncSessionsOn('acme/midturn', 'dev-a')).toBe(0);
+        await new Promise((r) => setTimeout(r, 20));
+      });
+      expect(job.branch).toBe('dev-child');
+      expect(job.prStatus).toBeNull();
+      expect(heads()).not.toContain('dev-a');
+    });
+
+    it('attaches the pull request the worker opens from its own branch', async () => {
+      githubRest.mockImplementation(
+        pulls({
+          'dev-a': [{ number: 1, base: { ref: 'main' } }],
+          'dev-child': [{ number: 2, base: { ref: 'dev-a' } }],
+        }),
+      );
+      await onBranch(job, 'dev-child', async () => {
+        expect(await attachPrForBranch(job, { fresh: true })).toBe(2);
+      });
+      expect(job.prStatus).toMatchObject({ number: 2, headRef: 'dev-child' });
+    });
+
+    it('looks again for the branch it switched to while GitHub answered', async () => {
+      let dir;
+      const answer = pulls({ 'dev-a': [{ number: 1, base: { ref: 'main' } }] });
+      githubRest.mockImplementation(async (cfg, method, url) => {
+        if (url.includes('head=acme:dev-a'))
+          spawnSync('git', ['-C', dir, 'symbolic-ref', 'HEAD', 'refs/heads/dev-child']);
+        return answer(cfg, method, url);
+      });
+      await onBranch(job, 'dev-a', async () => {
+        dir = job.workDir;
+        expect(await attachPrForBranch(job, { fresh: true })).toBeNull();
+        await vi.waitFor(() => expect(heads()).toContain('dev-child'));
+        await new Promise((r) => setTimeout(r, 20));
+      });
+      expect(job.branch).toBe('dev-child');
+      expect(job.prStatus).toBeNull();
+    });
+
+    it('still takes the parent branch PR while the worker has not left it', async () => {
+      githubRest.mockImplementation(pulls({ 'dev-a': [{ number: 1, base: { ref: 'main' } }] }));
+      await onBranch(job, 'dev-a', async () => {
+        expect(await attachPrForBranch(job, { fresh: true })).toBe(1);
+      });
+      expect(job.prStatus).toMatchObject({ number: 1, headRef: 'dev-a' });
+    });
   });
 });
 
@@ -16600,6 +16685,54 @@ describe('official orchestrator PR actions', () => {
       delete worker[field];
     }
   });
+
+  // A child worker spawned on the parent PR's branch, mid-turn: its record still says
+  // the branch it was spawned on, with the parent PR attached by that branch.
+  it.each([
+    ['has cut its own branch', 'dev-child', 'acme/shop', false],
+    ['is still on the parent branch', 'feature', 'acme/shop', true],
+    ['works in another project', 'feature', 'acme/tools', false],
+  ])(
+    'decides whether a child worker that %s blocks the parent PR action',
+    async (_case, head, repo, blocks) => {
+      const worker = getJob('pr-cap-0');
+      // The refresh logs on the worker; keep its own copy of the log to restore.
+      const original = { ...worker, events: [...(worker.events || [])] };
+      parent.ownerId = 42;
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-child-'));
+      spawnSync('git', ['init', '-q', '-b', head, dir]);
+      Object.assign(worker, {
+        ownerId: 42,
+        status: 'running',
+        repo,
+        workDir: dir,
+        startBranch: 'feature',
+        branch: 'feature',
+        baseBranch: 'main',
+        prStatus: { number: 12, state: 'open', headRef: 'feature', baseRef: 'main', headSha: 'parent-fix' },
+        prAttachedByBranch: true,
+      });
+      try {
+        const started = startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 });
+        if (blocks) {
+          await expect(started).rejects.toThrow(`"id":"${worker.id}"`);
+          expect(worker.prStatus.number).toBe(12);
+        } else {
+          expect((await started).id).not.toBe(worker.id);
+          // The child keeps its own branch and does not keep claiming the parent PR.
+          if (repo === parent.repo) {
+            expect(worker.branch).toBe('dev-child');
+            expect(worker.prStatus).toBeNull();
+          }
+        }
+        expect(worker.startBranch).toBe('feature');
+      } finally {
+        for (const key of Object.keys(worker)) delete worker[key];
+        Object.assign(worker, original);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   // A worker spawned with branch: 'feature' (PR #12's head) to build a stacked PR on it.
   // It found #12 from that branch at checkout; its working tree is on `head` now, mid-turn.
