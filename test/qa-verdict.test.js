@@ -455,6 +455,112 @@ ${historical}
     });
   });
 
+  it.each([
+    [
+      'a setext --- heading',
+      ['## History (run 2)', '', 'OLD', '', 'Regression scenarios', '--------------------'],
+    ],
+    ['a setext === heading', ['## History (run 2)', '', 'OLD', '', 'Regression scenarios', '====']],
+    [
+      'a heading in a current collapsible',
+      [
+        '## History (run 2)',
+        '',
+        'OLD',
+        '',
+        '<details><summary>Regression (this run)</summary>',
+        '',
+        '## Regression',
+      ],
+    ],
+    [
+      'an indented closer',
+      ['<details><summary>Historical runs</summary>', '', 'OLD', '', '    </details>', '', '### Regression'],
+    ],
+    [
+      'a closer after the end of a block comment',
+      [
+        '<details><summary>Historical runs</summary>',
+        '',
+        'OLD',
+        '',
+        '<!--',
+        'note',
+        '--> </details>',
+        '',
+        '## Current',
+      ],
+    ],
+  ])('counts current failures after history ended by %s', async (_name, history) => {
+    const table = (row) =>
+      ['| # | Scenario | Steps | Expected | Status | Evidence |', '|---|---|---|---|---|---|', row].join(
+        '\n',
+      );
+    gh.comments = [
+      {
+        id: 3,
+        body: [
+          TEST_SHEET_ANCHOR,
+          '## Results',
+          '',
+          table('| 1 | Login | Run | Works | ✅ | response.json |'),
+          '',
+          ...history.map((line) =>
+            line === 'OLD' ? table('| 2 | Old | Run | Works | ❌ | old failure |') : line,
+          ),
+          '',
+          table('| 3 | Checkout | Run | Works | ❌ | saw 500 |'),
+          '',
+          ...(history.some((line) => line.includes('this run')) ? ['</details>'] : []),
+        ].join('\n'),
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '3', scenario: 'Checkout', expected: 'Works', evidence: 'saw 500' }],
+      total: 2,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
+  it.each([
+    [
+      'an indented summary inside the details HTML block',
+      ['<details>', '    <summary>Historical runs</summary>'],
+    ],
+    ['a setext history heading', ['Historical runs', '---------------']],
+  ])('skips old failures under %s', async (_name, opening) => {
+    const table = (row) =>
+      ['| # | Scenario | Steps | Expected | Status | Evidence |', '|---|---|---|---|---|---|', row].join(
+        '\n',
+      );
+    gh.comments = [
+      {
+        id: 3,
+        body: [
+          TEST_SHEET_ANCHOR,
+          '## Results',
+          '',
+          table('| 1 | Login | Run | Works | ✅ | response.json |'),
+          '',
+          ...opening,
+          '',
+          table('| 2 | Old | Run | Works | ❌ | old failure |'),
+          '',
+          ...(opening[0] === '<details>' ? ['</details>'] : []),
+        ].join('\n'),
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
   it('marks only the details a multi-line summary opened in, even when both close together', async () => {
     gh.comments = [
       {
