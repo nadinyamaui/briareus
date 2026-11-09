@@ -561,6 +561,77 @@ ${historical}
     });
   });
 
+  it.each([
+    ['a bullet followed by a thematic break', ['- Historical run 2 (head abc1234): 1 ❌', '---']],
+    ['an ordered item followed by a thematic break', ['1. Archived test sheet', '---']],
+    ['a lazy list line followed by a thematic break', ['- note', 'Historical run 2', '---']],
+    [
+      'a setext heading whose paragraph only ends in a history label',
+      ['Results below supersede the', 'Historical runs', '---'],
+    ],
+  ])('counts current failures after %s', async (_name, lines) => {
+    const table = (row) =>
+      ['| # | Scenario | Steps | Expected | Status | Evidence |', '|---|---|---|---|---|---|', row].join(
+        '\n',
+      );
+    gh.comments = [
+      {
+        id: 3,
+        body: [
+          TEST_SHEET_ANCHOR,
+          '## Test sheet',
+          '',
+          '### UI',
+          '',
+          table('| 1 | Login | Run | Works | ✅ | response.json |'),
+          '',
+          ...lines,
+          '',
+          '### API',
+          '',
+          table('| 2 | Checkout | Run | Works | ❌ | saw 500 |'),
+        ].join('\n'),
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [{ number: '2', scenario: 'Checkout', expected: 'Works', evidence: 'saw 500' }],
+      total: 2,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
+  it('skips old failures under a setext history heading inside a list item', async () => {
+    const table = (row) =>
+      ['| # | Scenario | Steps | Expected | Status | Evidence |', '|---|---|---|---|---|---|', row].join(
+        '\n',
+      );
+    gh.comments = [
+      {
+        id: 3,
+        body: [
+          TEST_SHEET_ANCHOR,
+          '## Results',
+          '',
+          table('| 1 | Login | Run | Works | ✅ | response.json |'),
+          '',
+          '- Historical runs',
+          '  ---',
+          '',
+          table('| 2 | Old | Run | Works | ❌ | old failure |').replace(/^/gm, '  '),
+        ].join('\n'),
+      },
+    ];
+    expect(await latestTestVerdict(repo, 5)).toEqual({
+      failures: [],
+      total: 1,
+      passed: 1,
+      manual: 0,
+      incomplete: false,
+    });
+  });
+
   it('reads setext headings in a CRLF sheet edited on the web', async () => {
     const table = (row) =>
       ['| # | Scenario | Steps | Expected | Status | Evidence |', '|---|---|---|---|---|---|', row].join(
@@ -2105,9 +2176,9 @@ ${current}
       [
         '--input-type=module',
         '-e',
-        `${parser}\nconsole.log(JSON.stringify(parseSheetVerdict(${JSON.stringify(body)})));`,
+        `import { readFileSync } from 'node:fs';\n${parser}\nconsole.log(JSON.stringify(parseSheetVerdict(JSON.parse(readFileSync(0, 'utf8')))));`,
       ],
-      { encoding: 'utf8', timeout: 2000 },
+      { input: JSON.stringify(body), encoding: 'utf8', timeout: 2000 },
     );
     expect(JSON.parse(result)).toMatchObject({
       total: 2,
@@ -2415,9 +2486,9 @@ ${current}
       [
         '--input-type=module',
         '-e',
-        `${parser}\nconsole.log(JSON.stringify(parseSheetVerdict(${JSON.stringify(body)})));`,
+        `import { readFileSync } from 'node:fs';\n${parser}\nconsole.log(JSON.stringify(parseSheetVerdict(JSON.parse(readFileSync(0, 'utf8')))));`,
       ],
-      { encoding: 'utf8', timeout: 2000 },
+      { input: JSON.stringify(body), encoding: 'utf8', timeout: 2000 },
     );
     expect(JSON.parse(result)).toMatchObject({ total: 1, passed, incomplete: passed === 0 });
   });
@@ -2596,9 +2667,9 @@ ${current}
       [
         '--input-type=module',
         '-e',
-        `${parser}\nconsole.log(JSON.stringify(parseSheetVerdict(${JSON.stringify(body)})));`,
+        `import { readFileSync } from 'node:fs';\n${parser}\nconsole.log(JSON.stringify(parseSheetVerdict(JSON.parse(readFileSync(0, 'utf8')))));`,
       ],
-      { encoding: 'utf8', timeout: 2000 },
+      { input: JSON.stringify(body), encoding: 'utf8', timeout: 2000 },
     );
     expect(JSON.parse(result)).toMatchObject({
       total: 2,
@@ -2625,9 +2696,9 @@ ${current}
       [
         '--input-type=module',
         '-e',
-        `${parser}\nconsole.log(JSON.stringify(parseSheetVerdict(${JSON.stringify(body)})));`,
+        `import { readFileSync } from 'node:fs';\n${parser}\nconsole.log(JSON.stringify(parseSheetVerdict(JSON.parse(readFileSync(0, 'utf8')))));`,
       ],
-      { encoding: 'utf8', timeout: 2000 },
+      { input: JSON.stringify(body), encoding: 'utf8', timeout: 2000 },
     );
     expect(JSON.parse(result)).toMatchObject({
       total: 2,
