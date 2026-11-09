@@ -51,8 +51,8 @@ describe('getBinary / BINARIES', () => {
     expect(getBinary('vim')).toBeNull();
   });
 
-  it('offers Claude Opus 5.5', () => {
-    expect(BINARIES.claude.models()).toContain('claude-opus-5-5');
+  it('offers only Claude Opus 5.5 and Fable 5.2', () => {
+    expect(BINARIES.claude.models()).toEqual(['claude-opus-5-5', 'claude-fable-5-2']);
   });
 
   it('offers the GPT-6 family when no Codex model cache exists', () => {
