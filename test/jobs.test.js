@@ -284,7 +284,6 @@ import {
   setSessionProjectFilter,
   stepProvider,
   pullRequestHasOpenSession,
-  markPullRequestSessionsBehind,
   dropQueuedMessage,
   cancelDevTurn,
   closeDevSessionWithReason,
@@ -849,20 +848,6 @@ describe('pullRequestHasOpenSession', () => {
       expect(pullRequestHasOpenSession('acme/babysit', 211, 'feature/211', { busyOnly: true })).toBe(true);
     } finally {
       getJob('bs-number').status = 'idle';
-    }
-  });
-
-  it('marks only the idle sessions on a pull request to catch up with origin', () => {
-    // bs-number is on #211 and bs-own-branch on its branch; bs-borrowed is on neither.
-    getJob('bs-own-branch').status = 'running';
-    try {
-      markPullRequestSessionsBehind('acme/babysit', 211, 'feature/214');
-      expect(getJob('bs-number').originMoved).toBe(true);
-      expect(getJob('bs-own-branch').originMoved).toBeUndefined();
-      expect(getJob('bs-borrowed').originMoved).toBeUndefined();
-    } finally {
-      getJob('bs-own-branch').status = 'idle';
-      delete getJob('bs-number').originMoved;
     }
   });
 });
@@ -14782,6 +14767,85 @@ describe('automatic recovery after a server restart', () => {
     first.status = 'closed';
     await expect(deleteJobById(first.id, { closedOnly: true })).rejects.toMatchObject({ status: 409 });
     first.status = 'idle';
+  });
+
+  it('catches an idle session up with pull request commits others pushed, retrying a failed fetch', async () => {
+    const checkout = path.join(root, 'acme__restart');
+    fs.mkdirSync(checkout);
+    const git = (...args) => {
+      const result = spawnSync('git', args, { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    const commit = (dir, message) =>
+      git(
+        '-C',
+        dir,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '--allow-empty',
+        '-m',
+        message,
+      );
+    git('-C', checkout, 'init', '-b', 'feature');
+    commit(checkout, 'fixture');
+    const remote = path.join(root, 'remote.git');
+    git('clone', '--bare', checkout, remote);
+    git('-C', checkout, 'remote', 'add', 'origin', remote);
+    git('-C', checkout, 'fetch', '-q', 'origin');
+    const old = git('-C', checkout, 'rev-parse', 'HEAD');
+    const saved = row({
+      status: 'idle',
+      orchestrator: false,
+      workDir: checkout,
+      branch: 'feature',
+      workspacePrepared: true,
+      recoveryTurn: null,
+      prStatus: { number: 31, state: 'open', headRef: 'feature', baseRef: 'main', headSha: old },
+    });
+    claimSlot(checkout, saved.id, { prepared: true });
+    state.projects[0].envTemplate = '';
+    state.projects[0].setupCommands = [];
+    state.stored = [saved];
+    await initJobs();
+    expect(resumeRestartedSessions()).toBe(1);
+    await vi.waitFor(() => expect(saved.status, saved.error).toBe('idle'));
+    const turn = async (text) => {
+      const count = children.length;
+      sendDevMessage(saved.id, text);
+      await vi.waitFor(() => expect(children).toHaveLength(count + 1));
+      const child = children[count];
+      const prompt = JSON.stringify(child.rpc.filter((m) => m.method === 'turn/start'));
+      finish(child);
+      await vi.waitFor(() => expect(saved.status).toBe('idle'));
+      return prompt;
+    };
+
+    // Up to date: the turn starts as it is.
+    expect(await turn('First')).not.toContain('workspace-note');
+
+    // An errand pushes; syncDevPr records the new head. Origin is unreachable for
+    // the next turn, which is told rather than left on the old tip in silence.
+    const other = path.join(root, 'other');
+    git('clone', '-q', remote, other);
+    commit(other, 'errand fix');
+    git('-C', other, 'push', '-q', 'origin', 'feature');
+    const pushed = git('-C', other, 'rev-parse', 'HEAD');
+    saved.prStatus.headSha = pushed;
+    git('-C', checkout, 'remote', 'set-url', 'origin', path.join(root, 'missing.git'));
+    const told = await turn('Second');
+    expect(told).toContain('workspace-note');
+    expect(told).toContain(pushed.slice(0, 12));
+    expect(git('-C', checkout, 'rev-parse', 'HEAD')).toBe(old);
+
+    // Nothing was used up by the failure: the next turn fetches and fast-forwards.
+    git('-C', checkout, 'remote', 'set-url', 'origin', remote);
+    expect(await turn('Third')).not.toContain('workspace-note');
+    expect(git('-C', checkout, 'rev-parse', 'HEAD')).toBe(pushed);
+    expect(saved.events.some((e) => e.text === 'Fast-forwarded feature to origin/feature.')).toBe(true);
   });
 
   it('refuses deletion when a local reopen wins before checkout admission completes', async () => {

@@ -4,7 +4,6 @@ vi.mock('../lib/db.js', () => ({ loadAppSetting: vi.fn(), saveAppSetting: vi.fn(
 vi.mock('../lib/jobs.js', () => ({
   createDevSession: vi.fn(),
   pullRequestHasOpenSession: vi.fn(() => false),
-  markPullRequestSessionsBehind: vi.fn(),
 }));
 // The spec itself is lib/actions.js's business, tested there; here it only has to
 // reach createDevSession with the runtime on top.
@@ -55,7 +54,6 @@ function sitter({ projects = [project()], pulls = [pr()], stored = {}, ...over }
     projects: () => projects,
     pulls: async () => ({ pulls }),
     hasSession: () => false,
-    markBehind: () => {},
     start,
     load: async () => stored,
     save: async (v) => saved.push(JSON.parse(JSON.stringify(v))),
@@ -202,13 +200,11 @@ describe('PR errands', () => {
     await b.tick();
     expect(start).not.toHaveBeenCalled();
   });
-  it('passes idle sessions, marking them to catch up before a push errand', async () => {
+  it('passes idle sessions: only a busy one holds a pull request back', async () => {
     const hasSession = vi.fn(() => false);
-    const markBehind = vi.fn();
     const { b, start } = sitter({
       pulls: [pr({ number: 7 }), pr({ number: 8, branch: 'feature/fix', checks: 'failure' })],
       hasSession,
-      markBehind,
     });
     await b.tick();
     expect(start.mock.calls.map((c) => [c[0], c[2].number])).toEqual([
@@ -217,8 +213,6 @@ describe('PR errands', () => {
     ]);
     expect(hasSession).toHaveBeenCalledWith('acme/shop', 7, 'feature/cart', { busyOnly: true });
     expect(hasSession).toHaveBeenCalledWith('acme/shop', 8, 'feature/fix', { busyOnly: true });
-    // A review pushes nothing, so only the push errand marks the sessions.
-    expect(markBehind.mock.calls).toEqual([['acme/shop', 8, 'feature/fix']]);
   });
   it('starts the requested action', async () => {
     await startErrand('fix-checks', project(), pr(), { providerId: 3, model: 'opus', effort: 'high' });
