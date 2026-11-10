@@ -425,7 +425,7 @@ describe('the worker tools', () => {
 
     const [res] = await s.send(callTool('close_worker', { id: 'w1' }));
 
-    expect(fetched.mock.calls[0][0]).toBe(`${URL_BASE}/api/agent/sessions/w1/close`);
+    expect(fetched.mock.calls[0][0]).toBe(`${URL_BASE}/api/agent/sessions/w1/close?worker=1`);
     expect(res.result.content[0].text).toMatch(/^Closed worker w1 \[closed\]/);
   });
 
@@ -443,6 +443,15 @@ describe('the worker tools', () => {
     expect(fetched.mock.calls[0][0]).toBe(`${URL_BASE}/api/agent/sessions/s%2F1/close`);
     expect(fetched.mock.calls[0][1].method).toBe('POST');
     expect(res.result.content[0].text).toMatch(/^Closed session s\/1 \[closed\]/);
+  });
+
+  it('close_session prints the bare id and status the route answers for a non-worker', async () => {
+    stubFetch(reply({ body: { session: { id: 's1', status: 'closed' } } }));
+    const s = await boot();
+
+    const [res] = await s.send(callTool('close_session', { id: 's1' }));
+
+    expect(res.result.content[0].text).toBe('Closed session s1 [closed]');
   });
 
   it('advertises deletion as permanent and requiring an explicit user request', async () => {

@@ -56,7 +56,9 @@ blocking the PR it was spawned on, and `list_workers` shows the branch it is act
 `close_session` (the same `POST /api/agent/sessions/<id>/close` as `close_worker`) lets an
 orchestrator close a session of its own project that it did not start, such as the one
 holding a pull request it was asked to review: only sessions its owner could close from
-a client, noted in the closed session's transcript, and with no access beyond closing.
+a client, never an unattended (auto-closing) session or another orchestrator, noted in the
+closed session's transcript, and with no access beyond closing. `close_worker` closes the
+orchestrator's own workers only.
 CI verdict wakes are deduplicated per orchestrator and PR head across workers;
 empty, skipped-only and neutral-only check rollups do not wake it or claim merge readiness.
 

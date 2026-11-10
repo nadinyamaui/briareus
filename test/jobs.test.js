@@ -16714,6 +16714,24 @@ describe('official orchestrator PR actions', () => {
     }
   });
 
+  it('does not point close_session at an unattended blocker, whose close would delete it', async () => {
+    parent.ownerId = 42;
+    const blocker = getJob('pr-cap-0');
+    const original = { ...blocker };
+    Object.assign(blocker, { ownerId: 42, status: 'idle', startedOnPr: 12, autoClose: true });
+    try {
+      const error = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 }).catch(
+        (e) => e,
+      );
+      expect(error.message).toContain('Blocking session');
+      expect(error.message).not.toContain('close_session');
+      expect(error.message).toContain('Ask the user to finish or close this session');
+    } finally {
+      for (const key of Object.keys(blocker)) delete blocker[key];
+      Object.assign(blocker, original);
+    }
+  });
+
   it('does not disclose a blocker when sharing is revoked while reading GitHub', async () => {
     parent.ownerId = 42;
     const blocker = getJob('pr-cap-0');

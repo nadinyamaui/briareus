@@ -244,7 +244,8 @@ Orchestrators can spawn workers in accessible projects, toggle worker QA, and us
 They can close workers with `close_worker` to release resources while keeping
 readable history and the ability to reopen. `close_session` closes any other session
 of the orchestrator's own project that its owner could close from a client, such as
-the one holding a pull request it was asked to review; it grants no other access. Only an explicit user request to delete
+the one holding a pull request it was asked to review, except unattended sessions and other
+orchestrators; it grants no other access. Only an explicit user request to delete
 authorizes `delete_worker({ id: "<worker-id>" })`, which permanently erases a fully
 closed own worker's transcript and session history while preserving branches and PRs.
 The same operation is available as `DELETE /api/agent/sessions/<worker-id>` with

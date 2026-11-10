@@ -17,6 +17,7 @@ let sessions, foreign, closeDevSession, noteSession, ownerManages;
 beforeEach(async () => {
   worker = {
     id: 'w1',
+    kind: 'devchat',
     parentId: 'o1',
     qaLoop: { running: false, sessionId: null },
   };
@@ -250,8 +251,8 @@ describe('scoped worker deletion', () => {
 });
 
 describe('closing sessions', () => {
-  const close = (token = 'o1', id = 's1') =>
-    fetch(`${base}/${id}/close`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+  const close = (token = 'o1', id = 's1', query = '') =>
+    fetch(`${base}/${id}/close${query}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
   beforeEach(() => {
     Object.assign(sessions.o1, { kind: 'devchat', repo: 'Own/Repo', title: 'Weekly work' });
     Object.assign(sessions.o2, { kind: 'devchat', repo: 'other/repo' });
@@ -280,6 +281,29 @@ describe('closing sessions', () => {
     foreign.status = 'closed';
     expect((await close()).status).toBe(200);
     expect(noteSession).not.toHaveBeenCalled();
+  });
+  it('answers only the id and status of a session that is not its worker', async () => {
+    Object.assign(foreign, { title: 'Private title', lastText: 'secret' });
+    expect(await (await close()).json()).toEqual({ session: { id: 's1', status: 'closed' } });
+  });
+  it('notes nothing while a close already under way finishes', async () => {
+    foreign.closePending = true;
+    expect((await close()).status).toBe(200);
+    expect(closeDevSession).toHaveBeenCalledExactlyOnceWith('s1');
+    expect(noteSession).not.toHaveBeenCalled();
+  });
+  it('keeps close_worker to its own workers', async () => {
+    expect((await close('o1', 'w1', '?worker=1')).status).toBe(200);
+    expect((await close('o1', 's1', '?worker=1')).status).toBe(404);
+    expect(closeDevSession).toHaveBeenCalledExactlyOnceWith('w1');
+  });
+  it.each([
+    ['an unattended session, whose close deletes it', { autoClose: true }],
+    ['another orchestrator', { orchestrator: true }],
+  ])('refuses %s', async (_label, fields) => {
+    Object.assign(foreign, fields);
+    expect((await close()).status).toBe(404);
+    expect(closeDevSession).not.toHaveBeenCalled();
   });
   it.each([
     ['invalid', 's1', 401],
@@ -312,6 +336,7 @@ describe('closing sessions', () => {
     const res = await close();
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'database drop failed' });
+    expect(noteSession).not.toHaveBeenCalled();
   });
 });
 
