@@ -429,6 +429,22 @@ describe('the worker tools', () => {
     expect(res.result.content[0].text).toMatch(/^Closed worker w1 \[closed\]/);
   });
 
+  it('close_session posts the same close for a session that is not a worker', async () => {
+    const fetched = stubFetch(reply({ body: { session: worker({ id: 's/1', status: 'closed' }) } }));
+    const s = await boot();
+
+    const [listed] = await s.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+    const tool = listed.result.tools.find((t) => t.name === 'close_session');
+    expect(tool.description).toMatch(/not one of your workers/);
+    expect(tool.inputSchema.required).toEqual(['id']);
+
+    const [res] = await s.send(callTool('close_session', { id: 's/1' }));
+
+    expect(fetched.mock.calls[0][0]).toBe(`${URL_BASE}/api/agent/sessions/s%2F1/close`);
+    expect(fetched.mock.calls[0][1].method).toBe('POST');
+    expect(res.result.content[0].text).toMatch(/^Closed session s\/1 \[closed\]/);
+  });
+
   it('advertises deletion as permanent and requiring an explicit user request', async () => {
     const s = await boot();
     const [res] = await s.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });

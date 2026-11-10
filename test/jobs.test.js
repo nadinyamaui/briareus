@@ -16703,6 +16703,8 @@ describe('official orchestrator PR actions', () => {
           }),
         );
         expect(error.message).not.toContain('private');
+        // The blocker is in the orchestrator's own project, where it may close it.
+        expect(error.message).toContain('Close it with close_session');
       } else expect(error.message).toBe(generic);
       expect(workerSessionsFor(parent)).toHaveLength(before - (parentId === parent.id ? 0 : 1));
       expect(createCodeReview.mock.calls).toHaveLength(reviewsBefore);

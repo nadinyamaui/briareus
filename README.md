@@ -242,7 +242,9 @@ controlling whether the opening sheet is followed by execution.
 Orchestrators can spawn workers in accessible projects, toggle worker QA, and use
 `start_pr_action` with `review` or `solve-conflicts` on an existing PR in their own project.
 They can close workers with `close_worker` to release resources while keeping
-readable history and the ability to reopen. Only an explicit user request to delete
+readable history and the ability to reopen. `close_session` closes any other session
+of the orchestrator's own project that its owner could close from a client, such as
+the one holding a pull request it was asked to review; it grants no other access. Only an explicit user request to delete
 authorizes `delete_worker({ id: "<worker-id>" })`, which permanently erases a fully
 closed own worker's transcript and session history while preserving branches and PRs.
 The same operation is available as `DELETE /api/agent/sessions/<worker-id>` with

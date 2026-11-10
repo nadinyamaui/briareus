@@ -53,6 +53,10 @@ or holding its PR, so review and solve-conflicts on the lower PR stay available.
 Whether a session mid-turn holds a branch or its PR is read from the branch it has
 checked out at that moment, so a worker that moves to a branch of its own stops
 blocking the PR it was spawned on, and `list_workers` shows the branch it is actually on.
+`close_session` (the same `POST /api/agent/sessions/<id>/close` as `close_worker`) lets an
+orchestrator close a session of its own project that it did not start, such as the one
+holding a pull request it was asked to review: only sessions its owner could close from
+a client, noted in the closed session's transcript, and with no access beyond closing.
 CI verdict wakes are deduplicated per orchestrator and PR head across workers;
 empty, skipped-only and neutral-only check rollups do not wake it or claim merge readiness.
 
