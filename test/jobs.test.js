@@ -16703,9 +16703,29 @@ describe('official orchestrator PR actions', () => {
           }),
         );
         expect(error.message).not.toContain('private');
+        // The blocker is in the orchestrator's own project, where it may close it.
+        expect(error.message).toContain('Close it with close_session');
       } else expect(error.message).toBe(generic);
       expect(workerSessionsFor(parent)).toHaveLength(before - (parentId === parent.id ? 0 : 1));
       expect(createCodeReview.mock.calls).toHaveLength(reviewsBefore);
+    } finally {
+      for (const key of Object.keys(blocker)) delete blocker[key];
+      Object.assign(blocker, original);
+    }
+  });
+
+  it('does not point close_session at an unattended blocker, whose close would delete it', async () => {
+    parent.ownerId = 42;
+    const blocker = getJob('pr-cap-0');
+    const original = { ...blocker };
+    Object.assign(blocker, { ownerId: 42, status: 'idle', startedOnPr: 12, autoClose: true });
+    try {
+      const error = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 }).catch(
+        (e) => e,
+      );
+      expect(error.message).toContain('Blocking session');
+      expect(error.message).not.toContain('close_session');
+      expect(error.message).toContain('Ask the user to finish or close this session');
     } finally {
       for (const key of Object.keys(blocker)) delete blocker[key];
       Object.assign(blocker, original);
