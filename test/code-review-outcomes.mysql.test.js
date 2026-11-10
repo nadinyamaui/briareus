@@ -23,17 +23,22 @@ import {
   addCodeReviewFinding,
   beginCodeReviewStages,
   claimCodeReviewRound,
-  clearCodeReviewStatusFailure,
   completeCodeReview,
   createCodeReview,
   dbHealthy,
+  dropCodeReviewStatusDebt,
   failCodeReview,
   failRunningCodeReviewStages,
   getCodeReviewByJob,
+  getCodeReviewDecision,
   getCodeReviewOutcome,
   getProjectRow,
+  listCodeReviewDecisions,
+  listCodeReviewOutcomesDue,
   listCodeReviewStages,
   listFailedCodeReviewStatuses,
+  markCodeReviewOutcomeStale,
+  markCodeReviewStatusSending,
   listPullCodeReviews,
   readCodeReviewOutcomeState,
   recordCodeReviewStatusFailed,
@@ -46,12 +51,15 @@ import {
   updateCodeReviewFinding,
 } from '../lib/db.js';
 import {
+  noteReviewedRevision,
   provisionalReviewOutcome,
+  publishReviewStatus,
   readReviewOutcome,
   refreshReviewOutcome,
   retryReviewStatuses,
   reviewStatusFailures,
 } from '../lib/review-enforcement.js';
+import { verdictDecision } from '../lib/review-history.js';
 import { requiredReviewStages } from '../lib/review-outcome.js';
 import { up, down } from '../migrations/2026_11_10_140000_add_code_review_outcomes.js';
 
@@ -62,7 +70,19 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
   const off = { repo, reviewRoundLimit: 3 };
   const on = { ...off, enforceReviewOutcome: true };
   const cfg = { githubToken: 'server-token' };
-  let bootstrap, pool, requests, answers;
+  let bootstrap, pool, requests, answers, carried;
+  // The status a commit carries under the review's context, as GitHub would answer.
+  const onGithub = (letter) => carried.get(sha(letter))?.[0]?.state ?? null;
+  // A finding's verdict written as the routes write it: the finding and the pull
+  // request's decision on its claim in one transaction (lib/code-reviews.js).
+  const rule = (review, prNumber, findingId, changes, who = { source: 'review', decidedBy: 'session:x' }) =>
+    updateCodeReviewFinding(review.id, findingId, changes, {
+      repo,
+      prNumber,
+      outcomeStale: who.source === 'api',
+      build: (finding, previous) =>
+        verdictDecision({ headSha: review.head }, finding, previous, changes, who),
+    });
   const columns = async (table) => {
     const [rows] = await pool.query(
       'SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION',
@@ -120,15 +140,25 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
     expect(await dbHealthy()).toBe(true);
     pool = mysql.createPool({ ...config, database, connectionLimit: 3 });
     requests = [];
+    // What GitHub answers to status writes, in order; then every write is accepted.
     answers = [];
+    // What each commit carries on GitHub, newest first, as its read answers.
+    carried = new Map();
+    const json = (status, body) =>
+      new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url, init) => {
-        requests.push({ url, method: init.method, body: init.body ? JSON.parse(init.body) : null });
-        return (
-          answers.shift() ||
-          new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } })
-        );
+        const body = init.body ? JSON.parse(init.body) : null;
+        requests.push({ url, method: init.method, body });
+        const read = /\/commits\/([0-9a-f]+)\/statuses/.exec(url)?.[1];
+        if (init.method === 'GET') return json(200, read ? carried.get(read) || [] : {});
+        const next = answers.shift();
+        if (typeof next === 'function') return next(url, body);
+        if (next) return next;
+        const commit = url.split('/').pop();
+        carried.set(commit, [body, ...(carried.get(commit) || [])]);
+        return json(201, {});
       }),
     );
   }, 120_000);
@@ -181,15 +211,21 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
       'published_sha',
       'published_state',
       'published_description',
+      'published_confirmed',
       'published_at',
       'publish_error',
       'publish_error_status',
       'publish_attempts',
       'publish_failed_at',
       'publish_retry_at',
+      'publish_owed_at',
+      'recompute_at',
       'created_at',
       'updated_at',
     ]);
+    // The earlier migration's table gains what a verdict was recorded with.
+    const decisions = await columns('code_review_decisions');
+    expect(decisions[decisions.indexOf('rationale') + 1]).toBe('verification');
   });
 
   it('stores the project switch, off for a project that never set it', async () => {
@@ -616,7 +652,8 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
     expect((await listFailedCodeReviewStatuses()).map((r) => r.prNumber)).toEqual([51]);
     // Not due yet; then due and refused again, which counts and backs off further.
     const due = Date.parse(row.publishRetryAt);
-    expect(await listFailedCodeReviewStatuses({ dueBy: due - 1 })).toEqual([]);
+    expect(await listCodeReviewOutcomesDue({ now: due - 1 })).toEqual([]);
+    expect((await listCodeReviewOutcomesDue({ now: due })).map((r) => r.prNumber)).toEqual([51]);
     expect(await retryReviewStatuses({ getProject: () => on, cfg, now: () => due - 1 })).toEqual([]);
     answers.push(refused());
     const again = await retryReviewStatuses({ getProject: () => on, cfg, now: () => due });
@@ -635,41 +672,502 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
       publishAttempts: 0,
       publishFailedAt: null,
       publishRetryAt: null,
+      publishOwedAt: null,
+      publishedConfirmed: true,
     });
     expect(await listFailedCodeReviewStatuses()).toEqual([]);
+    expect(await listCodeReviewOutcomesDue({ now: due + 86_400_000 })).toEqual([]);
     expect((await readReviewOutcome(on, 51)).status.published).toBe(true);
   });
 
-  it('records a status write and its failure as the row’s own columns', async () => {
+  it('records a status write, its failure and what is owed as the row’s own columns', async () => {
     await refresh(off, 52);
+    // A project that publishes nothing owes nothing.
+    expect(await getCodeReviewOutcome(repo, 52)).toMatchObject({
+      publishOwedAt: null,
+      recomputeAt: null,
+      publishedConfirmed: false,
+    });
     await recordCodeReviewStatusFailed(repo, 52, { error: 'x'.repeat(3000), status: 502, retryAt: 5_000 });
     const failed = await getCodeReviewOutcome(repo, 52);
     expect(failed.publishError).toHaveLength(2000);
     expect(failed).toMatchObject({ publishErrorStatus: 502, publishAttempts: 1 });
     expect(failed.publishRetryAt).toBe(new Date(5_000).toISOString());
-    // The longest-waiting first.
+    // A failure that is to be tried again is a debt, whoever recorded it.
+    expect(failed.publishOwedAt).toBeTruthy();
+    // The longest-failing first, and for the sweep only what is due.
     await refresh(off, 53);
     await recordCodeReviewStatusFailed(repo, 53, { error: 'later', retryAt: 9_000 });
     expect((await listFailedCodeReviewStatuses()).map((r) => r.prNumber)).toEqual([52, 53]);
-    expect((await listFailedCodeReviewStatuses({ dueBy: 6_000 })).map((r) => r.prNumber)).toEqual([52]);
     expect((await listFailedCodeReviewStatuses({ limit: 1 })).map((r) => r.prNumber)).toEqual([52]);
-    await clearCodeReviewStatusFailure(repo, 52);
-    await recordCodeReviewStatusPublished(repo, 53, {
-      sha: sha('c'),
-      state: 'pending',
-      description: 'Waiting for a review of ccccccc',
+    const due = async (now) => (await listCodeReviewOutcomesDue({ now })).map((r) => r.prNumber);
+    expect(await due(4_999)).toEqual([]);
+    expect(await due(6_000)).toEqual([52]);
+    expect(await due(9_000)).toEqual([52, 53]);
+    expect((await listCodeReviewOutcomesDue({ now: 9_000, limit: 1 })).map((r) => r.prNumber)).toEqual([52]);
+    // A refusal that asking again cannot change: the failure stays, the debt goes.
+    await recordCodeReviewStatusFailed(repo, 52, { error: 'No commit found', status: 422, retryAt: null });
+    expect(await getCodeReviewOutcome(repo, 52)).toMatchObject({
+      publishAttempts: 2,
+      publishErrorStatus: 422,
+      publishRetryAt: null,
+      publishOwedAt: null,
     });
+    expect(await due(9_000)).toEqual([53]);
+    expect((await listFailedCodeReviewStatuses()).map((r) => r.prNumber)).toEqual([53, 52]);
+    // An outcome owed a recomputation is due at once, and counts once.
+    await markCodeReviewOutcomeStale(repo, 52);
+    const marked = (await getCodeReviewOutcome(repo, 52)).recomputeAt;
+    expect(marked).toBeTruthy();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await markCodeReviewOutcomeStale(repo, 52);
+    expect((await getCodeReviewOutcome(repo, 52)).recomputeAt).toBe(marked);
+    expect(await due(0)).toEqual([52]);
+    // Nothing is marked for a pull request that has no outcome to be out of date.
+    await markCodeReviewOutcomeStale(repo, 5200);
+    expect(await getCodeReviewOutcome(repo, 5200)).toBeNull();
+    // Computing it again settles that, in the same write.
+    await refresh(off, 52);
+    expect((await getCodeReviewOutcome(repo, 52)).recomputeAt).toBeNull();
+    // Dropped: neither listed nor due any more.
+    await markCodeReviewOutcomeStale(repo, 53);
+    await dropCodeReviewStatusDebt(repo, 53);
+    await dropCodeReviewStatusDebt(repo, 52);
     expect(await listFailedCodeReviewStatuses()).toEqual([]);
-    expect(await getCodeReviewOutcome(repo, 53)).toMatchObject({
+    expect(await due(Date.now())).toEqual([]);
+    // What GitHub took is confirmed; a write under way is not, until its answer.
+    const status = { sha: sha('c'), state: 'pending', description: 'Waiting for a review of ccccccc' };
+    await recordCodeReviewStatusPublished(repo, 53, status);
+    const taken = await getCodeReviewOutcome(repo, 53);
+    expect(taken).toMatchObject({
       publishedSha: sha('c'),
       publishedState: 'pending',
       publishedDescription: 'Waiting for a review of ccccccc',
+      publishedConfirmed: true,
       publishError: null,
     });
-    expect((await getCodeReviewOutcome(repo, 53)).publishedAt).toBeTruthy();
+    expect(taken.publishedAt).toBeTruthy();
+    await markCodeReviewStatusSending(repo, 53);
+    expect(await getCodeReviewOutcome(repo, 53)).toMatchObject({
+      publishedState: 'pending',
+      publishedConfirmed: false,
+    });
+    // Confirmed again by a read of the commit: the time it was written stays.
+    await recordCodeReviewStatusPublished(repo, 53, status, { posted: false });
+    expect(await getCodeReviewOutcome(repo, 53)).toMatchObject({
+      publishedConfirmed: true,
+      publishedAt: taken.publishedAt,
+    });
+  });
+
+  it('keeps a verdict’s verification with the decision, through a rerun and into the next round', async () => {
+    requests.length = 0;
+    const decision = async () =>
+      (await listCodeReviewDecisions(repo, 60)).find((d) => d.findingRef === 'ref-x');
+    // Review one finds a problem, and its verification step dismisses it on a likelihood.
+    const first = await started(60, 'a');
+    await refresh(on, 60, { reviewId: first.id });
+    const found = await addCodeReviewFinding(first.id, {
+      severity: 'high',
+      title: 'Lost update',
+      findingRef: 'ref-x',
+      commentId: 6001,
+      threadId: 'PRRT_x',
+    });
+    await rule(first, 60, found.id, {
+      shouldFix: 'dismiss',
+      verification: 'plausible',
+      comments: 'Probably guarded upstream.',
+    });
+    expect(await decision()).toMatchObject({
+      verdict: 'dismiss',
+      verification: 'plausible',
+      rationale: 'Probably guarded upstream.',
+      source: 'review',
+      findingId: found.id,
+    });
+    for (const stage of STAGES)
+      await setCodeReviewStage(first.jobId, stage, sha('a'), { status: 'completed' });
+    await completeCodeReview(first.jobId);
+    expect((await refresh(on, 60)).outcome.outcome).toBe('incomplete');
+    expect(onGithub('a')).toBe('error');
+
+    // `/review` again in the same session, on the same head: the review starts over,
+    // its findings are deleted, and this time it raises nothing.
+    await restartCodeReview(first.jobId, sha('a'));
+    await beginCodeReviewStages(first.jobId, { headSha: sha('a'), baseRef: 'main', stages: STAGES });
+    await refresh(on, 60, { reviewId: first.id });
+    for (const stage of STAGES)
+      await setCodeReviewStage(first.jobId, stage, sha('a'), { status: 'completed' });
+    await completeCodeReview(first.jobId);
+    expect(await listPullCodeReviews(repo, 60, 5)).toMatchObject([{ status: 'completed', findings: [] }]);
+    // The decision outlived the finding, with what it is worth: still not proven.
+    expect(await decision()).toMatchObject({ verdict: 'dismiss', verification: 'plausible' });
+    const rerun = await refresh(on, 60);
+    expect(rerun.outcome.outcome).toBe('incomplete');
+    expect(rerun.outcome.reasons).toEqual([
+      expect.objectContaining({
+        code: 'earlier_finding_unverified',
+        findingRef: 'ref-x',
+        threadId: 'PRRT_x',
+        verdict: 'dismiss',
+        missing: ['verification'],
+      }),
+    ]);
+    expect(onGithub('a')).toBe('error');
+
+    // The next round, by another session on the next head, finds the claim again and
+    // registers it as suppressed against that dismissal.
+    const second = await started(60, 'b');
+    await refresh(on, 60, { reviewId: second.id, current: { headSha: sha('b'), baseRef: 'main' } });
+    const repeated = await addCodeReviewFinding(second.id, {
+      severity: 'high',
+      title: 'Lost update',
+      findingRef: 'ref-x',
+      reconciliation: 'suppressed',
+      priorThreadId: 'PRRT_x',
+      priorDisposition: 'dismissed',
+      shouldFix: 'dismiss',
+      comments: 'Not repeated: already dismissed. Probably guarded upstream.',
+    });
+    for (const stage of STAGES)
+      await setCodeReviewStage(second.jobId, stage, sha('b'), { status: 'completed' });
+    await completeCodeReview(second.jobId);
+    const next = await refresh(on, 60);
+    expect(next.outcome).toMatchObject({ outcome: 'incomplete', headSha: sha('b'), stale: false });
+    expect(next.outcome.reasons).toEqual([
+      expect.objectContaining({
+        code: 'prior_decision_unverified',
+        findingId: repeated.id,
+        findingRef: 'ref-x',
+      }),
+    ]);
+    expect(onGithub('b')).toBe('error');
+    // Never, on either head, did GitHub get a `success`.
+    expect(requests.filter((r) => r.method === 'POST').map((r) => r.body.state)).not.toContain('success');
+    expect((await readReviewOutcome(on, 60)).status).toMatchObject({ state: 'error', published: true });
+
+    // A person looks into it and records the proof on the duplicate. Its verdict was
+    // another finding's, so that rules on the claim again, under their name.
+    await rule(
+      second,
+      60,
+      repeated.id,
+      { verification: 'confirmed' },
+      { source: 'api', decidedBy: 'user:4' },
+    );
+    expect(await decision()).toMatchObject({
+      verdict: 'dismiss',
+      verification: 'confirmed',
+      source: 'api',
+      decidedBy: 'user:4',
+      findingId: repeated.id,
+    });
+    // Marked out of date in that write, so the recomputation is owed until it lands.
+    expect((await getCodeReviewOutcome(repo, 60)).recomputeAt).toBeTruthy();
+    expect((await listCodeReviewOutcomesDue({ now: 0 })).map((r) => r.prNumber)).toEqual([60]);
+    const proven = await refresh(on, 60);
+    expect(proven.outcome).toMatchObject({ outcome: 'passed', reasons: [] });
+    expect(onGithub('b')).toBe('success');
+    expect((await getCodeReviewOutcome(repo, 60)).recomputeAt).toBeNull();
+  });
+
+  it('brings a decision’s verification up to date only through the finding that gave it', async () => {
+    const review = await reviewed(61, 'a');
+    const decision = async () =>
+      (await listCodeReviewDecisions(repo, 61)).find((d) => d.findingRef === 'ref-y');
+    const found = await addCodeReviewFinding(review.id, {
+      severity: 'low',
+      title: 'Naming',
+      findingRef: 'ref-y',
+      threadId: 'PRRT_y',
+      commentId: 6101,
+    });
+    // Optional, with nothing recorded about how that was established.
+    await rule(review, 61, found.id, { shouldFix: 'optional', comments: 'Style only.' });
+    expect(await decision()).toMatchObject({ verdict: 'optional', verification: null });
+    expect((await refresh(off, 61)).outcome.reasons.map((r) => r.code)).toEqual(['finding_unverified']);
+    // The verification is recorded afterwards, on the same finding: the decision follows.
+    await rule(review, 61, found.id, { verification: 'plausible' });
+    expect(await decision()).toMatchObject({
+      verdict: 'optional',
+      verification: 'plausible',
+      findingId: found.id,
+    });
+    expect((await refresh(off, 61)).outcome.outcome).toBe('passed');
+    // A person rules on the decision itself, as the API does where no finding is left.
+    const row = await decision();
+    expect(await getCodeReviewDecision(repo, 61, row.id)).toMatchObject({ id: row.id, anchor: 'PRRT_y' });
+    expect(await getCodeReviewDecision(repo, 62, row.id)).toBeNull();
+    await saveCodeReviewDecisions(
+      repo,
+      61,
+      [
+        {
+          anchor: row.anchor,
+          findingRef: row.findingRef,
+          verdict: 'dismiss',
+          verification: null,
+          rationale: 'Not worth changing',
+          source: 'api',
+          decidedBy: 'user:4',
+          decidedAt: Date.now(),
+        },
+      ],
+      { outcomeStale: true },
+    );
+    expect(await decision()).toMatchObject({ verdict: 'dismiss', verification: null, findingId: null });
+    expect((await getCodeReviewOutcome(repo, 61)).recomputeAt).toBeTruthy();
+    // The claim is that person's now. The old finding still says optional and verified,
+    // and it no longer speaks for the decision: neither its note nor its verification.
+    await rule(review, 61, found.id, { verification: 'confirmed', comments: 'Style, confirmed.' });
+    expect(await decision()).toMatchObject({
+      verdict: 'dismiss',
+      verification: null,
+      rationale: 'Not worth changing',
+    });
+    const outcome = (await refresh(off, 61)).outcome;
+    expect(outcome.outcome).toBe('incomplete');
+    expect(outcome.reasons).toEqual([
+      expect.objectContaining({
+        code: 'earlier_finding_unverified',
+        verdict: 'dismiss',
+        findingRef: 'ref-y',
+      }),
+    ]);
+    // A verdict read from GitHub's history is stored with no verification, and one that
+    // carries no verdict stores none whatever it says.
+    await saveCodeReviewDecisions(repo, 61, [
+      {
+        anchor: 'PRRT_old',
+        threadId: 'PRRT_old',
+        findingRef: 'ref-old',
+        verdict: 'dismiss',
+        rationale: 'Handled in the caller.',
+        source: 'github',
+        decidedBy: 'octo-reviewer',
+        decidedAt: Date.UTC(2026, 9, 1),
+      },
+      { anchor: 'PRRT_open', threadId: 'PRRT_open', findingRef: 'ref-open', verification: 'confirmed' },
+    ]);
+    const stored = await listCodeReviewDecisions(repo, 61);
+    expect(stored.find((d) => d.findingRef === 'ref-old')).toMatchObject({
+      source: 'github',
+      verification: null,
+    });
+    expect(stored.find((d) => d.findingRef === 'ref-open')).toMatchObject({
+      verdict: null,
+      verification: null,
+    });
+    expect((await refresh(off, 61)).outcome.reasons.map((r) => r.findingRef)).toEqual([
+      'ref-y',
+      'ref-old',
+      'ref-open',
+    ]);
+  });
+
+  it('posts again after a write whose answer was lost, instead of trusting the record', async () => {
+    requests.length = 0;
+    const review = await reviewed(54, 'a');
+    const fix = await addCodeReviewFinding(review.id, verdict({ shouldFix: 'fix' }));
+    await refresh(on, 54, { reviewId: review.id });
+    expect(onGithub('a')).toBe('failure');
+    // The fix is waived. GitHub takes the `success` and the answer never arrives, on
+    // any of the attempts.
+    await updateCodeReviewFinding(review.id, fix.id, { shouldFix: 'optional' });
+    const lost = (url, body) => {
+      carried.set(url.split('/').pop(), [body, ...(carried.get(url.split('/').pop()) || [])]);
+      throw new TypeError('fetch failed');
+    };
+    answers.push(lost, lost, lost);
+    expect((await refresh(on, 54)).published).toEqual({ published: false, error: 'fetch failed' });
+    expect(onGithub('a')).toBe('success');
+    expect(await getCodeReviewOutcome(repo, 54)).toMatchObject({
+      statusState: 'success',
+      publishedState: 'failure',
+      publishedConfirmed: false,
+    });
+    // Back to a required fix before any retry: what is owed equals what was last
+    // confirmed, and GitHub shows `success`.
+    await updateCodeReviewFinding(review.id, fix.id, { shouldFix: 'fix' });
+    const back = await refresh(on, 54);
+    expect(back.outcome.outcome).toBe('changes_required');
+    expect(back.published).toEqual({ published: true });
+    expect(onGithub('a')).toBe('failure');
+    expect(await getCodeReviewOutcome(repo, 54)).toMatchObject({
+      publishedState: 'failure',
+      publishedConfirmed: true,
+      publishFailedAt: null,
+      publishOwedAt: null,
+    });
+    expect((await readReviewOutcome(on, 54)).status).toMatchObject({ state: 'failure', published: true });
+  });
+
+  it('finds an outcome that was stored and never posted, and one whose recomputation is owed', async () => {
+    requests.length = 0;
+    const review = await reviewed(55, 'a');
+    const fix = await addCodeReviewFinding(review.id, verdict({ shouldFix: 'fix', findingRef: 'ref-55' }));
+    await refresh(on, 55, { reviewId: review.id });
+    expect(onGithub('a')).toBe('failure');
+    // The outcome changes and is committed, and the server stops before it posts
+    // anything: this is that transaction, with no publication after it.
+    await updateCodeReviewFinding(review.id, fix.id, { shouldFix: 'optional' });
+    await refreshCodeReviewOutcome(repo, 55, {}, () => ({
+      outcome: 'passed',
+      stale: false,
+      reasons: [],
+      headSha: sha('a'),
+      baseRef: 'main',
+      statusState: 'success',
+      statusDescription: 'Review passed at aaaaaaa: 1 optional, nothing to fix',
+      owed: true,
+    }));
+    const stored = await getCodeReviewOutcome(repo, 55);
+    expect(stored).toMatchObject({
+      statusState: 'success',
+      publishedState: 'failure',
+      publishFailedAt: null,
+    });
+    expect(stored.publishOwedAt).toBeTruthy();
+    expect(onGithub('a')).toBe('failure');
+    // No failure was ever recorded; the debt is what the sweep, and a boot, find.
+    expect(await listFailedCodeReviewStatuses()).toEqual([]);
+    const swept = await retryReviewStatuses({ getProject: () => on, cfg });
+    expect(swept).toEqual([{ repo, prNumber: 55, published: true }]);
+    expect(onGithub('a')).toBe('success');
+    expect(await getCodeReviewOutcome(repo, 55)).toMatchObject({
+      publishedState: 'success',
+      publishOwedAt: null,
+    });
+    expect(await retryReviewStatuses({ getProject: () => on, cfg })).toEqual([]);
+
+    // A client requires the fix again and the server stops before computing anything:
+    // the write itself left the outcome marked as out of date.
+    await rule(review, 55, fix.id, { shouldFix: 'fix' }, { source: 'api', decidedBy: 'user:4' });
+    expect(await getCodeReviewOutcome(repo, 55)).toMatchObject({
+      outcome: 'passed',
+      publishedState: 'success',
+    });
+    expect((await getCodeReviewOutcome(repo, 55)).recomputeAt).toBeTruthy();
+    expect(await retryReviewStatuses({ getProject: () => on, cfg })).toEqual([
+      { repo, prNumber: 55, published: true },
+    ]);
+    expect(await getCodeReviewOutcome(repo, 55)).toMatchObject({
+      outcome: 'changes_required',
+      publishedState: 'failure',
+      recomputeAt: null,
+    });
+    expect(onGithub('a')).toBe('failure');
+    // A project that is gone, and a failing status of a closed pull request, are
+    // dropped rather than kept first in line.
+    answers.push(new Response('{}', { status: 403, headers: { 'content-type': 'application/json' } }));
+    await rule(review, 55, fix.id, { shouldFix: 'optional' }, { source: 'api', decidedBy: 'user:4' });
+    expect((await refresh(on, 55)).published.published).toBe(false);
+    const due = Date.parse((await getCodeReviewOutcome(repo, 55)).publishRetryAt);
+    expect(
+      await retryReviewStatuses({ getProject: () => on, cfg, now: () => due, isOpen: async () => false }),
+    ).toEqual([{ repo, prNumber: 55, published: false, skipped: 'closed' }]);
+    expect(await getCodeReviewOutcome(repo, 55)).toMatchObject({
+      publishFailedAt: null,
+      publishOwedAt: null,
+    });
+    await markCodeReviewOutcomeStale(repo, 55);
+    expect(await retryReviewStatuses({ getProject: () => null, cfg })).toEqual([
+      { repo, prNumber: 55, published: false, skipped: 'no_project' },
+    ]);
+    expect(await listCodeReviewOutcomesDue({ now: Date.now() + 86_400_000 })).toEqual([]);
+  });
+
+  it('reads a status as published when its description had to be cut inside an astral character', async () => {
+    const review = await reviewed(56, 'a');
+    // No verdict, so the description quotes the title, and the cut falls in the middle
+    // of a pair: half of one is stored as U+FFFD and never equals what was sent again.
+    for (const pad of [0, 1]) {
+      await pool.query('DELETE FROM `code_review_findings` WHERE `code_review_id` = ?', [review.id]);
+      await addCodeReviewFinding(review.id, {
+        severity: 'low',
+        title: `${'x'.repeat(pad)}${'🙂'.repeat(120)}`,
+        findingRef: `ref-56-${pad}`,
+      });
+      const { outcome, published } = await refresh(on, 56, { reviewId: review.id });
+      expect(published.published).toBe(true);
+      const row = await getCodeReviewOutcome(repo, 56);
+      expect(row.statusDescription.isWellFormed()).toBe(true);
+      expect(row.statusDescription).not.toContain('\ufffd');
+      expect(row.statusDescription).toBe(outcome.status.description);
+      // What was sent is what was stored, to the character.
+      expect(requests.at(-1).body.description).toBe(row.statusDescription);
+      expect(row.publishedDescription).toBe(row.statusDescription);
+      expect((await readReviewOutcome(on, 56)).status.published).toBe(true);
+      expect(await publishReviewStatus(on, 56, { cfg })).toEqual({ published: true, skipped: 'unchanged' });
+    }
+  });
+
+  it('turns a passed outcome stale when the pull request is seen retargeted', async () => {
+    const review = await reviewed(57, 'a');
+    await refresh(on, 57, { reviewId: review.id });
+    expect(onGithub('a')).toBe('success');
+    expect(await noteReviewedRevision(on, 57, { headSha: sha('a'), baseRef: 'main' }, { cfg })).toBeNull();
+    const seen = await noteReviewedRevision(on, 57, { headSha: sha('a'), baseRef: 'release' }, { cfg });
+    await seen.published;
+    expect(seen.outcome).toMatchObject({ outcome: 'pending', stale: true, baseRef: 'release' });
+    expect(await getCodeReviewOutcome(repo, 57)).toMatchObject({
+      outcome: 'pending',
+      stale: true,
+      baseRef: 'release',
+      publishedState: 'pending',
+    });
+    // On the very commit that carried the `success`.
+    expect(onGithub('a')).toBe('pending');
+    expect(await noteReviewedRevision(on, 5700, { headSha: sha('a'), baseRef: 'main' }, { cfg })).toBeNull();
+    expect(await getCodeReviewOutcome(repo, 5700)).toBeNull();
+  });
+
+  it('computes the outcome from the review that was named, also when its row has no pull request yet', async () => {
+    // An earlier review of the pull request passed.
+    const earlier = await reviewed(58, 'a');
+    expect((await refresh(off, 58, { reviewId: earlier.id })).outcome.outcome).toBe('passed');
+    // A session that did not know its pull request when its review row was created
+    // reviews the same head now. Its discovery names its review.
+    await createCodeReview({ jobId: 'job-58-late', repo, prNumber: null, branch: 'feature' });
+    await restartCodeReview('job-58-late', sha('a'));
+    const [row] = await pool.query('SELECT `id`, `pr_number` FROM `code_reviews` WHERE `job_id` = ?', [
+      'job-58-late',
+    ]);
+    expect(row[0].pr_number).toBeNull();
+    const late = Number(row[0].id);
+    const named = await refresh(off, 58, { reviewId: late });
+    // That review governs: running, so pending. Not the earlier review's pass.
+    expect(named.outcome).toMatchObject({ outcome: 'pending', reviewId: late, execution: 'running' });
+    expect(named.outcome.reasons.map((r) => r.code)).toEqual(['review_running']);
+    expect((await getCodeReviewOutcome(repo, 58)).codeReviewId).toBe(late);
+    expect((await readReviewOutcome(off, 58)).reviewId).toBe(late);
+    // Another repository's review of that id is nobody's here.
+    expect((await readCodeReviewOutcomeState('acme/other', 58, { reviewId: late })).review).toBeNull();
+    // Discovery records the pull request it verified on a row that has none, and
+    // leaves one that has it alone.
+    await beginCodeReviewStages('job-58-late', {
+      headSha: sha('a'),
+      baseRef: 'main',
+      stages: STAGES,
+      prNumber: 58,
+    });
+    expect((await getCodeReviewByJob('job-58-late')).prNumber).toBe(58);
+    await beginCodeReviewStages(earlier.jobId, {
+      headSha: sha('a'),
+      baseRef: 'main',
+      stages: STAGES,
+      prNumber: 9999,
+    });
+    expect((await getCodeReviewByJob(earlier.jobId)).prNumber).toBe(58);
+    expect((await listPullCodeReviews(repo, 58, 5)).map((r) => r.id).sort()).toEqual(
+      [earlier.id, late].sort(),
+    );
   });
 
   it('rolls back to the earlier schema and comes back up with nothing passed', async () => {
+    // A review whose findings some of the decisions below were given by.
+    const fixture = await reviewed(59, 'a');
     const reviews = await columns('code_reviews');
     const projects = await columns('projects');
     await down({ context: pool });
@@ -677,6 +1175,32 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
     expect(await tables()).toEqual([]);
     expect(await columns('code_reviews')).not.toContain('base_ref');
     expect(await columns('projects')).not.toContain('enforce_review_outcome');
+    expect(await columns('code_review_decisions')).not.toContain('verification');
+    // Decisions as the earlier schema holds them, before the verification was kept:
+    const finding = async (fields) =>
+      (await addCodeReviewFinding(fixture.id, { severity: 'low', title: 'Kept', ...fields })).id;
+    const proven = await finding({ findingRef: 'm-proven', shouldFix: 'dismiss', verification: 'confirmed' });
+    const likely = await finding({
+      findingRef: 'm-likely',
+      shouldFix: 'optional',
+      verification: 'plausible',
+    });
+    const changed = await finding({ findingRef: 'm-changed', shouldFix: 'fix', verification: 'confirmed' });
+    const other = await finding({ findingRef: 'm-other', shouldFix: 'dismiss', verification: 'confirmed' });
+    const decided = (anchor, findingRef, findingId, verdict, source, prNumber = 59) =>
+      pool.query(
+        'INSERT INTO `code_review_decisions` (`repo`, `pr_number`, `anchor`, `finding_ref`, `finding_id`, `verdict`, `rationale`, `source`, `decided_at`, `created_at`, `updated_at`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1)',
+        [repo, prNumber, anchor, findingRef, findingId, verdict, 'Because', source],
+      );
+    await decided('M1', 'm-proven', proven, 'dismiss', 'review');
+    await decided('M2', 'm-likely', likely, 'optional', 'api');
+    // The finding says something else by now, or is another claim's, or another pull
+    // request's, or gone; and a verdict read from GitHub never had one.
+    await decided('M3', 'm-changed', changed, 'dismiss', 'review');
+    await decided('M4', 'm-elsewhere', other, 'dismiss', 'review');
+    await decided('M5', 'm-other', other, 'dismiss', 'review', 5900);
+    await decided('M6', 'm-gone', 4_000_000, 'dismiss', 'review');
+    await decided('M7', 'm-history', null, 'dismiss', 'github');
     // The reviews themselves are untouched by the rollback.
     const [kept] = await pool.query('SELECT COUNT(*) AS n FROM `code_reviews` WHERE `repo` = ?', [repo]);
     expect(Number(kept[0].n)).toBeGreaterThan(0);
@@ -684,6 +1208,27 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
     expect(await tables()).toEqual(['code_review_outcomes', 'code_review_stages']);
     expect(await columns('code_reviews')).toEqual(reviews);
     expect(await columns('projects')).toEqual(projects);
+    // A decision takes its verification from the finding that gave it, where that
+    // finding still stands for it. Every other one has none, and so is not verified.
+    const migrated = [
+      ...(await listCodeReviewDecisions(repo, 59)),
+      ...(await listCodeReviewDecisions(repo, 5900)),
+    ]
+      .filter((d) => /^M\d$/.test(d.anchor))
+      .map((d) => [d.anchor, d.verification]);
+    expect(migrated).toEqual([
+      ['M1', 'confirmed'],
+      ['M2', 'plausible'],
+      ['M3', null],
+      ['M4', null],
+      ['M6', null],
+      ['M7', null],
+      ['M5', null],
+    ]);
+    // Applying it again assumes nothing new.
+    await pool.query("UPDATE `code_review_decisions` SET `verification` = NULL WHERE `anchor` = 'M1'");
+    await up({ context: pool });
+    expect((await listCodeReviewDecisions(repo, 59)).find((d) => d.anchor === 'M1').verification).toBeNull();
     // Nothing is back-filled: a review that had passed has no record again, so it is
     // incomplete until it is reviewed again, and no project enforces.
     expect(await getCodeReviewOutcome(repo, 50)).toBeNull();

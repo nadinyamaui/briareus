@@ -5,8 +5,10 @@ import {
   STATUS_CONTEXT,
   STATUS_DESCRIPTION_MAX,
   computeReviewOutcome,
+  decisionEvidence,
   findingEvidence,
   requiredReviewStages,
+  statusDescription,
   statusFor,
 } from '../lib/review-outcome.js';
 
@@ -68,12 +70,57 @@ describe('what a verdict needs before it lets a finding through', () => {
     ).toEqual({ state: 'open', code: 'dismissal_unproven', missing: ['verification'] });
   });
 
-  it('takes a suppressed duplicate’s verdict from the earlier decision, unless a person requires a fix', () => {
+  it('clears a suppressed duplicate only against an earlier decision that is itself established', () => {
     const carried = { reconciliation: 'suppressed', verification: null, comments: 'Not repeated' };
-    expect(findingEvidence(finding({ ...carried, shouldFix: 'dismiss' })).state).toBe('cleared');
-    expect(findingEvidence(finding({ ...carried, shouldFix: 'optional' })).state).toBe('cleared');
-    expect(findingEvidence(finding({ ...carried, shouldFix: 'fix' })).state).toBe('fix');
-    expect(findingEvidence(finding({ ...carried, shouldFix: null })).code).toBe('finding_without_verdict');
+    const dismissed = finding({ ...carried, shouldFix: 'dismiss' });
+    // The claim is settled on the pull request: the duplicate needs nothing new.
+    expect(findingEvidence(dismissed, { settled: true })).toEqual({ state: 'cleared' });
+    expect(findingEvidence(finding({ ...carried, shouldFix: 'optional' }), { settled: true }).state).toBe(
+      'cleared',
+    );
+    // The earlier dismissal was never proven: carrying it over proves nothing either.
+    expect(findingEvidence(dismissed, { settled: false, missing: ['verification'] })).toEqual({
+      state: 'open',
+      code: 'prior_decision_unverified',
+      missing: ['verification'],
+    });
+    // And with nothing known about the claim it is not cleared at all.
+    expect(findingEvidence(dismissed)).toEqual({
+      state: 'open',
+      code: 'prior_decision_unverified',
+      missing: ['decision'],
+    });
+    // A fix the claim has come to owe since is listed for the claim, not twice.
+    expect(findingEvidence(dismissed, { owed: true }).state).toBe('cleared');
+    // A person can still overrule the carried verdict, and one without a verdict is open.
+    expect(findingEvidence(finding({ ...carried, shouldFix: 'fix' }), { settled: true }).state).toBe('fix');
+    expect(findingEvidence(finding({ ...carried, shouldFix: null }), { settled: true }).code).toBe(
+      'finding_without_verdict',
+    );
+  });
+
+  it('asks of a stored decision what it asks of a finding', () => {
+    const decision = (over) => ({
+      verdict: 'dismiss',
+      verification: 'confirmed',
+      rationale: 'Proof',
+      ...over,
+    });
+    expect(decisionEvidence(decision()).state).toBe('cleared');
+    expect(decisionEvidence(decision({ verification: 'plausible' }))).toEqual({
+      state: 'open',
+      code: 'dismissal_unproven',
+      missing: ['verification'],
+    });
+    // Nothing recorded, as for a verdict read from GitHub's history: not established.
+    expect(decisionEvidence(decision({ verification: null })).missing).toEqual(['verification']);
+    expect(decisionEvidence(decision({ verdict: 'optional', verification: 'plausible' })).state).toBe(
+      'cleared',
+    );
+    expect(decisionEvidence(decision({ verdict: 'optional', rationale: ' ' })).missing).toEqual(['comments']);
+    expect(decisionEvidence(decision({ verdict: 'fix', verification: null, rationale: null })).state).toBe(
+      'fix',
+    );
   });
 });
 
@@ -100,6 +147,17 @@ describe('computeReviewOutcome', () => {
       });
       expect(result.outcome).toBe('pending');
       expect(codes(result)).toEqual(['review_running']);
+      // Not for a revision that review is not covering: the pull request moved on or was
+      // retargeted while it runs, and what waits is a review of what it is now.
+      const moved = compute({ review: review({ status: 'running' }), current: { headSha: next } });
+      expect(moved).toMatchObject({ outcome: 'pending', stale: true, headSha: next });
+      expect(codes(moved)).toEqual(['head_moved']);
+      expect(statusFor(moved).description).toBe('Waiting for a review of bbbbbbb');
+      expect(
+        codes(
+          compute({ review: review({ status: 'running' }), current: { headSha: head, baseRef: 'release' } }),
+        ),
+      ).toEqual(['base_changed']);
     });
 
     it('when the head moved since the review: stale, never passed', () => {
@@ -233,8 +291,91 @@ describe('computeReviewOutcome', () => {
       expect(
         compute({
           findings: [finding({ reconciliation: 'suppressed', shouldFix: 'dismiss', threadId: null })],
+          standing: { fix: [], unverified: [], settled: ['ref-1'] },
         }).outcome,
       ).toBe('passed');
+    });
+
+    it('when an earlier decision that was never proven is all that would clear the pull request', () => {
+      // Review one dismissed the claim on a likelihood. The decision outlives it, so the
+      // review that follows, on the same head or the next, finds it still unverified:
+      const unproven = {
+        findingRef: 'ref-1',
+        threadId: 'PRRT_1',
+        title: 'Lost update',
+        verdict: 'dismiss',
+        verification: 'plausible',
+        missing: ['verification'],
+      };
+      // whether that review raises nothing at all,
+      const silent = compute({ standing: { fix: [], unverified: [unproven] } });
+      expect(silent.outcome).toBe('incomplete');
+      expect(silent.reasons).toEqual([
+        {
+          code: 'earlier_finding_unverified',
+          effect: 'incomplete',
+          message:
+            '"Lost update" was dismissed earlier without a recorded verification, so that decision does not stand as verified.',
+          findingRef: 'ref-1',
+          threadId: 'PRRT_1',
+          title: 'Lost update',
+          filePath: null,
+          verdict: 'dismiss',
+          missing: ['verification'],
+        },
+      ]);
+      expect(statusFor(silent).state).toBe('error');
+      // or raises the claim again and has it suppressed against that decision.
+      const repeated = compute({
+        findings: [
+          finding({ id: 8, reconciliation: 'suppressed', shouldFix: 'dismiss', comments: 'Not repeated' }),
+        ],
+        standing: { fix: [], unverified: [unproven] },
+      });
+      expect(repeated.outcome).toBe('incomplete');
+      // Listed once, on the finding a person can act on.
+      expect(repeated.reasons).toEqual([
+        expect.objectContaining({
+          code: 'prior_decision_unverified',
+          effect: 'incomplete',
+          findingId: 8,
+          findingRef: 'ref-1',
+          missing: ['verification'],
+        }),
+      ]);
+      expect(repeated.reasons[0].message).toContain(
+        'repeats a claim an earlier review dismissed without a recorded verification',
+      );
+      expect(repeated.counts).toMatchObject({ suppressed: 0, unverified: 1 });
+      // Once the decision is established the same two reviews pass.
+      const settled = { fix: [], unverified: [], settled: ['ref-1'] };
+      expect(compute({ standing: settled }).outcome).toBe('passed');
+      expect(
+        compute({
+          findings: [finding({ id: 8, reconciliation: 'suppressed', shouldFix: 'dismiss' })],
+          standing: settled,
+        }).outcome,
+      ).toBe('passed');
+    });
+
+    it('when an Optional kept from an earlier review has no evidence', () => {
+      const result = compute({
+        standing: {
+          fix: [],
+          unverified: [
+            {
+              findingRef: 'ref-o',
+              title: 'Naming',
+              verdict: 'optional',
+              missing: ['verification', 'comments'],
+            },
+          ],
+        },
+      });
+      expect(result.outcome).toBe('incomplete');
+      expect(result.reasons[0].message).toBe(
+        '"Naming" was marked optional earlier without a recorded verification and its evidence, so that decision does not stand as verified.',
+      );
     });
 
     it('when an earlier round left a published finding without a verified verdict', () => {
@@ -351,9 +492,23 @@ describe('computeReviewOutcome', () => {
           verified('optional', { id: 1 }),
           verified('optional', { id: 2, verification: 'plausible' }),
           verified('dismiss', { id: 3 }),
-          finding({ id: 4, reconciliation: 'suppressed', shouldFix: 'dismiss', threadId: null }),
-          finding({ id: 5, reconciliation: 'suppressed', shouldFix: 'optional', threadId: null }),
+          finding({
+            id: 4,
+            findingRef: 'r4',
+            reconciliation: 'suppressed',
+            shouldFix: 'dismiss',
+            threadId: null,
+          }),
+          finding({
+            id: 5,
+            findingRef: 'r5',
+            reconciliation: 'suppressed',
+            shouldFix: 'optional',
+            threadId: null,
+          }),
         ],
+        // What the two duplicates stand on: earlier decisions that are established.
+        standing: { fix: [], unverified: [], settled: ['r4', 'r5'] },
       });
       expect(result.outcome).toBe('passed');
       expect(result.reasons).toEqual([]);
@@ -499,5 +654,27 @@ describe('statusFor', () => {
     expect(long.state).toBe('error');
     expect(long.description).toHaveLength(STATUS_DESCRIPTION_MAX);
     expect(long.description.endsWith('…')).toBe(true);
+  });
+
+  it('never cuts a character in half, wherever the cut falls', () => {
+    // A title of astral characters (two UTF-16 units each): every possible cut position
+    // lands inside one for some padding. Half a pair is stored as U+FFFD by the
+    // database, and would never again equal what was sent.
+    for (let pad = 0; pad < 4; pad++) {
+      const title = `${'x'.repeat(pad)}${'🙂'.repeat(200)}`;
+      const { description } = status({ findings: [finding({ title })] });
+      expect(description.isWellFormed()).toBe(true);
+      expect(description.length).toBeLessThanOrEqual(STATUS_DESCRIPTION_MAX);
+      expect([...description].length).toBeLessThanOrEqual(STATUS_DESCRIPTION_MAX);
+      expect(description.endsWith('…')).toBe(true);
+      // As a round trip through a store that replaces what is not text would leave it.
+      expect(Buffer.from(description, 'utf8').toString('utf8')).toBe(description);
+    }
+    // A title that is itself broken text is repaired, not passed on.
+    const broken = status({ findings: [finding({ title: 'bad \ud83d end' })] }).description;
+    expect(broken.isWellFormed()).toBe(true);
+    expect(statusDescription('short')).toBe('short');
+    expect(statusDescription(`${'y'.repeat(139)}🙂`)).toBe(`${'y'.repeat(139)}…`);
+    expect(statusDescription('z'.repeat(140))).toBe('z'.repeat(140));
   });
 });

@@ -171,9 +171,10 @@ describe('operator attention', () => {
       repo: 'acme/shop',
       prNumber: 7,
       title: 'PR #7',
-      // The stale success is the thing a person must know about.
+      // The stale success is the thing a person must know about. "Last confirmed",
+      // since a write whose answer never came may have landed after it.
       summary:
-        'The code review outcome (changes required) could not be published as a commit status on bbbbbbb: GitHub answered 403 (Forbidden): the server’s GitHub token may not write commit statuses. GitHub still shows `success` on bbbbbbb. Retried automatically; check the server’s GitHub token if it keeps failing.',
+        'The code review outcome (changes required) could not be published as a commit status on bbbbbbb: GitHub answered 403 (Forbidden): the server’s GitHub token may not write commit statuses. GitHub last confirmed `success` on bbbbbbb. Retried automatically; check the server’s GitHub token if it keeps failing.',
       href: 'https://github.com/acme/shop/pull/7',
       at: '2026-11-10T12:00:00.000Z',
     });
@@ -184,8 +185,12 @@ describe('operator attention', () => {
     );
     const never = { ...failing, publishedSha: null, publishedState: null };
     expect(attentionItems([], [], [], [], [never])[0].summary).toContain(
-      'GitHub shows no status from Briareus.',
+      'GitHub has confirmed no status from Briareus.',
     );
+    // Given up on: a status GitHub will not accept for the commit is not asked for again.
+    expect(
+      attentionItems([], [], [], [], [{ ...failing, errorStatus: 422, retryAt: null }])[0].summary,
+    ).toMatch(/No longer retried: GitHub will not accept a status for this commit\.$/);
   });
   it('lists a pull request whose code review stopped at its round limit, with what is unresolved', () => {
     const waiting = {

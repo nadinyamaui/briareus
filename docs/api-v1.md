@@ -376,7 +376,11 @@ reviewed head and base, `stale`, the stage records and the state of its commit
 status. The server computes it from what it recorded, never from labels or an
 approval. With the project’s `enforceReviewOutcome` on, it is published as the commit
 status `briareus/code-review`, which a repository can require; `status.published`
-says whether GitHub carries it. See [Review outcome](features.md#review-outcome).
+says whether GitHub carries it. A verdict counts as verified only with the evidence
+recorded for it, also on the decision that outlives its finding; a claim left
+unverified with no finding to change is settled with
+`PATCH /pulls/{number}/code-review-decisions/{decisionId}`. See
+[Review outcome](features.md#review-outcome).
 
 ## Pull request data
 

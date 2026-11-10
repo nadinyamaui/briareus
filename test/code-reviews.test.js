@@ -1272,6 +1272,7 @@ describe('findings reconciled with a pull request’s earlier threads', () => {
         line: null,
         verdict: 'dismiss',
         rationale: 'The index exists, migrations/0007.sql:3.',
+        verification: 'confirmed',
         source: 'review',
         decidedBy: 'session:rev',
         headSha: head,
@@ -1317,6 +1318,7 @@ describe('findings reconciled with a pull request’s earlier threads', () => {
         findingRef: finding.findingRef,
         findingId: finding.id,
         rationale: 'Reproduced with an empty cart.',
+        verification: null,
         rationaleOnly: true,
       },
     ]);
@@ -1844,5 +1846,252 @@ describe('the review outcome through the pull request routes', () => {
     expect(store.listCodeReviewStages).toHaveBeenCalledWith(7);
     // Handling is a client's bookkeeping, not evidence.
     expect(outcome.refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe('a client’s change to the evidence and the outcome that follows', () => {
+  let server, base, store, outcome, decisions, saved;
+  const send = (method, path, body) =>
+    fetch(`${base}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: 'acme/shop', pr: 12, ...body }),
+    }).then(async (r) => ({ status: r.status, json: await r.json() }));
+  const rule = (id, body) => send('PATCH', `/api/pr/code-review-decisions/${id}`, body);
+  const decision = (id, over = {}) => ({
+    id,
+    repo: 'acme/shop',
+    prNumber: 12,
+    anchor: `PRRT_${id}`,
+    threadId: `PRRT_${id}`,
+    commentId: 500 + id,
+    findingRef: `ref-${id}`,
+    findingId: null,
+    title: 'Lost update',
+    verdict: 'dismiss',
+    rationale: 'Probably guarded',
+    verification: 'plausible',
+    source: 'review',
+    decidedBy: 'session:rev',
+    resolved: true,
+    resolvedBefore: false,
+    decidedAt: '2026-11-10T10:00:00.000Z',
+    ...over,
+  });
+
+  beforeEach(async () => {
+    decisions = [
+      // Dismissed on a likelihood by a review whose findings a rerun has since deleted.
+      decision(1),
+      // Reopened in a later thread, which is the one that rules on the claim.
+      decision(2, { findingRef: 'ref-re' }),
+      decision(3, { findingRef: 'ref-re', verdict: 'fix', verification: null, resolved: false }),
+      // Kept under a finding's reference, with no thread.
+      decision(4, { anchor: 'ref:ref-4', threadId: null, commentId: null }),
+    ];
+    saved = [];
+    const finding = {
+      id: 3,
+      codeReviewId: 7,
+      severity: 'high',
+      shouldFix: 'fix',
+      title: 'Null deref',
+      findingRef: 'ref-f',
+    };
+    const review = { id: 7, jobId: 'rev2', repo: 'acme/shop', prNumber: 12, status: 'completed' };
+    store = {
+      listPullCodeReviews: async () => [],
+      getPullCodeReview: async () => review,
+      setPullCodeReviewHandlingStatus: async () => review,
+      listCodeReviewFindings: async () => [finding],
+      getCodeReviewFinding: async () => finding,
+      updateCodeReviewFinding: vi.fn(async (_review, _id, changes) => Object.assign(finding, changes)),
+      listCodeReviewDecisions: async () => decisions,
+      getCodeReviewDecision: vi.fn(async (repo, prNumber, id) =>
+        prNumber === 12 ? decisions.find((d) => d.id === id) || null : null,
+      ),
+      saveCodeReviewDecisions: vi.fn(async (repo, prNumber, rows, options) => {
+        saved.push({ repo, prNumber, rows, options });
+        for (const row of rows)
+          Object.assign(
+            decisions.find((d) => d.anchor === row.anchor),
+            {
+              verdict: row.verdict,
+              verification: row.verification,
+              rationale: row.rationale,
+              source: row.source,
+              decidedBy: row.decidedBy,
+              decidedAt: new Date(row.decidedAt).toISOString(),
+            },
+          );
+      }),
+    };
+    outcome = {
+      read: vi.fn(async () => ({ outcome: 'incomplete' })),
+      refresh: vi.fn(async () => ({ outcome: 'passed' })),
+    };
+    const app = express();
+    app.use(express.json());
+    app.use((_req, res, next) => {
+      res.locals.apiUser = { id: 4 };
+      next();
+    });
+    app.use(
+      pullCodeReviewRoutes({
+        getProject: (repo) => (repo.toLowerCase() === 'acme/shop' ? { repo: 'acme/shop' } : null),
+        store,
+        outcome,
+      }),
+    );
+    server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterEach(() => new Promise((resolve) => server.close(resolve)));
+
+  it('has the store mark the outcome as out of date in the same write as a finding’s verdict', async () => {
+    await send('PATCH', '/api/pr/code-reviews/7/findings/3', { shouldFix: 'optional', comments: 'Style' });
+    // So a server that stops before the outcome is computed again, or a computation
+    // that fails, leaves the debt on record instead of an old status on GitHub.
+    expect(store.updateCodeReviewFinding).toHaveBeenCalledWith(
+      7,
+      3,
+      { shouldFix: 'optional', comments: 'Style' },
+      expect.objectContaining({ repo: 'acme/shop', prNumber: 12, outcomeStale: true }),
+    );
+    expect(outcome.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a person settle a claim by its decision, with the evidence a verdict needs', async () => {
+    // No finding is left to change: the decision is all there is of the claim.
+    const res = await rule(1, {
+      verdict: 'dismiss',
+      verification: 'confirmed',
+      rationale: ' Traced the caller: lib/api.js:12 rejects it. ',
+    });
+    expect(res.status).toBe(200);
+    expect(saved).toEqual([
+      {
+        repo: 'acme/shop',
+        prNumber: 12,
+        rows: [
+          {
+            anchor: 'PRRT_1',
+            findingRef: 'ref-1',
+            verdict: 'dismiss',
+            verification: 'confirmed',
+            rationale: 'Traced the caller: lib/api.js:12 rejects it.',
+            source: 'api',
+            decidedBy: 'user:4',
+            decidedAt: expect.any(Number),
+          },
+        ],
+        // Marked out of date with the write, then computed again.
+        options: { outcomeStale: true },
+      },
+    ]);
+    expect(res.json.decision).toMatchObject({
+      id: 1,
+      verdict: 'dismiss',
+      verification: 'confirmed',
+      source: 'api',
+      decidedBy: 'user:4',
+      disposition: 'dismissed',
+    });
+    // The store's key is not a client's business.
+    expect(res.json.decision).not.toHaveProperty('anchor');
+    expect(res.json.reviewOutcome).toEqual({ outcome: 'passed' });
+    expect(store.saveCodeReviewDecisions.mock.invocationCallOrder[0]).toBeLessThan(
+      outcome.refresh.mock.invocationCallOrder[0],
+    );
+    // A required fix needs no evidence, and a decision without a thread is ruled on the same way.
+    expect((await rule(4, { verdict: 'fix' })).json.decision).toMatchObject({
+      verdict: 'fix',
+      verification: null,
+    });
+    expect(saved[1].rows[0]).toMatchObject({ anchor: 'ref:ref-4', verdict: 'fix', rationale: null });
+  });
+
+  it('refuses a ruling that is not one, and one on a thread that no longer rules', async () => {
+    for (const [body, error] of [
+      [{}, 'verdict must be one of fix, optional, dismiss'],
+      [{ verdict: 'maybe' }, 'verdict must be one of fix, optional, dismiss'],
+      [{ verdict: 'dismiss', verification: 'confirmed' }, 'A dismissal needs its reason in rationale'],
+      [{ verdict: 'optional', verification: 'proven' }, 'verification must be one of confirmed, plausible'],
+      [{ verdict: 'optional', comments: 'x' }, 'Unknown decision fields: comments'],
+    ])
+      expect(await rule(1, body)).toEqual({ status: 400, json: { error } });
+    expect((await rule('x', { verdict: 'fix' })).status).toBe(400);
+    expect((await rule(9, { verdict: 'fix' })).status).toBe(404);
+    expect((await send('PATCH', '/api/pr/code-review-decisions/1', { pr: 13, verdict: 'fix' })).status).toBe(
+      404,
+    );
+    expect(
+      (await send('PATCH', '/api/pr/code-review-decisions/1', { repo: 'acme/other', verdict: 'fix' })).status,
+    ).toBe(404);
+    // The claim was reopened in thread 3: ruling on the thread it left would change nothing.
+    expect(await rule(2, { verdict: 'optional', verification: 'confirmed', rationale: 'Fine' })).toEqual({
+      status: 409,
+      json: { error: 'This claim was reopened in thread PRRT_3, which rules on it now: change decision 3' },
+    });
+    expect(saved).toEqual([]);
+    expect(outcome.refresh).not.toHaveBeenCalled();
+  });
+
+  it('keeps the ruling when the outcome could not be computed, and reports a store that is down', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    outcome.refresh.mockRejectedValue(new Error('deadlock'));
+    const res = await rule(1, { verdict: 'optional', verification: 'plausible', rationale: 'Cleanup' });
+    expect(res.status).toBe(200);
+    expect(res.json).toEqual({ decision: expect.objectContaining({ id: 1, verdict: 'optional' }) });
+    expect(error).toHaveBeenCalledWith('Code review outcome for acme/shop#12: deadlock');
+    error.mockRestore();
+    store.saveCodeReviewDecisions.mockRejectedValueOnce(new Error('database down'));
+    expect(await rule(1, { verdict: 'fix' })).toEqual({ status: 503, json: { error: 'database down' } });
+  });
+});
+
+describe('the review’s own writes and the outcome', () => {
+  it('does not mark the outcome out of date for a write the running review makes', async () => {
+    const review = { id: 1, jobId: 'rev', repo: 'acme/shop', prNumber: 12, headSha: 'a'.repeat(40) };
+    const finding = {
+      id: 1,
+      codeReviewId: 1,
+      severity: 'high',
+      title: 'Lost update',
+      findingRef: 'r1',
+      threadId: 'T1',
+    };
+    const updateCodeReviewFinding = vi.fn(async () => finding);
+    const app = express();
+    app.use(express.json());
+    app.use(
+      codeReviewRoutes({
+        agentSession: () => ({ id: 'rev', repo: 'acme/shop', activity: 'review' }),
+        store: {
+          getCodeReviewByJob: async () => review,
+          listCodeReviewFindings: async () => [finding],
+          getCodeReviewFinding: async () => finding,
+          addCodeReviewFinding: vi.fn(),
+          updateCodeReviewFinding,
+          setCodeReviewSummary: vi.fn(),
+        },
+      }),
+    );
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/api/agent/code-review/findings/1`, {
+        method: 'PATCH',
+        headers: { Authorization: 'Bearer rev', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shouldFix: 'dismiss', verification: 'confirmed', comments: 'Proven' }),
+      });
+      expect(res.status).toBe(200);
+      // The review settles its own outcome when it ends; a sweep recomputing a running
+      // review every minute would only read GitHub for nothing.
+      expect(updateCodeReviewFinding.mock.calls[0][3]).toMatchObject({ outcomeStale: false });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });

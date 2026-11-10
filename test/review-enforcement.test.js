@@ -14,7 +14,19 @@ const store = vi.hoisted(() => ({
   count: null,
   rounds: [],
   at: 0,
+  // Set by a test to make the next write of that kind fail, as a database that is down.
+  failing: {},
   now: () => new Date(Date.UTC(2026, 10, 10, 12, 0, store.at++)).toISOString(),
+  fail(what) {
+    if (!store.failing[what]) return;
+    const error = store.failing[what];
+    if (store.failing[what].once) delete store.failing[what];
+    throw new Error(error.message);
+  },
+  // What the row should carry is what it is recorded to carry.
+  settled(row, { sha, state, description }) {
+    return row.headSha === sha && row.statusState === state && row.statusDescription === description;
+  },
   state(reviewId) {
     const wanted = reviewId ?? store.row?.codeReviewId ?? null;
     const review = !store.review || (wanted && store.review.id !== wanted) ? store.other : store.review;
@@ -33,6 +45,7 @@ const store = vi.hoisted(() => ({
 vi.mock('../lib/db.js', () => ({
   readCodeReviewOutcomeState: vi.fn(async (_repo, _pr, { reviewId = null } = {}) => store.state(reviewId)),
   refreshCodeReviewOutcome: vi.fn(async (repo, prNumber, { reviewId = null }, compute) => {
+    store.fail('refresh');
     store.row ||= {
       repo,
       prNumber,
@@ -42,30 +55,49 @@ vi.mock('../lib/db.js', () => ({
       publishedSha: null,
       publishedState: null,
       publishedDescription: null,
+      publishedConfirmed: false,
       publishedAt: null,
       publishError: null,
       publishErrorStatus: null,
       publishAttempts: 0,
       publishFailedAt: null,
       publishRetryAt: null,
+      publishOwedAt: null,
+      recomputeAt: null,
     };
     const state = store.state(reviewId);
-    const next = compute(state);
-    Object.assign(store.row, next, { codeReviewId: state.review?.id ?? null, computedAt: store.now() });
+    const { owed, ...next } = compute(state);
+    // One transaction: the outcome, the debt it creates and the recomputation it settles.
+    Object.assign(store.row, next, {
+      codeReviewId: state.review?.id ?? null,
+      computedAt: store.now(),
+      recomputeAt: null,
+      publishOwedAt: owed ? store.row.publishOwedAt || store.now() : null,
+    });
     return { ...state, row: { ...store.row } };
   }),
   getCodeReviewOutcome: vi.fn(async () => (store.row ? { ...store.row } : null)),
-  recordCodeReviewStatusPublished: vi.fn(async (_repo, _pr, { sha, state, description }) => {
+  markCodeReviewOutcomeStale: vi.fn(async () => {
+    store.fail('stale');
+    if (store.row) store.row.recomputeAt ||= store.now();
+  }),
+  markCodeReviewStatusSending: vi.fn(async () => {
+    store.row.publishedConfirmed = false;
+  }),
+  recordCodeReviewStatusPublished: vi.fn(async (_repo, _pr, status, { posted = true } = {}) => {
+    store.fail('published');
     Object.assign(store.row, {
-      publishedSha: sha,
-      publishedState: state,
-      publishedDescription: description,
-      publishedAt: store.now(),
+      publishedSha: status.sha,
+      publishedState: status.state,
+      publishedDescription: status.description,
+      publishedConfirmed: true,
+      publishedAt: posted ? store.now() : store.row.publishedAt || store.now(),
       publishError: null,
       publishErrorStatus: null,
       publishAttempts: 0,
       publishFailedAt: null,
       publishRetryAt: null,
+      publishOwedAt: store.settled(store.row, status) ? null : store.row.publishOwedAt,
     });
   }),
   recordCodeReviewStatusFailed: vi.fn(async (_repo, _pr, { error, status = null, retryAt }) => {
@@ -74,23 +106,30 @@ vi.mock('../lib/db.js', () => ({
       publishErrorStatus: status,
       publishAttempts: store.row.publishAttempts + 1,
       publishFailedAt: store.now(),
-      publishRetryAt: new Date(retryAt).toISOString(),
+      publishRetryAt: retryAt == null ? null : new Date(retryAt).toISOString(),
+      publishOwedAt: retryAt == null ? null : store.row.publishOwedAt || store.now(),
     });
   }),
-  clearCodeReviewStatusFailure: vi.fn(async () => {
+  dropCodeReviewStatusDebt: vi.fn(async () => {
     Object.assign(store.row, {
       publishError: null,
       publishErrorStatus: null,
       publishAttempts: 0,
       publishFailedAt: null,
       publishRetryAt: null,
+      publishOwedAt: null,
+      recomputeAt: null,
     });
   }),
-  listFailedCodeReviewStatuses: vi.fn(async ({ dueBy = null } = {}) =>
-    store.row?.publishFailedAt && (dueBy == null || Date.parse(store.row.publishRetryAt) <= dueBy)
-      ? [{ ...store.row }]
-      : [],
-  ),
+  listFailedCodeReviewStatuses: vi.fn(async () => (store.row?.publishFailedAt ? [{ ...store.row }] : [])),
+  listCodeReviewOutcomesDue: vi.fn(async ({ now }) => {
+    const row = store.row;
+    const due =
+      row &&
+      (row.recomputeAt ||
+        (row.publishOwedAt && (!row.publishRetryAt || Date.parse(row.publishRetryAt) <= now)));
+    return due ? [{ ...row }] : [];
+  }),
   // What lib/review-rounds.js imports beside these; nothing here calls them.
   claimCodeReviewRound: vi.fn(),
   codeReviewDecisionsSince: vi.fn(async () => 0),
@@ -101,7 +140,7 @@ vi.mock('../lib/db.js', () => ({
 }));
 
 import {
-  clearCodeReviewStatusFailure,
+  dropCodeReviewStatusDebt,
   recordCodeReviewStatusFailed,
   refreshCodeReviewOutcome,
 } from '../lib/db.js';
@@ -146,7 +185,7 @@ function reviewed(sha = head, over = {}) {
 
 // Each test gets its own copy of the modules: lib/github.js keeps rate-limit cooldowns
 // and lib/review-enforcement.js its publication queue at module level.
-let enforcement, github, requests, answers;
+let enforcement, github, requests, answers, carried;
 const answer = (status, body = {}, headers = {}) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
 // Every status write GitHub was sent, in order.
@@ -154,6 +193,15 @@ const posted = () =>
   requests
     .filter((r) => r.method === 'POST' && r.url.includes('/statuses/'))
     .map((r) => ({ sha: r.url.split('/').pop(), ...r.body }));
+// Every time the commit's statuses were read back.
+const readBack = () => requests.filter((r) => r.method === 'GET' && r.url.includes('/statuses'));
+// GitHub takes a status write: the commit carries it from here, newest first.
+const take = (sha, body) => carried.set(sha, [body, ...(carried.get(sha) || [])]);
+// A write GitHub took and never answered: the connection dropped on the way back.
+const lostAnswer = () => (url, init) => {
+  take(url.split('/').pop(), JSON.parse(init.body));
+  throw new TypeError('fetch failed');
+};
 
 beforeEach(async () => {
   Object.assign(store, {
@@ -166,12 +214,16 @@ beforeEach(async () => {
     count: null,
     rounds: [],
     at: 0,
+    failing: {},
   });
   vi.clearAllMocks();
   vi.resetModules();
   requests = [];
-  // What GitHub answers, in order; once they run out every write is accepted.
+  // What GitHub answers to status writes, in order; once they run out every write is
+  // accepted. A function answers for itself (and decides whether the write landed).
   answers = [];
+  // The statuses each commit carries on GitHub, as its read answers them.
+  carried = new Map();
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url, init) => {
@@ -181,10 +233,16 @@ beforeEach(async () => {
         token: init.headers.Authorization.replace('Bearer ', ''),
         body: init.body ? JSON.parse(init.body) : null,
       });
+      if (init.method === 'GET') {
+        const sha = /\/commits\/([0-9a-f]+)\/statuses/.exec(url)?.[1];
+        return sha ? answer(200, carried.get(sha) || []) : answer(404, {});
+      }
       const next = answers.length ? answers.shift() : null;
       if (next instanceof Error) throw next;
       if (typeof next === 'function') return next(url, init);
-      return next || answer(201, {});
+      if (next) return next;
+      take(url.split('/').pop(), JSON.parse(init.body));
+      return answer(201, {});
     }),
   );
   enforcement = await import('../lib/review-enforcement.js');
@@ -300,6 +358,67 @@ describe('the stored outcome', () => {
     expect((await refresh({ ...off, reviewRoundLimit: 0 })).outcome.reasons.map((r) => r.code)).toEqual([
       'fix_owed',
     ]);
+  });
+
+  it('does not pass a rerun or a later review on a dismissal an earlier one never proved', async () => {
+    // Review one dismissed its finding on a likelihood and resolved the thread. The
+    // verdict is the pull request's decision from then on, kept with how well it was
+    // established, and that is all a rerun leaves: its findings are deleted.
+    const decision = {
+      findingRef: 'ref-1',
+      threadId: 'PRRT_1',
+      title: 'Lost update',
+      verdict: 'dismiss',
+      verification: 'plausible',
+      rationale: 'Probably guarded upstream',
+      source: 'review',
+      resolved: true,
+      decidedAt: '2026-11-10T11:00:00.000Z',
+    };
+    store.decisions = [decision];
+    // The rerun on the same head raises nothing.
+    reviewed();
+    const rerun = await refresh(on);
+    expect(rerun.outcome.outcome).toBe('incomplete');
+    expect(rerun.outcome.reasons).toEqual([
+      expect.objectContaining({
+        code: 'earlier_finding_unverified',
+        findingRef: 'ref-1',
+        verdict: 'dismiss',
+        missing: ['verification'],
+      }),
+    ]);
+    expect(posted().at(-1)).toMatchObject({ sha: head, state: 'error' });
+    // The next round, on the next head, raises the claim again and has it suppressed
+    // against that decision: carrying an unproven dismissal over proves nothing.
+    reviewed(next);
+    store.findings = [
+      finding({
+        reconciliation: 'suppressed',
+        shouldFix: 'dismiss',
+        verification: null,
+        threadId: null,
+        commentId: null,
+      }),
+    ];
+    const later = await refresh(on, { current: { headSha: next, baseRef: 'main' } });
+    expect(later.outcome.outcome).toBe('incomplete');
+    expect(later.outcome.reasons.map((r) => r.code)).toEqual(['prior_decision_unverified']);
+    expect(posted().map((status) => status.state)).not.toContain('success');
+    // Proven, by a person or a review: the same record passes, the duplicate counted
+    // as decided earlier.
+    store.decisions = [{ ...decision, verification: 'confirmed', rationale: 'lib/api.js:12 rejects it' }];
+    const proven = await refresh(on);
+    expect(proven.outcome).toMatchObject({ outcome: 'passed', reasons: [] });
+    expect(posted().at(-1)).toEqual({
+      sha: next,
+      state: 'success',
+      context: 'briareus/code-review',
+      description: 'Review passed at bbbbbbb: 1 decided earlier, nothing to fix',
+    });
+    // A verdict read from GitHub's history carries no record of what it proved.
+    store.decisions = [{ ...decision, source: 'github', verification: null }];
+    expect((await refresh(on)).outcome.outcome).toBe('incomplete');
   });
 
   it('follows the head the server last saw, and goes stale when it is not the reviewed one', async () => {
@@ -657,9 +776,12 @@ describe('the commit status', () => {
     expect(await enforcement.retryReviewStatuses({ getProject: () => off, cfg, now: () => due })).toEqual([
       { repo, prNumber: 7, published: false, skipped: 'not_enforced' },
     ]);
-    expect(clearCodeReviewStatusFailure).toHaveBeenCalledWith(repo, 7);
-    expect(store.row.publishFailedAt).toBeNull();
+    expect(dropCodeReviewStatusDebt).toHaveBeenCalledWith(repo, 7);
+    expect(store.row).toMatchObject({ publishFailedAt: null, publishOwedAt: null });
     expect(posted()).toHaveLength(1);
+    // And a later outcome of that project creates no debt at all.
+    await refresh(off);
+    expect(store.row.publishOwedAt).toBeNull();
   });
 
   it('lists only failures of open pull requests of enforcing projects as waiting on a person', async () => {
@@ -678,6 +800,453 @@ describe('the commit status', () => {
       }),
     ).toHaveLength(1);
     expect(await enforcement.reviewStatusFailures({ getProject: () => null })).toEqual([]);
+  });
+});
+
+describe('what GitHub is known to carry', () => {
+  it('is unknown from the moment a write is sent until its answer says it was taken', async () => {
+    reviewed();
+    store.findings = [finding({ shouldFix: 'fix' })];
+    await refresh(on);
+    expect(store.row).toMatchObject({ publishedState: 'failure', publishedConfirmed: true });
+    // The fix is waived: `success` is sent and GitHub takes it, but every answer is lost.
+    store.findings = [finding()];
+    answers = [lostAnswer(), lostAnswer(), lostAnswer()];
+    const lost = await refresh(on);
+    expect(lost.published).toEqual({ published: false, error: 'fetch failed' });
+    expect(carried.get(head)[0].state).toBe('success');
+    // The record still names the last status GitHub confirmed, and says it is no longer
+    // known to be what the commit carries.
+    expect(store.row).toMatchObject({
+      statusState: 'success',
+      publishedState: 'failure',
+      publishedConfirmed: false,
+      publishError: 'fetch failed',
+    });
+    expect(lost.outcome.status.published).toBe(false);
+    // The verdict goes back to Fix before any retry: what should be there now equals
+    // what was last confirmed, while GitHub shows `success`.
+    store.findings = [finding({ shouldFix: 'fix' })];
+    const back = await refresh(on);
+    // Not trusted, so not skipped: the write goes out and GitHub carries `failure` again.
+    expect(back.published).toEqual({ published: true });
+    expect(posted().map((status) => status.state)).toEqual([
+      'failure',
+      'success',
+      'success',
+      'success',
+      'failure',
+    ]);
+    expect(carried.get(head)[0].state).toBe('failure');
+    expect(store.row).toMatchObject({
+      outcome: 'changes_required',
+      publishedState: 'failure',
+      publishedConfirmed: true,
+      publishFailedAt: null,
+      publishOwedAt: null,
+    });
+    expect((await enforcement.readReviewOutcome(on, 7)).status).toMatchObject({
+      state: 'failure',
+      published: true,
+      publishedConfirmed: true,
+    });
+  });
+
+  it('is not reported as published while a write is unanswered, even for the same status', async () => {
+    reviewed();
+    await refresh(on);
+    // Marked by the store as sent and not yet answered, as a server stopping mid-write leaves it.
+    store.row.publishedConfirmed = false;
+    const read = await enforcement.readReviewOutcome(on, 7);
+    expect(read.status).toMatchObject({ state: 'success', published: false, publishedState: 'success' });
+    // The next publication posts rather than conclude anything from the record.
+    expect(await enforcement.publishReviewStatus(on, 7, { cfg })).toEqual({ published: true });
+    expect(posted()).toHaveLength(2);
+  });
+
+  it('reads the commit back before concluding that it already carries the status', async () => {
+    reviewed();
+    store.findings = [finding({ shouldFix: 'fix' })];
+    await refresh(on);
+    expect(readBack()).toHaveLength(0);
+    // Nothing changed: one read of the commit's statuses confirms it, and nothing is posted.
+    expect((await refresh(on)).published).toEqual({ published: true, skipped: 'unchanged' });
+    expect(readBack().map((r) => [r.url, r.token])).toEqual([
+      [`https://api.github.com/repos/${repo}/commits/${head}/statuses?per_page=100`, 'server-token'],
+    ]);
+    expect(posted()).toHaveLength(1);
+    // Something else wrote `success` under this context since (an agent holding a token
+    // that may write statuses, say). The record says `failure` is there; GitHub does not.
+    take(head, { state: 'success', context: 'briareus/code-review', description: 'Looks good to me' });
+    expect((await refresh(on)).published).toEqual({ published: true });
+    expect(posted().at(-1)).toMatchObject({ sha: head, state: 'failure' });
+    expect(carried.get(head)[0].state).toBe('failure');
+    // Another context on the commit is nobody's business here.
+    take(head, { state: 'failure', context: 'ci/build', description: 'Tests failed' });
+    expect((await refresh(on)).published).toEqual({ published: true, skipped: 'unchanged' });
+    // A read that fails proves nothing either way, so the status is sent again.
+    fetch.mockImplementationOnce(async () => answer(502, {}));
+    expect((await refresh(on)).published).toEqual({ published: true });
+    expect(posted()).toHaveLength(3);
+  });
+});
+
+describe('what is owed and swept', () => {
+  const sweep = (deps = {}) =>
+    enforcement.retryReviewStatuses({ getProject: () => on, cfg, retryDelayMs: 0, ...deps });
+
+  it('posts an outcome that was stored and never sent, with no failure on record', async () => {
+    reviewed();
+    store.findings = [finding({ shouldFix: 'fix' })];
+    await refresh(on);
+    // A verdict changes and the outcome is stored, and the server stops before the
+    // write goes out: GitHub is left on `failure`... or, the other way round, on `success`.
+    store.findings = [finding()];
+    await refreshCodeReviewOutcome(repo, 7, {}, () => ({
+      outcome: 'passed',
+      stale: false,
+      reasons: [],
+      headSha: head,
+      baseRef: 'main',
+      statusState: 'success',
+      statusDescription: 'Review passed at aaaaaaa: 1 optional, nothing to fix',
+      owed: true,
+    }));
+    expect(store.row).toMatchObject({ publishedState: 'failure', publishFailedAt: null });
+    expect(store.row.publishOwedAt).toBeTruthy();
+    // Nothing failed, so nothing is listed as failing; the debt alone is what the sweep finds.
+    expect(await enforcement.reviewStatusFailures({ getProject: () => on })).toEqual([]);
+    expect(await sweep()).toEqual([{ repo, prNumber: 7, published: true }]);
+    expect(posted().at(-1)).toMatchObject({ sha: head, state: 'success' });
+    expect(store.row).toMatchObject({
+      publishedState: 'success',
+      publishedConfirmed: true,
+      publishOwedAt: null,
+    });
+    // Paid: the next sweep has nothing to do.
+    expect(await sweep()).toEqual([]);
+    expect(posted()).toHaveLength(2);
+  });
+
+  it('creates the debt with the outcome, and settles it only for the status that outcome owes', async () => {
+    reviewed();
+    const { published } = await enforcement.refreshReviewOutcome(on, 7, { cfg, retryDelayMs: 0 });
+    // Owed from the transaction that stored the outcome: before anything was sent.
+    expect((await refreshCodeReviewOutcome.mock.results[0].value).row.publishOwedAt).toBeTruthy();
+    await published;
+    expect(store.row.publishOwedAt).toBeNull();
+    // A write that lands for an older outcome leaves the newer one's debt standing.
+    let release;
+    answers = [
+      () =>
+        new Promise((resolve) => {
+          release = () => {
+            take(head, { state: 'pending', context: 'briareus/code-review' });
+            resolve(answer(201));
+          };
+        }),
+    ];
+    store.review.status = 'running';
+    const slow = await enforcement.refreshReviewOutcome(on, 7, { cfg, retryDelayMs: 0 });
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    // Stored meanwhile by something that then stopped before publishing it.
+    Object.assign(store.row, { statusState: 'error', statusDescription: 'Review incomplete' });
+    release();
+    await slow.published;
+    expect(store.row).toMatchObject({ publishedState: 'pending', statusState: 'error' });
+    expect(store.row.publishOwedAt).toBeTruthy();
+    expect(await sweep()).toEqual([{ repo, prNumber: 7, published: true }]);
+    expect(posted().at(-1)).toMatchObject({ state: 'error' });
+  });
+
+  it('computes again an outcome whose recomputation failed, and publishes what it then is', async () => {
+    reviewed();
+    await refresh(on);
+    expect(carried.get(head)[0].state).toBe('success');
+    // A client turns a finding into a required fix; the write lands, the recomputation
+    // that should follow does not.
+    store.findings = [finding({ shouldFix: 'fix' })];
+    store.failing.refresh = { message: 'Deadlock found when trying to get lock', once: true };
+    await expect(refresh(on)).rejects.toThrow('Deadlock found');
+    // Owed on the row, so it survives a restart, and GitHub is not left on `success`.
+    expect(store.row.recomputeAt).toBeTruthy();
+    expect(store.row).toMatchObject({ outcome: 'passed', publishedState: 'success' });
+    expect(await sweep()).toEqual([{ repo, prNumber: 7, published: true }]);
+    expect(store.row).toMatchObject({
+      outcome: 'changes_required',
+      publishedState: 'failure',
+      recomputeAt: null,
+    });
+    expect(carried.get(head)[0].state).toBe('failure');
+    expect(await sweep()).toEqual([]);
+  });
+
+  it('keeps that debt in memory when the store cannot even record it', async () => {
+    reviewed();
+    await refresh(on);
+    store.findings = [finding({ shouldFix: 'fix' })];
+    store.failing.refresh = { message: 'Connection lost', once: true };
+    store.failing.stale = { message: 'Connection lost', once: true };
+    await expect(refresh(on)).rejects.toThrow('Connection lost');
+    expect(store.row.recomputeAt).toBeNull();
+    // The database is back by the next sweep.
+    expect(await sweep()).toEqual([{ repo, prNumber: 7, published: true }]);
+    expect(store.row).toMatchObject({ outcome: 'changes_required', publishedState: 'failure' });
+    expect(await sweep()).toEqual([]);
+  });
+
+  it('survives a row it cannot work and goes on, reporting it', async () => {
+    reviewed();
+    await refresh(on);
+    store.row.recomputeAt = store.now();
+    store.failing.refresh = { message: 'Connection lost', once: true };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await sweep()).toEqual([{ repo, prNumber: 7, published: false, error: 'Connection lost' }]);
+    expect(error).toHaveBeenCalledWith('Code review status for acme/shop#7: Connection lost');
+    error.mockRestore();
+    expect(await sweep()).toEqual([{ repo, prNumber: 7, published: true, skipped: 'unchanged' }]);
+  });
+
+  it('drops what a project that is gone owes, instead of keeping it first in line', async () => {
+    reviewed();
+    answers = [answer(403, { message: 'Forbidden' })];
+    await refresh(on);
+    const due = Date.parse(store.row.publishRetryAt);
+    expect(await sweep({ getProject: () => null, now: () => due })).toEqual([
+      { repo, prNumber: 7, published: false, skipped: 'no_project' },
+    ]);
+    expect(dropCodeReviewStatusDebt).toHaveBeenCalledWith(repo, 7);
+    expect(store.row).toMatchObject({ publishFailedAt: null, publishOwedAt: null, publishRetryAt: null });
+    expect(await sweep({ getProject: () => null, now: () => due })).toEqual([]);
+    expect(posted()).toHaveLength(1);
+  });
+
+  it('gives up a failing status of a pull request that closed, and still makes the first attempt', async () => {
+    reviewed();
+    const closed = { isOpen: async () => false };
+    // Owed and never tried: sent, closed or not. A status on a closed pull request's
+    // head harms nobody, and the board may simply not list the pull request.
+    await refreshCodeReviewOutcome(repo, 7, {}, () => ({
+      outcome: 'passed',
+      stale: false,
+      reasons: [],
+      headSha: head,
+      baseRef: 'main',
+      statusState: 'success',
+      statusDescription: 'Review passed',
+      owed: true,
+    }));
+    answers = [answer(403, { message: 'Forbidden' })];
+    const [first] = await sweep(closed);
+    expect(first).toMatchObject({ published: false });
+    expect(first.error).toContain('GitHub answered 403');
+    expect(posted()).toHaveLength(1);
+    // It failed, and the pull request is closed: nobody is waiting for that status.
+    const due = Date.parse(store.row.publishRetryAt);
+    expect(await sweep({ ...closed, now: () => due })).toEqual([
+      { repo, prNumber: 7, published: false, skipped: 'closed' },
+    ]);
+    expect(store.row).toMatchObject({ publishFailedAt: null, publishOwedAt: null });
+    expect(posted()).toHaveLength(1);
+    // A board that cannot say reads as open: the retry goes on.
+    answers = [answer(403, { message: 'Forbidden' })];
+    await refresh(on);
+    const again = Date.parse(store.row.publishRetryAt);
+    const unreadable = {
+      isOpen: async () => {
+        throw new Error('board unreadable');
+      },
+    };
+    expect(await sweep({ ...unreadable, now: () => again })).toEqual([
+      { repo, prNumber: 7, published: true },
+    ]);
+  });
+
+  it('stops asking for a status GitHub will not accept for the commit', async () => {
+    reviewed();
+    const refused = () => answer(422, { message: 'No commit found for SHA' });
+    answers = [refused()];
+    const { published } = await refresh(on);
+    expect(published.error).toContain('GitHub answered 422 (No commit found for SHA)');
+    expect(published).not.toHaveProperty('gaveUp');
+    let now = Date.parse(store.row.publishRetryAt);
+    for (let attempt = 2; attempt < enforcement.UNPROCESSABLE_ATTEMPTS; attempt++) {
+      answers = [refused()];
+      const [result] = await sweep({ now: () => now });
+      expect(result).not.toHaveProperty('gaveUp');
+      expect(store.row.publishAttempts).toBe(attempt);
+      now = Date.parse(store.row.publishRetryAt);
+    }
+    answers = [refused()];
+    expect(await sweep({ now: () => now })).toEqual([
+      { repo, prNumber: 7, published: false, error: expect.stringContaining('422'), gaveUp: true },
+    ]);
+    // No further attempt is due, ever; the failure stays for a person to see.
+    expect(store.row).toMatchObject({
+      publishAttempts: enforcement.UNPROCESSABLE_ATTEMPTS,
+      publishRetryAt: null,
+      publishOwedAt: null,
+      publishErrorStatus: 422,
+    });
+    expect(await sweep({ now: () => now + 86_400_000 })).toEqual([]);
+    expect(posted()).toHaveLength(enforcement.UNPROCESSABLE_ATTEMPTS);
+    expect(await enforcement.reviewStatusFailures({ getProject: () => on })).toEqual([
+      expect.objectContaining({ errorStatus: 422, retryAt: null }),
+    ]);
+    // A token GitHub refuses is another matter: fixing it is all it takes, so that goes on.
+    expect(enforcement.statusRetryDelay(50)).toBe(3_600_000);
+  });
+
+  it('runs one sweep at a time', async () => {
+    reviewed();
+    await refreshCodeReviewOutcome(repo, 7, {}, () => ({
+      outcome: 'passed',
+      stale: false,
+      reasons: [],
+      headSha: head,
+      baseRef: 'main',
+      statusState: 'success',
+      statusDescription: 'Review passed',
+      owed: true,
+    }));
+    // GitHub is slow to answer, and the timer comes round again meanwhile.
+    let release;
+    answers = [
+      (url, init) =>
+        new Promise((resolve) => {
+          release = () => {
+            take(head, JSON.parse(init.body));
+            resolve(answer(201));
+          };
+        }),
+    ];
+    const first = sweep();
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    expect(await sweep()).toEqual([]);
+    release();
+    expect(await first).toEqual([{ repo, prNumber: 7, published: true }]);
+    expect(posted()).toHaveLength(1);
+    // And the next one runs again.
+    store.row.recomputeAt = store.now();
+    expect(await sweep()).toHaveLength(1);
+  });
+
+  it('leaves a pull request alone whose publication is already under way', async () => {
+    reviewed();
+    let release;
+    answers = [
+      (url, init) =>
+        new Promise((resolve) => {
+          release = () => {
+            take(head, JSON.parse(init.body));
+            resolve(answer(201));
+          };
+        }),
+    ];
+    const { published } = await enforcement.refreshReviewOutcome(on, 7, { cfg, retryDelayMs: 0 });
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    expect(store.row.publishOwedAt).toBeTruthy();
+    expect(await sweep()).toEqual([]);
+    release();
+    expect(await published).toEqual({ published: true });
+    expect(posted()).toHaveLength(1);
+  });
+});
+
+describe('a pull request seen at another revision', () => {
+  const note = (revision) =>
+    enforcement
+      .noteReviewedRevision(on, 7, revision, { cfg, retryDelayMs: 0 })
+      .then(async (result) =>
+        result ? { outcome: result.outcome, published: await result.published } : null,
+      );
+
+  it('turns a passed outcome stale when the pull request is retargeted under the same head', async () => {
+    reviewed();
+    await refresh(on);
+    expect(carried.get(head)[0].state).toBe('success');
+    // Seen again as it was: nothing to do, and nothing is read or written for it.
+    expect(await note({ headSha: head, baseRef: 'main' })).toBeNull();
+    expect(refreshCodeReviewOutcome).toHaveBeenCalledTimes(1);
+    // Retargeted to a branch nobody reviewed against. The head, and the `success` on it,
+    // are the same commit: only a new status on that commit takes the pass away.
+    const retargeted = await note({ headSha: head, baseRef: 'release' });
+    expect(retargeted.outcome).toMatchObject({ outcome: 'pending', stale: true, baseRef: 'release' });
+    expect(retargeted.outcome.reasons[0]).toMatchObject({ code: 'base_changed', reviewedBaseRef: 'main' });
+    expect(posted().at(-1)).toEqual({
+      sha: head,
+      state: 'pending',
+      context: 'briareus/code-review',
+      description: 'Waiting for a review of aaaaaaa',
+    });
+    expect(carried.get(head)[0].state).toBe('pending');
+    expect(store.row).toMatchObject({ baseRef: 'release', outcome: 'pending', stale: true });
+    // Retargeted back: the review stands again for what it reviewed.
+    expect((await note({ headSha: head, baseRef: 'main' })).outcome.outcome).toBe('passed');
+    expect(carried.get(head)[0].state).toBe('success');
+  });
+
+  it('puts pending on a head that was pushed', async () => {
+    reviewed();
+    await refresh(on);
+    const pushed = await note({ headSha: next, baseRef: 'main' });
+    expect(pushed.outcome).toMatchObject({ outcome: 'pending', stale: true, headSha: next });
+    expect(carried.get(next)[0]).toMatchObject({ state: 'pending' });
+    // A sighting that names no base branch says nothing about it.
+    expect(await note({ headSha: next })).toBeNull();
+  });
+
+  it('does nothing for a pull request no review has a record of, or for no revision at all', async () => {
+    expect(await note({ headSha: head, baseRef: 'main' })).toBeNull();
+    expect(await note({ headSha: null, baseRef: 'main' })).toBeNull();
+    expect(await enforcement.noteReviewedRevision(null, 7, { headSha: head }, { cfg })).toBeNull();
+    expect(refreshCodeReviewOutcome).not.toHaveBeenCalled();
+    expect(store.row).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('stores the staleness for a project that publishes nothing, too', async () => {
+    reviewed();
+    await refresh(off);
+    const moved = await enforcement.noteReviewedRevision(off, 7, { headSha: next, baseRef: 'main' }, { cfg });
+    expect(moved.outcome).toMatchObject({ outcome: 'pending', stale: true, enforced: false });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('findings closed to the review itself', () => {
+  const review = { id: 5, headSha: head };
+  const stages = (label) => async () => stagesAt(head, { label: { status: label } });
+  const frozen = (over) =>
+    enforcement.reviewFindingsFrozen({ project: on, review, listStages: stages('pending'), ...over });
+
+  it('from the label step on, by the stage record', async () => {
+    expect(await frozen()).toBe(false);
+    for (const status of ['running', 'completed', 'failed'])
+      expect(await frozen({ listStages: stages(status) })).toBe(true);
+  });
+
+  it('by the session too, so a stage write that was lost does not leave them open', async () => {
+    // The step's start never reached the stage record: it still says pending.
+    const session = { codeReviewRecord: { id: 5, head, labelAt: 1_700_000_000_000 } };
+    expect(await frozen({ session })).toBe(true);
+    // Not for another run of the review, nor before the step.
+    expect(await frozen({ session: { codeReviewRecord: { id: 5, head: next, labelAt: 1 } } })).toBe(false);
+    expect(await frozen({ session: { codeReviewRecord: { id: 5, head } } })).toBe(false);
+    expect(await frozen({ session: null })).toBe(false);
+  });
+
+  it('never for a project that does not enforce the outcome, which is not even asked', async () => {
+    const listStages = vi.fn(stages('running'));
+    expect(await enforcement.reviewFindingsFrozen({ project: off, review, listStages })).toBe(false);
+    expect(listStages).not.toHaveBeenCalled();
+  });
+
+  it('refuses rather than allows when the record cannot be read', async () => {
+    const listStages = async () => {
+      throw new Error('database down');
+    };
+    await expect(frozen({ listStages })).rejects.toThrow('database down');
   });
 });
 
@@ -780,11 +1349,10 @@ describe('the label step held against the outcome', () => {
     expect(requests.some((r) => r.url.endsWith('/user'))).toBe(false);
   });
 
-  it('leaves alone an approval by somebody else, of another commit, or from before the step', async () => {
+  it('leaves alone an approval by somebody else or from before the step', async () => {
     github_({
       reviews: [
         approval(1, 'a-person'),
-        approval(2, 'briareus-bot', { commit_id: next }),
         // By the same account, by hand, long before the review's label step.
         approval(3, 'briareus-bot', { submitted_at: at(-3_600_000) }),
         approval(4, 'briareus-bot', { state: 'DISMISSED' }),
@@ -793,6 +1361,55 @@ describe('the label step held against the outcome', () => {
     });
     expect(await check()).toEqual([]);
     expect(dismissals()).toEqual([]);
+  });
+
+  it('dismisses the step’s approval of a head pushed meanwhile too', async () => {
+    // The pull request moved while the step ran and the agent approved what it found
+    // there: no more supported by the outcome than an approval of the reviewed commit.
+    github_({ reviews: [approval(902, 'briareus-bot', { commit_id: next })] });
+    const notes = await check({ outcome: 'pending' });
+    expect(notes).toEqual([
+      {
+        code: 'approval_dismissed',
+        message:
+          'The review approved bbbbbbb as briareus-bot while its outcome is pending; Briareus dismissed that approval.',
+        reviewId: 902,
+      },
+    ]);
+    expect(dismissals()[0].body.message).toBe(
+      'Briareus: the code review outcome for aaaaaaa is pending, so the review’s own approval of bbbbbbb does not stand.',
+    );
+  });
+
+  it('goes by the approvals that existed before the step, not by two clocks', async () => {
+    github_({
+      reviews: [
+        // By the reviewing account, by hand, a few seconds before the step: within any
+        // slack a clock comparison would have to allow, and not the step's.
+        approval(10, 'briareus-bot', { submitted_at: at(-5_000) }),
+        // Submitted during the step, and stamped by a GitHub clock running well behind.
+        approval(11, 'briareus-bot', { submitted_at: at(-300_000) }),
+      ],
+    });
+    const notes = await check({ known: [10] });
+    expect(notes.map((n) => [n.code, n.reviewId])).toEqual([['approval_dismissed', 11]]);
+    expect(dismissals().map((r) => r.url.split('/').at(-2))).toEqual(['11']);
+  });
+
+  it('lists the approvals a pull request carries, for that comparison', async () => {
+    github_({
+      reviews: [
+        approval(10, 'briareus-bot'),
+        approval(12, 'a-person'),
+        approval(13, 'briareus-bot', { state: 'DISMISSED' }),
+        { id: 14, state: 'COMMENTED', user: { login: 'briareus-bot' } },
+      ],
+    });
+    expect(await enforcement.approvalsBefore({ cfg, repo, prNumber: 7 })).toEqual([10, 12]);
+    fetch.mockImplementation(async () => answer(502, {}));
+    await expect(enforcement.approvalsBefore({ cfg, repo, prNumber: 7 })).rejects.toThrow(
+      'GitHub answered 502',
+    );
   });
 
   it('says so when GitHub will not dismiss the approval', async () => {

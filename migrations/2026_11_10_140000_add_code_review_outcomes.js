@@ -17,6 +17,17 @@
 // Reviews stored before this migration have no stage rows. Nothing is back-filled: what
 // their steps did was never recorded, so their outcome reads as incomplete, not passed.
 //
+// code_review_decisions (an earlier migration's table) gains the verification a verdict
+// was recorded with. A decision outlives the finding that gave it, and the outcome asks
+// of a decision what it asks of a finding: an Optional needs a recorded verification, a
+// Dismissed a confirmed one. A decision already stored takes the verification of the
+// finding that gave it where that finding still exists and still carries the same
+// verdict, since that is the record of how the verdict was established. Every other row
+// keeps none and so does not count as verified: a verdict read from GitHub's history
+// among them, because what its reply proved was never recorded here, and assuming it was
+// proven would let exactly the unproven dismissals through that this migration exists to
+// stop. Such a claim is ruled on again, by a review or by a person through the API.
+//
 // Guarded on what already exists: ADD COLUMN is not idempotent.
 
 /** @param {import('mysql2/promise').Pool} p @param {string} table @param {string} column */
@@ -74,6 +85,10 @@ export async function up({ context: p }) {
     published_sha VARCHAR(64) NULL,
     published_state ENUM('pending', 'success', 'failure', 'error') NULL,
     published_description VARCHAR(140) NULL,
+    -- 0 from the moment a write is sent until GitHub's answer says it was taken: a
+    -- write whose answer was lost may have landed, so what the commit carries is then
+    -- unknown and the next publication always posts.
+    published_confirmed TINYINT(1) NOT NULL DEFAULT 0,
     published_at BIGINT UNSIGNED NULL,
     -- The last attempt that failed, until one succeeds: why, GitHub's answer, how many
     -- in a row, and when the next one is due.
@@ -82,10 +97,19 @@ export async function up({ context: p }) {
     publish_attempts INT UNSIGNED NOT NULL DEFAULT 0,
     publish_failed_at BIGINT UNSIGNED NULL,
     publish_retry_at BIGINT UNSIGNED NULL,
+    -- Since when GitHub is owed the status above: set with the outcome, in its
+    -- transaction, for a project that publishes it, and cleared when GitHub carries it.
+    -- An outcome stored and never posted is found by this, failure recorded or not.
+    publish_owed_at BIGINT UNSIGNED NULL,
+    -- Since when the outcome itself is owed a recomputation: evidence changed and the
+    -- computation that should have followed did not land.
+    recompute_at BIGINT UNSIGNED NULL,
     created_at BIGINT UNSIGNED NOT NULL,
     updated_at BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (repo, pr_number),
-    KEY code_review_outcomes_retry (publish_failed_at, publish_retry_at)
+    KEY code_review_outcomes_failed (publish_failed_at),
+    KEY code_review_outcomes_owed (publish_owed_at, publish_retry_at),
+    KEY code_review_outcomes_recompute (recompute_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
   // The base branch the review reviewed against, beside the head it already records:
   // the outcome is bound to both. Branch names are case-sensitive.
@@ -99,10 +123,25 @@ export async function up({ context: p }) {
     await p.query(
       'ALTER TABLE `projects` ADD COLUMN `enforce_review_outcome` TINYINT(1) NOT NULL DEFAULT 0 AFTER `review_round_limit`',
     );
+  if (!(await hasColumn(p, 'code_review_decisions', 'verification'))) {
+    await p.query(
+      "ALTER TABLE `code_review_decisions` ADD COLUMN `verification` ENUM('confirmed', 'plausible') NULL AFTER `rationale`",
+    );
+    await p.query(
+      `UPDATE \`code_review_decisions\` d
+         JOIN \`code_review_findings\` f ON f.\`id\` = d.\`finding_id\`
+         JOIN \`code_reviews\` r ON r.\`id\` = f.\`code_review_id\` AND r.\`repo\` = d.\`repo\` AND r.\`pr_number\` = d.\`pr_number\`
+          SET d.\`verification\` = f.\`verification\`
+        WHERE d.\`source\` IN ('review', 'api') AND d.\`verdict\` IS NOT NULL AND d.\`verdict\` = f.\`should_fix\`
+          AND f.\`finding_ref\` = d.\`finding_ref\``,
+    );
+  }
 }
 
 /** @param {{ context: import('mysql2/promise').Pool }} ctx */
 export async function down({ context: p }) {
+  if (await hasColumn(p, 'code_review_decisions', 'verification'))
+    await p.query('ALTER TABLE `code_review_decisions` DROP COLUMN `verification`');
   if (await hasColumn(p, 'projects', 'enforce_review_outcome'))
     await p.query('ALTER TABLE `projects` DROP COLUMN `enforce_review_outcome`');
   if (await hasColumn(p, 'code_reviews', 'base_ref'))

@@ -1567,6 +1567,8 @@ describe('findingDecision', () => {
       line: 44,
       verdict: 'dismiss',
       rationale: 'Guarded upstream.',
+      // The verification recorded with the verdict goes with it; none was here.
+      verification: null,
       source: 'review',
       decidedBy: 'session:job-1',
       headSha: head,
@@ -1677,6 +1679,7 @@ describe('verdictDecision', () => {
       findingRef: 'ref-1',
       findingId: 9,
       rationale: 'Reworded.',
+      verification: null,
       rationaleOnly: true,
     });
     expect(decide({ shouldFix: 'fix' }, { ...base, shouldFix: 'fix' }, { severity: 'high' })).toBeNull();
@@ -1713,5 +1716,84 @@ describe('verdictDecision', () => {
 
   it('decides nothing for a finding with no reference', () => {
     expect(verdictDecision(review, { id: 1, shouldFix: 'fix' }, null, { shouldFix: 'fix' }, who)).toBeNull();
+  });
+
+  it('keeps the verification with the verdict, so the decision is worth what the finding is', () => {
+    // Given with the verdict, as the verification step records it.
+    expect(
+      decide(
+        { shouldFix: 'dismiss', verification: 'plausible', comments: 'Probably guarded.' },
+        { ...base },
+        { shouldFix: 'dismiss', verification: 'plausible', comments: 'Probably guarded.' },
+      ),
+    ).toMatchObject({ verdict: 'dismiss', verification: 'plausible', rationale: 'Probably guarded.' });
+    // Recorded afterwards, on a finding that has its verdict: the decision this finding
+    // gave is brought up to date, and only that one (the store checks whose it is).
+    expect(
+      decide(
+        { shouldFix: 'dismiss', verification: 'confirmed', comments: 'Probably guarded.' },
+        { ...base, shouldFix: 'dismiss', verification: 'plausible', comments: 'Probably guarded.' },
+        { verification: 'confirmed' },
+      ),
+    ).toEqual({
+      anchor: 'T_own',
+      findingRef: 'ref-1',
+      findingId: 9,
+      rationale: 'Probably guarded.',
+      verification: 'confirmed',
+      rationaleOnly: true,
+    });
+    // Withdrawn again: the decision loses it too.
+    expect(
+      decide(
+        { shouldFix: 'optional', verification: null, comments: 'Style.' },
+        { ...base, shouldFix: 'optional', verification: 'confirmed', comments: 'Style.' },
+        { verification: null },
+      ),
+    ).toMatchObject({ verification: null, rationaleOnly: true });
+    // A verification on a finding nobody ruled on is no decision.
+    expect(decide({ verification: 'confirmed' }, { ...base }, { verification: 'confirmed' })).toBeNull();
+  });
+
+  it('takes a verification recorded on a suppressed duplicate as ruling on the claim again', () => {
+    const carried = {
+      reconciliation: 'suppressed',
+      threadId: null,
+      commentId: null,
+      priorThreadId: 'T_prior',
+      shouldFix: 'dismiss',
+      comments: 'Not repeated: already dismissed.',
+    };
+    // Its verdict is another finding's, or GitHub's history's, and was never proven:
+    // whoever records that it now is, decides the claim, with the same verdict.
+    expect(
+      decide(
+        { ...carried, verification: 'confirmed' },
+        { ...base, ...carried },
+        { verification: 'confirmed' },
+      ),
+    ).toMatchObject({
+      anchor: 'T_prior',
+      threadId: 'T_prior',
+      verdict: 'dismiss',
+      verification: 'confirmed',
+      rationale: 'Not repeated: already dismissed.',
+      source: 'review',
+      decidedAt: 1234,
+    });
+    // Its note alone still decides nothing, nor does saying the same verification again.
+    expect(
+      decide({ ...carried, comments: 'Reworded.' }, { ...base, ...carried }, { comments: 'Reworded.' }),
+    ).toBeNull();
+    expect(
+      decide(
+        { ...carried, verification: 'confirmed' },
+        { ...base, ...carried, verification: 'confirmed' },
+        { verification: 'confirmed' },
+      ),
+    ).toBeNull();
+    expect(
+      decide({ ...carried, verification: null }, { ...base, ...carried }, { verification: null }),
+    ).toBeNull();
   });
 });

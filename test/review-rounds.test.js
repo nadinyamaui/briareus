@@ -120,6 +120,7 @@ import {
   roundLimitOf,
   roundsView,
   scopeFacts,
+  settledClaims,
   unresolvedWork,
 } from '../lib/review-rounds.js';
 import { claimCodeReviewRound, listCodeReviewDecisions } from '../lib/db.js';
@@ -586,10 +587,23 @@ describe('what is unresolved', () => {
         title: 'Leaks the token',
       }),
       decision({ findingRef: 'open', threadId: 'T2', verdict: null, decidedAt: null }),
-      // Decided, so not waiting: fixed and resolved, optional, refuted with its reason.
+      // Decided, so not waiting: fixed and resolved, optional with why and a recorded
+      // verification, refuted with its reason and proven.
       decision({ findingRef: 'done', threadId: 'T3', verdict: 'fix', resolved: true }),
-      decision({ findingRef: 'opt', threadId: 'T4', verdict: 'optional' }),
-      decision({ findingRef: 'no', threadId: 'T5', verdict: 'dismiss', rationale: 'Covered by the guard' }),
+      decision({
+        findingRef: 'opt',
+        threadId: 'T4',
+        verdict: 'optional',
+        verification: 'plausible',
+        rationale: 'Cleanup, nothing breaks',
+      }),
+      decision({
+        findingRef: 'no',
+        threadId: 'T5',
+        verdict: 'dismiss',
+        verification: 'confirmed',
+        rationale: 'Covered by the guard',
+      }),
       // Resolved with no verdict decides nothing, and is not something to verify either.
       decision({ findingRef: 'tidy', threadId: 'T6', verdict: null, decidedAt: null, resolved: true }),
     ]);
@@ -597,6 +611,78 @@ describe('what is unresolved', () => {
       expect.objectContaining({ findingRef: 'fix', threadId: 'T1', commentId: 11, title: 'Leaks the token' }),
     ]);
     expect(work.unverified).toEqual([expect.objectContaining({ findingRef: 'open', threadId: 'T2' })]);
+  });
+
+  it('keeps a verdict without its evidence unverified, whoever gave it and whatever the thread says', () => {
+    const rows = [
+      // Dismissed on a likelihood, and its thread resolved with the reply, as the
+      // verification step does: nobody proved the claim wrong.
+      decision({
+        findingRef: 'unproven',
+        threadId: 'T1',
+        verdict: 'dismiss',
+        verification: 'plausible',
+        rationale: 'Probably guarded',
+        resolved: true,
+        title: 'Lost update',
+      }),
+      // Optional with no verification recorded, and one with none of its explanation.
+      decision({ findingRef: 'bare', threadId: 'T2', verdict: 'optional', rationale: 'Style' }),
+      decision({ findingRef: 'mute', threadId: 'T3', verdict: 'optional', verification: 'confirmed' }),
+      // Read from GitHub's history: what that reply proved was never recorded here.
+      decision({
+        findingRef: 'history',
+        threadId: 'T4',
+        verdict: 'dismiss',
+        source: 'github',
+        rationale: 'Handled in the caller',
+        resolved: true,
+      }),
+      // Kept under a finding's reference, with no thread.
+      decision({ findingRef: 'loose', verdict: 'dismiss', verification: 'plausible', rationale: 'Unlikely' }),
+      // And one that has everything.
+      decision({
+        findingRef: 'proven',
+        threadId: 'T5',
+        verdict: 'dismiss',
+        verification: 'confirmed',
+        rationale: 'lib/api.js:12 checks it',
+        resolved: true,
+      }),
+    ];
+    const work = unresolvedWork(rows);
+    expect(work.fix).toEqual([]);
+    expect(work.unverified.map((f) => [f.findingRef, f.verdict, f.verification, f.missing])).toEqual([
+      ['unproven', 'dismiss', 'plausible', ['verification']],
+      ['bare', 'optional', null, ['verification']],
+      ['mute', 'optional', 'confirmed', ['comments']],
+      ['history', 'dismiss', null, ['verification']],
+      ['loose', 'dismiss', 'plausible', ['verification']],
+    ]);
+    expect(work.unverified[0]).toMatchObject({ threadId: 'T1', title: 'Lost update' });
+    // Only the proven one settles its claim; a claim never ruled on, and a required
+    // fix whose thread was resolved afterwards, are told apart from all of these.
+    expect([
+      ...settledClaims([
+        ...rows,
+        decision({ findingRef: 'open', threadId: 'T6', verdict: null, decidedAt: null }),
+        decision({ findingRef: 'owed', threadId: 'T7', verdict: 'fix' }),
+        decision({ findingRef: 'fixed', threadId: 'T8', verdict: 'fix', resolved: true }),
+        decision({ findingRef: 'tidy', threadId: 'T9', verdict: null, decidedAt: null, resolved: true }),
+      ]),
+    ]).toEqual(['proven', 'fixed']);
+    // Proven later, by whoever: the later decision on the claim is the one that counts.
+    const proven = unresolvedWork([
+      ...rows,
+      decision({
+        findingRef: 'loose',
+        verdict: 'dismiss',
+        verification: 'confirmed',
+        rationale: 'Traced: never called with null',
+        decidedAt: '2026-11-10T11:00:00.000Z',
+      }),
+    ]);
+    expect(proven.unverified.map((f) => f.findingRef)).not.toContain('loose');
   });
 
   it('keeps a fix owed when its thread was resolved before the fix was required', () => {
@@ -616,7 +702,12 @@ describe('what is unresolved', () => {
     // to the thread: the later decision stands on the claim.
     const overruled = unresolvedWork([
       decision({ threadId: 'T1', verdict: 'fix' }),
-      decision({ verdict: 'dismiss', rationale: 'Not reachable', decidedAt: '2026-11-10T11:00:00.000Z' }),
+      decision({
+        verdict: 'dismiss',
+        verification: 'confirmed',
+        rationale: 'Not reachable',
+        decidedAt: '2026-11-10T11:00:00.000Z',
+      }),
     ]);
     expect(overruled).toEqual({ fix: [], unverified: [] });
     // A dismissal resolved the thread; the fix required afterwards is still owed.
@@ -845,8 +936,22 @@ describe('how current the unresolved work is', () => {
     const start = Date.UTC(2026, 10, 10, 13);
     expect((await ask(start)).fix).toHaveLength(1);
     // A client dismissed it through the API meanwhile: seen at once, with no new read.
-    const dismissed = [{ ...decisions[0], verdict: 'dismiss', rationale: 'Not reachable' }];
-    expect((await ask(start + 59_000, dismissed)).fix).toEqual([]);
+    const dismissed = [
+      { ...decisions[0], verdict: 'dismiss', verification: 'confirmed', rationale: 'Not reachable' },
+    ];
+    expect(await ask(start + 59_000, dismissed)).toMatchObject({ fix: [], unverified: [] });
+    // Dismissed without proof, it is no longer a fix owed and not verified either: the
+    // reading against GitHub sorts it as the stored one does.
+    const unproven = [{ ...dismissed[0], verification: 'plausible' }];
+    expect((await ask(start + 59_000, unproven)).unverified).toEqual([
+      expect.objectContaining({
+        findingRef: 'r1',
+        threadId: 'T1',
+        verdict: 'dismiss',
+        verification: 'plausible',
+        missing: ['verification'],
+      }),
+    ]);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect((await ask(start + 59_000)).asOf.at).toBe(new Date(start).toISOString());
     await ask(start + 60_000);
