@@ -107,6 +107,95 @@ It is independent of the agent's `running`/`completed`/`failed` execution status
 and the individual findings' verdicts. Existing and new reviews start as `pending`,
 and rerunning a review in the same session resets it to `pending`.
 
+### Earlier review decisions
+
+A review does not repeat what earlier reviews of the same pull request already
+decided. The flow stays discover, publish, verify, label; between discovery and
+publication the server itself reads the pull request's review threads from
+GitHub, every thread and every reply however many pages that takes, and hands
+them to the publish step as a data file. A passing GitHub failure is tried
+again twice; if the read still fails or comes back incomplete, or the pull
+request's head moved, the review stops there: it fails like any other failed
+step and publishes nothing.
+
+Each thread gets a disposition from the verdict reply standing on it (the bold
+**Fix**, **Optional** or **Dismissed** the verify step writes; the latest one
+wins):
+
+| Disposition | Meaning                                                                            |
+| ----------- | ---------------------------------------------------------------------------------- |
+| `dismissed` | Refuted, with the reason given. A dismissal with no reason does not count.         |
+| `addressed` | A **Fix** verdict whose thread was then resolved.                                  |
+| `optional`  | Confirmed but not required. It stays distinct from a dismissal.                    |
+| `fix`       | A required fix still open.                                                         |
+| `open`      | No verdict yet.                                                                    |
+| `resolved`  | Resolved with no verdict. This decides nothing: people resolve threads to tidy up. |
+
+Only two kinds of verdict count: a reply written by the account the server reads
+GitHub as or by the account the review's agent posts as (the session owner's
+connected GitHub account, when there is one), and a decision Briareus stored,
+from a review's verify step or from a client through the API. A reply by
+anybody else is passed along as context and possible new evidence, never as a
+decision, however it is worded: on a public repository anyone can type
+`**Dismissed**`. Between a counted reply and a stored decision, the later one
+stands.
+
+The publish step then gives every finding one reconciliation, and the server
+checks it against the history it read before storing the finding:
+
+- `suppressed`: the same claim was dismissed and the reason still holds, was
+  addressed and is still fixed, or was optional in a thread since resolved. It
+  is not posted again. It is still registered, with the earlier decision as its
+  verdict and `priorUrl`, `priorDisposition` and `priorReason` naming the
+  thread and its reason, so repeats stay countable. A suppression naming a
+  thread that is not in the pull request's history, or one that does not carry
+  such a decision, is refused.
+- `adopted`: the same claim already has an unresolved thread, including a
+  comment an interrupted run already posted. No duplicate is posted; the
+  finding continues in that thread and gets its verdict there.
+- `revisit`: a decided claim whose decision changed code or new evidence
+  invalidates. It is posted as a new comment that links the earlier thread, and
+  `revisitReason` must say what changed; a revisit without it is refused.
+- `new`: everything else, including an unrelated problem in the same file or on
+  the same line and a claim whose thread was merely resolved.
+
+The verify step leaves suppressed findings alone and rules on adopted and
+revisited ones like any other. A dismissal stays on GitHub as before: the
+**Dismissed** reply with its reason, the thread resolved, nothing deleted. A
+decision that so far exists only in Briareus's records is replied into its
+thread when a later review relies on it.
+
+Findings carry `findingRef` (the same for one claim across every review of the
+pull request), `commentId` and `threadId` (the GitHub comment and thread it is
+published as; the thread is matched by the server once publication ends) and
+`headSha` (the head it was raised on). The decisions themselves are kept per
+pull request in `code_review_decisions`, one row per thread, or per finding that
+had no inline thread: the verdict, its reason, what recorded it (`github`,
+`review` or `api`), who, the head it was given on and whether the thread was
+resolved. Each review refreshes them from GitHub, and recording a verdict, from
+the verify step or `PATCH …/findings/{findingId}`, updates them at once. They
+reference no session and no review, so they survive a rerun in the same session
+(which replaces that review's findings), the session's deletion and every later
+review. Clients read them through
+`GET /api/v1/pulls/{number}/code-review-decisions`.
+
+Publication is safe to retry: a rerun or a recovered publish step reads the
+history again, so comments the interrupted attempt already posted are adopted
+rather than posted twice, and the summary comment ends with an invisible
+`<!-- reviewer:code-review <head> -->` line so the retry updates it instead of
+adding another.
+
+**Migration.** `2026_11_10_120000_add_code_review_decisions` adds the table and
+the finding columns at boot; there are no settings. Existing findings keep
+their data, get `reconciliation` `new` and a reference of their own (`f<id>`),
+and have no comment or thread ids. Nothing is back-filled from GitHub: a pull
+request's earlier threads are read the first time it is reviewed after the
+upgrade, and their verdict replies count when one of the accounts above wrote
+them. A verdict an earlier review posted as some other account is context
+until a review or a client records the decision again. The existing responses
+and requests are unchanged apart from the added fields; the fields describing
+a finding's reconciliation are read-only for clients.
+
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).
 
@@ -216,7 +305,8 @@ These additions are present in the server revision documented here:
   interactive sessions only).
 - Code reviews and their findings are stored in the database; review sessions
   register findings through their own MCP tools.; clients read them per
-  pull request through the API.
+  pull request through the API. What the reviews of a pull request decided is
+  kept per pull request and outlives the reviews and their sessions.
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.

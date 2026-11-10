@@ -1,10 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { TEST_SHEET_ANCHOR } from '../lib/markers.js';
+import { TEST_SHEET_ANCHOR, codeReviewAnchor } from '../lib/markers.js';
 
 // These strings are a contract with PRs already on GitHub (see lib/markers.js): changing one
 // makes every older PR unreadable, so a failure here means you are about to break old PRs.
 describe('markers', () => {
   it('pins the test sheet anchor', () => {
     expect(TEST_SHEET_ANCHOR).toBe('<!-- reviewer:test-sheet -->');
+  });
+
+  it('pins the code review summary anchor', () => {
+    expect(codeReviewAnchor('1a2b3c4')).toBe('<!-- reviewer:code-review 1a2b3c4 -->');
   });
 });

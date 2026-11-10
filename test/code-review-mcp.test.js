@@ -95,6 +95,46 @@ it('adds, updates and lists findings with the session token', async () => {
   ]);
 });
 
+it('states how a finding relates to earlier threads when it is registered, not afterwards', async () => {
+  const [add, update] = (await rpc('tools/list')).result.tools;
+  const stated = ['reconciliation', 'commentId', 'priorThreadId', 'priorFindingRef', 'revisitReason'];
+  expect(Object.keys(add.inputSchema.properties)).toEqual(expect.arrayContaining(stated));
+  expect(add.inputSchema.properties.reconciliation.enum).toEqual(['new', 'adopted', 'suppressed', 'revisit']);
+  expect(add.inputSchema.required).toEqual(['severity', 'title']);
+  for (const name of stated) expect(update.inputSchema.properties).not.toHaveProperty(name);
+  const suppressed = {
+    severity: 'low',
+    title: 'Null deref',
+    reconciliation: 'suppressed',
+    priorThreadId: 'PRRT_a',
+    priorDisposition: 'dismissed',
+  };
+  const added = await rpc('tools/call', { name: 'review_finding_add', arguments: suppressed });
+  // The list the verification step reads marks it, with the thread that decided it.
+  expect(added.result.content[0].text).toBe(
+    'Registered finding #7 [low, fix, confirmed, suppressed] lib/a.js:4 Null deref (earlier dismissed: PRRT_a)',
+  );
+  const posted = await rpc('tools/call', {
+    name: 'review_finding_add',
+    arguments: {
+      severity: 'high',
+      title: 'Lost update',
+      reconciliation: 'revisit',
+      commentId: 501,
+      priorUrl: 'https://github.com/acme/shop/pull/7#discussion_r101',
+    },
+  });
+  // And the comment the verification step replies to.
+  expect(posted.result.content[0].text).toBe(
+    'Registered finding #7 [high, fix, confirmed, revisit] lib/a.js:4 Lost update (comment 501) (earlier thread: https://github.com/acme/shop/pull/7#discussion_r101)',
+  );
+  expect(calls[0]).toMatchObject({
+    path: '/api/agent/code-review/findings',
+    method: 'POST',
+    body: suppressed,
+  });
+});
+
 it('stores the posted summary comment', async () => {
   const stored = await rpc('tools/call', {
     name: 'review_summary_set',
