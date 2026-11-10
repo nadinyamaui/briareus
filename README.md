@@ -250,6 +250,14 @@ when the change calls for it. At the limit no further review starts until a
 person continues it on purpose, and nothing is marked as passed because rounds
 ran out (see [Review rounds](docs/features.md#review-rounds)).
 
+What a review amounts to is computed by the server, apart from whether its
+session finished: pending, incomplete, changes required or passed, from the
+stages it saw complete, the stored findings and their evidence, and the reviewed
+head and base. With `enforceReviewOutcome` on, a project publishes it as the
+`briareus/code-review` commit status, which the repository can require; labels
+and the review's own approval never stand in for it (see
+[Review outcome](docs/features.md#review-outcome)).
+
 A session’s `qaLoop` starts QA when the task settles on an open pull request. QA
 writes and executes a test sheet and reports passed, failed, or incomplete coverage.
 A new head invalidates the previous result. Disarming QA leaves any running QA

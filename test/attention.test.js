@@ -146,6 +146,47 @@ describe('operator attention', () => {
       href: '/sessions/a',
     });
   });
+  it('lists a pull request whose review outcome GitHub does not carry, with what it shows instead', () => {
+    const failing = {
+      repo: 'acme/shop',
+      prNumber: 7,
+      headSha: 'b'.repeat(40),
+      outcome: 'changes_required',
+      state: 'failure',
+      publishedSha: 'b'.repeat(40),
+      publishedState: 'success',
+      error: 'GitHub answered 403 (Forbidden): the server’s GitHub token may not write commit statuses',
+      errorStatus: 403,
+      attempts: 4,
+      failedAt: '2026-11-10T12:00:00.000Z',
+      retryAt: '2026-11-10T12:08:00.000Z',
+    };
+    const [item] = attentionItems([], [], [], [], [failing]);
+    expect(item).toEqual({
+      id: 'review-status:acme/shop#7',
+      kind: 'review-status',
+      sessionId: null,
+      taskId: null,
+      revision: `${'b'.repeat(40)}:failure`,
+      repo: 'acme/shop',
+      prNumber: 7,
+      title: 'PR #7',
+      // The stale success is the thing a person must know about.
+      summary:
+        'The code review outcome (changes required) could not be published as a commit status on bbbbbbb: GitHub answered 403 (Forbidden): the server’s GitHub token may not write commit statuses. GitHub still shows `success` on bbbbbbb. Retried automatically; check the server’s GitHub token if it keeps failing.',
+      href: 'https://github.com/acme/shop/pull/7',
+      at: '2026-11-10T12:00:00.000Z',
+    });
+    // The retries of one failure are one occurrence; the next outcome owed is another.
+    expect(attentionItems([], [], [], [], [{ ...failing, attempts: 5 }])[0].revision).toBe(item.revision);
+    expect(attentionItems([], [], [], [], [{ ...failing, state: 'error' }])[0].revision).not.toBe(
+      item.revision,
+    );
+    const never = { ...failing, publishedSha: null, publishedState: null };
+    expect(attentionItems([], [], [], [], [never])[0].summary).toContain(
+      'GitHub shows no status from Briareus.',
+    );
+  });
   it('lists a pull request whose code review stopped at its round limit, with what is unresolved', () => {
     const waiting = {
       repo: 'acme/shop',

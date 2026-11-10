@@ -394,6 +394,177 @@ been verified against a live review: where it is not honoured the round reviews
 the whole pull request while recorded as `incremental`, which errs on the side
 of reviewing more.
 
+### Review outcome
+
+Whether a review session ran to its end and what the review amounts to are two
+things. `status` on a stored review (`running`, `completed`, `failed`) is the
+first and nothing else: a `completed` review is not a passed one. The second is
+the pull request's **review outcome**, which the server computes from its own
+records. A label, an approval and a clean exit of the last turn are not inputs.
+The flow of a review stays discover, publish, verify, label, and the project's
+provider, model and effort are used as configured.
+
+| Outcome            | Meaning                                                                                                                                             |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pending`          | Nothing to judge yet: no review covers the pull request, one is running, or the pull request moved on from the reviewed revision and awaits review. |
+| `incomplete`       | A review ran and no verdict can be drawn from it. Never passed.                                                                                     |
+| `changes_required` | The review is complete and a required fix stands.                                                                                                   |
+| `passed`           | Every required stage completed on the head the pull request still has, and every finding is properly verified as Optional or Dismissed.             |
+
+**What it is computed from.**
+
+- _Stages._ The server records what it saw each step do, per review and bound
+  to the head (`code_review_stages`): discovery left a report and the pull
+  request had not moved, publication ended and its findings were tied to their
+  threads, the Codex delegation receipt was verified (a required stage only for
+  a review on Codex), verification ended, labelling ended. The rows are written
+  when discovery starts, one per stage that review must complete, so they also
+  say which stages are required; a stage is complete only as `completed` for the
+  reviewed head. A stage still `running` after the review stopped was
+  interrupted, a `failed` one keeps why, and a review with no rows at all has no
+  record. Each of those is `incomplete`. The rows survive a restart: a recovered
+  step runs again and is recorded when it ends, and a discovery run starts them
+  over together with the review's findings.
+- _Findings and their evidence._ A finding needs evidence to stop blocking,
+  never to block:
+  - **Fix** always stands, `confirmed`, `plausible` or with no verification at
+    all: a defect the verification could not rule out is the author's to answer.
+  - **Optional** lets the finding through with `verification` set (`confirmed`
+    or `plausible`) and `comments` saying why it does not block. Whether the
+    claim was proven changes nothing about its not blocking, and its thread
+    stays open on GitHub.
+  - **Dismissed** lets the finding through only with `verification`
+    `confirmed` and its reason in `comments`. A `plausible` dismissal is a
+    refutation nobody proved, and a dismissal takes the claim out of later
+    reviews, so it is `incomplete` (`dismissal_unproven`) until it is proven,
+    recorded as Optional, or decided by a person through the API.
+  - No verdict, or a verdict missing those, is `incomplete`. So is a finding
+    registered with an inline comment the server did not find on the pull
+    request (`finding_unlinked`).
+  - A suppressed duplicate carries the earlier decision and needs nothing new.
+    Confirmed Optional findings and refuted ones stay distinct: they are
+    different verdicts, counted separately in the status description.
+- _What earlier rounds left._ A required fix still owed on the pull request
+  (`fix_owed`, including a fix whose thread was resolved before the verdict) is
+  `changes_required`, and a finding an earlier review published without a
+  verified verdict (`earlier_finding_unverified`) is `incomplete`, whether or
+  not this review raised them again. These are read from the stored decisions,
+  as of the last review that read the pull request's threads.
+- _The reviewed revision._ The outcome is bound to the head and the base branch
+  the review covered. Once the pull request's head moves, or it targets another
+  branch, the outcome is `stale` and reads `pending` for the new revision. The
+  base branch gaining commits under an unchanged head is not stale: the reviewed
+  commits are what they were, and whether a branch must be up to date is the
+  repository's own rule.
+- _The round limit._ An unreviewed revision of a pull request that has used its
+  rounds is `incomplete`, not `pending`: no review of it starts by itself, so it
+  waits on a person. On the reviewed head the limit changes nothing about the
+  outcome and is listed as a note; reaching it never passes anything.
+
+`incomplete` outranks `changes_required`, and every reason is listed either way.
+`reasons` is machine-readable: `{ code, effect, message, … }`, where `effect` is
+the outcome that reason alone leads to, or `note`.
+
+**When it is computed.** When a review starts (it becomes the review the outcome
+is computed from, and reads `pending`), when its execution settles, when a
+client changes a finding through
+`PATCH /api/v1/pulls/{number}/code-reviews/{reviewId}/findings/{findingId}`,
+and when a review request is refused at the round limit. It is stored per pull
+request in `code_review_outcomes`, beside what GitHub was last told, and every
+read computes it again from the stored records, so an answer is never older than
+those. Recomputations for one pull request run one at a time under a row lock.
+
+**Reading it.** `GET /api/v1/pulls/{number}/code-reviews` and
+`GET /api/v1/pulls/{number}/code-review-rounds` carry `reviewOutcome`: the
+outcome, its reasons, `stale`, the head and base it is for, the reviewed
+revision, the stage records, `enforced` and `status`. Each stored review lists
+its own `stages` and `baseRef`. The finding `PATCH` answers the outcome it led
+to. The rounds read computes it against the head GitHub has at that moment.
+
+**Enforcing it.** `enforceReviewOutcome` on the project, off by default and
+accepted only as `true` or `false`. Off, the outcome is computed, stored and
+readable, nothing is written to GitHub, and a review's steps and prompts are
+what they were; that is the state to watch outcomes in before requiring them.
+On:
+
+- The server publishes the outcome as the commit status **`briareus/code-review`**
+  on the pull request's head. Require that context in the repository's branch
+  protection or ruleset to block merging on it. `passed` is `success`,
+  `changes_required` is `failure`, `incomplete` is `error` (the review did not
+  reach a verdict, as opposed to the code having to change; GitHub blocks on
+  both) and `pending` is `pending`. The description says why in at most 140
+  characters. There is no target URL: this server has no page to link.
+- The server writes it with its own GitHub token, also when a client's request
+  led to the change, and never through the agent. The token must be allowed to
+  write commit statuses (`repo:status` on a classic token, "Commit statuses:
+  write" on a fine-grained one).
+- A review posts `pending` on its head when it starts, so a `success` an
+  earlier review left on the same commit stops counting while it runs.
+  `success` is written last, after every stage and after the label step was
+  checked. A head the server has not judged carries no status from Briareus,
+  which a required check reads as not met; a `success` on an older head is
+  harmless for the same reason.
+- A status is posted only when it differs from what GitHub last accepted for
+  that head. Writes for one pull request go out one at a time, in the order
+  the outcomes were stored. A write that fails in passing is retried at once
+  (three attempts); what still fails is recorded with GitHub's answer and
+  retried every minute at first, doubling to an hour, or when a rate limit
+  ends. Sending the same status again is harmless.
+- While GitHub does not carry the stored outcome, `status.published` is false
+  and `status.error` says why; `status.publishedSha` and `publishedState` say
+  what it last accepted. An outcome is enforced on GitHub only when `enforced`
+  and `status.published` are both true. A pull request in that state is listed
+  in `GET /api/v1/attention` as a `review-status` item until a retry lands.
+- The verification step is told what its record is read as, and from the label
+  step on the review can no longer add or change its own findings (409): the
+  step that is told the outcome cannot write itself a better one. A person
+  still can, through the API, under their own user.
+- The label step keeps the project's `reviewLabels` rules and the approval,
+  under the server's outcome. Before the step the server reads the pull request
+  from GitHub, computes the outcome without that step, and puts it first in the
+  prompt as the authority: with `passed` the rules apply and the approval is
+  allowed; with `changes_required` the rules apply but nothing that marks the
+  code approved; with `incomplete` or a moved pull request the labels are left
+  alone. After the step the server computes it again and, unless it is `passed`,
+  reads the pull request's labels and reviews. An approval of the reviewed
+  commit that the reviewing account submitted during the step is dismissed
+  through GitHub's API with the outcome as the reason (`approval_dismissed`, or
+  `approval_not_dismissed` when GitHub refuses). An approved label
+  (`code-approved`) is noted (`approved_label_ignored`) and left: a project's
+  label rules are its own and the label may predate the review. What blocks the
+  merge is the status. These are notes on an outcome that already does not pass.
+
+**Migration.** `2026_11_10_140000_add_code_review_outcomes` adds
+`code_review_stages`, `code_review_outcomes`, `base_ref` on `code_reviews` and
+`enforce_review_outcome` on `projects`, off for every existing project. Nothing
+is back-filled. A review stored before it has no stage records, so the outcome
+of a pull request whose latest review is such a one is `incomplete`
+(`stages_not_recorded`) until it is reviewed again; a pull request never
+reviewed is `pending`. A review session in flight during the upgrade gets its
+records at its next discovery run; one already past discovery finishes without
+them and is `incomplete`. Existing responses and requests are unchanged apart
+from the added fields.
+
+Turning `enforceReviewOutcome` on publishes nothing retroactively: a pull
+request gets its status the next time its outcome is computed (a review, a
+changed verdict, a refusal at the limit), and until then carries none, which a
+required check reads as not met. Turning it off stops the updates and leaves
+the statuses on GitHub as they were, so remove the requirement from branch
+protection first.
+
+What this does not do: it cannot withdraw a status GitHub will not let it
+replace, so if a write fails for good an older status stays on that commit
+while the API reports the outcome as not published; an outcome that turns from
+passed to something else after its review ended (a verdict changed through the
+API) flips the status, but the labels and any approval from that review are
+checked only right after the label step; a thread resolved on GitHub without a
+new review is not seen until the next review reads the threads; a review whose
+session vanished without being settled stays `running` and so `pending`; the
+pull request board still recommends actions from labels alone; and the server
+cannot judge the quality of evidence, only that it was recorded. The status
+write, the dismissal of an approval and the behaviour of a required check were
+exercised against stand-ins, not against GitHub itself.
+
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).
 
@@ -508,6 +679,10 @@ These additions are present in the server revision documented here:
 - Code reviews of one pull request are bounded by a per-project round limit
   (`reviewRoundLimit`, 3 by default); later rounds review what changed, and a
   person continues past the limit explicitly.
+- A pull request's review outcome (pending, incomplete, changes required or
+  passed) is computed by the server from recorded stages, findings and
+  evidence, apart from whether the session finished; a project can publish it
+  as the `briareus/code-review` commit status (`enforceReviewOutcome`).
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.

@@ -52,6 +52,22 @@ const state = vi.hoisted(() => ({
   appSettings: {},
   // The review rounds store, per `repo#pr`, standing in for lib/db.js's two tables.
   reviewRounds: new Map(),
+  // What the outcome is computed from (lib/review-enforcement.js), standing in for the
+  // stage and outcome tables: a test that cares fills these in and reads `stageLog`.
+  outcome: { review: null, stages: [], findings: [], decisions: [], row: null },
+  stageLog: [],
+  outcomeState(repo, prNumber) {
+    const pull = state.reviewRounds.get(`${repo}#${prNumber}`);
+    return {
+      row: state.outcome.row,
+      review: state.outcome.review,
+      stages: state.outcome.stages,
+      findings: state.outcome.findings,
+      decisions: state.outcome.decisions,
+      count: pull ? { ...pull.count } : null,
+      rounds: pull ? pull.rounds.map((r) => ({ ...r })) : [],
+    };
+  },
   claimRound(request, decide) {
     const key = `${request.repo}#${request.prNumber}`;
     const pull = state.reviewRounds.get(key) || { count: { rounds: 0, continuations: 0 }, rounds: [] };
@@ -215,6 +231,54 @@ vi.mock('../lib/db.js', () => ({
   getCodeReviewRounds: vi.fn(async () => ({ count: null, rounds: [] })),
   listPullCodeReviews: vi.fn(async () => []),
   listRefusedCodeReviewRounds: vi.fn(async () => []),
+  // No review row unless a test stores one, as with getCodeReviewByJob above: the
+  // stages are then not recorded, which is what a lost insert leaves.
+  beginCodeReviewStages: vi.fn(async (_jobId, run) => {
+    const review = state.outcome.review;
+    if (!review) return null;
+    // A discovery run starts the review over on the head it verified.
+    Object.assign(review, { headSha: run.headSha, baseRef: run.baseRef, status: 'running' });
+    state.outcome.stages = run.stages.map((stage, i) => ({
+      stage,
+      headSha: run.headSha,
+      status: i ? 'pending' : 'running',
+      detail: null,
+    }));
+    return review.id;
+  }),
+  setCodeReviewStage: vi.fn(async (_jobId, stage, headSha, seen) => {
+    state.stageLog.push({ stage, status: seen.status, ...(seen.detail ? { detail: seen.detail } : {}) });
+    const row = state.outcome.stages.find((s) => s.stage === stage && s.headSha === headSha);
+    if (row) Object.assign(row, { status: seen.status, detail: seen.detail ?? null });
+    return !!row;
+  }),
+  failRunningCodeReviewStages: vi.fn(async (_jobId, headSha, detail) => {
+    for (const row of state.outcome.stages.filter((s) => s.status === 'running' && s.headSha === headSha)) {
+      Object.assign(row, { status: 'failed', detail });
+      state.stageLog.push({ stage: row.stage, status: 'failed', detail });
+    }
+  }),
+  readCodeReviewOutcomeState: vi.fn(async (repo, prNumber) => state.outcomeState(repo, prNumber)),
+  refreshCodeReviewOutcome: vi.fn(async (repo, prNumber, _options, compute) => {
+    const read = state.outcomeState(repo, prNumber);
+    const next = compute(read);
+    state.outcome.row = { ...(read.row || {}), repo, prNumber, ...next };
+    return { ...read, row: state.outcome.row };
+  }),
+  getCodeReviewOutcome: vi.fn(async () => state.outcome.row),
+  recordCodeReviewStatusPublished: vi.fn(async (_repo, _pr, status) => {
+    Object.assign(state.outcome.row, {
+      publishedSha: status.sha,
+      publishedState: status.state,
+      publishedDescription: status.description,
+      publishFailedAt: null,
+    });
+  }),
+  recordCodeReviewStatusFailed: vi.fn(async (_repo, _pr, failure) => {
+    Object.assign(state.outcome.row, { publishError: failure.error, publishFailedAt: 'failed' });
+  }),
+  clearCodeReviewStatusFailure: vi.fn(async () => {}),
+  listFailedCodeReviewStatuses: vi.fn(async () => []),
 }));
 
 vi.mock('../lib/github.js', async (importOriginal) => ({
@@ -331,6 +395,9 @@ import {
   claimCodeReviewRound,
   setCodeReviewRoundScope,
   markCodeReviewRoundPublished,
+  beginCodeReviewStages,
+  failRunningCodeReviewStages,
+  refreshCodeReviewOutcome,
 } from '../lib/db.js';
 import { reviewHistoryOf } from '../lib/review-history.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
@@ -540,6 +607,8 @@ beforeEach(() => {
   forgetProviderUsage();
   transferClaudeSession.mockReset();
   state.reviewRounds.clear();
+  state.outcome = { review: null, stages: [], findings: [], decisions: [], row: null };
+  state.stageLog = [];
   state.provider = { id: 1, label: 'Claude entry', binary: 'claude', active: true };
   state.projects = [{ repo: 'acme/shop', label: 'Shop', localDir: '' }];
   setSessionProjectFilter(() => true);
@@ -2681,6 +2750,498 @@ describe('native Codex code review', () => {
       } finally {
         getJob('earlier-1').status = 'closed';
       }
+    });
+  });
+
+  describe('review outcome', () => {
+    const baseRef = 'series/step-1';
+    const STAGES = ['discover', 'publish', 'delegation', 'verify', 'label'];
+    const next = 'b'.repeat(40);
+    // The review row the session's stages are recorded under, as lib/db.js holds it.
+    const stored = (over = {}) => {
+      state.outcome.review = { id: 5, jobId: id, status: 'running', headSha: null, baseRef: null, ...over };
+    };
+    const stagesAt = (sha, over = {}) =>
+      STAGES.map((stage) => ({
+        stage,
+        headSha: sha,
+        status: 'completed',
+        detail: null,
+        ...(over[stage] || {}),
+      }));
+    const stage = (name) => state.outcome.stages.find((s) => s.stage === name);
+    const finding = (over = {}) => ({
+      id: 9,
+      findingRef: 'ref-9',
+      title: 'Lost update',
+      reconciliation: 'new',
+      commentId: null,
+      threadId: null,
+      shouldFix: 'optional',
+      verification: 'confirmed',
+      comments: 'Style only, lib/cart.js:44',
+      ...over,
+    });
+    // GitHub as the server talks to it: the pull request, and for an enforcing project
+    // the status writes, the labels and the reviews. Everything written is kept.
+    let writes;
+    const github = ({ labels = [], reviews = () => [], status = () => ({ ok: true, status: 201 }) } = {}) => {
+      writes = [];
+      githubRest.mockImplementation(async (_cfg, method, url, body) => {
+        const ok = (json) => ({ ok: true, status: 200, json: async () => json });
+        if (method === 'POST' && url.includes('/statuses/')) {
+          writes.push({ sha: url.split('/').pop(), ...body });
+          return { json: async () => ({ message: 'Resource not accessible' }), ...status() };
+        }
+        if (method === 'PUT' && url.includes('/dismissals')) {
+          writes.push({ dismissed: Number(url.split('/').at(-2)), ...body });
+          return ok({});
+        }
+        if (method !== 'GET') throw new Error(`Unexpected GitHub write: ${method} ${url}`);
+        if (url.includes('/labels')) return ok(labels.map((name) => ({ name })));
+        if (url.includes('/reviews?')) return ok(reviews());
+        if (url === '/user') return ok({ login: 'briareus-bot' });
+        return ok({
+          number: 77,
+          state: 'open',
+          head: { ref: 'feature', sha: head },
+          base: { ref: baseRef },
+          html_url: 'https://github.com/acme/shop/pull/77',
+        });
+      });
+    };
+    const statuses = () => writes.filter((w) => w.sha).map((w) => [w.sha, w.state]);
+    const texts = () => job.events.map((e) => e.text || '');
+    // Discovery, then the publish, verify and label turns, each ending cleanly.
+    const discover = async () => {
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(invocations).toHaveLength(1));
+      fs.writeFileSync(summaryPath, 'A candidate finding');
+      finishReview(invocations[0]);
+    };
+    const turn = async (index) => {
+      await vi.waitFor(() => expect(invocations).toHaveLength(index + 1));
+      await vi.waitFor(() => expect(invocations[index].child.prompt).toBeTruthy());
+      return invocations[index];
+    };
+    const review = async () => {
+      await discover();
+      for (let i = 1; i <= 3; i++) finishTurn(await turn(i));
+      await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+    };
+
+    beforeEach(() => {
+      for (const mock of [
+        beginCodeReviewStages,
+        refreshCodeReviewOutcome,
+        completeCodeReview,
+        failCodeReview,
+      ])
+        mock.mockClear();
+      // The store settles the review's execution, as lib/db.js does.
+      completeCodeReview.mockImplementation(async () => {
+        if (state.outcome.review) state.outcome.review.status = 'completed';
+      });
+      failCodeReview.mockImplementation(async () => {
+        if (state.outcome.review?.status === 'running') state.outcome.review.status = 'failed';
+      });
+      writes = [];
+    });
+    afterEach(() => {
+      completeCodeReview.mockImplementation(async () => {});
+      failCodeReview.mockImplementation(async () => {});
+    });
+
+    it('records each step as the server saw it and computes the outcome, writing nothing to GitHub', async () => {
+      stored();
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(invocations).toHaveLength(1));
+      // One record per step this review must complete, the delegation receipt among
+      // them on Codex, for the head and the base it verified.
+      expect(beginCodeReviewStages).toHaveBeenCalledWith(id, { headSha: head, baseRef, stages: STAGES });
+      // From here this review is the one the pull request's outcome is computed from.
+      expect(refreshCodeReviewOutcome.mock.calls[0].slice(0, 3)).toEqual(['acme/shop', 77, { reviewId: 5 }]);
+      expect(state.outcome.row).toMatchObject({ outcome: 'pending', headSha: head, statusState: 'pending' });
+      expect(state.outcome.row.reasons.map((r) => r.code)).toEqual(['review_running']);
+      fs.writeFileSync(summaryPath, 'A candidate finding');
+      finishReview(invocations[0]);
+      for (let i = 1; i <= 3; i++) finishTurn(await turn(i));
+      await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+      await vi.waitFor(() => expect(state.outcome.row.outcome).toBe('passed'));
+      // Each step as it started and ended, in order; the receipt is checked before
+      // verification and again before labelling.
+      expect(state.stageLog).toEqual([
+        { stage: 'discover', status: 'completed' },
+        { stage: 'publish', status: 'running' },
+        { stage: 'publish', status: 'completed' },
+        { stage: 'delegation', status: 'completed' },
+        { stage: 'verify', status: 'running' },
+        { stage: 'verify', status: 'completed' },
+        { stage: 'delegation', status: 'completed' },
+        { stage: 'label', status: 'running' },
+        { stage: 'label', status: 'completed' },
+      ]);
+      expect(state.outcome.row).toMatchObject({ outcome: 'passed', stale: false, statusState: 'success' });
+      // Settling the review computes for the pull request, without naming a review.
+      expect(refreshCodeReviewOutcome.mock.calls.at(-1).slice(0, 3)).toEqual([
+        'acme/shop',
+        77,
+        { reviewId: null },
+      ]);
+      // The project does not enforce the outcome: GitHub was only ever read, the steps
+      // were told what they always were, and the session says nothing new.
+      expect(githubRest.mock.calls.map(([, method]) => method)).not.toContain('POST');
+      expect(githubRest.mock.calls.every(([, method]) => method === 'GET')).toBe(true);
+      expect(invocations[2].child.prompt).not.toContain('briareus/code-review');
+      expect(invocations[3].child.prompt).not.toContain('Briareus computed this review');
+      expect(invocations[3].child.prompt).toContain(
+        'Before finalizing this review, check review_findings_list',
+      );
+      expect(texts().filter((t) => t.includes('Code review outcome'))).toEqual([]);
+      // Kept with the session for a restart, and not part of what a client reads.
+      expect(job.codeReviewRecord).toEqual({ id: 5, head });
+      expect(publicJob(job)).not.toHaveProperty('codeReviewRecord');
+    });
+
+    it('cannot pass a review that kept no record, however cleanly it ran', async () => {
+      // The review row's insert was lost: no stages are recorded for it.
+      await review();
+      expect(beginCodeReviewStages).toHaveBeenCalledTimes(1);
+      expect(job.codeReviewRecord).toBeNull();
+      await vi.waitFor(() => expect(refreshCodeReviewOutcome.mock.calls.length).toBeGreaterThan(1));
+      expect(state.outcome.row.outcome).toBe('pending');
+      expect(state.outcome.row.reasons.map((r) => r.code)).toEqual(['no_review']);
+      // And one stored without its stages reads as incomplete, completed or not.
+      stored({ status: 'completed', headSha: head, baseRef });
+      sendDevMessage(id, 'thanks');
+      await vi.waitFor(() => expect(invocations).toHaveLength(5));
+      finishTurn(invocations[4]);
+    });
+
+    it('publishes pending when the review starts and success last, for an enforcing project', async () => {
+      state.projects[0].enforceReviewOutcome = true;
+      stored();
+      state.outcome.findings = [finding()];
+      github();
+      await discover();
+      await vi.waitFor(() => expect(statuses()).toEqual([[head, 'pending']]));
+      expect(writes[0]).toEqual({
+        sha: head,
+        state: 'pending',
+        context: 'briareus/code-review',
+        description: `Review of ${head.slice(0, 7)} in progress`,
+      });
+      finishTurn(await turn(1));
+      // The verification step is told what its record is read as.
+      const verify = await turn(2);
+      expect(verify.child.prompt).toContain('Your goal is to try to REFUTE them');
+      expect(verify.child.prompt).toContain(
+        'Dismissed lets the finding through only with verification confirmed',
+      );
+      finishTurn(verify);
+      // The label step gets the server's outcome first, then the rules it always had.
+      const label = await turn(3);
+      expect(label.child.prompt).toContain(`for head ${head}: **passed**.`);
+      expect(label.child.prompt).toContain('That outcome is the authority for this step');
+      expect(label.child.prompt).toContain('add the `feedback-given` label');
+      expect(label.child.prompt).toContain(
+        `\`gh api repos/acme/shop/pulls/77/reviews -f commit_id=${head} -f event=APPROVE\``,
+      );
+      expect(texts()).toContain(
+        'Code review outcome before labelling: passed. The label step is held to it.',
+      );
+      // Nothing passing is on GitHub while the last step still runs.
+      expect(statuses()).toEqual([[head, 'pending']]);
+      expect(state.outcome.row.outcome).toBe('pending');
+      finishTurn(label);
+      await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+      await vi.waitFor(() =>
+        expect(statuses()).toEqual([
+          [head, 'pending'],
+          [head, 'success'],
+        ]),
+      );
+      expect(writes[1].description).toBe(`Review passed at ${head.slice(0, 7)}: 1 optional, nothing to fix`);
+      // A passed outcome has nothing to hold the step's labels or approval against.
+      expect(stage('label')).toMatchObject({ status: 'completed', detail: { outcome: 'passed', notes: [] } });
+      expect(githubRest.mock.calls.some(([, , url]) => url.includes('/labels'))).toBe(false);
+      expect(texts()).toContain(`Code review outcome for ${head.slice(0, 7)}: passed.`);
+      expect(state.outcome.row).toMatchObject({
+        outcome: 'passed',
+        publishedSha: head,
+        publishedState: 'success',
+      });
+    });
+
+    it('holds a label step that approved against a required fix, and never publishes success', async () => {
+      state.projects[0].enforceReviewOutcome = true;
+      stored();
+      state.outcome.findings = [finding({ shouldFix: 'fix', title: 'Leaks the token' })];
+      // The agent approved the commit and added the approved label all the same.
+      github({
+        labels: ['code-approved'],
+        reviews: () => [
+          {
+            id: 900,
+            state: 'APPROVED',
+            commit_id: head,
+            user: { login: 'briareus-bot' },
+            submitted_at: new Date().toISOString(),
+          },
+          // A person's approval is theirs.
+          {
+            id: 901,
+            state: 'APPROVED',
+            commit_id: head,
+            user: { login: 'dana' },
+            submitted_at: new Date().toISOString(),
+          },
+        ],
+      });
+      await discover();
+      finishTurn(await turn(1));
+      finishTurn(await turn(2));
+      const label = await turn(3);
+      expect(label.child.prompt).toContain('**changes required**');
+      expect(label.child.prompt).toContain('- "Leaks the token" is a required fix.');
+      expect(label.child.prompt).toContain('Add no label that marks the code as approved');
+      // The project's own label rules are still the ones applied.
+      expect(label.child.prompt).toContain('add the `feedback-given` label');
+      finishTurn(label);
+      // The session ran to its end: its execution is completed, its outcome is not passed.
+      await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+      await vi.waitFor(() =>
+        expect(statuses()).toEqual([
+          [head, 'pending'],
+          [head, 'failure'],
+        ]),
+      );
+      expect(state.outcome.review.status).toBe('completed');
+      expect(writes.filter((w) => w.dismissed)).toEqual([
+        {
+          dismissed: 900,
+          event: 'DISMISS',
+          message: `Briareus: the code review outcome for ${head.slice(0, 7)} is changes required, so the review’s own approval of it does not stand.`,
+        },
+      ]);
+      expect(stage('label').detail).toMatchObject({
+        outcome: 'changes_required',
+        notes: [
+          { code: 'approved_label_ignored', labels: ['code-approved'] },
+          { code: 'approval_dismissed', reviewId: 900 },
+        ],
+      });
+      // The label is left; what it is worth is said, in the outcome and in the session.
+      expect(state.outcome.row.reasons.map((r) => [r.code, r.effect])).toEqual([
+        ['fix_required', 'changes_required'],
+        ['approved_label_ignored', 'note'],
+        ['approval_dismissed', 'note'],
+      ]);
+      expect(texts().some((t) => t.includes('the label does not count as a passed review'))).toBe(true);
+      expect(texts().some((t) => t.includes('Briareus dismissed that approval'))).toBe(true);
+      expect(writes[2] || writes.at(-1)).toMatchObject({ state: 'failure' });
+      expect(statuses().map(([, s]) => s)).not.toContain('success');
+    });
+
+    it.each([
+      ['discover', 0],
+      ['publish', 1],
+      ['verify', 2],
+      ['label', 3],
+    ])('is incomplete when the %s step fails, and says which', async (failed, at) => {
+      state.projects[0].enforceReviewOutcome = true;
+      stored();
+      github();
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(invocations).toHaveLength(1));
+      if (at === 0) finishReview(invocations[0], 1);
+      else {
+        fs.writeFileSync(summaryPath, 'A candidate finding');
+        finishReview(invocations[0]);
+        for (let i = 1; i < at; i++) finishTurn(await turn(i));
+        (await turn(at)).child.emit('close', 1);
+      }
+      await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledWith(id));
+      await vi.waitFor(() => expect(state.outcome.row.outcome).toBe('incomplete'));
+      expect(completeCodeReview).not.toHaveBeenCalled();
+      expect(stage(failed)).toMatchObject({ status: 'failed', detail: { error: expect.any(String) } });
+      // The steps before it completed, those after it never started.
+      const order = ['discover', 'publish', 'verify', 'label'];
+      expect(order.map((name) => stage(name).status)).toEqual(
+        order.map((_, i) => (i < at ? 'completed' : i === at ? 'failed' : 'pending')),
+      );
+      expect(state.outcome.row.reasons.filter((r) => r.code === 'stage_failed')).toEqual([
+        expect.objectContaining({ stage: failed, effect: 'incomplete' }),
+      ]);
+      await vi.waitFor(() =>
+        expect(statuses()).toEqual([
+          [head, 'pending'],
+          [head, 'error'],
+        ]),
+      );
+      expect(writes.at(-1).description).toContain(`Review incomplete: The ${failed} step failed`);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+    });
+
+    it('leaves a step that was cut off as interrupted, which is incomplete too', async () => {
+      stored();
+      await discover();
+      finishTurn(await turn(1));
+      const verify = await turn(2);
+      // Somebody stops the review while verification runs.
+      cancelDevTurn(id);
+      verify.child.emit('close', null);
+      await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledWith(id));
+      await vi.waitFor(() => expect(state.outcome.row.outcome).toBe('incomplete'));
+      expect(stage('verify').status).toBe('running');
+      expect(state.outcome.row.reasons.map((r) => [r.code, r.stage])).toEqual([
+        ['stage_interrupted', 'verify'],
+        ['stage_not_run', 'label'],
+      ]);
+    });
+
+    it('leaves an earlier run’s records alone when the next run is refused its round', async () => {
+      // An earlier run of this session, on an earlier head, was cut off while verifying.
+      const earlier = 'c'.repeat(40);
+      stored({ status: 'failed', headSha: earlier, baseRef });
+      state.outcome.stages = stagesAt(earlier, {
+        verify: { status: 'running' },
+        label: { status: 'pending' },
+      });
+      job.codeReviewRecord = { id: 5, head: earlier };
+      reviewedRounds('acme/shop', 77, ['d'.repeat(40), 'e'.repeat(40), earlier], { baseRef });
+      job.reviewRequest = { source: 'babysitter', requestedBy: null, continuation: false };
+      failRunningCodeReviewStages.mockClear();
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(job.error).toContain('has used 3 of its 3 code review rounds'));
+      await vi.waitFor(() => expect(state.outcome.row?.outcome).toBe('incomplete'));
+      // The refusal is not that run's failure: its records say what they said.
+      expect(failRunningCodeReviewStages).not.toHaveBeenCalled();
+      expect(beginCodeReviewStages).not.toHaveBeenCalled();
+      expect(stage('verify').status).toBe('running');
+      // The head the session just saw is unreviewed, and no review of it is coming.
+      expect(state.outcome.row).toMatchObject({ stale: true, headSha: head });
+      expect(state.outcome.row.reasons.map((r) => r.code)).toEqual(['head_moved', 'round_limit_reached']);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+    });
+
+    it('keeps the records across a restart and completes them when the recovered step ends', async () => {
+      state.projects[0].enforceReviewOutcome = true;
+      // As the server left it when it stopped: verification was under way.
+      stored({ headSha: head, baseRef });
+      state.outcome.stages = stagesAt(head, { verify: { status: 'running' }, label: { status: 'pending' } });
+      fs.mkdirSync(path.dirname(completionPath), { recursive: true });
+      fs.writeFileSync(completionPath, JSON.stringify({ head, status: 'complete', requirements: [] }));
+      github();
+      Object.assign(job, {
+        status: 'interrupted',
+        interruptedFrom: 'running',
+        restartPending: true,
+        workspacePrepared: true,
+        codeReviewHead: head,
+        codeReviewBase: `refs/remotes/origin/${baseRef}`,
+        codeReviewRecord: { id: 5, head },
+        recoveryTurn: {
+          prompt: 'Verify each finding',
+          opts: { codeReviewStage: 'verify' },
+          phase: 'initial',
+          runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
+          completed: false,
+        },
+      });
+      claimSlot(root, id, { prepared: true });
+      resumeRestartedSessions();
+      finishTurn(await turn(0));
+      const label = await turn(1);
+      expect(label.child.prompt).toContain(`for head ${head}: **passed**.`);
+      finishTurn(label);
+      await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+      await vi.waitFor(() => expect(state.outcome.row?.outcome).toBe('passed'));
+      // Nothing was started over: the steps that completed before the restart stand.
+      expect(beginCodeReviewStages).not.toHaveBeenCalled();
+      expect(state.stageLog).toEqual([
+        { stage: 'delegation', status: 'completed' },
+        { stage: 'verify', status: 'running' },
+        { stage: 'verify', status: 'completed' },
+        { stage: 'delegation', status: 'completed' },
+        { stage: 'label', status: 'running' },
+        { stage: 'label', status: 'completed', detail: { outcome: 'passed', notes: [] } },
+      ]);
+      expect(state.outcome.stages.map((s) => s.status)).toEqual(Array(5).fill('completed'));
+      await vi.waitFor(() => expect(statuses()).toEqual([[head, 'success']]));
+    });
+
+    it('does not pass a head the pull request moved on from before labelling', async () => {
+      state.projects[0].enforceReviewOutcome = true;
+      stored();
+      github();
+      const reviewedHead = head;
+      await discover();
+      finishTurn(await turn(1));
+      const verify = await turn(2);
+      // A push lands while verification runs.
+      head = next;
+      finishTurn(verify);
+      const label = await turn(3);
+      expect(label.child.prompt).toContain(`for head ${reviewedHead}: **pending**.`);
+      expect(label.child.prompt).toContain(
+        `The pull request head is ${next.slice(0, 7)}; the review covered ${reviewedHead.slice(0, 7)}.`,
+      );
+      expect(label.child.prompt).toContain('leave the labels unchanged and submit no approval');
+      finishTurn(label);
+      await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+      await vi.waitFor(() =>
+        expect(statuses()).toEqual([
+          [reviewedHead, 'pending'],
+          [next, 'pending'],
+        ]),
+      );
+      // Every step completed on the reviewed head, and still nothing passed.
+      expect(state.outcome.stages.map((s) => s.status)).toEqual(Array(5).fill('completed'));
+      expect(state.outcome.row).toMatchObject({ outcome: 'pending', stale: true, headSha: next });
+      expect(writes.at(-1).description).toBe(`Waiting for a review of ${next.slice(0, 7)}`);
+    });
+
+    it('records a status GitHub refuses and tells the session, without calling the review passed there', async () => {
+      state.projects[0].enforceReviewOutcome = true;
+      stored();
+      github({ status: () => ({ ok: false, status: 403 }) });
+      await review();
+      await vi.waitFor(() => expect(state.outcome.row.publishError).toBeTruthy());
+      expect(state.outcome.row).toMatchObject({ outcome: 'passed', statusState: 'success' });
+      // Nothing was ever accepted, so nothing is recorded as published.
+      expect(state.outcome.row.publishedState).toBeUndefined();
+      expect(state.outcome.row.publishError).toContain('GitHub answered 403 (Resource not accessible)');
+      expect(state.outcome.row.publishError).toContain('may not write commit statuses');
+      await vi.waitFor(() =>
+        expect(texts().some((t) => t.includes('status could not be published on GitHub'))).toBe(true),
+      );
+    });
+
+    it('says a person must continue when a review of a new head is refused at the limit', async () => {
+      const project = state.projects[0];
+      project.enforceReviewOutcome = true;
+      stored({ status: 'completed', headSha: head, baseRef });
+      state.outcome.stages = stagesAt(head);
+      reviewedRounds('acme/shop', 77, ['c'.repeat(40), 'd'.repeat(40), head], { baseRef });
+      github();
+      const ask = (headSha) =>
+        admitPullReview({ project, prNumber: 77, headSha, baseRef, source: 'babysitter' });
+      // The reviewed head is not reviewed twice by automation; that changes nothing.
+      await expect(ask(head)).rejects.toMatchObject({ code: 'review_round_reviewed' });
+      expect(refreshCodeReviewOutcome).not.toHaveBeenCalled();
+      await expect(ask(next)).rejects.toMatchObject({ code: 'review_round_limit' });
+      expect(state.outcome.row).toMatchObject({ outcome: 'incomplete', stale: true, headSha: next });
+      expect(state.outcome.row.reasons.map((r) => r.code)).toEqual(['head_moved', 'round_limit_reached']);
+      await vi.waitFor(() => expect(statuses()).toEqual([[next, 'error']]));
+      expect(writes[0].description).toBe(
+        `Not reviewed at ${next.slice(0, 7)}; the review limit is reached and a person must continue`,
+      );
+      // With rounds left the review is admitted, and its own discovery posts pending.
+      project.reviewRoundLimit = 5;
+      refreshCodeReviewOutcome.mockClear();
+      await expect(ask(next)).resolves.toMatchObject({ source: 'babysitter' });
+      expect(refreshCodeReviewOutcome).not.toHaveBeenCalled();
     });
   });
 
