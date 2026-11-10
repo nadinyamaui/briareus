@@ -36,6 +36,7 @@ import { createPrintService } from './lib/print.js';
 import { printAgentRoutes } from './lib/print-agent.js';
 import { projectEnvRoutes } from './lib/project-env.js';
 import { codeReviewRoutes, pullCodeReviewRoutes } from './lib/code-reviews.js';
+import { readReviewRounds, reviewLimitsWaiting } from './lib/review-rounds.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
 import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
 import { createSlackService } from './lib/slack.js';
@@ -107,6 +108,7 @@ import {
   devSessionRecords,
   sessionTreeIds,
   createDevSession,
+  admitPullReview,
   sendDevMessage,
   askDevSessionBtw,
   cancelDevTurn,
@@ -763,6 +765,7 @@ api.use(
       updateCodeReviewFinding,
       listCodeReviewDecisions,
     },
+    rounds: readReviewRounds,
   }),
 );
 api.use(
@@ -879,6 +882,14 @@ api.use(
     getJob,
     sendMessage: sendDevMessage,
     sshVisible: sshRuledBy,
+    // A PR is open while the board lists it; the board is cached and mirrored, so this
+    // costs no GitHub call on an ordinary poll.
+    reviewLimits: () =>
+      reviewLimitsWaiting({
+        getProject,
+        isOpen: async (project, prNumber) =>
+          (await projectPulls(project)).pulls.some((pr) => pr.number === prNumber),
+      }),
   }),
 );
 
@@ -1837,9 +1848,14 @@ api.get('/api/dev/actions', (req, res) => {
 // errands run in the local checkout (no clone or pooled database wasted); actions that run the
 // app get a fully set up workspace clone (lib/actions.js).
 api.post('/api/dev/actions', async (req, res) => {
-  const { action: actionId, repo, prNumber, provider, model, effort, input } = req.body || {};
+  const { action: actionId, repo, prNumber, provider, model, effort, input, continueReview } = req.body || {};
   const action = getAction(actionId);
   if (!action) return res.status(400).json({ error: `Unknown action: ${actionId}` });
+  // One more review round past the project's limit, on a person's word: never implied.
+  if (continueReview !== undefined && (typeof continueReview !== 'boolean' || action.id !== 'review'))
+    return res
+      .status(400)
+      .json({ error: 'continueReview is true or false, and applies to the review action only' });
   // An action with required input (✍ Give feedback) has no errand without it.
   const answer = String(input == null ? '' : input).trim();
   if (action.input && action.input.required && !answer) {
@@ -1881,13 +1897,38 @@ api.post('/api/dev/actions', async (req, res) => {
       // What the user typed, verbatim; only an action with `input` reads it.
       input: answer,
     };
+    // A person's own request. At the pull request's review round limit it is refused
+    // like any other unless it says continueReview, which is recorded with their user.
+    const owner = requestOwner(res);
+    const reviewRequest =
+      action.id === 'review'
+        ? await admitPullReview({
+            project,
+            prNumber: number,
+            headSha: pr.head.sha,
+            baseRef: pr.base && pr.base.ref,
+            source: 'user',
+            requestedBy: owner == null ? null : `user:${owner}`,
+            continuation: continueReview === true,
+          })
+        : null;
     // A prompt that refuses fails the request rather than starting an empty errand.
     const spec = await actionSessionSpec(action, context);
-    const session = createDevSession({ provider, model, effort, ...spec, ownerId: requestOwner(res) });
+    const session = createDevSession({
+      provider,
+      model,
+      effort,
+      ...spec,
+      ownerId: owner,
+      ...(reviewRequest ? { reviewRequest } : {}),
+    });
     res.status(201).json({
       session,
     });
   } catch (e) {
+    // The review bound answers 409 with what was used and what is unresolved.
+    if (e.reviewRounds)
+      return res.status(409).json({ error: e.message, code: e.code, reviewRounds: e.reviewRounds });
     res.status(400).json({ error: e.message });
   }
 });

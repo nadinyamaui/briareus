@@ -4,6 +4,8 @@ vi.mock('../lib/db.js', () => ({ loadAppSetting: vi.fn(), saveAppSetting: vi.fn(
 vi.mock('../lib/jobs.js', () => ({
   createDevSession: vi.fn(),
   pullRequestHasOpenSession: vi.fn(() => false),
+  // What a review is created with once it is admitted (lib/review-rounds.js).
+  admitPullReview: vi.fn(async ({ source }) => ({ source, requestedBy: null, continuation: false })),
 }));
 // The spec itself is lib/actions.js's business, tested there; here it only has to
 // reach createDevSession with the runtime on top.
@@ -19,7 +21,7 @@ import {
   MAX_PUSH_ERRANDS,
   MAX_REVIEWS_PER_TICK,
 } from '../lib/babysitter.js';
-import { createDevSession } from '../lib/jobs.js';
+import { admitPullReview, createDevSession } from '../lib/jobs.js';
 import { actionSessionSpec } from '../lib/actions.js';
 
 const project = (over = {}) => ({
@@ -228,5 +230,131 @@ describe('PR errands', () => {
       expect.objectContaining({ activity: 'review', prNumber: 7 }),
     );
     await expect(startErrand('qa', project(), pr(), { providerId: 3 })).rejects.toThrow('Unknown action');
+  });
+  it('asks for a review round as automation before it starts a review, and only then', async () => {
+    createDevSession.mockClear();
+    admitPullReview.mockClear();
+    const runtime = { providerId: 3, model: 'opus', effort: 'high' };
+    await startErrand('fix-checks', project(), pr(), runtime);
+    expect(admitPullReview).not.toHaveBeenCalled();
+    expect(createDevSession.mock.calls[0][0]).not.toHaveProperty('reviewRequest');
+    const shop = project();
+    await startErrand('review', shop, pr(), runtime);
+    expect(admitPullReview).toHaveBeenCalledWith({
+      project: shop,
+      prNumber: 7,
+      headSha: 'abc1234def',
+      baseRef: 'main',
+      source: 'babysitter',
+    });
+    // The session is created as the babysitter's, with no continuation to claim with.
+    expect(createDevSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        activity: 'review',
+        reviewRequest: { source: 'babysitter', requestedBy: null, continuation: false },
+      }),
+    );
+    // Refused at the limit: no session is created at all.
+    createDevSession.mockClear();
+    admitPullReview.mockRejectedValueOnce(Object.assign(new Error('limit'), { code: 'review_round_limit' }));
+    await expect(startErrand('review', shop, pr(), runtime)).rejects.toThrow('limit');
+    expect(createDevSession).not.toHaveBeenCalled();
+  });
+});
+
+describe('a pull request at its review round limit', () => {
+  const refusal = (code = 'review_round_limit') =>
+    Object.assign(new Error('acme/shop PR #7 has used 3 of its 3 code review rounds'), { status: 409, code });
+  // Refuses every review the way the server does, and starts everything else.
+  const refusing = (code) =>
+    vi.fn(async (errand) => {
+      if (errand === 'review') throw refusal(code);
+    });
+  const reviewsAsked = (start) => start.mock.calls.filter(([errand]) => errand === 'review');
+
+  it('is asked once per head, not every fifteen minutes', async () => {
+    const stored = {};
+    const start = refusing();
+    const { b, saved } = sitter({ stored, start });
+    for (let tick = 0; tick < 5; tick++) await b.tick();
+    expect(reviewsAsked(start)).toHaveLength(1);
+    // Remembered as refused, never as reviewed.
+    expect(saved.at(-1)['acme/shop#7']).toEqual({ reviewRefused: 'abc1234def:3' });
+  });
+
+  it('gets no fresh count from a push: the new head is asked once and refused again', async () => {
+    const stored = {};
+    const start = refusing();
+    const pulls = [pr()];
+    const { b, saved } = sitter({ stored, start, pulls });
+    await b.tick();
+    pulls[0] = pr({ headSha: 'fed9876cba' });
+    for (let tick = 0; tick < 4; tick++) await b.tick();
+    expect(reviewsAsked(start).map(([, , asked]) => asked.headSha)).toEqual(['abc1234def', 'fed9876cba']);
+    expect(saved.at(-1)['acme/shop#7']).toEqual({ reviewRefused: 'fed9876cba:3' });
+  });
+
+  it('asks again when the project’s limit changes, without waiting for a push', async () => {
+    const stored = {};
+    // The server's answer: refused until the limit is above the three rounds used.
+    const start = vi.fn(async (errand, asked) => {
+      if (errand === 'review' && asked.reviewRoundLimit <= 3) throw refusal();
+    });
+    const projects = [project({ reviewRoundLimit: 2 })];
+    const { b, saved } = sitter({ stored, start, projects });
+    await b.tick();
+    await b.tick();
+    expect(reviewsAsked(start)).toHaveLength(1);
+    // Raised, but not past what the pull request used: asked once more, refused again.
+    projects[0] = project({ reviewRoundLimit: 3 });
+    await b.tick();
+    await b.tick();
+    expect(reviewsAsked(start)).toHaveLength(2);
+    expect(saved.at(-1)['acme/shop#7']).toEqual({ reviewRefused: 'abc1234def:3' });
+    // Raised far enough, the review starts, and the head is then reviewed once as ever.
+    projects[0] = project({ reviewRoundLimit: 5 });
+    await b.tick();
+    await b.tick();
+    expect(reviewsAsked(start)).toHaveLength(3);
+    expect(saved.at(-1)['acme/shop#7'].review).toBe('abc1234def');
+  });
+
+  it('still solves conflicts and fixes checks, and does not use up the reviews of a round', async () => {
+    const stored = {};
+    const start = refusing();
+    const pulls = [
+      pr({ number: 7 }),
+      pr({ number: 8, headSha: 'bbb', checks: 'failure' }),
+      pr({ number: 9, headSha: 'ccc' }),
+    ];
+    const { b, saved } = sitter({ stored, start, pulls });
+    await b.tick();
+    expect(start.mock.calls.map(([errand, , asked]) => [errand, asked.number])).toEqual([
+      ['review', 7],
+      ['fix-checks', 8],
+      ['review', 9],
+    ]);
+    expect(saved.at(-1)['acme/shop#8']).toEqual({ 'fix-checks': 'bbb', pushes: 1 });
+    // The refused head's other errands are not held back by the refusal.
+    pulls[0] = pr({ number: 7, checks: 'failure' });
+    await b.tick();
+    expect(start).toHaveBeenCalledWith('fix-checks', expect.anything(), pulls[0], expect.anything());
+  });
+
+  it('remembers the other refusals of the bound too, and retries what merely failed', async () => {
+    const again = refusing('review_round_reviewed');
+    const reviewed = sitter({ stored: {}, start: again });
+    await reviewed.b.tick();
+    await reviewed.b.tick();
+    expect(reviewsAsked(again)).toHaveLength(1);
+    // A database that was down said nothing about the limit: the next round asks again.
+    const failing = vi.fn(async () => {
+      throw new Error('Database unavailable');
+    });
+    const down = sitter({ stored: {}, start: failing });
+    await down.b.tick();
+    await down.b.tick();
+    expect(failing).toHaveBeenCalledTimes(2);
+    expect(down.saved.at(-1)).toEqual({});
   });
 });

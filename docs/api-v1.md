@@ -355,6 +355,19 @@ commit and at most three per project each round. The project’s action runtime 
 reviews. Author filters (for errands that push), head-commit deduplication, capacity
 limits and the repeated-push cap still apply; no feedback agents run.
 
+Reviews are also bounded per pull request. Every review of a new revision uses one
+of the project’s `reviewRoundLimit` rounds (3 by default, 0 for no limit), counted
+across all the pull request’s commits and never reset by a push. Once they are used,
+the babysitter and orchestrator sessions start no further review, and
+`POST /actions` with `action: "review"` answers 409 with
+`{ error, code: "review_round_limit", reviewRounds }`. Reaching the limit labels and
+approves nothing and is not a passed review. A person continues deliberately by
+sending the request again with `"continueReview": true`, which grants one more round
+and is recorded with their user. `GET /pulls/{number}/code-review-rounds` reports the
+rounds, the allowance and what is still unresolved, and a pull request waiting at its
+limit is listed in `GET /attention` as a `review-limit` item. See
+[Review rounds](features.md#review-rounds).
+
 ## Pull request data
 
 To bring a PR branch up to date with its base, call

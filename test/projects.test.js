@@ -356,6 +356,31 @@ describe('the local session limit', () => {
   });
 });
 
+describe('the code review round limit', () => {
+  it('defaults to three and takes a whole number up to 20, or 0 for no limit', async () => {
+    const saved = await createProject({ ...base });
+    expect(saved.reviewRoundLimit).toBe(3);
+    expect((await updateProject(saved.id, { reviewRoundLimit: '5' })).reviewRoundLimit).toBe(5);
+    // An update that names nothing about it leaves it alone.
+    expect((await updateProject(saved.id, { label: 'Renamed' })).reviewRoundLimit).toBe(5);
+    expect((await updateProject(saved.id, { reviewRoundLimit: 0 })).reviewRoundLimit).toBe(0);
+    expect((await updateProject(saved.id, { reviewRoundLimit: 20 })).reviewRoundLimit).toBe(20);
+    for (const bad of [-1, 21, 2.5, 'many', true])
+      await expect(updateProject(saved.id, { reviewRoundLimit: bad })).rejects.toThrow(
+        /reviewRoundLimit must be a whole number from 0 \(no limit\) to 20/,
+      );
+    expect((await updateProject(saved.id, { label: 'Still' })).reviewRoundLimit).toBe(20);
+  });
+
+  it('reads a cleared limit as the default, never as no limit', async () => {
+    const saved = await createProject({ ...base, reviewRoundLimit: 0 });
+    expect(saved.reviewRoundLimit).toBe(0);
+    expect((await updateProject(saved.id, { reviewRoundLimit: null })).reviewRoundLimit).toBe(3);
+    expect((await updateProject(saved.id, { reviewRoundLimit: 7 })).reviewRoundLimit).toBe(7);
+    expect((await updateProject(saved.id, { reviewRoundLimit: '' })).reviewRoundLimit).toBe(3);
+  });
+});
+
 describe('the local checkout auto-update', () => {
   it('keeps the update commands one per line and needs a checkout to be on', async () => {
     const saved = await createProject({
