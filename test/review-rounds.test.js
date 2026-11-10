@@ -1343,3 +1343,78 @@ describe('the scope facts of a checkout', () => {
     }
   });
 });
+
+describe('security claims among what is unresolved', () => {
+  it('carry their mark, from any row of the claim, and nothing else changes', () => {
+    const work = unresolvedWork([
+      decision({
+        findingRef: 'sec-fix',
+        threadId: 'T1',
+        verdict: 'fix',
+        title: 'Token logged',
+        security: true,
+      }),
+      decision({ findingRef: 'fix', threadId: 'T2', verdict: 'fix', title: 'Off by one' }),
+      // Reopened in a later thread: the claim was marked on its first.
+      decision({
+        findingRef: 'sec-open',
+        threadId: 'T3',
+        verdict: 'dismiss',
+        rationale: 'No.',
+        security: true,
+      }),
+      decision({ id: 9, findingRef: 'sec-open', threadId: 'T4', verdict: null, decidedAt: null }),
+      decision({ findingRef: 'open', threadId: 'T5', verdict: null, decidedAt: null }),
+    ]);
+    expect(work.fix.map((f) => [f.findingRef, f.security])).toEqual([
+      ['sec-fix', true],
+      ['fix', undefined],
+    ]);
+    expect(work.unverified.map((f) => [f.findingRef, f.security])).toEqual([
+      ['sec-open', true],
+      ['open', undefined],
+    ]);
+    // An unmarked claim reads exactly as it did.
+    expect(work.fix[1]).not.toHaveProperty('security');
+    // A finding the latest review registered with no verdict keeps its own mark.
+    const registered = unresolvedWork(
+      [],
+      [
+        { findingRef: 'new-1', title: 'SSRF', security: true },
+        { findingRef: 'new-2', title: 'Typo' },
+      ],
+    );
+    expect(registered.unverified.map((f) => [f.findingRef, f.security])).toEqual([
+      ['new-1', true],
+      ['new-2', undefined],
+    ]);
+  });
+
+  it('reach a later round’s scope file marked, for the security pass to pick out', () => {
+    const outstanding = unresolvedWork([
+      decision({
+        findingRef: 'sec-fix',
+        threadId: 'T1',
+        verdict: 'fix',
+        title: 'Token logged',
+        security: true,
+      }),
+      decision({ findingRef: 'fix', threadId: 'T2', verdict: 'fix', title: 'Off by one' }),
+    ]);
+    const file = reviewScopeFile({
+      repo,
+      prNumber: 7,
+      head: sha('b'),
+      base: 'main',
+      round: 2,
+      limit: 3,
+      scope: { scope: 'full', reason: 'base_updated', previousHead: null, previousRound: null },
+      facts: null,
+      outstanding,
+    });
+    expect(file.outstanding.map((f) => [f.findingRef, f.status, f.security])).toEqual([
+      ['sec-fix', 'fix', true],
+      ['fix', 'fix', undefined],
+    ]);
+  });
+});

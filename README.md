@@ -258,6 +258,16 @@ head and base. With `enforceReviewOutcome` on, a project publishes it as the
 and the review's own approval never stand in for it (see
 [Review outcome](docs/features.md#review-outcome)).
 
+A project's `securityReview` (`off` by default, `advisory` or `required`) adds a
+security pass to every review: a second, security-only discovery on the same
+provider, model and effort, covering permissions, secrets, user isolation,
+command execution and injection, untrusted input and dependency changes. Its
+findings are published, reconciled with earlier decisions and verified like the
+rest, and it completes only on a coverage record of what it assessed. The
+result is tracked apart, and under `required` a pass that did not run, did not
+complete or failed keeps the outcome from passing (see
+[Security review](docs/features.md#security-review)).
+
 A session’s `qaLoop` starts QA when the task settles on an open pull request. QA
 writes and executes a test sheet and reports passed, failed, or incomplete coverage.
 A new head invalidates the previous result. Disarming QA leaves any running QA

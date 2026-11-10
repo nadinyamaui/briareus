@@ -1797,3 +1797,189 @@ describe('verdictDecision', () => {
     ).toBeNull();
   });
 });
+
+describe('security claims in the history', () => {
+  const ref = findingRefFor('acme/shop', 7, 101);
+  const dismissed = (extra = {}) => ({
+    anchor: 'T_sec',
+    threadId: 'T_sec',
+    findingRef: ref,
+    verdict: 'dismiss',
+    rationale: 'Redacted by lib/log.js:12.',
+    verification: 'confirmed',
+    source: 'review',
+    decidedBy: 'session:earlier',
+    decidedAt: new Date(since + 60_000).toISOString(),
+    resolved: true,
+    ...extra,
+  });
+  const threads = [
+    thread('T_sec', [said(101, 'octo-reviewer', 'Session id reaches the log')], { resolved: true }),
+    thread('T_plain', [said(201, 'octo-reviewer', 'Off by one')]),
+  ];
+
+  it('marks every thread of a claim a security pass marked, and no other', () => {
+    const built = history(threads, { decisions: [dismissed({ security: true })] });
+    expect(built.threads.map((t) => [t.threadId, t.security])).toEqual([
+      ['T_sec', true],
+      ['T_plain', undefined],
+    ]);
+    // An unmarked thread reads exactly as it did, in the file the publish step reads too.
+    expect(built.threads[1]).not.toHaveProperty('security');
+    const file = reviewHistoryFile(built);
+    expect(file.threads[0]).toMatchObject({ threadId: 'T_sec', security: true, disposition: 'dismissed' });
+    expect(file.threads[1]).not.toHaveProperty('security');
+    // Without the mark on its decision the same thread is an ordinary dismissal.
+    expect(history(threads, { decisions: [dismissed()] }).threads[0]).not.toHaveProperty('security');
+  });
+
+  it('follows the claim into the thread it was reopened in, and onto a decision with no thread', () => {
+    const reopened = history(
+      [
+        ...threads,
+        // A revisit, stored with the comment it was posted as before its thread is matched.
+        thread('T_again', [said(301, 'octo-reviewer', 'Session id reaches the log again', 5)]),
+      ],
+      {
+        decisions: [
+          dismissed({ security: true }),
+          { anchor: `ref:${ref}`, threadId: null, commentId: 301, findingRef: ref, decidedAt: null },
+        ],
+      },
+    );
+    expect(
+      reopened.threads.map((t) => [t.threadId, t.findingRef === ref, t.security, t.supersededBy]),
+    ).toEqual([
+      ['T_sec', true, true, 'T_again'],
+      ['T_plain', false, undefined, null],
+      ['T_again', true, true, null],
+    ]);
+    const adrift = history([], {
+      decisions: [dismissed({ anchor: 'ref:gone', threadId: null, findingRef: 'gone', security: true })],
+    });
+    expect(adrift.unanchored).toEqual([expect.objectContaining({ findingRef: 'gone', security: true })]);
+    expect(reviewHistoryFile(adrift).decisionsWithoutThread[0]).toMatchObject({ security: true });
+  });
+
+  it('is what a finding reconciled with the claim inherits', async () => {
+    githubGraphql.mockResolvedValue(
+      threadsPage([
+        threadNode('T_sec', [commentNode(101, 'octo-reviewer', 'Session id reaches the log')], {
+          isResolved: true,
+        }),
+        threadNode('T_plain', [commentNode(201, 'octo-reviewer', 'Off by one')]),
+      ]),
+    );
+    await loadReviewHistory({
+      cfg,
+      jobId: 'job-sec',
+      repo: 'acme/shop',
+      prNumber: 7,
+      head,
+      store: {
+        listCodeReviewDecisions: async () => [dismissed({ security: true })],
+        saveCodeReviewDecisions: async () => {},
+        codeReviewDecisionsSince: async () => since,
+      },
+    });
+    const held = reviewHistoryOf('job-sec');
+    try {
+      expect(held.threads.get('T_sec')).toMatchObject({ security: true, suppressible: true });
+      expect(held.threads.get('T_plain')).not.toHaveProperty('security');
+      const review = { repo: 'acme/shop', prNumber: 7, head };
+      // Suppressed against the dismissal: not posted, verdict from the decision, marked.
+      expect(
+        reconcileFinding(held, { reconciliation: 'suppressed', priorThreadId: 'T_sec' }, review),
+      ).toMatchObject({
+        reconciliation: 'suppressed',
+        findingRef: ref,
+        security: true,
+        shouldFix: 'dismiss',
+        priorDisposition: 'dismissed',
+        priorReason: 'Redacted by lib/log.js:12.',
+      });
+      expect(
+        reconcileFinding(
+          held,
+          {
+            reconciliation: 'revisit',
+            priorThreadId: 'T_sec',
+            commentId: 900,
+            revisitReason: 'lib/log.js changed',
+          },
+          review,
+        ),
+      ).toMatchObject({ reconciliation: 'revisit', security: true, commentId: 900 });
+      // An ordinary thread passes no mark on, and a new finding has none to inherit.
+      expect(
+        reconcileFinding(held, { reconciliation: 'adopted', priorThreadId: 'T_plain' }, review),
+      ).not.toHaveProperty('security');
+      expect(reconcileFinding(held, { commentId: 901 }, review)).not.toHaveProperty('security');
+    } finally {
+      forgetReviewHistory('job-sec');
+    }
+  });
+
+  it('is kept on the decision a security finding’s verdict gives, and on the thread it is tied to', async () => {
+    const review = { headSha: head };
+    const who = { source: 'review', decidedBy: 'session:job-1', now: 1234 };
+    const finding = {
+      id: 9,
+      findingRef: 'ref-1',
+      threadId: 'T_own',
+      commentId: 501,
+      title: 'Token logged',
+      shouldFix: 'fix',
+      comments: 'lib/auth.js:10',
+      verification: 'confirmed',
+    };
+    expect(findingDecision(review, { ...finding, security: true }, who)).toMatchObject({
+      anchor: 'T_own',
+      verdict: 'fix',
+      security: true,
+    });
+    // An unmarked finding's decision says nothing about it: the store never unsets it.
+    expect(findingDecision(review, finding, who)).not.toHaveProperty('security');
+    expect(findingDecision(review, { ...finding, security: false }, who)).not.toHaveProperty('security');
+    expect(
+      verdictDecision(
+        review,
+        { ...finding, security: true },
+        { ...finding, shouldFix: null },
+        { shouldFix: 'fix' },
+        who,
+      ),
+    ).toMatchObject({ verdict: 'fix', security: true });
+    // Tied to its thread when publication ends: tracked as a security claim from then on.
+    githubGraphql.mockResolvedValue(
+      threadsPage([
+        threadNode('PRRT_sec', [commentNode(501, 'octo-reviewer', 'Token logged', { commit: head })]),
+        threadNode('PRRT_plain', [commentNode(502, 'octo-reviewer', 'Off by one', { commit: head })]),
+      ]),
+    );
+    const saved = [];
+    await linkPublishedFindings({
+      cfg,
+      jobId: 'job-link',
+      repo: 'acme/shop',
+      prNumber: 7,
+      retryDelayMs: 0,
+      store: {
+        listCodeReviewDecisions: async () => [],
+        saveCodeReviewDecisions: async (_repo, _pr, rows) => saved.push(rows),
+        codeReviewDecisionsSince: async () => since,
+        getCodeReviewByJob: async () => ({ id: 5, jobId: 'job-link', headSha: head }),
+        listCodeReviewFindings: async () => [
+          { id: 1, title: 'Token logged', findingRef: 'ref-sec', commentId: 501, security: true },
+          { id: 2, title: 'Off by one', findingRef: 'ref-plain', commentId: 502, security: false },
+        ],
+        updateCodeReviewFinding: async () => null,
+      },
+    });
+    forgetReviewHistory('job-link');
+    expect(saved.at(-1).map((row) => [row.anchor, row.security])).toEqual([
+      ['PRRT_sec', true],
+      ['PRRT_plain', undefined],
+    ]);
+  });
+});

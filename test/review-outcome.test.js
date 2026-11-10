@@ -4,8 +4,10 @@ import {
   REVIEW_STAGES,
   STATUS_CONTEXT,
   STATUS_DESCRIPTION_MAX,
+  SECURITY_STAGE,
   computeReviewOutcome,
   decisionEvidence,
+  evidenceReasons,
   findingEvidence,
   requiredReviewStages,
   statusDescription,
@@ -607,6 +609,101 @@ describe('computeReviewOutcome', () => {
       expect(compute({ requirements: [{ id: 'security', outcome: 'incomplete' }] }).outcome).toBe(
         'incomplete',
       );
+    });
+  });
+
+  describe('the security pass', () => {
+    it('is a stage of its own between discovery and publication, when the review runs one', () => {
+      expect(SECURITY_STAGE).toBe('security');
+      expect(requiredReviewStages({ security: true })).toEqual([
+        'discover',
+        'security',
+        'publish',
+        'verify',
+        'label',
+      ]);
+      expect(requiredReviewStages({ security: true, delegation: true })).toEqual([
+        'discover',
+        'security',
+        'publish',
+        'delegation',
+        'verify',
+        'label',
+      ]);
+      // Without one the rows are what they were.
+      expect(requiredReviewStages({ security: false })).toEqual(REVIEW_STAGES);
+      expect(requiredReviewStages({ delegation: true })).not.toContain('security');
+    });
+
+    it('is judged apart: its row never blocks the outcome by itself, whatever it holds', () => {
+      const names = requiredReviewStages({ security: true });
+      for (const security of [
+        { status: 'pending' },
+        { status: 'running' },
+        { status: 'failed', detail: { error: 'no record' } },
+        { headSha: next },
+        {},
+      ]) {
+        const result = compute({ stages: stages({ security }, names) });
+        expect(result.outcome).toBe('passed');
+        expect(result.reasons).toEqual([]);
+      }
+      // Every other row beside it is still required.
+      const blocked = compute({ stages: stages({ verify: { status: 'pending' } }, names) });
+      expect(blocked.reasons).toEqual([expect.objectContaining({ code: 'stage_not_run', stage: 'verify' })]);
+      // And it does not stand in for the rows a review must have.
+      expect(codes(compute({ stages: stages({}, ['security']) }))).toEqual([
+        'stage_not_run',
+        'stage_not_run',
+        'stage_not_run',
+        'stage_not_run',
+      ]);
+    });
+  });
+});
+
+describe('the evidence rule, read apart from the outcome', () => {
+  const standing = {
+    fix: [{ findingRef: 'old-1', title: 'Token logged' }],
+    unverified: [{ findingRef: 'old-2', title: 'SSRF' }],
+  };
+
+  it('gives the same reasons and counts the outcome is built from', () => {
+    const findings = [
+      verified('fix'),
+      verified('optional', { id: 2, findingRef: 'ref-2' }),
+      finding({ id: 3, findingRef: 'ref-3' }),
+    ];
+    const evidence = evidenceReasons({ findings, standing });
+    const outcome = compute({ findings, standing });
+    expect(evidence.reasons).toEqual(outcome.reasons);
+    expect(evidence.counts).toEqual(outcome.counts);
+    expect(evidence.reasons.map((r) => r.code)).toEqual([
+      'fix_required',
+      'finding_without_verdict',
+      'fix_owed',
+      'earlier_finding_unverified',
+    ]);
+    expect(evidenceReasons({})).toEqual({
+      reasons: [],
+      counts: { fix: 0, optional: 0, dismissed: 0, suppressed: 0, unverified: 0 },
+    });
+  });
+
+  it('can leave out what earlier rounds left, and still rest a suppressed finding on its claim', () => {
+    const own = evidenceReasons({ findings: [verified('fix')], standing, earlier: false });
+    expect(own.reasons.map((r) => r.code)).toEqual(['fix_required']);
+    expect(own.counts).toMatchObject({ fix: 1, unverified: 0 });
+    const suppressed = finding({
+      reconciliation: 'suppressed',
+      findingRef: 'old-1',
+      shouldFix: 'dismiss',
+      commentId: null,
+      threadId: null,
+    });
+    expect(evidenceReasons({ findings: [suppressed], standing, earlier: false })).toMatchObject({
+      reasons: [],
+      counts: { suppressed: 1 },
     });
   });
 });

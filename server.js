@@ -47,8 +47,10 @@ import {
   refreshReviewOutcome,
   retryReviewStatuses,
   reviewFindingsFrozen,
+  reviewSecurity,
   reviewStatusFailures,
 } from './lib/review-enforcement.js';
+import { securityPassCompleted } from './lib/review-security.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
 import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
 import { createSlackService } from './lib/slack.js';
@@ -776,6 +778,10 @@ api.use(
         session: getJob(review.jobId),
         listStages: listCodeReviewStages,
       }),
+    // A finding counts towards the security result only in a review whose security
+    // pass the server saw complete on the head it reviews.
+    securityPass: async (review) =>
+      securityPassCompleted(await listCodeReviewStages(review.id), review.headSha),
   }),
 );
 api.use(
@@ -802,6 +808,7 @@ api.use(
       refresh: async (project, prNumber) =>
         (await refreshReviewOutcome(project, prNumber, { cfg: getConfig() })).outcome,
     },
+    security: reviewSecurity,
   }),
 );
 api.use(

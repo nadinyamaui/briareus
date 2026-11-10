@@ -921,3 +921,32 @@ describe('main database backup settings', () => {
     );
   });
 });
+
+describe('the security review policy', () => {
+  it('is off until it is set, and stays as set', async () => {
+    const saved = await createProject({ ...base });
+    expect(saved.securityReview).toBe('off');
+    expect((await updateProject(saved.id, { securityReview: 'advisory' })).securityReview).toBe('advisory');
+    // An update that names nothing about it leaves it alone.
+    expect((await updateProject(saved.id, { label: 'Renamed' })).securityReview).toBe('advisory');
+    expect((await updateProject(saved.id, { securityReview: 'required' })).securityReview).toBe('required');
+    expect((await updateProject(saved.id, { securityReview: 'off' })).securityReview).toBe('off');
+    expect(await createProject({ ...base, repo: 'acme/required', securityReview: 'required' })).toMatchObject(
+      {
+        securityReview: 'required',
+      },
+    );
+  });
+
+  it('takes one of its three states by name: nothing loose turns a pass on, off or into a requirement', async () => {
+    const saved = await createProject({ ...base, securityReview: 'advisory' });
+    for (const bad of [true, false, 1, 0, null, '', 'on', 'Required', 'REQUIRED', ' required', ['required']])
+      await expect(updateProject(saved.id, { securityReview: bad })).rejects.toThrow(
+        'securityReview must be one of off, advisory, required',
+      );
+    await expect(createProject({ ...base, repo: 'acme/loose', securityReview: 'yes' })).rejects.toThrow(
+      'securityReview must be one of off, advisory, required',
+    );
+    expect((await updateProject(saved.id, { label: 'Still advisory' })).securityReview).toBe('advisory');
+  });
+});
