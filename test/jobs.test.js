@@ -6,7 +6,8 @@ import fs from 'fs';
 import fsp from 'node:fs/promises';
 import os from 'os';
 import path from 'path';
-import { spawn, spawnSync } from 'child_process';
+import { execFile, spawn, spawnSync } from 'child_process';
+import { promisify } from 'util';
 import { BINARIES } from '../lib/providers.js';
 import * as r2 from '../lib/r2.js';
 import { getUpload } from '../lib/uploads.js';
@@ -92,6 +93,8 @@ const state = vi.hoisted(() => ({
         Object.assign(round, { status: 'running', jobId: request.jobId });
         round.attempts++;
       }
+      for (const r of pull.rounds)
+        if (decision.stale.includes(r.id) && r !== round && r.status === 'running') r.status = 'failed';
     }
     return {
       decision: { action: decision.action, reason: decision.reason ?? null, continued: !!decision.continued },
@@ -104,7 +107,13 @@ const state = vi.hoisted(() => ({
 
 vi.mock('child_process', async (importOriginal) => {
   const actual = await importOriginal();
-  return { ...actual, spawn: vi.fn(actual.spawn) };
+  const { promisify } = await import('util');
+  // lib/jobs.js awaits git probes through promisify(execFile). The promisified form is
+  // kept (it is what resolves with { stdout, stderr }) and made observable, so a test
+  // can see which probes ran without blocking and with what timeout.
+  const execFile = (...args) => actual.execFile(...args);
+  execFile[promisify.custom] = vi.fn(actual.execFile[promisify.custom]);
+  return { ...actual, spawn: vi.fn(actual.spawn), execFile };
 });
 
 // A real child's output arrives under the async context it was spawned in, which is how a
@@ -356,6 +365,7 @@ import {
   getJob,
   createDevSession,
   admitPullReview,
+  admitUserReview,
   agentGithubEnv,
   setOwnerGithub,
   setSessionProjectFilter,
@@ -2002,10 +2012,9 @@ describe('native Codex code review', () => {
       // The store settles a round with its review, as lib/db.js does.
       completeCodeReview.mockImplementation(settle('completed'));
       failCodeReview.mockImplementation(settle('failed'));
-      markCodeReviewRoundPublished.mockImplementation(async (jobId) => {
+      markCodeReviewRoundPublished.mockImplementation(async (jobId, roundId) => {
         for (const pull of state.reviewRounds.values())
-          for (const r of pull.rounds)
-            if (r.jobId === jobId && r.status === 'running') r.publishedAt ||= 'now';
+          for (const r of pull.rounds) if (r.jobId === jobId && r.id === roundId) r.publishedAt ||= 'now';
         return true;
       });
     });
@@ -2045,6 +2054,7 @@ describe('native Codex code review', () => {
         mergeBaseSha: head,
       });
       expect(job.codeReviewRound).toEqual({
+        id: round(1).id,
         round: 1,
         limit: 3,
         head,
@@ -2073,7 +2083,8 @@ describe('native Codex code review', () => {
       fs.writeFileSync(summaryPath, 'A candidate finding');
       finishReview(native);
       await vi.waitFor(() => expect(invocations).toHaveLength(2));
-      expect(markCodeReviewRoundPublished).toHaveBeenCalledWith(id);
+      // By its id, so only the round this session holds is marked.
+      expect(markCodeReviewRoundPublished).toHaveBeenCalledWith(id, round(1).id);
       expect(round(1).publishedAt).toBeTruthy();
       // A first round with rounds to spare publishes as it always did.
       expect(invocations[1].child.prompt).not.toContain('code review round');
@@ -2174,6 +2185,15 @@ describe('native Codex code review', () => {
         ['ref-open', 'unverified'],
       ]);
       expect(fs.statSync(scopePath()).mode & 0o777).toBe(0o600);
+      // Measured without blocking: both diffs went through the awaited, bounded probe.
+      const diffs = execFile[promisify.custom].mock.calls.filter(([, args]) => args.includes('--numstat'));
+      expect(diffs.map(([, args]) => args.slice(2))).toEqual(
+        expect.arrayContaining([
+          ['diff', '--numstat', reviewedHead, 'HEAD'],
+          ['diff', '--numstat', head, 'HEAD'],
+        ]),
+      );
+      for (const [, , options] of diffs) expect(options.timeout).toBe(30_000);
       fs.writeFileSync(summaryPath, 'A candidate finding');
       finishReview(native);
       await vi.waitFor(() => expect(invocations).toHaveLength(2));
@@ -2187,6 +2207,59 @@ describe('native Codex code review', () => {
       await finishRest(1, next);
       await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
       expect(state.reviewRounds.get(key).count.rounds).toBe(2);
+    });
+
+    it('measures the change without blocking the server, and widens when git does not answer in time', async () => {
+      trackBase();
+      const reviewedHead = commit('cart.js', 200, 'feature');
+      const next = commit('fix.js', 12, 'fix');
+      pullAt(next);
+      reviewedRounds('acme/shop', 77, [reviewedHead], { baseRef, mergeBaseSha: head });
+      // The checkouts are blobless clones: measuring a diff fetches its blobs from
+      // origin. Here origin stalls and the probe is given up on, as its timeout does.
+      const probes = execFile[promisify.custom];
+      const real = probes.getMockImplementation();
+      probes.mockClear();
+      probes.mockImplementation((file, args, options) =>
+        args.includes('--numstat')
+          ? Promise.reject(Object.assign(new Error('timed out'), { killed: true, signal: 'SIGTERM' }))
+          : real(file, args, options),
+      );
+      try {
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        // Every probe of the scope went through the awaited, bounded helper: a
+        // synchronous git here would hold every request and stream for a round trip.
+        const scopeProbes = probes.mock.calls.filter(
+          ([file, args]) =>
+            file === 'git' && ['rev-parse', 'merge-base', 'cat-file', 'diff', 'rev-list'].includes(args[2]),
+        );
+        expect(scopeProbes.map(([, args]) => args.slice(2, 4).join(' '))).toEqual([
+          'rev-parse --verify',
+          'merge-base HEAD',
+          'cat-file -e',
+          'merge-base --is-ancestor',
+          'diff --numstat',
+        ]);
+        for (const [, args, options] of scopeProbes) {
+          expect(args.slice(0, 2)).toEqual(['-C', root]);
+          expect(options.timeout).toBe(30_000);
+        }
+        // What it could not learn widens the review, and says so.
+        expect(setCodeReviewRoundScope.mock.calls[0][2]).toMatchObject({
+          round: 2,
+          scope: 'full',
+          scopeReason: 'delta_unknown',
+          scopeBaseSha: null,
+        });
+        const context = instructions(invocations[0]);
+        expect(context).toContain('Review the whole pull request in this round');
+        expect(context).toContain('could not measure the change since the last review');
+        finishReview(invocations[0], 1);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      } finally {
+        probes.mockImplementation(real);
+      }
     });
 
     it('widens a later round to the whole pull request when the reviewed commit was rewritten away', async () => {
@@ -2368,6 +2441,7 @@ describe('native Codex code review', () => {
         workspacePrepared: true,
         codeReviewHead: head,
         codeReviewBase: `refs/remotes/origin/${baseRef}`,
+        codeReviewRound: { id: 1, round: 1, limit: 3, head, scope: 'full', reason: 'first_review' },
         recoveryTurn: {
           prompt: 'Publish the review above',
           opts: { codeReviewStage: 'publish' },
@@ -2381,6 +2455,7 @@ describe('native Codex code review', () => {
       await finishRest(0);
       await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
       expect(claimCodeReviewRound).not.toHaveBeenCalled();
+      expect(markCodeReviewRoundPublished).toHaveBeenCalledWith(id, 1);
       // The time it first started publishing is the one kept.
       expect(pull.rounds[0]).toMatchObject({ status: 'completed', publishedAt: 'earlier', attempts: 1 });
       expect(pull.count.rounds).toBe(1);
@@ -2420,6 +2495,110 @@ describe('native Codex code review', () => {
       expect(state.reviewRounds.get(key).count.rounds).toBe(1);
       finishReview(invocations[2], 1);
       await vi.waitFor(() => expect(job.status).toBe('idle'));
+    });
+
+    it('does not use the round up when the publish step never starts', async () => {
+      trackBase();
+      // The PR's earlier threads cannot be read, so the review stops before publishing.
+      githubGraphql.mockRejectedValue(
+        Object.assign(new Error('GitHub GraphQL answered 401'), { status: 401 }),
+      );
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(invocations).toHaveLength(1));
+      fs.writeFileSync(summaryPath, 'A candidate finding');
+      finishReview(invocations[0]);
+      await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      expect(job.error).toContain('could not be read, so nothing was published');
+      expect(invocations).toHaveLength(1);
+      expect(markCodeReviewRoundPublished).not.toHaveBeenCalled();
+      expect(round(1)).toMatchObject({ headSha: head, status: 'failed', publishedAt: null });
+      // GitHub answers again, but the review is stopped while it reads the threads:
+      // again no publish step, again nothing marked.
+      githubGraphql.mockImplementation(async (_cfg, query) => {
+        if (!query.includes('reviewThreads')) return undefined;
+        cancelDevTurn(id);
+        return {
+          viewer: { login: 'octo-reviewer' },
+          repository: {
+            pullRequest: {
+              headRefOid: head,
+              reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+            },
+          },
+        };
+      });
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(invocations).toHaveLength(2));
+      fs.writeFileSync(summaryPath, 'A candidate finding');
+      finishReview(invocations[1]);
+      await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      expect(invocations).toHaveLength(2);
+      expect(markCodeReviewRoundPublished).not.toHaveBeenCalled();
+      expect(round(1)).toMatchObject({ status: 'failed', publishedAt: null, attempts: 2 });
+      // Two reviews that posted nothing cost the pull request nothing: the next push is
+      // reviewed as the same round, not as round two.
+      const next = commit('late.js', 5, 'next push');
+      pullAt(next);
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(invocations).toHaveLength(3));
+      expect(round(1)).toMatchObject({ headSha: next, status: 'running', attempts: 3 });
+      expect(state.reviewRounds.get(key)).toMatchObject({ count: { rounds: 1 }, rounds: [{ round: 1 }] });
+      // And once its publish step does start, the round is marked, just before it.
+      fs.writeFileSync(summaryPath, 'A candidate finding');
+      finishReview(invocations[2]);
+      await vi.waitFor(() => expect(invocations).toHaveLength(4));
+      expect(markCodeReviewRoundPublished).toHaveBeenCalledTimes(1);
+      expect(markCodeReviewRoundPublished).toHaveBeenCalledWith(id, round(1).id);
+      expect(job.recoveryTurn.opts.codeReviewStage).toBe('publish');
+      await finishRest(3, next);
+      await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+    });
+
+    it('spends a continuation with the discovery it was granted for, even one that fails before claiming', async () => {
+      trackBase();
+      const pull = reviewedRounds('acme/shop', 77, ['a'.repeat(40), 'b'.repeat(40), 'c'.repeat(40)], {
+        baseRef,
+      });
+      job.reviewRequest = { source: 'user', requestedBy: 'user:4', continuation: true, headSha: head };
+      // The checkout is not the PR head, so discovery fails before it asks for a round.
+      pullAt('f'.repeat(40));
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(job.error).toMatch(/The checkout does not match the current PR head/));
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+      expect(claimCodeReviewRound).not.toHaveBeenCalled();
+      expect(job.reviewRequest).toEqual({ source: 'user', requestedBy: 'user:4', continuation: false });
+      // A later /review typed into the session, on a later head: nothing is left armed.
+      const next = commit('more.js', 3, 'another push');
+      pullAt(next);
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(job.error).toMatch(/has used 3 of its 3 code review rounds/));
+      expect(invocations).toHaveLength(0);
+      expect(pull.count).toMatchObject({ rounds: 3, continuations: 0 });
+      expect(pull.rounds).toHaveLength(3);
+    });
+
+    it('honours a continuation only for the head it was admitted for', async () => {
+      trackBase();
+      const pull = reviewedRounds('acme/shop', 77, ['a'.repeat(40), 'b'.repeat(40), 'c'.repeat(40)], {
+        baseRef,
+      });
+      // Admitted for the head the PR had then; somebody pushed before discovery ran.
+      job.reviewRequest = {
+        source: 'user',
+        requestedBy: 'user:4',
+        continuation: true,
+        headSha: 'e'.repeat(40),
+      };
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(job.error).toMatch(/has used 3 of its 3 code review rounds/));
+      expect(claimCodeReviewRound.mock.calls[0][0]).toMatchObject({ source: 'user', continuation: false });
+      expect(job.error).toContain('send this request again with "continueReview": true');
+      expect(invocations).toHaveLength(0);
+      expect(pull.count).toMatchObject({ rounds: 3, continuations: 0 });
+      // Refused or not, it is spent.
+      expect(job.reviewRequest).toEqual({ source: 'user', requestedBy: 'user:4', continuation: false });
     });
 
     it('refuses a checkout that is not the pull request head before it asks for any round', async () => {
@@ -2465,7 +2644,7 @@ describe('native Codex code review', () => {
       const pull = reviewedRounds('acme/shop', 77, ['a'.repeat(40), 'b'.repeat(40), 'c'.repeat(40)], {
         baseRef,
       });
-      job.reviewRequest = { source: 'user', requestedBy: 'user:4', continuation: true };
+      job.reviewRequest = { source: 'user', requestedBy: 'user:4', continuation: true, headSha: head };
       sendDevMessage(id, '/review');
       await vi.waitFor(() => expect(invocations).toHaveLength(1));
       expect(pull.count).toMatchObject({ rounds: 4, continuations: 1 });
@@ -3020,6 +3199,7 @@ describe('native Codex code review', () => {
   ])('publishes nothing when %s', async (_name, arrange) => {
     completeCodeReview.mockClear();
     failCodeReview.mockClear();
+    markCodeReviewRoundPublished.mockClear();
     arrange();
     sendDevMessage(id, '/review');
     await vi.waitFor(() => expect(invocations).toHaveLength(1));
@@ -3036,6 +3216,12 @@ describe('native Codex code review', () => {
     expect(fs.existsSync(historyPath)).toBe(false);
     expect(reviewHistoryOf(id)).toBeNull();
     expect(completeCodeReview).not.toHaveBeenCalled();
+    // The publish step never started, so its round is not marked as one somebody
+    // received: the next push's review takes it over instead of using another.
+    expect(markCodeReviewRoundPublished).not.toHaveBeenCalled();
+    expect(state.reviewRounds.get('acme/shop#77').rounds).toEqual([
+      expect.objectContaining({ round: 1, headSha: head, publishedAt: null }),
+    ]);
   });
 
   it('keeps earlier decisions through a rerun in the same session', async () => {
@@ -17916,7 +18102,9 @@ describe('official orchestrator PR actions', () => {
       );
       expect(error).toMatchObject({ status: 409, code: 'review_round_limit' });
       expect(error.message).toContain('acme/shop PR #12 has used 3 of its 3 code review rounds');
-      expect(error.message).toContain('Unresolved from the earlier rounds: 1 required fix.');
+      expect(error.message).toContain(
+        'Unresolved from the earlier rounds, as of round 3 (ccccccc): 1 required fix. Threads resolved or reopened on GitHub since are not in these numbers.',
+      );
       expect(error.message).toContain('An agent cannot continue past this limit. Tell your user');
       expect(workerSessionsFor(parent)).toHaveLength(before);
       expect(createCodeReview).not.toHaveBeenCalled();
@@ -17994,10 +18182,12 @@ describe('official orchestrator PR actions', () => {
     // Automation cannot carry one, whatever it sends.
     for (const source of ['babysitter', 'orchestrator'])
       await expect(ask({ source, continuation: true })).rejects.toMatchObject({ code: 'review_round_limit' });
+    // Granted for the head it was asked for, and no other.
     expect(await ask({ continuation: true })).toEqual({
       source: 'user',
       requestedBy: 'user:4',
       continuation: true,
+      headSha: 'd'.repeat(40),
     });
     // Admitted, not yet used: the round is the session's to claim.
     expect(pull.count).toMatchObject({ rounds: 3, continuations: 0 });
@@ -18007,6 +18197,47 @@ describe('official orchestrator PR actions', () => {
       requestedBy: 'user:4',
       continuation: false,
     });
+  });
+  it('admits the review of POST /actions as its user’s, for the pull request as GitHub reported it', async () => {
+    const project = state.projects[0];
+    const pull = reviewedRounds('acme/shop', 12, ['a'.repeat(40), 'b'.repeat(40), 'c'.repeat(40)]);
+    const reported = {
+      head: { ref: 'feature', sha: 'd'.repeat(40) },
+      base: { ref: 'release' },
+    };
+    const start = (over = {}) =>
+      admitUserReview({ project, prNumber: 12, pr: reported, ownerId: 4, ...over });
+    claimCodeReviewRound.mockClear();
+    // A plain request at the limit is refused like any other, and says how to go on.
+    const plain = await start().catch((e) => e);
+    expect(plain).toMatchObject({ status: 409, code: 'review_round_limit' });
+    expect(plain.message).toContain('send this request again with "continueReview": true');
+    expect(claimCodeReviewRound.mock.calls[0][0]).toEqual({
+      repo: 'acme/shop',
+      prNumber: 12,
+      headSha: 'd'.repeat(40),
+      baseRef: 'release',
+      source: 'user',
+      requestedBy: 'user:4',
+      continuation: false,
+      admitOnly: true,
+    });
+    // Only the boolean continues: what the handler lets through is still read strictly.
+    for (const continueReview of ['true', 1, null])
+      await expect(start({ continueReview })).rejects.toMatchObject({ code: 'review_round_limit' });
+    expect(await start({ continueReview: true })).toEqual({
+      source: 'user',
+      requestedBy: 'user:4',
+      continuation: true,
+      headSha: 'd'.repeat(40),
+    });
+    // A token with no user behind it is still a person's request, recorded without one.
+    expect(await start({ ownerId: null, continueReview: true })).toMatchObject({
+      source: 'user',
+      requestedBy: null,
+      continuation: true,
+    });
+    expect(pull.count).toMatchObject({ rounds: 3, continuations: 0 });
   });
   it('refuses a code review on a runtime that has no review command', async () => {
     state.otherProviders = [{ id: 2, label: 'Project reviewer', binary: 'gemini', active: true }];

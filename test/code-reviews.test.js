@@ -602,8 +602,9 @@ describe('pullCodeReviewRoutes', () => {
     it('answers a pull request’s rounds, its allowance and what is unresolved', async () => {
       const res = await readRounds({ repo: 'Acme/Shop', pr: '12' });
       expect(res).toEqual({ status: 200, json: { reviewRounds: view } });
-      // Asked with the project as stored, so its limit is the one applied.
-      expect(rounds).toHaveBeenCalledWith({ repo: 'acme/shop' }, 12);
+      // Asked with the project as stored, so its limit is the one applied, and for what
+      // is unresolved as GitHub has it now: this is the read a person decides from.
+      expect(rounds).toHaveBeenCalledWith({ repo: 'acme/shop' }, 12, { live: true });
     });
 
     it('refuses an unknown project or a bad number, and reports a database failure', async () => {
@@ -624,6 +625,9 @@ describe('pullCodeReviewRoutes', () => {
       expect(json.reviewRounds).toEqual(view);
       expect(json.codeReviews).toEqual((await read({ repo: 'acme/shop', pr: '12' })).json.codeReviews);
       expect(json.codeReviews.map((r) => r.id)).toEqual([7, 5]);
+      // The reviews read stays on stored records: it never asks for a GitHub read.
+      expect(rounds).toHaveBeenCalledTimes(1);
+      expect(rounds).toHaveBeenCalledWith({ repo: 'acme/shop' }, 12);
     });
 
     it('shows which round each review ran as and what it covered', async () => {

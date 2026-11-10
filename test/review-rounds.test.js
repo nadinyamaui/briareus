@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { execFile, spawnSync } from 'child_process';
+import { promisify } from 'util';
 
 // The store as lib/db.js keeps it, in memory: one count row and the rounds of each pull
 // request. The SQL itself, its locking included, is exercised against a real MySQL in
@@ -74,6 +75,8 @@ vi.mock('../lib/db.js', () => ({
       } else {
         Object.assign(round, { status: 'running', jobId: request.jobId, attempts: round.attempts + 1 });
       }
+      for (const r of pull.rounds)
+        if (decision.stale.includes(r.id) && r !== round && r.status === 'running') r.status = 'failed';
     }
     return {
       decision: { action: decision.action, reason: decision.reason ?? null, continued: !!decision.continued },
@@ -97,15 +100,20 @@ vi.mock('../lib/db.js', () => ({
   listRefusedCodeReviewRounds: vi.fn(async () =>
     [...store.pulls.values()].filter((p) => p.count.refusedAt).map((p) => ({ ...p.count })),
   ),
+  codeReviewDecisionsSince: vi.fn(async () => Date.UTC(2026, 10, 1)),
 }));
 
 import {
   DEFAULT_ROUND_LIMIT,
   LARGE_DELTA_FILES,
   LARGE_DELTA_LINES,
+  asOfText,
   claimReviewRound,
+  continueReviewProblem,
   decideRound,
+  liveUnresolved,
   readReviewRounds,
+  reviewRefusalBody,
   reviewLimitsWaiting,
   reviewScope,
   reviewScopeFile,
@@ -282,6 +290,22 @@ describe('claiming a round', () => {
     expect(rerun.round).toMatchObject({ status: 'running', jobId: 'job-3' });
   });
 
+  it('records a round nobody is running any more as failed when the next one is claimed', async () => {
+    await claim();
+    // Published, and the write that should have settled it was lost with the session.
+    settle(7, 1, { publishedAt: store.now() });
+    const next = await claim({ headSha: sha('b'), jobId: 'job-2' });
+    expect(next.number).toBe(2);
+    expect(store.pull(repo, 7).rounds.map((r) => [r.round, r.status])).toEqual([
+      [1, 'failed'],
+      [2, 'running'],
+    ]);
+    // Asking alone changes nothing, and a round a live session holds is left alone.
+    await claim({ headSha: sha('c'), jobId: null, admitOnly: true });
+    await claim({ headSha: sha('c'), jobId: 'job-3', isLive: (id) => id === 'job-2' });
+    expect(store.pull(repo, 7).rounds.map((r) => r.status)).toEqual(['failed', 'running', 'running']);
+  });
+
   it('never gives two claims the same round, whichever revision each asks for', async () => {
     const claims = await Promise.all(
       ['a', 'b', 'c', 'd', 'e'].map((letter, i) =>
@@ -307,15 +331,29 @@ describe('the limit', () => {
     await useUp();
     store.decisions = [
       decision({ findingRef: 'r1', threadId: 'T1', verdict: 'fix', title: 'Leaks the token' }),
-      decision({ findingRef: 'r2', threadId: 'T2', verdict: null, decidedAt: null }),
+      decision({
+        findingRef: 'r2',
+        threadId: 'T2',
+        verdict: null,
+        decidedAt: null,
+        updatedAt: '2026-11-10T11:00:00.000Z',
+      }),
     ];
     const error = await refusalOf(claim({ headSha: sha('d'), jobId: 'job-d', source }));
     expect(error).toMatchObject({ status: 409, code: 'review_round_limit', fromProvider: false });
     expect(error.message).toContain('acme/shop PR #7 has used 3 of its 3 code review rounds');
     expect(error.message).toContain('nothing is labelled, approved or reported as passed');
+    // The numbers are the stored ones, and say which review's reading they are.
     expect(error.message).toContain(
-      'Unresolved from the earlier rounds: 1 required fix and 1 finding without a verified verdict.',
+      'Unresolved from the earlier rounds, as of round 3 (ccccccc, 2026-11-10T11:00:00.000Z): 1 required fix and 1 finding without a verified verdict. Threads resolved or reopened on GitHub since are not in these numbers.',
     );
+    expect(error.reviewRounds.unresolved.asOf).toEqual({
+      source: 'stored',
+      round: 3,
+      headSha: sha('c'),
+      at: '2026-11-10T11:00:00.000Z',
+      error: null,
+    });
     // Told where a person continues, and offered no way to do it itself.
     expect(error.message).toContain('GET /api/v1/pulls/7/code-review-rounds?repo=acme/shop');
     if (source === 'orchestrator')
@@ -355,7 +393,12 @@ describe('the limit', () => {
     expect(error).toMatchObject({ status: 409, code: 'review_round_limit' });
     expect(error.message).toContain('send this request again with "continueReview": true');
     expect(error.message).toContain('grants exactly one more round and is recorded with your user');
-    expect(error.message).toContain('No finding of the earlier rounds is recorded as unresolved.');
+    expect(error.message).toContain(
+      'No finding of the earlier rounds is recorded as unresolved, as of round 3 (ccccccc).',
+    );
+    expect(error.message).toContain(
+      'GET /api/v1/pulls/7/code-review-rounds?repo=acme/shop lists what is unresolved as GitHub has it now.',
+    );
     expect(store.pull(repo, 7).count.rounds).toBe(3);
   });
 
@@ -489,6 +532,17 @@ describe('decideRound', () => {
     expect(decide([round({ status: 'failed', publishedAt: null })]).action).toBe('create');
   });
 
+  it('names the rounds left running by nobody, so a claim can record them as failed', () => {
+    const rounds = [
+      round({ status: 'running', jobId: 'job-9', reviewedAt: null }),
+      round({ id: 2, round: 2, headSha: sha('b'), status: 'running', jobId: 'gone', reviewedAt: null }),
+      round({ id: 3, round: 3, headSha: sha('c'), status: 'running', jobId: 'busy', reviewedAt: null }),
+    ];
+    // Its own earlier round and the one of a session that is gone; not the busy one's.
+    expect(decide(rounds, {}, { isLive: (id) => id === 'busy' }).stale).toEqual([1, 2]);
+    expect(decide([round()]).stale).toEqual([]);
+  });
+
   it('takes a round over at the limit too, since it was already counted', () => {
     const rounds = [
       round(),
@@ -516,6 +570,7 @@ function decision(over = {}) {
     resolved: false,
     resolvedBefore: false,
     decidedAt: '2026-11-10T10:00:00.000Z',
+    updatedAt: '2026-11-10T10:00:00.000Z',
     ...over,
   };
 }
@@ -646,13 +701,200 @@ describe('the read model', () => {
       continuations: 0,
       refused: null,
       rounds: [],
-      unresolved: { fix: [], unverified: [] },
+      unresolved: {
+        fix: [],
+        unverified: [],
+        asOf: { source: 'stored', round: null, headSha: null, at: null, error: null },
+      },
     });
     expect(roundsView({ count: { rounds: 9 }, rounds: [], limit: 0 })).toMatchObject({
       used: 9,
       remaining: null,
       limitReached: false,
     });
+  });
+});
+
+describe('how current the unresolved work is', () => {
+  // The pull request's threads as GitHub reports them now (fetchReviewThreads).
+  const thread = (id, commentId, over = {}) => ({
+    id,
+    resolved: false,
+    resolvedBy: null,
+    outdated: false,
+    path: 'src/cart.js',
+    line: 12,
+    startLine: null,
+    comments: [
+      {
+        id: commentId,
+        url: `https://github.com/acme/shop/pull/7#discussion_r${commentId}`,
+        body: 'A finding',
+        at: Date.UTC(2026, 10, 9),
+        author: 'octo-reviewer',
+        commit: sha('a'),
+      },
+    ],
+    ...over,
+  });
+  const github = (threads) => vi.fn(async () => ({ viewer: 'octo-reviewer', headSha: sha('d'), threads }));
+  const project = { repo, reviewRoundLimit: 3 };
+  const cfg = { githubToken: 'tok' };
+  // Two required fixes and an unverified finding, as round three's publish step left them.
+  const asRoundThreeLeftIt = () => [
+    decision({ findingRef: 'r1', threadId: 'T1', commentId: 11, verdict: 'fix', title: 'Leaks the token' }),
+    decision({ findingRef: 'r2', threadId: 'T2', commentId: 12, verdict: 'fix', title: 'Lost update' }),
+    decision({ findingRef: 'r3', threadId: 'T3', commentId: 13, verdict: null, decidedAt: null }),
+    decision({
+      findingRef: 'r4',
+      threadId: 'T4',
+      commentId: 14,
+      verdict: 'fix',
+      resolved: true,
+      title: 'Was fixed',
+    }),
+  ];
+
+  it('dates the stored state by the last review that read the threads', async () => {
+    await useUp();
+    store.decisions = asRoundThreeLeftIt();
+    store.decisions[1].updatedAt = '2026-11-10T11:30:00.000Z';
+    const view = await readReviewRounds(project, 7);
+    expect(view.unresolved.fix.map((f) => f.findingRef)).toEqual(['r1', 'r2']);
+    expect(view.unresolved.asOf).toEqual({
+      source: 'stored',
+      round: 3,
+      headSha: sha('c'),
+      at: '2026-11-10T11:30:00.000Z',
+      error: null,
+    });
+    expect(asOfText(view.unresolved.asOf)).toBe('as of round 3 (ccccccc, 2026-11-10T11:30:00.000Z)');
+    // A round that never reached its publish step read no threads.
+    await claim({ prNumber: 8, jobId: 'job-8' });
+    const unread = (await readReviewRounds(project, 8)).unresolved.asOf;
+    expect(unread).toMatchObject({ source: 'stored', round: null, headSha: null });
+    expect(asOfText(unread)).toBe('as stored, no review having read the threads yet');
+  });
+
+  it('reads the threads from GitHub for the dedicated read: fixes resolved since are no longer owed', async () => {
+    await useUp();
+    store.decisions = asRoundThreeLeftIt();
+    // Since round three: both fixes were made and their threads resolved, and the
+    // thread of the fix that had been addressed was reopened.
+    const fetch = github([
+      thread('T1', 11, { resolved: true }),
+      thread('T2', 12, { resolved: true }),
+      thread('T3', 13),
+      thread('T4', 14, { resolved: false }),
+      // A thread a person opened is theirs, not a finding nobody verified.
+      thread('T9', 19, {
+        comments: [{ id: 19, body: 'Why this?', at: 1, author: 'morgan', commit: sha('a') }],
+      }),
+    ]);
+    const view = await readReviewRounds(project, 7, { live: true, cfg, fetch });
+    expect(fetch).toHaveBeenCalledWith(cfg, repo, 7);
+    expect(view.unresolved.fix).toEqual([
+      expect.objectContaining({ findingRef: 'r4', threadId: 'T4', commentId: 14, title: 'Was fixed' }),
+    ]);
+    expect(view.unresolved.unverified.map((f) => f.threadId)).toEqual(['T3']);
+    expect(view.unresolved.asOf).toEqual({
+      source: 'github',
+      round: null,
+      headSha: sha('d'),
+      at: expect.any(String),
+      error: null,
+    });
+    expect(asOfText(view.unresolved.asOf)).toBe('as GitHub has them now');
+    // The stored reading, asked for without GitHub, still says what round three left.
+    const stored = await readReviewRounds(project, 7);
+    expect(stored.unresolved.fix.map((f) => f.findingRef)).toEqual(['r1', 'r2']);
+    expect(stored.unresolved.asOf.source).toBe('stored');
+  });
+
+  it('answers the stored state, marked as such, when GitHub cannot be read', async () => {
+    // Another pull request than the one the test above just read: that answer is kept.
+    await useUp(17);
+    store.decisions = asRoundThreeLeftIt().map((d) => ({ ...d, prNumber: 17 }));
+    const down = vi.fn(async () => {
+      throw new Error('GitHub answered 502');
+    });
+    const view = await readReviewRounds(project, 17, { live: true, cfg, fetch: down });
+    expect(view.unresolved.fix.map((f) => f.findingRef)).toEqual(['r1', 'r2']);
+    expect(view.unresolved.asOf).toMatchObject({
+      source: 'stored',
+      round: 3,
+      headSha: sha('c'),
+      error: 'GitHub could not be read: GitHub answered 502',
+    });
+    // The rest of the answer does not depend on GitHub at all.
+    expect(view).toMatchObject({ used: 3, limitReached: true });
+    const unconfigured = await readReviewRounds(project, 17, { live: true, cfg: {}, fetch: down });
+    expect(unconfigured.unresolved.asOf.error).toBe(
+      'GitHub could not be read: No GITHUB_TOKEN is configured',
+    );
+    expect(down).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps GitHub’s answer for a minute, and reads the stored decisions fresh each time', async () => {
+    const decisions = [
+      decision({ prNumber: 31, findingRef: 'r1', threadId: 'T1', commentId: 11, verdict: 'fix' }),
+    ];
+    const fetch = github([thread('T1', 11)]);
+    const ask = (now, list = decisions) =>
+      liveUnresolved({ cfg, repo, prNumber: 31, decisions: list, fetch, now });
+    const start = Date.UTC(2026, 10, 10, 13);
+    expect((await ask(start)).fix).toHaveLength(1);
+    // A client dismissed it through the API meanwhile: seen at once, with no new read.
+    const dismissed = [{ ...decisions[0], verdict: 'dismiss', rationale: 'Not reachable' }];
+    expect((await ask(start + 59_000, dismissed)).fix).toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await ask(start + 59_000)).asOf.at).toBe(new Date(start).toISOString());
+    await ask(start + 60_000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    // Another pull request is another read.
+    await liveUnresolved({ cfg, repo, prNumber: 32, decisions: [], fetch, now: start });
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('never asks GitHub for a refusal or for the list of what waits', async () => {
+    await useUp();
+    store.decisions = asRoundThreeLeftIt();
+    const error = await refusalOf(claim({ headSha: sha('d'), jobId: 'job-d' }));
+    expect(error.reviewRounds.unresolved.asOf).toMatchObject({ source: 'stored', round: 3 });
+    expect(error.message).toContain('Unresolved from the earlier rounds, as of round 3 (ccccccc,');
+    const [waiting] = await reviewLimitsWaiting({ getProject: () => project });
+    expect(waiting).toMatchObject({ fix: 2, unverified: 1, asOf: { source: 'stored', round: 3 } });
+  });
+});
+
+describe('the review request of POST /actions', () => {
+  it('reads continueReview as a person’s word only when it is exactly that', () => {
+    expect(continueReviewProblem('review', undefined)).toBeNull();
+    expect(continueReviewProblem('review', true)).toBeNull();
+    expect(continueReviewProblem('review', false)).toBeNull();
+    expect(continueReviewProblem('test-sheet', undefined)).toBeNull();
+    const wrong = 'continueReview is true or false, and applies to the review action only';
+    for (const loose of ['true', 1, 'yes', null, {}, []])
+      expect(continueReviewProblem('review', loose)).toBe(wrong);
+    for (const other of ['solve-conflicts', 'fix-checks', 'implement-feedback']) {
+      expect(continueReviewProblem(other, true)).toBe(wrong);
+      expect(continueReviewProblem(other, false)).toBe(wrong);
+    }
+  });
+
+  it('answers a refused review with its reason, which refusal it was and the rounds', async () => {
+    await useUp();
+    const error = await refusalOf(claim({ headSha: sha('d'), jobId: 'job-d', source: 'user' }));
+    expect(reviewRefusalBody(error)).toEqual({
+      error: error.message,
+      code: 'review_round_limit',
+      reviewRounds: expect.objectContaining({ limit: 3, used: 3, remaining: 0, limitReached: true }),
+    });
+    expect(Object.keys(reviewRefusalBody(error))).toEqual(['error', 'code', 'reviewRounds']);
+    // Anything else is the handler's ordinary 400.
+    expect(reviewRefusalBody(new Error('Unknown provider: 9'))).toBeNull();
+    expect(reviewRefusalBody(Object.assign(new Error('gone'), { status: 409 }))).toBeNull();
+    expect(reviewRefusalBody(null)).toBeNull();
   });
 });
 
@@ -683,6 +925,8 @@ describe('what waits on a person', () => {
         refusedHeadSha: sha('d'),
         fix: 1,
         unverified: 1,
+        // From the stored state, and dated: this list never waits on GitHub.
+        asOf: { source: 'stored', round: 3, headSha: sha('c'), at: '2026-11-10T10:00:00.000Z', error: null },
       },
     ]);
   });
@@ -761,6 +1005,15 @@ describe('the scope of a round', () => {
     ['most_of_pr', { facts: facts({ delta: { files: 2, lines: 300 } }) }],
   ])('widens to the whole pull request on %s', (reason, over) => {
     expect(scope(over)).toEqual({ scope: 'full', reason, previousHead: sha('a'), previousRound: 1 });
+  });
+
+  it('widens when a probe of the checkout did not finish, whatever it would have found', () => {
+    // Cut short while looking for the reviewed commit: not "rewritten", unknown.
+    expect(scope({ facts: facts({ incomplete: true, previousPresent: false, delta: null }) })).toMatchObject({
+      scope: 'full',
+      reason: 'delta_unknown',
+    });
+    expect(scope({ facts: facts({ incomplete: true }) }).reason).toBe('delta_unknown');
   });
 
   it('stays incremental right at the thresholds', () => {
@@ -844,7 +1097,15 @@ describe('the scope facts of a checkout', () => {
     run(cwd, 'commit', '-m', message);
     return run(cwd, 'rev-parse', 'HEAD');
   };
-  const probe = (cwd) => (args) => spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+  // As lib/jobs.js probes a checkout (gitProbe): never blocking, null when it did not finish.
+  const probe = (cwd) => async (args) => {
+    try {
+      const { stdout } = await promisify(execFile)('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+      return { status: 0, stdout };
+    } catch (e) {
+      return { status: typeof e.code === 'number' ? e.code : null, stdout: e.stdout || '' };
+    }
+  };
   // A base branch, a feature branch with a reviewed head, and whatever the test adds.
   function checkout() {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'review-scope-'));
@@ -855,11 +1116,11 @@ describe('the scope facts of a checkout', () => {
     return { root, base, reviewed };
   }
 
-  it('measures a follow-up push against the reviewed head and the whole pull request', () => {
+  it('measures a follow-up push against the reviewed head and the whole pull request', async () => {
     const { root, base, reviewed } = checkout();
     try {
       commit(root, 'fix.js', 10, 'fix');
-      const facts = scopeFacts(probe(root), { previousHead: reviewed, base: 'main' });
+      const facts = await scopeFacts(probe(root), { previousHead: reviewed, base: 'main' });
       expect(facts).toEqual({
         baseSha: base,
         mergeBase: base,
@@ -868,6 +1129,7 @@ describe('the scope facts of a checkout', () => {
         delta: { files: 1, lines: 10 },
         pull: { files: 2, lines: 110 },
         commits: 1,
+        incomplete: false,
       });
       const previous = { round: 1, headSha: reviewed, baseRef: 'main', mergeBaseSha: base };
       expect(reviewScope({ number: 2, previous, baseRef: 'main', facts })).toMatchObject({
@@ -879,23 +1141,23 @@ describe('the scope facts of a checkout', () => {
     }
   });
 
-  it('sees a force-push that rewrote the reviewed commit', () => {
+  it('sees a force-push that rewrote the reviewed commit', async () => {
     const { root, base, reviewed } = checkout();
     try {
       run(root, 'commit', '--amend', '-m', 'feature, reworded');
-      const facts = scopeFacts(probe(root), { previousHead: reviewed, base: 'main' });
+      const facts = await scopeFacts(probe(root), { previousHead: reviewed, base: 'main' });
       expect(facts).toMatchObject({ previousPresent: true, previousIsAncestor: false, delta: null });
       const previous = { round: 1, headSha: reviewed, baseRef: 'main', mergeBaseSha: base };
       expect(reviewScope({ number: 2, previous, baseRef: 'main', facts }).reason).toBe('history_rewritten');
       // A reviewed commit the clone never fetched is the same case.
-      const gone = scopeFacts(probe(root), { previousHead: sha('d'), base: 'main' });
+      const gone = await scopeFacts(probe(root), { previousHead: sha('d'), base: 'main' });
       expect(gone).toMatchObject({ previousPresent: false, previousIsAncestor: false });
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it('sees a branch that took in its base, by merge or by rebase', () => {
+  it('sees a branch that took in its base, by merge or by rebase', async () => {
     const { root, base, reviewed } = checkout();
     try {
       run(root, 'checkout', '-q', 'main');
@@ -903,10 +1165,10 @@ describe('the scope facts of a checkout', () => {
       run(root, 'checkout', '-q', 'feature');
       const previous = { round: 1, headSha: reviewed, baseRef: 'main', mergeBaseSha: base };
       // The base moving on its own changes nothing about what was reviewed.
-      const untouched = scopeFacts(probe(root), { previousHead: reviewed, base: 'main' });
+      const untouched = await scopeFacts(probe(root), { previousHead: reviewed, base: 'main' });
       expect(untouched).toMatchObject({ baseSha: moved, mergeBase: base });
       run(root, 'merge', '-q', '--no-edit', 'main');
-      const merged = scopeFacts(probe(root), { previousHead: reviewed, base: 'main' });
+      const merged = await scopeFacts(probe(root), { previousHead: reviewed, base: 'main' });
       expect(merged).toMatchObject({ previousIsAncestor: true, mergeBase: moved });
       expect(reviewScope({ number: 2, previous, baseRef: 'main', facts: merged }).reason).toBe(
         'base_updated',
@@ -916,16 +1178,58 @@ describe('the scope facts of a checkout', () => {
     }
   });
 
-  it('never hands git anything but a commit id, and reports what it cannot establish', () => {
+  it('does not block on git, and asks nothing more once a probe times out', async () => {
+    const { root, base, reviewed } = checkout();
+    try {
+      commit(root, 'fix.js', 10, 'fix');
+      // In a blobless clone the diff fetches its blobs from origin; here origin stalls
+      // and the probe gives up, as gitProbe does after its timeout.
+      const asked = [];
+      let pending = 0;
+      const stalled = async (args) => {
+        asked.push(args[0] === 'diff' ? 'diff' : args[0]);
+        if (args[0] !== 'diff') return probe(root)(args);
+        pending++;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return { status: null, stdout: '' };
+      };
+      const measuring = scopeFacts(stalled, { previousHead: reviewed, base: 'main' });
+      // Handed back at once: the caller's event loop is never held for a probe.
+      expect(measuring).toBeInstanceOf(Promise);
+      let ticked = false;
+      setImmediate(() => (ticked = true));
+      const facts = await measuring;
+      expect(ticked).toBe(true);
+      expect(pending).toBe(1);
+      expect(facts).toMatchObject({
+        mergeBase: base,
+        previousIsAncestor: true,
+        delta: null,
+        incomplete: true,
+      });
+      // The second diff and the commit count were not asked for: one timeout, not three.
+      expect(asked.filter((name) => name === 'diff')).toHaveLength(1);
+      expect(asked).not.toContain('rev-list');
+      const previous = { round: 1, headSha: reviewed, baseRef: 'main', mergeBaseSha: base };
+      expect(reviewScope({ number: 2, previous, baseRef: 'main', facts })).toMatchObject({
+        scope: 'full',
+        reason: 'delta_unknown',
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('never hands git anything but a commit id, and reports what it cannot establish', async () => {
     const { root } = checkout();
     try {
       const calls = [];
-      const spy = (args) => (calls.push(args), probe(root)(args));
-      const facts = scopeFacts(spy, { previousHead: '--upload-pack=touch', base: 'main' });
+      const spy = async (args) => (calls.push(args), probe(root)(args));
+      const facts = await scopeFacts(spy, { previousHead: '--upload-pack=touch', base: 'main' });
       expect(facts).toMatchObject({ previousPresent: false, delta: null });
       expect(calls.flat().join(' ')).not.toContain('upload-pack');
       // No base to compare with: the scope then widens (base_unknown).
-      expect(scopeFacts(probe(root), { base: 'refs/remotes/origin/main' })).toMatchObject({
+      expect(await scopeFacts(probe(root), { base: 'refs/remotes/origin/main' })).toMatchObject({
         baseSha: null,
         mergeBase: null,
       });

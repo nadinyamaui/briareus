@@ -74,7 +74,7 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review rounds on My
     const jobId = `job-${prNumber}-${letter}`;
     await createCodeReview({ jobId, repo, prNumber, branch: 'feature' });
     const claimed = await claim({ prNumber, headSha: sha(letter), jobId, ...over });
-    await markCodeReviewRoundPublished(jobId);
+    await markCodeReviewRoundPublished(jobId, claimed.round.id);
     await completeCodeReview(jobId);
     return claimed;
   }
@@ -217,25 +217,29 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review rounds on My
       scopeReason: 'first_review',
       scopeBaseSha: null,
     });
-    // A rerun starts the review row over; its round is assigned again at discovery.
+    // A rerun starts the review row over. The round stays: the claim that precedes the
+    // reset names it, and the scope is worked out again.
     await restartCodeReview('job-a2', sha('a'));
-    expect(await getCodeReviewByJob('job-a2')).toMatchObject({ round: null, scope: null, scopeReason: null });
+    expect(await getCodeReviewByJob('job-a2')).toMatchObject({ round: 1, scope: null, scopeReason: null });
     await setCodeReviewRoundScope('job-a2', id, details);
   });
 
   it('settles the round with the review, and keeps the count when the review rows go', async () => {
-    expect(await markCodeReviewRoundPublished('job-a2')).toBe(true);
+    const [{ id }] = (await getCodeReviewRounds(repo, 7)).rounds;
+    // Only the session that holds the round marks it.
+    expect(await markCodeReviewRoundPublished('job-a', id)).toBe(false);
+    expect((await getCodeReviewRounds(repo, 7)).rounds[0].publishedAt).toBeNull();
+    expect(await markCodeReviewRoundPublished('job-a2', id)).toBe(true);
     const published = (await getCodeReviewRounds(repo, 7)).rounds[0].publishedAt;
     expect(published).toBeTruthy();
     // Kept from the first time: a recovered publish step does not move it.
-    await markCodeReviewRoundPublished('job-a2');
+    await markCodeReviewRoundPublished('job-a2', id);
     expect((await getCodeReviewRounds(repo, 7)).rounds[0].publishedAt).toBe(published);
     await completeCodeReview('job-a2');
     const done = (await getCodeReviewRounds(repo, 7)).rounds[0];
     expect(done).toMatchObject({ status: 'completed', jobId: 'job-a2' });
     expect(done.reviewedAt).toBeTruthy();
-    // Nothing to mark for a session that holds no running round.
-    expect(await markCodeReviewRoundPublished('job-a2')).toBe(false);
+    // A later turn of the session going wrong does not undo a review that finished.
     await failCodeReview('job-a2');
     expect((await getCodeReviewRounds(repo, 7)).rounds[0].status).toBe('completed');
     const [stored] = await listPullCodeReviews(repo, 7, 1);
@@ -311,7 +315,7 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review rounds on My
     expect(state.count).toMatchObject({ rounds: 4, continuations: 1, refusedAt: null, refusedHeadSha: null });
     expect(await listRefusedCodeReviewRounds()).toEqual([]);
     // The grant was for that round: the next head is at the limit again.
-    await markCodeReviewRoundPublished('job-f');
+    await markCodeReviewRoundPublished('job-f', more.round.id);
     await completeCodeReview('job-f');
     expect(await outcome(claim({ headSha: sha('g'), jobId: 'job-g', source: 'user' }))).toBe(
       'review_round_limit',
@@ -333,7 +337,7 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review rounds on My
       scope: null,
       mergeBaseSha: null,
     });
-    await markCodeReviewRoundPublished('job-8b');
+    await markCodeReviewRoundPublished('job-8b', next.round.id);
     await failCodeReview('job-8b');
     expect((await claim({ prNumber: 8, headSha: sha('c'), jobId: 'job-8c' })).number).toBe(2);
     const { count, rounds } = await getCodeReviewRounds(repo, 8);
@@ -342,6 +346,69 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review rounds on My
       [1, sha('b')],
       [2, sha('c')],
     ]);
+  });
+
+  it('settles exactly the round its review names, together with the review', async () => {
+    const jobId = 'job-30';
+    const status = async () =>
+      (await getCodeReviewRounds(repo, 30)).rounds.map((r) => [r.round, r.status, !!r.reviewedAt]);
+    await createCodeReview({ jobId, repo, prNumber: 30, branch: 'feature' });
+    const first = await claim({ prNumber: 30, jobId });
+    // The claim itself names the round on the session's review row.
+    expect(await getCodeReviewByJob(jobId)).toMatchObject({ round: 1, status: 'running' });
+    await markCodeReviewRoundPublished(jobId, first.round.id);
+    // Its settling write is lost, and the session moves on to the next head.
+    const second = await claim({ prNumber: 30, headSha: sha('b'), jobId });
+    expect(second.number).toBe(2);
+    expect((await getCodeReviewByJob(jobId)).round).toBe(2);
+    await restartCodeReview(jobId, sha('b'));
+    expect((await getCodeReviewByJob(jobId)).round).toBe(2);
+    // The claim recorded the round nobody was running any more as failed.
+    expect(await status()).toEqual([
+      [1, 'failed', false],
+      [2, 'running', false],
+    ]);
+    // Even with that round still marked running, finishing the review of the second
+    // head completes the second round alone: the one its review names.
+    await pool.query("UPDATE `code_review_rounds` SET `status` = 'running' WHERE `id` = ?", [first.round.id]);
+    await completeCodeReview(jobId);
+    expect(await status()).toEqual([
+      [1, 'running', false],
+      [2, 'completed', true],
+    ]);
+    expect((await getCodeReviewByJob(jobId)).status).toBe('completed');
+    // Nor does a failure reach past the review's own round, or undo a finished review.
+    await failCodeReview(jobId);
+    expect(await status()).toEqual([
+      [1, 'running', false],
+      [2, 'completed', true],
+    ]);
+    // A review that is running fails together with its round, and only that one.
+    await claim({ prNumber: 30, headSha: sha('c'), jobId, isLive: () => true });
+    await restartCodeReview(jobId, sha('c'));
+    await failCodeReview(jobId);
+    expect(await status()).toEqual([
+      [1, 'failed', false],
+      [2, 'completed', true],
+      [3, 'failed', false],
+    ]);
+    expect(await getCodeReviewByJob(jobId)).toMatchObject({ round: 3, status: 'failed' });
+  });
+
+  it('lets a session claim while its last attempt is still being settled, without a deadlock', async () => {
+    const jobId = 'job-31';
+    await createCodeReview({ jobId, repo, prNumber: 31, branch: 'feature' });
+    // Both take the session's review row first, then the round: whichever goes first,
+    // the other waits and neither is rolled back.
+    for (let attempt = 0; attempt < 12; attempt++) {
+      await restartCodeReview(jobId, sha('a'));
+      const [claimed] = await Promise.all([outcome(claim({ prNumber: 31, jobId })), failCodeReview(jobId)]);
+      expect(claimed).toBe(1);
+    }
+    const { count, rounds } = await getCodeReviewRounds(repo, 31);
+    expect(count.rounds).toBe(1);
+    expect(rounds).toHaveLength(1);
+    expect(['running', 'failed']).toContain(rounds[0].status);
   });
 
   it('tells branches apart by case and pull requests apart by number', async () => {

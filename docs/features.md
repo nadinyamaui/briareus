@@ -256,15 +256,21 @@ same round, however often its review runs:
 - a round that failed before its publish step started reviewed nothing anybody
   received, so the next revision takes that round over instead of using a new
   one. A review that goes stale because the pull request's head or base moved
-  during discovery is such a round. Once a publish step has started, the round
-  stays what it is;
+  during discovery is such a round, and so is one whose publish step never
+  began because the pull request's thread history could not be read or the
+  review was stopped first. Once a publish step has started, the round stays
+  what it is;
 - a push never resets the count, and neither does deleting the review's session
   or its stored review: the count is kept per pull request, in tables that
   reference neither.
 
 Claims for one pull request run one at a time under a row lock, so two starters
 can never both take the last round. A second session asking for a revision that
-another session is reviewing right now is refused.
+another session is reviewing right now is refused. A review and its round are
+settled in one transaction, by the round the review row names, so a finished or
+failed review never marks any other round. A round still marked running that no
+session is running any more (its settling write was lost) is recorded as failed
+when the next round on the pull request is claimed.
 
 **Who asked.** The PR babysitter and an orchestrator's `start_pr_action` are
 automation; a review started through `POST /api/v1/actions` is a person's
@@ -300,10 +306,12 @@ judge. The refusal says so and how to go on:
   posted.
 
 **Continuing on purpose.** A person sends the review again with
-`"continueReview": true`. That grants exactly one more round, for that request:
-it is recorded on the round with the user and the time (`continuation`), the
-count goes up rather than back, and the next new revision is at the limit
-again. The flag changes nothing while rounds are left and is refused on any
+`"continueReview": true`. That grants exactly one more round, for that request
+and for the head the pull request had when it was made: it is recorded on the
+round with the user and the time (`continuation`), the count goes up rather than
+back, and the next new revision is at the limit again. A continuation whose
+review fails before it claims its round, or finds another head checked out, is
+spent and has to be asked for again. The flag changes nothing while rounds are left and is refused on any
 other action. Raising `reviewRoundLimit` in the project's settings is the other
 deliberate way: rounds are allowed again up to the new limit.
 
@@ -324,11 +332,15 @@ follow-up to what was reviewed:
 | `base_unknown`         | full        | A merge base could not be established.                                                 |
 | `large_delta`          | full        | More than 30 files or 1000 changed lines since the reviewed head.                      |
 | `most_of_pr`           | full        | The delta is at least half of the whole pull request's diff.                           |
-| `delta_unknown`        | full        | The delta could not be measured.                                                       |
+| `delta_unknown`        | full        | The delta could not be measured, or a probe of the checkout did not finish in time.    |
 | `changes_since_review` | incremental | None of the above.                                                                     |
 
 Every doubt widens; a narrow review is chosen only on facts the server
-established. The provider's review command is not rewritten for a later round.
+established. The facts come from git in the review's checkout, run without
+blocking the server and given 30 seconds each (measuring a diff in a blobless
+clone fetches from origin); one that does not finish is `delta_unknown`.
+
+The provider's review command is not rewritten for a later round.
 Its scope reaches it as instructions beside the command (an appended system
 prompt for Claude, developer instructions for Codex) and a data file with the
 round, the commit range and the outstanding findings, whose text was written on
@@ -343,6 +355,17 @@ round (its revision, status, who asked, its scope and any continuation) and
 `unresolved`. `GET /api/v1/pulls/{number}/code-reviews` carries the same object
 as `reviewRounds`. `limitReached` says the reviewing stopped; it is never a
 verdict on the pull request.
+
+`unresolved` says how current it is, in `asOf`. Whether a thread is resolved is
+stored only when a review reads the pull request's threads, at its publish step,
+so the stored state is as of the last round that got that far: a fix made and
+resolved since, or a thread reopened on GitHub, is not in it. The dedicated read
+therefore reads the threads from GitHub when it is asked (cached for a minute,
+nothing is written) and answers `asOf.source` `github`; when GitHub cannot be
+read it answers the stored state with `asOf.source` `stored`, the round, head and
+time it dates from and the reason in `asOf.error`. The 409 of a refused review,
+the attention item and `reviewRounds` on the code-reviews read never call GitHub:
+they give the stored state and name the round it is as of.
 
 **Setting.** `reviewRoundLimit` on the project: a whole number from 1 to 20, or
 0 for no limit, in which case rounds are still counted and scoped but never
@@ -365,7 +388,11 @@ What this does not do: a claim fails closed, so a review does not start while
 the database cannot be reached; the pull request board still recommends a
 review from labels alone, and the refusal is what tells an at-limit pull request
 apart; and the attention item is listed for pull requests the board mirror
-knows as open.
+knows as open. That the provider's review command honours the scope it is
+handed (Claude's appended system prompt, Codex's developer instructions) has not
+been verified against a live review: where it is not honoured the round reviews
+the whole pull request while recorded as `incremental`, which errs on the side
+of reviewing more.
 
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).

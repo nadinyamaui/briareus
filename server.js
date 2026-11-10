@@ -36,7 +36,12 @@ import { createPrintService } from './lib/print.js';
 import { printAgentRoutes } from './lib/print-agent.js';
 import { projectEnvRoutes } from './lib/project-env.js';
 import { codeReviewRoutes, pullCodeReviewRoutes } from './lib/code-reviews.js';
-import { readReviewRounds, reviewLimitsWaiting } from './lib/review-rounds.js';
+import {
+  continueReviewProblem,
+  readReviewRounds,
+  reviewLimitsWaiting,
+  reviewRefusalBody,
+} from './lib/review-rounds.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
 import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
 import { createSlackService } from './lib/slack.js';
@@ -108,7 +113,7 @@ import {
   devSessionRecords,
   sessionTreeIds,
   createDevSession,
-  admitPullReview,
+  admitUserReview,
   sendDevMessage,
   askDevSessionBtw,
   cancelDevTurn,
@@ -765,7 +770,8 @@ api.use(
       updateCodeReviewFinding,
       listCodeReviewDecisions,
     },
-    rounds: readReviewRounds,
+    rounds: (project, prNumber, options) =>
+      readReviewRounds(project, prNumber, { ...options, cfg: getConfig() }),
   }),
 );
 api.use(
@@ -1852,10 +1858,8 @@ api.post('/api/dev/actions', async (req, res) => {
   const action = getAction(actionId);
   if (!action) return res.status(400).json({ error: `Unknown action: ${actionId}` });
   // One more review round past the project's limit, on a person's word: never implied.
-  if (continueReview !== undefined && (typeof continueReview !== 'boolean' || action.id !== 'review'))
-    return res
-      .status(400)
-      .json({ error: 'continueReview is true or false, and applies to the review action only' });
+  const misused = continueReviewProblem(action.id, continueReview);
+  if (misused) return res.status(400).json({ error: misused });
   // An action with required input (✍ Give feedback) has no errand without it.
   const answer = String(input == null ? '' : input).trim();
   if (action.input && action.input.required && !answer) {
@@ -1902,15 +1906,7 @@ api.post('/api/dev/actions', async (req, res) => {
     const owner = requestOwner(res);
     const reviewRequest =
       action.id === 'review'
-        ? await admitPullReview({
-            project,
-            prNumber: number,
-            headSha: pr.head.sha,
-            baseRef: pr.base && pr.base.ref,
-            source: 'user',
-            requestedBy: owner == null ? null : `user:${owner}`,
-            continuation: continueReview === true,
-          })
+        ? await admitUserReview({ project, prNumber: number, pr, ownerId: owner, continueReview })
         : null;
     // A prompt that refuses fails the request rather than starting an empty errand.
     const spec = await actionSessionSpec(action, context);
@@ -1927,8 +1923,8 @@ api.post('/api/dev/actions', async (req, res) => {
     });
   } catch (e) {
     // The review bound answers 409 with what was used and what is unresolved.
-    if (e.reviewRounds)
-      return res.status(409).json({ error: e.message, code: e.code, reviewRounds: e.reviewRounds });
+    const refused = reviewRefusalBody(e);
+    if (refused) return res.status(409).json(refused);
     res.status(400).json({ error: e.message });
   }
 });
