@@ -51,3 +51,21 @@ it('gives up once the bound runs out, so the server still comes up', async () =>
   await expect(waitForDb({ sleep, log })).rejects.toThrow('ECONNREFUSED');
   expect(state.attempts).toBe(1);
 });
+
+it('gives up after a few retries once the bound runs out, sleeping no longer than is left', async () => {
+  state.bootWaitMs = 5000;
+  state.failures = Array(10).fill('ECONNREFUSED');
+  let now = 0;
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  const sleep = vi.fn(async (ms) => {
+    now += ms;
+  });
+  try {
+    await expect(waitForDb({ sleep, log })).rejects.toThrow('ECONNREFUSED');
+  } finally {
+    clock.mockRestore();
+  }
+  // 1s + 2s, then the 4s step is clamped to the 2s left; the attempt at 5s is the last.
+  expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([1000, 2000, 2000]);
+  expect(state.attempts).toBe(4);
+});

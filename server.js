@@ -2264,8 +2264,10 @@ const cfg = getConfig();
 const portFlag = process.argv.indexOf('--port');
 const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
 
-// Load projects and sessions (database-only) before serving. A down database gets one clear log
-// line, and the server still comes up so settings can show what is wrong.
+// Load projects and sessions (database-only) before serving. A database that is still starting is
+// retried, with a log line per attempt, for up to DB_BOOT_WAIT_SECONDS before HTTP is served; past
+// that, or on an error retrying cannot fix, the server comes up without it so settings can show
+// what is wrong.
 (async () => {
   try {
     await waitForDb();
