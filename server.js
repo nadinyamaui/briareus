@@ -72,7 +72,7 @@ import { maintenanceState } from './lib/recovery.js';
 import { workerTranscript } from './lib/worker-transcript.js';
 import { orchestratorRoutes } from './lib/orchestrator-routes.js';
 import {
-  initDb,
+  waitForDb,
   dbHealthy,
   loadTaskSessions,
   loadJobTurnUsage,
@@ -2268,7 +2268,7 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
 // line, and the server still comes up so settings can show what is wrong.
 (async () => {
   try {
-    await initDb();
+    await waitForDb();
     await users.init().catch((e) => console.error('Could not load users:', e.message));
     await initTemplates();
     await initProjects();
