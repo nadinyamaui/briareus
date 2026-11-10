@@ -120,6 +120,7 @@ import {
   roundLimitOf,
   roundsView,
   scopeFacts,
+  securityClaims,
   settledClaims,
   unresolvedWork,
 } from '../lib/review-rounds.js';
@@ -1416,5 +1417,71 @@ describe('security claims among what is unresolved', () => {
       ['sec-fix', 'fix', true],
       ['fix', 'fix', undefined],
     ]);
+  });
+});
+
+describe('the security claims a pass is given to check', () => {
+  it('are the marked claims still owed, never verified, or resolved since a fix was required', () => {
+    const claims = securityClaims([
+      decision({ findingRef: 'owed', threadId: 'T1', verdict: 'fix', title: 'Token logged', security: true }),
+      decision({ findingRef: 'open', threadId: 'T2', verdict: null, decidedAt: null, security: true }),
+      // Dismissed without proof: nobody verified it.
+      decision({
+        findingRef: 'unproven',
+        threadId: 'T3',
+        verdict: 'dismiss',
+        rationale: 'Probably fine',
+        security: true,
+      }),
+      // A required fix whose thread was resolved afterwards: for every other finding that
+      // is the end of it, and here it is what the pass has to confirm.
+      decision({
+        findingRef: 'resolved',
+        threadId: 'T4',
+        verdict: 'fix',
+        resolved: true,
+        title: 'SSRF',
+        security: true,
+      }),
+      // Settled, and not the pass's to look at again: refuted with proof, optional with why.
+      decision({
+        findingRef: 'refuted',
+        threadId: 'T5',
+        verdict: 'dismiss',
+        verification: 'confirmed',
+        rationale: 'Guarded by the caller',
+        resolved: true,
+        security: true,
+      }),
+      decision({
+        findingRef: 'optional',
+        threadId: 'T6',
+        verdict: 'optional',
+        verification: 'plausible',
+        rationale: 'Cleanup',
+        security: true,
+      }),
+      // Not a security claim at all, whatever its state.
+      decision({ findingRef: 'general', threadId: 'T7', verdict: 'fix', resolved: true }),
+      decision({ findingRef: 'general-owed', threadId: 'T8', verdict: 'fix' }),
+    ]);
+    expect(claims.map((c) => [c.findingRef, c.status])).toEqual([
+      ['owed', 'fix'],
+      ['open', 'unverified'],
+      ['unproven', 'unverified'],
+      ['resolved', 'addressed'],
+    ]);
+    expect(claims[3]).toMatchObject({ threadId: 'T4', title: 'SSRF', security: true, verdict: 'fix' });
+    expect(securityClaims([])).toEqual([]);
+  });
+
+  it('leave what `addressed` means for every other finding as it was', () => {
+    const rows = [
+      decision({ findingRef: 'resolved', threadId: 'T4', verdict: 'fix', resolved: true, security: true }),
+      decision({ findingRef: 'general', threadId: 'T7', verdict: 'fix', resolved: true }),
+    ];
+    // Neither is unresolved work, and both settle a suppressed duplicate, as before.
+    expect(unresolvedWork(rows)).toEqual({ fix: [], unverified: [] });
+    expect([...settledClaims(rows)].sort()).toEqual(['general', 'resolved']);
   });
 });

@@ -46,11 +46,12 @@ import {
   readReviewOutcome,
   refreshReviewOutcome,
   retryReviewStatuses,
+  oweProjectOutcomes,
   reviewFindingsFrozen,
   reviewSecurity,
   reviewStatusFailures,
 } from './lib/review-enforcement.js';
-import { securityPassCompleted } from './lib/review-security.js';
+import { securityCoverageOf } from './lib/review-security.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
 import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
 import { createSlackService } from './lib/slack.js';
@@ -231,6 +232,7 @@ import {
   createProject,
   updateProject,
   editProject,
+  onOutcomeSettingsChange,
   removeProject,
   reorderProjects,
   PROJECT_DEFAULTS,
@@ -567,6 +569,16 @@ api.put('/api/projects/order', async (req, res) => {
   }
 });
 
+// A save that changes what a project's review outcomes are computed from (its security
+// policy, whether it enforces the outcome, its round limit) marks the outcomes of its open
+// pull requests as owed, and the sweep below computes and publishes them again. The
+// board is cached and mirrored, so listing them costs no GitHub call on an ordinary save.
+onOutcomeSettingsChange((project) =>
+  oweProjectOutcomes(project, {
+    openPulls: async (saved) => (await projectPulls(saved)).pulls.map((pr) => pr.number),
+  }),
+);
+
 api.put('/api/projects/:id', async (req, res) => {
   try {
     const project = await updateProject(Number(req.params.id), req.body || {});
@@ -779,9 +791,9 @@ api.use(
         listStages: listCodeReviewStages,
       }),
     // A finding counts towards the security result only in a review whose security
-    // pass the server saw complete on the head it reviews.
-    securityPass: async (review) =>
-      securityPassCompleted(await listCodeReviewStages(review.id), review.headSha),
+    // pass the server saw complete on the head it reviews, and publishes a finding of
+    // that pass only if the coverage kept with it lists one.
+    securityPass: async (review) => securityCoverageOf(await listCodeReviewStages(review.id), review.headSha),
   }),
 );
 api.use(

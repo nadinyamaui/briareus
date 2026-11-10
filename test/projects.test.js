@@ -59,6 +59,8 @@ const {
   selfProject,
   QA_STEPS,
   PROJECT_DEFAULTS,
+  OUTCOME_SETTINGS,
+  onOutcomeSettingsChange,
 } = await import('../lib/projects.js');
 
 const base = { repo: 'exampleco/sample-app', dbPoolDatabase: 'sample' };
@@ -948,5 +950,58 @@ describe('the security review policy', () => {
       'securityReview must be one of off, advisory, required',
     );
     expect((await updateProject(saved.id, { label: 'Still advisory' })).securityReview).toBe('advisory');
+  });
+});
+
+describe('settings the review outcome is computed from', () => {
+  let changes;
+  beforeEach(() => {
+    changes = [];
+    onOutcomeSettingsChange(async (project, changed) => {
+      changes.push([project.repo, changed, project.securityReview]);
+    });
+  });
+
+  it('tell whoever keeps the outcomes when a save changes one, and only then', async () => {
+    const saved = await createProject({ ...base });
+    expect(changes).toEqual([]);
+    await updateProject(saved.id, { label: 'Renamed', qaTestRun: true });
+    // Saved again as it is: nothing changed.
+    await updateProject(saved.id, {
+      securityReview: 'off',
+      enforceReviewOutcome: false,
+      reviewRoundLimit: 3,
+    });
+    expect(changes).toEqual([]);
+    await updateProject(saved.id, { securityReview: 'required' });
+    expect(changes).toEqual([[base.repo, ['securityReview'], 'required']]);
+    await updateProject(saved.id, { enforceReviewOutcome: true, reviewRoundLimit: 5 });
+    expect(changes.at(-1)).toEqual([base.repo, ['enforceReviewOutcome', 'reviewRoundLimit'], 'required']);
+    await updateProject(saved.id, { securityReview: 'advisory', label: 'Again' });
+    expect(changes.at(-1)).toEqual([base.repo, ['securityReview'], 'advisory']);
+    // By the time it is told, the project reads as saved.
+    onOutcomeSettingsChange(async (project) => {
+      changes.push(getProject(project.repo).securityReview);
+    });
+    await updateProject(saved.id, { securityReview: 'off' });
+    expect(changes.at(-1)).toBe('off');
+    expect(OUTCOME_SETTINGS).toEqual(['securityReview', 'enforceReviewOutcome', 'reviewRoundLimit']);
+  });
+
+  it('keep a save that landed even when the outcomes could not be marked', async () => {
+    const saved = await createProject({ ...base });
+    onOutcomeSettingsChange(async () => {
+      throw new Error('database is down');
+    });
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect((await updateProject(saved.id, { securityReview: 'required' })).securityReview).toBe('required');
+      expect(logged).toHaveBeenCalledWith(
+        `Code review outcomes of ${base.repo} not marked for recomputation: database is down`,
+      );
+    } finally {
+      logged.mockRestore();
+    }
+    expect(getProject(base.repo).securityReview).toBe('required');
   });
 });

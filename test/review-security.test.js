@@ -1,12 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   ASSESSMENT_MAX,
   ASSESSMENT_MIN,
+  RECORD_BYTES_MAX,
+  RECORD_FINDINGS_MAX,
   SECURITY_CATEGORIES,
   SECURITY_POLICIES,
   SECURITY_RESULTS,
+  acceptedSecurityRecord,
   computeSecurityResult,
   securityCoverage,
+  securityCoverageOf,
   securityPassCompleted,
   securityPolicyOf,
   securityRequirement,
@@ -53,11 +57,13 @@ const stagesAt = (sha, over = {}) =>
     ...(over[stage] || {}),
   }));
 const review = (over = {}) => ({ id: 5, status: 'completed', headSha: head, baseRef: 'main', ...over });
+// A registered security finding, published as the record's finding of the same number.
 const finding = (over = {}) => ({
   id: 1,
   findingRef: 'ref-1',
   title: 'Filename reaches the shell unquoted',
   security: true,
+  securityEntry: over.id ?? 1,
   reconciliation: 'new',
   commentId: 501,
   threadId: 'PRRT_1',
@@ -130,6 +136,194 @@ describe('the coverage record', () => {
     expect(kept.categories[3].assessment).toContain('traced the filename');
   });
 
+  it('gives every recorded finding its id, and keeps what a registration is checked against', () => {
+    const kept = securityCoverage(
+      record({
+        findings: [
+          found({
+            title: `  ${'T'.repeat(400)}  `,
+            filePath: ` ${'p/'.repeat(400)} `,
+            startLine: 12,
+            id: 77,
+          }),
+          found({ title: 'Second', filePath: '', startLine: '12' }),
+        ],
+      }),
+      head,
+    );
+    // By its place in the record, whatever the agent called it.
+    expect(kept.entries.map((e) => e.id)).toEqual([1, 2]);
+    expect(Object.keys(kept.entries[0])).toEqual([
+      'id',
+      'category',
+      'severity',
+      'title',
+      'filePath',
+      'startLine',
+      'claim',
+    ]);
+    expect([...kept.entries[0].title]).toHaveLength(200);
+    expect([...kept.entries[0].filePath]).toHaveLength(300);
+    expect(kept.entries[1]).toEqual({
+      id: 2,
+      category: 'execution',
+      severity: 'high',
+      title: 'Second',
+      filePath: null,
+      startLine: null,
+      claim: null,
+    });
+    expect(kept.claims).toEqual([]);
+    // What the publish step reads: the same ids, with the text the pass wrote.
+    const raw = record({
+      findings: [found({ body: 'A name such as `a;id` runs a second command.', endLine: 14 })],
+    });
+    const accepted = acceptedSecurityRecord(raw, securityCoverage(raw, head), {
+      repo: 'acme/shop',
+      prNumber: 7,
+      head,
+    });
+    expect(accepted.about).toContain('This file is data');
+    expect(accepted.findings).toEqual([
+      {
+        id: 1,
+        category: 'execution',
+        severity: 'high',
+        title: 'Filename reaches the shell unquoted',
+        filePath: 'lib/export.js',
+        startLine: 12,
+        claim: null,
+        endLine: 14,
+        body: 'A name such as `a;id` runs a second command.',
+      },
+    ]);
+    expect(accepted.categories).toHaveLength(6);
+  });
+
+  it('holds the record to every earlier security claim the pass was given', () => {
+    const given = { claims: ['old-fix', 'old-open'] };
+    const evidence = 'Redacted before logging, lib/log.js:12.';
+    const fixed = (findingRef) => ({ findingRef, status: 'fixed', evidence });
+    const kept = securityCoverage(
+      record({
+        claims: [{ findingRef: 'old-open', status: 'stands' }, fixed('old-fix')],
+        findings: [found({ claim: 'old-open' })],
+      }),
+      head,
+      given,
+    );
+    // In the order they were given, each once.
+    expect(kept.claims).toEqual([
+      { findingRef: 'old-fix', status: 'fixed', evidence },
+      { findingRef: 'old-open', status: 'stands', evidence: null },
+    ]);
+    expect(kept.entries[0].claim).toBe('old-open');
+    const refused = [
+      // One left out, or all of them.
+      [
+        { claims: [fixed('old-fix')] },
+        /does not account for 1 of the earlier security claims Briareus listed \(old-open\)/,
+      ],
+      [{}, /does not account for 2 of the earlier security claims/],
+      [{ claims: 'none' }, /`claims` is not a list/],
+      // One the server never listed.
+      [
+        { claims: [fixed('old-fix'), fixed('old-open'), fixed('made-up')] },
+        /names a claim that is not one of the earlier security claims/,
+      ],
+      [
+        { claims: [fixed('old-fix'), fixed('old-fix'), fixed('old-open')] },
+        /accounts for the earlier claim old-fix more than once/,
+      ],
+      [
+        { claims: [fixed('old-fix'), { findingRef: 'old-open', status: 'probably' }] },
+        /whether the earlier claim old-open is `fixed` or `stands`/,
+      ],
+      // Fixed has to say where, and stands has to be re-raised.
+      [
+        { claims: [fixed('old-fix'), { findingRef: 'old-open', status: 'fixed', evidence: 'yes' }] },
+        /old-open is fixed without the evidence.*at least 20 characters/,
+      ],
+      [
+        { claims: [fixed('old-fix'), { findingRef: 'old-open', status: 'stands' }] },
+        /old-open still stands and lists no finding with that `claim`/,
+      ],
+      [
+        { claims: [fixed('old-fix'), fixed('old-open')], findings: [found({ claim: 'old-open' })] },
+        /old-open is fixed and lists a finding that re-raises it/,
+      ],
+      [
+        { claims: [fixed('old-fix'), fixed('old-open')], findings: [found({ claim: 'made-up' })] },
+        /names a `claim` that is not one of the earlier/,
+      ],
+    ];
+    for (const [over, why] of refused) expect(() => securityCoverage(record(over), head, given)).toThrow(why);
+    // With no claim given, a record that names one is refused, and one without any is fine.
+    expect(() => securityCoverage(record({ claims: [fixed('old-fix')] }), head)).toThrow(
+      /names a claim that is not/,
+    );
+    expect(securityCoverage(record({ claims: [] }), head).claims).toEqual([]);
+  });
+
+  it('says which rule a refused record broke, and whether asking again could help', () => {
+    const tooShort = record({
+      categories: record().categories.map((c) =>
+        c.id === 'secrets' ? { ...c, assessment: 'Docs-only change.' } : c,
+      ),
+    });
+    let refusal;
+    try {
+      securityCoverage(tooShort, head);
+    } catch (e) {
+      refusal = e;
+    }
+    // The rule is in the refusal, so the one correction can state it.
+    expect(refusal.message).toBe(
+      'The security record gives no assessment of the secrets category: why it does not apply has to be said, in at least 20 characters',
+    );
+    expect(refusal.blocked).toBeUndefined();
+    // A pass that says it could not do its work is not asked for its record again.
+    try {
+      securityCoverage(record({ status: 'blocked', blocker: 'No diff' }), head);
+    } catch (e) {
+      refusal = e;
+    }
+    expect(refusal).toMatchObject({
+      blocked: true,
+      message: 'The security pass reported itself blocked: No diff',
+    });
+    expect(RECORD_FINDINGS_MAX).toBe(100);
+    expect(RECORD_BYTES_MAX).toBe(1024 * 1024);
+  });
+
+  it('never works over more of an agent’s text than it can keep', () => {
+    // A record is capped before it is parsed (lib/jobs.js); what is in it is cut without
+    // first spreading megabytes into an array of characters.
+    const seen = [];
+    const original = String.prototype.toWellFormed;
+    const spy = vi.spyOn(String.prototype, 'toWellFormed').mockImplementation(function () {
+      seen.push(this.length);
+      return original.call(this);
+    });
+    try {
+      const huge = 'x'.repeat(3 * 1024 * 1024);
+      const kept = securityCoverage(
+        record({
+          categories: record().categories.map((c) => ({ ...c, assessment: huge })),
+          findings: [found({ title: huge, filePath: huge })],
+          widened: huge,
+        }),
+        head,
+      );
+      expect([...kept.widened]).toHaveLength(ASSESSMENT_MAX);
+      expect([...kept.entries[0].title]).toHaveLength(200);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(seen.length).toBeGreaterThan(0);
+    expect(Math.max(...seen)).toBeLessThanOrEqual(ASSESSMENT_MAX * 2 + 2);
+  });
+
   it('accepts a pass that found nothing only with every category assessed', () => {
     expect(coverage()).toMatchObject({ findings: 0, widened: null });
     // Zero findings and nothing else is not a record.
@@ -176,8 +370,14 @@ describe('the coverage record', () => {
         /assesses the permissions category more than once/,
       ],
       [record({ findings: [found({ category: 'style' })] }), /names no category/],
-      [record({ findings: [found({ severity: 'blocker' })] }), /lacks its severity or its title/],
-      [record({ findings: [found({ title: ' ' })] }), /lacks its severity or its title/],
+      [
+        record({ findings: [found({ severity: 'blocker' })] }),
+        /lacks its severity \(one of critical, high, medium, low\) or its title/,
+      ],
+      [
+        record({ findings: [found({ title: ' ' })] }),
+        /lacks its severity \(one of critical, high, medium, low\) or its title/,
+      ],
       [record({ findings: [null] }), /names no category/],
       // A finding under a category the record says the change does not touch.
       [
@@ -541,7 +741,11 @@ describe('the security result', () => {
   });
 
   it('is incomplete until what the pass recorded reached the pull request', () => {
-    const recorded = { security: { detail: { coverage: coverage([found(), found(), found()]) } } };
+    const recorded = {
+      security: {
+        detail: { coverage: coverage([found(), found({ title: 'Path is not checked' }), found()]) },
+      },
+    };
     const missing = result({ stages: stagesAt(head, recorded), findings: [finding()] });
     expect(missing.result).toBe('incomplete');
     expect(missing.reasons).toEqual([
@@ -549,9 +753,14 @@ describe('the security result', () => {
         code: 'findings_missing',
         effect: 'incomplete',
         stage: 'security',
-        message: 'The security pass recorded 3 finding(s), and the review registered 1 as security findings.',
+        message:
+          'The security pass recorded 3 finding(s), and 2 of them were not registered: #2 "Path is not checked", #3 "Filename reaches the shell unquoted".',
         recorded: 3,
         registered: 1,
+        entries: [
+          { id: 2, title: 'Path is not checked' },
+          { id: 3, title: 'Filename reaches the shell unquoted' },
+        ],
       },
     ]);
     for (const status of ['pending', 'running', 'failed']) {
@@ -573,11 +782,238 @@ describe('the security result', () => {
     // All of them registered, the report's own security findings beside them: fine.
     const all = result({
       stages: stagesAt(head, recorded),
-      findings: [1, 2, 3, 4].map((id) => finding({ id, findingRef: `r${id}` })),
+      findings: [
+        ...[1, 2, 3].map((id) => finding({ id, findingRef: `r${id}` })),
+        finding({ id: 4, findingRef: 'r4', securityEntry: null }),
+      ],
     });
     expect(all).toMatchObject({ result: 'passed', counts: { findings: 4, optional: 4 } });
-    // A pass that recorded nothing asks nothing of publication.
-    expect(result({ stages: stagesAt(head, { publish: { status: 'failed' } }) }).result).toBe('passed');
+  });
+
+  it('does not pass a pass that found nothing when the review never published', () => {
+    // The pass looked and recorded no finding, and publication then failed, stopped or
+    // never started: nobody was told anything, and the result does not say passed.
+    for (const status of ['pending', 'running', 'failed']) {
+      const r = result({ stages: stagesAt(head, { publish: { status } }) });
+      expect(r.result, status).toBe('incomplete');
+      expect(r.reasons).toEqual([
+        {
+          code: 'publication_incomplete',
+          effect: 'incomplete',
+          stage: 'security',
+          message:
+            'The review’s publish step did not complete, so what its security pass amounts to was never published.',
+          recorded: 0,
+        },
+      ]);
+      expect(r.blocking).toBe(true);
+    }
+    // A publish step recorded for another head published nothing of this one either.
+    expect(result({ stages: stagesAt(head, { publish: { headSha: next } }) }).result).toBe('incomplete');
+    expect(result({ stages: stagesAt(head).filter((s) => s.stage !== 'publish') }).result).toBe('incomplete');
+    expect(result().result).toBe('passed');
+  });
+
+  describe('each finding of the record, accounted for by the registration that names it', () => {
+    const one = { security: { detail: { coverage: coverage([found({ title: 'New critical defect' })]) } } };
+    const withFindings = (findings, standing) =>
+      result({ stages: stagesAt(head, one), findings, ...(standing ? { standing } : {}) });
+
+    it('is not satisfied by a mark another finding inherited', () => {
+      // The recorded finding was never registered. A finding of the provider's report was
+      // registered as suppressed against an earlier dismissed security claim, and carries
+      // that claim's mark: one marked finding, one recorded finding, and nothing published.
+      const inherited = finding({
+        id: 7,
+        findingRef: 'old-dismissed',
+        securityEntry: null,
+        reconciliation: 'suppressed',
+        commentId: null,
+        threadId: null,
+        shouldFix: 'dismiss',
+      });
+      const r = withFindings([inherited], { fix: [], unverified: [], settled: ['old-dismissed'] });
+      expect(r.result).toBe('incomplete');
+      expect(r.reasons).toEqual([
+        expect.objectContaining({
+          code: 'findings_missing',
+          recorded: 1,
+          registered: 0,
+          entries: [{ id: 1, title: 'New critical defect' }],
+        }),
+      ]);
+      // So the outcome of a project that requires the pass cannot pass on it.
+      const outcome = computeReviewOutcome({
+        review: review(),
+        stages: stagesAt(head, one),
+        findings: [inherited],
+        standing: { fix: [], unverified: [], settled: ['old-dismissed'] },
+        requirements: [securityRequirement(r)],
+      });
+      expect(outcome.outcome).toBe('incomplete');
+      expect(outcome.reasons.map((reason) => reason.requirement)).toEqual(['security']);
+    });
+
+    it('is not satisfied by a finding marked security that names no finding of the record', () => {
+      const nit = finding({ id: 8, findingRef: 'nit', securityEntry: null, title: 'Unrelated nit' });
+      const r = withFindings([nit]);
+      expect(r.result).toBe('incomplete');
+      expect(codes(r)).toEqual(['findings_missing']);
+      // It is a security finding all the same: counted, and held to the evidence rule.
+      expect(r.counts).toMatchObject({ findings: 1, optional: 1 });
+      const fix = withFindings([finding({ id: 1 }), { ...nit, shouldFix: 'fix' }]);
+      expect(fix.result).toBe('failed');
+      expect(codes(fix)).toEqual(['fix_required']);
+    });
+
+    it('is not satisfied by a registration that names another finding of the record', () => {
+      const two = { security: { detail: { coverage: coverage([found(), found({ title: 'Second' })]) } } };
+      const r = result({
+        stages: stagesAt(head, two),
+        // Two marked findings, both published as the first.
+        findings: [finding({ id: 1 }), finding({ id: 2, findingRef: 'r2', securityEntry: 1 })],
+      });
+      expect(r.result).toBe('incomplete');
+      expect(r.reasons[0]).toMatchObject({
+        code: 'findings_missing',
+        registered: 1,
+        entries: [{ id: 2, title: 'Second' }],
+      });
+      // An entry the record does not have accounts for nothing either.
+      expect(withFindings([finding({ securityEntry: 9 })]).result).toBe('incomplete');
+    });
+
+    it('is satisfied by its own registration, however that was reconciled', () => {
+      for (const reconciliation of ['new', 'adopted', 'revisit'])
+        expect(withFindings([finding({ reconciliation })]).result, reconciliation).toBe('passed');
+      const suppressed = finding({
+        findingRef: 'old-1',
+        reconciliation: 'suppressed',
+        commentId: null,
+        threadId: null,
+        shouldFix: 'dismiss',
+      });
+      // Suppressed against a decision that is itself established: accounted for and cleared.
+      expect(withFindings([suppressed], { fix: [], unverified: [], settled: ['old-1'] })).toMatchObject({
+        result: 'passed',
+        counts: { suppressed: 1 },
+      });
+      // Against one that was never proven: accounted for, and not cleared.
+      const unproven = withFindings([suppressed], {
+        fix: [],
+        unverified: [{ findingRef: 'old-1', security: true, verdict: 'dismiss', missing: ['verification'] }],
+      });
+      expect(unproven.result).toBe('incomplete');
+      expect(codes(unproven)).toEqual(['prior_decision_unverified']);
+    });
+
+    it('needs the ids the server gave: a coverage without them is no coverage', () => {
+      const { entries: _entries, ...counted } = coverage([found()]);
+      for (const kept of [
+        counted,
+        { ...counted, entries: [] },
+        { ...counted, entries: [{ id: 0, title: 'x' }] },
+        { ...coverage([found(), found()]), entries: [{ id: 1 }, { id: 1 }] },
+      ]) {
+        const stages = stagesAt(head, { security: { detail: { coverage: kept } } });
+        expect(codes(result({ stages, findings: [finding()] }))).toEqual(['coverage_missing']);
+        expect(securityCoverageOf(stages, head)).toBeNull();
+      }
+    });
+  });
+
+  describe('a security fix whose thread was resolved', () => {
+    const claim = { findingRef: 'old-fix', title: 'Token logged', threadId: 'PRRT_9', security: true };
+    const checked = (claims, findings = []) =>
+      stagesAt(head, {
+        security: {
+          detail: { coverage: securityCoverage(record({ claims, findings }), head, { claims: ['old-fix'] }) },
+        },
+      });
+    const fixed = [
+      { findingRef: 'old-fix', status: 'fixed', evidence: 'Redacted before logging, lib/log.js:12.' },
+    ];
+
+    it('is not settled by the thread: the pass has to confirm the fix in the code it reviewed', () => {
+      // The author resolved the thread and pushed; this round's pass was clean and never
+      // looked at the claim.
+      const r = result({ addressed: [claim] });
+      expect(r.result).toBe('incomplete');
+      expect(r.reasons).toEqual([
+        {
+          code: 'security_fix_unchecked',
+          effect: 'incomplete',
+          stage: 'security',
+          message:
+            '"Token logged" was a required fix whose thread was resolved, and the security pass of this review did not confirm the fix in the code it reviewed.',
+          findingRef: 'old-fix',
+          threadId: 'PRRT_9',
+          title: 'Token logged',
+        },
+      ]);
+      expect(r.blocking).toBe(true);
+      expect(securityRequirement(r)).toMatchObject({ id: 'security', outcome: 'incomplete' });
+    });
+
+    it('is settled once the record says where the fix is', () => {
+      const r = result({ stages: checked(fixed), addressed: [claim] });
+      expect(r).toMatchObject({ result: 'passed', reasons: [] });
+      expect(r.coverage.claims).toEqual(fixed);
+      // Another claim's check does not cover this one.
+      const other = { ...claim, findingRef: 'old-other', title: 'Key in the URL' };
+      expect(codes(result({ stages: checked(fixed), addressed: [claim, other] }))).toEqual([
+        'security_fix_unchecked',
+      ]);
+    });
+
+    it('stays open when the pass found it standing and nothing reopened it', () => {
+      const stands = [{ findingRef: 'old-fix', status: 'stands' }];
+      const reraise = [found({ title: 'Token logged again', claim: 'old-fix' })];
+      const stages = checked(stands, reraise);
+      // The record's finding was registered as a new claim: the old one still reads as addressed.
+      const elsewhere = result({
+        stages,
+        findings: [finding({ findingRef: 'new-ref' })],
+        addressed: [claim],
+      });
+      expect(elsewhere.result).toBe('incomplete');
+      expect(elsewhere.reasons.map((r) => [r.code, r.message])).toEqual([
+        [
+          'security_fix_unchecked',
+          '"Token logged" was a required fix whose thread was resolved, the security pass found it still standing, and no finding of this review reopened it.',
+        ],
+      ]);
+      // Reopened as the claim it is, the finding answers for it.
+      for (const reconciliation of ['revisit', 'adopted']) {
+        const reopened = result({
+          stages,
+          findings: [finding({ findingRef: 'old-fix', reconciliation, shouldFix: 'fix' })],
+          addressed: [claim],
+        });
+        expect(reopened.result).toBe('failed');
+        expect(codes(reopened)).toEqual(['fix_required']);
+      }
+      // A suppressed duplicate only repeats the claim: it confirms nothing.
+      const repeated = result({
+        stages,
+        findings: [
+          finding({
+            findingRef: 'old-fix',
+            reconciliation: 'suppressed',
+            commentId: null,
+            threadId: null,
+            shouldFix: 'dismiss',
+          }),
+        ],
+        standing: { fix: [], unverified: [], settled: ['old-fix'] },
+        addressed: [claim],
+      });
+      expect(codes(repeated)).toEqual(['security_fix_unchecked']);
+    });
+
+    it('is the pull request’s to answer, not one stored review’s own reading', () => {
+      expect(result({ own: true, addressed: [claim] }).result).toBe('passed');
+    });
   });
 
   it('is judged on its evidence whatever the policy is, and blocks only when required', () => {

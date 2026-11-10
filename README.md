@@ -264,8 +264,9 @@ provider, model and effort, covering permissions, secrets, user isolation,
 command execution and injection, untrusted input and dependency changes. Its
 findings are published, reconciled with earlier decisions and verified like the
 rest, and it completes only on a coverage record of what it assessed. The
-result is tracked apart, and under `required` a pass that did not run, did not
-complete or failed keeps the outcome from passing (see
+result is tracked apart. A security finding verified as a required fix blocks
+under every policy, like any required fix; a pass that did not run or did not
+complete blocks under `required` and does not under `advisory` (see
 [Security review](docs/features.md#security-review)).
 
 A session’s `qaLoop` starts QA when the task settles on an open pull request. QA

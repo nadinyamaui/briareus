@@ -10,10 +10,16 @@
 // (stage `security`), whose detail keeps the coverage record the server accepted, so it
 // belongs to its review and starts over with it like every other stage.
 //
+// That detail grows from TEXT to MEDIUMTEXT with it: beside six assessments it now holds
+// one entry per finding the pass recorded, and a record of a hundred findings in wide
+// characters does not fit in 64 KB.
+//
 // code_review_findings.security marks a finding as part of the security result. Only
 // the server sets it, on registration, for a review whose security pass completed (or
 // from the earlier decision a finding is reconciled with); the free-text `type` beside
-// it stays what the agent calls the defect. code_review_decisions.security carries the
+// it stays what the agent calls the defect. security_entry says which finding of the
+// pass's record the row publishes, by the id the server gave it when it accepted the
+// record: every recorded finding has to be published by exactly one row. code_review_decisions.security carries the
 // same mark on the pull request's decision about the claim, which outlives the finding:
 // a later round has to know that a fix still owed, or a dismissal, was a security one.
 // Once set it stays.
@@ -36,6 +42,15 @@ async function hasColumn(p, table, column) {
     [table, column],
   );
   return /** @type {any[]} */ (rows).length > 0;
+}
+
+/** @param {import('mysql2/promise').Pool} p @param {string} table @param {string} column */
+async function columnType(p, table, column) {
+  const [rows] = await p.query(
+    'SELECT DATA_TYPE AS type FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?',
+    [table, column],
+  );
+  return String(/** @type {any[]} */ (rows)[0]?.type || '').toLowerCase();
 }
 
 /** @param {{ context: import('mysql2/promise').Pool }} ctx */
@@ -71,6 +86,12 @@ export async function up({ context: p }) {
     await p.query(
       'ALTER TABLE `code_review_findings` ADD COLUMN `security` TINYINT(1) NOT NULL DEFAULT 0 AFTER `type`',
     );
+  if (!(await hasColumn(p, 'code_review_findings', 'security_entry')))
+    await p.query(
+      'ALTER TABLE `code_review_findings` ADD COLUMN `security_entry` INT UNSIGNED NULL AFTER `security`',
+    );
+  if ((await columnType(p, 'code_review_stages', 'detail')) === 'text')
+    await p.query('ALTER TABLE `code_review_stages` MODIFY `detail` MEDIUMTEXT NULL');
   if (!(await hasColumn(p, 'code_review_decisions', 'security')))
     await p.query(
       'ALTER TABLE `code_review_decisions` ADD COLUMN `security` TINYINT(1) NOT NULL DEFAULT 0 AFTER `verification`',
@@ -81,13 +102,21 @@ export async function up({ context: p }) {
 export async function down({ context: p }) {
   if (await hasColumn(p, 'code_review_decisions', 'security'))
     await p.query('ALTER TABLE `code_review_decisions` DROP COLUMN `security`');
+  if (await hasColumn(p, 'code_review_findings', 'security_entry'))
+    await p.query('ALTER TABLE `code_review_findings` DROP COLUMN `security_entry`');
   if (await hasColumn(p, 'code_review_findings', 'security'))
     await p.query('ALTER TABLE `code_review_findings` DROP COLUMN `security`');
   if (await hasColumn(p, 'projects', 'security_review'))
     await p.query('ALTER TABLE `projects` DROP COLUMN `security_review`');
   // The passes recorded as stages go with it: without the policy and the mark there is
   // nothing left that reads them, and the outcome requires every stage row it finds.
-  if (await hasColumn(p, 'code_review_stages', 'stage'))
+  if (await hasColumn(p, 'code_review_stages', 'stage')) {
     await p.query("DELETE FROM `code_review_stages` WHERE `stage` = 'security'");
+    // Back to the column it was, unless a row that stays would no longer fit.
+    const [rows] = await p.query('SELECT MAX(LENGTH(`detail`)) AS longest FROM `code_review_stages`');
+    const longest = Number(/** @type {any[]} */ (rows)[0]?.longest || 0);
+    if ((await columnType(p, 'code_review_stages', 'detail')) === 'mediumtext' && longest <= 65535)
+      await p.query('ALTER TABLE `code_review_stages` MODIFY `detail` TEXT NULL');
+  }
   await p.query('DROP TABLE IF EXISTS code_review_security');
 }

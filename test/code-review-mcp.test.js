@@ -199,6 +199,7 @@ it('offers the security mark only to a review that runs a security pass', async 
   const [plainAdd, plainUpdate] = (await rpc('tools/list')).result.tools;
   expect(plainAdd.inputSchema.properties).not.toHaveProperty('security');
   expect(plainUpdate.inputSchema.properties).not.toHaveProperty('security');
+  expect(plainAdd.inputSchema.properties).not.toHaveProperty('securityEntry');
   expect(JSON.stringify((await rpc('tools/list')).result.tools)).not.toMatch(/security pass/i);
   await withServer({ REVIEWER_SECURITY_PASS: '1' }, async (ask) => {
     const [add, update] = (await ask('tools/list')).result.tools;
@@ -209,7 +210,11 @@ it('offers the security mark only to a review that runs a security pass', async 
     // Stated when the finding is registered, like how it relates to earlier threads.
     expect(update.inputSchema.properties).not.toHaveProperty('security');
     expect(add.inputSchema.required).toEqual(['severity', 'title']);
-    const { security: _security, ...rest } = add.inputSchema.properties;
+    // Which finding of the pass's record a registration publishes, by its id.
+    expect(add.inputSchema.properties.securityEntry).toMatchObject({ type: 'integer', minimum: 1 });
+    expect(add.inputSchema.properties.securityEntry.description).toContain('One registration per id');
+    expect(update.inputSchema.properties).not.toHaveProperty('securityEntry');
+    const { security: _security, securityEntry: _entry, ...rest } = add.inputSchema.properties;
     expect(rest).toEqual(plainAdd.inputSchema.properties);
     const marked = { severity: 'high', title: 'Null deref', security: true };
     const added = await ask('tools/call', { name: 'review_finding_add', arguments: marked });
@@ -217,6 +222,12 @@ it('offers the security mark only to a review that runs a security pass', async 
       'Registered finding #7 [high, fix, confirmed, security] lib/a.js:4 Null deref',
     );
     expect(calls.at(-1)).toMatchObject({ method: 'POST', body: marked });
+    const published = { severity: 'high', title: 'Null deref', securityEntry: 2, security: true };
+    const named = await ask('tools/call', { name: 'review_finding_add', arguments: published });
+    expect(named.result.content[0].text).toBe(
+      'Registered finding #7 [high, fix, confirmed, security (record #2)] lib/a.js:4 Null deref',
+    );
+    expect(calls.at(-1)).toMatchObject({ method: 'POST', body: published });
   });
   for (const value of ['0', 'true', ''])
     await withServer({ REVIEWER_SECURITY_PASS: value }, async (ask) => {

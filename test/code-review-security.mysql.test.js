@@ -33,8 +33,10 @@ import {
   getProjectRow,
   listCodeReviewDecisions,
   listCodeReviewFindings,
+  listCodeReviewOutcomesDue,
   listCodeReviewStages,
   listPullCodeReviews,
+  markRepoCodeReviewOutcomesStale,
   restartCodeReview,
   saveCodeReviewDecisions,
   saveProject,
@@ -43,13 +45,15 @@ import {
 } from '../lib/db.js';
 import {
   noteReviewedRevision,
+  oweProjectOutcomes,
   readReviewOutcome,
   refreshReviewOutcome,
+  retryReviewStatuses,
   reviewSecurity,
 } from '../lib/review-enforcement.js';
 import { verdictDecision } from '../lib/review-history.js';
 import { requiredReviewStages } from '../lib/review-outcome.js';
-import { unresolvedWork } from '../lib/review-rounds.js';
+import { securityClaims, unresolvedWork } from '../lib/review-rounds.js';
 import { SECURITY_CATEGORIES, securityCoverage, securityPassCompleted } from '../lib/review-security.js';
 import { up, down } from '../migrations/2026_11_10_150000_add_code_review_security.js';
 
@@ -69,6 +73,13 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('the security review on M
       [table],
     );
     return rows.map((r) => r.name);
+  };
+  const columnType = async (table, column) => {
+    const [rows] = await pool.query(
+      'SELECT DATA_TYPE AS type FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?',
+      [table, column],
+    );
+    return rows[0]?.type;
   };
   const hasTable = async (table) => {
     const [rows] = await pool.query(
@@ -117,10 +128,12 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('the security review on M
     await completeCodeReview(review.jobId);
     return review;
   }
+  // A registered security finding, published as the record's first finding unless told.
   const marked = (over = {}) => ({
     severity: 'high',
     title: 'Token logged',
     security: true,
+    securityEntry: 1,
     shouldFix: 'optional',
     verification: 'confirmed',
     comments: 'Only at debug level, lib/auth.js:10',
@@ -189,6 +202,9 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('the security review on M
     expect(projects[projects.indexOf('enforce_review_outcome') + 1]).toBe('security_review');
     const findings = await columns('code_review_findings');
     expect(findings[findings.indexOf('type') + 1]).toBe('security');
+    expect(findings[findings.indexOf('security') + 1]).toBe('security_entry');
+    // The stage's detail holds a whole coverage record now.
+    expect(await columnType('code_review_stages', 'detail')).toBe('mediumtext');
     const decisions = await columns('code_review_decisions');
     expect(decisions[decisions.indexOf('verification') + 1]).toBe('security');
     const outcomes = await columns('code_review_outcomes');
@@ -476,7 +492,13 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('the security review on M
     ]);
     const second = await addCodeReviewFinding(
       review.id,
-      marked({ title: 'Key in the URL', shouldFix: null, verification: null, comments: null }),
+      marked({
+        title: 'Key in the URL',
+        securityEntry: 2,
+        shouldFix: null,
+        verification: null,
+        comments: null,
+      }),
     );
     // A general finding beside them is the outcome's alone.
     await addCodeReviewFinding(review.id, {
@@ -594,6 +616,7 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('the security review on M
       severity: 'high',
       title: 'Token logged',
       security: true,
+      securityEntry: 1,
       reconciliation: 'suppressed',
       findingRef: 'ref-log',
       priorThreadId: 'PRRT_log',
@@ -605,6 +628,7 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('the security review on M
     expect(again).toMatchObject({
       reconciliation: 'suppressed',
       security: true,
+      securityEntry: 1,
       commentId: null,
       threadId: null,
     });
@@ -645,6 +669,253 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('the security review on M
     const owed = (await refresh(required, 40)).outcome;
     expect(owed.outcome).toBe('changes_required');
     expect(owed.security.reasons.map((r) => [r.code, r.findingRef])).toEqual([['fix_owed', 'ref-owed']]);
+  });
+
+  it('accounts for each finding of the record by the row that publishes it, and by no other', async () => {
+    // An earlier review's security pass left a dismissal with its reason on the pull request.
+    await saveCodeReviewDecisions(repo, 70, [
+      {
+        anchor: 'PRRT_old',
+        threadId: 'PRRT_old',
+        findingRef: 'old-dismissed',
+        title: 'Session id reaches the log',
+        verdict: 'dismiss',
+        rationale: 'Redacted in lib/log.js:12',
+        verification: 'confirmed',
+        source: 'review',
+        decidedAt: Date.now(),
+        resolved: true,
+        security: true,
+      },
+    ]);
+    // This review's pass recorded one new finding. Publication never registered it: it
+    // registered a finding of the report as suppressed against that dismissal, which
+    // carries the claim's mark, and marked an unrelated one itself.
+    const review = await reviewed(70, 'a', { pass: { detail: { coverage: coverage('a', 1) } } });
+    const inherited = await addCodeReviewFinding(review.id, {
+      severity: 'high',
+      title: 'Session id reaches the log',
+      security: true,
+      reconciliation: 'suppressed',
+      findingRef: 'old-dismissed',
+      priorThreadId: 'PRRT_old',
+      shouldFix: 'dismiss',
+      comments: 'Not repeated: already dismissed. Redacted in lib/log.js:12',
+    });
+    const nit = await addCodeReviewFinding(
+      review.id,
+      marked({ title: 'Unrelated nit', securityEntry: undefined }),
+    );
+    expect([inherited.securityEntry, nit.securityEntry]).toEqual([null, null]);
+    carried.clear();
+    requests.length = 0;
+    const { outcome } = await refresh(enforcing, 70);
+    expect(outcome.security.result).toBe('incomplete');
+    expect(outcome.security.reasons).toEqual([
+      expect.objectContaining({
+        code: 'findings_missing',
+        recorded: 1,
+        registered: 0,
+        entries: [{ id: 1, title: 'Finding 1' }],
+      }),
+    ]);
+    expect(outcome.security.counts).toMatchObject({ findings: 2, suppressed: 1, optional: 1 });
+    expect(outcome.outcome).toBe('incomplete');
+    expect(posted()).toEqual([[sha('a'), 'error']]);
+    // Registered as the publication of that finding, the pass passes.
+    const published = await addCodeReviewFinding(review.id, marked({ title: 'Finding 1', securityEntry: 1 }));
+    expect(published.securityEntry).toBe(1);
+    expect((await listCodeReviewFindings(review.id)).map((f) => f.securityEntry)).toEqual([null, null, 1]);
+    const after = (await refresh(enforcing, 70)).outcome;
+    expect(after.outcome).toBe('passed');
+    expect(after.security).toMatchObject({ result: 'passed', counts: { findings: 3 } });
+    expect(posted().at(-1)).toEqual([sha('a'), 'success']);
+  });
+
+  it('keeps a whole record with the stage, however many findings and whatever their characters', async () => {
+    const wide = (n) => '😀'.repeat(n);
+    const record = {
+      head: sha('a'),
+      status: 'complete',
+      categories: SECURITY_CATEGORIES.map(({ id }) => ({ id, applicable: true, assessment: wide(5000) })),
+      findings: Array.from({ length: 100 }, () => ({
+        category: 'secrets',
+        severity: 'high',
+        title: wide(500),
+        filePath: wide(500),
+      })),
+      widened: wide(5000),
+    };
+    const kept = securityCoverage(record, sha('a'));
+    // More than the TEXT column this detail used to be could hold.
+    expect(Buffer.byteLength(JSON.stringify({ coverage: kept }))).toBeGreaterThan(65535);
+    const review = await started(71, 'a');
+    expect(
+      await setCodeReviewStage(review.jobId, 'security', review.head, {
+        status: 'completed',
+        detail: { coverage: kept },
+      }),
+    ).toBe(true);
+    const stage = (await listCodeReviewStages(review.id)).find((s) => s.stage === 'security');
+    expect(stage.detail.coverage).toEqual(kept);
+    expect(stage.detail.coverage.entries).toHaveLength(100);
+    expect(securityPassCompleted(await listCodeReviewStages(review.id), review.head)).toBe(true);
+  });
+
+  it('does not take a resolved thread as proof of a security fix: the pass confirms it or it stays open', async () => {
+    const fix = (over = {}) => ({
+      anchor: 'PRRT_fix',
+      threadId: 'PRRT_fix',
+      findingRef: 'ref-fix',
+      title: 'Token logged',
+      verdict: 'fix',
+      rationale: 'lib/auth.js:10',
+      source: 'review',
+      decidedAt: Date.now(),
+      security: true,
+      ...over,
+    });
+    // Round one required the fix. The author pushed and resolved the thread.
+    await saveCodeReviewDecisions(repo, 72, [fix()]);
+    await saveCodeReviewDecisions(repo, 72, [{ anchor: 'PRRT_fix', findingRef: 'ref-fix', resolved: true }]);
+    const decisions = await listCodeReviewDecisions(repo, 72);
+    expect(securityClaims(decisions).map((c) => [c.findingRef, c.status])).toEqual([
+      ['ref-fix', 'addressed'],
+    ]);
+    // For everything else that claim is settled, as it always was.
+    expect(unresolvedWork(decisions)).toEqual({ fix: [], unverified: [] });
+    // Round two's pass was clean and never looked at it.
+    await reviewed(72, 'b');
+    const unchecked = (await refresh(required, 72)).outcome;
+    expect(unchecked.outcome).toBe('incomplete');
+    expect(unchecked.security.reasons).toEqual([
+      expect.objectContaining({
+        code: 'security_fix_unchecked',
+        findingRef: 'ref-fix',
+        threadId: 'PRRT_fix',
+      }),
+    ]);
+    expect((await refresh(advisory, 72)).outcome).toMatchObject({
+      outcome: 'passed',
+      security: { result: 'incomplete' },
+    });
+    // A pass that was given the claim and recorded where the fix is settles it.
+    const head = sha('b');
+    const confirmed = securityCoverage(
+      {
+        head,
+        status: 'complete',
+        categories: SECURITY_CATEGORIES.map(({ id }) => ({
+          id,
+          applicable: id === 'secrets',
+          assessment: 'Read the changed handler and what it logs and returns.',
+        })),
+        findings: [],
+        claims: [
+          { findingRef: 'ref-fix', status: 'fixed', evidence: 'Redacted before logging, lib/log.js:12.' },
+        ],
+      },
+      head,
+      { claims: ['ref-fix'] },
+    );
+    await setCodeReviewStage('job-72-b', 'security', head, {
+      status: 'completed',
+      detail: { coverage: confirmed },
+    });
+    const checked = (await refresh(required, 72)).outcome;
+    expect(checked.outcome).toBe('passed');
+    expect(checked.security).toMatchObject({ result: 'passed', reasons: [] });
+    expect((await getCodeReviewSecurity(repo, 72)).coverage.claims).toEqual(confirmed.claims);
+    // The same history on a claim that is not a security one asks nothing of the pass.
+    await saveCodeReviewDecisions(repo, 73, [fix({ security: false })]);
+    await saveCodeReviewDecisions(repo, 73, [{ anchor: 'PRRT_fix', findingRef: 'ref-fix', resolved: true }]);
+    await reviewed(73, 'b');
+    expect((await refresh(required, 73)).outcome).toMatchObject({
+      outcome: 'passed',
+      security: { result: 'passed' },
+    });
+  });
+
+  it('does not pass a pass that found nothing when the review’s publication did not complete', async () => {
+    const review = await started(74, 'a');
+    await setCodeReviewStage(review.jobId, 'discover', review.head, { status: 'completed' });
+    await setCodeReviewStage(review.jobId, 'security', review.head, {
+      status: 'completed',
+      detail: { coverage: coverage('a') },
+    });
+    await setCodeReviewStage(review.jobId, 'publish', review.head, { status: 'running' });
+    await failRunningCodeReviewStages(review.jobId, review.head, { error: 'Codex entry exited with code 1' });
+    await failCodeReview(review.jobId);
+    const { outcome } = await refresh(required, 74);
+    expect(outcome.security.result).toBe('incomplete');
+    expect(outcome.security.reasons.map((r) => r.code)).toEqual(['publication_incomplete']);
+    expect(await getCodeReviewSecurity(repo, 74)).toMatchObject({ result: 'incomplete', blocking: true });
+  });
+
+  it('recomputes the outcomes of a project’s open pull requests when its settings change', async () => {
+    carried.clear();
+    requests.length = 0;
+    const on = { ...off, enforceReviewOutcome: true };
+    // Three pull requests reviewed and passed while the project asked for no pass.
+    for (const prNumber of [80, 81, 82]) {
+      await reviewed(prNumber, 'c', { stages: requiredReviewStages() });
+      await refresh(on, prNumber);
+    }
+    expect(await listCodeReviewOutcomesDue({ now: Date.now() })).toEqual([]);
+    // The project is switched to `required`. 80 and 81 are open; 82 was merged; 83 is
+    // open and was never reviewed, so it has no outcome to recompute.
+    expect(await oweProjectOutcomes(enforcing, { openPulls: async () => [80, 81, 83] })).toBe(2);
+    const due = await listCodeReviewOutcomesDue({ now: Date.now() });
+    expect(due.map((row) => [row.repo, row.prNumber, !!row.recomputeAt])).toEqual([
+      [repo, 80, true],
+      [repo, 81, true],
+    ]);
+    // Marked once, however often the project is saved before the sweep runs.
+    const since = due.map((row) => row.recomputeAt);
+    expect(await markRepoCodeReviewOutcomesStale(repo, [80, 81])).toBe(2);
+    expect((await listCodeReviewOutcomesDue({ now: Date.now() })).map((row) => row.recomputeAt)).toEqual(
+      since,
+    );
+    expect(await markRepoCodeReviewOutcomesStale(repo, [])).toBe(0);
+    expect(await markRepoCodeReviewOutcomesStale('acme/other', null)).toBe(0);
+    // The sweep pays it: nothing touched either pull request, and both lose their pass.
+    const swept = await retryReviewStatuses({ getProject: () => enforcing, cfg, retryDelayMs: 0 });
+    expect(swept).toEqual([
+      { repo, prNumber: 80, published: true },
+      { repo, prNumber: 81, published: true },
+    ]);
+    for (const prNumber of [80, 81]) {
+      expect(await getCodeReviewOutcome(repo, prNumber)).toMatchObject({
+        outcome: 'incomplete',
+        securityPolicy: 'required',
+        recomputeAt: null,
+      });
+      expect(await getCodeReviewSecurity(repo, prNumber)).toMatchObject({
+        result: 'not_run',
+        blocking: true,
+      });
+    }
+    expect(posted().slice(-2)).toEqual([
+      [sha('c'), 'error'],
+      [sha('c'), 'error'],
+    ]);
+    // The merged one is as it was.
+    expect(await getCodeReviewOutcome(repo, 82)).toMatchObject({ outcome: 'passed', securityPolicy: 'off' });
+    expect(await listCodeReviewOutcomesDue({ now: Date.now() })).toEqual([]);
+    // When the open ones cannot be listed, every outcome of the repository is marked.
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const every = await oweProjectOutcomes(on, {
+        openPulls: async () => Promise.reject(new Error('down')),
+      });
+      expect(every).toBeGreaterThanOrEqual(3);
+    } finally {
+      logged.mockRestore();
+    }
+    const again = await listCodeReviewOutcomesDue({ now: Date.now() });
+    expect(again.map((row) => row.prNumber)).toEqual(expect.arrayContaining([80, 81, 82]));
+    await retryReviewStatuses({ getProject: () => on, cfg, retryDelayMs: 0 });
+    expect(await getCodeReviewOutcome(repo, 80)).toMatchObject({ outcome: 'passed', securityPolicy: 'off' });
   });
 
   it('goes stale when the pull request moves, and follows a change of policy the next time it is seen', async () => {
@@ -726,7 +997,10 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('the security review on M
     expect(await hasTable('code_review_security')).toBe(false);
     expect(await columns('projects')).not.toContain('security_review');
     expect(await columns('code_review_findings')).not.toContain('security');
+    expect(await columns('code_review_findings')).not.toContain('security_entry');
     expect(await columns('code_review_decisions')).not.toContain('security');
+    // With the passes gone, the stages' detail is the column it was.
+    expect(await columnType('code_review_stages', 'detail')).toBe('text');
     // The passes go with it, so the earlier code, which requires every stage row it
     // finds, is not left with one it does not know. Every other record stays.
     const [passes] = await pool.query(

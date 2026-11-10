@@ -624,10 +624,13 @@ raises it or by a person through the decision `PATCH`. Nothing changes for
 required fixes, and nothing blocks anywhere until a project enforces the
 outcome.
 
-Turning `enforceReviewOutcome` on publishes nothing retroactively: a pull
-request gets its status the next time its outcome is computed (a review, a
-changed verdict, a refusal at the limit, a push or retarget the server sees),
-and until then carries none, which a required check reads as not met. Turning it off stops the updates and leaves
+Turning `enforceReviewOutcome` on publishes the outcomes already stored for the
+project's open pull requests: saving the setting marks them as owed, and the
+sweep computes them again and writes their statuses within about a minute (the
+same happens when `reviewRoundLimit` or `securityReview` changes). A pull
+request with no stored outcome gets its status the next time one is computed (a
+review, a changed verdict, a refusal at the limit, a push or retarget the server
+sees), and until then carries none, which a required check reads as not met. Turning it off stops the updates and leaves
 the statuses on GitHub as they were, so remove the requirement from branch
 protection first.
 
@@ -672,7 +675,7 @@ record of what it looked at; and Codex has no counterpart.
 
 **What it covers.** The reviewed head against the reviewed base, with the scope
 of the round: the whole pull request on a first round, and on a later one what
-changed since the last reviewed head, the security findings still outstanding
+changed since the last reviewed head, the pull request's earlier security claims
 and the behaviour those changes affect, or the whole pull request again
 whenever the provider's review is widened to that (see
 [Review rounds](#review-rounds)). The pass assesses six risk categories against
@@ -694,56 +697,112 @@ posts nothing: it only discovers.
 The pass therefore writes a record, a JSON file outside the checkout, for the
 head it reviewed: every category, whether the change touches it, and what was
 examined and concluded, or why it does not apply; and the findings it made, each
-under a category it recorded as applicable. The server checks that record when
-the turn ends and completes the pass only on a valid one: the right head, every
-category assessed with a reason, no finding under a category recorded as not
-applicable, and not a record that says it was blocked. It keeps the coverage
-with the pass's stage record (`security` in `code_review_stages`). A turn that
-ends cleanly without a valid record is a failed pass, with why. Zero findings
-never completes anything.
+under a category it recorded as applicable. The server reads that file once,
+when the turn ends, and only if it is at most 1 MB. It completes the pass only
+on a valid record: the right head, exactly one entry per category with an
+assessment of at least 20 characters, at most 100 findings, each with a
+category the record has as applicable, a severity and a title, every earlier
+security claim it was given accounted for (below), and not a record that says
+it was blocked. Every one of those rules is stated in the pass's prompt.
 
-**Same rules as every finding.** The publish step is given the record and
-publishes its findings with the report's: the same summary comment (a security
-finding's entry starts with **Security:**, and one line under the counts says
-how many the pass found and which categories it assessed), the same inline
-comments, the same reconciliation with the pull request's earlier threads
+A record the server cannot accept gets **one correction**: one more turn of the
+same conversation, in the same stage and round, that states what was wrong and
+asks for the record again, not for the pass. A record that is still not
+acceptable is a failed pass, and so is one the pass itself reports as blocked,
+which gets no correction. There is never a second one, also not across a
+restart.
+
+When the server accepts a record it gives each finding an id (its place in the
+record, from 1), keeps the coverage with the pass's stage record (`security` in
+`code_review_stages`): the categories, one entry per recorded finding with its
+id, and what it said of each earlier claim; and writes the record back as it
+accepted it, ids included, for the publish step to read. From then on the file
+is the agent's and is never read by the server again: every later step is told
+of the pass from what the server recorded when it settled it, and a pass the
+store could not record as completed did not complete. Zero findings never
+completes anything.
+
+**Earlier security claims.** A security fix that an earlier review required
+stops being owed, like any required fix, once its GitHub thread is resolved.
+For a security claim that is not the end of it, because resolving a thread is
+something the pull request's author does. Before the pass starts, the server
+writes the pull request's security claims that are still owed, never verified,
+or resolved since a fix was required to a file, and the pass checks each against
+the current code, whatever else the round covers. Its record has to account for
+every one: `fixed`, with where the fix is, or `stands`, in which case it lists
+the claim again as a finding. In the security result, a security fix whose
+thread was resolved is settled only by a pass of the governing review that
+recorded it as fixed; otherwise the result is `incomplete`
+(`security_fix_unchecked`). What `addressed` means for a finding that is not a
+security one is unchanged.
+
+**Same rules as every finding.** The publish step is given the accepted record
+and publishes its findings with the report's: the same summary comment (a
+security finding's entry starts with **Security:**, and one line under the
+counts says how many the pass found and which categories it assessed), the same
+inline comments, the same reconciliation with the pull request's earlier threads
 before anything is posted, the same registration. A security finding an earlier
 review dismissed is therefore suppressed, not posted again, and its dismissal
 stays on GitHub with its reason and in `code_review_decisions`. The verify step
 rules on security findings refutation first, like the others, and the label
-step is the review's last. A review whose pass failed still publishes and
-verifies what its report found; the pass's own findings are then not published.
+step is the review's last.
 
-**The mark.** A finding counts towards the security result when the server
-marked it (`security` on the finding), which is not the free-text `type`. The
-publish step asks for the mark on every finding of the pass's record and on a
-finding of the provider's report that is itself a security defect in one of the
-categories (the two reviews overlap, and a finding both make is one finding).
-The server grants it only in a review whose security pass it saw complete on
-the reviewed head, and refuses it otherwise; nothing can take it back. The
-pull request's decision on the claim carries the same mark, so a finding
-reconciled with an earlier security claim inherits it, and a later round's
-result still counts a security fix that is owed.
+A review whose pass failed still publishes and verifies what the provider's
+report found. What the failed pass reported is still in the conversation; the
+publish step is told that it is discovery output like the rest, to be published
+as ordinary findings and judged on their merits, and that nothing may be marked
+as a security finding. Such a finding blocks as any finding does if it is
+verified as a fix; it does not count towards the security result, which is
+incomplete either way.
+
+**The mark, and which recorded finding a registration publishes.** A finding
+counts towards the security result when the server marked it (`security` on
+the finding), which is not the free-text `type`. There are three ways to it:
+
+- A registration names the finding of the record it publishes
+  (`securityEntry`, that finding's id). The server checks that the review's
+  pass completed on the reviewed head, that its coverage lists that id, and
+  that no other finding of the review already publishes it. This is what
+  accounts for the record: each recorded finding by exactly one registered
+  finding, whatever its reconciliation (new, adopted, suppressed, revisit).
+- A registration states `security` for a finding the record does not hold: a
+  security defect the provider's report made. It needs a completed pass too,
+  counts as a security finding, and stands in for none of the record's.
+- A finding reconciled with an earlier claim that was a security one inherits
+  the mark from the pull request's decision on it. That needs no pass, and
+  again accounts for nothing the pass recorded.
+
+Nothing can take a mark back or move a `securityEntry`, and the pull request's
+decision on the claim carries the mark, so a later round still counts a
+security fix that is owed.
 
 **The security result.** Computed by the server from those records, per review
 and per pull request (`SecurityReview` in the API):
 
-| Result         | Meaning                                                                                                                                              |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `not_required` | The policy is off and the review ran no pass.                                                                                                        |
-| `not_run`      | The policy asks for a pass and the review that governs the pull request ran without one. Never read as passed.                                       |
-| `pending`      | No review yet, one is running, or the pull request moved on from the reviewed revision (`stale`).                                                    |
-| `incomplete`   | The pass failed or was interrupted, left no coverage record, its findings did not all reach the pull request, or a security finding is not verified. |
-| `failed`       | The pass is complete and a security finding stands as a required fix, from this review or owed from an earlier round.                                |
-| `passed`       | The pass completed with its coverage on the head the pull request still has, and every security finding is a verified Optional or Dismissed.         |
+| Result         | Meaning                                                                                                                                                                                                                        |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `not_required` | The policy is off and the review ran no pass.                                                                                                                                                                                  |
+| `not_run`      | The policy asks for a pass and the review that governs the pull request ran without one. Never read as passed.                                                                                                                 |
+| `pending`      | No review yet, one is running, or the pull request moved on from the reviewed revision (`stale`).                                                                                                                              |
+| `incomplete`   | The pass failed or was interrupted, left no coverage record, the review's publication did not complete, a recorded finding was not registered, a resolved security fix was not confirmed, or a security finding is unverified. |
+| `failed`       | The pass is complete and a security finding stands as a required fix, from this review or owed from an earlier round.                                                                                                          |
+| `passed`       | The pass completed with its coverage on the head the pull request still has, the review published, every recorded finding is registered, and every security finding is a verified Optional or Dismissed.                       |
 
 The evidence rule is the outcome's, applied to the marked findings and claims:
 a `fix` stands, an Optional needs a recorded verification and its reason, a
 Dismissed a confirmed verification and its reason, and a suppressed duplicate
-rests on a decision that is itself established. What the pass recorded also has
-to have arrived: a record of three findings and a review that registered one
-security finding is `incomplete` (`findings_missing`), as is a pass with
-findings whose publish step did not complete (`findings_unpublished`).
+rests on a decision that is itself established. Beside it:
+
+- The review's publish step has to have completed, also for a pass that
+  recorded nothing (`publication_incomplete`; `findings_unpublished` when it
+  recorded findings).
+- Every finding of the record has to be published by the registered finding
+  that names it (`findings_missing`, with the ids and titles of the ones that
+  are not). Another marked finding does not make up for it: not one that
+  inherited its mark, not one the publish step marked itself, not a second
+  registration of a different recorded finding.
+- A security fix whose thread was resolved has to have been confirmed by the
+  pass (`security_fix_unchecked`), as above.
 
 **The policy.** `securityReview` on the project: `off`, `advisory` or
 `required`, by name, `off` by default.
@@ -751,27 +810,39 @@ findings whose publish step did not complete (`findings_unpublished`).
 - `off`: no pass runs. Reviews, their prompts and the tools they are offered are
   exactly what they were, and the result reads `not_required`.
 - `advisory`: every review runs the pass. Its findings are published and
-  verified with the rest and the result is computed and shown, but the result
-  adds nothing to the review outcome: a pass that failed, was interrupted or
-  left no record does not hold the outcome back.
+  verified with the rest and the result is computed and shown. A pass that did
+  not run or did not complete never holds the review outcome back: not when its
+  record is refused, and not when its turn fails, in which case the pass is
+  recorded as failed and the review goes on to publish the provider's report.
 - `required`: also, any result other than `passed` keeps the review outcome from
   passing. It reaches the outcome as a requirement (`requirement_unmet` with
   `requirement` `security`): `changes_required` for a failed pass, `incomplete`
   for one that did not run or did not complete. The commit status of an
   enforcing project and the label step's instructions follow from the outcome,
   with no rule of their own; for a project that does not enforce the outcome,
-  the label step is told directly when the required pass did not complete.
+  the label step is told directly, with the server's reasons, whenever the
+  server's own reading of the pass before that step is not `passed`. A security
+  turn that fails ends a required project's review there, before publication,
+  as any step's failure does: the outcome cannot pass without the pass, and the
+  review has to be run again either way.
 
-One thing is the same under every policy: a security finding verified as a
-required fix is a required fix. It blocks the outcome as any finding does,
-because `fix` means the pull request must change before it merges, whichever
-pass found the defect. `advisory` makes the pass itself optional, not its
-verified findings; a real issue that should not block is ruled Optional, by the
-verify step or by a person. There is a second reason, which is why the mark can
-only ever add to what blocks: it is asked for by the review's own publish step,
-and the two reviews' findings overlap. If a marked finding stopped blocking
-under `advisory`, an agent's classification would decide which required fixes
-count, which is what computing the outcome on the server exists to prevent.
+Under every policy, a security finding verified as a required fix blocks the
+review outcome, exactly as any required fix does. `advisory` and `required`
+differ only in whether a pass that did not run or did not complete blocks: it
+does under `required` and does not under `advisory`. So `advisory` makes the
+pass itself optional, not its verified findings: `fix` means the pull request
+must change before it merges, whichever pass found the defect, and a real issue
+that should not block is ruled Optional, by the verify step or by a person.
+There is a second reason, which is why the mark can only ever add to what
+blocks: it is asked for by the review's own publish step, and the two reviews'
+findings overlap. If a marked finding stopped blocking under `advisory`, an
+agent's classification would decide which required fixes count, which is what
+computing the outcome on the server exists to prevent.
+
+Whatever the policy, some failures of the security turn end the review as they
+always did, because the next turn would only meet them again: somebody stopping
+or closing the session, the account's usage limit with no other account to
+continue on, a provider that is gone or a CLI that cannot start.
 
 **When the policy changes.** The pass is decided when a review's discovery
 starts, so a change applies to reviews that start after it; a review in flight
@@ -779,39 +850,52 @@ finishes as it began. A review that ran without the pass is never read as
 having passed it: under `advisory` or `required` its result is `not_run`, and
 under `required` the outcome of an open pull request reviewed before the switch
 is `incomplete` until it is reviewed again (reviewing the same revision again
-uses no new round). The stored outcome is computed again, and its commit status
-replaced, the next time the server sees the pull request (a webhook, a session,
-the babysitter) or computes its outcome for any reason; every API read already
-computes with the policy as it stands. Switching to `off` stops the result from
-counting and leaves what a pass found readable; verified required fixes still
-block.
+uses no new round). Saving the project with another `securityReview` marks the
+stored outcomes of its open pull requests as owed, and the server's sweep
+computes them again and replaces their commit statuses within about a minute,
+so a pull request nothing happens to does not keep a `success` the policy no
+longer supports. The same now holds for the two other settings an outcome is
+computed from, `enforceReviewOutcome` and `reviewRoundLimit`. Only open pull
+requests are marked (when they cannot be listed, every outcome of the
+repository is). As a second line, an outcome stored under another policy is
+also computed again the next time the server sees its pull request, and every
+API read computes with the policy as it stands. Switching to `off` stops the
+result from counting and leaves what a pass found readable; verified required
+fixes still block.
 
 **Reading it.** `reviewOutcome.security` is the pull request's result, with its
 reasons, the coverage, counts and the pass's stage status; each stored review
-carries its own under `security`, and each finding and decision says whether it
-is a security one. The result is also stored per pull request
-(`code_review_security`), in the outcome's transaction, so it outlives the
-reviews and sessions it was computed from. It adds no attention item: a pull
-request it blocks already shows through its outcome.
+carries its own under `security`, each finding says whether it is a security
+one and which recorded finding it publishes (`securityEntry`), and each
+decision whether its claim is a security one. The result is also stored per
+pull request (`code_review_security`), in the outcome's transaction, so it
+outlives the reviews and sessions it was computed from. It adds no attention
+item: a pull request it blocks already shows through its outcome.
 
 **Migration.** `2026_11_10_150000_add_code_review_security` adds
 `code_review_security`, `security_review` on `projects` (`off` for every
-existing project), and `security` on `code_review_findings` and
-`code_review_decisions` (false for every existing row). Nothing is back-filled:
-a review stored before it has no `security` stage, so it reads `not_required`
-while the policy is off and `not_run` once it is not. Existing responses and
-requests are unchanged apart from the added fields.
+existing project), `security` and `security_entry` on `code_review_findings`
+and `security` on `code_review_decisions` (false or null for every existing
+row), and widens `detail` on `code_review_stages` from `TEXT` to `MEDIUMTEXT`,
+since it now holds a whole coverage record. Nothing is back-filled: a review
+stored before it has no `security` stage, so it reads `not_required` while the
+policy is off and `not_run` once it is not. Existing responses and requests are
+unchanged apart from the added fields.
 
 What this does not do: the server checks that the record is complete and
-well-formed, not that an assessment is right, and it cannot see whether the
-pass really read the code it says it read; the mark on a finding of the
-provider's report is the publish step's classification, checked only for a
-completed pass behind it; the count of registered security findings is held
-against the record's, not each finding matched to its entry, so two entries
-merged into one finding read as one missing; a security pass is not a
-penetration test or a dependency audit, and it sees only what the checkout
-holds; and the pass was exercised here against stand-in provider processes, not
-by running a real review.
+well-formed, not that an assessment is right, that a claim recorded as `fixed`
+really is, or that the pass read the code it says it read; it checks that every
+recorded finding is published by a registration that names it, not that the
+registered finding says what the recorded one said; the mark on a finding of
+the provider's report is the publish step's classification, checked only for a
+completed pass behind it; two findings a pass records for one defect have to
+be registered as two, so a pass is told to list each defect once; the claims a
+pass re-checks are the ones the stored decisions hold when it starts, which
+are as current as the last review's read of the threads; after a change of
+settings, GitHub keeps the old status for up to a minute, longer if the sweep
+cannot reach it; a security pass is not a penetration test or a dependency
+audit, and it sees only what the checkout holds; and the pass was exercised
+here against stand-in provider processes, not by running a real review.
 
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).
