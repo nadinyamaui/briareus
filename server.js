@@ -43,6 +43,7 @@ import {
   reviewRefusalBody,
 } from './lib/review-rounds.js';
 import {
+  approvalsWaiting,
   readReviewOutcome,
   refreshReviewOutcome,
   retryReviewStatuses,
@@ -50,7 +51,11 @@ import {
   reviewFindingsFrozen,
   reviewSecurity,
   reviewStatusFailures,
+  setApprovalDirectory,
 } from './lib/review-enforcement.js';
+import { approvalRoutes } from './lib/approval-routes.js';
+import { ownsWorkOn } from './lib/review-approvals.js';
+import { readPullRevision } from './lib/review-revision.js';
 import { securityCoverageOf } from './lib/review-security.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
 import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
@@ -109,6 +114,10 @@ import {
   getCodeReviewDecision,
   saveCodeReviewDecisions,
   listCodeReviewStages,
+  getCodeReviewRisk,
+  listCodeReviewApprovals,
+  addCodeReviewApproval,
+  withdrawCodeReviewApproval,
 } from './lib/db.js';
 import {
   initJobs,
@@ -570,7 +579,7 @@ api.put('/api/projects/order', async (req, res) => {
 });
 
 // A save that changes what a project's review outcomes are computed from (its security
-// policy, whether it enforces the outcome, its round limit) marks the outcomes of its open
+// policy, its approval policy, whether it enforces the outcome, its round limit) marks the outcomes of its open
 // pull requests as owed, and the sweep below computes and publishes them again. The
 // board is cached and mirrored, so listing them costs no GitHub call on an ordinary save.
 onOutcomeSettingsChange((project) =>
@@ -823,6 +832,56 @@ api.use(
     security: reviewSecurity,
   }),
 );
+// Who the approval requirement of a pull request asks about a user (lib/review-approvals.js):
+// whether they still exist and may act on the project, and which GitHub accounts sessions
+// act as, since an approval on GitHub from one of those is not known to be its owner's.
+// An unloaded store answers as nobody known, or throws for the accounts: an approval then
+// does not count, which is the safe way round.
+setApprovalDirectory({
+  user: (id) => {
+    try {
+      const user = users.get(id);
+      return user ? { id: user.id, name: user.name, disabled: user.disabledAt != null } : null;
+    } catch {
+      return null;
+    }
+  },
+  mayApprove: (id, project) => {
+    try {
+      const user = users.get(id);
+      return !!user && user.disabledAt == null && !!project && shares.allows(user, 'project', project.id);
+    } catch {
+      return false;
+    }
+  },
+  linkedLogins: () =>
+    users
+      .list()
+      .map((user) => credentials.get(user.id, 'github')?.login)
+      .filter(Boolean),
+});
+// A person's approval of a reviewed pull request, and how the requirement stands
+// (lib/approval-routes.js). Reached through /api/v1 only, as the user the token belongs to.
+api.use(
+  approvalRoutes({
+    getProject,
+    outcome: {
+      read: readReviewOutcome,
+      refresh: async (project, prNumber, current = null) =>
+        (await refreshReviewOutcome(project, prNumber, { cfg: getConfig(), current })).outcome,
+    },
+    store: {
+      getCodeReviewRisk,
+      listCodeReviewApprovals,
+      addCodeReviewApproval,
+      withdrawCodeReviewApproval,
+    },
+    readPull: (project, prNumber) => readPullRevision(getConfig(), project.repo, prNumber),
+    linkedLogin: (user) => githubOf(user.id)?.login || null,
+    ownsWorkOn: (user, repo, prNumber) =>
+      ownsWorkOn(devSessionRecords(), { userId: user.id, repo, prNumber }),
+  }),
+);
 api.use(
   printAgentRoutes({
     service: createPrintService(),
@@ -947,6 +1006,12 @@ api.use(
       }),
     reviewStatuses: () =>
       reviewStatusFailures({
+        getProject,
+        isOpen: async (project, prNumber) =>
+          (await projectPulls(project)).pulls.some((pr) => pr.number === prNumber),
+      }),
+    reviewApprovals: () =>
+      approvalsWaiting({
         getProject,
         isOpen: async (project, prNumber) =>
           (await projectPulls(project)).pulls.some((pr) => pr.number === prNumber),

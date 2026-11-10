@@ -66,6 +66,8 @@ const state = vi.hoisted(() => ({
       decisions: state.outcome.decisions,
       count: pull ? { ...pull.count } : null,
       rounds: pull ? pull.rounds.map((r) => ({ ...r })) : [],
+      // What the server read about the revision, for a project with an approval policy.
+      risk: state.outcome.risk || null,
     };
   },
   claimRound(request, decide) {
@@ -293,6 +295,12 @@ vi.mock('../lib/db.js', () => ({
   listFailedCodeReviewStatuses: vi.fn(async () => []),
   listCodeReviewOutcomesDue: vi.fn(async () => []),
   listCodeReviewStages: vi.fn(async () => state.outcome.stages.map((s) => ({ ...s }))),
+  getCodeReviewRisk: vi.fn(async () => state.outcome.risk || null),
+  saveCodeReviewRisk: vi.fn(async (repo, prNumber, risk) => {
+    state.outcome.risk = { repo, prNumber, ...risk, retryAt: null, observedAt: 'now', updatedAt: 'now' };
+    return state.outcome.risk;
+  }),
+  syncGithubCodeReviewApprovals: vi.fn(async () => {}),
 }));
 
 vi.mock('../lib/github.js', async (importOriginal) => ({
@@ -402,6 +410,7 @@ import {
   saveJobEvents,
   restartCodeReview,
   getCodeReviewByJob,
+  syncGithubCodeReviewApprovals,
   listCodeReviewFindings,
   updateCodeReviewFinding,
   listCodeReviewDecisions,
@@ -415,6 +424,7 @@ import {
   setCodeReviewStage,
 } from '../lib/db.js';
 import { reviewHistoryOf } from '../lib/review-history.js';
+import { normalizeApprovalPolicy } from '../lib/review-risk.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
 import { ensureSessionDatabase, dropSessionDatabase } from '../lib/dbpool.js';
 import { latestTestVerdict } from '../lib/qa-verdict.js';
@@ -4985,6 +4995,170 @@ describe('native Codex code review', () => {
       expect(fs.existsSync(claimsPath())).toBe(false);
       await vi.waitFor(() => expect(state.outcome.row.outcome).toBe('passed'));
       expect(security()).toMatchObject({ policy: 'off', result: 'not_required', blocking: false });
+    });
+
+    describe('made required by the risk of the change', () => {
+      // A project that leaves the pass advisory, and requires it on high-risk changes.
+      const risky = (over = {}) =>
+        normalizeApprovalPolicy({
+          enabled: true,
+          tiers: { high: { approvals: 2, requireSecurity: true } },
+          rules: [{ pattern: '/migrations/', tier: 'high', label: 'Schema' }],
+          ...over,
+        });
+      // The pull request and its changed files, as GitHub answers the server for them.
+      const changes = (paths, { files = null } = {}) =>
+        githubRest.mockImplementation(async (_cfg, _method, url) => {
+          const ok = (json) => ({ ok: true, status: 200, json: async () => json });
+          if (url.includes('/pulls/77/files'))
+            return (
+              files ||
+              ok(paths.map((filename) => ({ filename, status: 'modified', additions: 1, deletions: 0 })))
+            );
+          if (url.includes('/pulls/77/commits'))
+            return ok([{ author: { login: 'octo-author' }, committer: { login: 'octo-author' } }]);
+          if (url === '/user') return ok({ login: 'briareus-bot' });
+          // What the label step left on the pull request: the review's own approval.
+          if (url.includes('/pulls/77/reviews'))
+            return ok([
+              {
+                id: 55,
+                state: 'APPROVED',
+                commit_id: head,
+                submitted_at: new Date().toISOString(),
+                author_association: 'COLLABORATOR',
+                user: { login: 'briareus-bot', type: 'User' },
+              },
+            ]);
+          return ok({
+            number: 77,
+            state: 'open',
+            head: { ref: 'feature', sha: head },
+            base: { ref: baseRef },
+            user: { login: 'octo-author' },
+            changed_files: paths.length,
+            commits: 1,
+            html_url: 'https://github.com/acme/shop/pull/77',
+          });
+        });
+      const asked = (part) => githubRest.mock.calls.filter(([, , url]) => url.includes(part));
+
+      beforeEach(() => {
+        state.projects[0].securityReview = 'advisory';
+        state.projects[0].approvalPolicy = risky();
+      });
+      afterEach(() => {
+        delete state.projects[0].approvalPolicy;
+        delete state.outcome.risk;
+      });
+
+      it('runs the pass as a required one on a high-risk change, with the review’s own command and runtime', async () => {
+        changes(['src/cart.js', 'migrations/002_orders.sql']);
+        stored();
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        // The tier was read from GitHub before the steps were chosen, by the server.
+        expect(asked('/pulls/77/files')).toHaveLength(1);
+        expect(job.codeReviewSecurity).toEqual({ head, policy: 'required', raisedBy: 'high' });
+        expect(beginCodeReviewStages.mock.calls[0][1].stages).toEqual([
+          'discover',
+          'security',
+          'publish',
+          'delegation',
+          'verify',
+          'label',
+        ]);
+        expect(state.outcome.risk).toMatchObject({ headSha: head, tier: 'high', complete: true });
+        // Discovery is the provider's own command on the session's runtime, as ever.
+        const native = invocations[0];
+        expect(native.args.slice(0, 5)).toEqual(['exec', 'review', '--json', '--base', base]);
+        expect(native.args.slice(-2)).toEqual(['--output-last-message', summaryPath]);
+        fs.writeFileSync(summaryPath, 'A candidate finding');
+        finishReview(native);
+        const pass = await turn(1);
+        expect(pass.child.rpc.find((r) => r.method === 'thread/resume').params).toMatchObject({
+          threadId: 'native-review-thread',
+          model: 'gpt-6.1-sol',
+        });
+        expect(pass.args).toContain('model_reasoning_effort="low"');
+        expect(job.recoveryTurn).toMatchObject({
+          opts: { codeReviewStage: 'security' },
+          runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
+        });
+        expect(texts()).toContain(
+          'Security pass (required for this pull request, whose change is high risk): a second, security-only discovery on the same runtime, before anything is published.',
+        );
+        // Held to it like a project's own required pass: one that leaves no record fails
+        // the review's security result, and the outcome with it.
+        finishTurn(pass);
+        finishTurn(await turn(2));
+        await finishRest(3);
+        await vi.waitFor(() => expect(state.outcome.row.outcome).toBe('incomplete'));
+        expect(security()).toMatchObject({ policy: 'required', blocking: true, requiredByRisk: 'high' });
+        // What the label step approved is put on record as the review's own, although
+        // this project counts no approval given on GitHub.
+        await vi.waitFor(() =>
+          expect(syncGithubCodeReviewApprovals).toHaveBeenCalledWith('acme/shop', 77, {
+            rows: [expect.objectContaining({ githubReviewId: 55, automation: 'review_label_step' })],
+            dismissed: [],
+          }),
+        );
+        expect(publicJob(job)).not.toHaveProperty('codeReviewRecord');
+      });
+
+      it('leaves a low-risk change to the project’s own advisory pass', async () => {
+        changes(['src/cart.js']);
+        stored();
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        expect(job.codeReviewSecurity).toEqual({ head, policy: 'advisory' });
+        fs.writeFileSync(summaryPath, 'A candidate finding');
+        finishReview(invocations[0]);
+        await turn(1);
+        expect(texts()).toContain(
+          'Security pass (advisory for this project): a second, security-only discovery on the same runtime, before anything is published.',
+        );
+        cancelDevTurn(id);
+        invocations[1].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      });
+
+      it('requires the pass when the changed files cannot be read before discovery', async () => {
+        changes([], { files: { ok: false, status: 502, json: async () => ({}) } });
+        stored();
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        expect(job.codeReviewSecurity).toEqual({ head, policy: 'required', raisedBy: 'high' });
+        expect(state.outcome.risk).toMatchObject({ complete: false, tier: 'high' });
+        cancelDevTurn(id);
+        invocations[0].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      });
+
+      it('runs a pass on a high-risk change of a project that otherwise runs none, and none on a low-risk one', async () => {
+        delete state.projects[0].securityReview;
+        changes(['migrations/002_orders.sql']);
+        stored();
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        expect(job.codeReviewSecurity).toEqual({ head, policy: 'required', raisedBy: 'high' });
+        cancelDevTurn(id);
+        invocations[0].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      });
+
+      it('reads nothing before discovery when no tier requires the pass', async () => {
+        state.projects[0].approvalPolicy = risky({ tiers: { high: { approvals: 2 } } });
+        changes(['migrations/002_orders.sql']);
+        // The review row is not there yet, so nothing is computed for it either.
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        expect(job.codeReviewSecurity).toEqual({ head, policy: 'advisory' });
+        expect(beginCodeReviewStages.mock.calls[0][1].stages).toContain('security');
+        cancelDevTurn(id);
+        invocations[0].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      });
     });
 
     it('decides the pass when discovery starts: a policy switched on while a review runs waits for the next one', async () => {

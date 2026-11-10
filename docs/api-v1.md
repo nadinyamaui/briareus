@@ -394,6 +394,21 @@ not run or did not complete blocks only under `required`, where a result other
 than `passed` appears among the outcome’s reasons as `requirement_unmet` with
 `requirement` `security`. See [Security review](features.md#security-review).
 
+With an `approvalPolicy` on the project, `reviewOutcome.approvals` says whether
+the people the change’s risk calls for approved the reviewed revision, and
+`reviewOutcome.ready` whether the review passed and nobody’s approval is
+missing. It never changes `reviewOutcome.outcome`: it is a result of its own
+(`not_required`, `pending`, `satisfied`) with its own commit status,
+`briareus/approvals`. `GET /pulls/{number}/approvals` reads it: the risk tier and
+which rule matched which files, how many approvals that asks for, and every
+approval on record with whether it counts and why not. A person records theirs
+with `POST /pulls/{number}/approvals` and the `headSha` they looked at, using
+their own token with a manage permission; it is bound to that head and base
+branch, and `POST /pulls/{number}/approvals/{approvalId}/withdraw` takes it
+back. A pull request that waits on people alone is a `review-approval` item in
+`GET /attention`. See
+[Risk-based human approvals](features.md#risk-based-human-approvals).
+
 ## Pull request data
 
 To bring a PR branch up to date with its base, call

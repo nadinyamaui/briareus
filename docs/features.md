@@ -900,6 +900,267 @@ here against stand-in provider processes, not by running a real review.
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).
 
+### Risk-based human approvals
+
+A project can require that people approve a pull request before it counts as
+ready, and how many depends on how risky the change is. The flow stays
+discover, (security,) publish, verify, label: nothing is added to a review but,
+on the tiers a project says so, the security pass it already knows. **Risk
+changes which checks and how many approvals a pull request needs, and nothing
+else. It never selects a provider, a model or an effort**: every review, and
+the pass a tier makes required, runs on the runtime the project configured.
+
+Off by default (`approvalPolicy` is null): nothing is assessed, nothing is
+required, no extra call is made to GitHub, and reviews, their prompts and their
+outcome are exactly what they were.
+
+**The policy.** `approvalPolicy` on a project (admin, `PUT
+/settings/projects/{id}`) is one object, checked in full when saved:
+
+```json
+{
+  "enabled": true,
+  "tiers": {
+    "low": { "approvals": 0 },
+    "medium": { "approvals": 1 },
+    "high": { "approvals": 2, "requireSecurity": true }
+  },
+  "rules": [
+    { "pattern": "/migrations/", "tier": "high", "label": "Schema" },
+    { "pattern": "*.pem", "tier": "high", "label": "Keys", "approvals": 3 },
+    { "pattern": "/config/**/*.yml", "tier": "medium" }
+  ],
+  "thresholds": { "medium": { "files": 30 }, "high": { "files": 100, "lines": 3000 } },
+  "acceptGithubApprovals": false,
+  "allowSelfApproval": false,
+  "securitySignalTier": null
+}
+```
+
+| Field                   | Meaning                                                                                                                                                                           |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`               | Only `true` switches the policy on. A policy kept with `false` is stored and asks for nothing.                                                                                    |
+| `tiers`                 | Per tier (`low`, `medium`, `high`): how many human approvals (0 to 10; 0, 1 and 2 by default) and whether the security pass is required (`requireSecurity`).                      |
+| `rules`                 | Up to 50 sensitive-path rules: a glob `pattern`, the `tier` it puts a change in, an optional `label`, and optionally its own `approvals` count, which can only exceed its tier's. |
+| `thresholds`            | For `medium` and `high`: a change with at least `files` changed files, or `lines` added and deleted lines, is at least that tier.                                                 |
+| `acceptGithubApprovals` | Whether an approval given on GitHub can count at all. False by default: only approvals recorded through Briareus do.                                                              |
+| `allowSelfApproval`     | Whether somebody who wrote the change may approve it. False by default.                                                                                                           |
+| `securitySignalTier`    | The least tier of a change whose security result is not clean; null by default. See below.                                                                                        |
+
+A higher tier cannot ask for fewer approvals, or require less, than a lower
+one, so raising a tier can only add. Unknown fields are refused, not ignored: a
+misspelt setting would be a requirement nobody is held to.
+
+**The glob syntax.** A pattern is matched against a changed file's path as
+GitHub reports it: relative to the repository root, `/` between segments,
+case-sensitive.
+
+- `?` is exactly one character of a segment and `*` any run of them, none
+  included; neither crosses a `/`.
+- `**` is a segment of its own and stands for any number of whole segments,
+  none included (`a/**/b` matches `a/b`); as the last segment it stands for at
+  least one, so `a/**` is everything under `a`.
+- A leading `/` anchors the pattern at the repository root, and so does a `/`
+  inside it. A pattern with no `/` inside (`*.pem`, `secrets/`) matches at any
+  depth.
+- A pattern matches the path it names and everything beneath it: `/config`
+  covers `config/app.yml`. A trailing `/` says the name is a directory, so only
+  what is beneath it matches.
+
+Everything else is refused when the policy is saved, rather than matched as
+something it is not: negation (`!`), character classes (`[a-z]`), braces
+(`{a,b}`), escapes (`\`), a `**` glued to other characters (`**.js`), `.` and
+`..` segments, and patterns over 200 characters. Matching is worked out as a
+table over the pattern's and the path's segments, so no pattern can make it
+backtrack.
+
+**The assessment.** The server reads the pull request's changed files from
+GitHub with its own token (`GET /pulls/{n}/files`, every page) and tries every
+rule against every file, and against the path a renamed file had before: a file
+moved out of a sensitive directory touches it as much as one moved in. The tier
+is the highest any matched rule or size threshold names, `low` when none
+applies; the approvals required are the tier's, or a matched rule's own count
+when that is higher. The result is kept per pull request for the head and base
+branch it was made for and the rules it was made under, with its reasons: which
+rule matched which files, which threshold was reached.
+
+Nothing an agent says is an input, so nothing an agent says can lower a tier.
+The agent's own view of the risk is not recorded at all.
+
+**When the files cannot be read.** A GitHub error, a pull request with more
+files than GitHub lists (3,000), a list shorter than the pull request's own
+count, a push while the pages were being read, or an assessment made under an
+earlier version of the policy: the assessment is `unknown`, and an unknown
+assessment is the highest tier, never a low one. A read that failed is tried
+again by the server, a minute later at first and doubling, six times; the
+other cases stay unknown until the pull request moves or the policy changes.
+
+**Security signals.** With `securitySignalTier` set, a change whose security
+result is not clean is at least that tier: a security pass that failed, is
+incomplete or did not run although asked for, or security findings on the
+review. It is off unless configured, because a project that runs the pass as
+advisory has decided its findings inform rather than gate; a project that sets
+it says a change the pass had something to say about deserves the people a
+sensitive path would get. It raises the approvals needed and never lowers a
+tier.
+
+**Risk-required checks.** A tier with `requireSecurity` makes the security
+pass required for the pull requests in it, whatever the project's
+`securityReview` says: an `advisory` pass is held to as `required`, and a
+project that otherwise runs no pass runs one. That is explicit configuration;
+no tier requires anything by default. The tier has to be known before
+discovery, because that is where a review's steps are chosen, so the changed
+files are read as the review starts. When they cannot be read then, the tier is
+unknown, which is the highest: the pass runs, and is required, if the highest
+tier requires it. The outcome computes the same thing from the stored
+assessment, and `security.requiredByRisk` names the tier. The pass itself is
+the one described under [Security review](#security-review), on the same
+provider, model and effort as the rest of the review.
+
+**What counts as a person approving.** This is decided by the server from what
+it can itself establish, and an approval it cannot attribute to a person does
+not count.
+
+- **An approval recorded through Briareus** (`POST /pulls/{n}/approvals`) is a
+  human approval. It is made with a person's own client token, with a manage
+  permission and the project in its scope, and is stored with who, when, an
+  optional note, and the exact head and base branch it approves. Agent sessions
+  cannot reach it: a session's token opens the agent routes only, the client
+  API does not know it, no agent or orchestrator tool records an approval, and
+  the handler refuses a request that did not come through the gateway.
+- **An approval on GitHub** counts only when the project sets
+  `acceptGithubApprovals`, and only from an account nothing automated acts as.
+  The server's own account never counts. Neither does an account a Briareus
+  user linked: sessions run `gh` with those credentials, and a review's label
+  step approves that way, so GitHub cannot say whether the person or a session
+  of theirs approved. The read model says so: _"Approval by ada-dev not counted:
+  the account is used by Briareus sessions, so an approval from it on GitHub may
+  be automation's; its owner can record the approval through the Briareus
+  API."_ A bot never counts, nor an account GitHub does not report as an owner,
+  member or collaborator of the repository. An approval a review's own label
+  step submitted is recorded as such when the review ends and never counts,
+  whatever account it used and whether or not that account is still linked
+  later (for a project that had an approval policy when the review ran). A person's verdict on GitHub is their latest: an approval they
+  followed with a request for changes, or one that was dismissed, stops
+  counting. While GitHub cannot be read, no approval given there counts.
+
+**Approving one's own change.** Unless the policy sets `allowSelfApproval`,
+the server refuses an approval from somebody it can tie to the change: the pull
+request is their linked GitHub account's; commits of it carry that account
+(which is also how a session of theirs commits once they linked one); or a
+session they own worked on the pull request, which is what ties a change to a
+person whose sessions commit as the server's account. A review, a QA run and a
+preview are not work on the change: somebody who asked for the review may
+approve it, and so may the person whose account the review's label step posted
+as, because the independence that matters is between who wrote the change and
+who approves it. What the server cannot see, it does not claim to enforce:
+commits pushed under a GitHub account never linked here, the work of sessions
+since deleted that committed as the server's account, and commits past the
+first 250 of a pull request, which is as many as GitHub lists. On a server
+only one person uses, the requirement cannot be met without
+`allowSelfApproval`.
+
+**Bound to the revision.** An approval is for one head against one base
+branch, and it has to name that head: `headSha` must be the pull request's head
+as GitHub has it when the approval is recorded, or the request is refused with
+the current head. It is also for a _reviewed_ revision: it is refused until a
+code review covers that head and has ended. From then on:
+
+| What happens                                      | The approval                                               |
+| ------------------------------------------------- | ---------------------------------------------------------- |
+| A new commit is pushed                            | stops counting (`head_moved`)                              |
+| The pull request is retargeted to another branch  | stops counting (`base_changed`), on the same head too      |
+| The base branch gains commits under the same head | still counts, as the review outcome stays current          |
+| Its approver withdraws it                         | stops counting (`withdrawn`), with when and why            |
+| Its approver is disabled or loses the project     | stops counting (`approver_disabled`, `approver_no_access`) |
+
+An approval that stops counting stays on record, listed with its reason.
+Withdrawing (`POST /pulls/{n}/approvals/{id}/withdraw`) is the approver's own
+to do, and nobody else's.
+
+**The requirement and its status.** The result is `not_required` (no policy,
+or the tier asks for no approval), `pending` or `satisfied`. `satisfied` needs
+enough approvals that count for the head and base branch the pull request has
+now, each person once, _and_ a review that covers that revision: approvals of
+a revision nobody reviewed make nothing ready, and when the review turns stale
+so does the readiness.
+
+It is a result of its own, beside the review outcome and never inside it. "The
+review passed" is what the server concluded from the review's evidence; "the
+required people approved" is what persons did afterwards. A missing approval is
+not a finding and not a change to make: it never turns the outcome into
+`changes_required` or into anything else, and the review's label step, which
+runs before anybody could have approved, is not held to it. So the two are two
+commit statuses, and a repository requires either or both in its branch
+protection:
+
+| Status context         | Says                                                  | States                                   |
+| ---------------------- | ----------------------------------------------------- | ---------------------------------------- |
+| `briareus/code-review` | what the review amounts to ([above](#review-outcome)) | `pending`, `success`, `failure`, `error` |
+| `briareus/approvals`   | whether the required people approved this revision    | `pending`, `success`                     |
+
+`briareus/approvals` is written for a project with `enforceReviewOutcome`, by
+the same publication as the outcome's status and with the same guarantees: on
+the head it is for, as the server, recorded as unconfirmed from the moment a
+write is sent until GitHub answers, read back before a status is taken as
+carried, owed on its own record in the outcome's transaction, and retried by
+the sweep after a failure, so a write that failed or was lost cannot leave a
+`success` standing for something that is not. A head nobody has computed
+carries no status, which a required check reads as not met. In the API,
+`reviewOutcome.outcome` is the review, `reviewOutcome.approvals` the people,
+and `reviewOutcome.ready` both.
+
+The requirement explains itself in plain words (`approvals.explanation`, and
+`approvals.reasons` for machines): _"This change is high risk, which asks for 2
+human approvals of 3f2c1ab against main. 1 approval counts (Ada); 1 more is
+needed."_, with the rules that matched and their files under `approvals.risk`,
+and every approval on record with whether it counts and why not.
+
+**When it is computed again.** With the outcome, always, and so whenever the
+outcome is: a review starts or ends, a verdict changes. And besides: when an
+approval is recorded or withdrawn (at once, in the request); when the server
+sees the pull request at another head or base branch (a webhook, a session's
+sync, the babysitter); when a review is submitted or dismissed on GitHub, for a
+project that accepts those (a webhook); when the policy is saved with a change
+(the open pull requests' outcomes are marked owed and the sweep computes them
+within about a minute); and when a failed read of the changed files is due
+again.
+
+**Waiting on people.** A pull request whose review passed for the revision it
+is at, and whose approvals are missing, is listed in `GET /attention` as a
+`review-approval` item for whoever may see the project, dated from when it
+began to wait (`approvals.waitingSince`).
+
+**API.** `GET /pulls/{n}/approvals` reads the requirement; `POST
+/pulls/{n}/approvals` records the caller's approval of `headSha`; `POST
+/pulls/{n}/approvals/{id}/withdraw` withdraws it. `reviewOutcome` on the
+code-review reads carries `approvals` and `ready`.
+
+**Migration.** `2026_11_10_160000_add_code_review_approvals` adds
+`projects.approval_policy` (null for every existing project) and three tables:
+`code_review_risk` (what the server read about the revision),
+`code_review_approvals` (every approval, kept as history) and
+`code_review_readiness` (the requirement as last computed, with the publication
+of its status). Nothing is back-filled, and nothing changes for a project that
+does not set a policy: none of the tables gets a row for it. Rolling back drops
+the three tables and the column and leaves every earlier record as it was.
+
+What this does not do. The server cannot tell who holds a client: a script
+given a person's token approves as that person, which is why an approval has to
+name the head and why tokens are issued from the machine, not through the API.
+An agent with a shell on the server's own machine is inside that boundary, as
+it is for SSH approvals. An approval on GitHub from an account no Briareus user
+linked is taken for a person's when the project accepts those; whether a person
+or their own tooling used that account is not something the server can see.
+GitHub reports org membership, not write access, as `MEMBER`: a repository that
+needs approvers with write access requires that in its own branch protection. A
+GitHub approval is bound to the base branch the pull request had when the
+server first saw the approval, not when it was submitted. An approver who loses
+access stops counting in the API at once and on GitHub at the next computation.
+The published status follows a change within about a minute, longer if the
+sweep cannot reach GitHub. And approvals on real GitHub pull requests were
+exercised here against a stand-in for GitHub's API, not against GitHub.
+
 ## Previews and browser access
 
 Run profiles serve session checkouts, branches and pull requests. A shared
@@ -1019,6 +1280,12 @@ These additions are present in the server revision documented here:
   off, advisory or required): a second discovery whose findings are published
   and verified with the rest, with a separately tracked security result and a
   coverage record of the risk categories it assessed.
+- A project can require human approvals by risk (`approvalPolicy`): the server
+  assesses each reviewed pull request from its changed files and the project's
+  sensitive-path rules, requires as many approvals as the tier asks for, counts
+  only approvals it can attribute to a person for the exact reviewed revision,
+  and publishes the result as the `briareus/approvals` commit status, apart
+  from the review outcome. A tier can make the security pass required.
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.

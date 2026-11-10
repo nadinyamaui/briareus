@@ -277,3 +277,43 @@ it('lists reviews stopped at their round limit to whoever may see the project, a
     logged.mockRestore();
   }
 });
+
+it('lists pull requests waiting on a human approval to whoever may see the project', async () => {
+  const waiting = (repo, prNumber) => ({
+    repo,
+    prNumber,
+    headSha: 'b'.repeat(40),
+    tier: 'high',
+    required: 2,
+    valid: 0,
+    waitingSince: '2026-11-10T12:00:00.000Z',
+  });
+  const quiet = {
+    listSessions: () => [],
+    reviewApprovals: async () => [waiting('acme/shop', 7), waiting('acme/site', 9)],
+  };
+  const ids = async (call) =>
+    (await (await call('/api/operations/attention')).json()).items.map((item) => item.id);
+  const admin = await serve(quiet);
+  const member = await serve(quiet, { id: 2, role: 'member' }, ['acme/shop']);
+  try {
+    expect(await ids(admin.call)).toEqual(['review-approval:acme/shop#7', 'review-approval:acme/site#9']);
+    expect(await ids(member.call)).toEqual(['review-approval:acme/shop#7']);
+  } finally {
+    await admin.close();
+    await member.close();
+  }
+  const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const down = await serve({
+    reviewApprovals: async () => {
+      throw new Error('Database unavailable');
+    },
+  });
+  try {
+    expect(await ids(down.call)).toEqual(['s:recovery']);
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('Database unavailable'));
+  } finally {
+    await down.close();
+    logged.mockRestore();
+  }
+});

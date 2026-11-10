@@ -15,6 +15,7 @@ vi.mock('../lib/jobs.js', () => ({
   deliverToSession: vi.fn(() => ({ status: 'running', held: 0 })),
   instructSession: vi.fn(() => ({ status: 'running' })),
   noteReviewedPull: vi.fn(async () => null),
+  noteReviewedOnGithub: vi.fn(async () => null),
 }));
 
 const feedback = vi.hoisted(() => ({ reviewEvent: vi.fn(async () => {}) }));
@@ -42,6 +43,7 @@ import {
   deliverToSession,
   instructSession,
   noteReviewedPull,
+  noteReviewedOnGithub,
 } from '../lib/jobs.js';
 import { deliveryId, DELIVERY_MAX_CHARS } from '../lib/deliveries.js';
 
@@ -575,6 +577,17 @@ describe('the events a delivery can carry', () => {
     await settle();
 
     expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat');
+  });
+
+  it('has the approval requirement looked at again when a review is submitted, not for a comment', async () => {
+    noteReviewedOnGithub.mockClear();
+    const pull = { pull_request: { number: 12, head: { ref: 'feat' } } };
+    await githubDelivery('pull_request_review_comment', { repository: { full_name: 'acme/shop' }, ...pull });
+    await settle();
+    expect(noteReviewedOnGithub).not.toHaveBeenCalled();
+    await githubDelivery('pull_request_review', { repository: { full_name: 'acme/shop' }, ...pull });
+    await settle();
+    expect(noteReviewedOnGithub.mock.calls).toEqual([['acme/shop', 12]]);
   });
 
   it('syncs on no branch when the pull request payload carries no head', async () => {
