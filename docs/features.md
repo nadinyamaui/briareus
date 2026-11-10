@@ -118,38 +118,60 @@ again twice; if the read still fails or comes back incomplete, or the pull
 request's head moved, the review stops there: it fails like any other failed
 step and publishes nothing.
 
-Each thread gets a disposition from the verdict reply standing on it (the bold
-**Fix**, **Optional** or **Dismissed** the verify step writes; the latest one
-wins):
+Each thread gets a disposition from the verdict standing on it:
 
-| Disposition | Meaning                                                                            |
-| ----------- | ---------------------------------------------------------------------------------- |
-| `dismissed` | Refuted, with the reason given. A dismissal with no reason does not count.         |
-| `addressed` | A **Fix** verdict whose thread was then resolved.                                  |
-| `optional`  | Confirmed but not required. It stays distinct from a dismissal.                    |
-| `fix`       | A required fix still open.                                                         |
-| `open`      | No verdict yet.                                                                    |
-| `resolved`  | Resolved with no verdict. This decides nothing: people resolve threads to tidy up. |
+| Disposition | Meaning                                                                                       |
+| ----------- | --------------------------------------------------------------------------------------------- |
+| `dismissed` | Refuted, with the reason given.                                                               |
+| `addressed` | A required fix whose thread was resolved after the fix was required.                          |
+| `optional`  | Confirmed but not required. It stays distinct from a dismissal.                               |
+| `fix`       | A required fix still owed. Its thread may be resolved, if it was before the fix was required. |
+| `open`      | No verdict yet.                                                                               |
+| `resolved`  | Resolved with no verdict. This decides nothing: people resolve threads to tidy up.            |
 
-Only two kinds of verdict count: a reply written by the account the server reads
-GitHub as or by the account the review's agent posts as (the session owner's
-connected GitHub account, when there is one), and a decision Briareus stored,
-from a review's verify step or from a client through the API. A reply by
-anybody else is passed along as context and possible new evidence, never as a
-decision, however it is worded: on a public repository anyone can type
-`**Dismissed**`. Between a counted reply and a stored decision, the later one
-stands.
+**Whose verdict counts.** A verdict is what Briareus stored: the review's verify
+step records each one as it replies on GitHub, and a client records one through
+`PATCH …/findings/{findingId}`. A stored verdict is the authority on its thread,
+and among stored verdicts the later one stands. Text on GitHub is not a verdict,
+whoever wrote it and however it is worded: the account a review posts as is the
+account the agents working on the pull request's branch post as, and on a public
+repository anyone can type `**Dismissed**`. Every reply reaches the review as
+context and possible new evidence. There is one exception, for history: a bold
+verdict reply (**Fix**, **Optional**, **Dismissed**) counts when it is older than
+the server's decision records (the moment the migration below ran), was written
+by the account the server reads GitHub as or the account the review's agent
+posts as, and sits on a thread with no stored verdict. That is how the verdicts
+of reviews run before the upgrade are honoured. The implement-feedback action is
+also told never to open a reply with a bold verdict word.
+
+Three rules keep a decision from being read as more than it is:
+
+- A dismissal with no reason decides nothing. The verdict before it stands, on
+  GitHub and in the stored records, until the reason is given.
+- A required fix is `addressed` only when its thread was resolved after the fix
+  was required. A fix required on a thread that was already resolved, or that
+  overturns the dismissal which resolved it, is still owed. Who resolved a
+  thread (`resolvedBy`) is passed to the review, which must check that the code
+  is still fixed before it relies on an `addressed` thread.
+- When a claim was reopened in a later thread (a revisit), that thread rules on
+  the claim and the earlier one is superseded: it cannot be suppressed against,
+  adopted or revisited again. A verdict stored under a finding's reference,
+  because its thread was never matched or was deleted since, is read as the
+  verdict of the claim's latest thread when it is the later one.
 
 The publish step then gives every finding one reconciliation, and the server
 checks it against the history it read before storing the finding:
 
 - `suppressed`: the same claim was dismissed and the reason still holds, was
   addressed and is still fixed, or was optional in a thread since resolved. It
-  is not posted again. It is still registered, with the earlier decision as its
-  verdict and `priorUrl`, `priorDisposition` and `priorReason` naming the
-  thread and its reason, so repeats stay countable. A suppression naming a
-  thread that is not in the pull request's history, or one that does not carry
-  such a decision, is refused.
+  is not posted again. It is still registered, so repeats stay countable, with
+  `priorDisposition`, `priorReason` and `priorUrl` naming the earlier decision.
+  Its `shouldFix` is set by the server as what that decision leaves to do:
+  `dismiss` when nothing is, and `optional` when the claim was optional.
+  `priorDisposition` tells a claim that was refuted (`dismissed`) from a fix
+  that was made (`addressed`), which `dismiss` alone does not. A suppression
+  naming a thread that is not in the pull request's history, or one that does
+  not carry such a decision, is refused.
 - `adopted`: the same claim already has an unresolved thread, including a
   comment an interrupted run already posted. No duplicate is posted; the
   finding continues in that thread and gets its verdict there.
@@ -157,7 +179,8 @@ checks it against the history it read before storing the finding:
   invalidates. It is posted as a new comment that links the earlier thread, and
   `revisitReason` must say what changed; a revisit without it is refused.
 - `new`: everything else, including an unrelated problem in the same file or on
-  the same line and a claim whose thread was merely resolved.
+  the same line, a claim whose thread was merely resolved, and a fix still owed
+  on a resolved thread.
 
 The verify step leaves suppressed findings alone and rules on adopted and
 revisited ones like any other. A dismissal stays on GitHub as before: the
@@ -170,31 +193,45 @@ pull request), `commentId` and `threadId` (the GitHub comment and thread it is
 published as; the thread is matched by the server once publication ends) and
 `headSha` (the head it was raised on). The decisions themselves are kept per
 pull request in `code_review_decisions`, one row per thread, or per finding that
-had no inline thread: the verdict, its reason, what recorded it (`github`,
-`review` or `api`), who, the head it was given on and whether the thread was
-resolved. Each review refreshes them from GitHub, and recording a verdict, from
-the verify step or `PATCH …/findings/{findingId}`, updates them at once. They
-reference no session and no review, so they survive a rerun in the same session
-(which replaces that review's findings), the session's deletion and every later
-review. Clients read them through
+had no inline thread: the verdict, its reason, what recorded it (`review`, `api`
+or, for history, `github`), who, the head it was given on and whether the thread
+was resolved. A finding's verdict and the decision it amounts to are written in
+one transaction. Only a verdict is a decision: saving `comments` alone rewords
+the reason of the decision that same finding gave, while it still stands, and
+changes nothing else. Decisions reference no session and no review, so they
+survive a rerun in the same session (which replaces that review's findings),
+the session's deletion and every later review. Clients read them through
 `GET /api/v1/pulls/{number}/code-review-decisions`.
 
-Publication is safe to retry: a rerun or a recovered publish step reads the
-history again, so comments the interrupted attempt already posted are adopted
-rather than posted twice, and the summary comment ends with an invisible
-`<!-- reviewer:code-review <head> -->` line so the retry updates it instead of
-adding another.
+Publication is safe to retry. A recovered publish step reads the history again
+and is given a prompt built from that read, not the one saved before the
+interruption, so comments the interrupted attempt already posted are there to
+adopt. Every publish prompt, on a first review too, names the history file and
+tells the agent to look for comments it already posted before posting one.
+Registering a comment, an adopted thread or a suppressed decision the review
+already registered answers the stored finding instead of adding another. The
+summary comment ends with an invisible `<!-- reviewer:code-review <head> -->`
+line so the retry updates it instead of adding another.
+
+What this does not rule out: a verdict reply written before the upgrade by
+anything holding the reviewing account counts as history; whoever can resolve a
+thread can make an open **Fix** read as `addressed`, which is why the review
+must find the code fixed before suppressing against it; whether two findings are
+the same claim is the review agent's judgement; and a retried step that posts a
+second comment for a claim despite its instructions is registered as a second
+finding, because nothing on the server can tell that two comments say the same.
 
 **Migration.** `2026_11_10_120000_add_code_review_decisions` adds the table and
 the finding columns at boot; there are no settings. Existing findings keep
 their data, get `reconciliation` `new` and a reference of their own (`f<id>`),
 and have no comment or thread ids. Nothing is back-filled from GitHub: a pull
 request's earlier threads are read the first time it is reviewed after the
-upgrade, and their verdict replies count when one of the accounts above wrote
-them. A verdict an earlier review posted as some other account is context
-until a review or a client records the decision again. The existing responses
-and requests are unchanged apart from the added fields; the fields describing
-a finding's reconciliation are read-only for clients.
+upgrade, and their verdict replies count as history under the rule above. A
+verdict an earlier review posted as some other account is context until a
+review or a client records the decision again, and so is any verdict reply
+written after the upgrade without a stored decision behind it. The existing
+responses and requests are unchanged apart from the added fields; the fields
+describing a finding's reconciliation are read-only for clients.
 
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).

@@ -90,7 +90,6 @@ import {
   updateCodeReviewFinding,
   setCodeReviewSummary,
   listCodeReviewDecisions,
-  saveCodeReviewDecisions,
 } from './lib/db.js';
 import {
   initJobs,
@@ -749,7 +748,6 @@ api.use(
       addCodeReviewFinding,
       updateCodeReviewFinding,
       setCodeReviewSummary,
-      saveCodeReviewDecisions,
     },
   }),
 );
@@ -764,7 +762,6 @@ api.use(
       getCodeReviewFinding,
       updateCodeReviewFinding,
       listCodeReviewDecisions,
-      saveCodeReviewDecisions,
     },
   }),
 );

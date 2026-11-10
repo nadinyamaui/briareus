@@ -144,6 +144,9 @@ vi.mock('../lib/db.js', () => ({
   updateCodeReviewFinding: vi.fn(async () => null),
   listCodeReviewDecisions: vi.fn(async () => []),
   saveCodeReviewDecisions: vi.fn(async () => {}),
+  // When decisions began to be stored: after the fixtures' verdict replies, which are
+  // then the history of earlier reviews.
+  codeReviewDecisionsSince: vi.fn(async () => Date.UTC(2026, 10, 1)),
 }));
 
 vi.mock('../lib/github.js', async (importOriginal) => ({
@@ -1428,7 +1431,10 @@ describe('Claude code review', () => {
         expect(publish.prompt).toContain('review_summary_set');
         expect(publish.prompt).toContain(head);
         // The server read the PR's earlier threads first; this PR has none to reconcile with.
-        expect(publish.prompt).toContain('found none, so every finding is new');
+        expect(publish.prompt).toContain('found no earlier thread, so there is no earlier decision');
+        // Even a first review may be retried after it started posting.
+        expect(publish.prompt).toContain(summaryPath.replace('-review-summary.md', '-review-history.json'));
+        expect(publish.prompt).toContain('This step may be a retry of one that was interrupted');
         expect(publish.prompt).toContain(`<!-- reviewer:code-review ${head} -->`);
         // Claude has the briefing as its system prompt, not in the message.
         expect(publish.prompt).not.toContain('<workspace-context>');
@@ -2317,6 +2323,10 @@ describe('native Codex code review', () => {
     expect(githubGraphql.mock.calls.filter(([, q]) => q.includes('reviewThreads'))).toHaveLength(1);
     expect(JSON.parse(fs.readFileSync(historyPath, 'utf8'))).toMatchObject({ head, threads: [] });
     expect(reviewHistoryOf(id)).not.toBeNull();
+    // And the step was told about that read, not sent the prompt saved before the restart.
+    expect(invocations[0].child.prompt).toContain(JSON.stringify(historyPath));
+    expect(job.recoveryTurn.prompt).toContain(JSON.stringify(historyPath));
+    expect(invocations[0].child.prompt).toContain(job.recoveryTurn.prompt);
     finishTurn(invocations[0]);
     await vi.waitFor(() => expect(invocations).toHaveLength(2));
     expect(invocations[1].child.prompt).toContain('Your goal is to try to REFUTE them');
@@ -2331,6 +2341,106 @@ describe('native Codex code review', () => {
       `\`gh api repos/acme/shop/pulls/77/reviews -f commit_id=${head} -f event=APPROVE\``,
     );
     expect(completeCodeReview).not.toHaveBeenCalled();
+    finishTurn(invocations[2]);
+    await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+    expect(failCodeReview).not.toHaveBeenCalled();
+  });
+
+  it('recovers a publish step that had already posted comments without posting them twice', async () => {
+    completeCodeReview.mockClear();
+    failCodeReview.mockClear();
+    // The PR had no thread when the step started, so the prompt saved with it says so.
+    // The step then posted two findings, registered the first, and the server restarted.
+    const stale = `Publish the review above of acme/shop PR #77. Briareus read this PR's complete review thread history into ${JSON.stringify(historyPath)} before this step and found no earlier thread, so there is no earlier decision to reconcile with.`;
+    answerReviewThreads(head, [
+      reviewThread('PRRT_first', [[501, 'octo-reviewer', 'Lost update', head]], { line: 44 }),
+      reviewThread('PRRT_second', [[502, 'octo-reviewer', 'Missing await', head]], { line: 60 }),
+    ]);
+    getCodeReviewByJob.mockImplementation(async () => ({ id: 5, jobId: id, headSha: head }));
+    listCodeReviewFindings.mockImplementation(async () => [
+      {
+        id: 9,
+        title: 'Lost update',
+        filePath: 'lib/cart.js',
+        startLine: 44,
+        findingRef: 'ref-9',
+        commentId: 501,
+      },
+    ]);
+    Object.assign(job, {
+      status: 'interrupted',
+      interruptedFrom: 'running',
+      restartPending: true,
+      workspacePrepared: true,
+      codeReviewHead: head,
+      codeReviewBase: 'refs/remotes/origin/series/step-1',
+      recoveryTurn: {
+        prompt: stale,
+        opts: { codeReviewStage: 'publish' },
+        phase: 'initial',
+        runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
+        completed: false,
+      },
+    });
+    claimSlot(root, id, { prepared: true });
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    const prompt = invocations[0].child.prompt;
+    // The recovered step is told what is on the PR now, not what was there before it began.
+    expect(prompt).not.toContain('found no earlier thread');
+    expect(prompt).toContain(
+      `Briareus read the PR's complete review thread history into ${JSON.stringify(historyPath)}: 2 thread(s)`,
+    );
+    expect(prompt).toContain(
+      'This step may be a retry of one that was interrupted after it had started posting',
+    );
+    expect(prompt).toContain('A comment that is already there is never posted a second time');
+    expect(prompt).toContain('adopted: the same claim already has an unresolved thread');
+    // The whole publish prompt again, on the reviewed head and base, and saved as such.
+    expect(prompt).toContain('Create a single comment in the PR with this format');
+    expect(prompt).toContain('Before publishing, complete the repository');
+    expect(prompt).toContain('"refs/remotes/origin/series/step-1"');
+    expect(prompt).toContain(`<!-- reviewer:code-review ${head} -->`);
+    expect(job.recoveryTurn).toMatchObject({ opts: { codeReviewStage: 'publish' }, completed: false });
+    expect(job.recoveryTurn.prompt).not.toContain('found no earlier thread');
+    expect(prompt).toContain(job.recoveryTurn.prompt);
+    // Both comments are in the file as this review's own, still open, to adopt.
+    const file = JSON.parse(fs.readFileSync(historyPath, 'utf8'));
+    expect(
+      file.threads.map((t) => [
+        t.threadId,
+        t.commentId,
+        t.raisedOnThisHead,
+        t.authorIsReviewer,
+        t.disposition,
+      ]),
+    ).toEqual([
+      ['PRRT_first', 501, true, true, 'open'],
+      ['PRRT_second', 502, true, true, 'open'],
+    ]);
+    // And the server knows them: neither can be registered as a comment posted just now.
+    expect([...reviewHistoryOf(id).comments]).toEqual([
+      [501, 'PRRT_first'],
+      [502, 'PRRT_second'],
+    ]);
+    expect(job.events.map((e) => e.text)).toContain(
+      'Read 2 earlier review thread(s) before publishing: 2 open.',
+    );
+    finishTurn(invocations[0]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(2));
+    // The finding registered before the restart is tied to the thread its comment became.
+    expect(updateCodeReviewFinding).toHaveBeenCalledWith(5, 9, { threadId: 'PRRT_first' });
+    expect(saveCodeReviewDecisions).toHaveBeenLastCalledWith('acme/shop', 77, [
+      expect.objectContaining({
+        anchor: 'PRRT_first',
+        commentId: 501,
+        findingRef: 'ref-9',
+        title: 'Lost update',
+      }),
+    ]);
+    expect(invocations[1].child.prompt).toContain('Your goal is to try to REFUTE them');
+    finishTurn(invocations[1]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(3));
     finishTurn(invocations[2]);
     await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
     expect(failCodeReview).not.toHaveBeenCalled();

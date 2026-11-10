@@ -18,6 +18,7 @@ vi.mock('../lib/config.js', async (importOriginal) => {
 import { getConfig } from '../lib/config.js';
 import {
   addCodeReviewFinding,
+  codeReviewDecisionsSince,
   createCodeReview,
   dbHealthy,
   getCodeReviewFinding,
@@ -87,6 +88,7 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review decisions on
       'thread_id',
       'comment_id',
       'finding_ref',
+      'finding_id',
       'title',
       'file_path',
       'line',
@@ -97,6 +99,7 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review decisions on
       'head_sha',
       'raised_sha',
       'resolved',
+      'resolved_before',
       'decided_at',
       'created_at',
       'updated_at',
@@ -167,7 +170,13 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review decisions on
     ).rejects.toThrow();
   });
 
-  it('keeps a decision moving forward only, and what the row describes filled in', async () => {
+  it('knows when decisions began to be stored', async () => {
+    const since = await codeReviewDecisionsSince();
+    expect(since).toBeGreaterThan(Date.now() - 10 * 60000);
+    expect(since).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('fills in what a row describes and keeps the reference it was first given', async () => {
     const pr = 8;
     const anchor = 'PRRT_thread1';
     // Tracked when published: no verdict yet.
@@ -190,6 +199,7 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review decisions on
       threadId: anchor,
       commentId: 5123456790,
       findingRef: 'ref-a',
+      findingId: null,
       title: 'Race in the queue',
       filePath: 'lib/queue.js',
       line: 12,
@@ -199,118 +209,308 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review decisions on
       decidedBy: null,
       decidedAt: null,
       resolved: false,
+      resolvedBefore: false,
       raisedSha: head,
     });
-    // The verification step rules on it.
+    // A row without the description leaves it, and `resolved` unsaid stays.
+    await saveCodeReviewDecisions(repo, pr, [{ anchor, findingRef: 'ref-other', resolved: true }]);
     await saveCodeReviewDecisions(repo, pr, [
-      {
-        anchor,
-        findingRef: 'ref-other',
-        verdict: 'dismiss',
-        rationale: 'The lock is taken by the caller.',
-        source: 'review',
-        decidedBy: 'session:job-1',
-        headSha: head,
-        decidedAt: 2000,
-      },
+      { anchor, findingRef: 'ref-a', title: 'Race in the queue (reworded)', raisedSha: 'c'.repeat(40) },
     ]);
     expect(await decision(pr, anchor)).toMatchObject({
-      // The reference is kept once given, and a row without the description leaves it.
       findingRef: 'ref-a',
-      title: 'Race in the queue',
+      title: 'Race in the queue (reworded)',
+      filePath: 'lib/queue.js',
       commentId: 5123456790,
-      verdict: 'dismiss',
-      rationale: 'The lock is taken by the caller.',
+      resolved: true,
+      raisedSha: head,
+      verdict: null,
+    });
+    expect(await listCodeReviewDecisions(repo, pr)).toHaveLength(1);
+    await expect(saveCodeReviewDecisions(repo, pr, [{ findingRef: 'ref-a' }])).rejects.toThrow(
+      /needs its anchor and reference/,
+    );
+  });
+
+  it('keeps a stored decision above anything read from GitHub', async () => {
+    const pr = 20;
+    const github = (anchor, verdict, decidedAt, extra = {}) => ({
+      anchor,
+      threadId: anchor,
+      findingRef: `ref-${anchor}`,
+      verdict,
+      rationale: `${verdict} on GitHub`,
+      source: 'github',
+      decidedBy: 'octo-reviewer',
+      decidedAt,
+      ...extra,
+    });
+    const stored = (anchor, verdict, decidedAt, extra = {}) => ({
+      anchor,
+      threadId: anchor,
+      findingRef: `ref-${anchor}`,
+      verdict,
+      rationale: verdict ? `${verdict} stored` : null,
       source: 'review',
       decidedBy: 'session:job-1',
       headSha: head,
-      decidedAt: new Date(2000).toISOString(),
+      findingId: 77,
+      decidedAt,
+      ...extra,
     });
-    // A stale reading of GitHub (an older verdict reply) changes nothing but what was seen.
-    await saveCodeReviewDecisions(repo, pr, [
-      {
-        anchor,
-        findingRef: 'ref-a',
-        resolved: true,
-        verdict: 'fix',
-        rationale: 'older',
-        source: 'github',
-        decidedBy: 'octo-reviewer',
-        decidedAt: 1000,
-      },
-    ]);
-    expect(await decision(pr, anchor)).toMatchObject({
+    // History read from GitHub: the later reply stands, an older reading changes nothing.
+    await saveCodeReviewDecisions(repo, pr, [github('T1', 'fix', 2000)]);
+    await saveCodeReviewDecisions(repo, pr, [github('T1', 'dismiss', 1000)]);
+    expect(await decision(pr, 'T1')).toMatchObject({ verdict: 'fix', source: 'github' });
+    await saveCodeReviewDecisions(repo, pr, [github('T1', 'dismiss', 3000)]);
+    expect(await decision(pr, 'T1')).toMatchObject({
       verdict: 'dismiss',
-      rationale: 'The lock is taken by the caller.',
-      source: 'review',
-      decidedBy: 'session:job-1',
-      decidedAt: new Date(2000).toISOString(),
-      resolved: true,
-    });
-    // A refresh that carries no verdict leaves the decision, and `resolved` unsaid stays.
-    await saveCodeReviewDecisions(repo, pr, [
-      { anchor, findingRef: 'ref-a', title: 'Race in the queue (reworded)' },
-    ]);
-    expect(await decision(pr, anchor)).toMatchObject({
-      verdict: 'dismiss',
-      resolved: true,
-      title: 'Race in the queue (reworded)',
-    });
-    // A later decision replaces all of it together, including a cleared verdict.
-    await saveCodeReviewDecisions(repo, pr, [
-      {
-        anchor,
-        findingRef: 'ref-a',
-        verdict: 'fix',
-        rationale: 'Reproduced.',
-        source: 'api',
-        decidedBy: 'user:4',
-        decidedAt: 3000,
-      },
-    ]);
-    expect(await decision(pr, anchor)).toMatchObject({
-      verdict: 'fix',
-      rationale: 'Reproduced.',
-      source: 'api',
-      decidedBy: 'user:4',
-      headSha: null,
+      rationale: 'dismiss on GitHub',
+      source: 'github',
+      decidedBy: 'octo-reviewer',
       decidedAt: new Date(3000).toISOString(),
     });
+    // What the server was given replaces it, whatever the dates say.
+    await saveCodeReviewDecisions(repo, pr, [stored('T1', 'fix', 2500)]);
+    expect(await decision(pr, 'T1')).toMatchObject({
+      verdict: 'fix',
+      rationale: 'fix stored',
+      source: 'review',
+      decidedBy: 'session:job-1',
+      headSha: head,
+      findingId: 77,
+      decidedAt: new Date(2500).toISOString(),
+    });
+    // And nothing read from GitHub lands on it again, however late the reply.
+    await saveCodeReviewDecisions(repo, pr, [github('T1', 'dismiss', 9000, { resolved: true })]);
+    expect(await decision(pr, 'T1')).toMatchObject({
+      verdict: 'fix',
+      source: 'review',
+      decidedAt: new Date(2500).toISOString(),
+      // What was seen of the thread is still refreshed.
+      resolved: true,
+    });
+    // Among stored decisions the later stands; an older one arriving late does not.
     await saveCodeReviewDecisions(repo, pr, [
-      {
-        anchor,
-        findingRef: 'ref-a',
-        verdict: null,
-        rationale: null,
-        source: 'api',
-        decidedBy: 'user:4',
-        decidedAt: 4000,
-      },
+      stored('T1', 'optional', 4000, { source: 'api', decidedBy: 'user:4' }),
     ]);
-    expect(await decision(pr, anchor)).toMatchObject({
+    await saveCodeReviewDecisions(repo, pr, [stored('T1', 'fix', 3500)]);
+    expect(await decision(pr, 'T1')).toMatchObject({
+      verdict: 'optional',
+      source: 'api',
+      decidedBy: 'user:4',
+    });
+    // A cleared verdict is the server's decision too: the old reply does not come back.
+    await saveCodeReviewDecisions(repo, pr, [
+      stored('T1', null, 5000, { source: 'api', decidedBy: 'user:4' }),
+    ]);
+    await saveCodeReviewDecisions(repo, pr, [github('T1', 'dismiss', 9500)]);
+    expect(await decision(pr, 'T1')).toMatchObject({
       verdict: null,
       rationale: null,
       source: 'api',
-      decidedAt: new Date(4000).toISOString(),
+      decidedAt: new Date(5000).toISOString(),
     });
-    // The same instant again is the same reply read again, and still applies.
+    // History does land on a thread a review tracks and has not ruled on.
     await saveCodeReviewDecisions(repo, pr, [
-      {
-        anchor,
-        findingRef: 'ref-a',
-        verdict: 'optional',
-        rationale: 'Edited.',
-        source: 'github',
-        decidedBy: 'octo-reviewer',
-        decidedAt: 4000,
-      },
+      { anchor: 'T2', threadId: 'T2', findingRef: 'ref-T2', title: 'Tracked' },
     ]);
-    expect(await decision(pr, anchor)).toMatchObject({
+    await saveCodeReviewDecisions(repo, pr, [github('T2', 'optional', 100)]);
+    expect(await decision(pr, 'T2')).toMatchObject({
       verdict: 'optional',
-      rationale: 'Edited.',
       source: 'github',
+      title: 'Tracked',
     });
-    expect(await listCodeReviewDecisions(repo, pr)).toHaveLength(1);
+  });
+
+  it('records whether the thread was already closed when a fix was required', async () => {
+    const pr = 21;
+    const rule = (anchor, verdict, decidedAt, extra = {}) => ({
+      anchor,
+      threadId: anchor,
+      findingRef: `ref-${anchor}`,
+      verdict,
+      rationale: 'because',
+      source: 'review',
+      decidedAt,
+      ...extra,
+    });
+    const before = async (anchor) => (await decision(pr, anchor)).resolvedBefore;
+    // Required on an open thread, resolved afterwards: that is a fix addressed.
+    await saveCodeReviewDecisions(repo, pr, [
+      { anchor: 'T_open', findingRef: 'ref-T_open', resolved: false },
+    ]);
+    await saveCodeReviewDecisions(repo, pr, [rule('T_open', 'fix', 1000)]);
+    await saveCodeReviewDecisions(repo, pr, [{ anchor: 'T_open', findingRef: 'ref-T_open', resolved: true }]);
+    expect(await before('T_open')).toBe(false);
+    // The same verdict saved again later is not a fix first required now.
+    await saveCodeReviewDecisions(repo, pr, [rule('T_open', 'fix', 2000, { source: 'api' })]);
+    expect(await decision(pr, 'T_open')).toMatchObject({
+      resolvedBefore: false,
+      source: 'api',
+      decidedAt: new Date(2000).toISOString(),
+    });
+    // Dismissed (which resolves the thread), then overruled: the fix is still owed, even
+    // though no review has read the thread as resolved yet.
+    await saveCodeReviewDecisions(repo, pr, [rule('T_dismissed', 'dismiss', 1000)]);
+    expect(await before('T_dismissed')).toBe(false);
+    await saveCodeReviewDecisions(repo, pr, [rule('T_dismissed', 'fix', 2000, { source: 'api' })]);
+    expect(await before('T_dismissed')).toBe(true);
+    await saveCodeReviewDecisions(repo, pr, [rule('T_dismissed', 'fix', 3000, { source: 'api' })]);
+    expect(await before('T_dismissed')).toBe(true);
+    // Required on a thread somebody had already resolved.
+    await saveCodeReviewDecisions(repo, pr, [
+      { anchor: 'T_closed', findingRef: 'ref-T_closed', resolved: true },
+    ]);
+    await saveCodeReviewDecisions(repo, pr, [rule('T_closed', 'fix', 1000)]);
+    expect(await before('T_closed')).toBe(true);
+    // A row that says so itself (history read from GitHub in order) is taken at its word.
+    await saveCodeReviewDecisions(repo, pr, [
+      rule('T_said', 'fix', 1000, { source: 'github', resolved: true, resolvedBefore: false }),
+      rule('T_said2', 'fix', 1000, { source: 'github', resolved: false, resolvedBefore: true }),
+    ]);
+    expect(await before('T_said')).toBe(false);
+    expect(await before('T_said2')).toBe(true);
+  });
+
+  it('writes a finding and the decision its verdict amounts to together, or neither', async () => {
+    const pr = 22;
+    const job = await createCodeReview({ jobId: 'job-22', repo, prNumber: pr, branch: 'feature' });
+    const deciding = (changes, source = 'review') => ({
+      repo,
+      prNumber: pr,
+      build: (finding, previous) => ({
+        anchor: 'T_tx',
+        threadId: 'T_tx',
+        findingRef: finding.findingRef,
+        findingId: finding.id,
+        title: finding.title,
+        verdict: finding.shouldFix,
+        rationale: `${previous ? (previous.shouldFix ?? 'none') : 'new'} -> ${finding.shouldFix}`,
+        source,
+        decidedAt: Date.now(),
+        ...changes,
+      }),
+    });
+    // Registered with its verdict: the build sees the stored row, with no previous one.
+    const finding = await addCodeReviewFinding(
+      job.id,
+      { severity: 'high', title: 'Lost update', findingRef: 'ref-tx', threadId: 'T_tx', shouldFix: 'fix' },
+      deciding({}),
+    );
+    expect(await decision(pr, 'T_tx')).toMatchObject({
+      findingRef: 'ref-tx',
+      findingId: finding.id,
+      title: 'Lost update',
+      verdict: 'fix',
+      rationale: 'new -> fix',
+    });
+    // Updated: the build sees the row as written and as it was.
+    const updated = await updateCodeReviewFinding(
+      job.id,
+      finding.id,
+      { shouldFix: 'optional' },
+      deciding({}),
+    );
+    expect(updated.shouldFix).toBe('optional');
+    expect(await decision(pr, 'T_tx')).toMatchObject({ verdict: 'optional', rationale: 'fix -> optional' });
+    // A build that decides nothing writes the finding alone.
+    await updateCodeReviewFinding(
+      job.id,
+      finding.id,
+      { severity: 'low' },
+      { repo, prNumber: pr, build: () => null },
+    );
+    expect((await getCodeReviewFinding(job.id, finding.id)).severity).toBe('low');
+    expect((await decision(pr, 'T_tx')).verdict).toBe('optional');
+    // A decision that cannot be kept takes the finding's change back with it.
+    await expect(
+      updateCodeReviewFinding(job.id, finding.id, { shouldFix: 'dismiss' }, deciding({ source: 'nobody' })),
+    ).rejects.toThrow();
+    expect((await getCodeReviewFinding(job.id, finding.id)).shouldFix).toBe('optional');
+    expect((await decision(pr, 'T_tx')).verdict).toBe('optional');
+    await expect(
+      addCodeReviewFinding(job.id, { severity: 'low', title: 'Never stored' }, deciding({ anchor: null })),
+    ).rejects.toThrow(/needs its anchor and reference/);
+    expect((await listCodeReviewFindings(job.id)).map((f) => f.title)).toEqual(['Lost update']);
+    // A finding a rerun removed is answered as missing, with nothing decided.
+    expect(await updateCodeReviewFinding(job.id, 999999, { shouldFix: 'fix' }, deciding({}))).toBeNull();
+    expect((await decision(pr, 'T_tx')).verdict).toBe('optional');
+    // Only the finding whose verdict stands rewords the reason.
+    const reword = (findingId, rationale) => ({
+      repo,
+      prNumber: pr,
+      build: () => ({ anchor: 'T_tx', findingRef: 'ref-tx', findingId, rationale, rationaleOnly: true }),
+    });
+    await updateCodeReviewFinding(
+      job.id,
+      finding.id,
+      { comments: 'x' },
+      reword(finding.id + 1000, 'from another'),
+    );
+    expect((await decision(pr, 'T_tx')).rationale).toBe('fix -> optional');
+    await updateCodeReviewFinding(job.id, finding.id, { comments: 'y' }, reword(finding.id, 'reworded'));
+    expect(await decision(pr, 'T_tx')).toMatchObject({ verdict: 'optional', rationale: 'reworded' });
+  });
+
+  it('leaves a finding and its decision agreeing when a client and the review write at once', async () => {
+    const pr = 23;
+    const job = await createCodeReview({ jobId: 'job-23', repo, prNumber: pr, branch: 'feature' });
+    const finding = await addCodeReviewFinding(job.id, {
+      severity: 'high',
+      title: 'Raced',
+      findingRef: 'ref-race',
+      threadId: 'T_race',
+    });
+    const write = (shouldFix, source) =>
+      updateCodeReviewFinding(
+        job.id,
+        finding.id,
+        { shouldFix },
+        {
+          repo,
+          prNumber: pr,
+          build: (stored) => ({
+            anchor: 'T_race',
+            threadId: 'T_race',
+            findingRef: 'ref-race',
+            findingId: stored.id,
+            verdict: stored.shouldFix,
+            rationale: 'raced',
+            source,
+            decidedAt: Date.now(),
+          }),
+        },
+      );
+    const verdicts = ['fix', 'optional', 'dismiss'];
+    for (let round = 0; round < 8; round++) {
+      await Promise.all(
+        Array.from({ length: 6 }, (_, i) => write(verdicts[(round + i) % 3], i % 2 ? 'api' : 'review')),
+      );
+      const stored = await getCodeReviewFinding(job.id, finding.id);
+      expect((await decision(pr, 'T_race')).verdict).toBe(stored.shouldFix);
+    }
+    // First writers of threads nobody has stored yet queue up rather than deadlock.
+    await Promise.all(
+      Array.from({ length: 6 }, (_, i) =>
+        saveCodeReviewDecisions(
+          repo,
+          pr,
+          ['T_new_c', 'T_new_a', 'T_new_b'].map((anchor) => ({
+            anchor,
+            threadId: anchor,
+            findingRef: `ref-${anchor}`,
+            verdict: 'fix',
+            source: 'github',
+            decidedAt: 1000 + i,
+          })),
+        ),
+      ),
+    );
+    const rows = (await listCodeReviewDecisions(repo, pr)).filter((d) => d.anchor.startsWith('T_new_'));
+    expect(rows.map((d) => [d.anchor, d.decidedAt])).toEqual(
+      ['T_new_a', 'T_new_b', 'T_new_c'].map((anchor) => [anchor, new Date(1005).toISOString()]),
+    );
   });
 
   it('keys decisions per pull request, case-sensitively, and saves a batch whole', async () => {
@@ -320,9 +520,10 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review decisions on
       { anchor: 'PRRT_ABC', threadId: 'PRRT_ABC', findingRef: 'r2', verdict: 'optional', decidedAt: 10 },
       { anchor: 'ref:r3', findingRef: 'r3', verdict: 'dismiss', rationale: 'Not reachable.', decidedAt: 10 },
     ]);
+    // Stored in anchor order, so two batches take their locks the same way.
     expect((await listCodeReviewDecisions(repo, pr)).map((d) => [d.anchor, d.threadId, d.verdict])).toEqual([
-      ['PRRT_abc', 'PRRT_abc', 'fix'],
       ['PRRT_ABC', 'PRRT_ABC', 'optional'],
+      ['PRRT_abc', 'PRRT_abc', 'fix'],
       ['ref:r3', null, 'dismiss'],
     ]);
     // The same thread id on another pull request or project is another row.

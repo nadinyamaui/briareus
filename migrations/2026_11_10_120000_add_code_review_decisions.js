@@ -46,6 +46,9 @@ export async function up({ context: p }) {
     -- The thread's first comment, the one REST replies are addressed to.
     comment_id BIGINT UNSIGNED NULL,
     finding_ref VARCHAR(64) NOT NULL,
+    -- The finding whose verdict stands, so only it can reword the reason. It may be
+    -- gone: a rerun deletes a review's findings and leaves the decision.
+    finding_id INT UNSIGNED NULL,
     title TEXT NULL,
     file_path TEXT NULL,
     line INT UNSIGNED NULL,
@@ -53,8 +56,8 @@ export async function up({ context: p }) {
     -- verdict was cleared.
     verdict ENUM('fix', 'optional', 'dismiss') NULL,
     rationale TEXT NULL,
-    -- What recorded the verdict: a verdict reply read from GitHub, a review session's
-    -- verification step, or a client through the API.
+    -- What recorded the verdict: a review session's verification step, a client
+    -- through the API, or a verdict reply read from GitHub that predates this table.
     source ENUM('github', 'review', 'api') NULL,
     -- A GitHub login, session:<id> or user:<id>, by source.
     decided_by VARCHAR(255) NULL,
@@ -63,6 +66,9 @@ export async function up({ context: p }) {
     raised_sha VARCHAR(64) NULL,
     -- Whether the thread was resolved the last time a review read it.
     resolved TINYINT(1) NOT NULL DEFAULT 0,
+    -- Whether it was already resolved when the verdict was given. A required fix is
+    -- addressed only by a resolution that came after it.
+    resolved_before TINYINT(1) NOT NULL DEFAULT 0,
     decided_at BIGINT UNSIGNED NULL,
     created_at BIGINT UNSIGNED NOT NULL,
     updated_at BIGINT UNSIGNED NOT NULL,
