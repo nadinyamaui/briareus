@@ -523,6 +523,23 @@ describe('buildReviewHistory', () => {
         ),
       ]),
     ).toMatchObject({ disposition: 'fix', suppressible: false });
+    // Still owed when the fix is restated, or follows a verdict given in between.
+    for (const middle of ['**Fix** Still reproduces.', '**Optional** Minor after all.']) {
+      const later = history([
+        thread(
+          'T',
+          [
+            finding,
+            said(2, 'octo-reviewer', '**Dismissed** Looked unreachable.', 1),
+            said(3, 'octo-reviewer', middle, 2),
+            said(4, 'octo-reviewer', '**Fix** Reachable through the importer.', 3),
+          ],
+          { resolved: true },
+        ),
+      ]);
+      expect(later.threads[0]).toMatchObject({ disposition: 'fix', suppressible: false });
+      expect(later.sync[0]).toMatchObject({ verdict: 'fix', resolvedBefore: true });
+    }
     // Required first and resolved since: addressed.
     const addressed = history([
       thread('T', [finding, said(2, 'octo-reviewer', '**Fix** Reproduced.', 1)], { resolved: true }),
