@@ -42,6 +42,13 @@ import {
   setCodeReviewStage,
   syncGithubCodeReviewApprovals,
   withdrawCodeReviewApproval,
+  clearCodeReviewWaiting,
+  listCodeReviewCommitOwners,
+  listCodeReviewStatusesAtHead,
+  loadGithubLinkRows,
+  oweCodeReviewStatusesAtHead,
+  recordCodeReviewCommitOwners,
+  saveGithubLink,
 } from '../lib/db.js';
 import {
   approvalsWaiting,
@@ -58,8 +65,8 @@ import { up, down } from '../migrations/2026_11_10_160000_add_code_review_approv
 
 describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on MySQL', () => {
   const repo = 'acme/shop';
-  // A commit of the pull request a test is about: no two pull requests here share one,
-  // since GitHub's statuses hang on the commit.
+  // A commit of the pull request a test is about: no two pull requests here share one
+  // unless the test is about that, since GitHub's statuses hang on the commit.
   let about = 0;
   const sha = (letter) => `${letter.repeat(38)}${String(about).padStart(2, '0')}`;
   const STAGES = requiredReviewStages();
@@ -90,8 +97,8 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on 
     return rows.length > 0;
   };
   // A review of `letter`'s head that ran to its end with every stage seen.
-  async function reviewed(prNumber, letter) {
-    about = prNumber;
+  async function reviewed(prNumber, letter, { head = prNumber } = {}) {
+    about = head;
     const jobId = `job-${prNumber}-${letter}`;
     await createCodeReview({ jobId, repo, prNumber, branch: 'feature' });
     await restartCodeReview(jobId, sha(letter));
@@ -107,12 +114,18 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on 
         state: 'open',
         head: { sha: sha(letter) },
         base: { ref: 'main' },
-        user: { login: 'octo-author' },
+        user: { login: 'octo-author', id: 900 },
         changed_files: files.length,
         commits: 1,
       },
       files: files.map((filename) => ({ filename, status: 'modified', additions: 2, deletions: 1 })),
-      commits: [{ author: { login: 'octo-author' }, committer: { login: 'octo-author' } }],
+      commits: [
+        {
+          sha: sha(letter),
+          author: { login: 'octo-author', id: 900 },
+          committer: { login: 'octo-author', id: 900 },
+        },
+      ],
       reviews: [],
       ...over,
     });
@@ -163,7 +176,16 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on 
         if (init.method === 'GET') {
           const read = /\/commits\/([0-9a-f]+)\/statuses/.exec(path)?.[1];
           if (read) return json(200, carried.get(read) || []);
-          if (path === '/user') return json(200, { login: 'briareus-bot' });
+          // The open pull requests at a commit: every one a test put there.
+          const at = /\/commits\/([0-9a-f]+)\/pulls/.exec(path)?.[1];
+          if (at)
+            return json(
+              200,
+              [...github.entries()]
+                .filter(([, g]) => g.pull.head.sha === at)
+                .map(([number, g]) => ({ number, state: g.pull.state, head: { sha: at } })),
+            );
+          if (path === '/user') return json(200, { login: 'briareus-bot', id: 7 });
           const [, number, what = 'pull'] = /\/pulls\/(\d+)(?:\/(\w+))?/.exec(path) || [];
           const known = github.get(Number(number));
           if (!known) return json(404, { message: 'Not Found' });
@@ -183,7 +205,9 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on 
     setApprovalDirectory({
       user: (id) => ({ id, name: `user ${id}`, disabled: false }),
       mayApprove: () => true,
-      linkedLogins: () => ['ada-dev'],
+      // Every user here has linked an account of their own.
+      accountsOf: (id) => [{ id: 100 + id, login: `user-${id}` }],
+      linkedAccounts: () => [1, 2, 3].map((id) => ({ id: 100 + id, login: `user-${id}` })),
     });
   }, 120_000);
   afterAll(async () => {
@@ -193,7 +217,7 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on 
     await bootstrap?.end();
   });
 
-  it('adds the policy column and the three tables at boot, and applies twice', async () => {
+  it('adds the policy column and its tables at boot, and applies twice', async () => {
     const [ran] = await pool.query('SELECT `migration` FROM `migrations` WHERE `migration` = ?', [
       '2026_11_10_160000_add_code_review_approvals',
     ]);
@@ -234,6 +258,7 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on 
       'user_id',
       'approver',
       'github_login',
+      'github_user_id',
       'github_review_id',
       'status',
       'active',
@@ -246,6 +271,7 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on 
       'automation',
       'association',
       'approved_at',
+      'seen_at',
       'withdrawn_at',
       'withdraw_note',
       'created_at',
@@ -546,6 +572,107 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on 
     expect(await listCodeReviewApprovals(repo, 17)).toHaveLength(1);
   });
 
+  it('takes how a review stands from the newest read, whichever read finishes last', async () => {
+    about = 18;
+    const row = (status, over = {}) => ({
+      githubReviewId: 9_100_000_001,
+      githubLogin: 'octo-reviewer',
+      githubUserId: 6001,
+      status,
+      headSha: sha('a'),
+      baseRef: 'main',
+      association: 'COLLABORATOR',
+      automation: null,
+      authorship: null,
+      approvedAt: 1_800_000_000_000,
+      ...over,
+    });
+    const stored = async () => (await listCodeReviewApprovals(repo, 18))[0];
+    // Two reads of the pull request's reviews were under way at once. The one that
+    // started later saw the approval superseded, and is stored first.
+    await syncGithubCodeReviewApprovals(repo, 18, { rows: [row('superseded')], dismissed: [], seenAt: 2000 });
+    expect(await stored()).toMatchObject({ status: 'superseded', githubUserId: 6001 });
+    // The one that started earlier still saw it standing, and finishes afterwards.
+    await syncGithubCodeReviewApprovals(repo, 18, {
+      rows: [row('approved', { association: 'NONE' })],
+      dismissed: [],
+      seenAt: 1000,
+    });
+    expect(await stored()).toMatchObject({ status: 'superseded', association: 'COLLABORATOR' });
+    // A read made after both is believed, in either direction.
+    await syncGithubCodeReviewApprovals(repo, 18, { rows: [row('approved')], dismissed: [], seenAt: 3000 });
+    expect((await stored()).status).toBe('approved');
+    await syncGithubCodeReviewApprovals(repo, 18, { rows: [row('superseded')], dismissed: [], seenAt: 3000 });
+    expect((await stored()).status).toBe('superseded');
+    // A dismissal stands whatever read reports it.
+    await syncGithubCodeReviewApprovals(repo, 18, { rows: [], dismissed: [9_100_000_001], seenAt: 500 });
+    expect((await stored()).status).toBe('dismissed');
+    // What was learned of the account later fills in what was not known.
+    await syncGithubCodeReviewApprovals(repo, 19, {
+      rows: [row('approved', { githubUserId: null })],
+      dismissed: [],
+      seenAt: 1,
+    });
+    await syncGithubCodeReviewApprovals(repo, 19, { rows: [row('approved')], dismissed: [], seenAt: 2 });
+    expect((await listCodeReviewApprovals(repo, 19))[0].githubUserId).toBe(6001);
+  });
+
+  it('keeps whose session made which commit, per repository, entered once', async () => {
+    const shas = ['1'.repeat(40), '2'.repeat(40), '3'.repeat(40)];
+    expect(
+      await recordCodeReviewCommitOwners(repo, {
+        userId: 2,
+        jobId: 'job-a',
+        branch: 'Feature/Cart',
+        shas: shas.slice(0, 2),
+      }),
+    ).toBe(2);
+    // The same commits again, and one more by somebody else's session.
+    expect(
+      await recordCodeReviewCommitOwners(repo, { userId: 2, jobId: 'job-b', shas: shas.slice(0, 2) }),
+    ).toBe(0);
+    await recordCodeReviewCommitOwners(repo, { userId: 3, jobId: 'job-c', shas: [shas[1], shas[2]] });
+    await recordCodeReviewCommitOwners('acme/other', { userId: 9, shas });
+    expect(await recordCodeReviewCommitOwners(repo, { userId: 4, shas: [] })).toBe(0);
+    expect((await listCodeReviewCommitOwners(repo, [shas[0]])).sort()).toEqual([2]);
+    expect((await listCodeReviewCommitOwners(repo, shas)).sort()).toEqual([2, 3]);
+    expect(await listCodeReviewCommitOwners(repo, ['4'.repeat(40)])).toEqual([]);
+    expect(await listCodeReviewCommitOwners(repo, [])).toEqual([]);
+    const [rows] = await pool.query(
+      'SELECT `job_id`, `branch` FROM `code_review_commit_owners` WHERE `repo` = ? AND `commit_sha` = ? AND `user_id` = 2',
+      [repo, shas[0]],
+    );
+    expect(rows).toEqual([{ job_id: 'job-a', branch: 'Feature/Cart' }]);
+  });
+
+  it('ties a change to the user whose session committed it, when the requirement is computed', async () => {
+    const review = await reviewed(26, 'a');
+    pullAt(26, 'a', ['config/app.yml']);
+    const current = { headSha: review.head, baseRef: 'main' };
+    await refresh(withPolicy, 26, { current });
+    await addCodeReviewApproval(repo, 26, approval(2, 'a'));
+    expect((await refresh(withPolicy, 26)).approvals).toMatchObject({ valid: 1, result: 'satisfied' });
+    // The record of the commit arrives after the head was first read: the session's turn
+    // ended later. It is found all the same, without the head being read again.
+    await recordCodeReviewCommitOwners(repo, { userId: 2, jobId: 'job-26', shas: [review.head] });
+    const tied = await readReviewOutcome(withPolicy, 26);
+    expect(tied.approvals).toMatchObject({ valid: 0, result: 'pending' });
+    expect(tied.approvals.approvals[0]).toMatchObject({ counted: false, reason: 'own_change' });
+  });
+
+  it('keeps every GitHub account a user linked, by id and login', async () => {
+    await saveGithubLink(4, { id: 104, login: 'user-four' });
+    await saveGithubLink(4, { id: 104, login: 'user-four' });
+    await saveGithubLink(4, { id: 104, login: 'user-four-renamed' });
+    await saveGithubLink(5, { id: null, login: 'legacy-five' });
+    const rows = (await loadGithubLinkRows()).filter((row) => [4, 5].includes(row.userId));
+    expect(rows.map((row) => [row.userId, row.id, row.login]).sort()).toEqual([
+      [4, 104, 'user-four'],
+      [4, 104, 'user-four-renamed'],
+      [5, null, 'legacy-five'],
+    ]);
+  });
+
   it('writes nothing more for a project without a policy', async () => {
     await reviewed(20, 'a');
     pullAt(20, 'a');
@@ -758,6 +885,126 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on 
     expect((await readReviewOutcome(stricter, 25)).approvals.risk.unknown).toBe(false);
   });
 
+  it('gives a commit two pull requests share the most restrictive status of the two', async () => {
+    // Pull request 40: high risk, reviewed and passed, nobody approved yet.
+    const first = await reviewed(40, 'a');
+    pullAt(40, 'a');
+    const head = first.head;
+    const current = { headSha: head, baseRef: 'main' };
+    await refresh(enforcing, 40, { current });
+    const carries = (context) => carried.get(head).find((status) => status.context === context);
+    expect(carries('briareus/approvals')).toMatchObject({
+      state: 'pending',
+      description: '0 of 2 human approvals at aaaaaaa (high risk)',
+    });
+    expect(carries('briareus/code-review')).toMatchObject({ state: 'success' });
+
+    // Its author opens pull request 41 from the same branch against another base: one
+    // trivial file, low risk, reviewed and passed. By itself it asks for no approval.
+    await reviewed(41, 'a', { head: 40 });
+    pullAt(41, 'a', ['README.md']);
+    const second = await refresh(enforcing, 41, { current });
+    expect(second).toMatchObject({ outcome: 'passed', ready: true });
+    expect(second.approvals).toMatchObject({ result: 'not_required', tier: 'low' });
+    expect(await getCodeReviewReadiness(repo, 41)).toMatchObject({ statusState: 'success' });
+    // The commit still says what holds for both: pull request 40 waits on people.
+    expect(carries('briareus/approvals')).toEqual({
+      context: 'briareus/approvals',
+      state: 'pending',
+      description: 'PR #40: 0 of 2 human approvals at aaaaaaa (high risk)',
+    });
+    expect(carries('briareus/code-review')).toMatchObject({
+      state: 'success',
+      description: 'PR #40: Review passed at aaaaaaa: no findings',
+    });
+    expect(await listCodeReviewStatusesAtHead(repo, head, 'approvals')).toEqual([
+      { prNumber: 40, state: 'pending', description: '0 of 2 human approvals at aaaaaaa (high risk)' },
+      { prNumber: 41, state: 'success', description: 'No human approval required at aaaaaaa: low risk' },
+    ]);
+    const mine = (await readReviewOutcome(enforcing, 41)).approvals.status;
+    expect(mine).toMatchObject({
+      state: 'success',
+      published: false,
+      publishedState: 'pending',
+      publishedDescription: 'PR #40: 0 of 2 human approvals at aaaaaaa (high risk)',
+    });
+    // Nothing is owed for 41: the commit carries what it should. 40 is told to look
+    // again, finds its own status there under its name, and writes nothing.
+    expect((await getCodeReviewReadiness(repo, 41)).publishOwedAt).toBeNull();
+    expect((await getCodeReviewReadiness(repo, 40)).publishOwedAt).toBeTruthy();
+    const writes = () => requests.filter((r) => r.url.endsWith(head)).length;
+    const before = writes();
+    await retryReviewStatuses({ getProject: () => enforcing, cfg, retryDelayMs: 0 });
+    expect(writes()).toBe(before);
+    expect(await getCodeReviewReadiness(repo, 40)).toMatchObject({
+      publishOwedAt: null,
+      publishedState: 'pending',
+      publishedDescription: 'PR #40: 0 of 2 human approvals at aaaaaaa (high risk)',
+    });
+    expect((await readReviewOutcome(enforcing, 40)).approvals.status.published).toBe(true);
+
+    // Two people approve pull request 40: now both pass, and the commit says so.
+    await addCodeReviewApproval(repo, 40, approval(1, 'a'));
+    await addCodeReviewApproval(repo, 40, approval(2, 'a'));
+    expect((await refresh(enforcing, 40)).ready).toBe(true);
+    expect(carries('briareus/approvals')).toMatchObject({
+      state: 'success',
+      description: 'PR #40: 2 of 2 human approvals at aaaaaaa (high risk)',
+    });
+    // 41 looks again in its turn and settles on the same status without another write.
+    const settled = writes();
+    await retryReviewStatuses({ getProject: () => enforcing, cfg, retryDelayMs: 0 });
+    await retryReviewStatuses({ getProject: () => enforcing, cfg, retryDelayMs: 0 });
+    expect(writes()).toBe(settled);
+    expect((await readReviewOutcome(enforcing, 41)).approvals.status).toMatchObject({ published: true });
+
+    // 41 closes: 40 has the commit to itself again, under its own words.
+    github.get(41).pull.state = 'closed';
+    expect(await oweCodeReviewStatusesAtHead(repo, head, 41)).toBe(2);
+    await retryReviewStatuses({ getProject: () => enforcing, cfg, retryDelayMs: 0 });
+    expect(carries('briareus/approvals')).toMatchObject({
+      state: 'success',
+      description: '2 of 2 human approvals at aaaaaaa (high risk)',
+    });
+  });
+
+  it('writes no success for a commit shared with a pull request nobody reviewed', async () => {
+    const review = await reviewed(42, 'a');
+    pullAt(42, 'a', ['README.md']);
+    // Another open pull request at the same head, which the server holds nothing for.
+    github.set(43, { pull: { state: 'open', head: { sha: review.head }, base: { ref: 'release' } } });
+    await refresh(enforcing, 42, { current: { headSha: review.head, baseRef: 'main' } });
+    const statuses = carried.get(review.head);
+    expect(statuses.find((s) => s.context === 'briareus/code-review')).toMatchObject({
+      state: 'pending',
+      description: 'PR #43: not reviewed at this commit yet',
+    });
+    expect(statuses.find((s) => s.context === 'briareus/approvals').state).toBe('pending');
+    expect(statuses.some((s) => s.state === 'success')).toBe(false);
+  });
+
+  it('lists who waits on people past the ones that closed, and takes their marks off', async () => {
+    // Three pull requests wait; the two that have waited longest have closed since.
+    for (const number of [50, 51, 52]) {
+      const review = await reviewed(number, 'a');
+      pullAt(number, 'a');
+      await refresh(withPolicy, number, { current: { headSha: review.head, baseRef: 'main' } });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const mine = (rows) =>
+      rows.filter((row) => [50, 51, 52].includes(row.prNumber)).map((row) => row.prNumber);
+    expect(mine(await listCodeReviewReadinessWaiting({ limit: 500 }))).toEqual([50, 51, 52]);
+    // Every other row of this file's earlier tests is taken for closed as well.
+    const isOpen = async (_project, number) => number === 52;
+    const waiting = await approvalsWaiting({ getProject: () => withPolicy, isOpen, limit: 2 });
+    expect(waiting.map((row) => row.prNumber)).toEqual([52]);
+    expect(mine(await listCodeReviewReadinessWaiting({ limit: 500 }))).toEqual([52]);
+    expect((await getCodeReviewReadiness(repo, 50)).waitingSince).toBeNull();
+    // Told directly, too.
+    await clearCodeReviewWaiting(repo, 52);
+    expect(await approvalsWaiting({ getProject: () => withPolicy, isOpen, limit: 2 })).toEqual([]);
+  });
+
   it('rolls back to the earlier schema and comes back up with nothing approved', async () => {
     await reviewed(30, 'a');
     pullAt(30, 'a');
@@ -767,7 +1014,13 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on 
     const outcomes = await columns('code_review_outcomes');
     await down({ context: pool });
     await down({ context: pool });
-    for (const table of ['code_review_risk', 'code_review_approvals', 'code_review_readiness'])
+    for (const table of [
+      'code_review_risk',
+      'code_review_approvals',
+      'code_review_readiness',
+      'code_review_commit_owners',
+      'user_github_links',
+    ])
       expect(await hasTable(table)).toBe(false);
     expect(await columns('projects')).toEqual(projects.filter((name) => name !== 'approval_policy'));
     // Every earlier record stays as it was.

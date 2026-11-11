@@ -29,7 +29,18 @@ let server,
   view,
   refreshed,
   sessions,
-  linked;
+  linked,
+  history,
+  owners,
+  asked;
+// Who wrote the pull request as read from GitHub: somebody who is no user here.
+const written = (over = {}) => ({
+  author: { id: 900, login: 'octo-author' },
+  commits: [{ id: 900, login: 'octo-author' }],
+  shas: ['c'.repeat(40)],
+  complete: true,
+  ...over,
+});
 // From which computation on the outcome cannot be stored; 0 for never.
 let failFrom;
 // The outcome as lib/review-enforcement.js answers it, as far as the routes read it.
@@ -89,14 +100,20 @@ beforeEach(async () => {
   };
   approvals = [];
   pull = { state: 'open', headSha: head, baseRef: 'main', author: 'octo-author' };
-  risk = { headSha: head, authors: { author: 'octo-author', commits: ['octo-author'], complete: true } };
+  risk = { headSha: head, authors: written() };
   view = {};
   failFrom = 0;
   refreshed = [];
   sessions = [];
-  linked = { 1: 'ada-dev' };
+  // The GitHub account each user has linked now, every account they ever linked, and
+  // the users whose sessions made commits of the pull request.
+  linked = { 1: { id: 101, login: 'ada-dev' }, 2: { id: 102, login: 'grace-dev' } };
+  history = {};
+  owners = [];
+  asked = [];
   const store = {
     getCodeReviewRisk: vi.fn(async () => risk),
+    listCodeReviewCommitOwners: vi.fn(async () => owners),
     listCodeReviewApprovals: vi.fn(async () => approvals.map((a) => ({ ...a }))),
     addCodeReviewApproval: vi.fn(async (_repo, _pr, approval) => {
       const standing = approvals.find(
@@ -124,8 +141,9 @@ beforeEach(async () => {
       getProject: (name) => projects[name] || null,
       outcome: {
         read: vi.fn(async () => outcomeNow()),
-        refresh: vi.fn(async (_project, _pr, current = null) => {
+        refresh: vi.fn(async (_project, _pr, current = null, options = {}) => {
           refreshed.push(current);
+          asked.push(!!options.asked);
           if (failFrom && refreshed.length >= failFrom) throw new Error('Connection lost');
           return outcomeNow();
         }),
@@ -135,8 +153,9 @@ beforeEach(async () => {
         if (pull instanceof Error) throw pull;
         return pull;
       }),
-      linkedLogin: (user) => linked[user.id] || null,
-      ownsWorkOn: (user, name, prNumber) =>
+      linkedAccount: (user) => linked[user.id] || null,
+      accountsOf: (user) => [...(history[user.id] || []), ...(linked[user.id] ? [linked[user.id]] : [])],
+      openedPull: (user, name, prNumber) =>
         sessions.some((s) => s.ownerId === user.id && s.repo === name && s.pr === prNumber),
     }),
   );
@@ -192,6 +211,7 @@ describe('recording an approval', () => {
         userId: 1,
         approver: 'Ada',
         githubLogin: 'ada-dev',
+        githubUserId: 101,
         headSha: head,
         baseRef: 'main',
         codeReviewId: 5,
@@ -344,8 +364,8 @@ describe('recording an approval', () => {
 });
 
 describe('approving one’s own change', () => {
-  it('is refused for the author, for commits under one’s account and for one’s own sessions', async () => {
-    risk.authors = { author: 'Ada-Dev', commits: [], complete: true };
+  it('is refused for the author, for commits under one’s account and for commits one’s sessions made', async () => {
+    risk.authors = written({ author: { id: 101, login: 'Ada-Dev' }, commits: [] });
     expect(await approve(tokens.ada)).toEqual({
       status: 403,
       body: {
@@ -355,47 +375,129 @@ describe('approving one’s own change', () => {
         authorship: 'author',
       },
     });
-    risk.authors = { author: 'octo-author', commits: ['octo-author', 'ada-dev'], complete: true };
+    risk.authors = written({
+      commits: [
+        { id: 900, login: 'octo-author' },
+        { id: 101, login: 'ada-dev' },
+      ],
+    });
     expect(await approve(tokens.ada)).toMatchObject({ status: 403, body: { authorship: 'commits' } });
-    // Grace linked no account: what ties her to the change is her session on it.
-    sessions = [{ ownerId: 2, repo, pr: 7 }];
+    // Grace's sessions commit as the server: what ties her to the change is the record
+    // of the commits they made, whatever those sessions were started for.
+    risk.authors = written();
+    owners = [2];
     expect(await approve(tokens.grace)).toMatchObject({
       status: 403,
       body: {
         code: 'own_change',
         authorship: 'session',
-        error: expect.stringMatching(/A session you own worked on/),
+        error: expect.stringMatching(/A session you own committed to this pull request/),
       },
     });
+    // Or, for work from before commits were recorded, the session that opened it.
+    owners = [];
+    sessions = [{ ownerId: 2, repo, pr: 7 }];
+    expect(await approve(tokens.grace)).toMatchObject({ status: 403, body: { authorship: 'session' } });
     expect(approvals).toEqual([]);
-    // Somebody else's session, or hers on another pull request, is not hers on this one.
+    // Somebody else's work, or hers on another pull request, is not hers on this one.
+    owners = [3];
     sessions = [
       { ownerId: 1, repo, pr: 8 },
       { ownerId: 3, repo, pr: 7 },
     ];
-    risk.authors = { author: 'octo-author', commits: [], complete: true };
     expect((await approve(tokens.grace)).status).toBe(201);
     expect((await approve(tokens.ada)).status).toBe(201);
   });
 
-  it('is recorded as such where the project allows it', async () => {
-    projects[repo].approvalPolicy = normalizeApprovalPolicy({ enabled: true, allowSelfApproval: true });
-    risk.authors = { author: 'ada-dev', commits: ['ada-dev'], complete: true };
-    expect((await approve(tokens.ada)).status).toBe(201);
-    expect(approvals[0]).toMatchObject({ userId: 1, authorship: 'author' });
+  it('cannot be got around by unlinking the account first', async () => {
+    // Ada opened the pull request as ada-dev, then removed the account from Briareus.
+    risk.authors = written({
+      author: { id: 101, login: 'ada-dev' },
+      commits: [{ id: 101, login: 'ada-dev' }],
+    });
+    history = { 1: [{ id: 101, login: 'ada-dev' }] };
+    delete linked[1];
+    // With no account linked nothing would tie her to anything: an approval needs one.
+    expect(await approve(tokens.ada)).toMatchObject({
+      status: 403,
+      body: { code: 'github_account_required', error: expect.stringMatching(/Link your GitHub account/) },
+    });
+    // Linking another one does not help: the one she had is still hers.
+    linked[1] = { id: 777, login: 'ada-second' };
+    expect(await approve(tokens.ada)).toMatchObject({
+      status: 403,
+      body: { code: 'own_change', authorship: 'author' },
+    });
+    // Nor does renaming the account on GitHub: it is known by its id.
+    linked[1] = { id: 101, login: 'ada-renamed' };
+    history = {};
+    expect(await approve(tokens.ada)).toMatchObject({ status: 403, body: { code: 'own_change' } });
+    expect(approvals).toEqual([]);
   });
 
-  it('is not taken when who wrote the pull request could not be read', async () => {
-    risk = { headSha: head, authors: null, error: 'GitHub answered 502 reading the pull request’s files' };
-    expect(await approve(tokens.ada)).toMatchObject({
-      status: 503,
-      body: { code: 'authorship_unknown', error: expect.stringMatching(/GitHub answered 502/) },
+  it('needs a linked account wherever two records could be one person', async () => {
+    delete linked[2];
+    expect(await approve(tokens.grace)).toMatchObject({
+      status: 403,
+      body: { code: 'github_account_required' },
     });
+    // Also where one's own change may be approved, once approvals on GitHub count too.
+    projects[repo].approvalPolicy = normalizeApprovalPolicy({
+      enabled: true,
+      allowSelfApproval: true,
+      acceptGithubApprovals: true,
+    });
+    expect(await approve(tokens.grace)).toMatchObject({
+      status: 403,
+      body: { code: 'github_account_required' },
+    });
+    // Not where neither rule is in play.
+    projects[repo].approvalPolicy = normalizeApprovalPolicy({ enabled: true, allowSelfApproval: true });
+    expect((await approve(tokens.grace)).status).toBe(201);
+    expect(approvals[0]).toMatchObject({ userId: 2, githubLogin: null, githubUserId: null });
+  });
+
+  it('is recorded as such where the project allows it', async () => {
+    projects[repo].approvalPolicy = normalizeApprovalPolicy({ enabled: true, allowSelfApproval: true });
+    risk.authors = written({ author: { id: 101, login: 'ada-dev' } });
+    expect((await approve(tokens.ada)).status).toBe(201);
+    expect(approvals[0]).toMatchObject({ userId: 1, authorship: 'author' });
+    // And taken without knowing who wrote the pull request, which then decides nothing.
+    risk = null;
+    expect((await approve(tokens.grace)).status).toBe(201);
+    expect(approvals[1]).toMatchObject({ userId: 2, authorship: null });
+  });
+
+  it('is not taken when who wrote the pull request could not be read, and says when to ask again', async () => {
+    risk = { headSha: head, authors: null, error: 'GitHub answered 502 reading the pull request’s commits' };
+    expect(await approve(tokens.ada)).toEqual({
+      status: 503,
+      body: {
+        code: 'authorship_unknown',
+        error:
+          'Briareus could not read who wrote this pull request from GitHub (GitHub answered 502 reading the pull request’s commits). It reads it again when you next ask, at most every 15 seconds',
+        retryAfter: 15,
+      },
+    });
+    // The computation before it was made as one a person waits on, which reads again.
+    expect(asked).toEqual([true]);
     // What is stored is of another head.
-    risk = { headSha: next, authors: { author: 'octo-author', commits: [], complete: true } };
+    risk = { headSha: next, authors: written() };
     expect((await approve(tokens.ada)).status).toBe(503);
     risk = null;
     expect((await approve(tokens.ada)).status).toBe(503);
+    expect(approvals).toEqual([]);
+  });
+
+  it('is not taken when the pull request has more commits than GitHub lists', async () => {
+    risk.authors = written({ complete: false });
+    expect(await approve(tokens.ada)).toMatchObject({
+      status: 409,
+      body: {
+        code: 'authorship_incomplete',
+        error: expect.stringMatching(/more commits than GitHub lists \(250\)/),
+      },
+    });
     expect(approvals).toEqual([]);
   });
 });

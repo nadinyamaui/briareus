@@ -149,6 +149,9 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url, init) => {
+        // Which open pull requests are at the commit, asked before every status write:
+        // none but the one written for. Two at one head are in the approvals suite.
+        if (init.method === 'GET' && /\/commits\/[0-9a-f]+\/pulls/.test(url)) return json(200, []);
         const body = init.body ? JSON.parse(init.body) : null;
         requests.push({ url, method: init.method, body });
         const read = /\/commits\/([0-9a-f]+)\/statuses/.exec(url)?.[1];

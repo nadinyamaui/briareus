@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  PATH_LIMITS,
   POLICY_LIMITS,
   approvalPolicyOf,
   assessRisk,
+  assessRiskInBatches,
   compileGlob,
   effectiveSecurityPolicy,
   globMatches,
@@ -382,6 +384,93 @@ describe('the risk of a change', () => {
     expect(reason.message).toMatch(/, …\.$/);
     const long = assessRisk({ policy, files: [file(`migrations/${'x'.repeat(500)}.sql`)] });
     expect(long.reasons[0].paths[0]).toHaveLength(300);
+  });
+});
+
+describe('an assessment of many files', () => {
+  const pems = policyOf({
+    rules: Array.from({ length: 50 }, (_, i) => ({ pattern: i ? `*.pem${i}` : '*.pem', tier: 'medium' })),
+  });
+
+  it('does not match a path too long to match, and never ignores it', () => {
+    const deep = Array.from({ length: PATH_LIMITS.segments + 1 }, () => 'a').join('/');
+    const long = `src/${'x'.repeat(PATH_LIMITS.length)}.js`;
+    for (const path of [deep, long]) {
+      const risk = assessRisk({ policy: pems, files: [file('README.md'), file(path)] });
+      expect(risk).toMatchObject({ tier: 'high', unknown: false, files: 2 });
+      expect(risk.reasons).toEqual([
+        expect.objectContaining({
+          code: 'path_unassessable',
+          tier: 'high',
+          matched: 1,
+          message: expect.stringMatching(/1 changed file has a path too long.*treated as high risk/),
+        }),
+      ]);
+      expect(risk.reasons[0].paths[0].length).toBeLessThanOrEqual(300);
+    }
+    // The path a renamed file had counts the same.
+    expect(
+      assessRisk({ policy: pems, files: [file('a.txt', { status: 'renamed', previousPath: deep })] }).tier,
+    ).toBe('high');
+    // At the limits themselves a path is matched like any other.
+    const edge = Array.from({ length: PATH_LIMITS.segments }, () => 'a').join('/');
+    expect(assessRisk({ policy: pems, files: [file(edge)] })).toMatchObject({ tier: 'low' });
+    expect(assessRisk({ policy: pems, files: [file(`${edge.slice(0, -1)}x.pem`)] })).toMatchObject({
+      tier: 'medium',
+    });
+    expect(assessRisk({ policy: pems, files: [file('x'.repeat(PATH_LIMITS.length))] }).tier).toBe('low');
+  });
+
+  it('stays quick on the paths that once took it half a minute', () => {
+    // Fifty rules against three thousand paths of two thousand one-character segments.
+    const path = Array.from({ length: 2000 }, () => 'a').join('/');
+    const files = Array.from({ length: 3000 }, (_, i) => file(`${path}/${i}.pem`));
+    const started = performance.now();
+    const risk = assessRisk({ policy: pems, files });
+    expect(performance.now() - started).toBeLessThan(1500);
+    expect(risk).toMatchObject({ tier: 'high', files: 3000 });
+    expect(risk.reasons[0]).toMatchObject({ code: 'path_unassessable', matched: 3000 });
+    expect(risk.reasons[0].paths).toHaveLength(20);
+  });
+
+  it('lets the event loop through while it works, and comes to the same answer', async () => {
+    const secrets = policyOf({
+      rules: Array.from({ length: 50 }, (_, i) => ({ pattern: `*secret*x${i}*`, tier: 'medium' })),
+    });
+    const files = Array.from({ length: 3000 }, (_, i) =>
+      file(`services/billing/src/handlers/payments/provider-${i}/webhook-signature-check.test.js`),
+    );
+    let turns = 0;
+    let worst = 0;
+    let last = performance.now();
+    const timer = setInterval(() => {
+      const now = performance.now();
+      worst = Math.max(worst, now - last);
+      last = now;
+      turns++;
+    }, 1);
+    try {
+      const risk = await assessRiskInBatches({ policy: secrets, files });
+      expect(risk).toEqual(assessRisk({ policy: secrets, files }));
+      expect(risk).toMatchObject({ tier: 'low', files: 3000 });
+    } finally {
+      clearInterval(timer);
+    }
+    // Other work got its turns, and never waited long for one.
+    expect(turns).toBeGreaterThan(3);
+    expect(worst).toBeLessThan(250);
+  });
+
+  it('assesses in batches what it assesses at once', async () => {
+    const policy = policyOf({
+      rules: [{ pattern: '/migrations/', tier: 'high', label: 'Schema' }],
+      thresholds: { medium: { files: 2 } },
+    });
+    const files = [file('migrations/1.sql'), file('src/a.js', { additions: 5 })];
+    expect(await assessRiskInBatches({ policy, files })).toEqual(assessRisk({ policy, files }));
+    expect(
+      await assessRiskInBatches({ policy, files, complete: false, incomplete: 'too_many_files' }),
+    ).toEqual(assessRisk({ policy, files, complete: false, incomplete: 'too_many_files' }));
   });
 });
 

@@ -31,6 +31,11 @@ const store = vi.hoisted(() => {
     findings: [],
     decisions: [],
     count: null,
+    // Whose sessions made commits of the revision, and what the other pull requests at
+    // the same head should carry by their own reckoning, per ledger.
+    workers: [],
+    siblings: { review: [], approvals: [] },
+    owedAtHead: [],
     at: 0,
     failing: {},
     publication,
@@ -45,6 +50,7 @@ const store = vi.hoisted(() => {
       count: s.count,
       rounds: [],
       risk: s.risk ? { ...s.risk } : null,
+      workers: s.workers,
       approvals: s.approvals.map((a) => ({ ...a })),
       readiness: s.readiness ? { ...s.readiness } : null,
     }),
@@ -114,7 +120,7 @@ vi.mock('../lib/db.js', () => {
         ...risk,
         reviewsSyncedAt: iso(risk.reviewsSyncedAt),
         retryAt: iso(risk.retryAt),
-        observedAt: store.now(),
+        observedAt: iso(risk.observedAt) || store.now(),
         updatedAt: store.now(),
       };
       return { ...store.risk };
@@ -150,6 +156,26 @@ vi.mock('../lib/db.js', () => {
     listCodeReviewReadinessWaiting: vi.fn(async () =>
       store.readiness?.waitingSince ? [{ ...store.readiness }] : [],
     ),
+    clearCodeReviewWaiting: vi.fn(async () => {
+      if (store.readiness) store.readiness.waitingSince = null;
+    }),
+    // This pull request's own row and the others' at that head, as stored.
+    listCodeReviewStatusesAtHead: vi.fn(async (_repo, sha, ledger = 'review') => {
+      const own = store.ledger(ledger);
+      return [
+        ...(own?.headSha === sha && own.statusState
+          ? [{ prNumber: own.prNumber, state: own.statusState, description: own.statusDescription || '' }]
+          : []),
+        ...store.siblings[ledger].filter((row) => row.sha === sha).map(({ sha: _sha, ...row }) => row),
+      ];
+    }),
+    oweCodeReviewStatusesAtHead: vi.fn(async (_repo, sha, exceptPr) => {
+      store.owedAtHead.push([sha, exceptPr]);
+      // The row of this pull request, when another one's change is what marks it.
+      for (const row of [store.row, store.readiness])
+        if (row && row.headSha === sha && row.prNumber !== exceptPr) row.publishOwedAt ||= store.now();
+      return 0;
+    }),
     markCodeReviewOutcomeStale: vi.fn(async () => {
       if (store.row) store.row.recomputeAt ||= store.now();
     }),
@@ -161,26 +187,30 @@ vi.mock('../lib/db.js', () => {
     markCodeReviewStatusSending: vi.fn(async (_repo, _pr, ledger) => {
       store.ledger(ledger).publishedConfirmed = false;
     }),
-    recordCodeReviewStatusPublished: vi.fn(async (_repo, _pr, status, { posted = true, ledger } = {}) => {
-      const row = store.ledger(ledger);
-      const settled =
-        row.headSha === status.sha &&
-        row.statusState === status.state &&
-        row.statusDescription === status.description;
-      Object.assign(row, {
-        publishedSha: status.sha,
-        publishedState: status.state,
-        publishedDescription: status.description,
-        publishedConfirmed: true,
-        publishedAt: posted ? store.now() : row.publishedAt || store.now(),
-        publishError: null,
-        publishErrorStatus: null,
-        publishAttempts: 0,
-        publishFailedAt: null,
-        publishRetryAt: null,
-        publishOwedAt: settled ? null : row.publishOwedAt,
-      });
-    }),
+    recordCodeReviewStatusPublished: vi.fn(
+      async (_repo, _pr, status, { posted = true, ledger, own } = {}) => {
+        const row = store.ledger(ledger);
+        // Settled against the pull request's own status, which a shared commit may not carry.
+        const mine = own || status;
+        const settled =
+          row.headSha === mine.sha &&
+          row.statusState === mine.state &&
+          row.statusDescription === mine.description;
+        Object.assign(row, {
+          publishedSha: status.sha,
+          publishedState: status.state,
+          publishedDescription: status.description,
+          publishedConfirmed: true,
+          publishedAt: posted ? store.now() : row.publishedAt || store.now(),
+          publishError: null,
+          publishErrorStatus: null,
+          publishAttempts: 0,
+          publishFailedAt: null,
+          publishRetryAt: null,
+          publishOwedAt: settled ? null : row.publishOwedAt,
+        });
+      },
+    ),
     recordCodeReviewStatusFailed: vi.fn(async (_repo, _pr, { error, status = null, retryAt, ledger }) => {
       const row = store.ledger(ledger);
       Object.assign(row, {
@@ -276,6 +306,11 @@ const approve = (userId, over = {}) =>
     ...over,
   });
 
+// The GitHub accounts users linked: Ada's and Grace's.
+const linked = [
+  { userId: 1, id: 101, login: 'ada-dev' },
+  { userId: 2, id: 102, login: 'grace-dev' },
+];
 // The pull request as GitHub answers for it.
 let enforcement, revision, requests, answers, carried, github;
 const answer = (status, body = {}) =>
@@ -301,6 +336,9 @@ beforeEach(async () => {
     findings: [],
     decisions: [],
     count: null,
+    workers: [],
+    siblings: { review: [], approvals: [] },
+    owedAtHead: [],
     at: 0,
     failing: {},
   });
@@ -321,7 +359,15 @@ beforeEach(async () => {
       commits: 1,
     },
     files: changed('migrations/002_orders.sql'),
-    commits: [{ author: { login: 'octo-author' }, committer: { login: 'web-flow' } }],
+    commits: [
+      {
+        sha: 'c'.repeat(40),
+        author: { login: 'octo-author', id: 900 },
+        committer: { login: 'web-flow', id: 2 },
+      },
+    ],
+    // The open pull requests at a commit; this one alone unless a test says otherwise.
+    pullsAt: null,
     reviews: [],
     user: { login: 'briareus-bot' },
     // Set to a status, or to a function, to make that read fail.
@@ -340,6 +386,14 @@ beforeEach(async () => {
       if (init.method === 'GET') {
         const sha = /\/commits\/([0-9a-f]+)\/statuses/.exec(path)?.[1];
         if (sha) return answer(200, carried.get(sha) || []);
+        const at = /\/commits\/([0-9a-f]+)\/pulls/.exec(path)?.[1];
+        if (at) {
+          if (github.failing.siblings) return answer(github.failing.siblings, { message: 'Server Error' });
+          return answer(
+            200,
+            github.pullsAt ? github.pullsAt(at) : [{ number: 7, state: 'open', head: { sha: at } }],
+          );
+        }
         const page = Number(/[?&]page=(\d+)/.exec(path)?.[1] || 1);
         const paged = (list) => answer(200, list.slice((page - 1) * 100, page * 100));
         const what = path === '/user' ? 'user' : /\/pulls\/7\/(\w+)/.exec(path)?.[1] || 'pull';
@@ -364,7 +418,8 @@ beforeEach(async () => {
   enforcement.setApprovalDirectory({
     user: (id) => ({ id, name: { 1: 'Ada', 2: 'Grace' }[id] || `user ${id}`, disabled: false }),
     mayApprove: () => true,
-    linkedLogins: () => ['ada-dev'],
+    accountsOf: (id) => linked.filter((account) => account.userId === id),
+    linkedAccounts: () => linked,
   });
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -458,7 +513,12 @@ describe('the risk the server reads for a revision', () => {
       error: null,
       retryAt: null,
     });
-    expect(store.risk.authors).toEqual({ author: 'octo-author', commits: ['octo-author'], complete: true });
+    expect(store.risk.authors).toEqual({
+      author: { id: null, login: 'octo-author' },
+      commits: [{ id: 900, login: 'octo-author' }],
+      shas: ['c'.repeat(40)],
+      complete: true,
+    });
     expect(outcome.approvals).toMatchObject({
       enabled: true,
       tier: 'high',
@@ -519,7 +579,7 @@ describe('the risk the server reads for a revision', () => {
       'GitHub lists fewer files than the pull request changes',
       () => (github.pull.changed_files = 5),
       'list_incomplete',
-      false,
+      true,
     ],
     [
       'the pull request changes more files than GitHub lists',
@@ -542,7 +602,7 @@ describe('the risk the server reads for a revision', () => {
         github.pull = () => (reads++ ? { ...pull, head: { sha: next } } : pull);
       },
       'head_moved',
-      false,
+      true,
     ],
   ])('treats the change as the highest tier when %s', async (_name, arrange, why, retried) => {
     reviewed();
@@ -612,6 +672,110 @@ describe('the risk the server reads for a revision', () => {
     }
     expect(store.risk).toMatchObject({ attempts: revision.OBSERVE_ATTEMPTS, retryAt: null, complete: false });
     expect(asked('/pulls/7/files').length).toBe(2 + revision.OBSERVE_ATTEMPTS);
+  });
+
+  it('is no dead end once the sweep gave up: read again when a person asks, and by itself after an hour', async () => {
+    reviewed();
+    github.failing.files = 502;
+    const project = withPolicy();
+    let now = Date.parse('2026-11-10T12:00:00Z');
+    const compute = (options = {}) =>
+      refresh(project, { current: { headSha: head, baseRef: 'main' }, now: () => now, ...options });
+    await compute();
+    for (let i = 0; i < 10 && store.risk.retryAt; i++) {
+      now = Date.parse(store.risk.retryAt) + 1;
+      await compute();
+    }
+    expect(store.risk).toMatchObject({ attempts: revision.OBSERVE_ATTEMPTS, retryAt: null, complete: false });
+    const reads = () => asked('/pulls/7/files').length;
+    const given = reads();
+    // Computed again a minute later, for whatever reason: nothing is read.
+    now += 60_000;
+    await compute();
+    expect(reads()).toBe(given);
+    // A person waits on it: read at once, and not again within a few seconds.
+    await compute({ asked: true });
+    expect(reads()).toBe(given + 1);
+    now += 5_000;
+    await compute({ asked: true });
+    expect(reads()).toBe(given + 1);
+    // By itself, an hour after the last attempt.
+    now += revision.RETRY_MAX_MS - 5_001;
+    await compute();
+    expect(reads()).toBe(given + 1);
+    now += 2;
+    await compute();
+    expect(reads()).toBe(given + 2);
+    expect(store.risk).toMatchObject({ complete: false, retryAt: null });
+    // And once GitHub answers, the assessment is the real one.
+    github.failing = {};
+    now += revision.ASKED_RETRY_MS;
+    const outcome = await compute({ asked: true });
+    expect(store.risk).toMatchObject({
+      complete: true,
+      tier: 'high',
+      attempts: 0,
+      error: null,
+      retryAt: null,
+    });
+    expect(outcome.approvals.risk.unknown).toBe(false);
+  });
+
+  it('reads a head again that moved under the first read, instead of leaving it unknown', async () => {
+    reviewed();
+    let reads = 0;
+    const pull = github.pull;
+    // The server's own idea of the head was ahead of what GitHub answered at first.
+    github.pull = () => (reads++ < 1 ? { ...pull, head: { sha: next } } : pull);
+    const project = withPolicy();
+    await refresh(project, { current: { headSha: head, baseRef: 'main' } });
+    expect(store.risk).toMatchObject({ complete: false, authors: null, attempts: 1 });
+    expect(store.risk.assessment.reasons[0].why).toBe('head_moved');
+    await sweep(project, Date.parse(store.risk.retryAt) + 1);
+    expect(store.risk).toMatchObject({ complete: true, tier: 'high', attempts: 0, retryAt: null });
+    expect(store.risk.authors.author).toEqual({ id: null, login: 'octo-author' });
+  });
+
+  it('keeps the two reads apart: the commits failing does not unsay what the files gave', async () => {
+    reviewed();
+    github.files = changed('src/cart.js');
+    github.failing.commits = 502;
+    const project = withPolicy();
+    const outcome = await refresh(project, { current: { headSha: head, baseRef: 'main' } });
+    expect(store.risk).toMatchObject({ complete: true, tier: 'low', authors: null, attempts: 1 });
+    expect(outcome.approvals.risk).toMatchObject({ unknown: false, tier: 'low' });
+    // Only the commits are asked for again.
+    github.failing = {};
+    await sweep(project, Date.parse(store.risk.retryAt) + 1);
+    expect(asked('/pulls/7/files')).toHaveLength(1);
+    expect(asked('/pulls/7/commits')).toHaveLength(2);
+    expect(store.risk).toMatchObject({ complete: true, attempts: 0, error: null, retryAt: null });
+    expect(store.risk.authors.complete).toBe(true);
+  });
+
+  it('says so when a pull request has more commits than GitHub lists', async () => {
+    reviewed();
+    github.pull = { ...github.pull, commits: 400 };
+    github.commits = Array.from({ length: 250 }, (_, i) => ({
+      sha: String(i).padStart(40, '0'),
+      author: { login: 'octo-author', id: 900 },
+      committer: { login: 'octo-author', id: 900 },
+    }));
+    approve(1);
+    approve(2);
+    const outcome = await refresh(withPolicy(), { current: { headSha: head, baseRef: 'main' } });
+    expect(asked('/pulls/7/commits')).toHaveLength(3);
+    expect(store.risk.authors).toMatchObject({ complete: false });
+    expect(store.risk.authors.shas).toHaveLength(250);
+    // Nobody's approval can be told from an approval of their own change.
+    expect(outcome.approvals.approvals.map((a) => a.reason)).toEqual([
+      'authorship_unknown',
+      'authorship_unknown',
+    ]);
+    expect(outcome.approvals.reasons.map((r) => r.code)).toContain('authorship_unknown');
+    // A project that counts such approvals is not held up by it.
+    const open = await refresh(withPolicy({ allowSelfApproval: true }));
+    expect(open.approvals).toMatchObject({ valid: 2, result: 'satisfied' });
   });
 
   it('stops waiting for a read once the project has no policy', async () => {
@@ -978,6 +1142,272 @@ describe('the approvals status, published like the outcome’s', () => {
   });
 });
 
+describe('a commit shared by several pull requests', () => {
+  // Pull request 7 here is the trivial one: a low-risk change whose review passed, so
+  // that by itself it asks for nothing. Pull request 5 is at the same commit against
+  // another base, high risk, reviewed and passed, with no approval yet.
+  const both = (sha) => [5, 7].map((number) => ({ number, state: 'open', head: { sha } }));
+  const fivePending = () => {
+    store.siblings = {
+      review: [
+        { sha: head, prNumber: 5, state: 'success', description: 'Review passed at aaaaaaa: no findings' },
+      ],
+      approvals: [
+        {
+          sha: head,
+          prNumber: 5,
+          state: 'pending',
+          description: '0 of 2 human approvals at aaaaaaa (high risk)',
+        },
+      ],
+    };
+  };
+  const trivial = () => {
+    reviewed();
+    github.files = changed('README.md');
+  };
+  const current = { headSha: head, baseRef: 'main' };
+
+  it('carries the most restrictive status of them, and says whose it is', async () => {
+    trivial();
+    fivePending();
+    github.pullsAt = both;
+    const project = enforcing();
+    await refresh(project, { current });
+    // By itself this pull request passes on both counts.
+    expect(store.row).toMatchObject({ outcome: 'passed', statusState: 'success' });
+    expect(store.readiness).toMatchObject({ result: 'not_required', statusState: 'success' });
+    // The commit does not say so for the approvals: pull request 5 still waits on people.
+    expect(posted('briareus/approvals')).toEqual([
+      {
+        sha: head,
+        context: 'briareus/approvals',
+        state: 'pending',
+        description: 'PR #5: 0 of 2 human approvals at aaaaaaa (high risk)',
+      },
+    ]);
+    expect(posted('briareus/code-review')).toEqual([
+      {
+        sha: head,
+        context: 'briareus/code-review',
+        state: 'success',
+        description: 'PR #5: Review passed at aaaaaaa: no findings',
+      },
+    ]);
+    const read = await enforcement.readReviewOutcome(project, 7);
+    expect(read.approvals.status).toMatchObject({
+      state: 'success',
+      published: false,
+      publishedState: 'pending',
+      publishedDescription: 'PR #5: 0 of 2 human approvals at aaaaaaa (high risk)',
+    });
+    // The same state under the other pull request's name is this one's state too.
+    expect(read.status).toMatchObject({ state: 'success', published: true });
+    // Nothing is owed for it: what the commit carries is what it should carry.
+    expect(store.readiness.publishOwedAt).toBeNull();
+    expect(await sweep(project)).toEqual([]);
+    // And the other pull request is told to look at the commit again.
+    expect(store.owedAtHead).toEqual([
+      [head, 7],
+      [head, 7],
+    ]);
+  });
+
+  it('works out the same status whichever of them publishes, and does not write it twice', async () => {
+    trivial();
+    fivePending();
+    github.pullsAt = both;
+    const project = enforcing();
+    await refresh(project, { current });
+    await refresh(project);
+    expect(posted('briareus/approvals')).toHaveLength(1);
+    expect(posted('briareus/code-review')).toHaveLength(1);
+    // Pull request 5 gets its approvals and publishes for the commit; this one, marked
+    // as owing, finds the commit carrying what it would have written and only records it.
+    store.siblings.approvals[0] = {
+      sha: head,
+      prNumber: 5,
+      state: 'success',
+      description: '2 of 2 human approvals at aaaaaaa (high risk)',
+    };
+    const theirs = {
+      context: 'briareus/approvals',
+      state: 'success',
+      description: 'PR #5: 2 of 2 human approvals at aaaaaaa (high risk)',
+    };
+    carried.set(head, [theirs, ...carried.get(head)]);
+    store.readiness.publishOwedAt = store.now();
+    expect(await sweep(project)).toEqual([
+      { repo, prNumber: 7, channel: 'approvals', published: true, skipped: 'unchanged' },
+    ]);
+    expect(posted('briareus/approvals')).toHaveLength(1);
+    expect(store.readiness).toMatchObject({
+      publishedState: 'success',
+      publishedDescription: theirs.description,
+      publishOwedAt: null,
+    });
+    expect((await enforcement.readReviewOutcome(project, 7)).approvals.status.published).toBe(true);
+  });
+
+  it('writes success again only once every pull request at the commit passes', async () => {
+    trivial();
+    fivePending();
+    github.pullsAt = both;
+    const project = enforcing();
+    await refresh(project, { current });
+    // Had the commit not been given it by the other publication, this one writes it.
+    store.siblings.approvals[0] = {
+      sha: head,
+      prNumber: 5,
+      state: 'success',
+      description: '2 of 2 human approvals at aaaaaaa (high risk)',
+    };
+    store.readiness.publishOwedAt = store.now();
+    await sweep(project);
+    expect(posted('briareus/approvals').map((s) => [s.state, s.description])).toEqual([
+      ['pending', 'PR #5: 0 of 2 human approvals at aaaaaaa (high risk)'],
+      ['success', 'PR #5: 2 of 2 human approvals at aaaaaaa (high risk)'],
+    ]);
+  });
+
+  it('counts a pull request at the commit the server never saw as not passed', async () => {
+    trivial();
+    github.pullsAt = (sha) => [7, 9].map((number) => ({ number, state: 'open', head: { sha } }));
+    await refresh(enforcing(), { current });
+    expect(posted('briareus/code-review').at(-1)).toMatchObject({
+      state: 'pending',
+      description: 'PR #9: not reviewed at this commit yet',
+    });
+    expect(posted('briareus/approvals').at(-1)).toMatchObject({
+      state: 'pending',
+      description: 'PR #9: no code review of this commit yet, so its approvals are not known',
+    });
+  });
+
+  it('leaves out pull requests that closed or merely contain the commit', async () => {
+    trivial();
+    // A row is still stored for pull request 5, which closed since.
+    fivePending();
+    github.pullsAt = (sha) => [
+      { number: 5, state: 'closed', head: { sha } },
+      { number: 7, state: 'open', head: { sha } },
+      // Stacked on top: the commit is in it, its head is another.
+      { number: 12, state: 'open', head: { sha: next } },
+    ];
+    await refresh(enforcing(), { current });
+    expect(posted().map((s) => [s.context, s.state, s.description])).toEqual([
+      ['briareus/code-review', 'success', 'Review passed at aaaaaaa: no findings'],
+      ['briareus/approvals', 'success', 'No human approval required at aaaaaaa: low risk'],
+    ]);
+  });
+
+  it('writes no success while GitHub cannot say which pull requests are at the commit', async () => {
+    trivial();
+    github.failing.siblings = 502;
+    const project = enforcing();
+    await refresh(project, { current });
+    expect(posted()).toEqual([]);
+    for (const row of [store.row, store.readiness]) {
+      expect(row).toMatchObject({ statusState: 'success', publishedSha: null, publishAttempts: 1 });
+      expect(row.publishError).toMatch(
+        /other pull requests at aaaaaaa could not be read from GitHub \(GitHub answered 502.*so `success` was not written/,
+      );
+      expect(row.publishRetryAt).toBeTruthy();
+    }
+    expect((await enforcement.readReviewOutcome(project, 7)).status.published).toBe(false);
+    // Tried again like any write that failed, and written once GitHub answers.
+    github.failing = {};
+    await sweep(project, Date.parse(store.row.publishRetryAt) + 1);
+    expect(posted().map((s) => [s.context, s.state])).toEqual([
+      ['briareus/code-review', 'success'],
+      ['briareus/approvals', 'success'],
+    ]);
+  });
+
+  it('still writes a status that does not pass when the others cannot be read', async () => {
+    reviewed();
+    github.failing.siblings = 502;
+    await refresh(enforcing(), { current: { headSha: head, baseRef: 'main' } });
+    // High risk, nobody approved: restrictive whatever the other pull requests say.
+    expect(posted('briareus/approvals')).toEqual([
+      expect.objectContaining({
+        state: 'pending',
+        description: '0 of 2 human approvals at aaaaaaa (high risk)',
+      }),
+    ]);
+    // The review's success is held back.
+    expect(posted('briareus/code-review')).toEqual([]);
+  });
+
+  it('asks nothing about other pull requests for a project that publishes nothing', async () => {
+    trivial();
+    github.pullsAt = both;
+    await refresh(withPolicy(), { current });
+    expect(asked('/commits/')).toEqual([]);
+    expect(posted()).toEqual([]);
+  });
+
+  it('has the pull requests at a commit look again when one comes to it, leaves it or closes', async () => {
+    reviewed();
+    const project = enforcing();
+    await refresh(project, { current: { headSha: head, baseRef: 'main' } });
+    store.owedAtHead = [];
+    // A second pull request is opened from the same branch.
+    await enforcement.notePullAtCommit(project, { number: 9, headSha: head, state: 'open' });
+    expect(store.owedAtHead).toEqual([[head, 9]]);
+    expect(store.row.publishOwedAt).toBeTruthy();
+    expect(store.readiness.publishOwedAt).toBeTruthy();
+    // It is pushed to: the commit it left and the one it came to.
+    store.owedAtHead = [];
+    await enforcement.notePullAtCommit(project, { number: 9, headSha: next, before: head, state: 'open' });
+    expect(store.owedAtHead).toEqual([
+      [next, 9],
+      [head, 9],
+    ]);
+    // Nothing for a project that publishes no status.
+    store.owedAtHead = [];
+    await enforcement.notePullAtCommit(withPolicy(), { number: 9, headSha: head, state: 'open' });
+    expect(store.owedAtHead).toEqual([]);
+  });
+});
+
+describe('the list of pull requests waiting on people', () => {
+  it('drops one that closed, and takes its mark off so it cannot crowd the list', async () => {
+    reviewed();
+    const project = withPolicy();
+    await refresh(project, { current: { headSha: head, baseRef: 'main' } });
+    expect(store.readiness.waitingSince).toBeTruthy();
+    // Whether it is open cannot be told: it stays.
+    const unknown = async () => {
+      throw new Error('GitHub answered 502');
+    };
+    expect(await enforcement.approvalsWaiting({ getProject: () => project, isOpen: unknown })).toHaveLength(
+      1,
+    );
+    expect(store.readiness.waitingSince).toBeTruthy();
+    expect(
+      await enforcement.approvalsWaiting({ getProject: () => project, isOpen: async () => false }),
+    ).toEqual([]);
+    expect(store.readiness.waitingSince).toBeNull();
+  });
+
+  it('drops one whose project asks for nothing any more', async () => {
+    reviewed();
+    await refresh(withPolicy(), { current: { headSha: head, baseRef: 'main' } });
+    expect(await enforcement.approvalsWaiting({ getProject: () => plain })).toEqual([]);
+    expect(store.readiness.waitingSince).toBeNull();
+  });
+
+  it('is told at once when the pull request closes', async () => {
+    reviewed();
+    const project = withPolicy();
+    await refresh(project, { current: { headSha: head, baseRef: 'main' } });
+    await enforcement.notePullAtCommit(project, { number: 7, headSha: head, state: 'closed' });
+    expect(store.readiness.waitingSince).toBeNull();
+    expect(await enforcement.approvalsWaiting({ getProject: () => project })).toEqual([]);
+  });
+});
+
 describe('approvals given on GitHub', () => {
   const review = (id, login, state = 'APPROVED', over = {}) => ({
     id,
@@ -1039,7 +1469,8 @@ describe('approvals given on GitHub', () => {
     enforcement.setApprovalDirectory({
       user: () => null,
       mayApprove: () => false,
-      linkedLogins: () => [],
+      accountsOf: () => [],
+      linkedAccounts: () => [],
     });
     const later = await refresh(project);
     expect(later.approvals.approvals[1]).toMatchObject({ counted: false, reason: 'review_label_step' });
@@ -1066,7 +1497,12 @@ describe('approvals given on GitHub', () => {
     await refresh(project);
     expect(asked('/reviews')).toHaveLength(1);
     // The project comes to accept GitHub approvals, with nobody linked any more.
-    enforcement.setApprovalDirectory({ user: () => null, mayApprove: () => false, linkedLogins: () => [] });
+    enforcement.setApprovalDirectory({
+      user: () => null,
+      mayApprove: () => false,
+      accountsOf: () => [],
+      linkedAccounts: () => [],
+    });
     const later = await refresh(withPolicy({ acceptGithubApprovals: true }));
     expect(later.approvals.approvals).toEqual([
       expect.objectContaining({ githubReviewId: 1, counted: false, reason: 'review_label_step' }),
@@ -1104,6 +1540,72 @@ describe('approvals given on GitHub', () => {
     await sweep(project, Date.parse(retryAt) + 1);
     expect(store.risk).toMatchObject({ complete: true, error: null, retryAt: null });
     expect(store.readiness).toMatchObject({ valid: 1 });
+  });
+
+  it('do not count while who wrote the head could not be read, however the retries end', async () => {
+    reviewed();
+    // The commits cannot be read; they would show octo-pair as a committer.
+    github.failing.commits = 502;
+    github.commits = [
+      { sha: 'c'.repeat(40), author: { login: 'octo-author' }, committer: { login: 'octo-pair' } },
+    ];
+    github.reviews = [review(1, 'octo-pair'), review(2, 'mona-reviewer')];
+    const project = withPolicy({ acceptGithubApprovals: true });
+    let now = Date.parse('2026-11-10T12:00:00Z');
+    const compute = (options = {}) =>
+      refresh(project, { current: { headSha: head, baseRef: 'main' }, now: () => now, ...options });
+    const first = await compute();
+    expect(store.risk).toMatchObject({ complete: true, authors: null, attempts: 1 });
+    expect(first.approvals.approvals.map((a) => a.reason)).toEqual([
+      'authorship_unknown',
+      'authorship_unknown',
+    ]);
+    for (let i = 0; i < 10 && store.risk.retryAt; i++) {
+      now = Date.parse(store.risk.retryAt) + 1;
+      await compute();
+    }
+    expect(store.risk).toMatchObject({ authors: null, attempts: revision.OBSERVE_ATTEMPTS, retryAt: null });
+    // The reviews are read fine from here on. That settles nothing about the commits.
+    now += 60_000;
+    const given = await compute();
+    expect(store.risk).toMatchObject({ authors: null, attempts: revision.OBSERVE_ATTEMPTS });
+    expect(store.risk.error).toMatch(/commits/);
+    expect(store.risk.reviewsSyncedAt).toBeTruthy();
+    expect(given.approvals).toMatchObject({ valid: 0, result: 'pending' });
+    expect(given.approvals.approvals.map((a) => a.counted)).toEqual([false, false]);
+    // Once the commits can be read, the co-author's approval is recognised for what it is.
+    github.failing = {};
+    const known = await compute({ asked: true });
+    expect(known.approvals.approvals.map((a) => [a.by.name, a.counted, a.reason])).toEqual([
+      ['octo-pair', false, 'own_change'],
+      ['mona-reviewer', true, null],
+    ]);
+  });
+
+  it('do not have the files read again, or their assessment lost, for a retry the reviews alone owe', async () => {
+    reviewed();
+    github.files = changed('src/cart.js');
+    github.reviews = [review(1, 'octo-reviewer')];
+    const project = enforcing({ acceptGithubApprovals: true });
+    await refresh(project, { current: { headSha: head, baseRef: 'main' } });
+    expect(store.risk).toMatchObject({ complete: true, tier: 'low' });
+    expect(posted('briareus/approvals').at(-1)).toMatchObject({ state: 'success' });
+    github.failing.reviews = 502;
+    await refresh(project);
+    expect(store.risk).toMatchObject({ attempts: 1, complete: true, tier: 'low' });
+    // The reviews answer again; the files would not, and are not asked.
+    github.failing = { files: 502 };
+    await sweep(project, Date.parse(store.risk.retryAt) + 1);
+    expect(asked('/pulls/7/files')).toHaveLength(1);
+    expect(store.risk).toMatchObject({
+      complete: true,
+      tier: 'low',
+      error: null,
+      attempts: 0,
+      retryAt: null,
+    });
+    expect(store.row).toMatchObject({ outcome: 'passed', statusState: 'success' });
+    expect(store.readiness).toMatchObject({ tier: 'low', statusState: 'success' });
   });
 
   it('follow a dismissal on GitHub, when a webhook says a review changed', async () => {
@@ -1160,7 +1662,9 @@ describe('approvals given on GitHub', () => {
 
   it('do not count from somebody whose commits are in the pull request', async () => {
     reviewed();
-    github.commits = [{ author: { login: 'octo-author' }, committer: { login: 'octo-pair' } }];
+    github.commits = [
+      { sha: 'c'.repeat(40), author: { login: 'octo-author' }, committer: { login: 'octo-pair' } },
+    ];
     github.reviews = [review(1, 'octo-pair'), review(2, 'mona-reviewer')];
     const outcome = await refresh(withPolicy({ acceptGithubApprovals: true }), {
       current: { headSha: head, baseRef: 'main' },

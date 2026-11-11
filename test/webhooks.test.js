@@ -16,6 +16,7 @@ vi.mock('../lib/jobs.js', () => ({
   instructSession: vi.fn(() => ({ status: 'running' })),
   noteReviewedPull: vi.fn(async () => null),
   noteReviewedOnGithub: vi.fn(async () => null),
+  notePullChanged: vi.fn(async () => {}),
 }));
 
 const feedback = vi.hoisted(() => ({ reviewEvent: vi.fn(async () => {}) }));
@@ -44,6 +45,7 @@ import {
   instructSession,
   noteReviewedPull,
   noteReviewedOnGithub,
+  notePullChanged,
 } from '../lib/jobs.js';
 import { deliveryId, DELIVERY_MAX_CHARS } from '../lib/deliveries.js';
 
@@ -577,6 +579,27 @@ describe('the events a delivery can carry', () => {
     await settle();
 
     expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feat');
+  });
+
+  it('tells whoever keeps the statuses that a pull request came to a commit, left one or closed', async () => {
+    notePullChanged.mockClear();
+    const pull = (state, sha) => ({ number: 12, state, head: { ref: 'feat', sha }, base: { ref: 'main' } });
+    await githubDelivery('pull_request', {
+      action: 'synchronize',
+      before: 'a'.repeat(40),
+      repository: { full_name: 'acme/shop' },
+      pull_request: pull('open', 'b'.repeat(40)),
+    });
+    await githubDelivery('pull_request', {
+      action: 'closed',
+      repository: { full_name: 'acme/shop' },
+      pull_request: pull('closed', 'b'.repeat(40)),
+    });
+    await settle();
+    expect(notePullChanged.mock.calls).toEqual([
+      ['acme/shop', { number: 12, headSha: 'b'.repeat(40), before: 'a'.repeat(40), state: 'open' }],
+      ['acme/shop', { number: 12, headSha: 'b'.repeat(40), before: undefined, state: 'closed' }],
+    ]);
   });
 
   it('has the approval requirement looked at again when a review is submitted, not for a comment', async () => {

@@ -26,8 +26,20 @@
 // told: the same record of a publication code_review_outcomes keeps, under the same
 // column names, because the same publisher works both (lib/review-enforcement.js).
 //
-// Nothing is back-filled: approvals given on GitHub before this migration are read in
-// when a project that accepts them is next computed.
+// code_review_commit_owners says which user's session made which commit, written when
+// a session's turn ends with commits it did not have before. It outlives the session:
+// it is what ties a person to a change their sessions wrote under the server's account,
+// whatever those sessions were started for.
+//
+// user_github_links keeps every GitHub account a user has linked, by GitHub's user id
+// and the login it had, after they unlink it: a commit made as that account stays that
+// person's, and an approval on GitHub from it stays one a session may have made. An
+// account linked when the server starts is entered then, so the history begins with
+// what is linked at this migration.
+//
+// Nothing else is back-filled: approvals given on GitHub before this migration are read
+// in when a project that accepts them is next computed, and commits sessions made before
+// a project had an approval policy have no owner on record.
 //
 // Guarded on what already exists: ADD COLUMN is not idempotent.
 
@@ -68,6 +80,7 @@ export async function up({ context: p }) {
     error TEXT NULL,
     attempts INT UNSIGNED NOT NULL DEFAULT 0,
     retry_at BIGINT UNSIGNED NULL,
+    -- When the files and the commits were last asked for.
     observed_at BIGINT UNSIGNED NOT NULL,
     created_at BIGINT UNSIGNED NOT NULL,
     updated_at BIGINT UNSIGNED NOT NULL,
@@ -84,7 +97,10 @@ export async function up({ context: p }) {
     -- outlives the user.
     user_id INT UNSIGNED NULL,
     approver VARCHAR(255) NULL,
+    -- The GitHub account: of a review read from GitHub, or the one the approver had
+    -- linked when they approved here. The id is GitHub's, which a rename keeps.
     github_login VARCHAR(100) NULL,
+    github_user_id BIGINT UNSIGNED NULL,
     github_review_id BIGINT UNSIGNED NULL,
     status ENUM('approved', 'withdrawn', 'dismissed', 'superseded') NOT NULL DEFAULT 'approved',
     active TINYINT(1) NULL DEFAULT 1,
@@ -101,6 +117,9 @@ export async function up({ context: p }) {
     automation VARCHAR(32) NULL,
     association VARCHAR(32) NULL,
     approved_at BIGINT UNSIGNED NULL,
+    -- When the list this row's standing on GitHub was last taken from was asked for: an
+    -- older read finishing later does not overwrite a newer one.
+    seen_at BIGINT UNSIGNED NULL,
     withdrawn_at BIGINT UNSIGNED NULL,
     withdraw_note TEXT NULL,
     created_at BIGINT UNSIGNED NOT NULL,
@@ -145,10 +164,31 @@ export async function up({ context: p }) {
     KEY code_review_readiness_owed (publish_owed_at, publish_retry_at),
     KEY code_review_readiness_waiting (waiting_since)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await p.query(`CREATE TABLE IF NOT EXISTS code_review_commit_owners (
+    repo VARCHAR(255) NOT NULL,
+    commit_sha VARCHAR(64) NOT NULL,
+    user_id INT UNSIGNED NOT NULL,
+    -- The session that made it and the branch it was on, for whoever asks why.
+    job_id VARCHAR(64) NULL,
+    branch VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL,
+    created_at BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (repo, commit_sha, user_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+  await p.query(`CREATE TABLE IF NOT EXISTS user_github_links (
+    user_id INT UNSIGNED NOT NULL,
+    -- GitHub's user id; 0 for a link stored before the id was kept.
+    github_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    login VARCHAR(100) NOT NULL,
+    first_linked_at BIGINT UNSIGNED NOT NULL,
+    last_linked_at BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (user_id, github_id, login)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
 }
 
 /** @param {{ context: import('mysql2/promise').Pool }} ctx */
 export async function down({ context: p }) {
+  await p.query('DROP TABLE IF EXISTS user_github_links');
+  await p.query('DROP TABLE IF EXISTS code_review_commit_owners');
   await p.query('DROP TABLE IF EXISTS code_review_readiness');
   await p.query('DROP TABLE IF EXISTS code_review_approvals');
   await p.query('DROP TABLE IF EXISTS code_review_risk');

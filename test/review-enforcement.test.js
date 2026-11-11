@@ -130,6 +130,8 @@ vi.mock('../lib/db.js', () => ({
     });
   }),
   listFailedCodeReviewStatuses: vi.fn(async () => (store.row?.publishFailedAt ? [{ ...store.row }] : [])),
+  listCodeReviewStatusesAtHead: vi.fn(async () => []),
+  oweCodeReviewStatusesAtHead: vi.fn(async () => 0),
   listCodeReviewOutcomesDue: vi.fn(async ({ now }) => {
     const row = store.row;
     const due =
@@ -236,6 +238,9 @@ beforeEach(async () => {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url, init) => {
+      // Which open pull requests are at the commit, asked before every status write: this
+      // one alone here. What two that share a head get is in test/review-revision.test.js.
+      if (init.method === 'GET' && /\/commits\/[0-9a-f]+\/pulls/.test(url)) return answer(200, []);
       requests.push({
         url,
         method: init.method,
@@ -894,7 +899,10 @@ describe('what GitHub is known to carry', () => {
     take(head, { state: 'failure', context: 'ci/build', description: 'Tests failed' });
     expect((await refresh(on)).published).toEqual({ published: true, skipped: 'unchanged' });
     // A read that fails proves nothing either way, so the status is sent again.
-    fetch.mockImplementationOnce(async () => answer(502, {}));
+    const github = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, init) =>
+      init.method === 'GET' && url.includes('/statuses') ? answer(502, {}) : github(url, init),
+    );
     expect((await refresh(on)).published).toEqual({ published: true });
     expect(posted()).toHaveLength(3);
   });

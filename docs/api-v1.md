@@ -405,8 +405,13 @@ approval on record with whether it counts and why not. A person records theirs
 with `POST /pulls/{number}/approvals` and the `headSha` they looked at, using
 their own token with a manage permission; it is bound to that head and base
 branch, and `POST /pulls/{number}/approvals/{approvalId}/withdraw` takes it
-back. A pull request that waits on people alone is a `review-approval` item in
-`GET /attention`. See
+back. The approver needs a GitHub account linked (`PUT /me/github`) wherever
+the policy has to tell their approval from their own change or from an approval
+on GitHub, and an approval of one’s own change is refused. Several open pull
+requests at one commit share its statuses: the commit carries the most
+restrictive of theirs, named after the pull request it is of, and
+`status.publishedDescription` says which. A pull request that waits on people
+alone is a `review-approval` item in `GET /attention`. See
 [Risk-based human approvals](features.md#risk-based-human-approvals).
 
 ## Pull request data

@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   APPROVALS_CONTEXT,
   approvalStatusFor,
+  authorshipGap,
   authorshipOf,
   computeApprovals,
   githubApprovalRows,
-  ownsWorkOn,
+  openedPull,
+  sameAccount,
 } from '../lib/review-approvals.js';
 import { assessRisk, normalizeApprovalPolicy } from '../lib/review-risk.js';
 
@@ -23,6 +25,15 @@ const policyOf = (over = {}) =>
 const riskOf = (policy, paths) =>
   assessRisk({ policy, files: paths.map((path) => ({ path, additions: 1, deletions: 0 })) });
 // Ada and Grace are users with access; Linus is disabled, Margaret lost the project.
+// Each linked a GitHub account, which GitHub knows by an id of its own; Katherine (5)
+// never linked one.
+const accounts = {
+  1: [{ id: 101, login: 'ada-dev' }],
+  2: [{ id: 102, login: 'grace-dev' }],
+  3: [{ id: 103, login: 'linus-dev' }],
+  4: [{ id: 104, login: 'margaret-dev' }],
+  9: [{ id: 109, login: 'gone-dev' }],
+};
 const directory = {
   user: (id) =>
     ({
@@ -30,10 +41,20 @@ const directory = {
       2: { id: 2, name: 'Grace', disabled: false },
       3: { id: 3, name: 'Linus', disabled: true },
       4: { id: 4, name: 'Margaret', disabled: false },
+      5: { id: 5, name: 'Katherine', disabled: false },
     })[id] || null,
   mayApprove: (id) => id !== 4,
-  linkedLogins: () => ['ada-dev'],
+  accountsOf: (id) => accounts[id] || [],
+  linkedAccounts: () => Object.values(accounts).flat(),
 };
+// Who wrote the pull request, as read from GitHub: somebody none of them is.
+const written = (over = {}) => ({
+  author: { id: 900, login: 'octo-author' },
+  commits: [{ id: 900, login: 'octo-author' }],
+  shas: ['c'.repeat(40)],
+  complete: true,
+  ...over,
+});
 const reviewedAt = (sha = head, over = {}) => ({
   outcome: 'passed',
   stale: false,
@@ -59,6 +80,8 @@ const onGithub = (login, over = {}) => ({
   source: 'github',
   userId: null,
   githubLogin: login,
+  // An account of its own unless the test says whose it is.
+  githubUserId: 5000 + ids,
   githubReviewId: 9000 + ids,
   status: 'approved',
   headSha: head,
@@ -76,8 +99,11 @@ const compute = (input = {}) => {
     project: { id: 1, repo: 'acme/shop' },
     risk: policy ? (input.risk ?? riskOf(policy, input.paths || ['migrations/1.sql'])) : null,
     outcome: input.outcome || reviewedAt(),
+    reviewEnded: input.reviewEnded ?? true,
     security: input.security || null,
     approvals: input.approvals || [],
+    authors: input.authors === undefined ? written() : input.authors,
+    workers: input.workers || [],
     github: input.github === undefined ? synced : input.github,
     directory: input.directory || directory,
   });
@@ -296,11 +322,54 @@ describe('an approval bound to its revision', () => {
       paths: ['src/a.js'],
       outcome: reviewedAt(head, { headSha: next, stale: true, outcome: 'pending' }),
     });
-    expect(state).toMatchObject({ result: 'not_required', reasons: [] });
-    expect(approvalStatusFor(state)).toEqual({
+    expect(state).toMatchObject({ result: 'not_required', required: 0 });
+    // Nothing waits on the review, so it only explains the status.
+    expect(state.reasons).toEqual([expect.objectContaining({ code: 'review_not_current', effect: 'note' })]);
+  });
+
+  it('never says success for a revision no review has finished with, whatever its tier asks', () => {
+    // No approval is required of a low-risk change; its status still waits for a review.
+    for (const outcome of [
+      { outcome: 'pending', stale: false, reviewed: null, headSha: head, baseRef: 'main' },
+      reviewedAt(head, { headSha: next, stale: true, outcome: 'pending' }),
+    ]) {
+      const state = compute({ paths: ['src/a.js'], outcome });
+      expect(state.result).toBe('not_required');
+      expect(approvalStatusFor(state)).toEqual({
+        state: 'pending',
+        description: `No human approval required at ${outcome.headSha.slice(0, 7)}: low risk; waiting for a review of this revision`,
+      });
+    }
+    expect(approvalStatusFor(compute({ paths: ['src/a.js'] }))).toEqual({
       state: 'success',
-      description: 'No human approval required at bbbbbbb: low risk',
+      description: 'No human approval required at aaaaaaa: low risk',
     });
+  });
+
+  it('does not count a review that is still running as a review of the revision', () => {
+    // Two approvals given on GitHub before and while the review of this head runs.
+    const policy = policyOf({ acceptGithubApprovals: true });
+    const given = [onGithub('octo-reviewer'), onGithub('mona-reviewer')];
+    const running = compute({
+      policy,
+      approvals: given,
+      reviewEnded: false,
+      outcome: reviewedAt(head, { outcome: 'pending' }),
+    });
+    expect(running).toMatchObject({ valid: 2, missing: 0, reviewCurrent: false, result: 'pending' });
+    expect(running.reasons).toEqual([
+      expect.objectContaining({
+        code: 'review_running',
+        effect: 'pending',
+        message:
+          'A code review of aaaaaaa against main is still running: approvals make the pull request ready once it has ended.',
+      }),
+    ]);
+    expect(approvalStatusFor(running).state).toBe('pending');
+    // Once it has ended the same approvals satisfy it.
+    const ended = compute({ policy, approvals: given });
+    expect(ended).toMatchObject({ reviewCurrent: true, result: 'satisfied' });
+    expect(approvalStatusFor(ended).state).toBe('success');
   });
 });
 
@@ -313,6 +382,17 @@ describe('who counts as a person approving', () => {
       ['Margaret', false, 'approver_no_access'],
       ['user 9', false, 'approver_gone'],
     ]);
+    // And only while which accounts are theirs can be read at all.
+    const unknown = compute({
+      approvals: [approval(1)],
+      directory: {
+        ...directory,
+        accountsOf: () => {
+          throw new Error('Linked GitHub accounts are unavailable');
+        },
+      },
+    });
+    expect(reasonsOf(unknown)).toEqual([['Ada', false, 'approver_unconfirmed']]);
   });
 
   it('counts nobody when the server cannot say who its users are', () => {
@@ -344,7 +424,7 @@ describe('who counts as a person approving', () => {
     expect(state.approvals[0].message).toBe(
       'Approval by Ada not counted: Ada opened this pull request, and this project does not count an approval of one’s own change.',
     );
-    expect(state.approvals[1].message).toMatch(/Grace owns a session that worked on this pull request/);
+    expect(state.approvals[1].message).toMatch(/Grace owns a session that committed to this pull request/);
     expect(state.approvals[2].message).toMatch(/Grace has commits in this pull request/);
     const allowed = compute({ policy: policyOf({ allowSelfApproval: true }), approvals: own.slice(0, 2) });
     expect(allowed).toMatchObject({ valid: 2, result: 'satisfied', allowsSelfApproval: true });
@@ -380,7 +460,7 @@ describe('who counts as a person approving', () => {
       policy,
       approvals: [
         // The account a user linked: sessions run `gh` as it, the label step included.
-        onGithub('Ada-Dev'),
+        onGithub('Ada-Dev', { githubUserId: 101 }),
         // Recorded as automation's when first seen, and no longer linked now.
         onGithub('grace-dev', { automation: 'linked_account' }),
         onGithub('briareus-bot', { automation: 'server_account' }),
@@ -414,7 +494,11 @@ describe('who counts as a person approving', () => {
   it('lets the owner of a linked account approve through the API instead', () => {
     const state = compute({
       policy: policyOf({ acceptGithubApprovals: true }),
-      approvals: [onGithub('ada-dev'), approval(1, { githubLogin: 'ada-dev' }), approval(2)],
+      approvals: [
+        onGithub('ada-dev', { githubUserId: 101 }),
+        approval(1, { githubLogin: 'ada-dev' }),
+        approval(2),
+      ],
     });
     expect(reasonsOf(state)).toEqual([
       ['ada-dev', false, 'linked_account'],
@@ -454,7 +538,7 @@ describe('who counts as a person approving', () => {
       approvals: given,
       directory: {
         ...directory,
-        linkedLogins: () => {
+        linkedAccounts: () => {
           throw new Error('User credentials are unavailable');
         },
       },
@@ -525,16 +609,25 @@ describe('what raises the tier beyond the diff', () => {
 });
 
 describe('the approvals GitHub holds, as records', () => {
+  // GitHub's user ids, by login, for the accounts these tests name.
+  const idOf = (login) =>
+    ({ 'ada-dev': 101, 'briareus-bot': 7 })[login.toLowerCase()] ??
+    6000 + login.length * 7 + login.charCodeAt(0);
   const review = (id, login, state, over = {}) => ({
     id,
     state,
     commit_id: head,
     submitted_at: '2026-11-10T12:00:00Z',
     author_association: 'COLLABORATOR',
-    user: { login, type: 'User' },
+    user: { login, id: idOf(login), type: 'User' },
     ...over,
   });
-  const context = { headSha: head, baseRef: 'main', serverLogin: 'briareus-bot', linkedLogins: ['Ada-Dev'] };
+  const context = {
+    headSha: head,
+    baseRef: 'main',
+    server: { id: 7, login: 'briareus-bot' },
+    linked: [{ id: 101, login: 'ada-dev' }],
+  };
 
   it('classifies each approval by whether a person can be told to have given it', () => {
     const { rows } = githubApprovalRows(
@@ -542,7 +635,7 @@ describe('the approvals GitHub holds, as records', () => {
         review(1, 'octo-reviewer', 'APPROVED'),
         review(2, 'ada-dev', 'APPROVED'),
         review(3, 'Briareus-Bot', 'APPROVED'),
-        review(4, 'renovate[bot]', 'APPROVED', { user: { login: 'renovate[bot]', type: 'Bot' } }),
+        review(4, 'renovate[bot]', 'APPROVED', { user: { login: 'renovate[bot]', id: 4242, type: 'Bot' } }),
         review(5, 'mona-reviewer', 'COMMENTED'),
         review(6, 'old-head', 'APPROVED', { commit_id: next }),
       ],
@@ -558,6 +651,7 @@ describe('the approvals GitHub holds, as records', () => {
     ]);
     expect(rows[0]).toMatchObject({
       headSha: head,
+      githubUserId: idOf('octo-reviewer'),
       association: 'COLLABORATOR',
       approvedAt: Date.parse('2026-11-10T12:00:00Z'),
     });
@@ -589,7 +683,7 @@ describe('the approvals GitHub holds, as records', () => {
     ];
     const { rows } = githubApprovalRows(reviews, {
       ...context,
-      linkedLogins: [],
+      linked: [],
       labelStep: { login: 'ada-dev', known: [1], since: 0 },
     });
     expect(rows.map((r) => [r.githubReviewId, r.automation])).toEqual([
@@ -618,41 +712,260 @@ describe('the approvals GitHub holds, as records', () => {
         review(2, 'octo-committer', 'APPROVED'),
         review(3, 'octo-reviewer', 'APPROVED'),
       ],
-      { ...context, author: 'Octo-Author', commitAuthors: ['octo-committer'] },
+      {
+        ...context,
+        authors: {
+          author: { id: idOf('octo-author'), login: 'Octo-Author' },
+          commits: [{ id: idOf('octo-committer'), login: 'octo-committer' }],
+        },
+      },
     );
     expect(rows.map((r) => r.authorship)).toEqual(['author', 'commits', null]);
+  });
+
+  it('knows an account by GitHub’s id, not by a login that can be renamed and taken', () => {
+    const { rows } = githubApprovalRows(
+      [
+        // Ada's linked account under a new login, and the server's under one.
+        review(1, 'ada-renamed', 'APPROVED', { user: { login: 'ada-renamed', id: 101, type: 'User' } }),
+        review(2, 'briareus-two', 'APPROVED', { user: { login: 'briareus-two', id: 7, type: 'User' } }),
+        // Somebody else who took the login Ada's account used to have.
+        review(3, 'ada-dev', 'APPROVED', { user: { login: 'ada-dev', id: 555, type: 'User' } }),
+        // No id at all: the login is all there is to go by.
+        review(4, 'ada-dev', 'APPROVED', { user: { login: 'ADA-DEV', type: 'User' } }),
+      ],
+      context,
+    );
+    expect(rows.map((r) => [r.githubLogin, r.githubUserId, r.automation])).toEqual([
+      ['ada-renamed', 101, 'linked_account'],
+      ['briareus-two', 7, 'server_account'],
+      ['ada-dev', 555, null],
+      ['ADA-DEV', null, 'linked_account'],
+    ]);
   });
 });
 
 describe('whose change it is', () => {
-  it('goes by the linked account on the pull request and its commits, then by sessions', () => {
-    expect(authorshipOf({ login: 'Ada-Dev', author: 'ada-dev' })).toBe('author');
-    expect(authorshipOf({ login: 'ada-dev', author: 'octo', commitAuthors: ['octo', 'ADA-dev'] })).toBe(
-      'commits',
-    );
-    expect(authorshipOf({ login: 'ada-dev', author: 'octo', commitAuthors: ['octo'], session: true })).toBe(
-      'session',
-    );
-    expect(authorshipOf({ login: null, author: 'octo', commitAuthors: ['octo'], session: true })).toBe(
-      'session',
-    );
-    expect(authorshipOf({ login: 'ada-dev', author: 'octo', commitAuthors: ['octo'] })).toBeNull();
-    // Without a linked account nothing on GitHub can be tied to the user.
-    expect(authorshipOf({ login: null, author: null, commitAuthors: [] })).toBeNull();
+  const authors = written({
+    author: { id: 900, login: 'octo-author' },
+    commits: [
+      { id: 900, login: 'octo-author' },
+      { id: 101, login: 'ada-dev' },
+    ],
   });
 
-  it('ties a pull request to the owner of a session that worked on it, not of one that only read it', () => {
+  it('goes by the accounts on the pull request and its commits, then by sessions', () => {
+    expect(authorshipOf({ accounts: [{ id: 900, login: 'someone' }], authors })).toBe('author');
+    expect(authorshipOf({ accounts: [{ id: null, login: 'Octo-Author' }], authors })).toBe('author');
+    expect(authorshipOf({ accounts: [{ id: 101, login: 'ada-renamed' }], authors })).toBe('commits');
+    expect(authorshipOf({ accounts: [{ id: 102, login: 'grace-dev' }], authors, session: true })).toBe(
+      'session',
+    );
+    expect(authorshipOf({ accounts: [], authors, session: true })).toBe('session');
+    expect(authorshipOf({ accounts: [{ id: 102, login: 'grace-dev' }], authors })).toBeNull();
+    // Without an account nothing on GitHub can be tied to the user.
+    expect(authorshipOf({ accounts: [], authors })).toBeNull();
+    expect(authorshipOf({ accounts: [{ id: 101, login: 'ada-dev' }], authors: null })).toBeNull();
+  });
+
+  it('tells two accounts apart by id where both have one', () => {
+    expect(sameAccount({ id: 1, login: 'a' }, { id: 1, login: 'b' })).toBe(true);
+    expect(sameAccount({ id: 1, login: 'a' }, { id: 2, login: 'a' })).toBe(false);
+    expect(sameAccount({ id: null, login: 'A' }, { id: 2, login: 'a' })).toBe(true);
+    expect(sameAccount({ id: null, login: '' }, { id: null, login: '' })).toBe(false);
+    expect(sameAccount(null, { id: 1, login: 'a' })).toBe(false);
+  });
+
+  it('says when who wrote a pull request is not known in full', () => {
+    expect(authorshipGap(written())).toBeNull();
+    expect(authorshipGap(null)).toMatch(/could not be read from GitHub/);
+    expect(authorshipGap(written({ complete: false }))).toMatch(/more commits than GitHub lists/);
+  });
+
+  it('ties a pull request to the owner of the session whose branch became it, while the server has it', () => {
     const sessions = [
       { ownerId: 1, repo: 'acme/shop', prStatus: { number: 7 } },
-      { ownerId: 2, repo: 'acme/shop', startedOnPr: 7, activity: 'review' },
-      { ownerId: 3, repo: 'acme/shop', startedOnPr: 7, activity: 'test-run' },
-      { ownerId: 4, repo: 'acme/shop', startedOnPr: 7, preview: true },
-      { ownerId: 5, repo: 'acme/shop', startedOnPr: 7, activity: 'fix-checks' },
-      { ownerId: 6, repo: 'acme/other', prStatus: { number: 7 } },
+      // Started on the pull request as an errand: what it did there is on record per commit.
+      { ownerId: 2, repo: 'acme/shop', startedOnPr: 7, prStatus: { number: 7 }, activity: 'review' },
+      { ownerId: 3, repo: 'acme/other', prStatus: { number: 7 } },
       { ownerId: null, repo: 'acme/shop', prStatus: { number: 7 } },
     ];
-    const owns = (userId, prNumber = 7) => ownsWorkOn(sessions, { userId, repo: 'Acme/Shop', prNumber });
-    expect([1, 2, 3, 4, 5, 6].map((id) => owns(id))).toEqual([true, false, false, false, true, false]);
-    expect(owns(1, 8)).toBe(false);
+    const opened = (userId, prNumber = 7) => openedPull(sessions, { userId, repo: 'Acme/Shop', prNumber });
+    expect([1, 2, 3].map((id) => opened(id))).toEqual([true, false, false]);
+    expect(opened(1, 8)).toBe(false);
+  });
+});
+
+describe('an approver who wrote the change', () => {
+  // Ada opened the pull request under the account she had linked.
+  const hers = written({ author: { id: 101, login: 'ada-dev' }, commits: [{ id: 101, login: 'ada-dev' }] });
+
+  it('is recognised whenever the requirement is computed, not only when the approval was recorded', () => {
+    // Recorded with nothing known against it.
+    const state = compute({ authors: hers, approvals: [approval(1), approval(2)] });
+    expect(reasonsOf(state)).toEqual([
+      ['Ada', false, 'own_change'],
+      ['Grace', true, null],
+    ]);
+    expect(state.approvals[0].message).toMatch(/Ada opened this pull request/);
+  });
+
+  it('is still recognised after unlinking the account: every account ever linked counts', () => {
+    // Ada unlinked before approving: the approval carries no account, the history does.
+    const state = compute({
+      authors: hers,
+      approvals: [approval(1, { githubLogin: null, githubUserId: null, authorship: null })],
+    });
+    expect(reasonsOf(state)).toEqual([['Ada', false, 'own_change']]);
+    // And by the account the approval itself was recorded with, should the history be lost.
+    const lost = compute({
+      authors: hers,
+      directory: { ...directory, accountsOf: () => [{ id: 777, login: 'ada-other' }] },
+      approvals: [approval(1, { githubLogin: 'ada-dev', githubUserId: 101 })],
+    });
+    expect(reasonsOf(lost)).toEqual([['Ada', false, 'own_change']]);
+    // A renamed account is the same account.
+    const renamed = compute({
+      authors: hers,
+      directory: { ...directory, accountsOf: () => [{ id: 101, login: 'ada-renamed' }] },
+      approvals: [approval(1)],
+    });
+    expect(reasonsOf(renamed)).toEqual([['Ada', false, 'own_change']]);
+  });
+
+  it('is recognised by the commits their sessions made, whatever those sessions were for', () => {
+    const state = compute({ workers: [2], approvals: [approval(1), approval(2)] });
+    expect(reasonsOf(state)).toEqual([
+      ['Ada', true, null],
+      ['Grace', false, 'own_change'],
+    ]);
+    expect(state.approvals[1].message).toMatch(/Grace owns a session that committed to this pull request/);
+  });
+
+  it('cannot approve under no account at all', () => {
+    const state = compute({ approvals: [approval(5), approval(2)] });
+    expect(reasonsOf(state)).toEqual([
+      ['Katherine', false, 'no_linked_account'],
+      ['Grace', true, null],
+    ]);
+    // Where the project counts an approval of one's own change and no GitHub approval,
+    // nothing depends on whose account is whose.
+    const open = compute({
+      policy: policyOf({ allowSelfApproval: true }),
+      approvals: [approval(5), approval(2)],
+    });
+    expect(open).toMatchObject({ valid: 2, result: 'satisfied' });
+  });
+
+  it('counts for nobody while who wrote the pull request is not known', () => {
+    const policy = policyOf({ acceptGithubApprovals: true });
+    const given = [approval(2), onGithub('octo-reviewer')];
+    for (const authors of [null, written({ complete: false })]) {
+      const state = compute({ policy, authors, approvals: given });
+      expect(reasonsOf(state)).toEqual([
+        ['Grace', false, 'authorship_unknown'],
+        ['octo-reviewer', false, 'authorship_unknown'],
+      ]);
+      expect(state).toMatchObject({ valid: 0, result: 'pending' });
+      expect(state.reasons.map((r) => r.code)).toEqual(['approvals_missing', 'authorship_unknown']);
+    }
+    // A co-author's approval on GitHub does not slip through while the commits are unread.
+    const coauthor = compute({
+      policy,
+      authors: null,
+      approvals: [onGithub('octo-pair'), onGithub('mona-reviewer')],
+    });
+    expect(coauthor.valid).toBe(0);
+    // Unless the project counts an approval of one's own change anyway.
+    const open = compute({
+      policy: policyOf({ acceptGithubApprovals: true, allowSelfApproval: true }),
+      authors: null,
+      approvals: given,
+    });
+    expect(open).toMatchObject({ valid: 2, result: 'satisfied' });
+  });
+});
+
+describe('one person, counted once', () => {
+  const policy = policyOf({ acceptGithubApprovals: true });
+
+  it('does not count an API approval beside a GitHub approval from an account that cannot be told apart', () => {
+    // Katherine linked no account, records an approval here and approves on GitHub with
+    // a collaborator account of her own.
+    const state = compute({ policy, approvals: [approval(5), onGithub('katherine-personal')] });
+    expect(reasonsOf(state)).toEqual([
+      ['Katherine', false, 'no_linked_account'],
+      ['katherine-personal', true, null],
+    ]);
+    expect(state).toMatchObject({ valid: 1, required: 2, result: 'pending' });
+    // The same for a project that allows approving one's own change.
+    const open = compute({
+      policy: policyOf({ acceptGithubApprovals: true, allowSelfApproval: true }),
+      approvals: [approval(5), onGithub('katherine-personal')],
+    });
+    expect(open.valid).toBe(1);
+  });
+
+  it('keys both sources on the GitHub account: an account once linked is its owner’s on GitHub too', () => {
+    // Grace approved here with grace-dev linked, then unlinked it and approved on GitHub:
+    // the history still names the account.
+    const state = compute({
+      policy,
+      approvals: [
+        approval(2, { githubLogin: 'grace-dev', githubUserId: 102 }),
+        onGithub('grace-dev', { githubUserId: 102 }),
+      ],
+    });
+    expect(reasonsOf(state)).toEqual([
+      ['Grace', true, null],
+      ['grace-dev', false, 'linked_account'],
+    ]);
+    // Even with the history gone, the account the approval was recorded with is hers.
+    const forgotten = {
+      ...directory,
+      accountsOf: () => [{ id: 888, login: 'grace-new' }],
+      linkedAccounts: () => [],
+    };
+    const lost = compute({
+      policy,
+      directory: forgotten,
+      approvals: [
+        approval(2, { githubLogin: 'grace-dev', githubUserId: 102 }),
+        onGithub('grace-renamed', { githubUserId: 102 }),
+      ],
+    });
+    expect(reasonsOf(lost)).toEqual([
+      ['Grace', true, null],
+      ['grace-renamed', false, 'duplicate'],
+    ]);
+    // In the other order too.
+    const reversed = compute({
+      policy,
+      directory: forgotten,
+      approvals: [
+        onGithub('grace-renamed', { githubUserId: 102 }),
+        approval(2, { githubLogin: 'grace-dev', githubUserId: 102 }),
+      ],
+    });
+    expect(reasonsOf(reversed)).toEqual([
+      ['grace-renamed', true, null],
+      ['Grace', false, 'duplicate'],
+    ]);
+  });
+
+  it('knows a linked account by its id after a rename, and not somebody who took its old login', () => {
+    const state = compute({
+      policy,
+      approvals: [
+        onGithub('ada-renamed', { githubUserId: 101 }),
+        onGithub('ada-dev', { githubUserId: 555 }),
+        onGithub('mona-reviewer'),
+      ],
+    });
+    expect(reasonsOf(state)).toEqual([
+      ['ada-renamed', false, 'linked_account'],
+      ['ada-dev', true, null],
+      ['mona-reviewer', true, null],
+    ]);
   });
 });

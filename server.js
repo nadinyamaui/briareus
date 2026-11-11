@@ -54,7 +54,8 @@ import {
   setApprovalDirectory,
 } from './lib/review-enforcement.js';
 import { approvalRoutes } from './lib/approval-routes.js';
-import { ownsWorkOn } from './lib/review-approvals.js';
+import { openedPull } from './lib/review-approvals.js';
+import { createGithubLinks } from './lib/github-links.js';
 import { readPullRevision } from './lib/review-revision.js';
 import { securityCoverageOf } from './lib/review-security.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
@@ -116,6 +117,7 @@ import {
   listCodeReviewStages,
   getCodeReviewRisk,
   listCodeReviewApprovals,
+  listCodeReviewCommitOwners,
   addCodeReviewApproval,
   withdrawCodeReviewApproval,
 } from './lib/db.js';
@@ -317,6 +319,25 @@ const api = express.Router();
 const users = createUsers();
 const shares = createShares();
 const credentials = createUserCredentials();
+// Every GitHub account a user ever linked, kept after they unlink it (lib/github-links.js).
+// It is loaded with the credentials and brought up to date whenever they are: the
+// accounts linked right now are entered as they are met, at boot, at every reload, and
+// at once when one is linked (around meRoutes, below). Never a reason for the
+// credentials themselves not to load.
+const githubLinks = createGithubLinks();
+for (const load of /** @type {const} */ (['init', 'refresh'])) {
+  const credentialsLoad = credentials[load];
+  credentials[load] = async () => {
+    await credentialsLoad();
+    try {
+      await githubLinks.init();
+      for (const user of users.list())
+        await githubLinks.remember(user.id, credentials.get(user.id, 'github'));
+    } catch (e) {
+      console.error('Could not keep the linked GitHub accounts:', e.message);
+    }
+  };
+}
 // A user's own GitHub identity (lib/me-routes.js), or null: none connected, the user is
 // gone or disabled, or CREDENTIALS_KEY cannot open it, in which case the server's stands.
 // An unloaded store must fail the action instead of silently changing its GitHub account.
@@ -833,10 +854,22 @@ api.use(
   }),
 );
 // Who the approval requirement of a pull request asks about a user (lib/review-approvals.js):
-// whether they still exist and may act on the project, and which GitHub accounts sessions
-// act as, since an approval on GitHub from one of those is not known to be its owner's.
-// An unloaded store answers as nobody known, or throws for the accounts: an approval then
-// does not count, which is the safe way round.
+// whether they still exist and may act on the project, and which GitHub accounts are
+// theirs or any user's: an approval on GitHub from an account sessions act as is not known
+// to be its owner's, and a change made under an account stays its owner's. Accounts are
+// every one ever linked (lib/github-links.js) and the ones linked now, each with GitHub's
+// user id. An unloaded store answers as nobody known, or throws for the accounts: an
+// approval then does not count, which is the safe way round.
+const linkedNow = (userId) => {
+  const account = credentials.get(userId, 'github');
+  return account?.login
+    ? { id: Number.isInteger(account.id) ? account.id : null, login: account.login }
+    : null;
+};
+const accountsOf = (userId) => {
+  const now = linkedNow(userId);
+  return [...githubLinks.of(userId), ...(now ? [now] : [])];
+};
 setApprovalDirectory({
   user: (id) => {
     try {
@@ -854,11 +887,14 @@ setApprovalDirectory({
       return false;
     }
   },
-  linkedLogins: () =>
-    users
+  accountsOf,
+  linkedAccounts: () => [
+    ...githubLinks.all(),
+    ...users
       .list()
-      .map((user) => credentials.get(user.id, 'github')?.login)
+      .map((user) => linkedNow(user.id))
       .filter(Boolean),
+  ],
 });
 // A person's approval of a reviewed pull request, and how the requirement stands
 // (lib/approval-routes.js). Reached through /api/v1 only, as the user the token belongs to.
@@ -867,19 +903,28 @@ api.use(
     getProject,
     outcome: {
       read: readReviewOutcome,
-      refresh: async (project, prNumber, current = null) =>
-        (await refreshReviewOutcome(project, prNumber, { cfg: getConfig(), current })).outcome,
+      refresh: async (project, prNumber, current = null, options = {}) =>
+        (await refreshReviewOutcome(project, prNumber, { cfg: getConfig(), current, ...options })).outcome,
     },
     store: {
       getCodeReviewRisk,
       listCodeReviewApprovals,
+      listCodeReviewCommitOwners,
       addCodeReviewApproval,
       withdrawCodeReviewApproval,
     },
     readPull: (project, prNumber) => readPullRevision(getConfig(), project.repo, prNumber),
-    linkedLogin: (user) => githubOf(user.id)?.login || null,
-    ownsWorkOn: (user, repo, prNumber) =>
-      ownsWorkOn(devSessionRecords(), { userId: user.id, repo, prNumber }),
+    // The account linked now, of a user who still stands (githubOf): what an approval
+    // is recorded with.
+    linkedAccount: (user) => {
+      const account = githubOf(user.id);
+      return account?.login
+        ? { id: Number.isInteger(account.id) ? account.id : null, login: account.login }
+        : null;
+    },
+    accountsOf: (user) => accountsOf(user.id),
+    openedPull: (user, repo, prNumber) =>
+      openedPull(devSessionRecords(), { userId: user.id, repo, prNumber }),
   }),
 );
 api.use(
@@ -1053,7 +1098,19 @@ api.use(
     getProject,
   }),
 );
-api.use(meRoutes({ credentials }));
+// Linking a GitHub account enters it in the history before anything else can happen to
+// it, so that linking and unlinking in one breath still leaves it on record.
+api.use(
+  meRoutes({
+    credentials: {
+      ...credentials,
+      set: async (userId, kind, value) => {
+        if (kind === 'github') await githubLinks.remember(userId, value);
+        return credentials.set(userId, kind, value);
+      },
+    },
+  }),
+);
 // Who each project and server is shared with (lib/shares.js); ids are compared as strings.
 const hasId = (list) => (id) => list().some((item) => String(item.id) === id);
 api.use(

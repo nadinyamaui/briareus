@@ -301,6 +301,12 @@ vi.mock('../lib/db.js', () => ({
     return state.outcome.risk;
   }),
   syncGithubCodeReviewApprovals: vi.fn(async () => {}),
+  // One pull request per commit here: what several at one head get is in
+  // test/review-revision.test.js.
+  listCodeReviewStatusesAtHead: vi.fn(async () => []),
+  oweCodeReviewStatusesAtHead: vi.fn(async () => 0),
+  clearCodeReviewWaiting: vi.fn(async () => {}),
+  recordCodeReviewCommitOwners: vi.fn(async () => 0),
 }));
 
 vi.mock('../lib/github.js', async (importOriginal) => ({
@@ -411,6 +417,7 @@ import {
   restartCodeReview,
   getCodeReviewByJob,
   syncGithubCodeReviewApprovals,
+  recordCodeReviewCommitOwners,
   listCodeReviewFindings,
   updateCodeReviewFinding,
   listCodeReviewDecisions,
@@ -3145,6 +3152,9 @@ describe('native Codex code review', () => {
           return ok({});
         }
         if (method !== 'GET') throw new Error(`Unexpected GitHub write: ${method} ${url}`);
+        // Which open pull requests are at the commit, asked before a status is written.
+        if (/\/commits\/[0-9a-f]+\/pulls/.test(url))
+          return ok([{ number: 77, state: 'open', head: { sha: head } }]);
         if (url.includes('/labels')) return ok(labels.map((name) => ({ name })));
         if (url.includes('/reviews?')) return ok(reviews());
         if (url === '/user') return ok({ login: 'briareus-bot' });
@@ -5016,8 +5026,15 @@ describe('native Codex code review', () => {
               ok(paths.map((filename) => ({ filename, status: 'modified', additions: 1, deletions: 0 })))
             );
           if (url.includes('/pulls/77/commits'))
-            return ok([{ author: { login: 'octo-author' }, committer: { login: 'octo-author' } }]);
-          if (url === '/user') return ok({ login: 'briareus-bot' });
+            return ok([
+              {
+                sha: head,
+                author: { login: 'octo-author', id: 900 },
+                committer: { login: 'octo-author', id: 900 },
+              },
+            ]);
+          if (url === '/user') return ok({ login: 'briareus-bot', id: 7 });
+          if (/\/commits\/[0-9a-f]+\/pulls/.test(url)) return ok([]);
           // What the label step left on the pull request: the review's own approval.
           if (url.includes('/pulls/77/reviews'))
             return ok([
@@ -5027,7 +5044,7 @@ describe('native Codex code review', () => {
                 commit_id: head,
                 submitted_at: new Date().toISOString(),
                 author_association: 'COLLABORATOR',
-                user: { login: 'briareus-bot', type: 'User' },
+                user: { login: 'briareus-bot', id: 7, type: 'User' },
               },
             ]);
           return ok({
@@ -5101,6 +5118,7 @@ describe('native Codex code review', () => {
           expect(syncGithubCodeReviewApprovals).toHaveBeenCalledWith('acme/shop', 77, {
             rows: [expect.objectContaining({ githubReviewId: 55, automation: 'review_label_step' })],
             dismissed: [],
+            seenAt: expect.any(Number),
           }),
         );
         expect(publicJob(job)).not.toHaveProperty('codeReviewRecord');
@@ -5145,6 +5163,82 @@ describe('native Codex code review', () => {
         cancelDevTurn(id);
         invocations[0].child.emit('close', null);
         await vi.waitFor(() => expect(job.status).toBe('idle'));
+      });
+
+      it('puts on record whose session made which commit, whatever the session was started for', async () => {
+        // A review session, which is as able to commit as any: its owner tells it to.
+        job.ownerId = 4;
+        recordCodeReviewCommitOwners.mockClear();
+        changes(['src/cart.js']);
+        stored();
+        // A turn in which nothing is committed records nothing.
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        cancelDevTurn(id);
+        invocations[0].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        expect(job).not.toHaveProperty('commitWatch');
+        expect(recordCodeReviewCommitOwners).not.toHaveBeenCalled();
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(2));
+        // Noted when the turn started, kept with the session and never shown to a client.
+        expect(job.commitWatch).toMatchObject({ head });
+        expect(publicJob(job)).not.toHaveProperty('commitWatch');
+        // While the turn runs the agent commits in the checkout.
+        const commit = (message) =>
+          spawnSync('git', [
+            '-C',
+            root,
+            '-c',
+            'user.name=Server',
+            '-c',
+            'user.email=server@example.com',
+            'commit',
+            '--allow-empty',
+            '-m',
+            message,
+          ]);
+        commit('One');
+        commit('Two');
+        const made = spawnSync('git', ['-C', root, 'rev-list', `${head}..HEAD`], { encoding: 'utf8' })
+          .stdout.trim()
+          .split('\n');
+        expect(made).toHaveLength(2);
+        cancelDevTurn(id);
+        invocations[1].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        await vi.waitFor(() =>
+          expect(recordCodeReviewCommitOwners).toHaveBeenCalledWith('acme/shop', {
+            userId: 4,
+            jobId: id,
+            branch: 'feature',
+            shas: made,
+          }),
+        );
+        expect(job).not.toHaveProperty('commitWatch');
+        delete job.ownerId;
+      });
+
+      it('keeps no such record for a session nobody owns, or a project without a policy', async () => {
+        recordCodeReviewCommitOwners.mockClear();
+        changes(['src/cart.js']);
+        stored();
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        expect(job).not.toHaveProperty('commitWatch');
+        cancelDevTurn(id);
+        invocations[0].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        job.ownerId = 4;
+        delete state.projects[0].approvalPolicy;
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(2));
+        expect(job).not.toHaveProperty('commitWatch');
+        cancelDevTurn(id);
+        invocations[1].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        expect(recordCodeReviewCommitOwners).not.toHaveBeenCalled();
+        delete job.ownerId;
       });
 
       it('reads nothing before discovery when no tier requires the pass', async () => {
