@@ -6,7 +6,8 @@ const state = vi.hoisted(() => ({ failures: [], attempts: 0, bootWaitMs: 60000 }
 
 vi.mock('../lib/config.js', () => ({
   getConfig: () => ({
-    db: { host: 'h', port: 3306, database: 'd', user: 'u', password: 'p', bootWaitMs: state.bootWaitMs },
+    db: { host: 'h', port: 3306, database: 'd', user: 'u', password: 'p' },
+    dbBootWaitMs: state.bootWaitMs,
   }),
 }));
 vi.mock('../lib/migrator.js', () => ({
@@ -56,7 +57,7 @@ it('gives up after a few retries once the bound runs out, sleeping no longer tha
   state.bootWaitMs = 5000;
   state.failures = Array(10).fill('ECONNREFUSED');
   let now = 0;
-  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
   const sleep = vi.fn(async (ms) => {
     now += ms;
   });

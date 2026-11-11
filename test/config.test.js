@@ -932,7 +932,8 @@ describe('the database boot wait', () => {
     ]) {
       const pairs = value === undefined ? complete() : complete({ DB_BOOT_WAIT_SECONDS: value });
       const { getConfig } = await loadConfig(pairs);
-      expect(getConfig().db.bootWaitMs).toBe(ms);
+      expect(getConfig().dbBootWaitMs).toBe(ms);
+      expect(getConfig().db).not.toHaveProperty('bootWaitMs');
     }
   });
 
