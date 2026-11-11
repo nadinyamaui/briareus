@@ -2209,6 +2209,44 @@ describe('native Codex code review', () => {
       expect(state.reviewRounds.get(key).count.rounds).toBe(2);
     });
 
+    it('keeps what the previous round registered with no verdict or thread among what is outstanding', async () => {
+      trackBase();
+      const reviewedHead = commit('cart.js', 200, 'feature');
+      const next = commit('fix.js', 12, 'fix');
+      pullAt(next);
+      reviewedRounds('acme/shop', 77, [reviewedHead], { baseRef, mergeBaseSha: head });
+      listCodeReviewDecisions.mockImplementation(async () => [
+        {
+          findingRef: 'ref-leak',
+          threadId: 'PRRT_leak',
+          verdict: 'fix',
+          decidedAt: '2026-11-01T00:05:00.000Z',
+        },
+      ]);
+      // Round 1's own review row, as the session that ran it left it.
+      getCodeReviewByJob.mockImplementation(async (jobId) =>
+        jobId === 'earlier-1' ? { id: 40, jobId, round: 1 } : null,
+      );
+      listCodeReviewFindings.mockImplementation(async (reviewId) =>
+        reviewId === 40
+          ? [
+              { findingRef: 'ref-leak', shouldFix: 'fix', title: 'Logs the token' },
+              { findingRef: 'ref-silent', shouldFix: null, title: 'Unchecked input', filePath: 'cart.js' },
+            ]
+          : [],
+      );
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(invocations).toHaveLength(1));
+      expect(job.codeReviewRound).toMatchObject({ round: 2, outstanding: 2 });
+      const file = JSON.parse(fs.readFileSync(scopePath(), 'utf8'));
+      expect(file.outstanding.map((f) => [f.findingRef, f.status])).toEqual([
+        ['ref-leak', 'fix'],
+        ['ref-silent', 'unverified'],
+      ]);
+      finishReview(invocations[0], 1);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+    });
+
     it('measures the change without blocking the server, and widens when git does not answer in time', async () => {
       trackBase();
       const reviewedHead = commit('cart.js', 200, 'feature');

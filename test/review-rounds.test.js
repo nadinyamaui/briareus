@@ -122,7 +122,7 @@ import {
   scopeFacts,
   unresolvedWork,
 } from '../lib/review-rounds.js';
-import { claimCodeReviewRound, listCodeReviewDecisions } from '../lib/db.js';
+import { claimCodeReviewRound, listCodeReviewDecisions, listPullCodeReviews } from '../lib/db.js';
 
 const repo = 'acme/shop';
 const sha = (letter) => letter.repeat(40);
@@ -755,6 +755,16 @@ describe('how current the unresolved work is', () => {
     }),
   ];
 
+  it('takes the latest review’s findings from a caller that already read them', async () => {
+    await useUp();
+    store.decisions = asRoundThreeLeftIt();
+    vi.mocked(listPullCodeReviews).mockClear();
+    const findings = [{ findingRef: 'r9', shouldFix: null, title: 'Never published' }];
+    const view = await readReviewRounds(project, 7, { findings });
+    expect(view.unresolved.unverified.map((f) => f.findingRef)).toEqual(['r3', 'r9']);
+    expect(listPullCodeReviews).not.toHaveBeenCalled();
+  });
+
   it('dates the stored state by the last review that read the threads', async () => {
     await useUp();
     store.decisions = asRoundThreeLeftIt();
@@ -929,6 +939,26 @@ describe('what waits on a person', () => {
         asOf: { source: 'stored', round: 3, headSha: sha('c'), at: '2026-11-10T10:00:00.000Z', error: null },
       },
     ]);
+  });
+
+  it('counts what the latest review left without a verdict or a thread, as the refusal does', async () => {
+    await useUp();
+    await refusalOf(claim({ headSha: sha('d'), jobId: 'job-d' }));
+    store.decisions = [decision({ findingRef: 'r1', threadId: 'T1', verdict: 'fix' })];
+    store.reviews = [
+      {
+        repo,
+        prNumber: 7,
+        findings: [
+          { findingRef: 'r1', shouldFix: null, title: 'Has its decision' },
+          { findingRef: 'r9', shouldFix: null, title: 'Never published' },
+        ],
+      },
+    ];
+    const [waiting] = await reviewLimitsWaiting({ getProject });
+    expect(waiting).toMatchObject({ fix: 1, unverified: 1 });
+    const view = await readReviewRounds(projects[0], 7);
+    expect(view.unresolved.unverified.map((f) => f.findingRef)).toEqual(['r9']);
   });
 
   it('stops listing one that was continued, closed, raised above its count or removed', async () => {
